@@ -84,7 +84,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let args = Args::parse();
-    let source_id = parse_source_id(&args.source_id_hex).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let source_id = parse_source_id(&args.source_id_hex)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     let listener = TcpListener::bind(&args.listen).await?;
     let local = listener.local_addr()?;

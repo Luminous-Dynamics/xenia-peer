@@ -165,9 +165,7 @@ async fn replay_protection_across_real_transport() {
 
         // Send the same frame twice — but seal it only ONCE, so the
         // second send is a real replay (identical envelope bytes).
-        let envelope = host
-            .seal_captured_rgba(2, 2, vec![255; 2 * 2 * 4])
-            .unwrap();
+        let envelope = host.seal_captured_rgba(2, 2, vec![255; 2 * 2 * 4]).unwrap();
         transport.send_envelope(&envelope).await.unwrap();
         transport.send_envelope(&envelope).await.unwrap();
     });

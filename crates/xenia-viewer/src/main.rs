@@ -35,7 +35,11 @@ use xenia_peer_core::{Session, SessionRole};
 const FIXTURE_KEY: [u8; 32] = *b"xenia-peer-m0-stub-fixture-key!!";
 
 #[derive(Parser, Debug)]
-#[command(name = "xenia-viewer", version, about = "Native viewer for Xenia sessions")]
+#[command(
+    name = "xenia-viewer",
+    version,
+    about = "Native viewer for Xenia sessions"
+)]
 struct Args {
     /// Address of the xenia-peer daemon to connect to.
     #[arg(long, default_value = "127.0.0.1:4747")]
@@ -78,7 +82,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let args = Args::parse();
-    let source_id = parse_source_id(&args.source_id_hex).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let source_id = parse_source_id(&args.source_id_hex)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     info!(peer = %args.connect, "connecting to xenia-peer daemon");
     warn!("M0 scaffold: fixture key in use; no frame decode; no GUI. See ADR-001.");
