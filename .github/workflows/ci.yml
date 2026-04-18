@@ -69,3 +69,33 @@ jobs:
       - env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --no-deps
+
+  h264:
+    name: Test (--features h264)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install libav + libclang for ffmpeg-next + bindgen
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libavcodec-dev \
+            libavformat-dev \
+            libavutil-dev \
+            libswscale-dev \
+            libswresample-dev \
+            libavfilter-dev \
+            libavdevice-dev \
+            libclang-dev \
+            clang \
+            pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build xenia-video with h264 feature
+        run: cargo build -p xenia-video --features h264
+      - name: Test xenia-video h264 encode/decode roundtrip
+        run: cargo test -p xenia-video --features h264
+      - name: Build daemon + viewer binaries with h264 feature
+        run: |
+          cargo build -p xenia-peer --features h264
+          cargo build -p xenia-viewer --features h264

@@ -73,7 +73,9 @@ Full reasoning: [ADR-001 §Decision 3](docs/ADR-001-m0-architecture.md).
 | Milestone | Status | Deliverable |
 |---|---|---|
 | **M0** | ✅ shipped | Workspace scaffold + loopback-tested wire integration + daemon + viewer binaries + ADR-001. |
-| M1 | 🚧 not started | **Wayland** screen capture + H.264 encode via `ffmpeg-next` + viewer-side decode to raw frames. 2–3 weeks. |
+| **M1.1** | ✅ shipped | `xenia-capture` + `xenia-video` crates (trait + passthrough codec + H.264 stubs). Full pipeline wired end-to-end with `TestCapture`. |
+| **M1.2b** | ✅ shipped | Real H.264 encode/decode via `ffmpeg-next` + libx264. `--codec {passthrough,h264}` flag on both binaries. Compression verified: ~100× smaller than passthrough on synthetic content. |
+| M1.2c | 🚧 not started | Real Wayland screen capture: `WlrootsCapture` via `wlr-screencopy-unstable-v1`, `PortalCapture` via `xdg-desktop-portal ScreenCast`. Both are `Unavailable` stubs today. |
 | M2 | not started | Input injection (Wayland, libei + xdg-portal paths) + consent-ceremony UI on the host. 1–2 weeks. |
 | M3 | not started | Iroh QUIC primary transport; WebSocket fallback. Cross-platform (macOS + Windows) deferred until post-M3 signal. 4–6 weeks. |
 | M4 | not started | egui GUI on `xenia-viewer`, clipboard, audio, file transfer, session recording. 3–4 months. |
@@ -109,28 +111,55 @@ Full reasoning: [ADR-001 §Decision 2](docs/ADR-001-m0-architecture.md).
 
 ## Quick start (developers)
 
+### Clone + test
+
 ```console
 $ git clone https://github.com/Luminous-Dynamics/xenia-peer
 $ cd xenia-peer
 $ cargo test --workspace
 ```
 
-Expected: 13 tests pass (9 unit + 4 integration including a real-TCP
-100-frame + 10-input loopback). All under 1 second.
+Expected: 23 tests pass (library unit tests + 4 real-TCP integration
+tests including the 100-frame + 10-input seal/open loopback). All
+under 2 seconds on a cold build.
 
-Run the daemon + viewer end-to-end (two terminals):
+### Run end-to-end (passthrough codec — always available)
+
+Two terminals:
 
 ```console
-# terminal 1 — host daemon
-$ cargo run --release -p xenia-peer -- --listen 127.0.0.1:4747 --max-inputs 5
+# terminal 1 — host daemon, sends 30 synthetic frames
+$ cargo run --release -p xenia-peer -- --listen 127.0.0.1:4747 --frames 30 --codec passthrough
 
-# terminal 2 — viewer client
-$ cargo run --release -p xenia-viewer -- --connect 127.0.0.1:4747 --probe-count 5
+# terminal 2 — viewer, verifies every frame byte-for-byte
+$ cargo run --release -p xenia-viewer -- --connect 127.0.0.1:4747 --frames 30 --codec passthrough --verify
 ```
 
-The viewer sends 5 synthetic input probes; the daemon receives them,
-opens each sealed envelope via `xenia-wire`, logs the sequence + size,
-and exits. End-to-end sanity check for M0.
+The viewer locally regenerates each expected frame via a mirror
+`TestCapture` and asserts byte-exact equality against what it
+decoded. Mismatch = pipeline broken.
+
+### Run end-to-end (H.264 codec)
+
+H.264 requires libav + libclang at build time. Easiest path is
+the bundled Nix flake:
+
+```console
+$ nix develop                                 # inside xenia-peer/
+$ cargo build --release --workspace --features "xenia-peer/h264 xenia-viewer/h264"
+$ ./target/release/xenia-peer --listen 127.0.0.1:4747 --frames 30 --codec h264 --bitrate-kbps 2000 &
+$ ./target/release/xenia-viewer --connect 127.0.0.1:4747 --frames 30 --codec h264
+```
+
+Outside Nix, install ffmpeg dev + llvm dev packages through your
+distro (`libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
+libswresample-dev libclang-dev` on Debian/Ubuntu) and rebuild with
+the same `--features` flags.
+
+On the synthetic 320×240 gradient at 30 fps the H.264 stream comes
+in around 11 KB for the keyframe + ~3 KB per P-frame — ~100× smaller
+than passthrough's 256 KB/frame. Real desktop content compresses
+further.
 
 ## M0 exit criterion (achieved)
 
