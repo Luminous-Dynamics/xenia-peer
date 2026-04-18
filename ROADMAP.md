@@ -2,7 +2,7 @@
 
 Single source of truth for what's shipped, what's next, and what's
 deferred. Updated by humans, not by commits. Last refresh:
-2026-04-18 (post-`9bb831f`).
+2026-04-18 (post-U1–U4 unification arc).
 
 If this file disagrees with reality, the file is wrong.
 
@@ -14,10 +14,11 @@ If this file disagrees with reality, the file is wrong.
 
 | Item | Status | Notes |
 |---|---|---|
-| 7-crate workspace | ✅ | `xenia-peer-core`, `xenia-peer`, `xenia-viewer`, `xenia-capture`, `xenia-video`, `xenia-transport-ws` + workspace root |
+| 9-crate workspace | ✅ | `xenia-peer-core`, `xenia-peer`, `xenia-viewer`, `xenia-capture`, `xenia-video`, `xenia-transport-ws`, `xenia-inject`, `xenia-handshake` + workspace root |
 | `flake.nix` | ✅ | H.264 + Wayland/DBus/PipeWire + libGL/libxkbcommon on LD_LIBRARY_PATH |
 | CI (GitHub Actions) | ✅ | fmt + clippy + test (ubuntu/macos/windows) + MSRV 1.85 + docs + h264 matrix |
 | ADR-001 architecture decisions | ✅ | `docs/ADR-001-m0-architecture.md` — monorepo, Wayland-exclusive, AGPL split |
+| ADR-002 library licensing | ✅ | `docs/ADR-002-library-licensing.md` — all library crates Apache/MIT; binaries AGPL. Extends ADR-001. |
 
 ### Codecs (3)
 
@@ -62,9 +63,9 @@ handles real traffic. Today every binary uses a hardcoded fixture
 AEAD key — that's fine for a loopback demo, catastrophic for a
 deployment.
 
-| # | Item | From Symthaea? | Estimate | Why it blocks |
+| # | Item | Status | Estimate | Why it blocks |
 |---|---|---|---|---|
-| B1 | **PQC handshake** (ML-KEM-768 + Ed25519 + HKDF-SHA256) | ✅ Carry `symthaea/src/swarm/pqc_handshake.rs` (458 LOC + 13 tests) | 1–2 focused days | Replaces `FIXTURE_KEY` in both binaries + the browser viewer. Until this lands, every deployment is effectively un-keyed. |
+| B1 | **PQC handshake** (ML-KEM-768 + Ed25519 + HKDF-SHA256) | 🟡 crate shipped (`xenia-handshake`, `4215ab1`, 15 tests); **wiring into binaries pending** | 0.5 day to wire | Fresh-impl against RustCrypto `ml-kem` 0.3.0-rc.2 + `ed25519-dalek` 2 + `hkdf` 0.12. Not a Symthaea carry — symthaea's version depended on `mycelix-crypto`. API shape aligned for easy reverse-migration. Still need: replace `FIXTURE_KEY` in `xenia-peer` + `xenia-viewer` + browser viewer with real handshake. |
 | B2 | **Real Wayland capture** | ❌ Write fresh against `wayland-client` + `xdg-desktop-portal` | 3–5 days (wlroots) + 5–7 days (portal) | Without this, daemon only shares synthetic TestCapture frames. `xenia-capture::{WlrootsCapture, PortalCapture}` are `Unavailable` stubs today. |
 | B3 | **Consent ceremony UI on the host** | ❌ Uses draft-03 SPEC §12 from xenia-wire | 2–3 days | The wire-level state machine exists; the UX to prompt a user "technician-X wants to share your screen, approve?" does not. |
 
@@ -79,6 +80,8 @@ deployment.
 | `src/swarm/rdp_capture.rs` (trait + TestCapture + BlankCapture) | `crates/xenia-capture/src/lib.rs` | `bd081cf` |
 | `src/swarm/rdp_codec.rs` (HDC hybrid tile-delta) | `crates/xenia-video/src/hdc.rs` | `9bb831f` |
 | `crates/symthaea-phone-embodiment/src/scrcpy/decoder.rs` (ffmpeg-next patterns) | `crates/xenia-video/src/h264.rs` (inspired; different codec) | `21d8cf3` |
+| `src/swarm/rdp_input.rs` (InputInjector trait + Wayland/uinput backends) | `crates/xenia-inject/src/lib.rs` | `23a49a9` |
+| `src/swarm/pqc_handshake.rs` (API shape only — fresh crypto impl) | `crates/xenia-handshake/src/lib.rs` | `4215ab1` |
 
 ### Still to carry (ranked by value)
 
@@ -86,7 +89,7 @@ deployment.
 
 | # | Symthaea path | LOC | Maps to | Notes |
 |---|---|---|---|---|
-| T2.1 | `src/swarm/rdp_input.rs` | 354 | new `xenia-inject` crate | Input injection: trait + Wayland/X11 backends. Enables viewer → daemon keystrokes/mouse. Pairs with xenia-wire's `Input` payload type (0x11) which is already live. |
+| ~~T2.1~~ | ~~`src/swarm/rdp_input.rs`~~ | ~~354~~ | ✅ shipped as `xenia-inject` (`23a49a9`). X11 backend dropped. Wayland + uinput are scaffold stubs; real plumbing lands with matching xenia-capture backend. |
 | T2.2 | `src/swarm/quic_transport.rs` | 785 | new `xenia-transport-quic` crate | Iroh QUIC. Primary transport per VIEWER_PLAN §4.5; also gives NAT-punch for phone-to-VM tests without Tailscale. |
 | T2.3 | `src/swarm/rdp_clipboard.rs` | 223 | new `xenia-clipboard` crate or feature in `xenia-peer-core` | Bidirectional clipboard with sensitivity scrubbing. |
 | T2.4 | `src/swarm/rdp_file_transfer.rs` | 198 | new `xenia-file-transfer` crate or feature | Chunked file transfer with BLAKE3. |
@@ -124,7 +127,7 @@ Recapitulated from VIEWER_PLAN §3 with today's-actual status:
 | **M1.1** | xenia-capture + xenia-video scaffold + pipeline wired end-to-end with passthrough | ✅ `bd081cf` |
 | **M1.2b** | Real H.264 encode/decode via ffmpeg-next | ✅ `21d8cf3` |
 | **M1.2c** | Real Wayland screen capture (wlr-screencopy + xdg-portal) | ❌ not started — this is **B2** above |
-| **M2** | Input injection + consent-ceremony UI | ❌ not started — **T2.1** + **B3** |
+| **M2** | Input injection + consent-ceremony UI | 🟡 `xenia-inject` crate shipped (`23a49a9`); real backend + consent UI pending (**B3**) |
 | **M3.1** | WebSocket transport | ✅ `e765459` |
 | **M3.2** | Iroh QUIC primary transport | ❌ not started — **T2.2** |
 | **M4.0** | egui GUI on xenia-viewer | ✅ `fd28bc3` |
@@ -181,26 +184,55 @@ but multi-week.
 Things the maintainer should explicitly decide before more
 autonomous shipping:
 
-1. **Which of B1 / B2 / B3 to tackle first?** B1 (PQC handshake)
-   unblocks real deployment; B2 (Wayland capture) unblocks visible
-   content; B3 (consent UI) unblocks the promise of the
-   consent-ceremony. Probably B1 first because it makes every later
-   milestone actually secure.
-2. **Phone → Desktop leg: Path A or Path B?** Path B is faster but
+1. **B1 wiring order:** the crate is shipped; what's left is wiring
+   `xenia-handshake::HandshakeManager` into `xenia-peer` (daemon) +
+   `xenia-viewer` (both CLI and egui) + the browser viewer so the
+   fixture key goes away. Do we want it behind a feature flag
+   initially (explicit `--insecure-fixture-key` opt-out) or a
+   hard cutover?
+2. **B2 vs B3 ordering:** with B1 at the crate layer, real Wayland
+   capture (B2) and the consent UI (B3) are the last two blockers
+   for real deployment. B2 unblocks visible content; B3 unblocks
+   the consent-ceremony promise. Neither depends on the other.
+3. **Phone → Desktop leg: Path A or Path B?** Path B is faster but
    requires a USB-tethered phone every time. Path A is real-world
    deployable but multi-week.
-3. **Licensing drift check.** `xenia-peer-core` is Apache/MIT;
-   everything new since M1 has been AGPL. Did we want
-   `xenia-capture` / `xenia-video` / `xenia-transport-ws` to stay
-   AGPL, or should any of those become Apache/MIT for ecosystem
-   reusability? (ADR-001 defended AGPL for the binaries; libraries
-   is a different question.)
 4. **Phone-as-target binary.** Do we want the Android `xenia-peer`
    port as a separate crate / target triple, or build it ad-hoc
    when a phone test comes up?
+5. ~~**Licensing drift check.**~~ Resolved 2026-04-18 (`996ec60`).
+   ADR-002 formalized "libraries Apache/MIT, binaries AGPL";
+   `xenia-capture` / `xenia-video` / `xenia-transport-ws` flipped
+   to match. `xenia-inject` / `xenia-handshake` born Apache/MIT.
 
 These don't block shipping the Tier 1/2 items above. They only
 matter if the answer would change WHAT we ship.
+
+---
+
+## Unification arc (2026-04-18)
+
+A five-step unification pass closed the "Symthaea ↔ xenia consumption
+pathway" question. Recorded here because the commits tell part of
+the story but not the why.
+
+| Step | What | Commit | Notes |
+|---|---|---|---|
+| U1 | Flip library crates AGPL → Apache/MIT | `996ec60` | `xenia-capture`, `xenia-video`, `xenia-transport-ws` were inheriting AGPL from ported Symthaea files. Matches the ADR-001 "libraries permissive" intent. |
+| U2 | Author ADR-002 documenting the license split | `996ec60` | Makes the rule explicit for future library crates. |
+| U3 | `xenia-handshake` crate (PQC hybrid) | `4215ab1` | **Fresh impl** against RustCrypto, NOT a carry of `symthaea/src/swarm/pqc_handshake.rs` — that file depends on `mycelix-crypto` from the monorepo and would pull it transitively. API shape aligned so a reverse-migration is mechanical. |
+| U4 | `xenia-inject` crate | `23a49a9` | Input-injection abstraction. Port of `symthaea/src/swarm/rdp_input.rs` minus the X11 backend (ADR-001 is Wayland-only). |
+| U5 | Roadmap refresh | (this commit) | Reflects B1 partial completion, license decision resolved, M2 progress. |
+
+**Symthaea-side migration (deferred, next session):** delete
+`symthaea/src/swarm/{rdp_session,rdp_protocol,rdp_transport,rdp_wire,
+rdp_input,pqc_handshake,...}.rs` and replace with `git = "…"`
+dependencies on the xenia crates. Not published to crates.io yet per
+maintainer preference ("let's wait").
+
+**Cross-repo publish plan (deferred):** once wire-level spec
+stabilizes past draft-02r2, publish xenia library crates to
+crates.io under Apache/MIT. Binaries stay on GitHub-only under AGPL.
 
 ---
 
