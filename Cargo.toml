@@ -6,6 +6,7 @@ members = [
     "crates/xenia-capture",
     "crates/xenia-video",
     "crates/xenia-transport-ws",
+    "crates/xenia-inject",
 ]
 resolver = "2"
 
