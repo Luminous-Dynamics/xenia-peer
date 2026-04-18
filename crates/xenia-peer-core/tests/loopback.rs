@@ -3,22 +3,22 @@
 
 //! M0 exit-criterion integration test.
 //!
-//! Spins up a TCP server on localhost, a TCP viewer that connects to
+//! Spins up a TCP host on localhost, a TCP viewer that connects to
 //! it, and exchanges 100 synthetic RGBA frames through the full
 //! xenia-wire seal/open path on both sides over real tokio TCP
 //! sockets. Also exercises the reverse path — the viewer sends 10
-//! synthetic input events and the server opens them.
+//! synthetic input events and the host opens them.
 //!
 //! This isn't testing the wire protocol (that lives in `xenia-wire`'s
-//! own tests) — it's testing that `xenia-server-core` correctly
+//! own tests) — it's testing that `xenia-peer-core` correctly
 //! composes the wire with its own framing types and a real transport.
 
 use std::time::Duration;
 
 use tokio::net::TcpListener;
 use tokio::time::timeout;
-use xenia_server_core::transport::{TcpTransport, Transport};
-use xenia_server_core::{Session, SessionRole};
+use xenia_peer_core::transport::{TcpTransport, Transport};
+use xenia_peer_core::{Session, SessionRole};
 
 const FIXTURE_KEY: [u8; 32] = [0xAB; 32];
 const FRAMES: u64 = 100;
@@ -41,7 +41,7 @@ fn synth_frame(frame_id: u64, w: u32, h: u32) -> Vec<u8> {
     pixels
 }
 
-/// End-to-end: 100 RGBA frames server→viewer + 10 inputs viewer→server.
+/// End-to-end: 100 RGBA frames host→viewer + 10 inputs viewer→host.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hundred_frames_plus_inputs_roundtrip_over_tcp() {
     // Bind on an ephemeral port.
@@ -57,13 +57,13 @@ async fn hundred_frames_plus_inputs_roundtrip_over_tcp() {
         stream.set_nodelay(true).ok();
         let mut transport = TcpTransport::new(stream);
 
-        let mut server = Session::with_fixture(SessionRole::Server, [0x11; 8], 0x42);
-        server.install_key(FIXTURE_KEY);
+        let mut host = Session::with_fixture(SessionRole::Host, [0x11; 8], 0x42);
+        host.install_key(FIXTURE_KEY);
 
         // Forward path: send FRAMES frames.
         for frame_id in 0..FRAMES {
             let pixels = synth_frame(frame_id, FRAME_W, FRAME_H);
-            let envelope = server
+            let envelope = host
                 .seal_captured_rgba(FRAME_W, FRAME_H, pixels)
                 .expect("seal frame");
             transport
@@ -76,7 +76,7 @@ async fn hundred_frames_plus_inputs_roundtrip_over_tcp() {
         let mut received_inputs = Vec::with_capacity(INPUTS as usize);
         for _ in 0..INPUTS {
             let envelope = transport.recv_envelope().await.expect("recv input");
-            let input = server.open_input(&envelope).expect("open input");
+            let input = host.open_input(&envelope).expect("open input");
             received_inputs.push(input);
         }
         received_inputs
@@ -160,12 +160,12 @@ async fn replay_protection_across_real_transport() {
         let (stream, _) = listener.accept().await.unwrap();
         stream.set_nodelay(true).ok();
         let mut transport = TcpTransport::new(stream);
-        let mut server = Session::with_fixture(SessionRole::Server, [0x22; 8], 0x43);
-        server.install_key(FIXTURE_KEY);
+        let mut host = Session::with_fixture(SessionRole::Host, [0x22; 8], 0x43);
+        host.install_key(FIXTURE_KEY);
 
         // Send the same frame twice — but seal it only ONCE, so the
         // second send is a real replay (identical envelope bytes).
-        let envelope = server
+        let envelope = host
             .seal_captured_rgba(2, 2, vec![255; 2 * 2 * 4])
             .unwrap();
         transport.send_envelope(&envelope).await.unwrap();
@@ -228,12 +228,12 @@ async fn oversize_envelope_is_rejected_before_allocation() {
 /// serves as usage documentation.
 #[test]
 fn session_fixture_constructors_work_without_runtime() {
-    let mut server = Session::with_fixture(SessionRole::Server, [1; 8], 1);
+    let mut host = Session::with_fixture(SessionRole::Host, [1; 8], 1);
     let mut viewer = Session::with_fixture(SessionRole::Viewer, [1; 8], 1);
-    server.install_key([0xCD; 32]);
+    host.install_key([0xCD; 32]);
     viewer.install_key([0xCD; 32]);
 
-    let envelope = server
+    let envelope = host
         .seal_captured_rgba(1, 1, vec![0, 255, 0, 255])
         .expect("seal tiny frame");
     let opened = viewer.open_frame(&envelope).expect("open tiny frame");

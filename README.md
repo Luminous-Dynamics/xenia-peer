@@ -1,4 +1,4 @@
-# xenia-server
+# xenia-peer
 
 Server + viewer crates for a real remote-desktop product built on top
 of the [xenia-wire](https://github.com/Luminous-Dynamics/xenia-wire)
@@ -24,7 +24,7 @@ PQC-sealed protocol.
 
 | Milestone | Status | Deliverable |
 |-----------|--------|-------------|
-| **M0** | ✅ shipped | Workspace scaffold + `xenia-server-core` crate + real-TCP loopback integration test exchanging 100 RGBA frames. |
+| **M0** | ✅ shipped | Workspace scaffold + `xenia-peer-core` crate + real-TCP loopback integration test exchanging 100 RGBA frames. |
 | M1 | 🚧 not started | Linux screen capture (X11 + Wayland via portal) + H.264 hardware encode via `ffmpeg-next` + browser WebCodecs decode. 2–3 weeks. |
 | M2 | not started | Input injection + consent-flow wiring (Linux first). 1–2 weeks. |
 | M3 | not started | macOS + Windows capture/encode/input. 4–6 weeks. |
@@ -38,10 +38,10 @@ planning lives).
 ## Crate layout
 
 ```
-xenia-server/
+xenia-peer/
 ├── Cargo.toml                              # workspace
 └── crates/
-    └── xenia-server-core/                  # this is M0
+    └── xenia-peer-core/                  # this is M0
         ├── src/
         │   ├── lib.rs                      # re-exports
         │   ├── frame.rs                    # RawFrame / RawInput / PixelFormat
@@ -61,7 +61,7 @@ Planned sub-crates for later milestones:
 - `xenia-transport-quic` (M1+) — QUIC transport (iroh or quinn).
 - `xenia-transport-ws` (M1+) — WebSocket transport for browser
   viewer compatibility.
-- `xenia-server` (M4) — the binary.
+- `xenia-peer` (M4) — the binary.
 - `xenia-viewer-native` (M4) — native Rust viewer (egui → Tauri).
 
 ## Design decisions locked in
@@ -102,8 +102,8 @@ design. **Our policy**:
 ## Quick start (developers)
 
 ```console
-$ git clone https://github.com/Luminous-Dynamics/xenia-server
-$ cd xenia-server
+$ git clone https://github.com/Luminous-Dynamics/xenia-peer
+$ cd xenia-peer
 $ cargo test
 ```
 
@@ -117,7 +117,7 @@ There is no binary to run yet — M0 is library-only.
 
 ## M0 exit criterion (achieved)
 
-> `cargo test -p xenia-server-core` green, and a `RawServer`/
+> `cargo test -p xenia-peer-core` green, and a `RawServer`/
 > `RawViewer` integration test exchanges 100 RGBA frames through
 > the sealed wire over [a real network transport] on localhost.
 
@@ -157,7 +157,7 @@ Dual-licensed under Apache-2.0 OR MIT, matching
 ## Security
 
 See [xenia-wire's SECURITY.md](https://github.com/Luminous-Dynamics/xenia-wire/blob/main/SECURITY.md)
-for the disclosure policy — xenia-server inherits the same
+for the disclosure policy — xenia-peer inherits the same
 posture. Do not report security issues via public GitHub issues.
 
 ## Relationship to Track A

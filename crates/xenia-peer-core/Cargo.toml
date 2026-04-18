@@ -1,6 +1,6 @@
 [package]
-name = "xenia-server-core"
-description = "Core session + transport primitives for xenia-server. M0 — pre-alpha, no real capture/encode yet."
+name = "xenia-peer-core"
+description = "Core session + transport primitives for xenia-peer. M0 — pre-alpha, no real capture/encode yet."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

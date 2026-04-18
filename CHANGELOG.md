@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to `xenia-server` and its sub-crates are documented
+All notable changes to `xenia-peer` and its sub-crates are documented
 here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
@@ -9,14 +9,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [0.0.0-m0] — 2026-04-18
 
-Initial milestone. Workspace scaffold + `xenia-server-core` crate with
+Initial milestone. Workspace scaffold + `xenia-peer-core` crate with
 the minimum necessary to exchange sealed-RGBA-over-TCP on localhost.
 **Not published to crates.io** — the crate is `publish = false` until
 at least M1 makes it useful.
 
 ### Added
 
-- `xenia-server-core` crate:
+- `xenia-peer-core` crate:
   - `RawFrame` + `RawInput` framing types (raw RGBA only; encoded
     formats reserved).
   - `Session` thin wrapper around `xenia_wire::Session` with
@@ -58,5 +58,5 @@ at least M1 makes it useful.
 - No browser client beyond what `xenia-viewer-web` in the
   `xenia-wire` repo already provides (demo-quality).
 
-[Unreleased]: https://github.com/Luminous-Dynamics/xenia-server/compare/v0.0.0-m0...HEAD
-[0.0.0-m0]: https://github.com/Luminous-Dynamics/xenia-server/releases/tag/v0.0.0-m0
+[Unreleased]: https://github.com/Luminous-Dynamics/xenia-peer/compare/v0.0.0-m0...HEAD
+[0.0.0-m0]: https://github.com/Luminous-Dynamics/xenia-peer/releases/tag/v0.0.0-m0

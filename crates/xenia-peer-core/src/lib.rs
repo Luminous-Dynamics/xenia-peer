@@ -1,9 +1,9 @@
 // Copyright (c) 2024-2026 Tristan Stoltz / Luminous Dynamics
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! # xenia-server-core
+//! # xenia-peer-core
 //!
-//! Core session + transport primitives for `xenia-server`. **M0 — not
+//! Core session + transport primitives for `xenia-peer`. **M0 — not
 //! usable as a real product yet**: no screen capture, no video encoding,
 //! no input injection. What this crate gives you today:
 //!

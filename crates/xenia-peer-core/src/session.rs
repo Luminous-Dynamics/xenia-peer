@@ -4,8 +4,8 @@
 //! Server-side session wrapper.
 //!
 //! A thin layer over [`xenia_wire::Session`] that tracks
-//! server-specific framing state: a monotonic frame counter on the
-//! forward (server → viewer) path, a monotonic input counter on the
+//! host-specific framing state: a monotonic frame counter on the
+//! forward (host → viewer) path, a monotonic input counter on the
 //! reverse path, and which role (`Server` / `Viewer`) this instance
 //! plays. All AEAD + replay + consent machinery lives in
 //! `xenia-wire`; this struct is thin.
@@ -22,13 +22,13 @@ use crate::frame::{RawFrame, RawInput};
 pub enum SessionRole {
     /// Captures frames, accepts input. The side running on the
     /// machine being controlled.
-    Server,
+    Host,
     /// Renders frames, sends input. The side running on the
     /// technician's device.
     Viewer,
 }
 
-/// Session errors surfaced from the server-side wrapper.
+/// Session errors surfaced from the host-side wrapper.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum SessionError {
@@ -37,7 +37,7 @@ pub enum SessionError {
     Wire(#[from] WireError),
 }
 
-/// A server or viewer session.
+/// A host or viewer session.
 ///
 /// Wraps `xenia_wire::Session` with framing-side bookkeeping.
 /// Caller installs a 32-byte AEAD key via [`Session::install_key`],
@@ -47,17 +47,17 @@ pub enum SessionError {
 pub struct Session {
     role: SessionRole,
     wire: WireSession,
-    /// Frame ID counter for outbound `RawFrame`s (server side only).
+    /// Frame ID counter for outbound `RawFrame`s (host side only).
     next_frame_id: u64,
     /// Input sequence counter for outbound `RawInput`s (viewer side only).
     next_input_seq: u64,
 }
 
 impl Session {
-    /// Construct a server-side session. Generates a random `source_id`
+    /// Construct a host-side session. Generates a random `source_id`
     /// and `epoch`; caller must install a key before sealing.
-    pub fn server() -> Self {
-        Self::with_role(SessionRole::Server)
+    pub fn host() -> Self {
+        Self::with_role(SessionRole::Host)
     }
 
     /// Construct a viewer-side session.
@@ -187,7 +187,7 @@ impl Session {
         xenia_wire::seal_input(&input_as_wire(&input)?, &mut self.wire).map_err(Into::into)
     }
 
-    /// Open a sealed input envelope on the server side.
+    /// Open a sealed input envelope on the host side.
     pub fn open_input(&mut self, envelope: &[u8]) -> Result<RawInput, SessionError> {
         let wire_input = open_input(envelope, &mut self.wire)?;
         input_from_wire(&wire_input).map_err(Into::into)
@@ -243,11 +243,11 @@ mod tests {
     }
 
     fn paired() -> (Session, Session) {
-        let mut server = Session::with_fixture(SessionRole::Server, [0x11; 8], 0xAB);
+        let mut host = Session::with_fixture(SessionRole::Host, [0x11; 8], 0xAB);
         let mut viewer = Session::with_fixture(SessionRole::Viewer, [0x11; 8], 0xAB);
-        server.install_key(fixture_key());
+        host.install_key(fixture_key());
         viewer.install_key(fixture_key());
-        (server, viewer)
+        (host, viewer)
     }
 
     fn solid_blue(w: u32, h: u32) -> Vec<u8> {
@@ -256,9 +256,9 @@ mod tests {
 
     #[test]
     fn frame_seal_open_roundtrip_preserves_pixels() {
-        let (mut server, mut viewer) = paired();
+        let (mut host, mut viewer) = paired();
         let pixels = solid_blue(8, 4);
-        let sealed = server.seal_captured_rgba(8, 4, pixels.clone()).unwrap();
+        let sealed = host.seal_captured_rgba(8, 4, pixels.clone()).unwrap();
         let opened = viewer.open_frame(&sealed).unwrap();
         assert_eq!(opened.width, 8);
         assert_eq!(opened.height, 4);
@@ -269,20 +269,20 @@ mod tests {
 
     #[test]
     fn frame_counter_advances_per_seal() {
-        let (mut server, _viewer) = paired();
+        let (mut host, _viewer) = paired();
         for expected_id in 0u64..5 {
-            let _ = server.seal_captured_rgba(2, 2, solid_blue(2, 2)).unwrap();
+            let _ = host.seal_captured_rgba(2, 2, solid_blue(2, 2)).unwrap();
             // next_frame_id advances past what we just used.
-            assert_eq!(server.next_frame_id, expected_id + 1);
+            assert_eq!(host.next_frame_id, expected_id + 1);
         }
     }
 
     #[test]
     fn input_seal_open_roundtrip_preserves_payload() {
-        let (mut server, mut viewer) = paired();
+        let (mut host, mut viewer) = paired();
         let payload = br#"{"type":"mousemove","x":0.7,"y":0.3}"#.to_vec();
         let sealed = viewer.seal_input_event(payload.clone()).unwrap();
-        let opened = server.open_input(&sealed).unwrap();
+        let opened = host.open_input(&sealed).unwrap();
         assert_eq!(opened.payload, payload);
         assert_eq!(opened.sequence, 0);
     }
@@ -291,7 +291,7 @@ mod tests {
     fn open_frame_rejects_dimension_mismatch() {
         // Hand-craft a RawFrame whose declared dims don't match the
         // buffer, seal it, and verify the viewer catches it on open.
-        let (mut server, mut viewer) = paired();
+        let (mut host, mut viewer) = paired();
         let bad = RawFrame {
             frame_id: 0,
             timestamp_ms: 0,
@@ -300,16 +300,16 @@ mod tests {
             pixel_format: crate::frame::PixelFormat::Rgba8,
             pixels: vec![0u8; 10],
         };
-        let sealed = server.seal_frame(&bad).unwrap();
+        let sealed = host.seal_frame(&bad).unwrap();
         let err = viewer.open_frame(&sealed);
         assert!(err.is_err(), "dimension mismatch must be rejected");
     }
 
     #[test]
     fn role_preserved() {
-        let server = Session::server();
+        let host = Session::host();
         let viewer = Session::viewer();
-        assert_eq!(server.role(), SessionRole::Server);
+        assert_eq!(host.role(), SessionRole::Host);
         assert_eq!(viewer.role(), SessionRole::Viewer);
     }
 }
