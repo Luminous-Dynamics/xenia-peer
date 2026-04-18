@@ -5,6 +5,7 @@ members = [
     "crates/xenia-viewer",
     "crates/xenia-capture",
     "crates/xenia-video",
+    "crates/xenia-transport-ws",
 ]
 resolver = "2"
 

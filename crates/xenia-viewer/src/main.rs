@@ -18,10 +18,32 @@ use clap::{Parser, ValueEnum};
 use tracing::{info, warn};
 use xenia_capture::{ScreenCapture, TestCapture};
 use xenia_peer_core::frame::PixelFormat as FramePixelFormat;
-use xenia_peer_core::transport::{TcpTransport, Transport};
+use xenia_peer_core::transport::{TcpTransport, Transport, TransportError};
 use xenia_peer_core::{Session, SessionRole};
+use xenia_transport_ws::WsTransport;
 use xenia_video::passthrough::PassthroughDecoder;
 use xenia_video::{Decoder, EncodedPacket};
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum TransportChoice {
+    Tcp,
+    Ws,
+}
+
+#[allow(clippy::large_enum_variant)] // see xenia-peer's identical note
+enum AnyTransport {
+    Tcp(TcpTransport),
+    Ws(WsTransport),
+}
+
+impl AnyTransport {
+    async fn recv_envelope(&mut self) -> Result<Vec<u8>, TransportError> {
+        match self {
+            AnyTransport::Tcp(t) => t.recv_envelope().await,
+            AnyTransport::Ws(t) => t.recv_envelope().await,
+        }
+    }
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum CodecChoice {
@@ -100,6 +122,11 @@ struct Args {
     /// `--codec` flag.
     #[arg(long, value_enum, default_value_t = CodecChoice::Passthrough)]
     codec: CodecChoice,
+
+    /// Transport. MUST match the daemon's `--transport`.
+    /// `tcp` expects `host:port`; `ws` expects `ws://host:port`.
+    #[arg(long, value_enum, default_value_t = TransportChoice::Tcp)]
+    transport: TransportChoice,
 }
 
 fn parse_source_id(hex: &str) -> Result<[u8; 8], String> {
@@ -130,7 +157,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(peer = %args.connect, frames = args.frames, verify = args.verify, codec = ?args.codec, "connecting to xenia-peer daemon");
     warn!("M1 scaffold: fixture key, no GUI. See ADR-001.");
 
-    let mut transport = TcpTransport::connect(&args.connect).await?;
+    let mut transport: AnyTransport = match args.transport {
+        TransportChoice::Tcp => AnyTransport::Tcp(TcpTransport::connect(&args.connect).await?),
+        TransportChoice::Ws => {
+            // Accept both forms: raw `host:port` (auto-prefixed) and
+            // an explicit `ws://` / `wss://` URL.
+            let url = if args.connect.starts_with("ws://") || args.connect.starts_with("wss://") {
+                args.connect.clone()
+            } else {
+                format!("ws://{}", args.connect)
+            };
+            AnyTransport::Ws(WsTransport::connect(&url).await?)
+        }
+    };
     let mut session = Session::with_fixture(SessionRole::Viewer, source_id, args.epoch);
     session.install_key(FIXTURE_KEY);
 

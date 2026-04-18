@@ -1,0 +1,21 @@
+[package]
+name = "xenia-transport-ws"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-or-later"
+description = "WebSocket transport for the Xenia remote-session stack. Sealed envelopes over binary WebSocket messages — browser-compatible + CGN-friendly fallback for environments where raw UDP (Iroh QUIC) can't punch."
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+xenia-peer-core = { path = "../xenia-peer-core" }
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+
+[dev-dependencies]

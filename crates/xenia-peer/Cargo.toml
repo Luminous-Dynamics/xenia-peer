@@ -16,6 +16,7 @@ publish = false  # unpublished until M1 makes it useful
 xenia-peer-core = { path = "../xenia-peer-core" }
 xenia-capture = { path = "../xenia-capture" }
 xenia-video = { path = "../xenia-video" }
+xenia-transport-ws = { path = "../xenia-transport-ws" }
 xenia-wire = { workspace = true, features = ["consent", "reference-frame"] }
 tokio.workspace = true
 tracing.workspace = true

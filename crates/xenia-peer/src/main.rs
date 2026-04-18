@@ -33,10 +33,42 @@ use tokio::net::TcpListener;
 use tracing::{info, warn};
 use xenia_capture::{ScreenCapture, TestCapture};
 use xenia_peer_core::frame::PixelFormat as FramePixelFormat;
-use xenia_peer_core::transport::{TcpTransport, Transport};
+use xenia_peer_core::transport::{TcpTransport, Transport, TransportError};
 use xenia_peer_core::{frame::RawFrame, Session, SessionRole};
+use xenia_transport_ws::WsTransport;
 use xenia_video::passthrough::PassthroughEncoder;
 use xenia_video::{EncodeParams, Encoder, PixelFormat as CodecPixelFormat};
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum TransportChoice {
+    /// Raw TCP with a 4-byte BE length-prefix. Always available.
+    Tcp,
+    /// WebSocket (`ws://`). Browser-compatible + CGN-friendly.
+    Ws,
+}
+
+/// Enum dispatch over the two transport implementations. Saves us
+/// the pain of dyn-incompatible async-fn-in-trait Transport.
+///
+/// clippy notes that the variants differ in size (WsTransport's
+/// tungstenite stream carries significantly more state than
+/// TcpTransport). The size gap is ~1 KiB per transport instance,
+/// paid once per session — negligible compared to the per-frame
+/// buffers that already dominate runtime memory.
+#[allow(clippy::large_enum_variant)]
+enum AnyTransport {
+    Tcp(TcpTransport),
+    Ws(WsTransport),
+}
+
+impl AnyTransport {
+    async fn send_envelope(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
+        match self {
+            AnyTransport::Tcp(t) => t.send_envelope(bytes).await,
+            AnyTransport::Ws(t) => t.send_envelope(bytes).await,
+        }
+    }
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum CodecChoice {
@@ -126,6 +158,13 @@ struct Args {
     /// the passthrough codec.
     #[arg(long, default_value_t = 3000)]
     bitrate_kbps: u32,
+
+    /// Transport. `tcp` is the simplest path (length-prefixed sealed
+    /// envelopes over a raw TCP stream). `ws` is WebSocket
+    /// (browser-compatible + CGN-friendly). Viewer's `--transport`
+    /// MUST match.
+    #[arg(long, value_enum, default_value_t = TransportChoice::Tcp)]
+    transport: TransportChoice,
 }
 
 fn parse_source_id(hex: &str) -> Result<[u8; 8], String> {
@@ -161,15 +200,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let source_id = parse_source_id(&args.source_id_hex)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
-    let listener = TcpListener::bind(&args.listen).await?;
-    let local = listener.local_addr()?;
-    info!(addr = %local, width = args.width, height = args.height, fps = args.fps, codec = ?args.codec, "xenia-peer daemon listening");
+    info!(addr = %args.listen, width = args.width, height = args.height, fps = args.fps, codec = ?args.codec, transport = ?args.transport, "xenia-peer daemon listening");
     warn!("M1 scaffold: fixture key, TestCapture synthetic frames. See ADR-001.");
 
-    let (stream, peer) = listener.accept().await?;
-    stream.set_nodelay(true).ok();
-    info!(peer = %peer, "viewer connected");
-    let mut transport = TcpTransport::new(stream);
+    let mut transport: AnyTransport = match args.transport {
+        TransportChoice::Tcp => {
+            let listener = TcpListener::bind(&args.listen).await?;
+            let (stream, peer) = listener.accept().await?;
+            stream.set_nodelay(true).ok();
+            info!(peer = %peer, "TCP viewer connected");
+            AnyTransport::Tcp(TcpTransport::new(stream))
+        }
+        TransportChoice::Ws => {
+            let (ws, local) = WsTransport::bind_and_accept_one(&args.listen).await?;
+            info!(local = %local, "WebSocket viewer connected");
+            AnyTransport::Ws(ws)
+        }
+    };
 
     let mut session = Session::with_fixture(SessionRole::Host, source_id, args.epoch);
     session.install_key(FIXTURE_KEY);
