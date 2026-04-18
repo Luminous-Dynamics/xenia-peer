@@ -1,5 +1,9 @@
 [workspace]
-members = ["crates/xenia-peer-core"]
+members = [
+    "crates/xenia-peer-core",
+    "crates/xenia-peer",
+    "crates/xenia-viewer",
+]
 resolver = "2"
 
 [workspace.package]

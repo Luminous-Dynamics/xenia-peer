@@ -1,0 +1,20 @@
+[package]
+name = "xenia-viewer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-or-later"
+description = "Native viewer for Xenia sessions. Connects to an xenia-peer daemon, decodes sealed frames, renders. Pre-alpha stub — M4 adds the egui GUI."
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+xenia-peer-core = { path = "../xenia-peer-core" }
+xenia-wire = { workspace = true, features = ["consent", "reference-frame"] }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+thiserror.workspace = true

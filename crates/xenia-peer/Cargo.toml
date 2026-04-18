@@ -1,0 +1,22 @@
+[package]
+name = "xenia-peer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-or-later"
+description = "Headless daemon that shares a screen over the Xenia wire. Hosts sessions; delegates capture/encode to xenia-peer-core. Pre-alpha stub — M1 adds real Wayland capture + H.264."
+repository.workspace = true
+homepage.workspace = true
+publish = false  # unpublished until M1 makes it useful
+
+# Binary-only crate; see workspace.lints for inherited deny-unsafe.
+
+[dependencies]
+xenia-peer-core = { path = "../xenia-peer-core" }
+xenia-wire = { workspace = true, features = ["consent", "reference-frame"] }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+thiserror.workspace = true
