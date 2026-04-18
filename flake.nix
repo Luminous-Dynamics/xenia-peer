@@ -53,6 +53,7 @@
             wayland-protocols
             wayland-scanner
             libxkbcommon
+            libGL
             dbus
             dbus.dev
             pipewire
@@ -70,6 +71,12 @@
             # its internal clang can find errno.h and friends.
             export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
             export BINDGEN_EXTRA_CLANG_ARGS="$(< ${pkgs.stdenv.cc}/nix-support/libc-cflags) $(< ${pkgs.stdenv.cc}/nix-support/cc-cflags)"
+
+            # eframe / winit dlopen these libraries at runtime. Without
+            # them on LD_LIBRARY_PATH, `--gui` crashes with
+            # "The wayland library could not be loaded" on Wayland or
+            # "Could not open libxkbcommon-x11.so" on X11.
+            export LD_LIBRARY_PATH="${pkgs.wayland}/lib:${pkgs.libxkbcommon}/lib:${pkgs.libGL}/lib:$LD_LIBRARY_PATH"
 
             # Preserve parent CARGO_TARGET_DIR for build isolation across
             # concurrent sessions (matches Symthaea's shellHook pattern).
