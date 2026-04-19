@@ -1,0 +1,25 @@
+[package]
+name = "xenia-ledger"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-or-later"
+description = "Append-only, hash-chained, Ed25519-signed consent ledger for the Xenia remote-session stack. The third-party-verifiable cryptographic moat of the Mycelix Sovereign suite."
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+blake3 = "1.5"
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core", "serde"] }
+serde = { workspace = true }
+serde-big-array = "0.5"
+bincode = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+rand = "0.8"
+rand_core = "0.6"
