@@ -1,0 +1,189 @@
+/* xenia-admin — minimal scaffold styles.
+ *
+ * Intentionally sparse: the real design system lands after the W1
+ * integration work (DID login + bridge-common session threading) is
+ * functional. Today this is just enough to make the scaffold readable.
+ */
+
+:root {
+    --bg: #0b1115;
+    --bg-elevated: #131b22;
+    --fg: #e9edf2;
+    --fg-dim: #8a97a4;
+    --accent: #5ee3ff;
+    --accent-dim: #2a7388;
+    --ok: #58d66a;
+    --warn: #f3b23f;
+    --err: #ff6b6b;
+    --border: #23303a;
+    --mono: ui-monospace, "JetBrains Mono", "Fira Code", "Source Code Pro", Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+.topbar {
+    display: flex;
+    align-items: center;
+    gap: 2rem;
+    padding: 0.75rem 1.5rem;
+    background: var(--bg-elevated);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+.brand {
+    display: flex;
+    flex-direction: column;
+    text-decoration: none;
+    color: var(--fg);
+}
+.brand-name { font-weight: 700; font-size: 1.1rem; }
+.brand-suite { font-size: 0.75rem; color: var(--fg-dim); letter-spacing: 0.04em; }
+
+.primary-nav {
+    display: flex;
+    gap: 1.25rem;
+    flex: 1;
+}
+.primary-nav a {
+    color: var(--fg-dim);
+    text-decoration: none;
+    padding: 0.3rem 0.6rem;
+    border-radius: 4px;
+    transition: color 120ms, background 120ms;
+}
+.primary-nav a:hover,
+.primary-nav a[aria-current="page"] {
+    color: var(--fg);
+    background: rgba(94, 227, 255, 0.08);
+}
+
+.auth-status { display: flex; align-items: center; gap: 0.75rem; }
+.did-chip {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    padding: 0.25rem 0.5rem;
+    background: rgba(94, 227, 255, 0.08);
+    border: 1px solid var(--accent-dim);
+    border-radius: 999px;
+    max-width: 22ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+button, .primary, .secondary {
+    font: inherit;
+    cursor: pointer;
+    padding: 0.4rem 0.9rem;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--fg);
+    text-decoration: none;
+    display: inline-block;
+}
+button.primary, .primary {
+    background: var(--accent);
+    color: #05131a;
+    border-color: var(--accent);
+    font-weight: 600;
+}
+button.primary:hover, .primary:hover { filter: brightness(1.1); }
+button.secondary, .secondary { color: var(--fg-dim); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button.sign-out { color: var(--fg-dim); }
+button.sign-out:hover { color: var(--err); border-color: var(--err); }
+
+.content {
+    max-width: 980px;
+    margin: 2rem auto;
+    padding: 0 1.5rem;
+}
+
+h1 { font-size: 1.5rem; margin: 0 0 0.75rem 0; }
+
+p.prose { color: var(--fg-dim); max-width: 65ch; margin: 0 0 1.5rem 0; }
+
+code {
+    font-family: var(--mono);
+    font-size: 0.9em;
+    background: rgba(255,255,255,0.04);
+    padding: 0.05em 0.35em;
+    border-radius: 3px;
+}
+
+.login-page { max-width: 28rem; }
+.login-form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 1rem;
+}
+.login-form label { font-size: 0.85rem; color: var(--fg-dim); }
+.login-form input {
+    font: inherit;
+    padding: 0.5rem 0.7rem;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    border-radius: 4px;
+    font-family: var(--mono);
+}
+.login-form input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+.form-error { color: var(--err); font-size: 0.85rem; margin: 0; }
+
+.devices-table, .sessions-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 1rem;
+}
+.devices-table th, .sessions-table th,
+.devices-table td, .sessions-table td {
+    text-align: left;
+    padding: 0.6rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+}
+.devices-table th, .sessions-table th {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--fg-dim);
+    font-weight: 600;
+}
+.devices-table td.dim, .sessions-table td.dim { color: var(--fg-dim); font-size: 0.85rem; }
+.devices-table td.numeric, .sessions-table td.numeric {
+    font-family: var(--mono);
+    text-align: right;
+}
+.did-mono { font-family: var(--mono); font-size: 0.85rem; }
+
+.posture, .state {
+    font-size: 0.8rem;
+    padding: 0.15rem 0.5rem;
+    border-radius: 3px;
+    font-weight: 600;
+}
+.posture-healthy, .state-active { background: rgba(88, 214, 106, 0.15); color: var(--ok); }
+.posture-degraded, .state-revoked { background: rgba(255, 107, 107, 0.15); color: var(--err); }
+.state-completed { background: rgba(138, 151, 164, 0.15); color: var(--fg-dim); }
+
+.signin-prompt, .not-found { text-align: center; padding: 3rem 0; }
+.planned-controls { color: var(--fg-dim); line-height: 1.8; }
+.planned-controls code { color: var(--fg); }

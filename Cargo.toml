@@ -9,6 +9,20 @@ members = [
     "crates/xenia-inject",
     "crates/xenia-handshake",
     "crates/xenia-ledger",
+    "crates/xenia-admin",
+]
+# xenia-admin is a wasm32-unknown-unknown CSR bin; keep it out of
+# host-only cargo check/build invocations.
+default-members = [
+    "crates/xenia-peer-core",
+    "crates/xenia-peer",
+    "crates/xenia-viewer",
+    "crates/xenia-capture",
+    "crates/xenia-video",
+    "crates/xenia-transport-ws",
+    "crates/xenia-inject",
+    "crates/xenia-handshake",
+    "crates/xenia-ledger",
 ]
 resolver = "2"
 
