@@ -7,6 +7,25 @@
     <meta name="description" content="Admin console for the Xenia remote-session stack — the operator surface of the Mycelix Sovereign suite."/>
     <link data-trunk rel="css" href="styles/main.css"/>
     <link data-trunk rel="rust" data-bin="xenia-admin" data-wasm-opt="z"/>
+
+    <!--
+      Runtime Holochain connection config.  Set any of these BEFORE the
+      wasm bundle loads and xenia-admin will read them via window.*.
+      Defaults (when unset) match the shared dev conductor in
+      CLAUDE.md — ws://localhost:8888, app_id=mycelix-unified,
+      role=identity.
+
+      __HC_AUTH_TOKEN is typically required against a Holochain 0.6
+      conductor. Obtain it from the admin WebSocket via
+      `AdminRequest::IssueAppAuthenticationToken` — see the runbook at
+      mycelix-sovereign/docs/runtime-verification-runbook.md.
+    -->
+    <script>
+      // window.__HC_CONDUCTOR_URL  = "ws://localhost:8888";
+      // window.__HC_APP_ID         = "mycelix-unified";
+      // window.__HC_IDENTITY_ROLE  = "identity";
+      // window.__HC_AUTH_TOKEN     = "<paste token from admin WebSocket here>";
+    </script>
 </head>
 <body>
     <div id="root"></div>

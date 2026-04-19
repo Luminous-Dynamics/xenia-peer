@@ -23,12 +23,17 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::hooks::use_navigate;
 use mycelix_leptos_client::{BrowserWsTransport, HolochainClient};
+use wasm_bindgen::JsValue;
 
 use crate::auth::AuthState;
 
-/// Build-time overridable conductor + role config. Defaults match the
-/// shared dev conductor in CLAUDE.md. Operators deploying for a
-/// specific customer can override at trunk-build time:
+/// Compile-time fallbacks. Runtime overrides (below) take precedence —
+/// this lets us ship one wasm bundle and deploy it against different
+/// conductors without a rebuild (matches the Mycelix ecosystem
+/// convention, see `mycelix-leptos-core::holochain_provider`).
+///
+/// Build-time override (only useful if you're baking a deployment-
+/// specific bundle):
 ///
 /// ```sh
 /// XENIA_ADMIN_CONDUCTOR_URL=wss://sovereign.example.org:8888 \
@@ -36,18 +41,52 @@ use crate::auth::AuthState;
 /// XENIA_ADMIN_IDENTITY_ROLE=identity \
 /// trunk build --release
 /// ```
-const CONDUCTOR_URL: &str = match option_env!("XENIA_ADMIN_CONDUCTOR_URL") {
+const DEFAULT_CONDUCTOR_URL: &str = match option_env!("XENIA_ADMIN_CONDUCTOR_URL") {
     Some(v) => v,
     None => "ws://localhost:8888",
 };
-const APP_ID: &str = match option_env!("XENIA_ADMIN_APP_ID") {
+const DEFAULT_APP_ID: &str = match option_env!("XENIA_ADMIN_APP_ID") {
     Some(v) => v,
     None => "mycelix-unified",
 };
-const IDENTITY_ROLE: &str = match option_env!("XENIA_ADMIN_IDENTITY_ROLE") {
+const DEFAULT_IDENTITY_ROLE: &str = match option_env!("XENIA_ADMIN_IDENTITY_ROLE") {
     Some(v) => v,
     None => "identity",
 };
+
+/// Read `window.__HC_CONDUCTOR_URL` — matches Praxis / mycelix-leptos-
+/// core convention. Fallback to the compile-time default.
+fn conductor_url() -> String {
+    window_string("__HC_CONDUCTOR_URL").unwrap_or_else(|| DEFAULT_CONDUCTOR_URL.to_string())
+}
+
+/// Read `window.__HC_APP_ID`.
+fn app_id() -> String {
+    window_string("__HC_APP_ID").unwrap_or_else(|| DEFAULT_APP_ID.to_string())
+}
+
+/// Read `window.__HC_IDENTITY_ROLE`.
+fn identity_role() -> String {
+    window_string("__HC_IDENTITY_ROLE").unwrap_or_else(|| DEFAULT_IDENTITY_ROLE.to_string())
+}
+
+/// Read `window.__HC_AUTH_TOKEN`. This is the app-authentication token
+/// that the Holochain 0.6 conductor issues via
+/// `AdminRequest::IssueAppAuthenticationToken`. Without it, zome calls
+/// against an authenticated conductor fail with a connection / auth
+/// error. See `mycelix-sovereign/docs/runtime-verification-runbook.md`
+/// for how to obtain and inject it.
+fn auth_token() -> Option<Vec<u8>> {
+    window_string("__HC_AUTH_TOKEN").map(|s| s.into_bytes())
+}
+
+fn window_string(key: &str) -> Option<String> {
+    let w = web_sys::window()?;
+    js_sys::Reflect::get(&w, &JsValue::from_str(key))
+        .ok()
+        .and_then(|v| v.as_string())
+        .filter(|s| !s.is_empty())
+}
 
 #[derive(Clone, Debug)]
 enum LoginStatus {
@@ -97,6 +136,7 @@ pub fn LoginPage() -> impl IntoView {
         });
     };
 
+    let url_display = conductor_url();
     view! {
         <section class="login-page">
             <h1>"Sign in"</h1>
@@ -105,7 +145,7 @@ pub fn LoginPage() -> impl IntoView {
                 "On submit, we call "
                 <code>"did_registry::resolve_did"</code>
                 " on the conductor at "
-                <code>{CONDUCTOR_URL}</code>
+                <code>{url_display}</code>
                 " — no server intermediary, zero trust in our infrastructure."
             </p>
             <form
@@ -135,11 +175,18 @@ pub fn LoginPage() -> impl IntoView {
                 </button>
             </form>
             <p class="footnote">
-                "App ID " <code>{APP_ID}</code>
-                " · role " <code>{IDENTITY_ROLE}</code>
-                ". Override at build time via "
-                <code>"XENIA_ADMIN_*"</code>
-                " env vars — see the component docs."
+                "App ID " <code>{app_id()}</code>
+                " · role " <code>{identity_role()}</code>
+                " · auth " <code>{if auth_token().is_some() { "token set" } else { "none (will fail against authenticated conductor)" }}</code>
+                ". Override at runtime via "
+                <code>"window.__HC_CONDUCTOR_URL"</code>
+                ", "
+                <code>"window.__HC_APP_ID"</code>
+                ", "
+                <code>"window.__HC_IDENTITY_ROLE"</code>
+                ", "
+                <code>"window.__HC_AUTH_TOKEN"</code>
+                " in index.html — see the admin console README."
             </p>
         </section>
     }
@@ -174,13 +221,18 @@ fn StatusBanner(status: RwSignal<LoginStatus>) -> impl IntoView {
 /// - `Ok(false)` if the conductor returned `None`
 /// - `Err(msg)`  on connect / zome / deserialization failure
 async fn resolve_did(did: &str) -> Result<bool, String> {
+    let url = conductor_url();
+    let app = app_id();
+    let role = identity_role();
+    let token = auth_token();
+
     let transport = BrowserWsTransport::new();
-    let client = HolochainClient::new(transport, APP_ID, IDENTITY_ROLE);
+    let client = HolochainClient::new(transport, app, role);
 
     client
-        .connect(CONDUCTOR_URL, None)
+        .connect(&url, token)
         .await
-        .map_err(|e| format!("connect {CONDUCTOR_URL}: {e}"))?;
+        .map_err(|e| format!("connect {url}: {e}"))?;
 
     // resolve_did(did: String) -> ExternResult<Option<Record>>
     // Pass an owned String (the trait bound requires Sized). We only
