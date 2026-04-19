@@ -35,6 +35,9 @@ getrandom = { version = "0.2", features = ["js"] }
 # Import / export of persisted chains on the Sessions page.
 serde_json = "1"
 
+# Real Holochain zome calls from the browser (resolve_did on login).
+mycelix-leptos-client = { version = "0.1", default-features = false, features = ["browser"] }
+
 [profile.release]
 opt-level = "z"
 lto = true
