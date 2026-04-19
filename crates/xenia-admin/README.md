@@ -58,7 +58,9 @@ This is the canonical "show a CISO what the product does" sequence. Every step h
 
 5. **The 30-second NIS2 Art. 21(f) pitch.** Click **Tamper** on any row (easy target: seq 1, Approval). Watch the badge flip to **✗ Verify failed** with a specific error like `entry_hash mismatch at seq 1 — tampering detected`. Click **Tamper** again on the same row to restore the kind — and verify flips back to ✓. This is the "admin cannot rewrite the audit log" property of `xenia-ledger` made visible, in a demo anyone can touch.
 
-6. **Sign out via the top-right button.** `localStorage` is cleared; subsequent visits redirect to `/login`.
+6. **The round-trip: export + import.** Scroll down; click **Show JSON export**. You see a portable self-contained attestation (public key + entries). Copy it. Scroll to **Verify a chain from JSON** below, paste, click **Verify** — it passes. Now modify a byte in the pasted JSON (change `"kind":"Approval"` to `"kind":"Denial"`) and verify again — it fails with a specific `VerifyError`. Proves the Verifier works on arbitrary input, not just chains we generated.
+
+7. **Sign out via the top-right button.** `localStorage` is cleared; subsequent visits redirect to `/login`.
 
 ## What's worth showing a CISO vs what's scaffold
 
@@ -98,7 +100,7 @@ crates/xenia-admin/
 
 - [ ] Replace `LoginPage` DID-shape validation with real `resolve_did` zome call via a browser-friendly shim over `mycelix-bridge-common`. Might require publishing a small `mycelix-leptos-client` port to crates.io, since xenia-peer is not inside the monorepo.
 - [ ] Add WebAuthn / TOTP MFA challenge step on login.
-- [ ] Replace `SessionsPage` synthetic chain with an import+verify flow: operator uploads a persisted ledger file (JSON / bincode) + pastes a public key, we verify it and render the same badges.
+- [x] Replace `SessionsPage` synthetic chain with an import+verify flow: operator uploads a persisted ledger file (JSON) — shipped, portable `ExportedChain` shape carries the public key alongside entries, single round-trip round-tripped.
 - [ ] Wire `DevicesPage` to `xenia-peer-core`'s session registry once that lands.
 - [ ] Policy CRUD (tier thresholds, session TTL, MFA enforcement) with every mutation producing a `ConsentKind::`-tagged ledger entry so policy drift is itself auditable.
 

@@ -276,3 +276,35 @@ button.tamper:hover { border-color: var(--warn); }
 
 .footnote { margin-top: 1rem; color: var(--fg-dim); font-size: 0.85rem; }
 .footnote code { color: var(--fg); }
+
+.export-section { margin-top: 1.5rem; }
+.export-section .prose.dim { color: var(--fg-dim); margin: 0.75rem 0; font-size: 0.85rem; }
+.export-textarea,
+.import-textarea {
+    width: 100%;
+    margin-top: 0.5rem;
+    padding: 0.6rem 0.8rem;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    border-radius: 4px;
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    resize: vertical;
+    line-height: 1.4;
+}
+.import-textarea:focus { outline: none; border-color: var(--accent); }
+.export-textarea { opacity: 0.9; }
+
+.import-section {
+    margin-top: 2.5rem;
+    padding-top: 2rem;
+    border-top: 1px solid var(--border);
+}
+.import-section h2 { font-size: 1.15rem; margin: 0 0 0.5rem 0; }
+
+.button-row {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+}

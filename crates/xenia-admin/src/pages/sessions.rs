@@ -20,10 +20,21 @@
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use leptos::prelude::*;
 use rand_core::OsRng;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use xenia_ledger::{Chain, ConsentEventRecord, ConsentKind, VerifyError, Verifier};
+use xenia_ledger::{Chain, ConsentEventRecord, ConsentKind, LedgerEntry, VerifyError, Verifier};
 
 use crate::auth::AuthState;
+
+/// Portable JSON shape used by the export/import pair. `public_key_hex`
+/// is the 64-char lowercase-hex encoding of the 32-byte Ed25519 verifying
+/// key; `entries` serializes via the crate-level serde derives on
+/// `LedgerEntry`.
+#[derive(Serialize, Deserialize)]
+struct ExportedChain {
+    public_key_hex: String,
+    entries: Vec<LedgerEntry>,
+}
 
 #[component]
 pub fn SessionsPage() -> impl IntoView {
@@ -34,6 +45,7 @@ pub fn SessionsPage() -> impl IntoView {
             fallback=|| view! { <a href="/login" class="primary">"Sign in to view sessions"</a> }
         >
             <LedgerDemo/>
+            <ChainImporter/>
         </Show>
     }
 }
@@ -140,7 +152,162 @@ fn LedgerDemo() -> impl IntoView {
                 ". Open the browser console to see zero network activity — "
                 "every byte was computed here."
             </p>
+
+            <ExportSection entries pub_key_hex=hex_full(pk.to_bytes().as_slice())/>
         </section>
+    }
+}
+
+#[component]
+fn ExportSection(
+    entries: RwSignal<Vec<LedgerEntry>>,
+    pub_key_hex: String,
+) -> impl IntoView {
+    let show = RwSignal::new(false);
+    let pk_hex_for_memo = pub_key_hex.clone();
+    let json = Memo::new(move |_| {
+        let exported = ExportedChain {
+            public_key_hex: pk_hex_for_memo.clone(),
+            entries: entries.get(),
+        };
+        serde_json::to_string_pretty(&exported)
+            .unwrap_or_else(|e| format!("serialization error: {e}"))
+    });
+
+    view! {
+        <div class="export-section">
+            <button
+                class="secondary"
+                on:click=move |_| show.update(|s| *s = !*s)
+            >
+                {move || if show.get() { "Hide JSON export" } else { "Show JSON export" }}
+            </button>
+            <Show when=move || show.get()>
+                <p class="prose dim">
+                    "The JSON below is a self-contained attestation: anyone holding "
+                    "it can verify the session history against the operator's "
+                    "embedded public key using only the open-source "
+                    <code>"xenia-ledger"</code>
+                    " crate — no access to our servers required. Try modifying a "
+                    "byte and pasting the result into the Verify section below."
+                </p>
+                <textarea class="export-textarea" readonly rows="14">
+                    {move || json.get()}
+                </textarea>
+            </Show>
+        </div>
+    }
+}
+
+#[component]
+fn ChainImporter() -> impl IntoView {
+    let input = RwSignal::new(String::new());
+    let result = RwSignal::new(None::<Result<ImportedSummary, String>>);
+
+    let verify = move |_| {
+        let text = input.get();
+        if text.trim().is_empty() {
+            result.set(Some(Err("Paste a JSON chain first.".into())));
+            return;
+        }
+        result.set(Some(parse_and_verify(&text)));
+    };
+
+    let clear = move |_| {
+        input.set(String::new());
+        result.set(None);
+    };
+
+    view! {
+        <section class="import-section">
+            <h2>"Verify a chain from JSON"</h2>
+            <p class="prose">
+                "Paste an exported chain (or a tampered one) to verify it against "
+                "its own declared public key. Same code path a third-party auditor "
+                "would use."
+            </p>
+            <textarea
+                class="import-textarea"
+                placeholder=r#"{"public_key_hex":"...","entries":[...]}"#
+                rows="8"
+                prop:value=move || input.get()
+                on:input=move |ev| input.set(event_target_value(&ev))
+            ></textarea>
+            <div class="button-row">
+                <button class="primary" on:click=verify>"Verify"</button>
+                <button class="secondary" on:click=clear>"Clear"</button>
+            </div>
+            <Show when=move || result.get().is_some()>
+                {move || render_import_result(result.get().unwrap())}
+            </Show>
+        </section>
+    }
+}
+
+#[derive(Clone)]
+struct ImportedSummary {
+    entry_count: usize,
+    public_key_hex: String,
+}
+
+fn render_import_result(r: Result<ImportedSummary, String>) -> AnyView {
+    match r {
+        Ok(summary) => view! {
+            <div class="verify-row">
+                <span class="badge ok">"✓ Verified"</span>
+                <span class="badge-note">
+                    {format!(
+                        "{} entries; chain integrity confirmed against embedded public key {}…",
+                        summary.entry_count,
+                        &summary.public_key_hex[..16]
+                    )}
+                </span>
+            </div>
+        }.into_any(),
+        Err(e) => view! {
+            <div class="verify-row">
+                <span class="badge err">"✗ Verify failed"</span>
+                <span class="badge-note">{e}</span>
+            </div>
+        }.into_any(),
+    }
+}
+
+fn parse_and_verify(text: &str) -> Result<ImportedSummary, String> {
+    let exported: ExportedChain = serde_json::from_str(text)
+        .map_err(|e| format!("JSON parse error: {e}"))?;
+    let pk_bytes = decode_hex_32(&exported.public_key_hex)
+        .ok_or("public_key_hex must be exactly 64 lowercase-hex characters")?;
+    let pk = VerifyingKey::from_bytes(&pk_bytes)
+        .map_err(|e| format!("invalid public key bytes: {e}"))?;
+    Verifier::verify_chain(&exported.entries, &pk)
+        .map_err(|e| format!("{e}"))?;
+    Ok(ImportedSummary {
+        entry_count: exported.entries.len(),
+        public_key_hex: exported.public_key_hex,
+    })
+}
+
+fn decode_hex_32(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    let bytes = s.as_bytes();
+    for i in 0..32 {
+        let hi = hex_digit(bytes[i * 2])?;
+        let lo = hex_digit(bytes[i * 2 + 1])?;
+        out[i] = (hi << 4) | lo;
+    }
+    Some(out)
+}
+
+fn hex_digit(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
     }
 }
 
