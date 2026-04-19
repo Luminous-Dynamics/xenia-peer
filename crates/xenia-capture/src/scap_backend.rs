@@ -223,31 +223,142 @@ fn scap_worker(
 }
 
 /// Convert a scap `Frame` into our `CapturedFrame` (RGBA, top-left).
-/// Returns `None` if the frame is not BGRA (shouldn't happen given our
-/// `FrameType::BGRAFrame` request, but defensive against scap's variant
-/// enum expanding in a future beta).
+///
+/// On macOS/Windows, `FrameType::BGRAFrame` → `VideoFrame::BGRA(BGRAFrame)`.
+/// On Linux the user-side `FrameType` request is (effectively) ignored —
+/// scap negotiates with PipeWire and emits whichever of `RGBx` / `RGB` /
+/// `XBGR` / `BGRx` the compositor offers (upstream issue #151). We handle
+/// all of them.
+///
+/// Audio frames and `YUVFrame` are discarded — we don't capture audio, and
+/// YUV→RGBA conversion for NV12 is non-trivial and out of scope for this
+/// wrapper.
 fn frame_to_rgba(frame: scap::frame::Frame) -> Option<CapturedFrame> {
-    match frame {
-        scap::frame::Frame::BGRA(bgra) => {
-            let mut pixels = bgra.data;
-            // Defensive: upstream #159 reports occasional 0-byte frames
-            // after which latency spikes 4-5×. Drop them silently.
-            let expected_len = bgra.width as usize * bgra.height as usize * 4;
-            if pixels.len() != expected_len {
+    use scap::frame::{Frame, VideoFrame};
+
+    let video = match frame {
+        Frame::Video(v) => v,
+        Frame::Audio(_) => return None,
+    };
+
+    match video {
+        VideoFrame::BGRA(f) => {
+            // B-G-R-A → R-G-B-A: swap bytes 0 and 2.
+            let mut pixels = f.data;
+            if !length_matches(&pixels, f.width, f.height, 4) {
                 return None;
             }
-            // BGRA → RGBA: swap bytes 0 and 2 in each 4-byte pixel.
             for chunk in pixels.chunks_exact_mut(4) {
                 chunk.swap(0, 2);
             }
             Some(CapturedFrame {
                 pixels,
-                width: bgra.width as u32,
-                height: bgra.height as u32,
+                width: f.width as u32,
+                height: f.height as u32,
             })
         }
-        _ => None,
+        VideoFrame::BGRx(f) => {
+            // B-G-R-X → R-G-B-A: swap 0 and 2, force alpha to 255.
+            let mut pixels = f.data;
+            if !length_matches(&pixels, f.width, f.height, 4) {
+                return None;
+            }
+            for chunk in pixels.chunks_exact_mut(4) {
+                chunk.swap(0, 2);
+                chunk[3] = 255;
+            }
+            Some(CapturedFrame {
+                pixels,
+                width: f.width as u32,
+                height: f.height as u32,
+            })
+        }
+        VideoFrame::RGBx(f) => {
+            // R-G-B-X → R-G-B-A: force alpha to 255, no channel swap.
+            let mut pixels = f.data;
+            if !length_matches(&pixels, f.width, f.height, 4) {
+                return None;
+            }
+            for chunk in pixels.chunks_exact_mut(4) {
+                chunk[3] = 255;
+            }
+            Some(CapturedFrame {
+                pixels,
+                width: f.width as u32,
+                height: f.height as u32,
+            })
+        }
+        VideoFrame::XBGR(f) => {
+            // X-B-G-R → R-G-B-A: rotate bytes, set alpha to 255.
+            let mut pixels = f.data;
+            if !length_matches(&pixels, f.width, f.height, 4) {
+                return None;
+            }
+            for chunk in pixels.chunks_exact_mut(4) {
+                let (b, g, r) = (chunk[1], chunk[2], chunk[3]);
+                chunk[0] = r;
+                chunk[1] = g;
+                chunk[2] = b;
+                chunk[3] = 255;
+            }
+            Some(CapturedFrame {
+                pixels,
+                width: f.width as u32,
+                height: f.height as u32,
+            })
+        }
+        VideoFrame::RGB(f) => {
+            // R-G-B → R-G-B-A: expand to 4 bytes per pixel, alpha 255.
+            if !length_matches(&f.data, f.width, f.height, 3) {
+                return None;
+            }
+            let mut pixels = Vec::with_capacity(f.data.len() / 3 * 4);
+            for chunk in f.data.chunks_exact(3) {
+                pixels.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+            }
+            Some(CapturedFrame {
+                pixels,
+                width: f.width as u32,
+                height: f.height as u32,
+            })
+        }
+        VideoFrame::BGR0(f) => {
+            // B-G-R-0 → R-G-B-A: swap 0 and 2, force alpha to 255.
+            // (Same bytes-per-pixel as BGRx; separate case because scap
+            // surfaces them as distinct variants for semantic reasons.)
+            let mut pixels = f.data;
+            if !length_matches(&pixels, f.width, f.height, 4) {
+                return None;
+            }
+            for chunk in pixels.chunks_exact_mut(4) {
+                chunk.swap(0, 2);
+                chunk[3] = 255;
+            }
+            Some(CapturedFrame {
+                pixels,
+                width: f.width as u32,
+                height: f.height as u32,
+            })
+        }
+        VideoFrame::YUVFrame(_) => {
+            // NV12 YUV → RGBA conversion is non-trivial (420 subsampling,
+            // BT.601 vs BT.709 color-matrix choice). Out of scope for this
+            // wrapper — request BGRAFrame upstream and let scap handle it.
+            None
+        }
     }
+}
+
+/// Defensive length check — upstream issue #159 reports occasional
+/// 0-byte frames after which frame latency spikes 4-5×. Reject frames
+/// whose data length doesn't match the declared dimensions at the
+/// expected bytes-per-pixel.
+fn length_matches(data: &[u8], width: i32, height: i32, bpp: usize) -> bool {
+    if width <= 0 || height <= 0 {
+        return false;
+    }
+    let expected = width as usize * height as usize * bpp;
+    data.len() == expected
 }
 
 impl Drop for ScapCapture {

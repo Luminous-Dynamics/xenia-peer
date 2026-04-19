@@ -19,16 +19,17 @@ tracing.workspace = true
 # libspa on Linux) that only the nix-develop environment provides. See
 # mycelix-sovereign/docs/adr/0001-screen-capture-backend.md for the decision.
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
-# NOTE (2026-04-19): scap 0.1.0-beta.1 is UPSTREAM-BROKEN on Linux.
-# `src/capturer/engine/linux/mod.rs` references `Frame::XBGR`, `Frame::BGRx`,
-# and treats `timestamp as u64` where the enum variants were removed and
-# `display_time` now expects `SystemTime`. The tip of `main` (c03f15a4) has
-# the same errors — the "fix windows build" commit did not address Linux.
-# The `scap-backend` feature is therefore SCAFFOLDED BUT NOT USABLE on Linux
-# today. macOS/Windows may work; not verified from this NixOS host.
-# Action: watch for scap 0.1.0-beta.2. If it slips, flip primary to xcap
-# per the ADR-0001 fallback plan.
-scap = { version = "=0.1.0-beta.1", optional = true }
+# Pointing at our Luminous-Dynamics fork of scap with the Linux-engine fix
+# (two-level Frame::Video(VideoFrame::*) enum + SystemTime display_time).
+# Upstream PR: https://github.com/CapSoftware/scap/pull/183.  When the fix
+# merges and a release cuts, we can switch back to the crates.io version.
+#
+# The `scap-backend` feature enables Linux PipeWire capture (xdg-desktop-
+# portal on GNOME/KDE, xdg-desktop-portal-wlr on wlroots), macOS
+# ScreenCaptureKit, Windows Graphics Capture.  Linux builds require
+# libpipewire-0.3 + libspa-0.2 + libdbus-1 dev headers, provided by
+# `nix develop` inside the xenia-peer workspace.
+scap = { git = "https://github.com/Luminous-Dynamics/scap", branch = "fix/linux-engine-two-level-frame-enum", optional = true }
 
 [features]
 default = []
