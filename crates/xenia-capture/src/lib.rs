@@ -22,13 +22,17 @@
 //!   Always available. Used by unit + integration tests.
 //! - [`BlankCapture`] — solid-color frames. Always available. Useful
 //!   for bandwidth smoke tests where content is irrelevant.
+//! - [`ScapCapture`] — cross-platform (Windows WGC, macOS
+//!   ScreenCaptureKit, Linux PipeWire via xdg-desktop-portal)
+//!   backed by the `scap` crate. Feature-gated on `scap-backend`.
+//!   Primary backend per `mycelix-sovereign` ADR 0001.
 //! - `WlrootsCapture` — wlr-screencopy-unstable-v1 on wlroots
 //!   compositors (Sway, Hyprland, labwc). Feature-gated on
-//!   `wayland-wlroots`. Scaffold only as of `0.0.0-m1`; the
-//!   `Screencopy` WAYLAND negotiation lands in M1.2b.
-//! - `PortalCapture` — xdg-desktop-portal ScreenCast on GNOME/KDE.
-//!   Feature-gated on `wayland-portal`. Scaffold only as of
-//!   `0.0.0-m1`; portal DBus negotiation lands in M1.2c.
+//!   `wayland-wlroots`. Scaffold only; superseded by `scap-backend`
+//!   for most deployments via the xdg-desktop-portal-wlr bridge.
+//! - `PortalCapture` — hand-rolled xdg-desktop-portal ScreenCast on
+//!   GNOME/KDE. Feature-gated on `wayland-portal`. Scaffold only;
+//!   superseded by `scap-backend`.
 //!
 //! X11 is explicitly out of scope — see the repo-level
 //! `docs/ADR-001-m0-architecture.md` for the reasoning. The X11
@@ -38,6 +42,12 @@
 
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
+
+#[cfg(feature = "scap-backend")]
+mod scap_backend;
+
+#[cfg(feature = "scap-backend")]
+pub use scap_backend::{ScapCapture, ScapOptions, ScapResolution};
 
 use thiserror::Error;
 

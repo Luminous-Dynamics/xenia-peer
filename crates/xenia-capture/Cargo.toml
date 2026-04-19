@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license = "Apache-2.0 OR MIT"
-description = "Screen-capture abstraction for the Xenia remote-session stack. Wayland-native (wlr-screencopy on wlroots, xdg-desktop-portal ScreenCast on GNOME/KDE). Contains portions extracted from Symthaea's rdp_capture.rs."
+description = "Screen-capture abstraction for the Xenia remote-session stack. Cross-platform via scap (Windows WGC, macOS ScreenCaptureKit, Linux PipeWire/xdg-desktop-portal). Wayland-only on Linux by design (see xenia-peer ADR-001)."
 repository.workspace = true
 homepage.workspace = true
 publish = false
@@ -14,15 +14,38 @@ publish = false
 thiserror.workspace = true
 tracing.workspace = true
 
+# scap backend — cross-platform (Windows + macOS + Linux Wayland via PipeWire).
+# Gated off by default because scap pulls heavy system deps (libpipewire-0.3,
+# libspa on Linux) that only the nix-develop environment provides. See
+# mycelix-sovereign/docs/adr/0001-screen-capture-backend.md for the decision.
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
+# NOTE (2026-04-19): scap 0.1.0-beta.1 is UPSTREAM-BROKEN on Linux.
+# `src/capturer/engine/linux/mod.rs` references `Frame::XBGR`, `Frame::BGRx`,
+# and treats `timestamp as u64` where the enum variants were removed and
+# `display_time` now expects `SystemTime`. The tip of `main` (c03f15a4) has
+# the same errors — the "fix windows build" commit did not address Linux.
+# The `scap-backend` feature is therefore SCAFFOLDED BUT NOT USABLE on Linux
+# today. macOS/Windows may work; not verified from this NixOS host.
+# Action: watch for scap 0.1.0-beta.2. If it slips, flip primary to xcap
+# per the ADR-0001 fallback plan.
+scap = { version = "=0.1.0-beta.1", optional = true }
+
 [features]
 default = []
+# Cross-platform scap backend. Primary backend per ADR 0001.
+# Enables ScapCapture on Linux (PipeWire portal), macOS (ScreenCaptureKit),
+# Windows (Windows Graphics Capture). Linux builds require
+# libpipewire-0.3 + libspa-0.2 dev headers (provided by `nix develop`).
+scap-backend = ["dep:scap"]
 # wlr-screencopy capture on wlroots-based compositors (Sway, Hyprland,
-# labwc). Requires wayland-client + wayland-protocols dev headers;
-# enable this feature inside a `nix develop` shell or an environment
-# with the appropriate dev packages.
+# labwc). Pre-existing scaffold; superseded for most deployments by
+# `scap-backend` via the xdg-desktop-portal-wlr bridge. Retained for
+# potential direct-wlr-screencopy path if portal performance is inadequate.
+# Requires wayland-client + wayland-protocols dev headers.
 wayland-wlroots = []
-# xdg-desktop-portal ScreenCast capture on GNOME/KDE. Requires
-# zbus + ashpd.
+# xdg-desktop-portal ScreenCast capture on GNOME/KDE. Pre-existing scaffold;
+# superseded by `scap-backend`. Retained for potential hand-rolled path if
+# scap proves unstable. Requires zbus + ashpd.
 wayland-portal = []
 
 [dev-dependencies]
