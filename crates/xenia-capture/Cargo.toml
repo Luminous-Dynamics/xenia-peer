@@ -50,3 +50,11 @@ wayland-wlroots = []
 wayland-portal = []
 
 [dev-dependencies]
+
+# W0 scap validation harness (docs/capture-validation-runbook.md).
+# Only builds when scap-backend feature is enabled — no-op in default
+# `cargo build` / `cargo test` runs.
+[[example]]
+name = "capture_bench"
+path = "examples/capture_bench.rs"
+required-features = ["scap-backend"]
