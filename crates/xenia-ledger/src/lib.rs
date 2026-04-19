@@ -130,7 +130,7 @@ pub enum LedgerError {
 }
 
 /// Errors surfaced by [`Verifier`] operations.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum VerifyError {
     /// Chain was empty where at least one entry was required.
     #[error("chain is empty")]

@@ -187,3 +187,92 @@ code {
 .signin-prompt, .not-found { text-align: center; padding: 3rem 0; }
 .planned-controls { color: var(--fg-dim); line-height: 1.8; }
 .planned-controls code { color: var(--fg); }
+
+/* Sessions page / ledger demo */
+
+.pub-key {
+    margin: 1rem 0;
+    padding: 0.6rem 0.8rem;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 0.8rem;
+    display: flex;
+    gap: 0.5rem;
+    align-items: baseline;
+    flex-wrap: wrap;
+}
+.pub-key-label { color: var(--fg-dim); }
+.pub-key-value {
+    font-family: var(--mono);
+    word-break: break-all;
+    color: var(--fg);
+}
+
+.verify-row {
+    margin: 1rem 0;
+    padding: 0.8rem 1rem;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+    flex-wrap: wrap;
+}
+.badge {
+    font-weight: 600;
+    padding: 0.2rem 0.6rem;
+    border-radius: 3px;
+    font-size: 0.85rem;
+}
+.badge.ok  { background: rgba(88, 214, 106, 0.15); color: var(--ok); border: 1px solid rgba(88, 214, 106, 0.4); }
+.badge.err { background: rgba(255, 107, 107, 0.15); color: var(--err); border: 1px solid rgba(255, 107, 107, 0.4); }
+.badge-note { color: var(--fg-dim); font-size: 0.85rem; }
+
+.ledger-table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
+.ledger-table th, .ledger-table td {
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.9rem;
+}
+.ledger-table th {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--fg-dim);
+    font-weight: 600;
+}
+.ledger-table td.numeric { font-family: var(--mono); text-align: right; color: var(--fg-dim); }
+.ledger-table code.hash {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    color: var(--fg-dim);
+    background: transparent;
+}
+
+.kind {
+    display: inline-block;
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 0.12rem 0.5rem;
+    border-radius: 3px;
+    font-variant: small-caps;
+}
+.kind-request    { background: rgba(94, 227, 255, 0.12); color: var(--accent); }
+.kind-approval   { background: rgba(88, 214, 106, 0.15); color: var(--ok); }
+.kind-denial     { background: rgba(243, 178, 63, 0.15); color: var(--warn); }
+.kind-revocation { background: rgba(138, 151, 164, 0.15); color: var(--fg-dim); }
+.kind-violation  { background: rgba(255, 107, 107, 0.15); color: var(--err); }
+
+button.tamper {
+    font-size: 0.8rem;
+    padding: 0.25rem 0.6rem;
+    color: var(--warn);
+    border-color: var(--border);
+}
+button.tamper:hover { border-color: var(--warn); }
+
+.footnote { margin-top: 1rem; color: var(--fg-dim); font-size: 0.85rem; }
+.footnote code { color: var(--fg); }

@@ -24,6 +24,15 @@ js-sys = "0.3"
 web-sys = { version = "0.3", features = ["console", "Storage", "Window", "Location"] }
 serde = { workspace = true }
 
+# Live xenia-ledger demo on the Sessions page.
+xenia-ledger = { path = "../xenia-ledger" }
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+uuid = { version = "1", features = ["v4", "serde", "js"] }
+# Force getrandom to use Web Crypto in the browser (required by
+# rand_core -> ed25519_dalek::SigningKey::generate in wasm32).
+getrandom = { version = "0.2", features = ["js"] }
+
 [profile.release]
 opt-level = "z"
 lto = true
