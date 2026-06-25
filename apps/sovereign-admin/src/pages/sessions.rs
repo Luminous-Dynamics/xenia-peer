@@ -114,7 +114,7 @@ fn RealLedger(config: DaemonConfig) -> impl IntoView {
                 <p>"Fetching live ledger..."</p>
             </Show>
             <Show when=move || error.get().is_some()>
-                <p class="error">{move || error.get().unwrap()}</p>
+                <p class="error">{move || error.get().unwrap_or_else(|| "Unknown session error".to_string())}</p>
             </Show>
             {move || data.get().map(|(pk_hex, entries)| {
                 view! {
@@ -338,7 +338,7 @@ fn ChainImporter() -> impl IntoView {
                 <button class="secondary" on:click=clear>"Clear"</button>
             </div>
             <Show when=move || result.get().is_some()>
-                {move || render_import_result(result.get().unwrap())}
+                {move || result.get().map(render_import_result)}
             </Show>
         </section>
     }
