@@ -85,6 +85,32 @@ def is_allowed_public_bind(rel: str, allowed: list[str]) -> bool:
     return any(fnmatch.fnmatch(rel, pattern) for pattern in allowed)
 
 
+def is_reviewed_warning(rel: str, pattern: str, line: str, reviewed: list[dict[str, Any]]) -> bool:
+    """Return true when a warning literal is intentionally reviewed.
+
+    Reviewed warnings are for policy text, local-loopback development defaults,
+    and test/example transport literals. They must remain precise: path, pattern,
+    text match, and reason are all required so a broad file exclusion cannot hide
+    new secure-default debt.
+    """
+    for entry in reviewed:
+        path_pattern = entry.get("path")
+        reviewed_pattern = entry.get("pattern")
+        text_contains = entry.get("text_contains")
+        reason = entry.get("reason")
+
+        if not path_pattern or not reviewed_pattern or not text_contains or not reason:
+            continue
+        if not fnmatch.fnmatch(rel, path_pattern):
+            continue
+        if reviewed_pattern != pattern:
+            continue
+        if text_contains not in line:
+            continue
+        return True
+    return False
+
+
 def iter_files(root: Path, data: dict[str, Any]) -> list[Path]:
     scanner = data.get("scanner", {})
     source_exts = set(scanner.get("source_extensions", []))
@@ -111,6 +137,7 @@ def scan(root: Path, data: dict[str, Any]) -> list[Finding]:
     warning_patterns = data.get("review_required_patterns", {}).get("warning", [])
     public_binds = set(data.get("network", {}).get("public_binds_requiring_review", []))
     allowed_public_bind_files = data.get("network", {}).get("allowed_public_bind_files", [])
+    reviewed_warnings = data.get("reviewed_warnings", {}).get("entries", [])
 
     findings: list[Finding] = []
     for path in iter_files(root, data):
@@ -128,12 +155,18 @@ def scan(root: Path, data: dict[str, Any]) -> list[Finding]:
             for pattern in hard_patterns:
                 if pattern in line:
                     severity = "warning" if is_doc else "hard"
+                    if severity == "warning" and is_reviewed_warning(rel, pattern, line, reviewed_warnings):
+                        continue
+                    if severity == "warning" and is_reviewed_warning(rel, pattern, line, reviewed_warnings):
+                        continue
                     findings.append(Finding(severity, rel, idx, pattern, stripped[:180]))
             for pattern in warning_patterns:
                 if pattern in line:
                     severity = "warning"
                     if pattern in public_binds and not is_doc and not is_allowed_public_bind(rel, allowed_public_bind_files):
                         severity = "hard"
+                    if severity == "warning" and is_reviewed_warning(rel, pattern, line, reviewed_warnings):
+                        continue
                     findings.append(Finding(severity, rel, idx, pattern, stripped[:180]))
     return findings
 
