@@ -2,7 +2,7 @@
 
 Single source of truth for what's shipped, what's next, and what's
 deferred. Updated by humans, not by commits. Last refresh:
-2026-04-18 (post-U1–U4 unification arc).
+2026-06-22 (transport conformance + auto transport selection).
 
 If this file disagrees with reality, the file is wrong.
 
@@ -14,9 +14,9 @@ If this file disagrees with reality, the file is wrong.
 
 | Item | Status | Notes |
 |---|---|---|
-| 9-crate workspace | ✅ | `xenia-peer-core`, `xenia-peer`, `xenia-viewer`, `xenia-capture`, `xenia-video`, `xenia-transport-ws`, `xenia-inject`, `xenia-handshake` + workspace root |
+| 10-crate workspace | ✅ | `xenia-peer-core`, `xenia-peer`, `xenia-viewer`, `xenia-capture`, `xenia-video`, `xenia-transport-ws`, `xenia-transport-quic`, `xenia-inject`, `xenia-handshake`, `xenia-ledger` + workspace root |
 | `flake.nix` | ✅ | H.264 + Wayland/DBus/PipeWire + libGL/libxkbcommon on LD_LIBRARY_PATH |
-| CI (GitHub Actions) | ✅ | fmt + clippy + test (ubuntu/macos/windows) + MSRV 1.85 + docs + h264 matrix |
+| CI (GitHub Actions) | ✅ | fmt + clippy + test (ubuntu/macos/windows) + MSRV 1.94 + docs + h264 matrix |
 | ADR-001 architecture decisions | ✅ | `docs/ADR-001-m0-architecture.md` — monorepo, Wayland-exclusive, AGPL split |
 | ADR-002 library licensing | ✅ | `docs/ADR-002-library-licensing.md` — all library crates Apache/MIT; binaries AGPL. Extends ADR-001. |
 
@@ -28,12 +28,20 @@ If this file disagrees with reality, the file is wrong.
 | H.264 (libx264) | `h264` | ✅ live | 11.8 KB keyframe + ~2.7 KB P-frame |
 | HDC hybrid tile-delta | `hdc` | ✅ live | 64.5 KB keyframe + 37 B per static delta frame |
 
-### Transports (2)
+### Transports (3)
 
 | Transport | Crate | Status |
 |---|---|---|
-| TCP length-prefix | `xenia-peer-core::transport::TcpTransport` | ✅ live |
-| WebSocket (binary frames) | `xenia-transport-ws` | ✅ live |
+| TCP length-prefix | `xenia-peer-core::transport::TcpTransport` | ✅ daemon/viewer baseline; conformance-tested; explicit fallback |
+| WebSocket (binary frames) | `xenia-transport-ws` | ✅ daemon/viewer baseline; conformance-tested; selected by `auto` for `ws://...` |
+| Iroh QUIC | `xenia-transport-quic` | ✅ daemon/viewer CLI wired; conformance-tested; auto-discovered from `host:port` when daemon advertises it |
+
+### Transport improvement plan
+
+1. Keep TCP + WebSocket as the stable daemon/viewer baseline.
+2. Maintain the shared transport conformance tests for envelope boundaries, ordering, and oversize rejection before expanding transport behavior.
+3. Keep `--transport auto` as the normal CLI path: daemon accepts TCP/WS, advertises QUIC over an initial TCP probe, and accepts QUIC directly.
+4. Next: harden fallback policy with timeouts, user-visible selected-transport reporting, and browser-compatible advertisement over WebSocket.
 
 ### Viewers (3)
 
@@ -47,8 +55,8 @@ If this file disagrees with reality, the file is wrong.
 
 | Daemon | Viewer | Transport | Codec | Status |
 |---|---|---|---|---|
-| `xenia-peer` on desktop | CLI | tcp / ws | all three | ✅ loopback + LAN |
-| `xenia-peer` on desktop | egui `--gui` | tcp / ws | all three | ✅ visually verifiable |
+| `xenia-peer` on desktop | CLI | tcp / ws / quic | all three | ✅ loopback + LAN; QUIC smoke verified with passthrough |
+| `xenia-peer` on desktop | egui `--gui` | tcp / ws / quic | all three | ✅ visually verifiable; QUIC path uses same receive loop |
 | `xenia-peer` on desktop | browser (phone or desktop) | ws | passthrough | ✅ |
 | `xenia-peer` on desktop | browser (phone or desktop) | ws | h264 | ❌ needs WebCodecs wiring |
 | `xenia-peer` on desktop | browser (phone or desktop) | ws | hdc | ❌ needs bincode+grayscale decoder in WASM (~50 LOC) |
@@ -59,14 +67,14 @@ If this file disagrees with reality, the file is wrong.
 ## Hard blockers for real deployment
 
 These MUST land before anyone uses xenia-peer on anything that
-handles real traffic. Today every binary uses a hardcoded fixture
-AEAD key — that's fine for a loopback demo, catastrophic for a
-deployment.
+handles real traffic. Native daemon/viewer handshakes now derive a
+session key, but the capture and consent surfaces are still not
+deployment-grade.
 
 | # | Item | Status | Estimate | Why it blocks |
 |---|---|---|---|---|
-| B1 | **PQC handshake** (ML-KEM-768 + Ed25519 + HKDF-SHA256) | 🟡 crate shipped (`xenia-handshake`, `4215ab1`, 15 tests); **wiring into binaries pending** | 0.5 day to wire | Fresh-impl against RustCrypto `ml-kem` 0.3.0-rc.2 + `ed25519-dalek` 2 + `hkdf` 0.12. Not a Symthaea carry — symthaea's version depended on `mycelix-crypto`. API shape aligned for easy reverse-migration. Still need: replace `FIXTURE_KEY` in `xenia-peer` + `xenia-viewer` + browser viewer with real handshake. |
-| B2 | **Real Wayland capture** | ❌ Write fresh against `wayland-client` + `xdg-desktop-portal` | 3–5 days (wlroots) + 5–7 days (portal) | Without this, daemon only shares synthetic TestCapture frames. `xenia-capture::{WlrootsCapture, PortalCapture}` are `Unavailable` stubs today. |
+| B1 | **PQC handshake** (ML-KEM-768 + Ed25519 + HKDF-SHA256) | 🟡 native daemon/viewer wired; browser viewer pending | 0.5 day to finish browser path | Fresh-impl against RustCrypto `ml-kem` 0.3.0-rc.2 + `ed25519-dalek` 2 + `hkdf` 0.12. Not a Symthaea carry — symthaea's version depended on `mycelix-crypto`. Native CLI/egui paths derive and install a session key; browser viewer still needs the same handshake. |
+| B2 | **Universal host ingestion** | 🟡 telemetry backend + GUI panel wired; RawAudio timing lane wired; display/audio/input real backends pending | 3–7 days per display/audio/input backend | Without this, daemon only shares synthetic TestCapture frames. `xenia-capture` now exposes host-agnostic display, audio, input, and telemetry traits; native daemon/viewer already stream sealed `sysinfo` telemetry metadata with explicit `basic` / `system` / `off` policy, plus synthetic RawAudio frames for jitter/timing validation. |
 | B3 | **Consent ceremony UI on the host** | ❌ Uses draft-03 SPEC §12 from xenia-wire | 2–3 days | The wire-level state machine exists; the UX to prompt a user "technician-X wants to share your screen, approve?" does not. |
 
 ---
@@ -79,7 +87,7 @@ deployment.
 |---|---|---|
 | `src/swarm/rdp_capture.rs` (trait + TestCapture + BlankCapture) | `crates/xenia-capture/src/lib.rs` | `bd081cf` |
 | `src/swarm/rdp_codec.rs` (HDC hybrid tile-delta) | `crates/xenia-video/src/hdc.rs` | `9bb831f` |
-| `crates/symthaea-phone-embodiment/src/scrcpy/decoder.rs` (ffmpeg-next patterns) | `crates/xenia-video/src/h264.rs` (inspired; different codec) | `21d8cf3` |
+| `crates/crates/symthaea-phone-embodiment/src/scrcpy/decoder.rs` (ffmpeg-next patterns) | `crates/xenia-video/src/h264.rs` (inspired; different codec) | `21d8cf3` |
 | `src/swarm/rdp_input.rs` (InputInjector trait + Wayland/uinput backends) | `crates/xenia-inject/src/lib.rs` | `23a49a9` |
 | `src/swarm/pqc_handshake.rs` (API shape only — fresh crypto impl) | `crates/xenia-handshake/src/lib.rs` | `4215ab1` |
 
@@ -90,7 +98,7 @@ deployment.
 | # | Symthaea path | LOC | Maps to | Notes |
 |---|---|---|---|---|
 | ~~T2.1~~ | ~~`src/swarm/rdp_input.rs`~~ | ~~354~~ | ✅ shipped as `xenia-inject` (`23a49a9`). X11 backend dropped. Wayland + uinput are scaffold stubs; real plumbing lands with matching xenia-capture backend. |
-| T2.2 | `src/swarm/quic_transport.rs` | 785 | new `xenia-transport-quic` crate | Iroh QUIC. Primary transport per VIEWER_PLAN §4.5; also gives NAT-punch for phone-to-VM tests without Tailscale. |
+| ~~T2.2~~ | ~~`src/swarm/quic_transport.rs`~~ | ~~785~~ | ✅ `xenia-transport-quic` crate + daemon/viewer CLI wiring shipped | Iroh QUIC. Primary transport per VIEWER_PLAN §4.5; also gives NAT-punch for phone-to-VM tests without Tailscale. |
 | T2.3 | `src/swarm/rdp_clipboard.rs` | 223 | new `xenia-clipboard` crate or feature in `xenia-peer-core` | Bidirectional clipboard with sensitivity scrubbing. |
 | T2.4 | `src/swarm/rdp_file_transfer.rs` | 198 | new `xenia-file-transfer` crate or feature | Chunked file transfer with BLAKE3. |
 
@@ -98,10 +106,10 @@ deployment.
 
 | # | Symthaea path | LOC | Notes |
 |---|---|---|---|
-| T3.1 | `src/swarm/rdp_audio.rs` | ? | Audio streaming. |
+| T3.1 | `src/swarm/rdp_audio.rs` | ? | 🟡 RawAudio timing lane landed: 48 kHz stereo S16LE, deterministic sine/noise sources, jitter buffer, GUI/CLI accounting, TCP/WS/QUIC conformance. Device capture/playback, cpal, and Opus are still future work. |
 | T3.2 | `src/swarm/rdp_recording.rs` | ? | Session recording / replay (`.xenia-session` format). |
 | T3.3 | `src/swarm/rdp_adaptive.rs` | 280 | Adaptive bitrate skeleton; wire to `xenia-video` backends. |
-| T3.4 | `crates/symthaea-phone-embodiment/src/scrcpy/*` + `streaming_bridge.rs` | ~2000 | **Phone-as-source.** Unblocks the phone→desktop test leg by letting a desktop capture its phone's screen via USB + scrcpy. |
+| T3.4 | `crates/crates/symthaea-phone-embodiment/src/scrcpy/*` + `streaming_bridge.rs` | ~2000 | **Phone-as-source.** Unblocks the phone→desktop test leg by letting a desktop capture its phone's screen via USB + scrcpy. |
 
 ### Superseded — DO NOT port
 
@@ -126,16 +134,18 @@ Recapitulated from VIEWER_PLAN §3 with today's-actual status:
 | **M0** | Workspace + loopback TCP roundtrip | ✅ `cf4e37a` |
 | **M1.1** | xenia-capture + xenia-video scaffold + pipeline wired end-to-end with passthrough | ✅ `bd081cf` |
 | **M1.2b** | Real H.264 encode/decode via ffmpeg-next | ✅ `21d8cf3` |
-| **M1.2c** | Real Wayland screen capture (wlr-screencopy + xdg-portal) | ❌ not started — this is **B2** above |
+| **M1.2c** | Real host display capture | ❌ not started — this is the display part of **B2** above |
 | **M2** | Input injection + consent-ceremony UI | 🟡 `xenia-inject` crate shipped (`23a49a9`); real backend + consent UI pending (**B3**) |
 | **M3.1** | WebSocket transport | ✅ `e765459` |
-| **M3.2** | Iroh QUIC primary transport | ❌ not started — **T2.2** |
+| **M3.2** | Iroh QUIC primary transport | ✅ library crate + conformance tests + daemon/viewer CLI smoke |
 | **M4.0** | egui GUI on xenia-viewer | ✅ `fd28bc3` |
 | **M4.1** | WASM browser viewer speaks daemon protocol | ✅ `e68c5ad` (in xenia-wire repo) |
 | **M4.1b** | WebCodecs H.264 decode in browser | ❌ not started |
 | **M4.1c** | HDC codec in the browser viewer | ❌ not started (~50 LOC WASM) |
 | **M4.2** | HDC hybrid codec (port from Symthaea) | ✅ `9bb831f` |
 | **M4.2b** | HDC codec RGB output (not grayscale-only) | ❌ not started |
+| **M4.3** | RawAudio timing lane | ✅ sealed RawAudio + jitter buffer + synthetic source + native transport conformance |
+| **M4.3b** | Opus audio payload | ❌ not started |
 
 ---
 
@@ -146,7 +156,7 @@ This is the concrete goal organizing the next round of work:
 ### ✅ Desktop ↔ Desktop (works today)
 
 Two machines on the same LAN / Tailscale, both running the native
-binaries. All three codecs, both transports, CLI or GUI viewer.
+binaries. All three codecs, all native transports, CLI or GUI viewer.
 Only caveat: real screen content requires **B2** (Wayland capture);
 today both ends use the synthetic `TestCapture` gradient.
 
@@ -184,16 +194,16 @@ but multi-week.
 Things the maintainer should explicitly decide before more
 autonomous shipping:
 
-1. **B1 wiring order:** the crate is shipped; what's left is wiring
-   `xenia-handshake::HandshakeManager` into `xenia-peer` (daemon) +
-   `xenia-viewer` (both CLI and egui) + the browser viewer so the
-   fixture key goes away. Do we want it behind a feature flag
-   initially (explicit `--insecure-fixture-key` opt-out) or a
-   hard cutover?
-2. **B2 vs B3 ordering:** with B1 at the crate layer, real Wayland
-   capture (B2) and the consent UI (B3) are the last two blockers
-   for real deployment. B2 unblocks visible content; B3 unblocks
-   the consent-ceremony promise. Neither depends on the other.
+1. **Browser handshake wiring:** native daemon/viewer paths now use
+   `xenia-handshake::HandshakeManager`; the browser viewer still needs
+   the equivalent flow before browser sessions should be considered
+   deployment-grade.
+2. **Universal ingestion vs B3 ordering:** with B1 at the crate layer,
+   real display/audio/telemetry backends (B2) and the consent UI (B3)
+   are the last two blockers for real deployment. B2 unblocks visible
+   host content and metrics; B3 unblocks the consent-ceremony promise.
+   Neither depends strictly on the other, but production input
+   injection should wait for B3.
 3. **Phone → Desktop leg: Path A or Path B?** Path B is faster but
    requires a USB-tethered phone every time. Path A is real-world
    deployable but multi-week.
@@ -244,7 +254,7 @@ crates.io under Apache/MIT. Binaries stay on GitHub-only under AGPL.
   stays lean.
 - **Feature-gated code lives in its own crate.** `xenia-video`
   (codecs), `xenia-capture` (screen capture), `xenia-transport-ws`
-  (WebSocket), future `xenia-transport-quic`, `xenia-inject`, etc.
+  (WebSocket), `xenia-transport-quic`, `xenia-inject`, etc.
 - **Pattern for new Symthaea carries:** inline the minimal
   dependencies (e.g. `ContinuousHV` in `hdc.rs`) rather than
   cross-crate paths, unless the upstream dep is already published

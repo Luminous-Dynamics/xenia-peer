@@ -77,6 +77,8 @@ pub enum ConsentKind {
     Revocation,
     /// Protocol violation detected (e.g., a contradictory Response after a prior Revocation).
     Violation,
+    /// Automated action triggered by Athena AI triage.
+    AthenaTriage,
 }
 
 /// A single consent event. Carries enough context for an auditor to
@@ -191,7 +193,10 @@ impl Chain {
     /// confirm integrity. This method only establishes the append
     /// frontier for subsequent [`Chain::append`] calls.
     pub fn from_entries(entries: Vec<LedgerEntry>, signing_key: SigningKey) -> Self {
-        Self { entries, signing_key }
+        Self {
+            entries,
+            signing_key,
+        }
     }
 
     /// Return the number of entries in the chain.

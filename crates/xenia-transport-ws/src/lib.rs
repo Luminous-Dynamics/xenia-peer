@@ -46,10 +46,10 @@ use futures_util::{SinkExt, StreamExt};
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::protocol::Message;
-use tokio_tungstenite::{accept_async, connect_async, WebSocketStream};
+use tokio_tungstenite::{WebSocketStream, accept_async, connect_async};
 use tracing::debug;
 
-use xenia_peer_core::transport::{Transport, TransportError, MAX_ENVELOPE_BYTES};
+use xenia_peer_core::transport::{MAX_ENVELOPE_BYTES, Transport, TransportError};
 
 /// Errors specific to the WebSocket transport. Coerced into
 /// [`TransportError::Io`] or `::UnexpectedEof` where possible so the
@@ -124,11 +124,17 @@ impl WsTransport {
         let local = listener.local_addr()?.to_string();
         let (stream, peer) = listener.accept().await?;
         stream.set_nodelay(true).ok();
+        let transport = Self::accept_stream(stream).await?;
+        debug!(peer = %peer, "websocket server accepted + upgraded");
+        Ok((transport, local))
+    }
+
+    /// Upgrade an already-accepted TCP stream into a WebSocket transport.
+    pub async fn accept_stream(stream: TcpStream) -> Result<Self, TransportError> {
         let ws = accept_async(stream)
             .await
             .map_err(|e| TransportError::from(WsError::from(e)))?;
-        debug!(peer = %peer, "websocket server accepted + upgraded");
-        Ok((WsTransport::Server(ws), local))
+        Ok(WsTransport::Server(ws))
     }
 
     /// Send a message on whichever variant we are.

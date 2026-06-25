@@ -1,0 +1,22 @@
+[package]
+name = "xenia-transport-quic"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "Apache-2.0 OR MIT"
+description = "Iroh QUIC transport for the Xenia remote-session stack. Sealed envelopes over a long-lived bidirectional QUIC stream."
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+xenia-peer-core = { path = "../xenia-peer-core" }
+iroh = { version = "1.0.0", default-features = false, features = ["tls-ring"] }
+thiserror.workspace = true
+tracing.workspace = true
+bs58.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

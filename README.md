@@ -50,13 +50,15 @@ for the full architectural decisions.
 
 ## Crate layout
 
-Single Cargo workspace. Three crates.
+Single Cargo workspace. Core crates:
 
 | Crate | Kind | License | Purpose |
 |---|---|---|---|
 | [`xenia-peer-core`](crates/xenia-peer-core/) | library | **Apache-2.0 OR MIT** | Shared library: `Session`, `Transport` trait, `TcpTransport`, `RawFrame` / `RawInput`. Reusable by third-party clients. |
 | [`xenia-peer`](crates/xenia-peer/) | binary (daemon) | **AGPL-3.0-or-later** | The machine sharing its screen. Listens for viewer connections, hosts the session, drives the consent UI (M2+). |
 | [`xenia-viewer`](crates/xenia-viewer/) | binary (CLI → GUI at M4) | **AGPL-3.0-or-later** | The machine watching. Connects to a daemon, decodes frames, renders. Today a CLI probe tool; egui GUI lands at M4. |
+| [`xenia-transport-ws`](crates/xenia-transport-ws/) | library | **Apache-2.0 OR MIT** | Binary-envelope WebSocket transport. |
+| [`xenia-transport-quic`](crates/xenia-transport-quic/) | library | **Apache-2.0 OR MIT** | Iroh QUIC transport over a long-lived bidirectional stream. |
 
 **Why split the licenses?** The library stays permissive so any tool
 (browser client, VS Code extension, TUI, etc.) can link against it.
@@ -73,29 +75,42 @@ Full reasoning: [ADR-001 §Decision 3](docs/ADR-001-m0-architecture.md).
 The single source of truth for what's done, blocked, and queued is
 [`ROADMAP.md`](ROADMAP.md). Short version:
 
-**Live today** — 3 codecs (passthrough / H.264 / HDC), 2
-transports (TCP / WebSocket), 3 viewers (CLI / egui GUI / browser),
-end-to-end testable between any two desktops and desktop→phone
-browser.
+**Live today** — TCP, WebSocket, and Iroh QUIC daemon/viewer
+transports, shared transport conformance coverage, passthrough codec
+by default, H.264 / HDC behind feature flags, and native CLI / egui
+viewer paths. The daemon sends synthetic capture frames through
+capture → encode → `xenia-wire` seal → transport, and the viewer can
+verify passthrough frames byte-for-byte. The daemon also samples host
+telemetry via `sysinfo` and sends it as sealed metadata frames on the
+same session; the GUI viewer shows the latest CPU/memory values in a
+host panel. A synthetic raw-audio lane is available for protocol
+bring-up and jitter accounting; it does not use device capture,
+playback, cpal, or Opus yet.
 
-**Hard blockers before real deployment** — PQC handshake (still
-on fixture key), real Wayland capture (stub today), consent-
-ceremony UI. See ROADMAP §"Hard blockers for real deployment".
+**Hard blockers before real deployment** — real host capture beyond
+synthetic frames, consent-ceremony UI, and browser-viewer handshake
+wiring. See ROADMAP §"Hard blockers for real deployment".
 
-**Still-to-carry from Symthaea** — input injection, Iroh QUIC,
-clipboard, file transfer, audio, recording. See ROADMAP §"From
-Symthaea: carry-wholesale backlog".
+**Still-to-carry from Symthaea** — platform input backend wiring,
+clipboard, file transfer, audio, recording, and richer transport
+fallback policy. See ROADMAP §"From Symthaea: carry-wholesale
+backlog".
 
 Full VIEWER_PLAN (the parent design doc) is in the sibling repo:
 [`plans/VIEWER_PLAN.md`](https://github.com/Luminous-Dynamics/xenia-wire/blob/main/plans/VIEWER_PLAN.md).
 
-## Platform policy — Wayland only
+## Platform policy
 
-`xenia-peer` supports **Wayland-native capture and input** only.
-X11 is explicitly out of scope. The X11 server's core design permits
-any client to read any other client's keystrokes and screen content —
-that's fundamentally incompatible with Xenia's end-to-end-encrypted
-consent-gated threat model.
+`xenia-capture` is now a host-ingestion abstraction for display,
+audio, input, and telemetry. Display capture is intended to be
+cross-platform through `scap` where possible: Windows Graphics Capture
+on Windows, ScreenCaptureKit on macOS, and PipeWire /
+xdg-desktop-portal on Linux.
+
+On Linux, X11 is explicitly out of scope. The X11 server's core design
+permits any client to read any other client's keystrokes and screen
+content, which is fundamentally incompatible with Xenia's
+end-to-end-encrypted consent-gated threat model.
 
 Supported Wayland paths:
 
@@ -123,9 +138,8 @@ $ cd xenia-peer
 $ cargo test --workspace
 ```
 
-Expected: 23 tests pass (library unit tests + 4 real-TCP integration
-tests including the 100-frame + 10-input seal/open loopback). All
-under 2 seconds on a cold build.
+Expected: the workspace test suite passes, including the real-TCP
+100-frame + 10-input seal/open loopback.
 
 ### Run end-to-end (passthrough codec — always available)
 
@@ -142,6 +156,42 @@ $ cargo run --release -p xenia-viewer -- --connect 127.0.0.1:4747 --frames 30 --
 The viewer locally regenerates each expected frame via a mirror
 `TestCapture` and asserts byte-exact equality against what it
 decoded. Mismatch = pipeline broken.
+
+The daemon's default `--transport auto` accepts TCP and WebSocket on
+the listen address and also starts QUIC/Iroh. A default viewer pointed
+at `host:port` first reads the daemon's transport advertisement and
+upgrades to QUIC automatically when available. `ws://...` still selects
+WebSocket directly, and `iroh:...` can still be passed explicitly.
+The daemon samples host telemetry every second by default; tune with
+`--telemetry-interval-ms`.
+
+Telemetry policy is explicit:
+
+- `--telemetry-level basic` (default): CPU and memory only.
+- `--telemetry-level system`: CPU, memory, hostname, and OS version.
+- `--telemetry-level off`: no telemetry metadata frames.
+
+Synthetic audio is explicit and independent of telemetry policy:
+
+- `--audio off` (default): no audio frames.
+- `--audio sine`: deterministic 48 kHz stereo S16LE sine frames.
+- `--audio noise`: deterministic 48 kHz stereo S16LE noise frames.
+- `--audio-interval-ms 20` controls generation cadence.
+
+The viewer validates the audio lane with a jitter buffer and reports
+sequence, age, gaps, duplicates, late frames, and underruns. It does
+not play audio yet.
+
+For explicit QUIC testing, pass the daemon's printed
+`QUIC_CONNECT=iroh:...` value to the viewer:
+
+```console
+# terminal 1
+$ cargo run --release -p xenia-peer -- --frames 10 --codec passthrough
+
+# terminal 2
+$ cargo run --release -p xenia-viewer -- --connect 'iroh:...' --frames 10 --codec passthrough --verify
+```
 
 ### Run end-to-end (H.264 codec)
 

@@ -4,3 +4,20 @@ Cargo.lock
 *.swp
 .idea/
 .vscode/
+
+# Xenia normalization local/generated archives.
+_archive/**/active-artifacts/
+_archive/**/build-output/
+_archive/**/generated-artifacts/
+_archive/**/python-cache/
+_archive/**/source-bundles/
+_archive/**/target/
+target/
+**/target/
+**/dist/
+
+# Python/generated validation byproducts.
+__pycache__/
+*.py[cod]
+_archive/**/generated-cache/
+_archive/**/xenia-validate-*.log

@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+XENIA_RG_EXCLUDES=(
+  --glob '!_archive/**'
+  --glob '!target/**'
+  --glob '!**/target/**'
+)
+
+
+root="${1:-.}"
+cd "$root"
+
+fail=0
+
+section() {
+  printf '\n== %s ==\n' "$1"
+}
+
+check_absent_find() {
+  local label="$1"
+  shift
+  section "$label"
+  mapfile -t hits < <(find . -path './_archive' -prune -o "$@" -print | sort)
+  if ((${#hits[@]})); then
+    printf '%s\n' "${hits[@]}"
+    fail=1
+  else
+    printf 'clean\n'
+  fi
+}
+
+check_absent_rg() {
+  local label="$1"
+  local pattern="$2"
+  shift 2
+  section "$label"
+  if command -v rg >/dev/null 2>&1; then
+    if rg -n --hidden -g '!_archive/**' -g '!target/**' -g '!dist/**' -g '!.git/**' "$@" "$pattern" .; then
+      fail=1
+    else
+      printf 'clean\n'
+    fi
+  else
+    printf 'rg not found; skipping\n'
+  fi
+}
+
+check_warn_rg() {
+  local label="$1"
+  local pattern="$2"
+  shift 2
+  section "$label"
+  if command -v rg >/dev/null 2>&1; then
+    if ! rg -n --hidden -g '!_archive/**' -g '!target/**' -g '!dist/**' -g '!.git/**' "$@" "$pattern" .; then
+      printf 'clean\n'
+    fi
+  else
+    printf 'rg not found; skipping\n'
+  fi
+}
+
+check_absent_find 'archive bundles in active paths' -type f \( -name '*.tar.gz' -o -name '*.tgz' \)
+check_absent_find 'build output directories in active paths' -type d \( -name target -o -name dist \)
+check_absent_find 'migration scratch scripts in active paths' -type f \( -name 'fix_*.py' -o -name '*_final*.py' \)
+check_absent_find 'nested git repositories in active paths' -mindepth 2 -type d -name .git
+check_absent_rg 'absolute local workspace references in source/config' '/srv'"/luminous-dynamics" -g '!**/*.md'
+check_warn_rg 'absolute local workspace references in docs' '/srv'"/luminous-dynamics" -g '**/*.md'
+check_warn_rg 'review markers for humans' 'DO NOT USE IN PRODUCTION|placeholder|stub|TODO|FIXME'
+
+
+section 'local runtime secret/state files'
+mapfile -t runtime_state < <(find . \
+  -path './_archive' -prune -o \
+  -type f \( -name 'operator.key' -o -name '*.ledger' -o -name '.env' -o -name '.env.*' \) -print | sort)
+if ((${#runtime_state[@]})); then
+  printf '%s\n' "${runtime_state[@]}"
+  fail=1
+else
+  printf 'clean\n'
+fi
+
+section 'cargo metadata smoke check'
+if [[ -f Cargo.toml ]]; then
+  if command -v cargo >/dev/null 2>&1; then
+    if cargo metadata --format-version 1 --no-deps >/tmp/xenia-cargo-metadata.json; then
+      printf 'cargo metadata: ok\n'
+    else
+      printf 'cargo metadata: failed\n'
+      fail=1
+    fi
+  else
+    printf 'cargo not found; skipped\n'
+  fi
+else
+  printf 'no Cargo.toml at audit root; skipped\n'
+fi
+
+if ((fail)); then
+  printf '\nXenia hygiene audit failed. Move historical/build artifacts to _archive and reconcile warnings.\n' >&2
+  exit 1
+fi
+
+printf '\nXenia hygiene audit passed.\n'

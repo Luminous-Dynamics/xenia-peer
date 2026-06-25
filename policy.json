@@ -1,0 +1,16 @@
+[
+  {
+    "rule_id": "require_human_consensus_for_revocation",
+    "trigger_priority": "Critical",
+    "condition": "SecurityBreach",
+    "action": "revoke_access",
+    "require_threshold_signature": true
+  },
+  {
+    "rule_id": "auto_quarantine_unknown_did",
+    "trigger_priority": "High",
+    "condition": "IdentityUnverified",
+    "action": "quarantine_stream",
+    "require_threshold_signature": false
+  }
+]

@@ -48,12 +48,11 @@ use std::time::SystemTime;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use ml_kem::{
+    MlKem768, TryKeyInit,
     kem::{Decapsulate, Encapsulate, Kem, KeyExport},
     ml_kem_768::{
-        Ciphertext as MlKemCiphertext, DecapsulationKey as MlKemDk,
-        EncapsulationKey as MlKemEk,
+        Ciphertext as MlKemCiphertext, DecapsulationKey as MlKemDk, EncapsulationKey as MlKemEk,
     },
-    MlKem768, TryKeyInit,
 };
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -215,11 +214,7 @@ impl HandshakeManager {
     }
 
     /// Verify a signature from a peer's `VerifyingKey`.
-    pub fn verify(
-        peer_pk: &VerifyingKey,
-        message: &[u8],
-        signature: &Signature,
-    ) -> Result<()> {
+    pub fn verify(peer_pk: &VerifyingKey, message: &[u8], signature: &Signature) -> Result<()> {
         peer_pk
             .verify(message, signature)
             .map_err(|_| HandshakeError::SignatureVerificationFailed)
@@ -245,7 +240,8 @@ impl HandshakeManager {
         if kem_pk.len() != ML_KEM_768_PK_LEN {
             return Err(HandshakeError::InvalidKemPublicKey { got: kem_pk.len() });
         }
-        self.pending_kem.insert(peer_id.to_string(), kem_pk.to_vec());
+        self.pending_kem
+            .insert(peer_id.to_string(), kem_pk.to_vec());
         Ok(())
     }
 
@@ -266,8 +262,11 @@ impl HandshakeManager {
             .remove(peer_id)
             .ok_or_else(|| HandshakeError::UnknownPeer(peer_id.to_string()))?;
 
-        let ek: MlKemEk = <MlKemEk as TryKeyInit>::new_from_slice(&pk_bytes)
-            .map_err(|_| HandshakeError::InvalidKemPublicKey { got: pk_bytes.len() })?;
+        let ek: MlKemEk = <MlKemEk as TryKeyInit>::new_from_slice(&pk_bytes).map_err(|_| {
+            HandshakeError::InvalidKemPublicKey {
+                got: pk_bytes.len(),
+            }
+        })?;
 
         let (ct, shared) = <MlKemEk as Encapsulate>::encapsulate(&ek);
 
@@ -404,9 +403,7 @@ mod tests {
             .receive_kem_public_key("responder", responder.kem_public_key_bytes())
             .unwrap();
 
-        let ct = initiator
-            .encapsulate_for_peer("responder", &nonce)
-            .unwrap();
+        let ct = initiator.encapsulate_for_peer("responder", &nonce).unwrap();
         assert_eq!(ct.len(), ML_KEM_768_CT_LEN);
 
         let responder_key = responder
@@ -459,19 +456,18 @@ mod tests {
     #[test]
     fn missing_peer_kem_pk_fails() {
         let mut mgr = HandshakeManager::new();
-        let err = mgr
-            .encapsulate_for_peer("nobody", &[0u8; 32])
-            .unwrap_err();
+        let err = mgr.encapsulate_for_peer("nobody", &[0u8; 32]).unwrap_err();
         assert!(matches!(err, HandshakeError::UnknownPeer(_)));
     }
 
     #[test]
     fn wrong_length_kem_public_key_rejected() {
         let mut mgr = HandshakeManager::new();
-        let err = mgr
-            .receive_kem_public_key("peer", &[0u8; 100])
-            .unwrap_err();
-        assert!(matches!(err, HandshakeError::InvalidKemPublicKey { got: 100 }));
+        let err = mgr.receive_kem_public_key("peer", &[0u8; 100]).unwrap_err();
+        assert!(matches!(
+            err,
+            HandshakeError::InvalidKemPublicKey { got: 100 }
+        ));
     }
 
     #[test]
@@ -480,7 +476,10 @@ mod tests {
         let err = mgr
             .decapsulate_and_derive("peer", &[0u8; 42], &[0u8; 32])
             .unwrap_err();
-        assert!(matches!(err, HandshakeError::InvalidKemCiphertext { got: 42 }));
+        assert!(matches!(
+            err,
+            HandshakeError::InvalidKemCiphertext { got: 42 }
+        ));
     }
 
     #[test]
@@ -509,9 +508,7 @@ mod tests {
         assert!(HandshakeManager::verify(&bob_pk, transcript, &sig).is_ok());
 
         // Tampered transcript must fail.
-        assert!(
-            HandshakeManager::verify(&bob_pk, b"xenia:eve<->bob:session-42", &sig).is_err()
-        );
+        assert!(HandshakeManager::verify(&bob_pk, b"xenia:eve<->bob:session-42", &sig).is_err());
     }
 
     #[test]

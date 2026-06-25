@@ -46,7 +46,10 @@ fn main() {
             .and_then(|s| s.parse().ok())
             .unwrap_or(30),
     );
-    let fps: u32 = env::var("FPS").ok().and_then(|s| s.parse().ok()).unwrap_or(30);
+    let fps: u32 = env::var("FPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30);
     let dump_path = env::var("DUMP_FRAME").ok();
 
     println!("xenia-capture bench — W0 scap validation harness");
@@ -98,13 +101,17 @@ fn main() {
                     first_frame_at = Some(start.elapsed());
                 }
                 frames += 1;
-                last_bytes = frame.pixels.len();
+                let Some(pixels) = frame.pixels() else {
+                    eprintln!("  warning: capture returned non-pixel frame; skipping dump");
+                    continue;
+                };
+                last_bytes = pixels.len();
                 last_w = frame.width;
                 last_h = frame.height;
 
                 if !dumped {
                     if let Some(ref path) = dump_path {
-                        if let Err(e) = std::fs::write(path, &frame.pixels) {
+                        if let Err(e) = std::fs::write(path, pixels) {
                             eprintln!("  warning: DUMP_FRAME write failed: {e}");
                         } else {
                             println!("  wrote first-frame RGBA to {path} ({last_bytes} bytes)");

@@ -1,0 +1,21 @@
+name: Xenia Artifacts
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  collect-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Collect validation artifacts
+        run: |
+          chmod +x scripts/*.sh scripts/*.py || true
+          scripts/ci-collect-artifacts.sh . _archive/ci-artifacts
+      - name: Upload validation artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xenia-validation-artifacts
+          path: _archive/ci-artifacts
+          if-no-files-found: error

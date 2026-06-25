@@ -1,0 +1,22 @@
+# Xenia ownership map.
+# Replace @luminous-dynamics/xenia-maintainers with the real GitHub team/user
+# before making this repository public.
+
+* @luminous-dynamics/xenia-maintainers
+
+/xenia-wire/ @luminous-dynamics/xenia-maintainers
+/xenia-peer/crates/xenia-peer-core/ @luminous-dynamics/xenia-maintainers
+/xenia-peer/crates/xenia-handshake/ @luminous-dynamics/xenia-maintainers
+/xenia-peer/crates/xenia-ledger/ @luminous-dynamics/xenia-maintainers
+/xenia-peer/crates/xenia-transport-quic/ @luminous-dynamics/xenia-maintainers
+/xenia-peer/crates/xenia-transport-ws/ @luminous-dynamics/xenia-maintainers
+/xenia-peer/crates/xenia-capture/ @luminous-dynamics/xenia-maintainers
+/xenia-peer/crates/xenia-video/ @luminous-dynamics/xenia-maintainers
+/xenia-peer/crates/xenia-inject/ @luminous-dynamics/xenia-maintainers
+/xenia-peer/apps/ @luminous-dynamics/xenia-maintainers
+/docs/security/ @luminous-dynamics/xenia-maintainers
+/scripts/ @luminous-dynamics/xenia-maintainers
+/xenia.policy.toml @luminous-dynamics/xenia-maintainers
+/xenia.safety.toml @luminous-dynamics/xenia-maintainers
+/xenia.release.toml @luminous-dynamics/xenia-maintainers
+/xenia.normalization.toml @luminous-dynamics/xenia-maintainers

@@ -1,0 +1,83 @@
+{
+  "applied": [],
+  "applied_count": 0,
+  "blocked": [],
+  "blocked_count": 0,
+  "dry_run": [
+    {
+      "action": "archive",
+      "source": ".git",
+      "status": "would-move",
+      "target": "_archive/normalization-v0.2/nested-git-metadata/.git"
+    },
+    {
+      "action": "archive",
+      "source": "target",
+      "status": "would-move",
+      "target": "_archive/normalization-v0.2/build-output/target"
+    },
+    {
+      "action": "move",
+      "source": "crates/xenia-viewer",
+      "status": "would-move",
+      "target": "apps/xenia-viewer"
+    },
+    {
+      "action": "move",
+      "source": "crates/xenia-peer",
+      "status": "would-move",
+      "target": "apps/xenia-peer"
+    },
+    {
+      "action": "move",
+      "source": "crates/sovereign-admin",
+      "status": "would-move",
+      "target": "apps/sovereign-admin"
+    },
+    {
+      "action": "move",
+      "source": "crates/xenia-viewer-web",
+      "status": "would-move",
+      "target": "apps/xenia-viewer-web"
+    },
+    {
+      "action": "rewrite_cargo_member",
+      "cargo_toml": "xenia-peer/Cargo.toml",
+      "from": "crates/sovereign-admin",
+      "reason": "cargo-toml-missing",
+      "status": "skipped",
+      "to": "apps/sovereign-admin"
+    },
+    {
+      "action": "rewrite_cargo_member",
+      "cargo_toml": "xenia-peer/Cargo.toml",
+      "from": "crates/xenia-peer",
+      "reason": "cargo-toml-missing",
+      "status": "skipped",
+      "to": "apps/xenia-peer"
+    },
+    {
+      "action": "rewrite_cargo_member",
+      "cargo_toml": "xenia-peer/Cargo.toml",
+      "from": "crates/xenia-viewer",
+      "reason": "cargo-toml-missing",
+      "status": "skipped",
+      "to": "apps/xenia-viewer"
+    },
+    {
+      "action": "rewrite_cargo_member",
+      "cargo_toml": "xenia-peer/Cargo.toml",
+      "from": "crates/xenia-viewer-web",
+      "reason": "cargo-toml-missing",
+      "status": "skipped",
+      "to": "apps/xenia-viewer-web"
+    }
+  ],
+  "dry_run_count": 10,
+  "ledger": "/srv/luminous-dynamics/xenia/xenia-peer/_archive/normalization-v0.2/execution-ledger-20260625T154644Z.json",
+  "mode": "dry-run",
+  "plan": "/srv/luminous-dynamics/xenia/xenia-peer/_archive/normalization-v0.2/execution-plan.json",
+  "rollback": null,
+  "root": "/srv/luminous-dynamics/xenia/xenia-peer",
+  "schema": "xenia.normalization.execution-ledger.v1"
+}

@@ -1,0 +1,67 @@
+# Xenia secure-defaults manifest.
+# This is not a substitute for a security review. It encodes the defaults that
+# must remain true while Xenia is pre-production.
+
+[manifest]
+manifest_version = 1
+stage = "pre-production"
+owner = "xenia"
+
+[secure_defaults]
+remote_control_enabled_by_default = false
+capture_enabled_by_default = false
+injection_enabled_by_default = false
+unattended_access_allowed = false
+consent_required_for_privileged_sessions = true
+consent_revocation_fail_closed = true
+ledger_required_for_privileged_sessions = true
+public_bind_requires_explicit_flag = true
+default_bind_address = "127.0.0.1"
+plaintext_credentials_allowed = false
+silent_session_start_allowed = false
+
+[network]
+allowed_default_binds = ["127.0.0.1", "localhost", "::1"]
+public_binds_requiring_review = ["0.0.0.0", "::", "[::]"]
+allowed_public_bind_files = []
+
+[scanner]
+# Source/config files produce hard findings. Docs produce warnings.
+source_extensions = [
+  ".rs", ".toml", ".json", ".yaml", ".yml", ".ts", ".tsx", ".js", ".jsx", ".html", ".sh", ".py"
+]
+doc_extensions = [".md", ".rst", ".txt"]
+exclude_dirs = [".git", "target", "dist", "node_modules", ".direnv", "_archive"]
+exclude_files = [
+  "scripts/check-secure-defaults.py",
+  "scripts/generate-release-dashboard.py",
+  "xenia.safety.toml"
+]
+
+[review_required_patterns]
+# Keep this intentionally small and low-noise. The scanner treats exact strings
+# as evidence that a security reviewer must look at the diff.
+hard = [
+  "consent_required = false",
+  "consentRequired: false",
+  "remote_control_enabled = true",
+  "remoteControlEnabled: true",
+  "capture_enabled = true",
+  "injection_enabled = true",
+  "unattended_access = true",
+  "allow_unattended = true",
+  "revocation_fail_open",
+  "fail_open",
+  "disable_consent",
+  "bypass_consent",
+  "skip_consent",
+  "dangerously_disable"
+]
+warning = [
+  "0.0.0.0",
+  "[::]",
+  "ws://",
+  "http://",
+  "allow_any_origin",
+  "Access-Control-Allow-Origin: *"
+]

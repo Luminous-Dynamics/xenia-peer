@@ -51,12 +51,19 @@
 
 #![warn(missing_docs)]
 
+pub mod advertisement;
 pub mod frame;
+pub mod handshake;
 mod session;
 pub mod transport;
 
-pub use frame::{PixelFormat, RawFrame, RawInput};
+pub use frame::{
+    AudioJitterBuffer, AudioSampleFormat, JitterInsert, JitterStats, PixelFormat, RawAudio,
+    RawFrame, RawInput, RawTelemetry, SyntheticAudioKind, SyntheticAudioSource, TelemetrySample,
+    TelemetryValue,
+};
 pub use session::{Session, SessionError, SessionRole};
+pub use xenia_handshake::HandshakeManager;
 
 /// Semantic-version string for the xenia-wire crate this server
 /// binds against. Exposed so the transport layer can log it on

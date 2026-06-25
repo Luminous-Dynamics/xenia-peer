@@ -252,7 +252,7 @@ fn frame_to_rgba(frame: scap::frame::Frame) -> Option<CapturedFrame> {
                 chunk.swap(0, 2);
             }
             Some(CapturedFrame {
-                pixels,
+                data: FrameData::Pixels(pixels),
                 width: f.width as u32,
                 height: f.height as u32,
             })
@@ -268,7 +268,7 @@ fn frame_to_rgba(frame: scap::frame::Frame) -> Option<CapturedFrame> {
                 chunk[3] = 255;
             }
             Some(CapturedFrame {
-                pixels,
+                data: FrameData::Pixels(pixels),
                 width: f.width as u32,
                 height: f.height as u32,
             })
@@ -283,7 +283,7 @@ fn frame_to_rgba(frame: scap::frame::Frame) -> Option<CapturedFrame> {
                 chunk[3] = 255;
             }
             Some(CapturedFrame {
-                pixels,
+                data: FrameData::Pixels(pixels),
                 width: f.width as u32,
                 height: f.height as u32,
             })
@@ -302,7 +302,7 @@ fn frame_to_rgba(frame: scap::frame::Frame) -> Option<CapturedFrame> {
                 chunk[3] = 255;
             }
             Some(CapturedFrame {
-                pixels,
+                data: FrameData::Pixels(pixels),
                 width: f.width as u32,
                 height: f.height as u32,
             })
@@ -317,7 +317,7 @@ fn frame_to_rgba(frame: scap::frame::Frame) -> Option<CapturedFrame> {
                 pixels.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
             }
             Some(CapturedFrame {
-                pixels,
+                data: FrameData::Pixels(pixels),
                 width: f.width as u32,
                 height: f.height as u32,
             })
@@ -335,7 +335,7 @@ fn frame_to_rgba(frame: scap::frame::Frame) -> Option<CapturedFrame> {
                 chunk[3] = 255;
             }
             Some(CapturedFrame {
-                pixels,
+                data: FrameData::Pixels(pixels),
                 width: f.width as u32,
                 height: f.height as u32,
             })
@@ -385,9 +385,9 @@ impl ScreenCapture for ScapCapture {
             }
             Ok(Err(e)) => Err(e),
             Err(mpsc::TryRecvError::Empty) => Ok(None),
-            Err(mpsc::TryRecvError::Disconnected) => Err(CaptureError::Backend(
-                "scap worker thread dropped".into(),
-            )),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err(CaptureError::Backend("scap worker thread dropped".into()))
+            }
         }
     }
 

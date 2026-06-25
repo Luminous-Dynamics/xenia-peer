@@ -11,7 +11,7 @@
 //!
 //! **Requires the `h264` feature**, which in turn requires libav dev
 //! headers + libclang at build time. On NixOS this is
-//! `nix develop /srv/luminous-dynamics` (or Symthaea's flake);
+//! `nix develop` from the product workspace flake;
 //! outside Nix install `ffmpeg` + `llvm` dev packages through
 //! distro channels.
 //!
@@ -265,6 +265,9 @@ struct CachedScaler {
     in_height: u32,
     ctx: ffmpeg::software::scaling::Context,
 }
+
+// SwsContext is safe to send between threads; we only access it via &mut self.
+unsafe impl Send for CachedScaler {}
 
 impl H264Decoder {
     /// Build an H.264 decoder. Dimensions are learned from the

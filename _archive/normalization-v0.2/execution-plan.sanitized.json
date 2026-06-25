@@ -1,0 +1,182 @@
+{
+  "action_count": 8,
+  "actions": [
+    {
+      "action": "archive",
+      "exists": true,
+      "reason": "Build output is reproducible and should not be committed or exported.",
+      "rule_id": "build-output-target",
+      "source": "target",
+      "source_kind": "dir",
+      "target": "_archive/normalization-v0.2/build-output/target"
+    },
+    {
+      "action": "move",
+      "id": "app-native-viewer",
+      "kind": "app",
+      "reason": "The native viewer is a runnable UI product surface.",
+      "source": "crates/xenia-viewer",
+      "source_exists": true,
+      "target": "apps/xenia-viewer",
+      "target_exists": false
+    },
+    {
+      "action": "move",
+      "id": "app-peer-daemon",
+      "kind": "app",
+      "reason": "The peer daemon is a runnable product surface, not a reusable library crate.",
+      "source": "crates/xenia-peer",
+      "source_exists": true,
+      "target": "apps/xenia-peer",
+      "target_exists": false
+    },
+    {
+      "action": "move",
+      "id": "app-sovereign-admin",
+      "kind": "app",
+      "reason": "The sovereign admin surface is an app/control-plane UI.",
+      "source": "crates/sovereign-admin",
+      "source_exists": true,
+      "target": "apps/sovereign-admin",
+      "target_exists": false
+    },
+    {
+      "action": "rewrite_cargo_member",
+      "cargo_toml": "Cargo.toml",
+      "cargo_toml_exists": true,
+      "from": "crates/sovereign-admin",
+      "to": "apps/sovereign-admin"
+    },
+    {
+      "action": "rewrite_cargo_member",
+      "cargo_toml": "Cargo.toml",
+      "cargo_toml_exists": true,
+      "from": "crates/xenia-peer",
+      "to": "apps/xenia-peer"
+    },
+    {
+      "action": "rewrite_cargo_member",
+      "cargo_toml": "Cargo.toml",
+      "cargo_toml_exists": true,
+      "from": "crates/xenia-viewer",
+      "to": "apps/xenia-viewer"
+    }
+  ],
+  "evidence": [
+    {
+      "bytes": 65293,
+      "dirs": 4,
+      "exists": true,
+      "files": 19,
+      "metadata_sha256": "1a7988bfdb19ee4f28179c0fdb3a32a688049b1a9df403450b9b77496f4668b5",
+      "path": "crates/sovereign-admin",
+      "sample": [
+        "crates/sovereign-admin/.gitignore",
+        "crates/sovereign-admin/Cargo.toml",
+        "crates/sovereign-admin/README.md",
+        "crates/sovereign-admin/Trunk.toml",
+        "crates/sovereign-admin/index.html",
+        "crates/sovereign-admin/src/app.rs",
+        "crates/sovereign-admin/src/auth.rs",
+        "crates/sovereign-admin/src/config.rs",
+        "crates/sovereign-admin/src/main.rs",
+        "crates/sovereign-admin/src/pages/consent.rs",
+        "crates/sovereign-admin/src/pages/devices.rs",
+        "crates/sovereign-admin/src/pages/governance.rs",
+        "crates/sovereign-admin/src/pages/login.rs",
+        "crates/sovereign-admin/src/pages/mod.rs",
+        "crates/sovereign-admin/src/pages/monitor.rs",
+        "crates/sovereign-admin/src/pages/policy.rs",
+        "crates/sovereign-admin/src/pages/sessions.rs",
+        "crates/sovereign-admin/src/pages/verify.rs",
+        "crates/sovereign-admin/styles/main.css"
+      ],
+      "type": "dir"
+    },
+    {
+      "bytes": 29663,
+      "dirs": 3,
+      "exists": true,
+      "files": 4,
+      "metadata_sha256": "d56d772adf03dcc6d976b098a88a8f5f4de535f0049c22ef17c0c2dae14b1f4a",
+      "path": "crates/xenia-peer",
+      "sample": [
+        "crates/xenia-peer/Cargo.toml",
+        "crates/xenia-peer/src/main.rs",
+        "crates/xenia-peer/src/api/mod.rs",
+        "crates/xenia-peer/src/governance/mod.rs"
+      ],
+      "type": "dir"
+    },
+    {
+      "bytes": 39210,
+      "dirs": 1,
+      "exists": true,
+      "files": 3,
+      "metadata_sha256": "893010493ec84e637b3b0acfc5ee621a94af0fab4f98a8cece0a07d448f46b19",
+      "path": "crates/xenia-viewer",
+      "sample": [
+        "crates/xenia-viewer/Cargo.toml",
+        "crates/xenia-viewer/src/gui.rs",
+        "crates/xenia-viewer/src/main.rs"
+      ],
+      "type": "dir"
+    },
+    {
+      "bytes": 5601790269,
+      "dirs": 1674,
+      "exists": true,
+      "files": 11490,
+      "metadata_sha256": "961815cd94c85014f8f45bbcdcb48cf22827315e0fdc7ca3f613ed455d97533c",
+      "path": "target",
+      "sample": [
+        "target/.rustc_info.json",
+        "target/CACHEDIR.TAG",
+        "target/debug/.cargo-artifact-lock",
+        "target/debug/.cargo-build-lock",
+        "target/debug/.cargo-lock",
+        "target/debug/.fingerprint/ab_glyph-018c2c3a049359cd/dep-lib-ab_glyph",
+        "target/debug/.fingerprint/ab_glyph-018c2c3a049359cd/invoked.timestamp",
+        "target/debug/.fingerprint/ab_glyph-018c2c3a049359cd/lib-ab_glyph",
+        "target/debug/.fingerprint/ab_glyph-018c2c3a049359cd/lib-ab_glyph.json",
+        "target/debug/.fingerprint/ab_glyph-9e3899d828c95277/dep-lib-ab_glyph",
+        "target/debug/.fingerprint/ab_glyph-9e3899d828c95277/invoked.timestamp",
+        "target/debug/.fingerprint/ab_glyph-9e3899d828c95277/lib-ab_glyph",
+        "target/debug/.fingerprint/ab_glyph-9e3899d828c95277/lib-ab_glyph.json",
+        "target/debug/.fingerprint/ab_glyph_rasterizer-6de60d85b036d175/dep-lib-ab_glyph_rasterizer",
+        "target/debug/.fingerprint/ab_glyph_rasterizer-6de60d85b036d175/invoked.timestamp",
+        "target/debug/.fingerprint/ab_glyph_rasterizer-6de60d85b036d175/lib-ab_glyph_rasterizer",
+        "target/debug/.fingerprint/ab_glyph_rasterizer-6de60d85b036d175/lib-ab_glyph_rasterizer.json",
+        "target/debug/.fingerprint/ab_glyph_rasterizer-8ce847dc04f7bf61/dep-lib-ab_glyph_rasterizer",
+        "target/debug/.fingerprint/ab_glyph_rasterizer-8ce847dc04f7bf61/invoked.timestamp",
+        "target/debug/.fingerprint/ab_glyph_rasterizer-8ce847dc04f7bf61/lib-ab_glyph_rasterizer"
+      ],
+      "type": "dir"
+    },
+    {
+      "bytes": 5134,
+      "exists": true,
+      "path": "xenia.normalization.toml",
+      "sha256": "bdcb583d212661e4a244d360f07b4f123f4cffb9dafde2ec9fcb154e466f8848",
+      "sha256_omitted_reason": null,
+      "type": "file"
+    }
+  ],
+  "manifest": "xenia.normalization.toml",
+  "manifest_sha256": "bdcb583d212661e4a244d360f07b4f123f4cffb9dafde2ec9fcb154e466f8848",
+  "mode": "plan-only",
+  "notes": [
+    "This plan does not execute filesystem changes.",
+    "Review archive and move actions before using apply-normalization-execution.py --apply.",
+    "Generated target paths must not already exist unless a previous partial normalization is being reviewed."
+  ],
+  "root": "/srv/luminous-dynamics/xenia/xenia-peer",
+  "sanitization_notes": [
+    "Removed root .git archive action; root .git is expected for a normal checkout.",
+    "Removed xenia-viewer-web actions; web viewer belongs under xenia-wire, not xenia-peer.",
+    "Rewrote cargo_toml from xenia-peer/Cargo.toml to Cargo.toml for current repo root."
+  ],
+  "sanitized_at_utc": "2026-06-25T16:06:48Z",
+  "sanitized_by": "manual-normalization-v0.2-gate",
+  "schema": "xenia.normalization.execution-plan.v1"
+}

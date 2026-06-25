@@ -11,11 +11,15 @@ publish = false  # unpublished until M1 makes it useful
 
 [dependencies]
 xenia-wire = { workspace = true, features = ["consent"] }
-tokio = { workspace = true }
-serde = { workspace = true }
+xenia-handshake = { path = "../xenia-handshake" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde-big-array = "0.5"
+ed25519-dalek = "2"
 bincode = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
+thiserror = "2.0"
+tracing = "0.1"
+rand = "0.8"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

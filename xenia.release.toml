@@ -1,0 +1,102 @@
+# Xenia release-train manifest.
+#
+# This file is deliberately conservative. It does not declare Xenia production
+# ready; it defines the visible path from stabilization work to an RC1 branch.
+
+[release_train]
+manifest_version = 1
+current_milestone = "stabilization-v0.1"
+next_candidate = "rc1"
+status = "pre-rc"
+release_branch_prefix = "release/xenia-"
+archive_root = "_archive"
+
+[gates]
+hygiene_required = true
+policy_required = true
+cargo_boundaries_required = true
+source_archive_required = true
+runtime_risk_report_required = true
+unsafe_surface_report_required = true
+consent_abuse_review_required = true
+threat_model_review_required = true
+fault_injection_plan_required = true
+observability_event_taxonomy_required = true
+normalization_manifest_required = true
+normalization_snapshot_required = true
+normalization_execution_plan_required = true
+post_normalization_check_required = true
+safety_manifest_required = true
+secure_defaults_required = true
+codeowners_required = true
+release_dashboard_required = true
+
+[[milestone]]
+name = "stabilization-v0.1"
+kind = "current"
+summary = "Make the workspace reproducible, auditable, and safe for normalization."
+entry_criteria = [
+  "v1-v5 guardrail patches applied",
+  "active tarballs/build outputs identified",
+  "policy manifest present"
+]
+exit_criteria = [
+  "hygiene audit passes on active source tree",
+  "preflight report generated without hidden cleanup debt",
+  "release-readiness check passes in non-RC mode"
+]
+
+[[milestone]]
+name = "normalization-v0.2"
+kind = "planned"
+summary = "Move from transitional layout to explicit crates/apps boundaries."
+entry_criteria = [
+  "stabilization-v0.1 exit criteria complete",
+  "workspace normalization plan reviewed",
+  "normalization snapshot generated before moves",
+  "normalization execution plan generated and reviewed"
+]
+exit_criteria = [
+  "xenia.policy.toml layout.mode set to normalized",
+  "apps live under xenia-peer/apps",
+  "libraries live under xenia-peer/crates",
+  "cargo metadata passes for xenia-wire and xenia-peer",
+  "post-normalization acceptance check passes",
+  "execution ledger and rollback script produced"
+]
+
+[[milestone]]
+name = "rc1"
+kind = "candidate"
+summary = "First release-candidate branch; not a production security claim."
+entry_criteria = [
+  "normalization-v0.2 exit criteria complete",
+  "runtime risk strict mode reviewed or exceptioned",
+  "unsafe surface report reviewed",
+  "fault-injection plan has minimum tests mapped",
+  "clean source archive passes check-source-archive.sh"
+]
+exit_criteria = [
+  "RC1 candidate checklist complete",
+  "threat model and consent abuse cases reviewed against diff",
+  "release archive generated from clean source only"
+]
+
+[blockers]
+# Keep these human-readable. The release-readiness checker fails --rc1 while
+# any hard blocker remains.
+hard = [
+  "active target/dist/nested .git cleanup not yet confirmed on production tree",
+  "layout is still transitional until normalization pass lands",
+  "normalization manifest, execution plan, ledger, and before/after snapshots need review",
+  "runtime unwrap/expect findings need review before RC strict mode"
+]
+soft = [
+  "source archives need reproducible checksum manifest",
+  "normalization executor should be dry-run once on the production tree before apply",
+  "secure-default strict scan needs review before RC1",
+  "release dashboard should be generated from the normalized branch",
+  "transport fault-injection tests need expansion",
+  "operator/admin audit events need stable names",
+  "replace CODEOWNERS placeholder with the real maintainer/team before public release"
+]

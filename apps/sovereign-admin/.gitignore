@@ -1,0 +1,13 @@
+# Trunk build output — never committed.
+/dist/
+
+# Local archives and build/export products must not live in active source paths.
+*.tar.gz
+*.tgz
+*.zip
+/dist/
+/pkg/
+.claude/
+.idea/
+.vscode/
+.DS_Store

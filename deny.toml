@@ -1,0 +1,50 @@
+# cargo-deny starter policy for Xenia.
+# Run manually with: cargo deny check
+# CI should treat this as advisory until the dependency graph is normalized.
+
+[advisories]
+
+version = 2
+yanked = "warn"
+unmaintained = "workspace"
+unsound = "workspace"
+
+ignore = [
+  { id = "RUSTSEC-2025-0141", reason = "Temporary M0 normalization exception. bincode 1.3.3 is used in internal serialization/test paths; migrate to postcard, bitcode, wincode, or a stable Xenia wire codec before RC1." },
+]
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+allow-wildcard-paths = true
+[sources]
+unknown-registry = "deny"
+unknown-git = "warn"
+allow-git = [
+  "https://github.com/Luminous-Dynamics/scap",
+]
+
+[licenses]
+unused-allowed-license = "warn"
+confidence-threshold = 0.8
+
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "MPL-2.0",
+  "AGPL-3.0-or-later",
+  "CC0-1.0",
+  "Unlicense",
+  "BSL-1.0",
+  "OFL-1.1",
+  "CDLA-Permissive-2.0",
+  "LicenseRef-UFL-1.0",
+]
+
+[licenses.private]
+ignore = true

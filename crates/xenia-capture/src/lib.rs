@@ -12,10 +12,14 @@
 
 //! # xenia-capture
 //!
-//! Screen-capture abstraction for the Xenia remote-session stack.
+//! Host-ingestion abstractions for the Xenia remote-session stack.
 //!
-//! Implements a platform-agnostic [`ScreenCapture`] trait with four
-//! implementations:
+//! The crate is deliberately trait-first: daemon code consumes stable
+//! display, audio, input, and telemetry interfaces while platform
+//! backends hide OS-specific APIs behind those traits.
+//!
+//! Implements a platform-agnostic [`ScreenCapture`] trait with these
+//! display implementations:
 //!
 //! - [`TestCapture`] — deterministic synthetic gradient frames with a
 //!   per-frame-varying "active region" that simulates cursor motion.
@@ -49,6 +53,8 @@ mod scap_backend;
 #[cfg(feature = "scap-backend")]
 pub use scap_backend::{ScapCapture, ScapOptions, ScapResolution};
 
+use serde::{Deserialize, Serialize};
+use sysinfo::System;
 use thiserror::Error;
 
 /// Errors surfaced by a capture backend.
@@ -73,16 +79,68 @@ pub enum CaptureError {
     ConsentDenied,
 }
 
-/// A captured screen frame.
+/// Errors surfaced by non-display ingestion backends.
+#[derive(Debug, Error)]
+pub enum IngestionError {
+    /// Backend-specific failure.
+    #[error("ingestion backend: {0}")]
+    Backend(String),
+
+    /// The requested backend is not available on this host or build.
+    #[error("ingestion unavailable: {0}")]
+    Unavailable(String),
+
+    /// The operating system or user denied permission.
+    #[error("ingestion consent denied")]
+    ConsentDenied,
+}
+
+/// Frame capture result, potentially wrapping a DMABUF handle.
 #[derive(Clone, Debug)]
 pub struct CapturedFrame {
-    /// RGBA pixel data, row-major, top-left origin, 4 bytes per
-    /// pixel. Length MUST equal `width * height * 4`.
-    pub pixels: Vec<u8>,
-    /// Frame width in pixels.
+    /// Captured frame width in pixels.
     pub width: u32,
-    /// Frame height in pixels.
+    /// Captured frame height in pixels.
     pub height: u32,
+    /// Captured frame backing data.
+    pub data: FrameData,
+}
+
+/// Backing storage for a captured frame.
+#[derive(Clone, Debug)]
+pub enum FrameData {
+    /// Tightly packed RGBA pixel bytes.
+    Pixels(Vec<u8>),
+    /// DMA-BUF frame handle and plane metadata.
+    Dmabuf {
+        /// File descriptor for the DMA-BUF.
+        fd: i32,
+        /// DRM fourcc pixel format.
+        format: u32,
+        /// DRM format modifier.
+        modifier: u64,
+        /// Plane offsets and strides.
+        planes: Vec<Plane>,
+    },
+}
+
+/// One DMA-BUF plane.
+#[derive(Debug, Clone)]
+pub struct Plane {
+    /// Byte offset of the plane in the buffer.
+    pub offset: u32,
+    /// Row stride in bytes.
+    pub stride: u32,
+}
+
+impl CapturedFrame {
+    /// Return tightly packed pixel bytes when this frame is CPU-backed.
+    pub fn pixels(&self) -> Option<&[u8]> {
+        match &self.data {
+            FrameData::Pixels(pixels) => Some(pixels),
+            FrameData::Dmabuf { .. } => None,
+        }
+    }
 }
 
 /// Monitor information for multi-monitor enumeration.
@@ -148,6 +206,304 @@ pub trait ScreenCapture: Send {
     /// Identifier string for the active backend. Used for
     /// observability; stable for a given crate version.
     fn backend_name(&self) -> &str;
+}
+
+/// Interleaved PCM audio captured from a host source.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AudioFrame {
+    /// Sample rate in Hz.
+    pub sample_rate_hz: u32,
+    /// Channel count.
+    pub channels: u16,
+    /// Signed 16-bit interleaved samples.
+    pub samples_i16: Vec<i16>,
+    /// Capture timestamp in milliseconds since Unix epoch when known.
+    pub timestamp_ms: u64,
+}
+
+/// Platform-agnostic audio-capture interface.
+pub trait AudioCapture: Send {
+    /// Capture the next audio frame, or `Ok(None)` when no data is
+    /// currently available.
+    fn capture_audio(&mut self) -> Result<Option<AudioFrame>, IngestionError>;
+
+    /// Identifier string for the active backend.
+    fn backend_name(&self) -> &str;
+}
+
+/// Pointer button for host input injection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointerButton {
+    /// Primary button.
+    Primary,
+    /// Secondary button.
+    Secondary,
+    /// Middle button.
+    Middle,
+}
+
+/// Host input event expressed in display-coordinate space.
+#[derive(Clone, Debug, PartialEq)]
+pub enum InputEvent {
+    /// Move pointer to absolute coordinates.
+    PointerMove {
+        /// X coordinate in display space.
+        x: i32,
+        /// Y coordinate in display space.
+        y: i32,
+    },
+    /// Press or release a pointer button.
+    PointerButton {
+        /// Pointer button.
+        button: PointerButton,
+        /// `true` for press, `false` for release.
+        pressed: bool,
+    },
+    /// Scroll wheel or touchpad delta.
+    Scroll {
+        /// Horizontal scroll delta.
+        delta_x: f32,
+        /// Vertical scroll delta.
+        delta_y: f32,
+    },
+    /// Keyboard key by platform-neutral symbolic name.
+    Key {
+        /// Symbolic key name.
+        key: String,
+        /// `true` for press, `false` for release.
+        pressed: bool,
+    },
+    /// UTF-8 text input.
+    Text(String),
+}
+
+/// Platform-agnostic input-injection interface.
+pub trait InputInjector: Send {
+    /// Inject one input event into the host OS.
+    fn inject(&mut self, event: InputEvent) -> Result<(), IngestionError>;
+
+    /// Identifier string for the active backend.
+    fn backend_name(&self) -> &str;
+}
+
+/// Scalar telemetry value.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum TelemetryValue {
+    /// Signed integer value.
+    I64(i64),
+    /// Unsigned integer value.
+    U64(u64),
+    /// Floating-point value.
+    F64(f64),
+    /// Boolean value.
+    Bool(bool),
+    /// Short text value.
+    Text(String),
+}
+
+/// One host telemetry measurement.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TelemetrySample {
+    /// Stable metric name, e.g. `cpu.total.percent`.
+    pub name: String,
+    /// Metric value.
+    pub value: TelemetryValue,
+    /// Optional unit, e.g. `%`, `bytes`, `celsius`.
+    pub unit: Option<String>,
+    /// Sample timestamp in milliseconds since Unix epoch.
+    pub timestamp_ms: u64,
+}
+
+/// Platform-agnostic telemetry stream.
+pub trait TelemetryStream: Send {
+    /// Poll currently available telemetry samples.
+    fn poll_samples(&mut self) -> Result<Vec<TelemetrySample>, IngestionError>;
+
+    /// Identifier string for the active backend.
+    fn backend_name(&self) -> &str;
+}
+
+/// Host capabilities exposed by an ingestion backend.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct IngestionCapabilities {
+    /// Display frames are available.
+    pub display: bool,
+    /// Host loopback or microphone audio is available.
+    pub audio: bool,
+    /// Input injection is available.
+    pub input: bool,
+    /// System telemetry is available.
+    pub telemetry: bool,
+}
+
+/// Test audio source that emits silence.
+pub struct SilentAudioCapture {
+    sample_rate_hz: u32,
+    channels: u16,
+    frame_samples: usize,
+}
+
+impl SilentAudioCapture {
+    /// Create a silent audio source.
+    pub fn new(sample_rate_hz: u32, channels: u16, frame_samples: usize) -> Self {
+        Self {
+            sample_rate_hz,
+            channels,
+            frame_samples,
+        }
+    }
+}
+
+impl AudioCapture for SilentAudioCapture {
+    fn capture_audio(&mut self) -> Result<Option<AudioFrame>, IngestionError> {
+        Ok(Some(AudioFrame {
+            sample_rate_hz: self.sample_rate_hz,
+            channels: self.channels,
+            samples_i16: vec![0; self.frame_samples * usize::from(self.channels)],
+            timestamp_ms: 0,
+        }))
+    }
+
+    fn backend_name(&self) -> &str {
+        "silent-audio"
+    }
+}
+
+/// Input injector used by tests and dry-run deployments.
+#[derive(Default)]
+pub struct NullInputInjector {
+    events: Vec<InputEvent>,
+}
+
+impl NullInputInjector {
+    /// Return injected events captured so far.
+    pub fn events(&self) -> &[InputEvent] {
+        &self.events
+    }
+}
+
+impl InputInjector for NullInputInjector {
+    fn inject(&mut self, event: InputEvent) -> Result<(), IngestionError> {
+        self.events.push(event);
+        Ok(())
+    }
+
+    fn backend_name(&self) -> &str {
+        "null-input"
+    }
+}
+
+/// Deterministic telemetry source for tests and demos.
+pub struct TestTelemetryStream {
+    tick: u64,
+}
+
+impl TestTelemetryStream {
+    /// Create a deterministic telemetry stream.
+    pub fn new() -> Self {
+        Self { tick: 0 }
+    }
+}
+
+impl Default for TestTelemetryStream {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TelemetryStream for TestTelemetryStream {
+    fn poll_samples(&mut self) -> Result<Vec<TelemetrySample>, IngestionError> {
+        self.tick += 1;
+        Ok(vec![TelemetrySample {
+            name: "test.tick".to_string(),
+            value: TelemetryValue::U64(self.tick),
+            unit: None,
+            timestamp_ms: self.tick,
+        }])
+    }
+
+    fn backend_name(&self) -> &str {
+        "test-telemetry"
+    }
+}
+
+/// Cross-platform telemetry source backed by `sysinfo`.
+pub struct SysinfoTelemetryStream {
+    system: System,
+}
+
+impl SysinfoTelemetryStream {
+    /// Create a sysinfo-backed telemetry stream.
+    pub fn new() -> Self {
+        let mut system = System::new_all();
+        system.refresh_memory();
+        system.refresh_cpu();
+        Self { system }
+    }
+}
+
+impl Default for SysinfoTelemetryStream {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TelemetryStream for SysinfoTelemetryStream {
+    fn poll_samples(&mut self) -> Result<Vec<TelemetrySample>, IngestionError> {
+        self.system.refresh_memory();
+        self.system.refresh_cpu();
+        let timestamp_ms = now_ms();
+        let mut samples = vec![
+            TelemetrySample {
+                name: "cpu.total.percent".to_string(),
+                value: TelemetryValue::F64(f64::from(self.system.global_cpu_info().cpu_usage())),
+                unit: Some("%".to_string()),
+                timestamp_ms,
+            },
+            TelemetrySample {
+                name: "memory.total.bytes".to_string(),
+                value: TelemetryValue::U64(self.system.total_memory()),
+                unit: Some("bytes".to_string()),
+                timestamp_ms,
+            },
+            TelemetrySample {
+                name: "memory.used.bytes".to_string(),
+                value: TelemetryValue::U64(self.system.used_memory()),
+                unit: Some("bytes".to_string()),
+                timestamp_ms,
+            },
+        ];
+
+        if let Some(host_name) = System::host_name() {
+            samples.push(TelemetrySample {
+                name: "host.name".to_string(),
+                value: TelemetryValue::Text(host_name),
+                unit: None,
+                timestamp_ms,
+            });
+        }
+        if let Some(os_version) = System::long_os_version() {
+            samples.push(TelemetrySample {
+                name: "host.os.version".to_string(),
+                value: TelemetryValue::Text(os_version),
+                unit: None,
+                timestamp_ms,
+            });
+        }
+
+        Ok(samples)
+    }
+
+    fn backend_name(&self) -> &str {
+        "sysinfo"
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or(std::time::Duration::ZERO)
+        .as_millis() as u64
 }
 
 // ───────────────────────── TestCapture ─────────────────────────────
@@ -229,7 +585,7 @@ impl ScreenCapture for TestCapture {
         self.frame_counter += 1;
 
         Ok(Some(CapturedFrame {
-            pixels,
+            data: FrameData::Pixels(pixels),
             width: self.width,
             height: self.height,
         }))
@@ -284,7 +640,7 @@ impl BlankCapture {
 impl ScreenCapture for BlankCapture {
     fn capture(&mut self) -> Result<Option<CapturedFrame>, CaptureError> {
         Ok(Some(CapturedFrame {
-            pixels: self.pixels.clone(),
+            data: FrameData::Pixels(self.pixels.clone()),
             width: self.width,
             height: self.height,
         }))
@@ -410,7 +766,7 @@ mod tests {
         let f = cap.capture().unwrap().unwrap();
         assert_eq!(f.width, 160);
         assert_eq!(f.height, 120);
-        assert_eq!(f.pixels.len(), 160 * 120 * 4);
+        assert_eq!(f.pixels().unwrap().len(), 160 * 120 * 4);
     }
 
     #[test]
@@ -422,12 +778,12 @@ mod tests {
         let f0 = cap.capture().unwrap().unwrap();
         let f1 = cap.capture().unwrap().unwrap();
         // Different frame counter ⇒ the active region differs.
-        assert_ne!(f0.pixels, f1.pixels);
+        assert_ne!(f0.pixels().unwrap(), f1.pixels().unwrap());
         // But recreate cap and the sequence is identical.
         let mut cap2 = TestCapture::new(64, 64);
         cap2.set_active_region(8, 8, 16);
         let g0 = cap2.capture().unwrap().unwrap();
-        assert_eq!(f0.pixels, g0.pixels);
+        assert_eq!(f0.pixels().unwrap(), g0.pixels().unwrap());
     }
 
     #[test]
@@ -435,11 +791,13 @@ mod tests {
         let mut cap = BlankCapture::new(32, 32, 0x10, 0x20, 0x30);
         let f0 = cap.capture().unwrap().unwrap();
         let f1 = cap.capture().unwrap().unwrap();
-        assert_eq!(f0.pixels, f1.pixels);
-        assert_eq!(f0.pixels[0], 0x10);
-        assert_eq!(f0.pixels[1], 0x20);
-        assert_eq!(f0.pixels[2], 0x30);
-        assert_eq!(f0.pixels[3], 255);
+        let p0 = f0.pixels().unwrap();
+        let p1 = f1.pixels().unwrap();
+        assert_eq!(p0, p1);
+        assert_eq!(p0[0], 0x10);
+        assert_eq!(p0[1], 0x20);
+        assert_eq!(p0[2], 0x30);
+        assert_eq!(p0[3], 255);
     }
 
     #[test]
@@ -450,5 +808,42 @@ mod tests {
         assert_eq!(mons[0].width, 800);
         assert_eq!(mons[0].height, 600);
         assert!(mons[0].is_primary);
+    }
+
+    #[test]
+    fn silent_audio_capture_emits_interleaved_silence() {
+        let mut audio = SilentAudioCapture::new(48_000, 2, 480);
+        let frame = audio.capture_audio().unwrap().unwrap();
+        assert_eq!(frame.sample_rate_hz, 48_000);
+        assert_eq!(frame.channels, 2);
+        assert_eq!(frame.samples_i16.len(), 960);
+        assert!(frame.samples_i16.iter().all(|sample| *sample == 0));
+    }
+
+    #[test]
+    fn null_input_records_events() {
+        let mut input = NullInputInjector::default();
+        input
+            .inject(InputEvent::PointerMove { x: 10, y: 20 })
+            .unwrap();
+        assert_eq!(input.events(), &[InputEvent::PointerMove { x: 10, y: 20 }]);
+    }
+
+    #[test]
+    fn test_telemetry_stream_ticks_forward() {
+        let mut telemetry = TestTelemetryStream::new();
+        let first = telemetry.poll_samples().unwrap();
+        let second = telemetry.poll_samples().unwrap();
+        assert_eq!(first[0].value, TelemetryValue::U64(1));
+        assert_eq!(second[0].value, TelemetryValue::U64(2));
+    }
+
+    #[test]
+    fn sysinfo_telemetry_reports_basic_host_metrics() {
+        let mut telemetry = SysinfoTelemetryStream::new();
+        let samples = telemetry.poll_samples().unwrap();
+        assert!(samples.iter().any(|s| s.name == "cpu.total.percent"));
+        assert!(samples.iter().any(|s| s.name == "memory.total.bytes"));
+        assert!(samples.iter().any(|s| s.name == "memory.used.bytes"));
     }
 }

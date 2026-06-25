@@ -1,0 +1,8 @@
+{
+  "applied": 7,
+  "blocked": 0,
+  "dry_run": 0,
+  "ledger": "/srv/luminous-dynamics/xenia/xenia-peer/_archive/normalization-v0.2/execution-ledger-20260625T160711Z.json",
+  "mode": "apply",
+  "rollback": "/srv/luminous-dynamics/xenia/xenia-peer/_archive/normalization-v0.2/rollback-20260625T160711Z.sh"
+}

@@ -1,0 +1,52 @@
+name: Xenia Validate
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Script syntax
+        run: |
+          if [ -d scripts ]; then
+            find scripts -type f -name '*.sh' -print0 | xargs -0 -r bash -n
+            find scripts -type f -name '*.py' -print0 | xargs -0 -r python3 -m py_compile
+          fi
+      - name: Xenia validation
+        run: |
+          chmod +x scripts/*.sh scripts/*.py || true
+          scripts/xenia-validate.sh .
+
+
+  nix:
+    runs-on: ubuntu-latest
+    if: ${{ hashFiles('flake.nix') != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Nix flake check
+        run: nix flake check --show-trace
+      - name: Validate inside Nix CI shell
+        run: nix develop .#ci -c bash scripts/xenia-validate.sh .
+
+  xenia-wire:
+    runs-on: ubuntu-latest
+    if: ${{ hashFiles('xenia-wire/Cargo.toml') != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Check xenia-wire
+        run: |
+          cd xenia-wire
+          cargo metadata --format-version 1 --no-deps >/dev/null
+          cargo fmt --all -- --check
+          cargo test --all-features
