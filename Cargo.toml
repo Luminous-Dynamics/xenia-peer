@@ -71,3 +71,9 @@ blake3 = "1.6"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
+
+# Workspace profiles moved from apps/sovereign-admin.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
