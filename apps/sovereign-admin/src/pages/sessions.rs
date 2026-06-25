@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use xenia_ledger::{Chain, ConsentEventRecord, ConsentKind, LedgerEntry, Verifier, VerifyError};
 
-use crate::auth::AuthState;
 use crate::config::DaemonConfig;
+use crate::context::{auth_context, daemon_config_context, missing_context_view};
 
 /// Portable JSON shape used by the export/import pair.
 #[derive(Serialize, Deserialize)]
@@ -24,8 +24,12 @@ struct ExportedChain {
 
 #[component]
 pub fn SessionsPage() -> impl IntoView {
-    let auth = use_context::<AuthState>().expect("AuthState provided at App root");
-    let config = use_context::<DaemonConfig>().expect("DaemonConfig provided at App root");
+    let Ok(auth) = auth_context() else {
+        return missing_context_view("AuthState").into_any();
+    };
+    let Ok(config) = daemon_config_context() else {
+        return missing_context_view("DaemonConfig").into_any();
+    };
 
     view! {
         <Show
@@ -72,7 +76,7 @@ pub fn SessionsPage() -> impl IntoView {
                 <ChainImporter/>
             </div>
         </Show>
-    }
+    }.into_any()
 }
 
 #[component]
@@ -114,7 +118,7 @@ fn RealLedger(config: DaemonConfig) -> impl IntoView {
                 <p>"Fetching live ledger..."</p>
             </Show>
             <Show when=move || error.get().is_some()>
-                <p class="error">{move || error.get().unwrap()}</p>
+                <p class="error">{move || error.get().unwrap_or_else(|| "Unknown session error".to_string())}</p>
             </Show>
             {move || data.get().map(|(pk_hex, entries)| {
                 view! {
@@ -338,7 +342,7 @@ fn ChainImporter() -> impl IntoView {
                 <button class="secondary" on:click=clear>"Clear"</button>
             </div>
             <Show when=move || result.get().is_some()>
-                {move || render_import_result(result.get().unwrap())}
+                {move || result.get().map(render_import_result)}
             </Show>
         </section>
     }

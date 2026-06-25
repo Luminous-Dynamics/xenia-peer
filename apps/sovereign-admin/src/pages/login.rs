@@ -25,7 +25,7 @@ use leptos_router::hooks::use_navigate;
 use mycelix_leptos_client::{BrowserWsTransport, HolochainClient};
 use wasm_bindgen::JsValue;
 
-use crate::auth::AuthState;
+use crate::context::{auth_context, missing_context_view};
 
 /// Compile-time fallbacks. Runtime overrides (below) take precedence —
 /// this lets us ship one wasm bundle and deploy it against different
@@ -99,7 +99,9 @@ enum LoginStatus {
 
 #[component]
 pub fn LoginPage() -> impl IntoView {
-    let auth = use_context::<AuthState>().expect("AuthState provided at App root");
+    let Ok(auth) = auth_context() else {
+        return missing_context_view("AuthState").into_any();
+    };
     let navigate = use_navigate();
 
     let did_value = RwSignal::new(String::new());
@@ -193,7 +195,7 @@ pub fn LoginPage() -> impl IntoView {
                 " in index.html — see the admin console README."
             </p>
         </section>
-    }
+    }.into_any()
 }
 
 #[component]

@@ -1,22 +1,22 @@
 # Xenia ownership map.
-# Replace @luminous-dynamics/xenia-maintainers with the real GitHub team/user
+# Replace @Tristan-Stoltz-ERC with the real GitHub team/user
 # before making this repository public.
 
-* @luminous-dynamics/xenia-maintainers
+* @Tristan-Stoltz-ERC
 
-/xenia-wire/ @luminous-dynamics/xenia-maintainers
-/xenia-peer/crates/xenia-peer-core/ @luminous-dynamics/xenia-maintainers
-/xenia-peer/crates/xenia-handshake/ @luminous-dynamics/xenia-maintainers
-/xenia-peer/crates/xenia-ledger/ @luminous-dynamics/xenia-maintainers
-/xenia-peer/crates/xenia-transport-quic/ @luminous-dynamics/xenia-maintainers
-/xenia-peer/crates/xenia-transport-ws/ @luminous-dynamics/xenia-maintainers
-/xenia-peer/crates/xenia-capture/ @luminous-dynamics/xenia-maintainers
-/xenia-peer/crates/xenia-video/ @luminous-dynamics/xenia-maintainers
-/xenia-peer/crates/xenia-inject/ @luminous-dynamics/xenia-maintainers
-/xenia-peer/apps/ @luminous-dynamics/xenia-maintainers
-/docs/security/ @luminous-dynamics/xenia-maintainers
-/scripts/ @luminous-dynamics/xenia-maintainers
-/xenia.policy.toml @luminous-dynamics/xenia-maintainers
-/xenia.safety.toml @luminous-dynamics/xenia-maintainers
-/xenia.release.toml @luminous-dynamics/xenia-maintainers
-/xenia.normalization.toml @luminous-dynamics/xenia-maintainers
+/xenia-wire/ @Tristan-Stoltz-ERC
+/xenia-peer/crates/xenia-peer-core/ @Tristan-Stoltz-ERC
+/xenia-peer/crates/xenia-handshake/ @Tristan-Stoltz-ERC
+/xenia-peer/crates/xenia-ledger/ @Tristan-Stoltz-ERC
+/xenia-peer/crates/xenia-transport-quic/ @Tristan-Stoltz-ERC
+/xenia-peer/crates/xenia-transport-ws/ @Tristan-Stoltz-ERC
+/xenia-peer/crates/xenia-capture/ @Tristan-Stoltz-ERC
+/xenia-peer/crates/xenia-video/ @Tristan-Stoltz-ERC
+/xenia-peer/crates/xenia-inject/ @Tristan-Stoltz-ERC
+/xenia-peer/apps/ @Tristan-Stoltz-ERC
+/docs/security/ @Tristan-Stoltz-ERC
+/scripts/ @Tristan-Stoltz-ERC
+/xenia.policy.toml @Tristan-Stoltz-ERC
+/xenia.safety.toml @Tristan-Stoltz-ERC
+/xenia.release.toml @Tristan-Stoltz-ERC
+/xenia.normalization.toml @Tristan-Stoltz-ERC

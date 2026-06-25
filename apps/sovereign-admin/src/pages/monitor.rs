@@ -3,7 +3,7 @@
 
 //! AI Monitor page — real-time Athena thought stream.
 
-use crate::config::DaemonConfig;
+use crate::context::{daemon_config_context, missing_context_view};
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -18,7 +18,9 @@ pub struct Thought {
 
 #[component]
 pub fn MonitorPage() -> impl IntoView {
-    let config = use_context::<DaemonConfig>().expect("DaemonConfig provided at App root");
+    let Ok(config) = daemon_config_context() else {
+        return missing_context_view("DaemonConfig").into_any();
+    };
     let thoughts = RwSignal::new(vec![]);
 
     // Connect to Athena thought stream (websocket)
@@ -30,7 +32,9 @@ pub fn MonitorPage() -> impl IntoView {
         let host = binding.split(':').next().unwrap_or("127.0.0.1");
         let ws_url = format!("ws://{}:8430/v1/thoughts", host);
 
-        let ws = web_sys::WebSocket::new(&ws_url).unwrap();
+        let Ok(ws) = web_sys::WebSocket::new(&ws_url) else {
+            return;
+        };
         let thoughts_signal = thoughts;
 
         let onmessage_callback =
@@ -67,5 +71,5 @@ pub fn MonitorPage() -> impl IntoView {
                 }).collect_view()}
             </div>
         </section>
-    }
+    }.into_any()
 }

@@ -415,10 +415,11 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             received += 1;
 
             if let Some(ref mut mirror) = expected_mirror {
-                let expected = mirror
-                    .capture()
-                    .expect("mirror capture")
-                    .expect("mirror produced frame");
+                let expected = match mirror.capture() {
+                    Ok(Some(frame)) => frame,
+                    Ok(None) => return Err("verify: mirror did not produce frame".into()),
+                    Err(err) => return Err(format!("verify: mirror capture failed: {err}").into()),
+                };
                 let expected_pixels = expected
                     .pixels()
                     .ok_or("verify: mirror produced non-pixel frame data")?;
@@ -428,10 +429,10 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     )
                     .into());
                 }
-                if received <= 3 || received % 10 == 0 {
+                if received <= 3 || received.is_multiple_of(10) {
                     info!(received, "frame verified byte-for-byte vs mirror");
                 }
-            } else if received <= 3 || received % 10 == 0 {
+            } else if received <= 3 || received.is_multiple_of(10) {
                 info!(
                     received,
                     width = decoded.width,

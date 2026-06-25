@@ -15,6 +15,7 @@ use leptos::prelude::*;
 mod app;
 mod auth;
 mod config;
+mod context;
 mod pages;
 
 fn main() {

@@ -11,17 +11,18 @@ pub fn ConsentModal() -> impl IntoView {
     let (consent_req, set_consent_req) = signal(None::<String>);
     let (is_open, set_is_open) = signal(false);
 
-    let ws = WebSocket::open("ws://127.0.0.1:8081/ws").expect("Failed to connect to WS");
-    let (_writer, mut reader) = ws.split();
+    if let Ok(ws) = WebSocket::open("ws://127.0.0.1:8081/ws") {
+        let (_writer, mut reader) = ws.split();
 
-    spawn_local(async move {
-        while let Some(msg) = reader.next().await {
-            if let Ok(Message::Text(text)) = msg {
-                set_consent_req.set(Some(text));
-                set_is_open.set(true);
+        spawn_local(async move {
+            while let Some(msg) = reader.next().await {
+                if let Ok(Message::Text(text)) = msg {
+                    set_consent_req.set(Some(text));
+                    set_is_open.set(true);
+                }
             }
-        }
-    });
+        });
+    }
 
     view! {
         <Show when=move || is_open.get()>

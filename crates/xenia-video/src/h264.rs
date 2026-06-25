@@ -254,20 +254,7 @@ impl Encoder for H264Encoder {
 /// H.264 decoder producing RGBA frames.
 pub struct H264Decoder {
     decoder: ffmpeg::decoder::Video,
-    // Scaler is lazy because we don't know the stream dimensions
-    // until we see the first decoded frame.
-    scaler: Option<CachedScaler>,
 }
-
-struct CachedScaler {
-    in_format: Pixel,
-    in_width: u32,
-    in_height: u32,
-    ctx: ffmpeg::software::scaling::Context,
-}
-
-// SwsContext is safe to send between threads; we only access it via &mut self.
-unsafe impl Send for CachedScaler {}
 
 impl H264Decoder {
     /// Build an H.264 decoder. Dimensions are learned from the
@@ -285,10 +272,7 @@ impl H264Decoder {
             .decoder()
             .video()
             .map_err(|e| ff_err(e, "decoder() -> video"))?;
-        Ok(Self {
-            decoder,
-            scaler: None,
-        })
+        Ok(Self { decoder })
     }
 
     fn convert_to_rgba(&mut self, yuv: &ffmpeg::frame::Video) -> Result<Vec<u8>, CodecError> {
@@ -296,35 +280,19 @@ impl H264Decoder {
         let in_width = yuv.width();
         let in_height = yuv.height();
 
-        let needs_rebuild = match &self.scaler {
-            Some(s) => {
-                s.in_format != in_format || s.in_width != in_width || s.in_height != in_height
-            }
-            None => true,
-        };
-        if needs_rebuild {
-            let ctx = ffmpeg::software::scaling::Context::get(
-                in_format,
-                in_width,
-                in_height,
-                Pixel::RGBA,
-                in_width,
-                in_height,
-                ffmpeg::software::scaling::Flags::BILINEAR,
-            )
-            .map_err(|e| ff_err(e, "swscale YUV->RGBA"))?;
-            self.scaler = Some(CachedScaler {
-                in_format,
-                in_width,
-                in_height,
-                ctx,
-            });
-        }
+        let mut scaler = ffmpeg::software::scaling::Context::get(
+            in_format,
+            in_width,
+            in_height,
+            Pixel::RGBA,
+            in_width,
+            in_height,
+            ffmpeg::software::scaling::Flags::BILINEAR,
+        )
+        .map_err(|e| ff_err(e, "swscale YUV->RGBA"))?;
 
-        let scaler = self.scaler.as_mut().expect("scaler set above");
         let mut rgba_frame = ffmpeg::frame::Video::empty();
         scaler
-            .ctx
             .run(yuv, &mut rgba_frame)
             .map_err(|e| ff_err(e, "scaler.run"))?;
 
