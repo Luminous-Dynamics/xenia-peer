@@ -126,6 +126,7 @@ enum AnyTransport {
     },
 }
 
+#[allow(clippy::large_enum_variant)] // WsTransport is intentionally stored inline; mirrors xenia-viewer transport enum policy.
 enum AutoAcceptedTransport {
     Tcp(TcpTransport),
     Ws(WsTransport),
@@ -390,11 +391,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let key_path = std::path::Path::new("operator.key");
     let signing_key = if key_path.exists() {
-        let key_bytes = std::fs::read(&key_path)?;
+        let key_bytes = std::fs::read(key_path)?;
         SigningKey::from_bytes(&key_bytes.try_into().map_err(|_| "Invalid key length")?)
     } else {
         let key = SigningKey::generate(&mut rand::thread_rng());
-        std::fs::write(&key_path, key.to_bytes())?;
+        std::fs::write(key_path, key.to_bytes())?;
         key
     };
 
@@ -403,7 +404,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let ledger_path = std::path::Path::new("consent.ledger");
     let ledger = if ledger_path.exists() {
-        let bytes = std::fs::read(&ledger_path)?;
+        let bytes = std::fs::read(ledger_path)?;
         let entries: Vec<LedgerEntry> = bincode::deserialize(&bytes)?;
         Chain::from_entries(entries, signing_key.clone())
     } else {
@@ -608,7 +609,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     transport.send_envelope(&envelope).await?;
                     sent_telemetry += 1;
                     last_telemetry_sent = std::time::Instant::now();
-                    if sent_telemetry <= 3 || sent_telemetry % 10 == 0 {
+                    if sent_telemetry <= 3 || sent_telemetry.is_multiple_of(10) {
                         info!(
                             sent = sent_telemetry,
                             frame_id, "telemetry batch sealed and sent"
@@ -620,17 +621,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        if let Some(audio) = &mut audio {
-            if last_audio_sent.elapsed() >= audio_interval {
-                let frame_id = session.next_frame_id();
-                let audio_frame = audio.next_frame(now_ms()).into_frame(frame_id)?;
-                let envelope = session.seal_frame(&audio_frame)?;
-                transport.send_envelope(&envelope).await?;
-                sent_audio += 1;
-                last_audio_sent = std::time::Instant::now();
-                if sent_audio <= 3 || sent_audio % 50 == 0 {
-                    info!(sent = sent_audio, frame_id, "audio frame sealed and sent");
-                }
+        if let Some(audio) = &mut audio
+            && last_audio_sent.elapsed() >= audio_interval
+        {
+            let frame_id = session.next_frame_id();
+            let audio_frame = audio.next_frame(now_ms()).into_frame(frame_id)?;
+            let envelope = session.seal_frame(&audio_frame)?;
+            transport.send_envelope(&envelope).await?;
+            sent_audio += 1;
+            last_audio_sent = std::time::Instant::now();
+            if sent_audio <= 3 || sent_audio.is_multiple_of(50) {
+                info!(sent = sent_audio, frame_id, "audio frame sealed and sent");
             }
         }
 
@@ -670,7 +671,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let envelope = session.seal_frame(&raw)?;
             transport.send_envelope(&envelope).await?;
             sent_frames += 1;
-            if sent_frames <= 3 || sent_frames % 10 == 0 {
+            if sent_frames <= 3 || sent_frames.is_multiple_of(10) {
                 info!(
                     sent = sent_frames,
                     frame_id, "frame encoded, sealed, and sent"

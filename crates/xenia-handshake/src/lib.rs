@@ -235,7 +235,7 @@ impl HandshakeManager {
     // ─── Initiator side ──────────────────────────────────────────────────
 
     /// Store the responder's KEM public key for later use in
-    /// [`encapsulate_for_peer`].
+    /// [`Self::encapsulate_for_peer`].
     pub fn receive_kem_public_key(&mut self, peer_id: &str, kem_pk: &[u8]) -> Result<()> {
         if kem_pk.len() != ML_KEM_768_PK_LEN {
             return Err(HandshakeError::InvalidKemPublicKey { got: kem_pk.len() });
