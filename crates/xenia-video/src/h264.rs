@@ -321,7 +321,11 @@ impl H264Decoder {
             });
         }
 
-        let scaler = self.scaler.as_mut().expect("scaler set above");
+        let Some(scaler) = self.scaler.as_mut() else {
+            return Err(CodecError::Backend(
+                "swscale YUV->RGBA: scaler cache missing after rebuild".into(),
+            ));
+        };
         let mut rgba_frame = ffmpeg::frame::Video::empty();
         scaler
             .ctx

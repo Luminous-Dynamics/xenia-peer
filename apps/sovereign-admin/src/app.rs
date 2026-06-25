@@ -12,6 +12,7 @@ use leptos_router::{
 
 use crate::auth::AuthState;
 use crate::config::DaemonConfig;
+use crate::context::{auth_context, missing_context_view};
 use crate::pages::{
     ConsentModal, DevicesPage, GovernancePage, LoginPage, MonitorPage, PolicyPage, SessionsPage,
 };
@@ -65,7 +66,9 @@ fn Nav() -> impl IntoView {
 
 #[component]
 fn AuthStatus() -> impl IntoView {
-    let auth = use_context::<AuthState>().expect("AuthState provided at App root");
+    let Ok(auth) = auth_context() else {
+        return missing_context_view("AuthState").into_any();
+    };
     view! {
         <div class="auth-status">
             <Show
@@ -79,6 +82,7 @@ fn AuthStatus() -> impl IntoView {
             </Show>
         </div>
     }
+    .into_any()
 }
 
 #[component]

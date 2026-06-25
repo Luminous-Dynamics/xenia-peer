@@ -12,7 +12,7 @@
 
 use leptos::prelude::*;
 
-use crate::auth::AuthState;
+use crate::context::{auth_context, missing_context_view};
 
 struct MockDevice {
     id: &'static str,
@@ -48,7 +48,9 @@ const MOCK_DEVICES: &[MockDevice] = &[
 
 #[component]
 pub fn DevicesPage() -> impl IntoView {
-    let auth = use_context::<AuthState>().expect("AuthState provided at App root");
+    let Ok(auth) = auth_context() else {
+        return missing_context_view("AuthState").into_any();
+    };
 
     view! {
         <Show
@@ -58,6 +60,7 @@ pub fn DevicesPage() -> impl IntoView {
             <DevicesTable/>
         </Show>
     }
+    .into_any()
 }
 
 #[component]

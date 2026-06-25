@@ -8,11 +8,13 @@
 
 use leptos::prelude::*;
 
-use crate::auth::AuthState;
+use crate::context::{auth_context, missing_context_view};
 
 #[component]
 pub fn PolicyPage() -> impl IntoView {
-    let auth = use_context::<AuthState>().expect("AuthState provided at App root");
+    let Ok(auth) = auth_context() else {
+        return missing_context_view("AuthState").into_any();
+    };
     view! {
         <Show
             when=move || auth.is_authenticated()
@@ -39,4 +41,5 @@ pub fn PolicyPage() -> impl IntoView {
             </section>
         </Show>
     }
+    .into_any()
 }

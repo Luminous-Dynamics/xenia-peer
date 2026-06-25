@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use xenia_ledger::{Chain, ConsentEventRecord, ConsentKind, LedgerEntry, Verifier, VerifyError};
 
-use crate::auth::AuthState;
 use crate::config::DaemonConfig;
+use crate::context::{auth_context, daemon_config_context, missing_context_view};
 
 /// Portable JSON shape used by the export/import pair.
 #[derive(Serialize, Deserialize)]
@@ -24,8 +24,12 @@ struct ExportedChain {
 
 #[component]
 pub fn SessionsPage() -> impl IntoView {
-    let auth = use_context::<AuthState>().expect("AuthState provided at App root");
-    let config = use_context::<DaemonConfig>().expect("DaemonConfig provided at App root");
+    let Ok(auth) = auth_context() else {
+        return missing_context_view("AuthState").into_any();
+    };
+    let Ok(config) = daemon_config_context() else {
+        return missing_context_view("DaemonConfig").into_any();
+    };
 
     view! {
         <Show
@@ -72,7 +76,7 @@ pub fn SessionsPage() -> impl IntoView {
                 <ChainImporter/>
             </div>
         </Show>
-    }
+    }.into_any()
 }
 
 #[component]
