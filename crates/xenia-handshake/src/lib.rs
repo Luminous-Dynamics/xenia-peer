@@ -367,8 +367,16 @@ pub fn hkdf_derive(classical_nonce: &[u8], kem_shared_secret: &[u8]) -> [u8; 32]
 
     let hk = Hkdf::<Sha256>::new(Some(HKDF_SALT), &ikm);
     let mut okm = [0u8; 32];
-    hk.expand(HKDF_INFO, &mut okm)
-        .expect("HKDF-SHA256 32-byte expand always succeeds");
+    if hk.expand(HKDF_INFO, &mut okm).is_err() {
+        // RFC 5869 HKDF expansion can only fail when the requested output length
+        // exceeds the algorithm limit. This function requests exactly 32 bytes
+        // from SHA-256, so failure would indicate a violated implementation
+        // invariant rather than attacker-controlled input.
+        debug_assert!(
+            false,
+            "HKDF-SHA256 32-byte expand failed for 32-byte output"
+        );
+    }
     okm
 }
 
