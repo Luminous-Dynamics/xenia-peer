@@ -208,8 +208,12 @@ impl ViewerApp {
         if self.recent_frame_instants.len() < 2 {
             return 0.0;
         }
-        let first = self.recent_frame_instants.front().unwrap();
-        let last = self.recent_frame_instants.back().unwrap();
+        let (Some(first), Some(last)) = (
+            self.recent_frame_instants.front(),
+            self.recent_frame_instants.back(),
+        ) else {
+            return 0.0;
+        };
         let span = last.duration_since(*first).as_secs_f32();
         if span <= 0.0 {
             return 0.0;

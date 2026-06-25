@@ -30,7 +30,9 @@ pub fn MonitorPage() -> impl IntoView {
         let host = binding.split(':').next().unwrap_or("127.0.0.1");
         let ws_url = format!("ws://{}:8430/v1/thoughts", host);
 
-        let ws = web_sys::WebSocket::new(&ws_url).unwrap();
+        let Ok(ws) = web_sys::WebSocket::new(&ws_url) else {
+            return;
+        };
         let thoughts_signal = thoughts;
 
         let onmessage_callback =
