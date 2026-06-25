@@ -129,6 +129,10 @@ pub enum LedgerError {
     /// Serialization of an entry's pre-hash payload failed.
     #[error("bincode serialization failed: {0}")]
     Serialization(#[from] bincode::Error),
+
+    /// An entry was pushed but could not be read back from the chain.
+    #[error("ledger append invariant failed: pushed entry missing")]
+    AppendInvariant,
 }
 
 /// Errors surfaced by [`Verifier`] operations.
@@ -225,7 +229,8 @@ impl Chain {
 
     /// Append a new consent event, producing a signed, chained entry.
     pub fn append(&mut self, event: ConsentEventRecord) -> Result<&LedgerEntry, LedgerError> {
-        let seq = self.entries.len() as u64;
+        let entry_index = self.entries.len();
+        let seq = entry_index as u64;
         let prev_hash = self.last_hash();
         let timestamp = SystemTime::now();
 
@@ -240,7 +245,9 @@ impl Chain {
             entry_hash,
             signature,
         });
-        Ok(self.entries.last().expect("just pushed"))
+        self.entries
+            .get(entry_index)
+            .ok_or(LedgerError::AppendInvariant)
     }
 
     /// Consume the chain and return its entries. Useful for persistence.
