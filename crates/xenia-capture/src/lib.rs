@@ -26,7 +26,7 @@
 //!   Always available. Used by unit + integration tests.
 //! - [`BlankCapture`] — solid-color frames. Always available. Useful
 //!   for bandwidth smoke tests where content is irrelevant.
-//! - [`ScapCapture`] — cross-platform (Windows WGC, macOS
+//! - `ScapCapture` — cross-platform (Windows WGC, macOS
 //!   ScreenCaptureKit, Linux PipeWire via xdg-desktop-portal)
 //!   backed by the `scap` crate. Feature-gated on `scap-backend`.
 //!   Primary backend per `mycelix-sovereign` ADR 0001.

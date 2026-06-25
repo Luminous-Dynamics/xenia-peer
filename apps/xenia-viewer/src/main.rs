@@ -428,10 +428,10 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     )
                     .into());
                 }
-                if received <= 3 || received % 10 == 0 {
+                if received <= 3 || received.is_multiple_of(10) {
                     info!(received, "frame verified byte-for-byte vs mirror");
                 }
-            } else if received <= 3 || received % 10 == 0 {
+            } else if received <= 3 || received.is_multiple_of(10) {
                 info!(
                     received,
                     width = decoded.width,
