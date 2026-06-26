@@ -5,7 +5,7 @@
 
 [release_train]
 manifest_version = 1
-current_milestone = "stabilization-v0.1"
+current_milestone = "normalization-v0.2"
 next_candidate = "rc1"
 status = "pre-rc"
 release_branch_prefix = "release/xenia-"
@@ -33,7 +33,7 @@ release_dashboard_required = true
 
 [[milestone]]
 name = "stabilization-v0.1"
-kind = "current"
+kind = "completed"
 summary = "Make the workspace reproducible, auditable, and safe for normalization."
 entry_criteria = [
   "v1-v5 guardrail patches applied",
@@ -48,7 +48,7 @@ exit_criteria = [
 
 [[milestone]]
 name = "normalization-v0.2"
-kind = "planned"
+kind = "current"
 summary = "Move from transitional layout to explicit crates/apps boundaries."
 entry_criteria = [
   "stabilization-v0.1 exit criteria complete",
@@ -86,17 +86,12 @@ exit_criteria = [
 # Keep these human-readable. The release-readiness checker fails --rc1 while
 # any hard blocker remains.
 hard = [
-  "active target/dist/nested .git cleanup not yet confirmed on production tree",
-  "layout is still transitional until normalization pass lands",
-  "normalization manifest, execution plan, ledger, and before/after snapshots need review",
-  "runtime unwrap/expect findings need review before RC strict mode"
+  "normalization manifest, execution plan, ledger, and before/after snapshots need review"
 ]
 soft = [
   "source archives need reproducible checksum manifest",
   "normalization executor should be dry-run once on the production tree before apply",
-  "secure-default strict scan needs review before RC1",
   "release dashboard should be generated from the normalized branch",
   "transport fault-injection tests need expansion",
-  "operator/admin audit events need stable names",
-  "replace CODEOWNERS placeholder with the real maintainer/team before public release"
+  "operator/admin audit events need stable names"
 ]

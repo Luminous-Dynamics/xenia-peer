@@ -11,7 +11,7 @@ policy_version = 1
 archive_root = "_archive"
 
 [layout]
-mode = "transitional"
+mode = "normalized"
 wire_roots = ["xenia-wire"]
 peer_workspace_roots = ["xenia-peer"]
 library_roots = ["xenia-peer/crates", "."]
