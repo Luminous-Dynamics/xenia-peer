@@ -368,7 +368,6 @@ fn compute_entry_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand_core::OsRng;
 
     fn sample_event(kind: ConsentKind) -> ConsentEventRecord {
         ConsentEventRecord {
@@ -381,7 +380,7 @@ mod tests {
     }
 
     fn new_signing_key() -> SigningKey {
-        SigningKey::generate(&mut OsRng)
+        SigningKey::from_bytes(&[7u8; 32])
     }
 
     #[test]
