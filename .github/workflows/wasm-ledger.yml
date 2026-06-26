@@ -1,0 +1,22 @@
+name: Xenia WASM Ledger
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  wasm-ledger:
+    name: Ledger wasm32 check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable with wasm target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Check ledger for wasm32
+        run: scripts/check-wasm-ledger.sh .
