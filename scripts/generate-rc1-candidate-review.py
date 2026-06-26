@@ -168,7 +168,7 @@ def collect(root: Path) -> dict:
     all_evidence_present = all(item["present"] for item in evidence)
 
     ready = (
-        release_train.get("status") == "pre-rc"
+        release_train.get("status") in {"pre-rc", "rc"}
         and len(hard) == 0
         and len(soft) == 0
         and all_checks_pass
@@ -198,8 +198,8 @@ def collect(root: Path) -> dict:
         "evidence": evidence,
         "decision": {
             "rc1_candidate_review_ready": ready,
-            "promotion_performed": False,
-            "promotion_policy": "Promotion must be a separate explicit PR after this review passes.",
+            "promotion_performed": release_train.get("status") == "rc",
+            "promotion_policy": "Promotion must be a separate explicit PR after candidate review passes; status rc records that promotion has occurred.",
         },
     }
 
@@ -219,7 +219,7 @@ def render_markdown(data: dict) -> str:
         "Status: generated for explicit RC1 candidate review.",
         "",
         "This evidence confirms that Xenia has exited blocker burn-down while still",
-        "remaining in `pre-rc` status. It does not promote the release train.",
+        "recording the current release-train status. Before promotion this is `pre-rc`; after the explicit promotion PR this is `rc`.",
         "",
         "## Release train",
         "",
