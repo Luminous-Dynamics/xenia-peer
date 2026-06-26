@@ -1,0 +1,25 @@
+name: Xenia RC1 Review
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  rc1-review:
+    name: RC1 Review
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: Run RC1 review
+        run: nix develop .#ci -c bash scripts/xenia-rc1-review.sh .
