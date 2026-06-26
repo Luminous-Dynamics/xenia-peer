@@ -87,7 +87,6 @@ exit_criteria = [
 # any hard blocker remains.
 hard = []
 soft = [
-  "normalization executor should be dry-run once on the production tree before apply",
   "transport fault-injection tests need expansion",
   "operator/admin audit events need stable names"
 ]

@@ -1,0 +1,103 @@
+{
+  "command": [
+    "/run/current-system/sw/bin/python3",
+    "<repo-root>/scripts/apply-normalization-execution.py",
+    "<repo-root>",
+    "--plan",
+    "<repo-root>/_archive/normalization-v0.2/execution-plan.sanitized.json",
+    "--ledger",
+    "<temp-ledger>"
+  ],
+  "dry_run_result": {
+    "applied": 0,
+    "blocked": 0,
+    "dry_run": 7,
+    "ledger": "<temp-ledger>",
+    "mode": "dry-run",
+    "rollback": null
+  },
+  "executor": {
+    "path": "scripts/apply-normalization-execution.py",
+    "sha256": "b200f59be0c140cf226c4221dc2f74bc0059f8dc636a32fe461db32f225e2c08"
+  },
+  "git_status_after": "?? docs/release/evidence/NORMALIZATION_V0_2_DRY_RUN_EVIDENCE.md\n?? docs/release/evidence/normalization-v0.2-dry-run-current.json\n?? scripts/generate-normalization-dry-run-evidence.py\n",
+  "git_status_before": "?? docs/release/evidence/NORMALIZATION_V0_2_DRY_RUN_EVIDENCE.md\n?? docs/release/evidence/normalization-v0.2-dry-run-current.json\n?? scripts/generate-normalization-dry-run-evidence.py\n",
+  "ledger": {
+    "applied": [],
+    "applied_count": 0,
+    "blocked": [],
+    "blocked_count": 0,
+    "dry_run": [
+      {
+        "action": "archive",
+        "source": "target",
+        "status": "would-move",
+        "target": "_archive/normalization-v0.2/build-output/target"
+      },
+      {
+        "action": "move",
+        "source": "crates/xenia-viewer",
+        "status": "would-move",
+        "target": "apps/xenia-viewer"
+      },
+      {
+        "action": "move",
+        "source": "crates/xenia-peer",
+        "status": "would-move",
+        "target": "apps/xenia-peer"
+      },
+      {
+        "action": "move",
+        "source": "crates/sovereign-admin",
+        "status": "would-move",
+        "target": "apps/sovereign-admin"
+      },
+      {
+        "action": "rewrite_cargo_member",
+        "cargo_toml": "Cargo.toml",
+        "from": "crates/sovereign-admin",
+        "reason": "member-not-found",
+        "status": "unchanged",
+        "to": "apps/sovereign-admin"
+      },
+      {
+        "action": "rewrite_cargo_member",
+        "cargo_toml": "Cargo.toml",
+        "from": "crates/xenia-peer",
+        "reason": "member-not-found",
+        "status": "unchanged",
+        "to": "apps/xenia-peer"
+      },
+      {
+        "action": "rewrite_cargo_member",
+        "cargo_toml": "Cargo.toml",
+        "from": "crates/xenia-viewer",
+        "reason": "member-not-found",
+        "status": "unchanged",
+        "to": "apps/xenia-viewer"
+      }
+    ],
+    "dry_run_count": 7,
+    "ledger": "<temp-ledger>",
+    "mode": "dry-run",
+    "plan": "<repo-root>/_archive/normalization-v0.2/execution-plan.sanitized.json",
+    "rollback": null,
+    "root": "<repo-root>",
+    "schema": "xenia.normalization.execution-ledger.v1"
+  },
+  "reviewed_plan": {
+    "path": "_archive/normalization-v0.2/execution-plan.sanitized.json",
+    "sha256": "14ca656493795a3c8a3017897e5b914f87cbc4e3530293703af759d71c8e5843"
+  },
+  "schema": "xenia.normalization.dry-run-evidence.v1",
+  "scope": "rc1-soft-blocker-burn-down",
+  "soft_blocker_closed": "normalization executor should be dry-run once on the production tree before apply",
+  "stdout": "{\n  \"applied\": 0,\n  \"blocked\": 0,\n  \"dry_run\": 7,\n  \"ledger\": \"<temp-ledger>\",\n  \"mode\": \"dry-run\",\n  \"rollback\": null\n}\n",
+  "validation": {
+    "applied_count_is_zero": true,
+    "blocked_count_is_zero": true,
+    "executor_mode_is_dry_run": true,
+    "no_apply_rollback_emitted": true,
+    "working_tree_unchanged_by_dry_run": true
+  }
+}
