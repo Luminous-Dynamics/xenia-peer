@@ -104,7 +104,7 @@ def main() -> int:
             if name in milestone_names:
                 errors.append(f"duplicate milestone: {name}")
             milestone_names.add(name)
-            if milestone.get("kind") not in {"current", "planned", "candidate", "released"}:
+            if milestone.get("kind") not in {"completed", "current", "planned", "candidate", "released"}:
                 errors.append(f"milestone {name} has invalid kind")
             if not isinstance(milestone.get("summary"), str) or not milestone.get("summary"):
                 errors.append(f"milestone {name} missing summary")
