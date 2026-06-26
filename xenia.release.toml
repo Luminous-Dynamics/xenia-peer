@@ -87,6 +87,5 @@ exit_criteria = [
 # any hard blocker remains.
 hard = []
 soft = [
-  "transport fault-injection tests need expansion",
   "operator/admin audit events need stable names"
 ]
