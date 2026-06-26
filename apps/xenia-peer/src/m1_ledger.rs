@@ -146,4 +146,93 @@ mod tests {
 
         assert!(record.is_none());
     }
+
+    #[test]
+    fn m1_lifecycle_builds_verifiable_ledger_transcript() {
+        use ed25519_dalek::SigningKey;
+        use xenia_ledger::{Chain, Verifier};
+        use xenia_peer_core::M1SessionMachine;
+
+        let signing_key = SigningKey::from_bytes(&[9u8; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let mut chain = Chain::new(signing_key);
+
+        let source_id = [0xAB; 32];
+        let session_id = Uuid::from_bytes([1; 16]);
+        let request_id = Uuid::from_bytes([2; 16]);
+        let scope = "view screen";
+
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+        session.grant_consent().unwrap();
+        session.stream_frame().unwrap();
+        session.inject_input().unwrap();
+        session.revoke().unwrap();
+
+        let appended = session
+            .audit()
+            .iter()
+            .filter_map(|event| {
+                consent_record_for_m1_event(source_id, session_id, request_id, scope, *event)
+            })
+            .map(|record| chain.append(record).map(|_| ()))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("M1 consent-boundary events should append to the ledger");
+
+        assert_eq!(appended.len(), 3);
+
+        let entries = chain.into_entries();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].event.kind, ConsentKind::Request);
+        assert_eq!(entries[1].event.kind, ConsentKind::Approval);
+        assert_eq!(entries[2].event.kind, ConsentKind::Revocation);
+        assert_eq!(entries[0].event.stable_name(), "consent.requested");
+        assert_eq!(entries[1].event.stable_name(), "consent.granted");
+        assert_eq!(entries[2].event.stable_name(), "consent.revoked");
+
+        Verifier::verify_chain(&entries, &verifying_key)
+            .expect("M1 ledger transcript should verify");
+    }
+
+    #[test]
+    fn m1_frame_and_input_events_are_absent_from_consent_transcript() {
+        use ed25519_dalek::SigningKey;
+        use xenia_ledger::Chain;
+        use xenia_peer_core::M1SessionMachine;
+
+        let signing_key = SigningKey::from_bytes(&[10u8; 32]);
+        let mut chain = Chain::new(signing_key);
+
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+        session.grant_consent().unwrap();
+        session.stream_frame().unwrap();
+        session.inject_input().unwrap();
+        session.revoke().unwrap();
+
+        for event in session.audit() {
+            if let Some(record) = consent_record_for_m1_event(
+                [0xAB; 32],
+                Uuid::from_bytes([1; 16]),
+                Uuid::from_bytes([2; 16]),
+                "view screen",
+                *event,
+            ) {
+                chain.append(record).unwrap();
+            }
+        }
+
+        let stable_names = chain
+            .into_entries()
+            .into_iter()
+            .map(|entry| entry.event.stable_name())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            stable_names,
+            vec!["consent.requested", "consent.granted", "consent.revoked"]
+        );
+        assert!(!stable_names.contains(&"frame.streamed"));
+        assert!(!stable_names.contains(&"input.injected"));
+    }
 }
