@@ -530,7 +530,10 @@ mod tests {
         chain.append(sample_event(ConsentKind::Request)).unwrap();
 
         let entries: Vec<_> = chain.iter().cloned().collect();
+        let valid_pk = new_signing_key().verifying_key();
         let wrong_pk = new_signing_key_from_seed(8).verifying_key();
+        assert_ne!(valid_pk.to_bytes(), wrong_pk.to_bytes());
+
         match Verifier::verify_chain(&entries, &wrong_pk) {
             Err(VerifyError::BadSignature { seq: 0 }) => {}
             other => panic!("expected BadSignature, got {other:?}"),

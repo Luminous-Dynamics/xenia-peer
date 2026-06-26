@@ -33,16 +33,17 @@ A later ADR will formally record this exception.
 ```rust
 use xenia_ledger::{Chain, ConsentEventRecord, ConsentKind, Verifier};
 use ed25519_dalek::SigningKey;
+use rand_core::OsRng;
 use uuid::Uuid;
 
-let sk = SigningKey::from_bytes(&[7u8; 32]);
+let sk = SigningKey::generate(&mut OsRng);
 let pk = sk.verifying_key();
 
 let mut chain = Chain::new(sk);
 chain.append(ConsentEventRecord {
     source_id: [0xAB; 32],
-    session_id: Uuid::from_bytes([1u8; 16]),
-    request_id: Uuid::from_bytes([2u8; 16]),
+    session_id: Uuid::new_v4(),
+    request_id: Uuid::new_v4(),
     kind: ConsentKind::Request,
     scope: "view screen, inject input".into(),
 })?;
