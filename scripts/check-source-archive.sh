@@ -56,19 +56,19 @@ else
 fi
 
 section 'absolute local workspace references in source/config'
-needle='/srv'"/luminous-dynamics"
+needle='/srv'"/luminous-dynamics|/"'home/'"|/"'mnt/data|tristan'"\\.stoltz@|evolvingresonantcocreationism\\.com"
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir" /tmp/xenia-archive-list.$$' EXIT
 
 tar -xzf "$archive" -C "$tmpdir"
 if command -v rg >/dev/null 2>&1; then
-  if rg -n --hidden -g '!**/*.md' -g '!**/target/**' -g '!**/dist/**' -g '!**/.git/**' "$needle" "$tmpdir"; then
+  if rg -n --hidden -g '!**/*.md' -g '!**/target/**' -g '!**/dist/**' -g '!**/.git/**' -g '!**/scripts/check-source-archive.sh' -g '!**/scripts/xenia-hygiene-audit.sh' -g '!**/scripts/generate-source-archive-checksums.py' "$needle" "$tmpdir"; then
     fail=1
   else
     echo 'clean'
   fi
 else
-  if grep -R --exclude='*.md' --exclude-dir='.git' --exclude-dir='target' --exclude-dir='dist' "$needle" "$tmpdir"; then
+  if grep -RE --exclude='*.md' --exclude='check-source-archive.sh' --exclude='xenia-hygiene-audit.sh' --exclude='generate-source-archive-checksums.py' --exclude-dir='.git' --exclude-dir='target' --exclude-dir='dist' "$needle" "$tmpdir"; then
     fail=1
   else
     echo 'clean'
