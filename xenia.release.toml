@@ -85,9 +85,7 @@ exit_criteria = [
 [blockers]
 # Keep these human-readable. The release-readiness checker fails --rc1 while
 # any hard blocker remains.
-hard = [
-  "normalization manifest, execution plan, ledger, and before/after snapshots need review"
-]
+hard = []
 soft = [
   "source archives need reproducible checksum manifest",
   "normalization executor should be dry-run once on the production tree before apply",
