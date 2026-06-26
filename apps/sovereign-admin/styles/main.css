@@ -266,6 +266,13 @@ code {
 .kind-revocation { background: rgba(138, 151, 164, 0.15); color: var(--fg-dim); }
 .kind-violation  { background: rgba(255, 107, 107, 0.15); color: var(--err); }
 
+.kind-consent-requested { background: rgba(94, 227, 255, 0.12); color: var(--accent); }
+.kind-consent-granted { background: rgba(88, 214, 106, 0.15); color: var(--ok); }
+.kind-consent-denied { background: rgba(243, 178, 63, 0.15); color: var(--warn); }
+.kind-consent-revoked { background: rgba(138, 151, 164, 0.15); color: var(--fg-dim); }
+.kind-consent-protocol-violation { background: rgba(255, 107, 107, 0.15); color: var(--err); }
+.kind-admin-athena_triage { background: rgba(94, 227, 255, 0.12); color: var(--accent); }
+
 button.tamper {
     font-size: 0.8rem;
     padding: 0.25rem 0.6rem;
