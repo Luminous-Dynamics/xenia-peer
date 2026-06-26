@@ -54,6 +54,7 @@
 pub mod advertisement;
 pub mod frame;
 pub mod handshake;
+pub mod m1_session;
 mod session;
 pub mod transport;
 
@@ -61,6 +62,9 @@ pub use frame::{
     AudioJitterBuffer, AudioSampleFormat, JitterInsert, JitterStats, PixelFormat, RawAudio,
     RawFrame, RawInput, RawTelemetry, SyntheticAudioKind, SyntheticAudioSource, TelemetrySample,
     TelemetryValue,
+};
+pub use m1_session::{
+    M1AuditEvent, M1Permission, M1SessionError, M1SessionMachine, M1SessionState,
 };
 pub use session::{Session, SessionError, SessionRole};
 pub use xenia_handshake::HandshakeManager;
