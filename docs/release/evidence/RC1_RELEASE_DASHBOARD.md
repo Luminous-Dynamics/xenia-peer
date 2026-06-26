@@ -1,6 +1,6 @@
 # Xenia Release Dashboard
 
-Root: `/srv/luminous-dynamics/xenia/xenia-peer`
+Root: `<repo-root>`
 Current milestone: `normalization-v0.2`
 Status: `pre-rc`
 
@@ -69,26 +69,6 @@ clean
 clean
 
 == review markers for humans ==
-./ROADMAP.md:100:| ~~T2.1~~ | ~~`src/swarm/rdp_input.rs`~~ | ~~354~~ | ✅ shipped as `xenia-inject` (`23a49a9`). X11 backend dropped. Wayland + uinput are scaffold stubs; real plumbing lands with matching xenia-capture backend. |
-./scripts/xenia-hygiene-audit.sh:118:    'DO NOT USE IN PRODUCTION|placeholder|stub|TODO|FIXME' .
-./scripts/check-codeowners.py:45:        print("WARN: CODEOWNERS still uses placeholder team @luminous-dynamics/xenia-maintainers")
-./XENIA_IMPROVEMENTS_APPLIED.md:19:  - Pre-alpha banner no longer says the wire crate owns the placeholder
-./XENIA_IMPROVEMENTS_APPLIED.md:30:  - Reports pre-alpha/TODO markers as review warnings, not hard failures.
-./apps/xenia-viewer/Cargo.toml:8:description = "Native viewer for Xenia sessions. Connects to an xenia-peer daemon, decodes sealed frames, renders. Pre-alpha stub — M4 adds the egui GUI."
-./apps/xenia-peer/Cargo.toml:8:description = "Headless daemon that shares a screen over the Xenia wire. Hosts sessions; delegates capture/encode to xenia-peer-core. Pre-alpha stub — M1 adds real Wayland capture + H.264."
-./docs/ADR-001-m0-architecture.md:34:| `xenia-peer` | binary (daemon) | AGPL-3.0-or-later | M0 stub |
-./docs/ADR-001-m0-architecture.md:35:| `xenia-viewer` | binary (CLI now, GUI at M4) | AGPL-3.0-or-later | M0 stub |
-./docs/security/THREAT_MODEL.md:49:1. No placeholder handshake path in production builds.
-./docs/release/RELEASE_GATES.md:39:- `beta`: no known placeholder security paths; external testing welcome.
-./docs/implementation/NORMALIZATION_FOLLOWUPS.md:7:- Replace CODEOWNERS placeholder with the real maintainer/team.
-./apps/sovereign-admin/src/pages/sessions.rs:335:                placeholder=r#"{"public_key_hex":"...","entries":[...]}"#
-./apps/sovereign-admin/src/pages/policy.rs:4:// Policy page. Scaffold stub — the admin console's CRUD surface for
-./apps/sovereign-admin/src/pages/login.rs:16:// TODO (W1 tail-end):
-./apps/sovereign-admin/src/pages/login.rs:166:                    placeholder="did:mycelix:… or did:key:…"
-./apps/sovereign-admin/src/pages/login.rs:205:            LoginStatus::Idle => view! { <span class="status-placeholder"></span> }.into_any(),
-./apps/sovereign-admin/src/pages/devices.rs:8:// TODO (year-2):
-./apps/sovereign-admin/README.md:14:- **Policy:** stub page listing planned controls.
-./apps/sovereign-admin/README.md:96:        └── policy.rs   planned-controls stub
 
 == local runtime secret/state files ==
 clean
@@ -144,7 +124,7 @@ Note: run with --rc1 only during an explicit release-candidate review.
 
 ```text
 xenia normalization plan check
-root: /srv/luminous-dynamics/xenia/xenia-peer
+root: <repo-root>
 moves: 3
 archive_rules: 5
 components: 9
