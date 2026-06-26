@@ -3,7 +3,7 @@
     {
       "exit_code": 0,
       "name": "hygiene",
-      "output": "Output redacted from committed evidence JSON. The corresponding command completed successfully; review-marker details are available by rerunning the gate locally.",
+      "output": "\n== archive bundles in active paths ==\nclean\n\n== build output directories in active paths ==\nclean\n\n== migration scratch scripts in active paths ==\nclean\n\n== nested git repositories in active paths ==\nclean\n\n== absolute local workspace references in source/config ==\nclean\n\n== absolute local workspace references in docs ==\nclean\n\n== review markers for humans ==\n./ROADMAP.md:100:| ~~T2.1~~ | ~~`src/swarm/rdp_input.rs`~~ | ~~354~~ | \u2705 shipped as `xenia-inject` (`23a49a9`). X11 backend dropped. Wayland + uinput are scaffold stubs; real plumbing lands with matching xenia-capture backend. |\n./XENIA_IMPROVEMENTS_APPLIED.md:19:  - Pre-alpha banner no longer says the wire crate owns the placeholder\n./XENIA_IMPROVEMENTS_APPLIED.md:30:  - Reports pre-alpha/TODO markers as review warnings, not hard failures.\n./scripts/check-codeowners.py:45:        print(\"WARN: CODEOWNERS still uses placeholder team @luminous-dynamics/xenia-maintainers\")\n./scripts/xenia-hygiene-audit.sh:118:    'DO NOT USE IN PRODUCTION|placeholder|stub|TODO|FIXME' .\n./apps/xenia-viewer/Cargo.toml:8:description = \"Native viewer for Xenia sessions. Connects to an xenia-peer daemon, decodes sealed frames, renders. Pre-alpha stub \u2014 M4 adds the egui GUI.\"\n./apps/xenia-peer/Cargo.toml:8:description = \"Headless daemon that shares a screen over the Xenia wire. Hosts sessions; delegates capture/encode to xenia-peer-core. Pre-alpha stub \u2014 M1 adds real Wayland capture + H.264.\"\n./docs/security/THREAT_MODEL.md:49:1. No placeholder handshake path in production builds.\n./apps/sovereign-admin/src/pages/sessions.rs:335:                placeholder=r#\"{\"public_key_hex\":\"...\",\"entries\":[...]}\"#\n./apps/sovereign-admin/src/pages/policy.rs:4:// Policy page. Scaffold stub \u2014 the admin console's CRUD surface for\n./apps/sovereign-admin/src/pages/login.rs:16:// TODO (W1 tail-end):\n./apps/sovereign-admin/src/pages/login.rs:166:                    placeholder=\"did:mycelix:\u2026 or did:key:\u2026\"\n./apps/sovereign-admin/src/pages/login.rs:205:            LoginStatus::Idle => view! { <span class=\"status-placeholder\"></span> }.into_any(),\n./apps/sovereign-admin/src/pages/devices.rs:8:// TODO (year-2):\n./docs/ADR-001-m0-architecture.md:34:| `xenia-peer` | binary (daemon) | AGPL-3.0-or-later | M0 stub |\n./docs/ADR-001-m0-architecture.md:35:| `xenia-viewer` | binary (CLI now, GUI at M4) | AGPL-3.0-or-later | M0 stub |\n./apps/sovereign-admin/README.md:14:- **Policy:** stub page listing planned controls.\n./apps/sovereign-admin/README.md:96:        \u2514\u2500\u2500 policy.rs   planned-controls stub\n./docs/implementation/NORMALIZATION_FOLLOWUPS.md:7:- Replace CODEOWNERS placeholder with the real maintainer/team.\n./docs/release/RELEASE_GATES.md:39:- `beta`: no known placeholder security paths; external testing welcome.\n\n== local runtime secret/state files ==\nclean\n\n== cargo metadata smoke check ==\ncargo metadata: ok\n\nXenia hygiene audit passed.\n",
       "status": "pass"
     },
     {
@@ -27,7 +27,7 @@
     {
       "exit_code": 0,
       "name": "release-readiness",
-      "output": "== Xenia release readiness ==\npolicy_stage: pre-production\nlayout_mode: normalized\nrelease_status: pre-rc\ncurrent_milestone: normalization-v0.2\nnext_candidate: rc1\nhard_blockers: 1\nsoft_blockers: 5\n\nRelease readiness manifest check passed.\nNote: run with --rc1 only during an explicit release-candidate review.\n",
+      "output": "== Xenia release readiness ==\npolicy_stage: pre-production\nlayout_mode: normalized\nrelease_status: pre-rc\ncurrent_milestone: normalization-v0.2\nnext_candidate: rc1\nhard_blockers: 0\nsoft_blockers: 3\n\nRelease readiness manifest check passed.\nNote: run with --rc1 only during an explicit release-candidate review.\n",
       "status": "pass"
     },
     {
@@ -61,9 +61,7 @@
       "status": "pass"
     }
   ],
-  "hard_blockers": [
-    "normalization manifest, execution plan, ledger, and before/after snapshots need review"
-  ],
+  "hard_blockers": [],
   "release_train": {
     "archive_root": "_archive",
     "current_milestone": "normalization-v0.2",
@@ -74,10 +72,17 @@
   },
   "root": "<repo-root>",
   "soft_blockers": [
-    "source archives need reproducible checksum manifest",
     "normalization executor should be dry-run once on the production tree before apply",
-    "release dashboard should be generated from the normalized branch",
     "transport fault-injection tests need expansion",
     "operator/admin audit events need stable names"
-  ]
+  ],
+  "source": {
+    "current_milestone": "normalization-v0.2",
+    "generated_from_normalized_layout": true,
+    "git_branch": "xenia/rc1-dashboard-normalized-branch-v0.1",
+    "git_head": "ffca6296372a",
+    "layout_mode": "normalized",
+    "release_status": "pre-rc",
+    "root": "<repo-root>"
+  }
 }

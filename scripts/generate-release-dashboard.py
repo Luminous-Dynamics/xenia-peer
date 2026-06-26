@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
-"""Generate a Xenia release/readiness dashboard in Markdown and optional JSON."""
+"""Generate a sanitized Xenia release/readiness dashboard.
+
+The dashboard is intended to be committed as release evidence, so it must not
+record machine-local absolute paths, temporary filenames, user names, or other
+workspace-specific details. Keep the raw checks useful, but normalize the paths
+that vary between developer machines and CI runners.
+"""
 from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tomllib
@@ -24,6 +31,9 @@ CHECKS = [
     ("unsafe-surfaces", [sys.executable, "scripts/check-unsafe-surfaces.py", ".", "--max-lines", "80"]),
 ]
 
+ROOT_PLACEHOLDER = "<repo-root>"
+TEMP_PLACEHOLDER = "<temp-artifact>"
+
 
 def load_toml(path: Path) -> dict[str, Any]:
     if not path.exists():
@@ -32,27 +42,81 @@ def load_toml(path: Path) -> dict[str, Any]:
         return tomllib.load(f)
 
 
+def git_value(root: Path, *args: str) -> str:
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001 - dashboard should be best-effort evidence
+        return "unknown"
+    value = proc.stdout.strip()
+    return value if proc.returncode == 0 and value else "unknown"
+
+
+def sanitize_text(text: str, root: Path) -> str:
+    """Remove machine-local values from committed dashboard evidence."""
+    sanitized = text.replace(str(root), ROOT_PLACEHOLDER)
+    sanitized = sanitized.replace(str(root.resolve()), ROOT_PLACEHOLDER)
+
+    # Archive/check helpers use temporary files. Keep the evidence meaningful
+    # while removing host-specific temporary paths.
+    sanitized = re.sub(r"/tmp/xenia[-A-Za-z0-9_.:/]+", TEMP_PLACEHOLDER, sanitized)
+    sanitized = re.sub(r"/var/folders/[-A-Za-z0-9_./]+", TEMP_PLACEHOLDER, sanitized)
+    sanitized = re.sub(r"[A-Z]:\\\\[^\s`\"']+", TEMP_PLACEHOLDER, sanitized)
+    return sanitized
+
+
 def run_check(root: Path, name: str, command: list[str]) -> dict[str, Any]:
-    executable = root / command[1] if command[0] in {"bash", sys.executable} and len(command) > 1 else root / command[0]
-    # For Python/bash script commands, skip missing scripts instead of failing the dashboard generator.
+    # For Python/bash script commands, skip missing scripts instead of failing
+    # the dashboard generator.
     if len(command) > 1 and command[1].startswith("scripts/") and not (root / command[1]).exists():
         return {"name": name, "status": "missing", "exit_code": None, "output": "script not found"}
     try:
         proc = subprocess.run(command, cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
         status = "pass" if proc.returncode == 0 else "fail"
-        return {"name": name, "status": status, "exit_code": proc.returncode, "output": proc.stdout[-12000:]}
+        output = sanitize_text(proc.stdout[-12000:], root)
+        return {"name": name, "status": status, "exit_code": proc.returncode, "output": output}
     except Exception as exc:  # noqa: BLE001 - dashboard should keep going
-        return {"name": name, "status": "error", "exit_code": None, "output": str(exc)}
+        return {"name": name, "status": "error", "exit_code": None, "output": sanitize_text(str(exc), root)}
 
 
-def render_markdown(root: Path, results: list[dict[str, Any]], release: dict[str, Any], safety: dict[str, Any]) -> str:
+def source_context(root: Path, release: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
+    layout = policy.get("layout", {})
+    train = release.get("release_train", {})
+    return {
+        "root": ROOT_PLACEHOLDER,
+        "git_branch": git_value(root, "branch", "--show-current"),
+        "git_head": git_value(root, "rev-parse", "--short=12", "HEAD"),
+        "layout_mode": layout.get("mode", "unknown"),
+        "current_milestone": train.get("current_milestone", "unknown"),
+        "release_status": train.get("status", "unknown"),
+        "generated_from_normalized_layout": layout.get("mode") == "normalized",
+    }
+
+
+def render_markdown(
+    source: dict[str, Any],
+    results: list[dict[str, Any]],
+    release: dict[str, Any],
+    safety: dict[str, Any],
+) -> str:
     train = release.get("release_train", {})
     blockers = release.get("blockers", {})
     safety_defaults = safety.get("secure_defaults", {})
     lines: list[str] = []
     lines.append("# Xenia Release Dashboard")
     lines.append("")
-    lines.append(f"Root: `{root}`")
+    lines.append(f"Root: `{source['root']}`")
+    lines.append(f"Generated from branch: `{source['git_branch']}`")
+    lines.append(f"Generated from HEAD: `{source['git_head']}`")
+    lines.append(f"Layout mode: `{source['layout_mode']}`")
+    lines.append(f"Generated from normalized layout: `{source['generated_from_normalized_layout']}`")
     lines.append(f"Current milestone: `{train.get('current_milestone', 'unknown')}`")
     lines.append(f"Status: `{train.get('status', 'unknown')}`")
     lines.append("")
@@ -107,16 +171,19 @@ def main() -> int:
 
     root = Path(args.root).resolve()
     release = load_toml(root / "xenia.release.toml")
+    policy = load_toml(root / "xenia.policy.toml")
     safety = load_toml(root / "xenia.safety.toml")
     results = [run_check(root, name, command) for name, command in CHECKS]
+    source = source_context(root, release, policy)
     dashboard = {
-        "root": str(root),
+        "source": source,
+        "root": ROOT_PLACEHOLDER,
         "release_train": release.get("release_train", {}),
         "hard_blockers": release.get("blockers", {}).get("hard", []),
         "soft_blockers": release.get("blockers", {}).get("soft", []),
         "checks": results,
     }
-    markdown = render_markdown(root, results, release, safety)
+    markdown = render_markdown(source, results, release, safety)
     if args.markdown:
         Path(args.markdown).write_text(markdown, encoding="utf-8")
         print(f"wrote markdown dashboard: {args.markdown}")
