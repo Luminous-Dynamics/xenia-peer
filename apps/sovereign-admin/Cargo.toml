@@ -1,0 +1,49 @@
+[package]
+name = "sovereign-admin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-or-later"
+description = "Leptos CSR admin console for the Xenia remote-session stack — the operator surface of the Mycelix Sovereign suite."
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[[bin]]
+name = "sovereign-admin"
+path = "src/main.rs"
+
+[dependencies]
+bincode = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+leptos = { version = "0.8", features = ["csr"] }
+leptos_router = "0.8"
+leptos_meta = "0.8"
+console_error_panic_hook = "0.1"
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["console", "Storage", "Window", "Location"] }
+serde = { version = "1.0", features = ["derive"] }
+gloo-net = "0.6"
+
+# Live xenia-ledger demo on the Sessions page.
+xenia-ledger = { path = "../../crates/xenia-ledger" }
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+uuid = { version = "1", features = ["v4", "serde", "js"] }
+# Force getrandom to use Web Crypto in the browser (required by
+# rand_core -> ed25519_dalek::SigningKey::generate in wasm32).
+getrandom = { version = "0.2", features = ["js"] }
+# Import / export of persisted chains on the Sessions page.
+serde_json = "1"
+
+# Real Holochain zome calls from the browser (resolve_did on login).
+mycelix-leptos-client = { version = "0.1", default-features = false, features = ["browser"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+# Native-only Mycelix crypto integration is intentionally not wired with an
+# absolute local path here. Add it back via a workspace-relative dependency or
+# feature-gated adapter once sovereign-admin has a native build target.

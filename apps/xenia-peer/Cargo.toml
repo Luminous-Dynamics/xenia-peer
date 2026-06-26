@@ -1,0 +1,49 @@
+[package]
+name = "xenia-peer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-or-later"
+description = "Headless daemon that shares a screen over the Xenia wire. Hosts sessions; delegates capture/encode to xenia-peer-core. Pre-alpha stub — M1 adds real Wayland capture + H.264."
+repository.workspace = true
+homepage.workspace = true
+publish = false  # unpublished until M1 makes it useful
+
+[dependencies]
+xenia-peer-core = { path = "../../crates/xenia-peer-core" }
+xenia-capture = { path = "../../crates/xenia-capture" }
+xenia-video = { path = "../../crates/xenia-video" }
+xenia-transport-ws = { path = "../../crates/xenia-transport-ws" }
+xenia-transport-quic = { path = "../../crates/xenia-transport-quic" }
+xenia-ledger = { path = "../../crates/xenia-ledger" }
+tokio-tungstenite = "0.24"
+
+xenia-wire = { workspace = true, features = ["consent", "reference-frame"] }
+tokio = { workspace = true }
+tokio-util = "0.7"
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+thiserror.workspace = true
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+rand = "0.8"
+axum = { version = "0.8", features = ["ws"] }
+futures = "0.3"
+serde_json = "1"
+hex = "0.4"
+bincode = "1"
+serde = { version = "1", features = ["derive"] }
+reqwest = { version = "0.13", features = ["json"] }
+xenia-handshake = { path = "../../crates/xenia-handshake" }
+
+[features]
+scap = ["xenia-capture/scap-backend"]
+# Pass-through: rebuild xenia-video with the h264 feature so the
+# daemon can select `--codec h264` at runtime. Requires libav dev
+# headers (enable inside nix develop).
+h264 = ["xenia-video/h264"]
+# HDC hybrid tile-delta codec (ported from Symthaea). Pure Rust,
+# no external libs. Grayscale output.
+hdc = ["xenia-video/hdc"]

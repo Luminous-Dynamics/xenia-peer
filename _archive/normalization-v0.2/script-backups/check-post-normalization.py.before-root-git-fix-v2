@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""Validate the Xenia tree after a normalization pass."""
+from __future__ import annotations
+
+import argparse
+import os
+from pathlib import Path
+import sys
+import tomllib
+from typing import Any
+
+
+def fail_line(message: str) -> None:
+    print(f"FAIL: {message}")
+
+
+def warn_line(message: str) -> None:
+    print(f"WARN: {message}")
+
+
+def is_under(path: Path, ancestor: Path) -> bool:
+    try:
+        path.resolve().relative_to(ancestor.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def load_manifest(root: Path) -> dict[str, Any]:
+    path = root / "xenia.normalization.toml"
+    if not path.exists():
+        raise FileNotFoundError(path)
+    with path.open("rb") as f:
+        return tomllib.load(f)
+
+
+def cargo_members(cargo: Path) -> set[str]:
+    if not cargo.exists():
+        return set()
+    try:
+        data = tomllib.loads(cargo.read_text(encoding="utf-8"))
+    except Exception:
+        return set()
+    workspace = data.get("workspace", {})
+    members = workspace.get("members", [])
+    return {str(m) for m in members}
+
+
+def scan_for_active_artifacts(root: Path, archive_root: Path) -> list[str]:
+    findings: list[str] = []
+    for current, dirnames, filenames in os.walk(root):
+        current_path = Path(current)
+        if is_under(current_path, archive_root):
+            dirnames[:] = []
+            continue
+        dirnames[:] = sorted(dirnames)
+        filenames = sorted(filenames)
+        for dirname in list(dirnames):
+            if dirname in {"target", "dist", ".git"}:
+                findings.append((current_path / dirname).relative_to(root).as_posix())
+        for filename in filenames:
+            if filename.endswith((".tar.gz", ".tgz")):
+                findings.append((current_path / filename).relative_to(root).as_posix())
+    return findings
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Check Xenia post-normalization acceptance conditions.")
+    parser.add_argument("root", nargs="?", default=".")
+    parser.add_argument("--strict", action="store_true", help="treat missing source paths that were already moved as failures")
+    args = parser.parse_args()
+
+    root = Path(args.root).resolve()
+    try:
+        manifest = load_manifest(root)
+    except FileNotFoundError:
+        fail_line("xenia.normalization.toml not found")
+        return 1
+
+    archive_root = root / manifest.get("normalization", {}).get("archive_root", "_archive")
+    workspace = manifest.get("normalization", {}).get("workspace", "xenia-peer")
+    cargo = root / workspace / "Cargo.toml"
+    members = cargo_members(cargo)
+
+    failures = 0
+    warnings = 0
+
+    active_artifacts = scan_for_active_artifacts(root, archive_root)
+    for artifact in active_artifacts:
+        fail_line(f"active generated/archive artifact remains outside archive: {artifact}")
+        failures += 1
+
+    for move in manifest.get("move", []):
+        source = root / str(move.get("source"))
+        target = root / str(move.get("target"))
+        source_rel = str(move.get("source"))
+        target_rel = str(move.get("target"))
+        source_member = source_rel.removeprefix(f"{workspace}/")
+        target_member = target_rel.removeprefix(f"{workspace}/")
+
+        if source.exists() and target.exists():
+            fail_line(f"both pre- and post-normalization app paths exist: {source_rel} and {target_rel}")
+            failures += 1
+        elif source.exists() and not target.exists():
+            warn_line(f"move not applied yet: {source_rel} -> {target_rel}")
+            warnings += 1
+        elif not source.exists() and not target.exists():
+            message = f"neither source nor target exists for planned move: {source_rel} -> {target_rel}"
+            if args.strict:
+                fail_line(message)
+                failures += 1
+            else:
+                warn_line(message)
+                warnings += 1
+        else:
+            print(f"OK: normalized app path exists: {target_rel}")
+
+        if members:
+            if source_member in members:
+                fail_line(f"Cargo workspace still references pre-normalization member: {source_member}")
+                failures += 1
+            if target.exists() and target_member not in members:
+                fail_line(f"Cargo workspace missing normalized member: {target_member}")
+                failures += 1
+
+    for component in manifest.get("component", []):
+        role = component.get("role")
+        path = str(component.get("canonical_path"))
+        if role == "library" and "/apps/" in path:
+            fail_line(f"library component is under apps/: {component.get('name')} -> {path}")
+            failures += 1
+        if role in {"app", "control-plane"} and "/crates/" in path:
+            fail_line(f"app/control-plane component is under crates/: {component.get('name')} -> {path}")
+            failures += 1
+
+    print(f"post-normalization check completed: failures={failures} warnings={warnings}")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

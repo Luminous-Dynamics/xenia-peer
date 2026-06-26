@@ -13,7 +13,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
-use xenia_wire::{open_frame, open_input, Session as WireSession, WireError};
+use xenia_wire::{Session as WireSession, WireError, open_frame, open_input};
 
 use crate::frame::{RawFrame, RawInput};
 
@@ -51,6 +51,7 @@ pub struct Session {
     next_frame_id: u64,
     /// Input sequence counter for outbound `RawInput`s (viewer side only).
     next_input_seq: u64,
+    last_frame_sent_ms: u64,
 }
 
 impl Session {
@@ -71,6 +72,7 @@ impl Session {
             wire: WireSession::new(),
             next_frame_id: 0,
             next_input_seq: 0,
+            last_frame_sent_ms: 0,
         }
     }
 
@@ -83,6 +85,7 @@ impl Session {
             wire: WireSession::with_source_id(source_id, epoch),
             next_frame_id: 0,
             next_input_seq: 0,
+            last_frame_sent_ms: 0,
         }
     }
 
@@ -142,23 +145,40 @@ impl Session {
 
     /// Seal a captured raw-RGBA frame on the forward path.
     ///
-    /// Fills in `frame_id` (from [`Session::next_frame_id`]) and
-    /// `timestamp_ms` (system time) automatically.
+    /// Checks `ConsentState` to ensure the session is authorized.
     pub fn seal_captured_rgba(
         &mut self,
         width: u32,
         height: u32,
         pixels: Vec<u8>,
     ) -> Result<Vec<u8>, SessionError> {
-        let frame = RawFrame::rgba8(self.next_frame_id(), now_ms(), width, height, pixels);
+        self.check_consent_for_frame()?;
+        let now = now_ms();
+        let frame = RawFrame::rgba8(self.next_frame_id(), now, width, height, pixels);
+        self.last_frame_sent_ms = now;
         xenia_wire::seal_frame(&frame_as_wire(&frame)?, &mut self.wire).map_err(Into::into)
     }
 
+    /// Return telemetry: time since last frame was sent (in ms).
+    pub fn last_frame_latency_ms(&self) -> u64 {
+        now_ms().saturating_sub(self.last_frame_sent_ms)
+    }
+
     /// Seal a fully-constructed `RawFrame` on the forward path.
-    /// Use this when you need control over frame_id / timestamp_ms
-    /// (e.g. replaying a recording).
+    /// Checks `ConsentState` to ensure the session is authorized.
     pub fn seal_frame(&mut self, frame: &RawFrame) -> Result<Vec<u8>, SessionError> {
+        self.check_consent_for_frame()?;
         xenia_wire::seal_frame(&frame_as_wire(frame)?, &mut self.wire).map_err(Into::into)
+    }
+
+    fn check_consent_for_frame(&self) -> Result<(), SessionError> {
+        use xenia_wire::consent::ConsentState;
+        match self.consent_state() {
+            ConsentState::LegacyBypass | ConsentState::Approved => Ok(()),
+            _ => Err(SessionError::Wire(WireError::decode(
+                "Consent required for frame flow",
+            ))),
+        }
     }
 
     /// Open a sealed envelope as a `RawFrame` on the viewer side.
@@ -303,6 +323,43 @@ mod tests {
         let sealed = host.seal_frame(&bad).unwrap();
         let err = viewer.open_frame(&sealed);
         assert!(err.is_err(), "dimension mismatch must be rejected");
+    }
+
+    #[test]
+    fn telemetry_frame_seal_open_roundtrip() {
+        let (mut host, mut viewer) = paired();
+        let telemetry = crate::frame::RawTelemetry {
+            frame_id: host.next_frame_id(),
+            timestamp_ms: 1_700_000_000_500,
+            backend: "test".to_string(),
+            samples: vec![crate::frame::TelemetrySample {
+                name: "memory.used.bytes".to_string(),
+                value: crate::frame::TelemetryValue::U64(1024),
+                unit: Some("bytes".to_string()),
+                timestamp_ms: 1_700_000_000_500,
+            }],
+        };
+        let frame = telemetry.clone().into_frame().unwrap();
+        let sealed = host.seal_frame(&frame).unwrap();
+        let opened = viewer.open_frame(&sealed).unwrap();
+        assert_eq!(opened.pixel_format, crate::frame::PixelFormat::Telemetry);
+        assert_eq!(
+            crate::frame::RawTelemetry::from_frame(&opened).unwrap(),
+            telemetry
+        );
+    }
+
+    #[test]
+    fn audio_frame_seal_open_roundtrip() {
+        let (mut host, mut viewer) = paired();
+        let mut source =
+            crate::frame::SyntheticAudioSource::new(1, crate::frame::SyntheticAudioKind::Sine);
+        let audio = source.next_frame(1_700_000_000_700);
+        let frame = audio.clone().into_frame(host.next_frame_id()).unwrap();
+        let sealed = host.seal_frame(&frame).unwrap();
+        let opened = viewer.open_frame(&sealed).unwrap();
+        assert_eq!(opened.pixel_format, crate::frame::PixelFormat::Audio);
+        assert_eq!(crate::frame::RawAudio::from_frame(&opened).unwrap(), audio);
     }
 
     #[test]

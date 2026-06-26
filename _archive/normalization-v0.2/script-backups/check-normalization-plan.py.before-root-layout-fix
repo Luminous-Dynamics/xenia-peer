@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Validate Xenia's workspace-normalization manifest.
+
+This checker is intentionally dependency-free and safe to run before the repo is
+fully normalized. It validates the plan, reports what is present in the current
+working tree, and fails only on manifest problems or impossible path shapes.
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+import tomllib
+from pathlib import Path
+
+ALLOWED_MOVE_KINDS = {"app", "library", "protocol", "archive"}
+DISALLOWED_PARTS = {"", ".", ".."}
+FORBIDDEN_ACTIVE_PARTS = {"target", "dist", "node_modules", ".git"}
+
+
+def load_manifest(root: Path) -> dict:
+    path = root / "xenia.normalization.toml"
+    if not path.exists():
+        raise SystemExit("FAIL: xenia.normalization.toml is missing")
+    try:
+        return tomllib.loads(path.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as exc:
+        raise SystemExit(f"FAIL: invalid TOML in {path}: {exc}") from exc
+
+
+def check_rel_path(label: str, value: str, *, allow_glob: bool = False) -> list[str]:
+    errors: list[str] = []
+    if not value or value.strip() != value:
+        errors.append(f"{label}: path is empty or has surrounding whitespace")
+        return errors
+    path = Path(value)
+    if path.is_absolute():
+        errors.append(f"{label}: absolute paths are forbidden: {value}")
+    if "\\" in value:
+        errors.append(f"{label}: use portable '/' path separators: {value}")
+    parts = path.parts
+    if any(part in DISALLOWED_PARTS for part in parts):
+        errors.append(f"{label}: contains unsafe relative segment: {value}")
+    if not allow_glob and any("*" in part or "?" in part for part in parts):
+        errors.append(f"{label}: glob characters are not allowed here: {value}")
+    return errors
+
+
+def check_manifest(root: Path, manifest: dict) -> int:
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    normalization = manifest.get("normalization", {})
+    if normalization.get("manifest_version") != 1:
+        errors.append("normalization.manifest_version must be 1")
+    if normalization.get("status") not in {"planning", "reviewed", "applied"}:
+        errors.append("normalization.status must be planning, reviewed, or applied")
+    for key in ("archive_root", "workspace", "source_root"):
+        if key in normalization:
+            errors.extend(check_rel_path(f"normalization.{key}", str(normalization[key])))
+
+    constraints = manifest.get("constraints", {})
+    if constraints.get("no_delete") is not True:
+        errors.append("constraints.no_delete must be true")
+    if constraints.get("no_absolute_paths") is not True:
+        errors.append("constraints.no_absolute_paths must be true")
+    apps_under = str(constraints.get("apps_under", "xenia-peer/apps"))
+    libraries_under = str(constraints.get("libraries_under", "xenia-peer/crates"))
+    errors.extend(check_rel_path("constraints.apps_under", apps_under))
+    errors.extend(check_rel_path("constraints.libraries_under", libraries_under))
+
+    seen_ids: set[str] = set()
+    seen_targets: set[str] = set()
+    for idx, move in enumerate(manifest.get("move", []), start=1):
+        move_id = str(move.get("id", ""))
+        label = f"move[{idx}] {move_id or '<missing-id>'}"
+        if not move_id:
+            errors.append(f"{label}: missing id")
+        elif move_id in seen_ids:
+            errors.append(f"{label}: duplicate id")
+        seen_ids.add(move_id)
+
+        kind = str(move.get("kind", ""))
+        if kind not in ALLOWED_MOVE_KINDS:
+            errors.append(f"{label}: invalid kind {kind!r}")
+
+        source = str(move.get("source", ""))
+        target = str(move.get("target", ""))
+        errors.extend(check_rel_path(f"{label}.source", source))
+        errors.extend(check_rel_path(f"{label}.target", target))
+        if target in seen_targets:
+            errors.append(f"{label}: duplicate target {target}")
+        seen_targets.add(target)
+
+        if source == target:
+            errors.append(f"{label}: source and target are identical")
+        if kind == "app" and not target.startswith(apps_under + "/"):
+            errors.append(f"{label}: app target must be under {apps_under}: {target}")
+        if kind == "library" and not target.startswith(libraries_under + "/"):
+            errors.append(f"{label}: library target must be under {libraries_under}: {target}")
+        if any(part in FORBIDDEN_ACTIVE_PARTS for part in Path(target).parts):
+            errors.append(f"{label}: target points into generated/metadata path: {target}")
+
+        if not (root / source).exists():
+            warnings.append(f"{label}: source not present in this checkout yet: {source}")
+        if (root / target).exists():
+            warnings.append(f"{label}: target already exists; review before moving: {target}")
+
+    for idx, rule in enumerate(manifest.get("archive_rule", []), start=1):
+        rule_id = str(rule.get("id", ""))
+        label = f"archive_rule[{idx}] {rule_id or '<missing-id>'}"
+        if not rule_id:
+            errors.append(f"{label}: missing id")
+        pattern = str(rule.get("pattern", ""))
+        if not pattern:
+            errors.append(f"{label}: missing pattern")
+        destination = str(rule.get("destination", ""))
+        errors.extend(check_rel_path(f"{label}.destination", destination))
+        if not destination.startswith(str(normalization.get("archive_root", "_archive")) + "/"):
+            errors.append(f"{label}: destination should live under archive_root: {destination}")
+
+    component_names: set[str] = set()
+    for idx, component in enumerate(manifest.get("component", []), start=1):
+        name = str(component.get("name", ""))
+        label = f"component[{idx}] {name or '<missing-name>'}"
+        if not name:
+            errors.append(f"{label}: missing name")
+        elif name in component_names:
+            errors.append(f"{label}: duplicate component name")
+        component_names.add(name)
+        role = str(component.get("role", ""))
+        if role not in {"protocol", "library", "app"}:
+            errors.append(f"{label}: invalid role {role!r}")
+        path = str(component.get("canonical_path", ""))
+        errors.extend(check_rel_path(f"{label}.canonical_path", path))
+        if role == "app" and not path.startswith(apps_under + "/"):
+            errors.append(f"{label}: app canonical_path must be under {apps_under}: {path}")
+        if role == "library" and not path.startswith(libraries_under + "/"):
+            errors.append(f"{label}: library canonical_path must be under {libraries_under}: {path}")
+
+    print("xenia normalization plan check")
+    print(f"root: {root}")
+    print(f"moves: {len(manifest.get('move', []))}")
+    print(f"archive_rules: {len(manifest.get('archive_rule', []))}")
+    print(f"components: {len(manifest.get('component', []))}")
+
+    for warning in warnings:
+        print(f"WARN: {warning}", file=sys.stderr)
+    for error in errors:
+        print(f"FAIL: {error}", file=sys.stderr)
+    if errors:
+        return 1
+    print("normalization manifest is coherent")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("root", nargs="?", default=".", help="Xenia root")
+    args = parser.parse_args()
+    root = Path(args.root).resolve()
+    return check_manifest(root, load_manifest(root))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

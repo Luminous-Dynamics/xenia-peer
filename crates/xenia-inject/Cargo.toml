@@ -1,0 +1,30 @@
+[package]
+name = "xenia-inject"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "Apache-2.0 OR MIT"
+description = "Input-injection abstraction for the Xenia remote-session stack. Pointer / keyboard / touch events via platform backends. Ported from Symthaea's rdp_input.rs."
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+serde = { version = "1", features = ["derive"] }
+
+[features]
+default = []
+# wlr-virtual-pointer-v1 + zwp-virtual-keyboard-v1 backend for
+# wlroots compositors (Sway, Hyprland, labwc). Scaffold today;
+# real wayland-client plumbing lands with the matching
+# xenia-capture backend.
+wayland-virtual = []
+# uinput kernel-level backend. Works on any Linux with
+# /dev/uinput accessible (root, `input` group, or udev rule).
+uinput = []
+
+[dev-dependencies]
+bincode = "1.3"

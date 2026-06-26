@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${1:-.}"
+cd "$ROOT"
+
+failures=0
+
+section() {
+  printf '\n== %s ==\n' "$1"
+}
+
+fail_if_any() {
+  local title="$1"
+  shift
+
+  section "$title"
+
+  local tmp
+  tmp="$(mktemp)"
+  if "$@" > "$tmp"; then
+    if [ -s "$tmp" ]; then
+      cat "$tmp"
+      failures=$((failures + 1))
+    else
+      echo "clean"
+    fi
+  else
+    if [ -s "$tmp" ]; then
+      cat "$tmp"
+      failures=$((failures + 1))
+    else
+      echo "clean"
+    fi
+  fi
+  rm -f "$tmp"
+}
+
+warn_if_any() {
+  local title="$1"
+  shift
+
+  section "$title"
+
+  local tmp
+  tmp="$(mktemp)"
+  if "$@" > "$tmp"; then
+    if [ -s "$tmp" ]; then
+      cat "$tmp"
+    else
+      echo "clean"
+    fi
+  else
+    if [ -s "$tmp" ]; then
+      cat "$tmp"
+    else
+      echo "clean"
+    fi
+  fi
+  rm -f "$tmp"
+}
+
+# Hard failures: active generated/source-control artifacts.
+fail_if_any "archive bundles in active paths" \
+  find . \
+    -path './.git' -prune -o \
+    -path './_archive' -prune -o \
+    -type f \( -name '*.tar.gz' -o -name '*.tgz' -o -name '*.zip' \) -print
+
+fail_if_any "build output directories in active paths" \
+  find . \
+    -path './.git' -prune -o \
+    -path './_archive' -prune -o \
+    -type d \( -name target -o -name dist -o -name build -o -name node_modules \) -print
+
+fail_if_any "migration scratch scripts in active paths" \
+  find . \
+    -path './.git' -prune -o \
+    -path './_archive' -prune -o \
+    -maxdepth 2 \
+    -type f \( -name 'fix_transport*.py' -o -name '*scratch*.py' \) -print
+
+# Root .git is expected. Nested .git is not.
+fail_if_any "nested git repositories in active paths" \
+  find . \
+    -path './.git' -prune -o \
+    -path './_archive' -prune -o \
+    -type d -name .git -print
+
+# Hard failure only for source/config machine-local paths.
+fail_if_any "absolute local workspace references in source/config" \
+  rg -n \
+    --glob '!_archive/**' \
+    --glob '!target/**' \
+    --glob '!**/target/**' \
+    --glob '!*.md' \
+    '/srv/luminous-dynamics|/home/|/mnt/data|tristan\.stoltz@|evolvingresonantcocreationism\.com' .
+
+# Docs are warnings, because docs may intentionally describe forbidden examples.
+warn_if_any "absolute local workspace references in docs" \
+  rg -n \
+    --glob '!_archive/**' \
+    --glob '!target/**' \
+    --glob '!**/target/**' \
+    --glob '*.md' \
+    '/srv/luminous-dynamics|/home/|/mnt/data|tristan\.stoltz@|evolvingresonantcocreationism\.com' .
+
+warn_if_any "review markers for humans" \
+  rg -n \
+    --glob '!_archive/**' \
+    --glob '!target/**' \
+    --glob '!**/target/**' \
+    'DO NOT USE IN PRODUCTION|placeholder|stub|TODO|FIXME' .
+
+fail_if_any "local runtime secret/state files" \
+  find . \
+    -path './.git' -prune -o \
+    -path './_archive' -prune -o \
+    -type f \( -name '.env' -o -name '*.pem' -o -name '*.key' -o -name '*.sqlite' -o -name '*.db' \) -print
+
+section "cargo metadata smoke check"
+cargo metadata --format-version 1 --no-deps >/dev/null
+echo "cargo metadata: ok"
+
+if [ "$failures" -ne 0 ]; then
+  echo
+  echo "Xenia hygiene audit failed. Move historical/build artifacts to _archive and reconcile warnings."
+  exit 1
+fi
+
+echo
+echo "Xenia hygiene audit passed."

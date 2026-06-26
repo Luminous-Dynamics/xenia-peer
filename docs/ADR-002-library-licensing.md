@@ -48,7 +48,7 @@ Concrete assignment:
 | `xenia-transport-ws` | library | Apache-2.0 OR MIT (was AGPL; flipped) |
 | `xenia-handshake` (future) | library | Apache-2.0 OR MIT |
 | `xenia-inject` (future) | library | Apache-2.0 OR MIT |
-| `xenia-transport-quic` (future) | library | Apache-2.0 OR MIT |
+| `xenia-transport-quic` | library | Apache-2.0 OR MIT |
 | **`xenia-peer`** | binary | **AGPL-3.0-or-later** |
 | **`xenia-viewer`** | binary | **AGPL-3.0-or-later** |
 | `xenia-wire` (sibling repo) | library | Apache-2.0 OR MIT |
@@ -115,7 +115,7 @@ principle explicit for all future library crates.
 Several library files carry code ported from Symthaea:
 
 - `xenia-capture/src/lib.rs` — from `symthaea/src/swarm/rdp_capture.rs`
-- `xenia-video/src/h264.rs` — patterns from `symthaea/crates/symthaea-phone-embodiment/src/scrcpy/decoder.rs`
+- `xenia-video/src/h264.rs` — patterns from `symthaea/crates/crates/symthaea-phone-embodiment/src/scrcpy/decoder.rs`
 - `xenia-video/src/hdc.rs` — from `symthaea/src/swarm/rdp_codec.rs`
 
 All ported files carry the same copyright holder as their

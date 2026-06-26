@@ -1,0 +1,107 @@
+# Xenia implementation task manifest.
+# This file is intentionally small and machine-readable. It converts the
+# stabilization plan into concrete tickets for the first real normalization and
+# secure-default implementation branches.
+
+[meta]
+version = "0.1"
+stage = "implementation-closure-v10"
+owner = "luminous-dynamics/xenia-maintainers"
+policy = "pre-production"
+
+[[task]]
+id = "XN-001"
+title = "Run normalization execution on real workspace"
+kind = "normalization"
+priority = "P0"
+status = "ready"
+blocking_rc1 = true
+summary = "Apply the reviewed normalization plan on a dedicated branch, archive active build artifacts, move apps out of crates, and produce before/after evidence."
+commands = [
+  "scripts/create-normalization-snapshot.py . _archive/normalization-v0.2/snapshot-before.json",
+  "scripts/plan-normalization-execution.py . --output _archive/normalization-v0.2/execution-plan.json",
+  "scripts/apply-normalization-execution.py . --apply --plan _archive/normalization-v0.2/execution-plan.json --ledger _archive/normalization-v0.2/execution-ledger.json --rollback _archive/normalization-v0.2/rollback.sh",
+  "scripts/create-normalization-snapshot.py . _archive/normalization-v0.2/snapshot-after.json",
+  "scripts/check-post-normalization.py ."
+]
+acceptance = [
+  "No active target/dist/tarball/nested .git artifacts outside _archive.",
+  "Runnable apps are under xenia-peer/apps.",
+  "Reusable libraries remain under xenia-peer/crates.",
+  "Rollback script and ledger are committed or archived with the branch evidence."
+]
+
+[[task]]
+id = "XN-002"
+title = "Repair Cargo and Nix after app moves"
+kind = "build"
+priority = "P0"
+status = "blocked-on-XN-001"
+blocking_rc1 = true
+summary = "Update workspace members, package paths, app references, and flake checks after the apps/ move."
+commands = [
+  "cargo metadata --format-version 1 --no-deps",
+  "cargo check --workspace",
+  "nix flake check"
+]
+acceptance = [
+  "cargo metadata succeeds from xenia-peer.",
+  "cargo check --workspace succeeds or remaining failures are documented as code-level issues, not path-layout issues.",
+  "nix flake check reaches project checks on supported Linux targets."
+]
+
+[[task]]
+id = "XN-003"
+title = "Implement consent-state invariant tests"
+kind = "security-test"
+priority = "P0"
+status = "ready"
+blocking_rc1 = true
+summary = "Add tests proving privileged sessions cannot become Active without Presented and Granted states and stop on revoke/fault/expiry."
+commands = [
+  "scripts/scaffold-consent-tests.py . --stdout",
+  "cargo test consent_state --workspace"
+]
+acceptance = [
+  "Active requires Presented then Granted.",
+  "Revoked, Denied, Expired, and FaultClosed stop privileged flow.",
+  "Reconnect does not silently restore Active.",
+  "Ledger/audit events exist for session lifecycle transitions."
+]
+
+[[task]]
+id = "XN-004"
+title = "Convert runtime risk findings into issues"
+kind = "hardening"
+priority = "P1"
+status = "ready"
+blocking_rc1 = true
+summary = "Turn unwrap/expect/unsafe findings into auditable fix tickets or explicit exceptions before RC1."
+commands = [
+  "scripts/check-runtime-risk-patterns.py . --json _archive/runtime-risk.json",
+  "scripts/check-unsafe-surfaces.py . --json _archive/unsafe-surfaces.json",
+  "scripts/generate-fix-tickets.py . --markdown _archive/fix-tickets.md --json _archive/fix-tickets.json"
+]
+acceptance = [
+  "All runtime-risk findings are fixed, downgraded with rationale, or tracked in the ticket output.",
+  "All unsafe/FFI surfaces are justified or removed.",
+  "Strict runtime/unsafe scans are clean or have approved exceptions."
+]
+
+[[task]]
+id = "XN-005"
+title = "Publish CI artifacts for every validation run"
+kind = "ci"
+priority = "P1"
+status = "ready"
+blocking_rc1 = false
+summary = "Make validation outputs downloadable from CI so failed checks produce useful evidence."
+commands = [
+  "scripts/ci-collect-artifacts.sh . _archive/ci-artifacts"
+]
+acceptance = [
+  "Release dashboard markdown and JSON are generated.",
+  "Metrics JSON is generated.",
+  "Handoff report is generated.",
+  "Validation logs are captured even when checks fail."
+]

@@ -1,0 +1,98 @@
+# Xenia secure-defaults manifest.
+# This is not a substitute for a security review. It encodes the defaults that
+# must remain true while Xenia is pre-production.
+
+[manifest]
+manifest_version = 1
+stage = "pre-production"
+owner = "xenia"
+
+[secure_defaults]
+remote_control_enabled_by_default = false
+capture_enabled_by_default = false
+injection_enabled_by_default = false
+unattended_access_allowed = false
+consent_required_for_privileged_sessions = true
+consent_revocation_fail_closed = true
+ledger_required_for_privileged_sessions = true
+public_bind_requires_explicit_flag = true
+default_bind_address = "127.0.0.1"
+plaintext_credentials_allowed = false
+silent_session_start_allowed = false
+
+[network]
+allowed_default_binds = ["127.0.0.1", "localhost", "::1"]
+public_binds_requiring_review = ["0.0.0.0", "::", "[::]"]
+allowed_public_bind_files = []
+
+[scanner]
+# Source/config files produce hard findings. Docs produce warnings.
+source_extensions = [
+  ".rs", ".toml", ".json", ".yaml", ".yml", ".ts", ".tsx", ".js", ".jsx", ".html", ".sh", ".py"
+]
+doc_extensions = [".md", ".rst", ".txt"]
+exclude_dirs = [".git", "target", "dist", "node_modules", ".direnv", "_archive"]
+exclude_files = [
+  "scripts/check-secure-defaults.py",
+  "scripts/generate-release-dashboard.py",
+  "xenia.safety.toml"
+]
+
+[review_required_patterns]
+# Keep this intentionally small and low-noise. The scanner treats exact strings
+# as evidence that a security reviewer must look at the diff.
+hard = [
+  "consent_required = false",
+  "consentRequired: false",
+  "remote_control_enabled = true",
+  "remoteControlEnabled: true",
+  "capture_enabled = true",
+  "injection_enabled = true",
+  "unattended_access = true",
+  "allow_unattended = true",
+  "revocation_fail_open",
+  "fail_open",
+  "disable_consent",
+  "bypass_consent",
+  "skip_consent",
+  "dangerously_disable"
+]
+warning = [
+  "0.0.0.0",
+  "[::]",
+  "ws://",
+  "http://",
+  "allow_any_origin",
+  "Access-Control-Allow-Origin: *"
+]
+
+[reviewed_warnings]
+# Reviewed secure-default warning literals.
+#
+# These entries do not allow hard findings. They suppress warning-only literals
+# when the path, matched pattern, and source text all match an explicit review
+# rationale. Keep this list precise; do not replace it with broad file excludes.
+entries = [
+  { path = "README.md", pattern = "ws://", text_contains = "ws://...", reason = "README documents explicit WebSocket transport selection; it is not a default bind or privileged session start." },
+  { path = "ROADMAP.md", pattern = "ws://", text_contains = "selected by `auto` for `ws://...`", reason = "Roadmap documents transport behavior, not a secure default." },
+  { path = "apps/sovereign-admin/README.md", pattern = "http://", text_contains = "http://localhost:8134/login", reason = "Admin README uses loopback Trunk development URL." },
+  { path = "apps/sovereign-admin/index.html", pattern = "ws://", text_contains = "ws://localhost:8888", reason = "Sovereign admin conductor URL example is loopback-only development configuration." },
+  { path = "apps/sovereign-admin/src/config.rs", pattern = "http://", text_contains = "http://127.0.0.1:8134", reason = "Default admin endpoint is loopback-only during pre-production." },
+  { path = "apps/sovereign-admin/src/pages/login.rs", pattern = "ws://", text_contains = "ws://localhost:8888", reason = "Default Holochain conductor endpoint is loopback-only development configuration." },
+  { path = "apps/sovereign-admin/src/pages/consent.rs", pattern = "ws://", text_contains = "ws://127.0.0.1:8081/ws", reason = "Consent modal connects to loopback development websocket only." },
+  { path = "apps/sovereign-admin/src/pages/consent.rs", pattern = "ws://", text_contains = "ws://127.0.0.1:8082", reason = "Consent approve/deny path targets loopback development websocket only." },
+  { path = "apps/sovereign-admin/src/pages/monitor.rs", pattern = "http://", text_contains = "endpoint.replace(\"http://\", \"\")", reason = "Monitor derives a local development websocket host from the configured admin endpoint." },
+  { path = "apps/sovereign-admin/src/pages/monitor.rs", pattern = "ws://", text_contains = "ws://{}:8430/v1/thoughts", reason = "Athena thought stream is a development-only websocket derived from the configured admin host." },
+  { path = "apps/xenia-viewer/src/main.rs", pattern = "ws://", text_contains = "connect.starts_with(\"ws://\")", reason = "Viewer accepts explicit WebSocket URLs as user-selected transport, not as an insecure default." },
+  { path = "apps/xenia-viewer/src/main.rs", pattern = "ws://", text_contains = "format!(\"ws://{connect}\")", reason = "Viewer normalizes explicit host input into WebSocket transport; this is user-selected connection behavior." },
+  { path = "docs/security/SECURE_BY_DEFAULT_BASELINE.md", pattern = "0.0.0.0", text_contains = "0.0.0.0", reason = "Security baseline documents forbidden/review-required public bind examples." },
+  { path = "docs/security/SECURE_BY_DEFAULT_BASELINE.md", pattern = "[::]", text_contains = "[::]", reason = "Security baseline documents forbidden/review-required public bind examples." },
+  { path = "docs/security/SECURE_BY_DEFAULT_BASELINE.md", pattern = "skip_consent", text_contains = "skip_consent", reason = "Security baseline documents consent-bypass review triggers." },
+  { path = "docs/security/SECURE_BY_DEFAULT_BASELINE.md", pattern = "disable_consent", text_contains = "disable_consent", reason = "Security baseline documents consent-bypass review triggers." },
+  { path = "docs/security/SECURE_BY_DEFAULT_BASELINE.md", pattern = "bypass_consent", text_contains = "bypass_consent", reason = "Security baseline documents consent-bypass review triggers." },
+  { path = "docs/security/SECURE_BY_DEFAULT_BASELINE.md", pattern = "fail_open", text_contains = "fail_open", reason = "Security baseline documents fail-open review triggers." },
+  { path = "docs/implementation/NORMALIZATION_FOLLOWUPS.md", pattern = "ws://", text_contains = "local `http://` and `ws://` endpoints", reason = "Follow-up document tracks the secure-default review item itself." },
+  { path = "docs/implementation/NORMALIZATION_FOLLOWUPS.md", pattern = "http://", text_contains = "local `http://` and `ws://` endpoints", reason = "Follow-up document tracks the secure-default review item itself." },
+  { path = "crates/xenia-transport-ws/src/lib.rs", pattern = "ws://", text_contains = "format!(\"ws://{addr}\")", reason = "Literal appears in crate-local test code for loopback WebSocket conformance." },
+  { path = "crates/xenia-transport-ws/tests/transport_conformance.rs", pattern = "ws://", text_contains = "format!(\"ws://{addr}\")", reason = "Literal appears in integration test code for loopback WebSocket conformance." }
+]

@@ -1,0 +1,15 @@
+[build]
+target = "index.html"
+dist = "dist"
+
+[watch]
+watch = ["src", "styles", "index.html"]
+
+[serve]
+# Port 8134 — allocated to xenia-admin in the Mycelix port registry
+# (.claude/rules/PORTS.md). Admin console serves at:
+#   https://admin.<suite-domain> in production (via Cloudflare Tunnel)
+#   http://localhost:8134      in dev (trunk serve)
+address = "127.0.0.1"
+port = 8134
+open = false

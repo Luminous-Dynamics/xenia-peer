@@ -17,10 +17,10 @@ use std::time::Duration;
 
 use tokio::net::TcpListener;
 use tokio::time::timeout;
+use xenia_peer_core::handshake::{perform_host_handshake, perform_viewer_handshake};
 use xenia_peer_core::transport::{TcpTransport, Transport};
-use xenia_peer_core::{Session, SessionRole};
+use xenia_peer_core::{HandshakeManager, Session, SessionRole};
 
-const FIXTURE_KEY: [u8; 32] = [0xAB; 32];
 const FRAMES: u64 = 100;
 const INPUTS: u64 = 10;
 const FRAME_W: u32 = 32;
@@ -48,17 +48,18 @@ async fn hundred_frames_plus_inputs_roundtrip_over_tcp() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local_addr");
 
-    // Fixed source_id/epoch so both sides agree on the replay-window
-    // key even though the AEAD key is shared. This is the test-
-    // fixture pattern; in production each side has independent
-    // source_id + epoch.
     let server_task = tokio::spawn(async move {
         let (stream, _peer) = listener.accept().await.expect("accept");
         stream.set_nodelay(true).ok();
         let mut transport = TcpTransport::new(stream);
 
+        let mut handshake_mgr = HandshakeManager::new();
+        let session_key = perform_host_handshake(&mut transport, &mut handshake_mgr, "viewer")
+            .await
+            .expect("host handshake failed");
+
         let mut host = Session::with_fixture(SessionRole::Host, [0x11; 8], 0x42);
-        host.install_key(FIXTURE_KEY);
+        host.install_key(session_key);
 
         // Forward path: send FRAMES frames.
         for frame_id in 0..FRAMES {
@@ -87,8 +88,13 @@ async fn hundred_frames_plus_inputs_roundtrip_over_tcp() {
             .await
             .expect("connect");
 
+        let mut handshake_mgr = HandshakeManager::new();
+        let session_key = perform_viewer_handshake(&mut transport, &mut handshake_mgr, "host")
+            .await
+            .expect("viewer handshake failed");
+
         let mut viewer = Session::with_fixture(SessionRole::Viewer, [0x11; 8], 0x42);
-        viewer.install_key(FIXTURE_KEY);
+        viewer.install_key(session_key);
 
         // Receive FRAMES frames on the forward path.
         let mut received_frames = Vec::with_capacity(FRAMES as usize);
@@ -160,8 +166,14 @@ async fn replay_protection_across_real_transport() {
         let (stream, _) = listener.accept().await.unwrap();
         stream.set_nodelay(true).ok();
         let mut transport = TcpTransport::new(stream);
+
+        let mut handshake_mgr = HandshakeManager::new();
+        let session_key = perform_host_handshake(&mut transport, &mut handshake_mgr, "viewer")
+            .await
+            .expect("host handshake failed");
+
         let mut host = Session::with_fixture(SessionRole::Host, [0x22; 8], 0x43);
-        host.install_key(FIXTURE_KEY);
+        host.install_key(session_key);
 
         // Send the same frame twice — but seal it only ONCE, so the
         // second send is a real replay (identical envelope bytes).
@@ -172,8 +184,14 @@ async fn replay_protection_across_real_transport() {
 
     let viewer_task = tokio::spawn(async move {
         let mut transport = TcpTransport::connect(&addr.to_string()).await.unwrap();
+
+        let mut handshake_mgr = HandshakeManager::new();
+        let session_key = perform_viewer_handshake(&mut transport, &mut handshake_mgr, "host")
+            .await
+            .expect("viewer handshake failed");
+
         let mut viewer = Session::with_fixture(SessionRole::Viewer, [0x22; 8], 0x43);
-        viewer.install_key(FIXTURE_KEY);
+        viewer.install_key(session_key);
 
         let first = viewer
             .open_frame(&transport.recv_envelope().await.unwrap())

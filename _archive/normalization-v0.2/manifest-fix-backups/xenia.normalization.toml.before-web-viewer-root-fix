@@ -1,0 +1,177 @@
+# Xenia workspace-normalization manifest.
+#
+# This file is a planning source of truth. It does not move files by itself.
+# Use scripts/check-normalization-plan.py to validate it and
+# scripts/emit-normalization-plan.py to generate reviewable commands.
+
+[normalization]
+manifest_version = 1
+status = "planning"
+archive_root = "_archive"
+source_root = "."
+workspace = "xenia-peer"
+layout_mode_before = "transitional"
+layout_mode_after = "normalized"
+command_style = "git-mv-preferred"
+rollback_required = true
+snapshot_required = true
+
+[constraints]
+no_delete = true
+no_absolute_paths = true
+no_build_outputs_in_active_tree = true
+no_nested_git_in_active_tree = true
+source_archives_are_source_only = true
+apps_under = "xenia-peer/apps"
+libraries_under = "xenia-peer/crates"
+wire_crate = "xenia-wire"
+
+[[archive_rule]]
+id = "active-tarballs"
+summary = "Archive tarballs out of active source paths."
+pattern = "*.tar.gz"
+destination = "_archive/normalization-v0.2/tarballs"
+reason = "Tarballs inside crates/apps confuse source-of-truth and export hygiene."
+
+[[archive_rule]]
+id = "active-tgz"
+summary = "Archive tgz bundles out of active source paths."
+pattern = "*.tgz"
+destination = "_archive/normalization-v0.2/tarballs"
+reason = "Compressed artifacts should never be active workspace inputs."
+
+[[archive_rule]]
+id = "build-output-target"
+summary = "Archive Rust build output if it was accidentally captured."
+pattern = "target"
+destination = "_archive/normalization-v0.2/build-output"
+reason = "Build output is reproducible and should not be committed or exported."
+
+[[archive_rule]]
+id = "frontend-dist"
+summary = "Archive generated web distribution output."
+pattern = "dist"
+destination = "_archive/normalization-v0.2/build-output"
+reason = "Generated UI output belongs in release artifacts, not source archives."
+
+[[archive_rule]]
+id = "nested-git"
+summary = "Archive nested Git metadata before publishing a source archive."
+pattern = ".git"
+destination = "_archive/normalization-v0.2/nested-git-metadata"
+reason = "Nested Git metadata makes exports non-reproducible and leaks history/state."
+
+[[move]]
+id = "app-peer-daemon"
+kind = "app"
+source = "crates/xenia-peer"
+target = "apps/xenia-peer"
+reason = "The peer daemon is a runnable product surface, not a reusable library crate."
+validation = ["cargo metadata in xenia-peer", "daemon binary still resolves"]
+
+[[move]]
+id = "app-native-viewer"
+kind = "app"
+source = "crates/xenia-viewer"
+target = "apps/xenia-viewer"
+reason = "The native viewer is a runnable UI product surface."
+validation = ["cargo metadata in xenia-peer", "viewer binary still resolves"]
+
+[[move]]
+id = "app-web-viewer"
+kind = "app"
+source = "crates/xenia-viewer-web"
+target = "apps/xenia-viewer-web"
+reason = "The web viewer/admin frontend is an app surface and may have web build outputs."
+validation = ["frontend package metadata still resolves", "dist/ remains untracked"]
+
+[[move]]
+id = "app-sovereign-admin"
+kind = "app"
+source = "crates/sovereign-admin"
+target = "apps/sovereign-admin"
+reason = "The sovereign admin surface is an app/control-plane UI."
+validation = ["admin app manifest still resolves", "privileged admin actions remain audited"]
+
+[[component]]
+name = "xenia-wire"
+role = "protocol"
+canonical_path = "xenia-wire"
+may_depend_on = []
+
+[[component]]
+name = "xenia-peer-core"
+role = "library"
+canonical_path = "crates/xenia-peer-core"
+may_depend_on = ["xenia-wire"]
+
+[[component]]
+name = "xenia-capture"
+role = "library"
+canonical_path = "crates/xenia-capture"
+may_depend_on = ["xenia-peer-core", "xenia-wire"]
+
+[[component]]
+name = "xenia-video"
+role = "library"
+canonical_path = "crates/xenia-video"
+may_depend_on = ["xenia-peer-core", "xenia-wire"]
+
+[[component]]
+name = "xenia-handshake"
+role = "library"
+canonical_path = "crates/xenia-handshake"
+may_depend_on = ["xenia-peer-core", "xenia-wire"]
+
+[[component]]
+name = "xenia-ledger"
+role = "library"
+canonical_path = "crates/xenia-ledger"
+may_depend_on = ["xenia-peer-core", "xenia-wire"]
+
+[[component]]
+name = "xenia-transport-ws"
+role = "library"
+canonical_path = "crates/xenia-transport-ws"
+may_depend_on = ["xenia-peer-core", "xenia-wire"]
+
+[[component]]
+name = "xenia-transport-quic"
+role = "library"
+canonical_path = "crates/xenia-transport-quic"
+may_depend_on = ["xenia-peer-core", "xenia-wire"]
+
+[[component]]
+name = "xenia-inject"
+role = "library"
+canonical_path = "crates/xenia-inject"
+may_depend_on = ["xenia-peer-core"]
+
+[execution]
+manifest_version = 1
+plan_script = "scripts/plan-normalization-execution.py"
+apply_script = "scripts/apply-normalization-execution.py"
+post_check_script = "scripts/check-post-normalization.py"
+default_mode = "dry-run"
+ledger_destination = "_archive/normalization-v0.2"
+rollback_script_required = true
+cargo_member_rewrite = "known-move-table-only"
+allow_overwrite = false
+
+[[postcondition]]
+id = "no-active-artifacts"
+summary = "No tarballs, target directories, dist directories, or nested .git metadata remain outside _archive."
+checker = "scripts/check-post-normalization.py"
+severity = "hard"
+
+[[postcondition]]
+id = "apps-under-apps"
+summary = "Runnable Xenia product surfaces live under xenia-peer/apps."
+checker = "scripts/check-post-normalization.py"
+severity = "hard"
+
+[[postcondition]]
+id = "cargo-members-normalized"
+summary = "Cargo workspace members reference normalized app paths after app moves."
+checker = "scripts/check-post-normalization.py"
+severity = "hard"

@@ -1,0 +1,22 @@
+# Xenia ownership map.
+# Replace @Tristan-Stoltz-ERC with the real GitHub team/user
+# before making this repository public.
+
+* @Tristan-Stoltz-ERC
+
+/xenia-wire/ @Tristan-Stoltz-ERC
+/xenia-peer/crates/xenia-peer-core/ @Tristan-Stoltz-ERC
+/xenia-peer/crates/xenia-handshake/ @Tristan-Stoltz-ERC
+/xenia-peer/crates/xenia-ledger/ @Tristan-Stoltz-ERC
+/xenia-peer/crates/xenia-transport-quic/ @Tristan-Stoltz-ERC
+/xenia-peer/crates/xenia-transport-ws/ @Tristan-Stoltz-ERC
+/xenia-peer/crates/xenia-capture/ @Tristan-Stoltz-ERC
+/xenia-peer/crates/xenia-video/ @Tristan-Stoltz-ERC
+/xenia-peer/crates/xenia-inject/ @Tristan-Stoltz-ERC
+/xenia-peer/apps/ @Tristan-Stoltz-ERC
+/docs/security/ @Tristan-Stoltz-ERC
+/scripts/ @Tristan-Stoltz-ERC
+/xenia.policy.toml @Tristan-Stoltz-ERC
+/xenia.safety.toml @Tristan-Stoltz-ERC
+/xenia.release.toml @Tristan-Stoltz-ERC
+/xenia.normalization.toml @Tristan-Stoltz-ERC

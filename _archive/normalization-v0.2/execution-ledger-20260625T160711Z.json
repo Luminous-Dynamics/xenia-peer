@@ -1,0 +1,63 @@
+{
+  "applied": [
+    {
+      "action": "archive",
+      "source": "target",
+      "status": "moved",
+      "target": "_archive/normalization-v0.2/build-output/target"
+    },
+    {
+      "action": "move",
+      "source": "crates/xenia-viewer",
+      "status": "moved",
+      "target": "apps/xenia-viewer"
+    },
+    {
+      "action": "move",
+      "source": "crates/xenia-peer",
+      "status": "moved",
+      "target": "apps/xenia-peer"
+    },
+    {
+      "action": "move",
+      "source": "crates/sovereign-admin",
+      "status": "moved",
+      "target": "apps/sovereign-admin"
+    },
+    {
+      "action": "rewrite_cargo_member",
+      "cargo_toml": "Cargo.toml",
+      "count": 1,
+      "from": "crates/sovereign-admin",
+      "status": "rewritten",
+      "to": "apps/sovereign-admin"
+    },
+    {
+      "action": "rewrite_cargo_member",
+      "cargo_toml": "Cargo.toml",
+      "count": 2,
+      "from": "crates/xenia-peer",
+      "status": "rewritten",
+      "to": "apps/xenia-peer"
+    },
+    {
+      "action": "rewrite_cargo_member",
+      "cargo_toml": "Cargo.toml",
+      "count": 2,
+      "from": "crates/xenia-viewer",
+      "status": "rewritten",
+      "to": "apps/xenia-viewer"
+    }
+  ],
+  "applied_count": 7,
+  "blocked": [],
+  "blocked_count": 0,
+  "dry_run": [],
+  "dry_run_count": 0,
+  "ledger": "/srv/luminous-dynamics/xenia/xenia-peer/_archive/normalization-v0.2/execution-ledger-20260625T160711Z.json",
+  "mode": "apply",
+  "plan": "/srv/luminous-dynamics/xenia/xenia-peer/_archive/normalization-v0.2/execution-plan.sanitized.json",
+  "rollback": "/srv/luminous-dynamics/xenia/xenia-peer/_archive/normalization-v0.2/rollback-20260625T160711Z.sh",
+  "root": "/srv/luminous-dynamics/xenia/xenia-peer",
+  "schema": "xenia.normalization.execution-ledger.v1"
+}

@@ -1,0 +1,123 @@
+# Xenia project policy manifest.
+#
+# This file is intentionally small and machine-readable. It defines the current
+# safety posture and boundary expectations that validation scripts can enforce
+# before Xenia is treated as a release candidate.
+
+[project]
+name = "xenia"
+stage = "pre-production"
+policy_version = 1
+archive_root = "_archive"
+
+[layout]
+mode = "normalized"
+wire_roots = ["xenia-wire"]
+peer_workspace_roots = ["xenia-peer"]
+library_roots = ["xenia-peer/crates", "."]
+app_roots = ["xenia-peer/apps", "."]
+
+[release]
+source_archives_must_be_clean = true
+build_outputs_forbidden = true
+nested_git_forbidden = true
+absolute_workspace_paths_forbidden = true
+cargo_boundary_check_required = true
+runtime_risk_report_required = true
+consent_abuse_review_required = true
+threat_model_review_required = true
+
+[security]
+remote_control_default = "disabled"
+consent_required_for_input = true
+consent_required_for_capture = true
+revocation_must_fail_closed = true
+ledger_required_for_privileged_sessions = true
+operator_auth_required = true
+pre_shared_dev_keys_forbidden_in_release = true
+
+[[component]]
+name = "xenia-wire"
+kind = "protocol"
+release_role = "publishable-foundation"
+may_depend_on_product = false
+may_depend_on_apps = false
+
+[[component]]
+name = "xenia-peer-core"
+kind = "library"
+release_role = "shared-runtime-types"
+may_depend_on_apps = false
+
+[[component]]
+name = "xenia-handshake"
+kind = "library"
+release_role = "identity-session-bootstrap"
+may_depend_on_apps = false
+
+[[component]]
+name = "xenia-ledger"
+kind = "library"
+release_role = "audit-provenance"
+may_depend_on_apps = false
+
+[[component]]
+name = "xenia-capture"
+kind = "library"
+release_role = "screen-audio-capture"
+may_depend_on_apps = false
+
+[[component]]
+name = "xenia-video"
+kind = "library"
+release_role = "encode-decode-pipeline"
+may_depend_on_apps = false
+
+[[component]]
+name = "xenia-transport-ws"
+kind = "library"
+release_role = "browser-dev-transport"
+may_depend_on_apps = false
+
+[[component]]
+name = "xenia-transport-quic"
+kind = "library"
+release_role = "low-latency-transport"
+may_depend_on_apps = false
+
+[[component]]
+name = "xenia-inject"
+kind = "library"
+release_role = "input-injection"
+may_depend_on_apps = false
+
+[[component]]
+name = "xenia-peer"
+kind = "app"
+release_role = "daemon"
+requires_consent_review = true
+
+[[component]]
+name = "xenia-viewer"
+kind = "app"
+release_role = "native-viewer"
+requires_consent_review = true
+
+[[component]]
+name = "xenia-viewer-web"
+kind = "app"
+release_role = "web-viewer"
+requires_consent_review = true
+
+[[component]]
+name = "sovereign-admin"
+kind = "app"
+release_role = "operator-admin-ui"
+requires_consent_review = true
+
+[quality]
+release_readiness_manifest_required = true
+unsafe_surface_report_required = true
+fault_injection_plan_required = true
+observability_event_taxonomy_required = true
+metrics_snapshot_recommended = true

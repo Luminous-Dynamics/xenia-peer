@@ -1,0 +1,26 @@
+[package]
+name = "xenia-handshake"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "Apache-2.0 OR MIT"
+description = "Post-quantum hybrid handshake (Ed25519 + ML-KEM-768 + HKDF-SHA-256) for the Xenia remote-session stack. Fresh implementation against RustCrypto primitives; API-aligned with Symthaea's pqc_handshake but self-contained."
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+serde = { version = "1", features = ["derive"] }
+
+ml-kem = { version = "0.3.0-rc.2", default-features = false, features = ["zeroize", "getrandom"] }
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+bincode = "1.3"

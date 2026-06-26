@@ -1,0 +1,15 @@
+--- XENIA_IMPROVEMENTS_APPLIED.md	2026-06-23 21:15:11.835155786 +0000
++++ XENIA_IMPROVEMENTS_APPLIED.md	2026-06-23 21:17:38.703085387 +0000
+@@ -90,3 +90,12 @@
+ - Added `docs/architecture/NORMALIZATION_ADR.md`, `docs/runbooks/WORKSPACE_NORMALIZATION_RUNBOOK.md`, and `docs/release/POST_NORMALIZATION_ACCEPTANCE.md`.
+ - Added `docs/agents/FILE_TOUCH_POLICY.md` and `docs/testing/SECURE_CONTROL_ACCEPTANCE_TESTS.md`.
+ - Updated validation, preflight, handoff, and release-train files to include normalization-plan evidence.
++
++## v8 add-on: normalization execution safety
++
++- Added `scripts/plan-normalization-execution.py` to generate deterministic JSON execution plans from `xenia.normalization.toml` and the live tree.
++- Added `scripts/apply-normalization-execution.py`, a dry-run-first executor that never overwrites targets and writes an execution ledger plus rollback script when `--apply` is used.
++- Added `scripts/check-post-normalization.py` to verify app/library placement, active artifact cleanup, and Cargo workspace-member updates after normalization.
++- Extended `xenia.normalization.toml` with execution metadata and postconditions.
++- Added `docs/runbooks/NORMALIZATION_EXECUTION_PROTOCOL.md`, `docs/release/NORMALIZATION_EXECUTION_ACCEPTANCE.md`, and `docs/agents/NORMALIZATION_AGENT_RULES.md`.
++- Updated validation, preflight, handoff, and release-train files to include normalization execution evidence and post-move checks.

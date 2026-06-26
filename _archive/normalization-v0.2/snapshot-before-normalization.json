@@ -1,0 +1,151 @@
+{
+  "generated_utc": "2026-06-25T15:46:43+00:00",
+  "manifest_version": 1,
+  "paths": [
+    {
+      "exists": false,
+      "kind": "missing",
+      "path": "apps/sovereign-admin"
+    },
+    {
+      "exists": false,
+      "kind": "missing",
+      "path": "apps/xenia-peer"
+    },
+    {
+      "exists": false,
+      "kind": "missing",
+      "path": "apps/xenia-viewer"
+    },
+    {
+      "exists": false,
+      "kind": "missing",
+      "path": "apps/xenia-viewer-web"
+    },
+    {
+      "bytes": 65293,
+      "exists": true,
+      "file_count": 19,
+      "kind": "directory",
+      "metadata": {
+        "crates/sovereign-admin/Cargo.toml": "b60c34c98ddfac9d09c0f5f065aef775218c2b9cebe9265cbc28b0b0256204fd",
+        "crates/sovereign-admin/README.md": "22dbccfd39abfe0582e143ded212acfdfaa2ed5c3c17d302105ef5c36ce37f3d",
+        "crates/sovereign-admin/Trunk.toml": "8aa94cc91968a4387164755132be6586140a7dfbcc405feff9fbf9c75af43e2a"
+      },
+      "path": "crates/sovereign-admin"
+    },
+    {
+      "bytes": 51602,
+      "exists": true,
+      "file_count": 4,
+      "kind": "directory",
+      "metadata": {
+        "crates/xenia-capture/Cargo.toml": "c24749b505f1c99bc321e25ec637d3f1b0204a561ff90bb1d651ec9c3fbeb78f"
+      },
+      "path": "crates/xenia-capture"
+    },
+    {
+      "bytes": 23243,
+      "exists": true,
+      "file_count": 2,
+      "kind": "directory",
+      "metadata": {
+        "crates/xenia-handshake/Cargo.toml": "e0fefe227cfaff5307bf411a92a17f504cf5430a0cfafb90585fd788c2baa99c"
+      },
+      "path": "crates/xenia-handshake"
+    },
+    {
+      "bytes": 18758,
+      "exists": true,
+      "file_count": 2,
+      "kind": "directory",
+      "metadata": {
+        "crates/xenia-inject/Cargo.toml": "d34e84e31b357882329058b517a3d343ce45145126e5820f2d6457cbbb6ff0a2"
+      },
+      "path": "crates/xenia-inject"
+    },
+    {
+      "bytes": 24225,
+      "exists": true,
+      "file_count": 3,
+      "kind": "directory",
+      "metadata": {
+        "crates/xenia-ledger/Cargo.toml": "4835584559ec979a019d43790adb2e2a698304ce68a57e8c6cba34711e789ed3",
+        "crates/xenia-ledger/README.md": "34178bb8b989baeff4a5aae167c5ec1624197855d66f0ce6b8db3b4eb4c125c0"
+      },
+      "path": "crates/xenia-ledger"
+    },
+    {
+      "bytes": 29663,
+      "exists": true,
+      "file_count": 4,
+      "kind": "directory",
+      "metadata": {
+        "crates/xenia-peer/Cargo.toml": "ed944ce82e883683e4458952e2368c966c1edef863ecafe181f20f852e9f45ff"
+      },
+      "path": "crates/xenia-peer"
+    },
+    {
+      "bytes": 64494,
+      "exists": true,
+      "file_count": 9,
+      "kind": "directory",
+      "metadata": {
+        "crates/xenia-peer-core/Cargo.toml": "7ed15cf6d3fffb349793f6b0c5e003315edb3ba7406c0728971245167c2cd7d4"
+      },
+      "path": "crates/xenia-peer-core"
+    },
+    {
+      "bytes": 15685,
+      "exists": true,
+      "file_count": 3,
+      "kind": "directory",
+      "metadata": {
+        "crates/xenia-transport-quic/Cargo.toml": "90e4f7471d759c968b432f53e25d4b7fbc0821a395311873ed3e1c6eaf12df7b"
+      },
+      "path": "crates/xenia-transport-quic"
+    },
+    {
+      "bytes": 18661,
+      "exists": true,
+      "file_count": 3,
+      "kind": "directory",
+      "metadata": {
+        "crates/xenia-transport-ws/Cargo.toml": "3d1b31c05175f7264e93f0cc3670a78f522e025d67431581276e583fee684608"
+      },
+      "path": "crates/xenia-transport-ws"
+    },
+    {
+      "bytes": 69369,
+      "exists": true,
+      "file_count": 5,
+      "kind": "directory",
+      "metadata": {
+        "crates/xenia-video/Cargo.toml": "1d69f5a8cacd5958fcc66d03035890e704d425f164936ab2d010a5bb28f0ddf1"
+      },
+      "path": "crates/xenia-video"
+    },
+    {
+      "bytes": 39210,
+      "exists": true,
+      "file_count": 3,
+      "kind": "directory",
+      "metadata": {
+        "crates/xenia-viewer/Cargo.toml": "0857ddb4bf924bb1114442ebb80b463bd4079a890a71c912df44594ef656248a"
+      },
+      "path": "crates/xenia-viewer"
+    },
+    {
+      "exists": false,
+      "kind": "missing",
+      "path": "crates/xenia-viewer-web"
+    },
+    {
+      "exists": false,
+      "kind": "missing",
+      "path": "xenia-wire"
+    }
+  ],
+  "root": "/srv/luminous-dynamics/xenia/xenia-peer",
+  "schema": "xenia.normalization.snapshot.v1"
+}
