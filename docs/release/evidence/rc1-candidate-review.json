@@ -1,0 +1,107 @@
+{
+  "blockers": {
+    "hard": [],
+    "hard_count": 0,
+    "soft": [],
+    "soft_count": 0
+  },
+  "checks": [
+    {
+      "command": [
+        "bash",
+        "scripts/xenia-validate.sh",
+        "."
+      ],
+      "exit_code": 0,
+      "name": "xenia-validate",
+      "status": "pass"
+    },
+    {
+      "command": [
+        "python3",
+        "scripts/check-release-readiness.py",
+        "."
+      ],
+      "exit_code": 0,
+      "name": "release-readiness",
+      "status": "pass"
+    },
+    {
+      "command": [
+        "python3",
+        "scripts/check-release-readiness.py",
+        ".",
+        "--rc1"
+      ],
+      "exit_code": 0,
+      "name": "release-readiness-rc1",
+      "status": "pass"
+    }
+  ],
+  "decision": {
+    "promotion_performed": false,
+    "promotion_policy": "Promotion must be a separate explicit PR after this review passes.",
+    "rc1_candidate_review_ready": true
+  },
+  "evidence": [
+    {
+      "name": "normalization review",
+      "path": "docs/release/evidence/NORMALIZATION_V0_2_EVIDENCE_REVIEW.md",
+      "present": true,
+      "purpose": "normalization manifest, execution plan, ledger, and current after-snapshot were reviewed",
+      "sha256": "3c8fc8bcf7b1d3313aa003168fc3c3efe93d2c3c52addf529d5b8bb70d0cba08",
+      "size_bytes": 1740
+    },
+    {
+      "name": "release dashboard",
+      "path": "docs/release/evidence/RC1_RELEASE_DASHBOARD.md",
+      "present": true,
+      "purpose": "RC1 dashboard evidence was generated from the normalized branch",
+      "sha256": "8542ed088b7e5f22380bb66eeaaeaff17ce010f836aa5ee059b0e918def56bc3",
+      "size_bytes": 16164
+    },
+    {
+      "name": "source archive checksums",
+      "path": "docs/release/evidence/RC1_SOURCE_ARCHIVE_CHECKSUMS.md",
+      "present": true,
+      "purpose": "source archive generation has deterministic checksum evidence",
+      "sha256": "54f91a7e04f19a4d5db9836a2428018988ec589bbdf8141dc246bbf449db92c0",
+      "size_bytes": 936
+    },
+    {
+      "name": "normalization dry-run",
+      "path": "docs/release/evidence/NORMALIZATION_V0_2_DRY_RUN_EVIDENCE.md",
+      "present": true,
+      "purpose": "normalization executor dry-run evidence exists for the current normalized tree",
+      "sha256": "8792d40b8bf4bc77df7562f84d7c62bfdb08468f88e6ca3f34b424abf4d2937b",
+      "size_bytes": 1102
+    },
+    {
+      "name": "transport fault injection",
+      "path": "docs/release/evidence/RC1_TRANSPORT_FAULT_INJECTION.md",
+      "present": true,
+      "purpose": "transport fault-injection coverage was expanded and recorded",
+      "sha256": "82ce57784f48bc54e5f4eba6bcc66d215d289648344480b39b9f7a2709843fe5",
+      "size_bytes": 1298
+    },
+    {
+      "name": "admin audit event names",
+      "path": "docs/release/evidence/RC1_ADMIN_AUDIT_EVENT_NAMES.md",
+      "present": true,
+      "purpose": "operator/admin audit event names have a stable dot-namespaced contract",
+      "sha256": "b1f513cf6d7bde97d1f327cecdfee4fc85488d04d35e7a38e5f812a8d69f19b9",
+      "size_bytes": 853
+    }
+  ],
+  "generated_by": "scripts/generate-rc1-candidate-review.py",
+  "git": {
+    "branch": "xenia/rc1-candidate-review-v0.1",
+    "head": "43dcf0e"
+  },
+  "release_train": {
+    "current_milestone": "normalization-v0.2",
+    "next_candidate": "rc1",
+    "status": "pre-rc"
+  },
+  "schema": "xenia.rc1_candidate_review.v1"
+}
