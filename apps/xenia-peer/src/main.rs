@@ -37,6 +37,7 @@ use xenia_video::{
 use xenia_capture::ScapCapture;
 
 mod governance;
+mod m1_ledger;
 use crate::governance::{GovernanceBridge, MitigationRule};
 
 #[derive(Parser, Debug)]
