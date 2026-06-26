@@ -87,5 +87,4 @@ exit_criteria = [
 # any hard blocker remains.
 hard = []
 soft = [
-  "operator/admin audit events need stable names"
 ]

@@ -76,9 +76,11 @@ consent.granted
 consent.denied
 session.active_started
 session.revocation_requested
-session.revoked
+consent.revoked
+consent.protocol_violation
 session.expired
 session.fault_closed
 ```
 
-These names should eventually line up with `docs/observability/EVENT_TAXONOMY.md`.
+These names now line up with `docs/observability/EVENT_TAXONOMY.md` for the
+ledger-backed consent/admin events exposed by `xenia-ledger`.

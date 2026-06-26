@@ -81,6 +81,25 @@ pub enum ConsentKind {
     AthenaTriage,
 }
 
+impl ConsentKind {
+    /// Stable dot-namespaced audit event name for this consent event kind.
+    ///
+    /// These names are part of the operator/admin audit contract. They are
+    /// intentionally decoupled from Rust enum variant spelling so UI labels,
+    /// release evidence, and downstream audit consumers do not depend on
+    /// `Debug` formatting.
+    pub const fn stable_name(self) -> &'static str {
+        match self {
+            Self::Request => "consent.requested",
+            Self::Approval => "consent.granted",
+            Self::Denial => "consent.denied",
+            Self::Revocation => "consent.revoked",
+            Self::Violation => "consent.protocol_violation",
+            Self::AthenaTriage => "admin.athena_triage",
+        }
+    }
+}
+
 /// A single consent event. Carries enough context for an auditor to
 /// reconstruct which session, which request, and which party was
 /// involved.
@@ -100,6 +119,13 @@ pub struct ConsentEventRecord {
     /// `"view screen, inject input on /dev/tty1"`). Audit trails
     /// benefit from this; verification does not depend on it.
     pub scope: String,
+}
+
+impl ConsentEventRecord {
+    /// Stable dot-namespaced audit event name for this record.
+    pub const fn stable_name(&self) -> &'static str {
+        self.kind.stable_name()
+    }
 }
 
 /// A signed, chained ledger entry. Every field is covered by
@@ -356,6 +382,31 @@ mod tests {
 
     fn new_signing_key() -> SigningKey {
         SigningKey::generate(&mut OsRng)
+    }
+
+    #[test]
+    fn consent_kind_stable_names_are_contractual() {
+        let cases = [
+            (ConsentKind::Request, "consent.requested"),
+            (ConsentKind::Approval, "consent.granted"),
+            (ConsentKind::Denial, "consent.denied"),
+            (ConsentKind::Revocation, "consent.revoked"),
+            (ConsentKind::Violation, "consent.protocol_violation"),
+            (ConsentKind::AthenaTriage, "admin.athena_triage"),
+        ];
+
+        for (kind, expected) in cases {
+            assert_eq!(kind.stable_name(), expected);
+            assert!(expected.contains('.'));
+            assert_eq!(expected, expected.to_ascii_lowercase());
+            assert!(!expected.contains(' '));
+        }
+    }
+
+    #[test]
+    fn consent_event_record_uses_stable_kind_name() {
+        let event = sample_event(ConsentKind::Approval);
+        assert_eq!(event.stable_name(), "consent.granted");
     }
 
     #[test]

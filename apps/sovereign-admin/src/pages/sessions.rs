@@ -192,8 +192,9 @@ fn VerifiableLedger(
                 <tbody>
                     {move || entries.get().into_iter().enumerate().map(|(idx, entry)| {
                         let hash_hex = hex_short(&entry.entry_hash);
-                        let kind_str = format!("{:?}", entry.event.kind);
-                        let mut kind_class = format!("kind kind-{}", kind_str.to_lowercase());
+                        let kind_str = entry.event.stable_name();
+                        let kind_class_suffix = kind_str.replace('.', "-");
+                        let mut kind_class = format!("kind kind-{kind_class_suffix}");
                         if entry.event.kind == ConsentKind::AthenaTriage {
                             kind_class.push_str(" ai-triage");
                         }
@@ -202,7 +203,7 @@ fn VerifiableLedger(
                                 <td class="numeric">{entry.seq}</td>
                                 <td class=kind_class>
                                     {if entry.event.kind == ConsentKind::AthenaTriage { "🤖 " } else { "" }}
-                                    {kind_str}
+                                    {kind_str.to_string()}
                                 </td>
                                 <td>{entry.event.scope.clone()}</td>
                                 <td><code class="hash">{hash_hex}</code></td>

@@ -1,0 +1,86 @@
+{
+  "commands": [
+    {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "xenia-ledger",
+        "consent_kind_stable_names_are_contractual",
+        "--",
+        "--exact"
+      ],
+      "id": "ledger-stable-name-contract",
+      "output": "Compiling libc v0.2.186\n   Compiling serde_core v1.0.228\n   Compiling serde v1.0.228\n   Compiling typenum v1.19.0\n   Compiling zeroize v1.9.0\n   Compiling curve25519-dalek v4.1.3\n   Compiling getrandom v0.4.2\n   Compiling serde_derive v1.0.228\n   Compiling curve25519-dalek-derive v0.1.1\n   Compiling thiserror-impl v2.0.18\n   Compiling thiserror v2.0.18\n   Compiling generic-array v0.14.7\n   Compiling getrandom v0.2.17\n   Compiling crypto-common v0.1.7\n   Compiling block-buffer v0.10.4\n   Compiling rand_core v0.6.4\n   Compiling digest v0.10.7\n   Compiling rand_chacha v0.3.1\n   Compiling sha2 v0.10.9\n   Compiling rand v0.8.6\n   Compiling uuid v1.23.1\n   Compiling ed25519 v2.2.3\n   Compiling serde-big-array v0.5.1\n   Compiling bincode v1.3.3\n   Compiling ed25519-dalek v2.2.0\n   Compiling xenia-ledger v0.0.0-m0 (<workspace>/crates/xenia-ledger)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.94s\n     Running unittests src/lib.rs (<tmp-path>)\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s",
+      "passed": true,
+      "returncode": 0
+    },
+    {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "xenia-ledger",
+        "consent_event_record_uses_stable_kind_name",
+        "--",
+        "--exact"
+      ],
+      "id": "ledger-record-stable-name",
+      "output": "Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s\n     Running unittests src/lib.rs (<tmp-path>)\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s",
+      "passed": true,
+      "returncode": 0
+    },
+    {
+      "command": [
+        "python3",
+        "scripts/check-consent-coverage.py",
+        ".",
+        "--strict"
+      ],
+      "id": "consent-coverage",
+      "output": "Consent coverage scan\n  missing events: 0\n  missing states: 0",
+      "passed": true,
+      "returncode": 0
+    }
+  ],
+  "passed": true,
+  "schema": "xenia.rc1.admin_audit_event_names.v1",
+  "stable_names": {
+    "expected_names": [
+      "consent.requested",
+      "consent.granted",
+      "consent.denied",
+      "consent.revoked",
+      "consent.protocol_violation",
+      "admin.athena_triage"
+    ],
+    "hits": {
+      "admin.athena_triage": [
+        "crates/xenia-ledger/src/lib.rs",
+        "docs/observability/EVENT_TAXONOMY.md"
+      ],
+      "consent.denied": [
+        "crates/xenia-ledger/src/lib.rs",
+        "docs/observability/EVENT_TAXONOMY.md"
+      ],
+      "consent.granted": [
+        "crates/xenia-ledger/src/lib.rs",
+        "docs/observability/EVENT_TAXONOMY.md"
+      ],
+      "consent.protocol_violation": [
+        "crates/xenia-ledger/src/lib.rs",
+        "docs/observability/EVENT_TAXONOMY.md"
+      ],
+      "consent.requested": [
+        "crates/xenia-ledger/src/lib.rs",
+        "docs/observability/EVENT_TAXONOMY.md"
+      ],
+      "consent.revoked": [
+        "crates/xenia-ledger/src/lib.rs",
+        "docs/observability/EVENT_TAXONOMY.md"
+      ]
+    },
+    "missing": []
+  },
+  "workspace": "xenia-peer"
+}
