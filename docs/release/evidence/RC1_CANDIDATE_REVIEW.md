@@ -3,13 +3,13 @@
 Status: generated for explicit RC1 candidate review.
 
 This evidence confirms that Xenia has exited blocker burn-down while still
-remaining in `pre-rc` status. It does not promote the release train.
+recording the current release-train status. Before promotion this is `pre-rc`; after the explicit promotion PR this is `rc`.
 
 ## Release train
 
 - Current milestone: `normalization-v0.2`
 - Next candidate: `rc1`
-- Release status: `pre-rc`
+- Release status: `rc`
 - Hard blockers: `0`
 - Soft blockers: `0`
 
@@ -35,8 +35,8 @@ remaining in `pre-rc` status. It does not promote the release train.
 ## Decision
 
 - RC1 candidate review ready: `True`
-- Promotion performed: `False`
-- Promotion policy: Promotion must be a separate explicit PR after this review passes.
+- Promotion performed: `True`
+- Promotion policy: Promotion must be a separate explicit PR after candidate review passes; status rc records that promotion has occurred.
 
 ## Next step
 

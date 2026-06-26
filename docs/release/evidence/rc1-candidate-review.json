@@ -39,8 +39,8 @@
     }
   ],
   "decision": {
-    "promotion_performed": false,
-    "promotion_policy": "Promotion must be a separate explicit PR after this review passes.",
+    "promotion_performed": true,
+    "promotion_policy": "Promotion must be a separate explicit PR after candidate review passes; status rc records that promotion has occurred.",
     "rc1_candidate_review_ready": true
   },
   "evidence": [
@@ -97,7 +97,7 @@
   "release_train": {
     "current_milestone": "normalization-v0.2",
     "next_candidate": "rc1",
-    "status": "pre-rc"
+    "status": "rc"
   },
   "review_scope": {
     "git_identity_recorded": false,

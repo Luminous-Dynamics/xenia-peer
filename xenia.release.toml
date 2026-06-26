@@ -7,7 +7,7 @@
 manifest_version = 1
 current_milestone = "normalization-v0.2"
 next_candidate = "rc1"
-status = "pre-rc"
+status = "rc"
 release_branch_prefix = "release/xenia-"
 archive_root = "_archive"
 
