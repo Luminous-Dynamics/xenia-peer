@@ -87,7 +87,6 @@ exit_criteria = [
 # any hard blocker remains.
 hard = []
 soft = [
-  "source archives need reproducible checksum manifest",
   "normalization executor should be dry-run once on the production tree before apply",
   "release dashboard should be generated from the normalized branch",
   "transport fault-injection tests need expansion",
