@@ -178,9 +178,10 @@ def collect(root: Path) -> dict:
     return {
         "schema": "xenia.rc1_candidate_review.v1",
         "generated_by": "scripts/generate-rc1-candidate-review.py",
-        "git": {
-            "branch": git_value(root, ["branch", "--show-current"]),
-            "head": git_value(root, ["rev-parse", "--short", "HEAD"]),
+        "review_scope": {
+            "workspace": "current checkout",
+            "git_identity_recorded": False,
+            "reason": "Branch names and commit SHAs change across squash merges; RC1 evidence is structural.",
         },
         "release_train": {
             "status": release_train.get("status", "unknown"),

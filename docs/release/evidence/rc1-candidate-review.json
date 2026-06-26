@@ -94,14 +94,15 @@
     }
   ],
   "generated_by": "scripts/generate-rc1-candidate-review.py",
-  "git": {
-    "branch": "xenia/rc1-candidate-review-v0.1",
-    "head": "43dcf0e"
-  },
   "release_train": {
     "current_milestone": "normalization-v0.2",
     "next_candidate": "rc1",
     "status": "pre-rc"
+  },
+  "review_scope": {
+    "git_identity_recorded": false,
+    "reason": "Branch names and commit SHAs change across squash merges; RC1 evidence is structural.",
+    "workspace": "current checkout"
   },
   "schema": "xenia.rc1_candidate_review.v1"
 }
