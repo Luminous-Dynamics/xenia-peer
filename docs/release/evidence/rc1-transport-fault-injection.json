@@ -1,0 +1,114 @@
+{
+  "all_cases_passed": true,
+  "cases": [
+    {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "xenia-transport-ws",
+        "--test",
+        "transport_conformance",
+        "tcp_detects_truncated_envelope_as_unexpected_eof",
+        "--",
+        "--exact"
+      ],
+      "crate": "xenia-transport-ws",
+      "exit_code": 0,
+      "expected": "receiver returns TransportError::UnexpectedEof without session decode",
+      "fault": "TCP peer closes before the advertised envelope length is satisfied.",
+      "id": "tcp-truncated-envelope",
+      "output": "Compiling xenia-transport-ws v0.0.0-m0 (<repo-root>/crates/xenia-transport-ws)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.29s\n     Running tests/transport_conformance.rs (<tmp-path>)\n\nrunning 1 test\ntest tcp_detects_truncated_envelope_as_unexpected_eof ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s",
+      "passed": true,
+      "test": "tcp_detects_truncated_envelope_as_unexpected_eof"
+    },
+    {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "xenia-transport-ws",
+        "--test",
+        "transport_conformance",
+        "tcp_rejects_oversize_receive_before_allocation",
+        "--",
+        "--exact"
+      ],
+      "crate": "xenia-transport-ws",
+      "exit_code": 0,
+      "expected": "receiver returns TransportError::EnvelopeTooLarge before payload allocation",
+      "fault": "TCP peer advertises an envelope larger than MAX_ENVELOPE_BYTES.",
+      "id": "tcp-oversize-prefix",
+      "output": "Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s\n     Running tests/transport_conformance.rs (<tmp-path>)\n\nrunning 1 test\ntest tcp_rejects_oversize_receive_before_allocation ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s",
+      "passed": true,
+      "test": "tcp_rejects_oversize_receive_before_allocation"
+    },
+    {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "xenia-transport-ws",
+        "--test",
+        "transport_conformance",
+        "websocket_rejects_oversize_send_without_poisoning_connection",
+        "--",
+        "--exact"
+      ],
+      "crate": "xenia-transport-ws",
+      "exit_code": 0,
+      "expected": "local send is rejected and the connection remains usable for a sentinel envelope",
+      "fault": "WebSocket side attempts to send a binary envelope larger than MAX_ENVELOPE_BYTES.",
+      "id": "websocket-oversize-binary",
+      "output": "Finished `test` profile [unoptimized + debuginfo] target(s) in 0.27s\n     Running tests/transport_conformance.rs (<tmp-path>)\n\nrunning 1 test\ntest websocket_rejects_oversize_send_without_poisoning_connection ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s",
+      "passed": true,
+      "test": "websocket_rejects_oversize_send_without_poisoning_connection"
+    },
+    {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "xenia-transport-ws",
+        "--test",
+        "transport_conformance",
+        "websocket_rejects_text_protocol_fault",
+        "--",
+        "--exact"
+      ],
+      "crate": "xenia-transport-ws",
+      "exit_code": 0,
+      "expected": "receiver fails closed with TransportError::UnexpectedEof-compatible protocol error",
+      "fault": "WebSocket peer sends text instead of sealed binary envelope bytes.",
+      "id": "websocket-text-frame",
+      "output": "Finished `test` profile [unoptimized + debuginfo] target(s) in 0.29s\n     Running tests/transport_conformance.rs (<tmp-path>)\n\nrunning 1 test\ntest websocket_rejects_text_protocol_fault ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s",
+      "passed": true,
+      "test": "websocket_rejects_text_protocol_fault"
+    },
+    {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "xenia-transport-quic",
+        "--test",
+        "transport_conformance",
+        "quic_rejects_oversize_send_without_poisoning_connection",
+        "--",
+        "--exact"
+      ],
+      "crate": "xenia-transport-quic",
+      "exit_code": 0,
+      "expected": "local send is rejected and the stream remains usable for a sentinel envelope",
+      "fault": "QUIC side attempts to send an envelope larger than MAX_ENVELOPE_BYTES.",
+      "id": "quic-oversize-send",
+      "output": "Finished `test` profile [unoptimized + debuginfo] target(s) in 0.40s\n     Running tests/transport_conformance.rs (<tmp-path>)\n\nrunning 1 test\ntest quic_rejects_oversize_send_without_poisoning_connection ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.06s",
+      "passed": true,
+      "test": "quic_rejects_oversize_send_without_poisoning_connection"
+    }
+  ],
+  "evidence_scope": "transport fault-injection soft blocker",
+  "generated_at_utc": "2026-06-26T08:56:57+00:00",
+  "release_status": "pre-rc",
+  "schema": "xenia.rc1.transport_fault_injection.v1"
+}

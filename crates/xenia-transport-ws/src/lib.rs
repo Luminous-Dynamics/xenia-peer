@@ -157,12 +157,17 @@ impl WsTransport {
     }
 }
 
+fn ensure_envelope_size(len: usize) -> Result<(), TransportError> {
+    if len > MAX_ENVELOPE_BYTES as usize {
+        let reported = u32::try_from(len).unwrap_or(u32::MAX);
+        return Err(TransportError::EnvelopeTooLarge(reported));
+    }
+    Ok(())
+}
+
 impl Transport for WsTransport {
     async fn send_envelope(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
-        let len = bytes.len();
-        if len > MAX_ENVELOPE_BYTES as usize {
-            return Err(TransportError::EnvelopeTooLarge(len as u32));
-        }
+        ensure_envelope_size(bytes.len())?;
         self.send_msg(Message::Binary(bytes.to_vec()))
             .await
             .map_err(|e| TransportError::from(WsError::from(e)))?;
@@ -172,7 +177,10 @@ impl Transport for WsTransport {
     async fn recv_envelope(&mut self) -> Result<Vec<u8>, TransportError> {
         loop {
             match self.next_msg().await {
-                Some(Ok(Message::Binary(data))) => return Ok(data.to_vec()),
+                Some(Ok(Message::Binary(data))) => {
+                    ensure_envelope_size(data.len())?;
+                    return Ok(data.to_vec());
+                }
                 Some(Ok(Message::Close(_))) => {
                     return Err(TransportError::from(WsError::Closed));
                 }
@@ -202,6 +210,12 @@ impl Transport for WsTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn websocket_envelope_size_check_rejects_oversize_binary_payload() {
+        let err = ensure_envelope_size(MAX_ENVELOPE_BYTES as usize + 1).unwrap_err();
+        assert!(matches!(err, TransportError::EnvelopeTooLarge(_)));
+    }
 
     /// Bind to an ephemeral port, listen on a background task,
     /// connect a client, exchange 20 binary envelopes of varying

@@ -1,6 +1,7 @@
+use futures_util::SinkExt;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
-use tokio_tungstenite::accept_async;
+use tokio_tungstenite::{accept_async, tungstenite::protocol::Message};
 use xenia_peer_core::transport::{MAX_ENVELOPE_BYTES, TcpTransport, Transport, TransportError};
 use xenia_peer_core::{
     RawAudio, RawTelemetry, Session, SessionRole, SyntheticAudioKind, SyntheticAudioSource,
@@ -199,6 +200,46 @@ async fn tcp_carries_sealed_audio_metadata() {
 async fn websocket_carries_sealed_audio_metadata() {
     let (server, client) = ws_pair().await;
     assert_audio_metadata_roundtrip(server, client).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tcp_detects_truncated_envelope_as_unexpected_eof() {
+    use tokio::io::AsyncWriteExt;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        stream.write_all(&16u32.to_be_bytes()).await.unwrap();
+        stream.write_all(b"only-partial").await.unwrap();
+        // Drop the stream before the advertised envelope length is satisfied.
+    });
+
+    let mut client = TcpTransport::connect(&addr.to_string()).await.unwrap();
+    let err = client.recv_envelope().await.unwrap_err();
+    assert!(matches!(err, TransportError::UnexpectedEof));
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_rejects_text_protocol_fault() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        stream.set_nodelay(true).ok();
+        let mut ws = accept_async(stream).await.unwrap();
+        ws.send(Message::Text("not a xenia sealed envelope".into()))
+            .await
+            .unwrap();
+    });
+
+    let mut client = WsTransport::connect(&format!("ws://{addr}")).await.unwrap();
+    let err = client.recv_envelope().await.unwrap_err();
+    assert!(matches!(err, TransportError::UnexpectedEof));
+    server.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

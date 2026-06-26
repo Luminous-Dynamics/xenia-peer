@@ -14,6 +14,7 @@ and should fail early before expensive checks run.
 | Test build | `cargo test --workspace --all-targets --no-run` | Prove tests compile without requiring devices. | Yes |
 | Unit/integration tests | `cargo test --workspace` or `cargo nextest run` | Prove behavior. | Required for release candidates |
 | Transport conformance | `cargo test -p xenia-transport-ws -p xenia-transport-quic` | Keep WS and QUIC behavior aligned. | Required for release candidates |
+| Transport fault injection | `python3 scripts/generate-transport-fault-injection-evidence.py .` | Runs mapped malformed transport cases and writes sanitized RC1 evidence. | Required for release candidates |
 | Protocol vectors | `cd xenia-wire && cargo test --all-features` | Ensure sealed envelope compatibility. | Yes for wire changes |
 | Supply chain | `cargo deny check advisories bans licenses sources` | Catch yanked/vulnerable/disallowed deps/licenses. | Advisory until dependency graph is normalized; required before public release |
 | Archive validation | `scripts/check-source-archive.sh <archive.tar.gz>` | Prove source exports are clean. | Required before publishing archives |
