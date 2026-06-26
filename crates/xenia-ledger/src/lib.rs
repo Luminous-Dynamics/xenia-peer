@@ -368,7 +368,6 @@ fn compute_entry_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand_core::OsRng;
 
     fn sample_event(kind: ConsentKind) -> ConsentEventRecord {
         ConsentEventRecord {
@@ -381,7 +380,11 @@ mod tests {
     }
 
     fn new_signing_key() -> SigningKey {
-        SigningKey::generate(&mut OsRng)
+        new_signing_key_from_seed(7)
+    }
+
+    fn new_signing_key_from_seed(seed: u8) -> SigningKey {
+        SigningKey::from_bytes(&[seed; 32])
     }
 
     #[test]
@@ -527,7 +530,7 @@ mod tests {
         chain.append(sample_event(ConsentKind::Request)).unwrap();
 
         let entries: Vec<_> = chain.iter().cloned().collect();
-        let wrong_pk = new_signing_key().verifying_key();
+        let wrong_pk = new_signing_key_from_seed(8).verifying_key();
         match Verifier::verify_chain(&entries, &wrong_pk) {
             Err(VerifyError::BadSignature { seq: 0 }) => {}
             other => panic!("expected BadSignature, got {other:?}"),
