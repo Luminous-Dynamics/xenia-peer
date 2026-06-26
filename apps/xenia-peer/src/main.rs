@@ -38,6 +38,7 @@ use xenia_capture::ScapCapture;
 
 mod governance;
 mod m1_ledger;
+mod m1_runtime;
 use crate::governance::{GovernanceBridge, MitigationRule};
 
 #[derive(Parser, Debug)]
