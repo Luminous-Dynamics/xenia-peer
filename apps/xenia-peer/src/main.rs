@@ -88,6 +88,10 @@ struct Args {
 
     #[arg(long, default_value_t = 20)]
     audio_interval_ms: u64,
+
+    /// Run a deterministic M1 runtime smoke check and exit.
+    #[arg(long)]
+    m1_runtime_smoke: bool,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -389,6 +393,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let source_id = parse_source_id(&args.source_id_hex)?;
 
+    if args.m1_runtime_smoke {
+        run_m1_runtime_smoke(source_id)?;
+        return Ok(());
+    }
+
     info!(addr = %args.listen, "xenia-peer daemon listening");
 
     let key_path = std::path::Path::new("operator.key");
@@ -686,5 +695,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     transport.close().await?;
+    Ok(())
+}
+
+fn run_m1_runtime_smoke(source_id_short: [u8; 8]) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = SigningKey::from_bytes(&[0x4Du8; 32]);
+    let verifying_key = signing_key.verifying_key();
+
+    let mut source_id = [0u8; 32];
+    source_id[..8].copy_from_slice(&source_id_short);
+
+    let mut runtime = crate::m1_runtime::M1RuntimeSession::new(
+        signing_key,
+        source_id,
+        Uuid::from_bytes([0x11; 16]),
+        Uuid::from_bytes([0x22; 16]),
+        "m1 runtime cli smoke",
+    );
+
+    runtime.offer()?;
+    runtime.grant_consent()?;
+    runtime.stream_frame()?;
+    runtime.inject_input()?;
+    runtime.revoke()?;
+    runtime.verify(&verifying_key)?;
+
+    let entries = runtime.entries();
+
+    println!("M1 runtime smoke passed");
+    println!("entries: {}", entries.len());
+
+    for entry in entries {
+        println!("{}", entry.event.stable_name());
+    }
+
     Ok(())
 }
