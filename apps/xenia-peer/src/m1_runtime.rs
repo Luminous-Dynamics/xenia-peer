@@ -155,7 +155,10 @@ impl M1RuntimeSession {
     }
 
     pub(crate) fn stable_names(&self) -> Vec<&'static str> {
-        self.chain.iter().map(|entry| entry.event.stable_name()).collect()
+        self.chain
+            .iter()
+            .map(|entry| entry.event.stable_name())
+            .collect()
     }
 
     pub(crate) fn persist_entries_bincode(
@@ -482,5 +485,4 @@ mod tests {
         assert_eq!(entries[2].event.kind, ConsentKind::Revocation);
         M1RuntimeSession::verify_entries(&entries, &verifying_key).unwrap();
     }
-
 }
