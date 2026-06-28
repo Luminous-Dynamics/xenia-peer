@@ -89,6 +89,26 @@ impl Session {
         }
     }
 
+    /// Construct with deterministic `source_id` + `epoch` and require
+    /// the xenia-wire consent ceremony before application frame/input
+    /// payloads can flow.
+    ///
+    /// This is intended for pre-production daemon/runtime wiring and
+    /// tests. It preserves fixture determinism while avoiding
+    /// `LegacyBypass`.
+    pub fn with_fixture_require_consent(role: SessionRole, source_id: [u8; 8], epoch: u8) -> Self {
+        Self {
+            role,
+            wire: WireSession::builder()
+                .with_source_id(source_id, epoch)
+                .require_consent(true)
+                .build(),
+            next_frame_id: 0,
+            next_input_seq: 0,
+            last_frame_sent_ms: 0,
+        }
+    }
+
     /// Install a 32-byte session key. Must be called before any
     /// `seal_*` or `open_*` call.
     pub fn install_key(&mut self, key: [u8; 32]) {
