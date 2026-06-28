@@ -720,7 +720,21 @@ fn run_m1_runtime_smoke(source_id_short: [u8; 8]) -> Result<(), Box<dyn std::err
     runtime.revoke()?;
     runtime.verify(&verifying_key)?;
 
+    let transcript_path = std::env::temp_dir().join(format!(
+        "xenia-m1-runtime-smoke-{}-{}.bin",
+        std::process::id(),
+        Uuid::from_bytes([0x22; 16])
+    ));
+    runtime.persist_entries_bincode(&transcript_path)?;
+    let persisted_entries =
+        crate::m1_runtime::M1RuntimeSession::load_entries_bincode(&transcript_path)?;
+    crate::m1_runtime::M1RuntimeSession::verify_entries(&persisted_entries, &verifying_key)?;
+    let _ = std::fs::remove_file(&transcript_path);
+
     let entries = runtime.entries();
+    if entries != persisted_entries {
+        return Err("M1 persisted transcript mismatch".into());
+    }
 
     println!("M1 runtime smoke passed");
     println!("entries: {}", entries.len());
