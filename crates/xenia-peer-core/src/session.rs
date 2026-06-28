@@ -130,6 +130,38 @@ impl Session {
         self.wire.observe_consent(event)
     }
 
+    /// Observe a local consent request event.
+    pub fn observe_consent_request(
+        &mut self,
+        request_id: u64,
+    ) -> Result<xenia_wire::consent::ConsentState, xenia_wire::consent::ConsentViolation> {
+        self.observe_consent(xenia_wire::consent::ConsentEvent::Request { request_id })
+    }
+
+    /// Observe a local consent approval event.
+    pub fn observe_consent_approved(
+        &mut self,
+        request_id: u64,
+    ) -> Result<xenia_wire::consent::ConsentState, xenia_wire::consent::ConsentViolation> {
+        self.observe_consent(xenia_wire::consent::ConsentEvent::ResponseApproved { request_id })
+    }
+
+    /// Observe a local consent denial event.
+    pub fn observe_consent_denied(
+        &mut self,
+        request_id: u64,
+    ) -> Result<xenia_wire::consent::ConsentState, xenia_wire::consent::ConsentViolation> {
+        self.observe_consent(xenia_wire::consent::ConsentEvent::ResponseDenied { request_id })
+    }
+
+    /// Observe a local consent revocation event.
+    pub fn observe_consent_revocation(
+        &mut self,
+        request_id: u64,
+    ) -> Result<xenia_wire::consent::ConsentState, xenia_wire::consent::ConsentViolation> {
+        self.observe_consent(xenia_wire::consent::ConsentEvent::Revocation { request_id })
+    }
+
     /// Current consent state from the underlying wire session.
     pub fn consent_state(&self) -> xenia_wire::consent::ConsentState {
         self.wire.consent_state()
