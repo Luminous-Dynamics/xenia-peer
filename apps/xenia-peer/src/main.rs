@@ -92,6 +92,13 @@ struct Args {
     /// Run a deterministic M1 runtime smoke check and exit.
     #[arg(long)]
     m1_runtime_smoke: bool,
+
+    /// PRE-PRODUCTION ONLY: auto-grant the local M1 runtime gate after handshake.
+    ///
+    /// This exists until the real consent approval source drives the M1 runtime.
+    /// Without this flag, live frame flow fails closed after the M1 session offer.
+    #[arg(long)]
+    m1_preprod_auto_consent: bool,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -569,6 +576,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut session = Session::with_fixture(SessionRole::Host, source_id, args.epoch);
     session.install_key(session_key);
 
+    let m1_signing_key = SigningKey::from_bytes(&[0x41u8; 32]);
+    let mut m1_runtime = crate::m1_runtime::M1RuntimeSession::new(
+        m1_signing_key,
+        expand_source_id_for_m1(source_id),
+        session_id,
+        Uuid::new_v4(),
+        "preproduction daemon frame flow",
+    );
+    m1_runtime.offer()?;
+
+    if args.m1_preprod_auto_consent {
+        warn!("PRE-PRODUCTION ONLY: auto-granting M1 runtime consent gate after handshake");
+        m1_runtime.grant_consent()?;
+    } else {
+        warn!("M1 runtime gate offered but not approved; live frame flow will fail closed");
+    }
+
     let params = EncodeParams {
         width: args.width,
         height: args.height,
@@ -617,6 +641,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     .into_frame()?;
                     let envelope = session.seal_frame(&telemetry_frame)?;
+                    m1_runtime.allow_frame_flow()?;
                     transport.send_envelope(&envelope).await?;
                     sent_telemetry += 1;
                     last_telemetry_sent = std::time::Instant::now();
@@ -638,6 +663,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let frame_id = session.next_frame_id();
             let audio_frame = audio.next_frame(now_ms()).into_frame(frame_id)?;
             let envelope = session.seal_frame(&audio_frame)?;
+            m1_runtime.allow_frame_flow()?;
             transport.send_envelope(&envelope).await?;
             sent_audio += 1;
             last_audio_sent = std::time::Instant::now();
@@ -680,6 +706,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 packet.bytes,
             );
             let envelope = session.seal_frame(&raw)?;
+            m1_runtime.allow_frame_flow()?;
             transport.send_envelope(&envelope).await?;
             sent_frames += 1;
             if sent_frames <= 3 || sent_frames.is_multiple_of(10) {
@@ -698,12 +725,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn expand_source_id_for_m1(source_id_short: [u8; 8]) -> [u8; 32] {
+    let mut source_id = [0u8; 32];
+    source_id[..8].copy_from_slice(&source_id_short);
+    source_id
+}
+
 fn run_m1_runtime_smoke(source_id_short: [u8; 8]) -> Result<(), Box<dyn std::error::Error>> {
     let signing_key = SigningKey::from_bytes(&[0x4Du8; 32]);
     let verifying_key = signing_key.verifying_key();
 
-    let mut source_id = [0u8; 32];
-    source_id[..8].copy_from_slice(&source_id_short);
+    let source_id = expand_source_id_for_m1(source_id_short);
 
     let mut runtime = crate::m1_runtime::M1RuntimeSession::new(
         signing_key,
