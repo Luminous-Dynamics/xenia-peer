@@ -617,7 +617,11 @@ fn raw_audio_from_capture_frame(
         )
         .into());
     }
-    if frame.samples_i16.len() % usize::from(frame.channels) != 0 {
+    if !frame
+        .samples_i16
+        .len()
+        .is_multiple_of(usize::from(frame.channels))
+    {
         return Err("captured audio samples are not divisible by channel count".into());
     }
 
