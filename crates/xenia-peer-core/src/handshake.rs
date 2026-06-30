@@ -10,7 +10,9 @@ use crate::transport::Transport;
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 use tracing::info;
-use xenia_handshake::{HandshakeManager, ML_KEM_768_CT_LEN, ML_KEM_768_PK_LEN};
+use xenia_handshake::{
+    HandshakeManager, HandshakeTranscriptV1, ML_KEM_768_CT_LEN, ML_KEM_768_PK_LEN,
+};
 
 /// Handshake messages exchanged between host and viewer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,18 +50,42 @@ pub enum HandshakeMessage {
     },
 }
 
-/// Perform a host-side handshake.
+/// Result of a completed handshake, including the canonical transcript hash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandshakeOutcome {
+    /// The 32-byte session key installed into the Xenia wire session.
+    pub session_key: [u8; 32],
+    /// BLAKE3-256 hash of the canonical public handshake transcript.
+    pub transcript_hash: [u8; 32],
+}
+
+/// Perform a host-side handshake and return only the session key.
 pub async fn perform_host_handshake<T: Transport>(
     transport: &mut T,
     mgr: &mut HandshakeManager,
     peer_id: &str,
 ) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    Ok(
+        perform_host_handshake_with_transcript(transport, mgr, peer_id)
+            .await?
+            .session_key,
+    )
+}
+
+/// Perform a host-side handshake and return evidence binding material.
+pub async fn perform_host_handshake_with_transcript<T: Transport>(
+    transport: &mut T,
+    mgr: &mut HandshakeManager,
+    peer_id: &str,
+) -> Result<HandshakeOutcome, Box<dyn std::error::Error>> {
     info!("Starting host-side handshake");
     let host_nonce = rand::random::<[u8; 32]>();
+    let host_ed25519_pk = mgr.identity_public_key_bytes();
+    let host_kem_pk = *mgr.kem_public_key_bytes();
 
     let hello = HandshakeMessage::HostHello {
-        ed25519_pk: mgr.identity_public_key_bytes(),
-        kem_pk: *mgr.kem_public_key_bytes(),
+        ed25519_pk: host_ed25519_pk,
+        kem_pk: host_kem_pk,
         nonce: host_nonce,
     };
 
@@ -107,16 +133,44 @@ pub async fn perform_host_handshake<T: Transport>(
         .send_envelope(&bincode::serialize(&finalize)?)
         .await?;
 
+    let canonical_transcript = HandshakeTranscriptV1::new(
+        host_ed25519_pk,
+        ed25519_pk,
+        host_kem_pk.to_vec(),
+        kem_ct.to_vec(),
+        host_nonce,
+        viewer_nonce,
+        signature.to_vec(),
+        host_sig.to_vec(),
+    )?;
+    let transcript_hash = canonical_transcript.transcript_hash()?;
+
     info!("Host-side handshake complete");
-    Ok(session_key)
+    Ok(HandshakeOutcome {
+        session_key,
+        transcript_hash,
+    })
 }
 
-/// Perform a viewer-side handshake.
+/// Perform a viewer-side handshake and return only the session key.
 pub async fn perform_viewer_handshake<T: Transport>(
     transport: &mut T,
     mgr: &mut HandshakeManager,
     peer_id: &str,
 ) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    Ok(
+        perform_viewer_handshake_with_transcript(transport, mgr, peer_id)
+            .await?
+            .session_key,
+    )
+}
+
+/// Perform a viewer-side handshake and return evidence binding material.
+pub async fn perform_viewer_handshake_with_transcript<T: Transport>(
+    transport: &mut T,
+    mgr: &mut HandshakeManager,
+    peer_id: &str,
+) -> Result<HandshakeOutcome, Box<dyn std::error::Error>> {
     info!("Starting viewer-side handshake");
 
     let hello_bytes = transport.recv_envelope().await?;
@@ -142,17 +196,22 @@ pub async fn perform_viewer_handshake<T: Transport>(
 
     let kem_ct = mgr.encapsulate_for_peer(peer_id, &combined_nonce)?;
 
+    let viewer_ed25519_pk = mgr.identity_public_key_bytes();
+
     // Sign the transcript: HostHello + ViewerResponse (sans signature).
     let mut transcript = hello_bytes.clone();
-    transcript.extend_from_slice(&mgr.identity_public_key_bytes());
+    transcript.extend_from_slice(&viewer_ed25519_pk);
     transcript.extend_from_slice(&kem_ct);
     transcript.extend_from_slice(&viewer_nonce);
 
     let viewer_sig = mgr.sign(&transcript).to_bytes();
 
     let response = HandshakeMessage::ViewerResponse {
-        ed25519_pk: mgr.identity_public_key_bytes(),
-        kem_ct: kem_ct.try_into().map_err(|_| "Invalid KEM CT length")?,
+        ed25519_pk: viewer_ed25519_pk,
+        kem_ct: kem_ct
+            .clone()
+            .try_into()
+            .map_err(|_| "Invalid KEM CT length")?,
         nonce: viewer_nonce,
         signature: viewer_sig,
     };
@@ -179,6 +238,21 @@ pub async fn perform_viewer_handshake<T: Transport>(
         .ok_or("Session key missing after handshake")?
         .bytes();
 
+    let canonical_transcript = HandshakeTranscriptV1::new(
+        ed25519_pk,
+        viewer_ed25519_pk,
+        kem_pk.to_vec(),
+        kem_ct.to_vec(),
+        host_nonce,
+        viewer_nonce,
+        viewer_sig.to_vec(),
+        host_sig_bytes.to_vec(),
+    )?;
+    let transcript_hash = canonical_transcript.transcript_hash()?;
+
     info!("Viewer-side handshake complete");
-    Ok(session_key)
+    Ok(HandshakeOutcome {
+        session_key,
+        transcript_hash,
+    })
 }
