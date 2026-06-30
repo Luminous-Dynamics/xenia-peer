@@ -20,9 +20,13 @@
 //! Input capture (mouse / keyboard → `RawInput` back to the
 //! daemon) is NOT wired yet; that's M2.
 
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use eframe::egui;
+use xenia_peer_core::RawAudio;
+
+use crate::AudioPlaybackSink;
 
 /// A single decoded frame ready for display. `rgba` length MUST
 /// equal `width * height * 4`.
@@ -51,6 +55,8 @@ pub struct FrameData {
     /// decode). Displayed in the status bar so the user can eyeball
     /// codec efficiency.
     pub wire_bytes: usize,
+    /// Video presentation/capture timestamp in milliseconds.
+    pub timestamp_ms: u64,
 }
 
 /// Latest host telemetry values shared between receive task and GUI.
@@ -77,8 +83,18 @@ pub struct TelemetryData {
 /// Latest audio timing state shared between receive task and GUI.
 #[derive(Clone, Debug, Default)]
 pub struct AudioData {
-    /// Audio frames received by the viewer.
-    pub frames_received: u64,
+    /// Audio frames decoded by the viewer.
+    pub frames_decoded: u64,
+    /// Audio frames inserted into the jitter buffer.
+    pub frames_inserted: u64,
+    /// Audio frames emitted from the jitter buffer.
+    pub frames_emitted: u64,
+    /// Audio frames accepted by the playback sink.
+    pub frames_played: u64,
+    /// Audio samples accepted by the playback sink.
+    pub samples_played: u64,
+    /// Audio frames rejected by the playback sink policy.
+    pub playback_rejected: u64,
     /// Last received sequence.
     pub last_sequence: u64,
     /// Last accepted stream id.
@@ -95,6 +111,8 @@ pub struct AudioData {
     pub duplicates: u64,
     /// Late frames detected by jitter buffer.
     pub late: u64,
+    /// Buffered frames dropped by jitter buffer depth policy.
+    pub dropped: u64,
     /// Missing sequence gaps detected by jitter buffer.
     pub gaps: u64,
     /// Underruns reported by jitter buffer.
@@ -177,9 +195,12 @@ pub struct ViewerApp {
     slot: Arc<FrameSlot>,
     texture: Option<egui::TextureHandle>,
     config: ViewerConfig,
+    audio_rx: Option<mpsc::Receiver<RawAudio>>,
+    audio_sink: Box<dyn AudioPlaybackSink>,
     frames_received: u64,
     last_wire_bytes: usize,
     last_frame_seq: u64,
+    last_video_timestamp_ms: u64,
     last_telemetry: Option<TelemetryData>,
     last_audio: Option<AudioData>,
     // Simple rolling fps: timestamp of last ~30 frames.
@@ -190,17 +211,40 @@ impl ViewerApp {
     /// Construct the app. Owns the shared `FrameSlot` so the
     /// background receive task can `put` into it by cloning the
     /// `Arc`.
-    pub fn new(slot: Arc<FrameSlot>, config: ViewerConfig) -> Self {
+    pub fn new(
+        slot: Arc<FrameSlot>,
+        config: ViewerConfig,
+        audio_rx: Option<mpsc::Receiver<RawAudio>>,
+        audio_sink: Box<dyn AudioPlaybackSink>,
+    ) -> Self {
         Self {
             slot,
             texture: None,
             config,
+            audio_rx,
+            audio_sink,
             frames_received: 0,
             last_wire_bytes: 0,
             last_frame_seq: 0,
+            last_video_timestamp_ms: 0,
             last_telemetry: None,
             last_audio: None,
             recent_frame_instants: std::collections::VecDeque::with_capacity(64),
+        }
+    }
+
+    fn drain_audio_playback(&mut self) {
+        let Some(rx) = &self.audio_rx else {
+            return;
+        };
+        while let Ok(frame) = rx.try_recv() {
+            self.audio_sink.submit(&frame);
+        }
+        let playback = self.audio_sink.stats();
+        if let Some(audio) = &mut self.last_audio {
+            audio.frames_played = playback.frames_played;
+            audio.samples_played = playback.samples_played;
+            audio.playback_rejected = audio.playback_rejected.max(playback.rejected);
         }
     }
 
@@ -257,6 +301,7 @@ impl eframe::App for ViewerApp {
             self.frames_received += 1;
             self.last_wire_bytes = frame.wire_bytes;
             self.last_frame_seq = frame.seq;
+            self.last_video_timestamp_ms = frame.timestamp_ms;
 
             let now = std::time::Instant::now();
             self.recent_frame_instants.push_back(now);
@@ -270,6 +315,7 @@ impl eframe::App for ViewerApp {
         if let Some(audio) = self.slot.audio() {
             self.last_audio = Some(audio);
         }
+        self.drain_audio_playback();
 
         egui::TopBottomPanel::top("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -351,7 +397,11 @@ impl eframe::App for ViewerApp {
                     ui.heading("Audio");
                     if let Some(audio) = &self.last_audio {
                         ui.label(format!("stream: {}", audio.stream_id));
-                        ui.label(format!("frames: {}", audio.frames_received));
+                        ui.label(format!("decoded: {}", audio.frames_decoded));
+                        ui.label(format!("inserted: {}", audio.frames_inserted));
+                        ui.label(format!("emitted: {}", audio.frames_emitted));
+                        ui.label(format!("played: {}", audio.frames_played));
+                        ui.label(format!("played samples: {}", audio.samples_played));
                         ui.label(format!("last seq: {}", audio.last_sequence));
                         ui.label(format!(
                             "format: {} Hz / {} ch / {} ms",
@@ -364,7 +414,14 @@ impl eframe::App for ViewerApp {
                         ui.label(format!("gaps: {}", audio.gaps));
                         ui.label(format!("duplicates: {}", audio.duplicates));
                         ui.label(format!("late: {}", audio.late));
+                        ui.label(format!("dropped: {}", audio.dropped));
+                        ui.label(format!("playback rejected: {}", audio.playback_rejected));
                         ui.label(format!("underruns: {}", audio.underruns));
+                        if self.last_video_timestamp_ms != 0 {
+                            let drift_ms = audio.capture_timestamp_ms as i128
+                                - self.last_video_timestamp_ms as i128;
+                            ui.label(format!("a/v drift: {drift_ms:+} ms"));
+                        }
                     } else {
                         ui.label(egui::RichText::new("Audio lane idle").size(14.0).italics());
                     }

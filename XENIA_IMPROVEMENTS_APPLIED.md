@@ -72,3 +72,17 @@ hardens the daemon around spawned-server failures.
 - Added `scripts/xenia-preflight-report.sh` to generate a single markdown diagnostic report from the current tree.
 - Updated `scripts/xenia-validate.sh` and GitHub Actions to include the new boundary checks.
 - Updated `scripts/export-source-archive.sh` to post-validate archives when `check-source-archive.sh` is present.
+
+## Evidence bundle verification gate
+
+- Added `Verifier::verify_evidence_bundle(...)` to bind an evidence crypto
+  manifest to the exported ledger entry signature envelopes.
+- Added `EvidenceBundleVerifyError::LedgerSignatureSuiteMismatch` so artifacts
+  cannot attach a stronger manifest to a weaker Ed25519 export.
+- Added docs and a validation script for the evidence bundle contract.
+
+## Evidence transcript binding hardening
+
+- Added `SessionTranscriptBinding` and `compute_session_transcript_hash` to `xenia-ledger`.
+- Added `Verifier::verify_transcript_bound_evidence_bundle(...)` so a valid exported ledger cannot be trusted beside the wrong session transcript.
+- Added a transcript-bound evidence contract doc and validation script.

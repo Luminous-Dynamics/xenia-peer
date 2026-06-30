@@ -99,3 +99,53 @@ jobs:
         run: |
           cargo build -p xenia-peer --features h264
           cargo build -p xenia-viewer --features h264
+
+  audio-output:
+    name: Check viewer audio output
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ALSA headers for CPAL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check xenia-viewer audio-output feature
+        run: cargo check -p xenia-viewer --features audio-output
+      - name: Test xenia-viewer audio-output feature
+        run: cargo test -p xenia-viewer --features audio-output
+
+  audio-capture:
+    name: Check daemon audio capture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ALSA headers for CPAL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check xenia-peer audio-capture feature
+        run: cargo check -p xenia-peer --features audio-capture
+      - name: Test xenia-peer audio-capture feature
+        run: cargo test -p xenia-peer --features audio-capture
+
+  audio-opus:
+    name: Check Opus audio codec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Opus headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopus-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test xenia-peer-core Opus feature
+        run: cargo test -p xenia-peer-core --features opus
+      - name: Check daemon Opus feature
+        run: cargo check -p xenia-peer --features audio-opus
+      - name: Check viewer Opus feature
+        run: cargo check -p xenia-viewer --features audio-opus

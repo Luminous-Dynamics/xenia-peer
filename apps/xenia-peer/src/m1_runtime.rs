@@ -20,8 +20,11 @@ use std::path::Path;
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use uuid::Uuid;
-use xenia_ledger::{Chain, ConsentKind, LedgerEntry, LedgerError, Verifier, VerifyError};
-use xenia_peer_core::{M1SessionError, M1SessionMachine, M1SessionState};
+use xenia_ledger::{
+    CURRENT_EVIDENCE_CRYPTO_MANIFEST, Chain, ConsentKind, EvidenceBundleVerifyError, LedgerEntry,
+    LedgerEntryExport, LedgerError, SessionTranscriptBinding, Verifier, VerifyError,
+};
+use xenia_peer_core::{M1Permission, M1SessionError, M1SessionMachine, M1SessionState};
 
 use crate::m1_ledger::consent_record_for_m1_event;
 
@@ -30,6 +33,8 @@ pub(crate) enum M1RuntimeError {
     Session(M1SessionError),
     Ledger(LedgerError),
     Verify(VerifyError),
+    EvidenceBundle(EvidenceBundleVerifyError),
+    MissingTranscriptBinding,
     PersistIo(std::io::Error),
     PersistCodec(bincode::Error),
 }
@@ -40,6 +45,11 @@ impl fmt::Display for M1RuntimeError {
             Self::Session(err) => write!(f, "M1 session error: {err}"),
             Self::Ledger(err) => write!(f, "M1 ledger error: {err}"),
             Self::Verify(err) => write!(f, "M1 ledger verification error: {err}"),
+            Self::EvidenceBundle(err) => write!(f, "M1 transcript-bound evidence error: {err}"),
+            Self::MissingTranscriptBinding => write!(
+                f,
+                "M1 session has no canonical handshake transcript hash bound"
+            ),
             Self::PersistIo(err) => write!(f, "M1 ledger persistence I/O error: {err}"),
             Self::PersistCodec(err) => write!(f, "M1 ledger persistence codec error: {err}"),
         }
@@ -66,6 +76,12 @@ impl From<VerifyError> for M1RuntimeError {
     }
 }
 
+impl From<EvidenceBundleVerifyError> for M1RuntimeError {
+    fn from(err: EvidenceBundleVerifyError) -> Self {
+        Self::EvidenceBundle(err)
+    }
+}
+
 impl From<std::io::Error> for M1RuntimeError {
     fn from(err: std::io::Error) -> Self {
         Self::PersistIo(err)
@@ -85,6 +101,7 @@ pub(crate) struct M1RuntimeSession {
     session_id: Uuid,
     request_id: Uuid,
     scope: String,
+    session_transcript_hash: Option<[u8; 32]>,
     next_audit_index: usize,
 }
 
@@ -119,6 +136,7 @@ impl M1RuntimeSession {
             session_id,
             request_id,
             scope: scope.into(),
+            session_transcript_hash: None,
             next_audit_index: 0,
         }
     }
@@ -148,6 +166,41 @@ impl M1RuntimeSession {
 
     pub(crate) fn entries(&self) -> Vec<LedgerEntry> {
         self.chain.iter().cloned().collect()
+    }
+
+    pub(crate) fn export_entries(&self) -> Vec<LedgerEntryExport> {
+        self.chain.export_entries()
+    }
+
+    pub(crate) fn bind_session_transcript_hash(&mut self, transcript_hash: [u8; 32]) {
+        self.session_transcript_hash = Some(transcript_hash);
+    }
+
+    pub(crate) fn session_transcript_binding(&self) -> Option<SessionTranscriptBinding> {
+        self.session_transcript_hash.map(|hash| {
+            SessionTranscriptBinding::from_hash(
+                self.session_id,
+                hash,
+                CURRENT_EVIDENCE_CRYPTO_MANIFEST.transcript_signature,
+            )
+        })
+    }
+
+    pub(crate) fn verify_transcript_bound_export(
+        &self,
+        public_key: &VerifyingKey,
+    ) -> Result<(), M1RuntimeError> {
+        let Some(binding) = self.session_transcript_binding() else {
+            return Err(M1RuntimeError::MissingTranscriptBinding);
+        };
+        let entries = self.export_entries();
+        Verifier::verify_transcript_bound_evidence_bundle(
+            CURRENT_EVIDENCE_CRYPTO_MANIFEST,
+            &binding,
+            &entries,
+            public_key,
+        )?;
+        Ok(())
     }
 
     pub(crate) fn ledger_len(&self) -> usize {
@@ -230,6 +283,17 @@ impl M1RuntimeSession {
 
     pub(crate) fn allow_frame_flow(&mut self) -> Result<(), M1RuntimeError> {
         self.stream_frame()
+    }
+
+    pub(crate) fn preflight_frame_flow(&self) -> Result<(), M1RuntimeError> {
+        if self.session.state() == M1SessionState::Active {
+            Ok(())
+        } else {
+            Err(M1RuntimeError::Session(M1SessionError::PermissionDenied {
+                state: self.session.state(),
+                permission: M1Permission::StreamFrame,
+            }))
+        }
     }
 
     pub(crate) fn allow_input_flow(&mut self) -> Result<(), M1RuntimeError> {
@@ -320,6 +384,35 @@ mod tests {
     }
 
     #[test]
+    fn runtime_exports_transcript_bound_evidence() {
+        let (mut runtime, verifying_key) = runtime(21);
+        runtime.bind_session_transcript_hash([0x5A; 32]);
+
+        runtime.offer().unwrap();
+        runtime.grant_consent().unwrap();
+        runtime.revoke().unwrap();
+
+        let binding = runtime.session_transcript_binding().unwrap();
+        assert_eq!(binding.session_id, Uuid::from_bytes([1; 16]));
+        assert_eq!(binding.transcript_hash, [0x5A; 32]);
+        assert_eq!(runtime.export_entries().len(), 3);
+        runtime
+            .verify_transcript_bound_export(&verifying_key)
+            .expect("transcript-bound export should verify");
+    }
+
+    #[test]
+    fn runtime_without_transcript_hash_cannot_verify_transcript_bound_export() {
+        let (mut runtime, verifying_key) = runtime(22);
+        runtime.offer().unwrap();
+
+        assert!(matches!(
+            runtime.verify_transcript_bound_export(&verifying_key),
+            Err(M1RuntimeError::MissingTranscriptBinding)
+        ));
+    }
+
+    #[test]
     fn stream_and_input_do_not_append_consent_entries() {
         let (mut runtime, verifying_key) = runtime(12);
 
@@ -360,6 +453,27 @@ mod tests {
         ));
 
         runtime.verify(&verifying_key).unwrap();
+    }
+
+    #[test]
+    fn preflight_frame_flow_is_non_auditing_and_fails_closed() {
+        let (mut runtime, _) = runtime(18);
+
+        runtime.offer().unwrap();
+        let before = runtime.ledger_len();
+        assert!(matches!(
+            runtime.preflight_frame_flow(),
+            Err(M1RuntimeError::Session(M1SessionError::PermissionDenied {
+                state: M1SessionState::Offered,
+                permission: M1Permission::StreamFrame,
+            }))
+        ));
+        assert_eq!(runtime.ledger_len(), before);
+
+        runtime.grant_consent().unwrap();
+        let before = runtime.ledger_len();
+        runtime.preflight_frame_flow().unwrap();
+        assert_eq!(runtime.ledger_len(), before);
     }
 
     #[test]

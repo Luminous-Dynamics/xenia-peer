@@ -1,6 +1,6 @@
 # xenia-ledger
 
-Append-only, hash-chained, Ed25519-signed consent ledger for the Xenia remote-session stack.
+Append-only, hash-chained, Ed25519-signed consent ledger for the Xenia remote-session stack, with algorithm-tagged signature envelopes for exported evidence.
 
 ## What it does
 
@@ -8,9 +8,9 @@ Every privileged Xenia session produces a sequence of consent events — request
 
 1. **Append-only** — entries reference the hash of the prior entry, so reordering or deletion invalidates the chain.
 2. **Hash-chained** — blake3 over `(seq, prev_hash, timestamp, event)` per entry.
-3. **Signed** — Ed25519 over each entry's hash, using the operator's key.
+3. **Signed** — Ed25519 over each entry's hash today, using the operator's key. Exported evidence carries an algorithm-tagged `SignatureEnvelope` so ML-DSA/SLH-DSA can be added without another export-schema break.
 
-The effect: an auditor holding only the operator's public key can verify, offline, that the ledger has not been rewritten since each entry was signed.
+The effect: an auditor holding only the operator's public key can verify, offline, that the ledger has not been rewritten since each entry was signed. The current verifier accepts Ed25519 envelopes and explicitly rejects PQ signature envelopes until a real ML-DSA/SLH-DSA backend lands. Long-lived evidence exports should use `Verifier::verify_evidence_bundle(...)` so the manifest cannot overstate the signature suite carried by the entry envelopes.
 
 This is the enforcement layer behind the Mycelix Sovereign threat-model claim that **an administrator cannot silently rewrite the audit log of their own privileged sessions**.
 
@@ -49,14 +49,25 @@ chain.append(ConsentEventRecord {
 })?;
 // ... more events ...
 
-let entries = chain.into_entries();
-// serialize `entries` however you like (JSON, CBOR, SQLite, ...)
+let exported = chain.export_entries();
+let manifest = Verifier::evidence_crypto_manifest();
+// serialize `manifest` + `exported` however you like (JSON, CBOR, SQLite, ...)
 
-// Later, an auditor:
-Verifier::verify_chain(&entries, &pk)?;
+// Later, an auditor should verify the manifest and exported chain together:
+Verifier::verify_evidence_bundle(manifest, &exported, &pk)?;
 ```
 
 See the crate docs for the full API.
+
+## Verification boundary
+
+The verifier proves that a supplied chain is internally contiguous, hash-linked,
+and signed by the expected operator public key. It does **not** by itself prove
+operator key custody, wall-clock timestamp truth, honest UI presentation, host OS
+integrity, or legal sufficiency of a consent ceremony. Those are companion
+deployment controls. See
+[`docs/security/LEDGER_VERIFICATION_BOUNDARY.md`](../../docs/security/LEDGER_VERIFICATION_BOUNDARY.md)
+for the full claim boundary.
 
 ## Status
 
@@ -76,11 +87,13 @@ Not yet:
 
 - Persistent storage integration (intentional — callers pick their own)
 - External `xenia-ledger-verify` binary (planned; AGPL)
-- PQC signature option (Dilithium / ML-DSA) — tracked separately
+- PQC signature verification backend (ML-DSA / SLH-DSA) — the export envelope exists, but verification is intentionally not faked
 - Chain-to-chain merkle anchoring for inter-operator attestation
 
 ## See also
 
+- [Signature envelope agility](../../docs/crypto/SIGNATURE_ENVELOPE_AGILITY.md)
+- [Evidence bundle verification](../../docs/crypto/EVIDENCE_BUNDLE_VERIFICATION.md)
 - [Mycelix Sovereign suite plan](../../../MYCELIX_SOVEREIGN_PLAN.md)
 - [ADR 0001 — screen capture backend](../../../mycelix-sovereign/docs/adr/0001-screen-capture-backend.md)
 - [xenia-peer ADR-001](../../docs/ADR-001-m0-architecture.md) (the permissive-library pattern this crate opts out of)

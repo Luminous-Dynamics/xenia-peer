@@ -16,16 +16,29 @@
 //! Both modes share the same receive/decode pipeline; the flag
 //! selects the output sink.
 
+#[cfg(feature = "audio-output")]
+use std::collections::VecDeque;
 use std::sync::Arc;
+#[cfg(feature = "audio-output")]
+use std::sync::Mutex;
+use std::sync::mpsc;
 
 use clap::{Parser, ValueEnum};
 use tracing::{info, warn};
 use xenia_capture::{ScreenCapture, TestCapture};
-use xenia_peer_core::advertisement::{AdvertisedTransport, TransportAdvertisement};
-use xenia_peer_core::frame::{PixelFormat as FramePixelFormat, RawAudio, RawTelemetry};
+#[cfg(feature = "audio-opus")]
+use xenia_peer_core::OpusAudioCodec;
+use xenia_peer_core::advertisement::{
+    AdvertisedAudioCodec, AdvertisedTransport, TransportAdvertisement,
+};
+use xenia_peer_core::frame::{
+    PixelFormat as FramePixelFormat, RawAudio, RawCapabilities, RawTelemetry, audio_flags,
+};
 use xenia_peer_core::handshake::perform_viewer_handshake;
 use xenia_peer_core::transport::{TcpTransport, Transport, TransportError};
-use xenia_peer_core::{AudioJitterBuffer, HandshakeManager, Session, SessionRole};
+use xenia_peer_core::{
+    AudioCodec, AudioJitterBuffer, HandshakeManager, RawPcmAudioCodec, Session, SessionRole,
+};
 use xenia_transport_quic::{QuicTransport, bind_xenia_endpoint, decode_endpoint_addr};
 use xenia_transport_ws::WsTransport;
 use xenia_video::passthrough::PassthroughDecoder;
@@ -54,6 +67,11 @@ enum AnyTransport {
         _endpoint: xenia_transport_quic::iroh::Endpoint,
         transport: QuicTransport,
     },
+}
+
+struct ConnectedTransport {
+    transport: AnyTransport,
+    advertisement: Option<TransportAdvertisement>,
 }
 
 impl Transport for AnyTransport {
@@ -104,6 +122,375 @@ enum CodecChoice {
     Hdc,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum PlayAudioMode {
+    Off,
+    Synthetic,
+    Device,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum AudioCodecChoice {
+    Auto,
+    RawPcm,
+    #[cfg(feature = "audio-opus")]
+    Opus,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AudioPlaybackStats {
+    pub(crate) frames_played: u64,
+    pub(crate) samples_played: u64,
+    pub(crate) rejected: u64,
+}
+
+pub(crate) trait AudioPlaybackSink {
+    fn submit(&mut self, frame: &RawAudio);
+    fn stats(&self) -> AudioPlaybackStats;
+}
+
+#[cfg(any(feature = "audio-output", test))]
+fn raw_audio_i16_samples(frame: &RawAudio) -> impl Iterator<Item = i16> + '_ {
+    frame
+        .payload
+        .chunks_exact(2)
+        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+}
+
+#[derive(Debug, Default)]
+struct NullAudioSink {
+    stats: AudioPlaybackStats,
+}
+
+impl AudioPlaybackSink for NullAudioSink {
+    fn submit(&mut self, _frame: &RawAudio) {}
+
+    fn stats(&self) -> AudioPlaybackStats {
+        self.stats
+    }
+}
+
+#[derive(Debug, Default)]
+struct SyntheticAudioSink {
+    stats: AudioPlaybackStats,
+}
+
+impl AudioPlaybackSink for SyntheticAudioSink {
+    fn submit(&mut self, frame: &RawAudio) {
+        if frame.flags & audio_flags::SYNTHETIC == 0 {
+            self.stats.rejected += 1;
+            return;
+        }
+        if frame.sample_format != xenia_peer_core::AudioSampleFormat::PcmS16Le {
+            self.stats.rejected += 1;
+            return;
+        }
+        let bytes_per_sample = 2u64;
+        let samples = frame.payload.len() as u64 / bytes_per_sample;
+        self.stats.frames_played += 1;
+        self.stats.samples_played = self.stats.samples_played.saturating_add(samples);
+    }
+
+    fn stats(&self) -> AudioPlaybackStats {
+        self.stats
+    }
+}
+
+struct ChannelAudioSink {
+    sender: mpsc::SyncSender<RawAudio>,
+    stats: AudioPlaybackStats,
+}
+
+impl ChannelAudioSink {
+    fn new(sender: mpsc::SyncSender<RawAudio>) -> Self {
+        Self {
+            sender,
+            stats: AudioPlaybackStats::default(),
+        }
+    }
+}
+
+impl AudioPlaybackSink for ChannelAudioSink {
+    fn submit(&mut self, frame: &RawAudio) {
+        match self.sender.try_send(frame.clone()) {
+            Ok(()) => {
+                self.stats.frames_played += 1;
+                self.stats.samples_played = self
+                    .stats
+                    .samples_played
+                    .saturating_add(frame.payload.len() as u64 / 2);
+            }
+            Err(_) => {
+                self.stats.rejected += 1;
+            }
+        }
+    }
+
+    fn stats(&self) -> AudioPlaybackStats {
+        self.stats
+    }
+}
+
+enum ViewerAudioSink {
+    Off(NullAudioSink),
+    Synthetic(SyntheticAudioSink),
+    #[cfg(feature = "audio-output")]
+    Device(DeviceAudioSink),
+}
+
+impl ViewerAudioSink {
+    fn new(
+        mode: PlayAudioMode,
+        output_device: Option<&str>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        match mode {
+            PlayAudioMode::Off => Ok(Self::Off(NullAudioSink::default())),
+            PlayAudioMode::Synthetic => Ok(Self::Synthetic(SyntheticAudioSink::default())),
+            PlayAudioMode::Device => build_device_audio_sink(output_device),
+        }
+    }
+}
+
+impl AudioPlaybackSink for ViewerAudioSink {
+    fn submit(&mut self, frame: &RawAudio) {
+        match self {
+            ViewerAudioSink::Off(sink) => sink.submit(frame),
+            ViewerAudioSink::Synthetic(sink) => sink.submit(frame),
+            #[cfg(feature = "audio-output")]
+            ViewerAudioSink::Device(sink) => sink.submit(frame),
+        }
+    }
+
+    fn stats(&self) -> AudioPlaybackStats {
+        match self {
+            ViewerAudioSink::Off(sink) => sink.stats(),
+            ViewerAudioSink::Synthetic(sink) => sink.stats(),
+            #[cfg(feature = "audio-output")]
+            ViewerAudioSink::Device(sink) => sink.stats(),
+        }
+    }
+}
+
+#[cfg(not(feature = "audio-output"))]
+fn build_device_audio_sink(
+    _output_device: Option<&str>,
+) -> Result<ViewerAudioSink, Box<dyn std::error::Error + Send + Sync>> {
+    Err("xenia-viewer was built without device audio output; rebuild with `cargo build -p xenia-viewer --features audio-output`, or use --play-audio synthetic".into())
+}
+
+#[cfg(feature = "audio-output")]
+struct DeviceAudioSink {
+    queue: Arc<Mutex<VecDeque<i16>>>,
+    stats: AudioPlaybackStats,
+    output_sample_rate_hz: u32,
+    output_channels: u16,
+    _stream: cpal::Stream,
+}
+
+#[cfg(feature = "audio-output")]
+impl DeviceAudioSink {
+    const MAX_BUFFERED_SAMPLES: usize = 48_000 * 2;
+
+    fn new(output_device: Option<&str>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+        let host = cpal::default_host();
+        let device = if let Some(query) = output_device {
+            let query = query.to_ascii_lowercase();
+            host.output_devices()?
+                .find(|device| {
+                    device
+                        .name()
+                        .is_ok_and(|name| name.to_ascii_lowercase().contains(&query))
+                })
+                .ok_or_else(|| format!("no output audio device matched `{query}`"))?
+        } else {
+            host.default_output_device()
+                .ok_or("no default audio output device available")?
+        };
+        let device_name = device.name().unwrap_or_else(|_| "unknown".to_string());
+        let supported = device.default_output_config()?;
+        let output_sample_rate_hz = supported.sample_rate().0;
+        let output_channels = supported.channels();
+        if output_channels == 0 {
+            return Err("default output device reported zero channels".into());
+        }
+        if output_channels > xenia_peer_core::frame::RAW_AUDIO_MAX_CHANNELS {
+            warn!(
+                output_channels,
+                "audio output device uses more than two channels; stereo frames will be expanded"
+            );
+        }
+
+        let config: cpal::StreamConfig = supported.clone().into();
+        let queue = Arc::new(Mutex::new(VecDeque::<i16>::new()));
+        let err_fn = |err| warn!(error = %err, "audio output stream error");
+
+        let stream = match supported.sample_format() {
+            cpal::SampleFormat::F32 => {
+                let queue = Arc::clone(&queue);
+                device.build_output_stream(
+                    &config,
+                    move |data: &mut [f32], _| fill_output_f32(data, &queue),
+                    err_fn,
+                    None,
+                )?
+            }
+            cpal::SampleFormat::I16 => {
+                let queue = Arc::clone(&queue);
+                device.build_output_stream(
+                    &config,
+                    move |data: &mut [i16], _| fill_output_i16(data, &queue),
+                    err_fn,
+                    None,
+                )?
+            }
+            cpal::SampleFormat::U16 => {
+                let queue = Arc::clone(&queue);
+                device.build_output_stream(
+                    &config,
+                    move |data: &mut [u16], _| fill_output_u16(data, &queue),
+                    err_fn,
+                    None,
+                )?
+            }
+            other => {
+                return Err(format!("unsupported output sample format: {other:?}").into());
+            }
+        };
+        stream.play()?;
+        info!(
+            device = %device_name,
+            output_sample_rate_hz,
+            output_channels,
+            sample_format = ?supported.sample_format(),
+            "audio output stream started"
+        );
+
+        Ok(Self {
+            queue,
+            stats: AudioPlaybackStats::default(),
+            output_sample_rate_hz,
+            output_channels,
+            _stream: stream,
+        })
+    }
+}
+
+#[cfg(feature = "audio-output")]
+impl AudioPlaybackSink for DeviceAudioSink {
+    fn submit(&mut self, frame: &RawAudio) {
+        if !frame.validate() {
+            self.stats.rejected += 1;
+            return;
+        }
+
+        let adapted = adapt_audio_samples(frame, self.output_sample_rate_hz, self.output_channels);
+        let mut queue = self.queue.lock().expect("audio queue poisoned");
+        for sample in adapted {
+            if queue.len() >= Self::MAX_BUFFERED_SAMPLES {
+                queue.pop_front();
+            }
+            queue.push_back(sample);
+        }
+        drop(queue);
+
+        self.stats.frames_played += 1;
+        self.stats.samples_played = self
+            .stats
+            .samples_played
+            .saturating_add(frame.payload.len() as u64 / 2);
+    }
+
+    fn stats(&self) -> AudioPlaybackStats {
+        self.stats
+    }
+}
+
+#[cfg(feature = "audio-output")]
+fn build_device_audio_sink(
+    output_device: Option<&str>,
+) -> Result<ViewerAudioSink, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(ViewerAudioSink::Device(DeviceAudioSink::new(
+        output_device,
+    )?))
+}
+
+#[cfg(any(feature = "audio-output", test))]
+fn adapt_audio_samples(
+    frame: &RawAudio,
+    output_sample_rate_hz: u32,
+    output_channels: u16,
+) -> Vec<i16> {
+    let input_channels = usize::from(frame.channels);
+    let output_channels = usize::from(output_channels.max(1));
+    let input_samples: Vec<i16> = raw_audio_i16_samples(frame).collect();
+    if input_channels == 0 || input_samples.is_empty() {
+        return Vec::new();
+    }
+    let input_frames = input_samples.len() / input_channels;
+    if input_frames == 0 {
+        return Vec::new();
+    }
+
+    let output_frames = ((input_frames as u64)
+        .saturating_mul(u64::from(output_sample_rate_hz))
+        .saturating_add(u64::from(frame.sample_rate_hz) - 1)
+        / u64::from(frame.sample_rate_hz)) as usize;
+    let mut adapted = Vec::with_capacity(output_frames.saturating_mul(output_channels));
+
+    for output_frame in 0..output_frames {
+        let src_pos = output_frame as f64 * f64::from(frame.sample_rate_hz)
+            / f64::from(output_sample_rate_hz);
+        let left = src_pos.floor() as usize;
+        let right = (left + 1).min(input_frames - 1);
+        let frac = src_pos - left as f64;
+
+        for output_channel in 0..output_channels {
+            let input_channel = match (input_channels, output_channels) {
+                (1, _) => 0,
+                (_, 1) => 0,
+                _ => output_channel.min(input_channels - 1),
+            };
+            let a = f64::from(input_samples[left * input_channels + input_channel]);
+            let b = f64::from(input_samples[right * input_channels + input_channel]);
+            let sample = a + (b - a) * frac;
+            adapted.push(
+                sample
+                    .round()
+                    .clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16,
+            );
+        }
+    }
+
+    adapted
+}
+
+#[cfg(feature = "audio-output")]
+fn fill_output_i16(data: &mut [i16], queue: &Arc<Mutex<VecDeque<i16>>>) {
+    let mut queue = queue.lock().expect("audio queue poisoned");
+    for sample in data {
+        *sample = queue.pop_front().unwrap_or(0);
+    }
+}
+
+#[cfg(feature = "audio-output")]
+fn fill_output_f32(data: &mut [f32], queue: &Arc<Mutex<VecDeque<i16>>>) {
+    let mut queue = queue.lock().expect("audio queue poisoned");
+    for sample in data {
+        *sample = f32::from(queue.pop_front().unwrap_or(0)) / f32::from(i16::MAX);
+    }
+}
+
+#[cfg(feature = "audio-output")]
+fn fill_output_u16(data: &mut [u16], queue: &Arc<Mutex<VecDeque<i16>>>) {
+    let mut queue = queue.lock().expect("audio queue poisoned");
+    for sample in data {
+        let signed = i32::from(queue.pop_front().unwrap_or(0));
+        *sample = (signed + 32_768) as u16;
+    }
+}
+
 fn make_decoder(
     choice: CodecChoice,
 ) -> Result<Box<dyn Decoder + Send>, Box<dyn std::error::Error>> {
@@ -140,6 +527,76 @@ fn codec_to_frame_format(choice: CodecChoice) -> FramePixelFormat {
         CodecChoice::Passthrough => FramePixelFormat::Passthrough,
         CodecChoice::H264 => FramePixelFormat::H264,
         CodecChoice::Hdc => FramePixelFormat::Hdc,
+    }
+}
+
+fn make_audio_codec(
+    choice: AudioCodecChoice,
+) -> Result<Box<dyn AudioCodec>, Box<dyn std::error::Error + Send + Sync>> {
+    match choice {
+        AudioCodecChoice::Auto => make_audio_codec(AudioCodecChoice::RawPcm),
+        AudioCodecChoice::RawPcm => Ok(Box::new(RawPcmAudioCodec::new())),
+        #[cfg(feature = "audio-opus")]
+        AudioCodecChoice::Opus => Ok(Box::new(OpusAudioCodec::new()?)),
+    }
+}
+
+fn choose_audio_codec(
+    requested: AudioCodecChoice,
+    advertisement: Option<&TransportAdvertisement>,
+) -> Result<AudioCodecChoice, Box<dyn std::error::Error + Send + Sync>> {
+    if requested != AudioCodecChoice::Auto {
+        return Ok(requested);
+    }
+    let Some(advertisement) = advertisement else {
+        return Ok(AudioCodecChoice::RawPcm);
+    };
+    let Some(audio) = &advertisement.audio else {
+        return Ok(AudioCodecChoice::RawPcm);
+    };
+    match audio.selected_codec {
+        AdvertisedAudioCodec::RawPcm => Ok(AudioCodecChoice::RawPcm),
+        AdvertisedAudioCodec::Opus => {
+            #[cfg(feature = "audio-opus")]
+            {
+                Ok(AudioCodecChoice::Opus)
+            }
+            #[cfg(not(feature = "audio-opus"))]
+            {
+                Err(
+                    "daemon selected Opus audio, but xenia-viewer was built without `audio-opus`"
+                        .into(),
+                )
+            }
+        }
+    }
+}
+
+fn choose_audio_codec_from_capabilities(
+    requested: AudioCodecChoice,
+    capabilities: &RawCapabilities,
+) -> Result<AudioCodecChoice, Box<dyn std::error::Error + Send + Sync>> {
+    if requested != AudioCodecChoice::Auto {
+        return Ok(requested);
+    }
+    let Some(audio) = &capabilities.audio else {
+        return Ok(AudioCodecChoice::RawPcm);
+    };
+    match audio.selected_codec {
+        AdvertisedAudioCodec::RawPcm => Ok(AudioCodecChoice::RawPcm),
+        AdvertisedAudioCodec::Opus => {
+            #[cfg(feature = "audio-opus")]
+            {
+                Ok(AudioCodecChoice::Opus)
+            }
+            #[cfg(not(feature = "audio-opus"))]
+            {
+                Err(
+                    "daemon selected Opus audio, but xenia-viewer was built without `audio-opus`"
+                        .into(),
+                )
+            }
+        }
     }
 }
 
@@ -191,29 +648,42 @@ fn decode_telemetry_frame(raw_frame: &xenia_peer_core::RawFrame) -> Option<Telem
 fn process_audio_frame(
     raw_frame: &xenia_peer_core::RawFrame,
     jitter: &mut AudioJitterBuffer,
-    frames_received: &mut u64,
+    codec: &mut dyn AudioCodec,
+    sink: &mut dyn AudioPlaybackSink,
+    frames_decoded: &mut u64,
 ) -> Option<AudioData> {
     match RawAudio::from_frame(raw_frame) {
         Ok(audio) => {
-            if !audio.validate() {
-                warn!(sequence = audio.sequence, "dropping invalid audio frame");
-                return None;
-            }
+            let audio = match codec.decode(audio) {
+                Ok(audio) => audio,
+                Err(err) => {
+                    warn!(error = %err, "dropping undecodable audio frame");
+                    return None;
+                }
+            };
             let last = audio.clone();
             let insert = jitter.push(audio);
-            *frames_received += 1;
+            *frames_decoded += 1;
             while jitter.next_ready() {
-                let _ = jitter.pop_next();
+                if let Some(frame) = jitter.pop_ready() {
+                    sink.submit(&frame);
+                }
             }
             let stats = jitter.stats();
+            let playback = sink.stats();
             info!(
                 stream_id = last.stream_id,
                 sequence = last.sequence,
                 result = ?insert,
-                "audio frame accepted"
+                "audio frame processed"
             );
             Some(AudioData {
-                frames_received: *frames_received,
+                frames_decoded: *frames_decoded,
+                frames_inserted: stats.inserted,
+                frames_emitted: stats.emitted,
+                frames_played: playback.frames_played,
+                samples_played: playback.samples_played,
+                playback_rejected: playback.rejected,
                 last_sequence: last.sequence,
                 stream_id: last.stream_id,
                 sample_rate_hz: last.sample_rate_hz,
@@ -222,6 +692,7 @@ fn process_audio_frame(
                 capture_timestamp_ms: last.capture_timestamp_ms,
                 duplicates: stats.duplicates,
                 late: stats.late,
+                dropped: stats.dropped,
                 gaps: stats.gaps,
                 underruns: stats.underruns,
             })
@@ -278,6 +749,18 @@ struct Args {
     /// `--codec` flag.
     #[arg(long, value_enum, default_value_t = CodecChoice::Passthrough)]
     codec: CodecChoice,
+
+    /// Viewer-side audio playout sink. `synthetic` accepts only
+    /// synthetic RawAudio frames and does not open an OS audio device.
+    #[arg(long, value_enum, default_value_t = PlayAudioMode::Off)]
+    play_audio: PlayAudioMode,
+
+    #[arg(long, value_enum, default_value_t = AudioCodecChoice::RawPcm)]
+    audio_codec: AudioCodecChoice,
+
+    /// Optional output-device name substring for `--play-audio device`.
+    #[arg(long)]
+    audio_output_device: Option<String>,
 
     /// Transport. `auto` infers from `--connect`: `iroh:...` uses
     /// QUIC, `ws://...` / `wss://...` uses WebSocket, otherwise TCP.
@@ -339,7 +822,11 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     info!(peer = %args.connect, frames = frame_limit, verify = args.verify, codec = ?args.codec, transport = ?args.transport, "connecting to xenia-peer daemon");
     warn!("M1 scaffold: CLI probe mode. Use --gui for a window.");
 
-    let mut transport = connect_transport(&args).await?;
+    let connected = connect_transport(&args).await?;
+    let selected_audio_codec =
+        choose_audio_codec(args.audio_codec, connected.advertisement.as_ref())
+            .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+    let mut transport = connected.transport;
     let mut handshake_mgr = HandshakeManager::new();
     let session_key =
         perform_viewer_handshake(&mut transport, &mut handshake_mgr, "daemon").await?;
@@ -361,8 +848,17 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut received: u64 = 0;
-    let mut audio_received: u64 = 0;
-    let mut audio_jitter = AudioJitterBuffer::new(0, 16);
+    let mut audio_decoded: u64 = 0;
+    let mut last_audio_data: Option<AudioData> = None;
+    let mut audio_jitter = AudioJitterBuffer::with_playout_delay(0, 16, 2);
+    let mut audio_codec = make_audio_codec(selected_audio_codec)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+    info!(
+        audio_codec = audio_codec.name(),
+        "viewer audio codec configured"
+    );
+    let mut audio_sink = ViewerAudioSink::new(args.play_audio, args.audio_output_device.as_deref())
+        .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
     loop {
         if frame_limit != 0 && received >= frame_limit {
             info!(received, "reached --frames, exiting");
@@ -387,8 +883,32 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             let _ = decode_telemetry_frame(&raw_frame);
             continue;
         }
+        if raw_frame.pixel_format == FramePixelFormat::Capabilities {
+            let capabilities = RawCapabilities::from_frame(&raw_frame)?;
+            let negotiated_audio_codec =
+                choose_audio_codec_from_capabilities(args.audio_codec, &capabilities)
+                    .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+            audio_codec = make_audio_codec(negotiated_audio_codec)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+            info!(
+                audio_codec = audio_codec.name(),
+                video_format = ?capabilities.video_format,
+                telemetry_enabled = capabilities.telemetry_enabled,
+                input_control_enabled = capabilities.input_control_enabled,
+                "sealed session capabilities applied"
+            );
+            continue;
+        }
         if raw_frame.pixel_format == FramePixelFormat::Audio {
-            let _ = process_audio_frame(&raw_frame, &mut audio_jitter, &mut audio_received);
+            if let Some(audio) = process_audio_frame(
+                &raw_frame,
+                &mut audio_jitter,
+                &mut *audio_codec,
+                &mut audio_sink,
+                &mut audio_decoded,
+            ) {
+                last_audio_data = Some(audio);
+            }
             continue;
         }
         if raw_frame.pixel_format != expected_frame_fmt {
@@ -453,6 +973,32 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     if args.verify {
         info!(verified = received, "verify: all frames matched mirror");
     }
+    let playback = audio_sink.stats();
+    let jitter = audio_jitter.stats();
+    println!(
+        "audio summary: decoded={} inserted={} emitted={} played={} samples={} rejected={} gaps={} duplicates={} late={} dropped={} underruns={}",
+        audio_decoded,
+        jitter.inserted,
+        jitter.emitted,
+        playback.frames_played,
+        playback.samples_played,
+        playback.rejected,
+        jitter.gaps,
+        jitter.duplicates,
+        jitter.late,
+        jitter.dropped,
+        jitter.underruns
+    );
+    if let Some(audio) = last_audio_data {
+        println!(
+            "audio last: stream={} sequence={} rate={} channels={} duration_ms={}",
+            audio.stream_id,
+            audio.last_sequence,
+            audio.sample_rate_hz,
+            audio.channels,
+            audio.frame_duration_ms
+        );
+    }
     info!(received, "viewer exiting");
     Ok(())
 }
@@ -466,6 +1012,9 @@ fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         transport: format!("{:?}", args.transport),
         peer_addr: args.connect.clone(),
     };
+    let audio_sink = ViewerAudioSink::new(args.play_audio, args.audio_output_device.as_deref())
+        .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+    let (audio_tx, audio_rx) = mpsc::sync_channel(64);
 
     // Spawn the receive/decode pipeline on a dedicated tokio thread.
     // eframe wants to own the main thread; tokio runs beside it.
@@ -476,7 +1025,7 @@ fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let slot_for_task = Arc::clone(&slot);
     let args_for_task = args.clone();
     rt.spawn(async move {
-        if let Err(err) = gui_receive_loop(args_for_task, slot_for_task).await {
+        if let Err(err) = gui_receive_loop(args_for_task, slot_for_task, audio_tx).await {
             tracing::error!(error = %err, "gui receive loop exited with error");
         }
     });
@@ -493,7 +1042,14 @@ fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     eframe::run_native(
         "xenia-viewer",
         native_opts,
-        Box::new(move |_cc| Ok(Box::new(ViewerApp::new(slot, config)))),
+        Box::new(move |_cc| {
+            Ok(Box::new(ViewerApp::new(
+                slot,
+                config,
+                Some(audio_rx),
+                Box::new(audio_sink),
+            )))
+        }),
     )
     .map_err(|e| -> Box<dyn std::error::Error> { format!("eframe: {e}").into() })?;
 
@@ -505,15 +1061,19 @@ fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 async fn gui_receive_loop(
     args: Args,
     slot: Arc<FrameSlot>,
+    audio_tx: mpsc::SyncSender<RawAudio>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let source_id = parse_source_id(&args.source_id_hex)
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
     info!(peer = %args.connect, codec = ?args.codec, transport = ?args.transport, "GUI connecting to xenia-peer daemon");
 
-    let mut transport = connect_transport(&args)
+    let connected = connect_transport(&args)
         .await
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
+    let selected_audio_codec =
+        choose_audio_codec(args.audio_codec, connected.advertisement.as_ref())?;
+    let mut transport = connected.transport;
 
     let mut handshake_mgr = HandshakeManager::new();
     let session_key = perform_viewer_handshake(&mut transport, &mut handshake_mgr, "daemon")
@@ -529,8 +1089,16 @@ async fn gui_receive_loop(
 
     let frame_limit = args.frames.unwrap_or(0);
     let mut received: u64 = 0;
-    let mut audio_received: u64 = 0;
-    let mut audio_jitter = AudioJitterBuffer::new(0, 16);
+    let mut audio_decoded: u64 = 0;
+    let mut audio_jitter = AudioJitterBuffer::with_playout_delay(0, 16, 2);
+    let mut audio_codec = make_audio_codec(selected_audio_codec)
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
+    info!(
+        audio_codec = audio_codec.name(),
+        "viewer audio codec configured"
+    );
+    let mut audio_sink: Box<dyn AudioPlaybackSink + Send> =
+        Box::new(ChannelAudioSink::new(audio_tx));
     loop {
         if frame_limit != 0 && received >= frame_limit {
             info!(received, "reached --frames, closing receive loop");
@@ -557,10 +1125,32 @@ async fn gui_receive_loop(
             }
             continue;
         }
+        if raw_frame.pixel_format == FramePixelFormat::Capabilities {
+            let capabilities = RawCapabilities::from_frame(&raw_frame).map_err(
+                |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
+            )?;
+            let negotiated_audio_codec =
+                choose_audio_codec_from_capabilities(args.audio_codec, &capabilities)?;
+            audio_codec = make_audio_codec(negotiated_audio_codec).map_err(
+                |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
+            )?;
+            info!(
+                audio_codec = audio_codec.name(),
+                video_format = ?capabilities.video_format,
+                telemetry_enabled = capabilities.telemetry_enabled,
+                input_control_enabled = capabilities.input_control_enabled,
+                "sealed session capabilities applied"
+            );
+            continue;
+        }
         if raw_frame.pixel_format == FramePixelFormat::Audio {
-            if let Some(audio) =
-                process_audio_frame(&raw_frame, &mut audio_jitter, &mut audio_received)
-            {
+            if let Some(audio) = process_audio_frame(
+                &raw_frame,
+                &mut audio_jitter,
+                &mut *audio_codec,
+                audio_sink.as_mut(),
+                &mut audio_decoded,
+            ) {
                 slot.put_audio(audio);
             }
             continue;
@@ -593,6 +1183,7 @@ async fn gui_receive_loop(
                 rgba: decoded.pixels,
                 seq: received,
                 wire_bytes,
+                timestamp_ms: decoded.pts_ms,
             });
         }
     }
@@ -601,20 +1192,181 @@ async fn gui_receive_loop(
 
 // ─── Shared helper ─────────────────────────────────────────────────
 
-async fn connect_transport(args: &Args) -> Result<AnyTransport, TransportError> {
+async fn connect_transport(args: &Args) -> Result<ConnectedTransport, TransportError> {
     match args.transport {
         TransportChoice::Auto => connect_auto(&args.connect).await,
-        TransportChoice::Tcp => connect_tcp(&args.connect).await,
-        TransportChoice::Ws => connect_ws(&args.connect).await,
-        TransportChoice::Quic => connect_quic(&args.connect).await,
+        TransportChoice::Tcp => Ok(ConnectedTransport {
+            transport: connect_tcp(&args.connect).await?,
+            advertisement: None,
+        }),
+        TransportChoice::Ws => Ok(ConnectedTransport {
+            transport: connect_ws(&args.connect).await?,
+            advertisement: None,
+        }),
+        TransportChoice::Quic => Ok(ConnectedTransport {
+            transport: connect_quic(&args.connect).await?,
+            advertisement: None,
+        }),
     }
 }
 
-async fn connect_auto(connect: &str) -> Result<AnyTransport, TransportError> {
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xenia_peer_core::{SyntheticAudioKind, SyntheticAudioSource};
+
+    #[test]
+    fn synthetic_audio_sink_accepts_only_synthetic_frames() {
+        let mut source = SyntheticAudioSource::new(1, SyntheticAudioKind::Sine);
+        let synthetic = source.next_frame(1_700_000_000_000);
+        let mut captured = synthetic.clone();
+        captured.flags &= !audio_flags::SYNTHETIC;
+
+        let mut sink = SyntheticAudioSink::default();
+        sink.submit(&captured);
+        assert_eq!(sink.stats().rejected, 1);
+        assert_eq!(sink.stats().frames_played, 0);
+
+        sink.submit(&synthetic);
+        assert_eq!(sink.stats().rejected, 1);
+        assert_eq!(sink.stats().frames_played, 1);
+        assert_eq!(sink.stats().samples_played, 48_000 / 50 * 2);
+    }
+
+    #[test]
+    fn channel_audio_sink_reports_backpressure() {
+        let mut source = SyntheticAudioSource::new(1, SyntheticAudioKind::Sine);
+        let frame = source.next_frame(1_700_000_000_000);
+        let (tx, rx) = mpsc::sync_channel(1);
+        let mut sink = ChannelAudioSink::new(tx);
+
+        sink.submit(&frame);
+        sink.submit(&frame);
+
+        assert_eq!(sink.stats().frames_played, 1);
+        assert_eq!(sink.stats().rejected, 1);
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn process_audio_frame_reports_playback_sink_counters() {
+        let mut source = SyntheticAudioSource::new(1, SyntheticAudioKind::Sine);
+        let mut jitter = AudioJitterBuffer::with_playout_delay(0, 8, 1);
+        let mut codec = RawPcmAudioCodec::new();
+        let mut sink = ViewerAudioSink::new(PlayAudioMode::Synthetic, None).unwrap();
+        let mut decoded = 0;
+
+        let first = source.next_frame(1_700_000_000_000).into_frame(1).unwrap();
+        let data =
+            process_audio_frame(&first, &mut jitter, &mut codec, &mut sink, &mut decoded).unwrap();
+        assert_eq!(data.frames_decoded, 1);
+        assert_eq!(data.frames_inserted, 1);
+        assert_eq!(data.frames_emitted, 0);
+        assert_eq!(data.frames_played, 0);
+
+        let second = source.next_frame(1_700_000_000_020).into_frame(2).unwrap();
+        let data =
+            process_audio_frame(&second, &mut jitter, &mut codec, &mut sink, &mut decoded).unwrap();
+        assert_eq!(data.frames_decoded, 2);
+        assert_eq!(data.frames_inserted, 2);
+        assert_eq!(data.frames_emitted, 1);
+        assert_eq!(data.frames_played, 1);
+        assert_eq!(data.playback_rejected, 0);
+    }
+
+    #[test]
+    fn process_audio_frame_rejects_invalid_codec_payload() {
+        let mut source = SyntheticAudioSource::new(1, SyntheticAudioKind::Sine);
+        let mut audio = source.next_frame(1_700_000_000_000);
+        audio.payload.pop();
+        let frame = audio.into_frame(1).unwrap();
+        let mut jitter = AudioJitterBuffer::with_playout_delay(0, 8, 1);
+        let mut codec = RawPcmAudioCodec::new();
+        let mut sink = ViewerAudioSink::new(PlayAudioMode::Synthetic, None).unwrap();
+        let mut decoded = 0;
+
+        assert!(
+            process_audio_frame(&frame, &mut jitter, &mut codec, &mut sink, &mut decoded).is_none()
+        );
+        assert_eq!(decoded, 0);
+        assert_eq!(jitter.stats().inserted, 0);
+        assert_eq!(sink.stats().frames_played, 0);
+    }
+
+    #[test]
+    fn auto_audio_codec_defaults_to_raw_without_advertisement() {
+        assert_eq!(
+            choose_audio_codec(AudioCodecChoice::Auto, None).unwrap(),
+            AudioCodecChoice::RawPcm
+        );
+    }
+
+    #[test]
+    fn auto_audio_codec_uses_advertised_raw_selection() {
+        let advert = TransportAdvertisement::auto("iroh:test".to_string()).with_audio(
+            xenia_peer_core::advertisement::AudioAdvertisement {
+                codecs: vec![AdvertisedAudioCodec::RawPcm],
+                selected_codec: AdvertisedAudioCodec::RawPcm,
+                sample_rate_hz: 48_000,
+                max_channels: 2,
+                frame_duration_ms: vec![10, 20],
+            },
+        );
+
+        assert_eq!(
+            choose_audio_codec(AudioCodecChoice::Auto, Some(&advert)).unwrap(),
+            AudioCodecChoice::RawPcm
+        );
+    }
+
+    #[test]
+    fn audio_adapter_expands_mono_to_stereo() {
+        let samples_per_channel = 48_000 / 100;
+        let mut payload = Vec::with_capacity(samples_per_channel * 2);
+        for _ in 0..samples_per_channel {
+            payload.extend_from_slice(&1_000i16.to_le_bytes());
+        }
+        let frame = RawAudio {
+            schema_version: xenia_peer_core::frame::RAW_AUDIO_SCHEMA_VERSION,
+            clock_domain: xenia_peer_core::frame::RAW_AUDIO_CLOCK_UNIX_MS,
+            stream_id: 1,
+            sequence: 0,
+            capture_timestamp_ms: 1_700_000_000_000,
+            sample_rate_hz: xenia_peer_core::frame::RAW_AUDIO_SAMPLE_RATE_HZ,
+            channels: 1,
+            sample_format: xenia_peer_core::AudioSampleFormat::PcmS16Le,
+            frame_duration_ms: 10,
+            flags: audio_flags::SYNTHETIC,
+            payload,
+        };
+
+        assert!(frame.validate());
+        let adapted = adapt_audio_samples(&frame, 48_000, 2);
+        assert_eq!(adapted.len(), samples_per_channel * 2);
+        assert!(adapted.chunks_exact(2).all(|pair| pair == [1_000, 1_000]));
+    }
+
+    #[test]
+    fn audio_adapter_resamples_to_output_rate() {
+        let mut source = SyntheticAudioSource::new(1, SyntheticAudioKind::Sine);
+        let frame = source.next_frame(1_700_000_000_000);
+        let adapted = adapt_audio_samples(&frame, 24_000, 2);
+        assert_eq!(adapted.len(), 48_000 / 50 / 2 * 2);
+    }
+}
+
+async fn connect_auto(connect: &str) -> Result<ConnectedTransport, TransportError> {
     if connect.starts_with("iroh:") {
-        connect_quic(connect).await
+        Ok(ConnectedTransport {
+            transport: connect_quic(connect).await?,
+            advertisement: None,
+        })
     } else if connect.starts_with("ws://") || connect.starts_with("wss://") {
-        connect_ws(connect).await
+        Ok(ConnectedTransport {
+            transport: connect_ws(connect).await?,
+            advertisement: None,
+        })
     } else {
         connect_auto_with_advertisement(connect).await
     }
@@ -624,16 +1376,21 @@ async fn connect_tcp(connect: &str) -> Result<AnyTransport, TransportError> {
     Ok(AnyTransport::Tcp(TcpTransport::connect(connect).await?))
 }
 
-async fn connect_auto_with_advertisement(connect: &str) -> Result<AnyTransport, TransportError> {
+async fn connect_auto_with_advertisement(
+    connect: &str,
+) -> Result<ConnectedTransport, TransportError> {
     let mut tcp = TcpTransport::connect(connect).await?;
     let first = tcp.recv_envelope().await?;
     let advert =
         TransportAdvertisement::decode(&first).map_err(|e| std::io::Error::other(e.to_string()))?;
     let Some(advert) = advert else {
         info!("daemon did not send a transport advertisement; continuing on TCP");
-        return Ok(AnyTransport::PreloadedTcp {
-            first: Some(first),
-            transport: tcp,
+        return Ok(ConnectedTransport {
+            transport: AnyTransport::PreloadedTcp {
+                first: Some(first),
+                transport: tcp,
+            },
+            advertisement: None,
         });
     };
 
@@ -643,11 +1400,17 @@ async fn connect_auto_with_advertisement(connect: &str) -> Result<AnyTransport, 
         .filter(|_| advert.transports.contains(&AdvertisedTransport::Quic))
     {
         info!("daemon advertised QUIC; reconnecting over Iroh");
-        return connect_quic(quic_connect).await;
+        return Ok(ConnectedTransport {
+            transport: connect_quic(quic_connect).await?,
+            advertisement: Some(advert),
+        });
     }
 
     info!("daemon advertisement did not include QUIC; continuing on TCP");
-    Ok(AnyTransport::Tcp(tcp))
+    Ok(ConnectedTransport {
+        transport: AnyTransport::Tcp(tcp),
+        advertisement: Some(advert),
+    })
 }
 
 async fn connect_ws(connect: &str) -> Result<AnyTransport, TransportError> {

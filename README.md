@@ -259,6 +259,9 @@ See
 for the disclosure policy — `xenia-peer` inherits the same posture.
 Do not report security issues via public GitHub issues.
 
+For the audit claim boundary, see
+[`docs/security/LEDGER_VERIFICATION_BOUNDARY.md`](docs/security/LEDGER_VERIFICATION_BOUNDARY.md).
+
 ## Relationship to Track A
 
 [`xenia-wire`](https://github.com/Luminous-Dynamics/xenia-wire) is

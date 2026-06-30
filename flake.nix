@@ -20,7 +20,9 @@
 
         pkgConfigPath = lib.makeSearchPathOutput "dev" "lib/pkgconfig" [
           ffmpeg
+          pkgs.alsa-lib
           pkgs.dbus
+          pkgs.libopus
           pkgs.pipewire
         ];
 
@@ -32,6 +34,7 @@
 
         commonNativeBuildInputs = with pkgs; [
           pkg-config
+          cmake
           llvmPackages.libclang
           git
         ];
@@ -69,6 +72,12 @@
           ffmpeg
           ffmpeg.dev
 
+          # Native audio deps for CPAL capture/playback and Opus codec checks.
+          alsa-lib
+          alsa-lib.dev
+          libopus
+          libopus.dev
+
           # Wayland + DBus deps for capture/viewer backends.
           wayland
           wayland-protocols
@@ -80,6 +89,39 @@
           pipewire
           pipewire.dev
         ];
+
+        xeniaEnv = ''
+          export PKG_CONFIG_PATH="${pkgConfigPath}:''${PKG_CONFIG_PATH:-}"
+          export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
+          BINDGEN_EXTRA_CLANG_ARGS="$(< ${pkgs.stdenv.cc}/nix-support/libc-cflags) $(< ${pkgs.stdenv.cc}/nix-support/cc-cflags)"
+          export BINDGEN_EXTRA_CLANG_ARGS
+          export LD_LIBRARY_PATH="${runtimeLibraryPath}:''${LD_LIBRARY_PATH:-}"
+          export RUST_SRC_PATH="${pkgs.rustPlatform.rustLibSrc}"
+        '';
+
+        mkValidationApp =
+          name: description: commands:
+          let
+            script = pkgs.writeShellApplication {
+              inherit name;
+              runtimeInputs =
+                commonNativeBuildInputs
+                ++ rustCoreTools
+                ++ mediaAndPlatformInputs
+                ++ auditTools
+                ++ [ pkgs.coreutils pkgs.nix pkgs.nixpkgs-fmt pkgs.python3 ];
+              text = ''
+                set -euo pipefail
+                ${xeniaEnv}
+                ${commands}
+              '';
+            };
+          in
+          {
+            type = "app";
+            program = "${script}/bin/${name}";
+            meta.description = description;
+          };
 
         mkXeniaShell =
           { name
@@ -100,20 +142,7 @@
               ++ lib.optionals includeWebTools webTools;
 
             shellHook = ''
-              # pkg-config needs to see libav, dbus, and pipewire .pc files.
-              export PKG_CONFIG_PATH="${pkgConfigPath}:''${PKG_CONFIG_PATH:-}"
-
-              # bindgen needs libclang and glibc CFLAGS so its internal clang
-              # can find errno.h and friends.
-              export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
-              export BINDGEN_EXTRA_CLANG_ARGS="$(< ${pkgs.stdenv.cc}/nix-support/libc-cflags) $(< ${pkgs.stdenv.cc}/nix-support/cc-cflags)"
-
-              # eframe / winit dlopen these libraries at runtime. Without
-              # them on LD_LIBRARY_PATH, `--gui` crashes on Wayland/X11.
-              export LD_LIBRARY_PATH="${runtimeLibraryPath}:''${LD_LIBRARY_PATH:-}"
-
-              # Help rust-analyzer find std sources when launched from this shell.
-              export RUST_SRC_PATH="${pkgs.rustPlatform.rustLibSrc}"
+              ${xeniaEnv}
 
               # Preserve parent CARGO_TARGET_DIR for build isolation across
               # concurrent agent sessions.
@@ -127,14 +156,15 @@
               export RUST_BACKTRACE=1
 
               cat <<'BANNER'
-              xenia-peer dev shell — H.264 + Wayland/PipeWire deps ready.
+              xenia-peer dev shell — H.264 + Wayland/PipeWire + audio deps ready.
                 scripts/xenia-validate.sh .
                 cargo test --workspace --features "xenia-peer/h264 xenia-viewer/h264"
                 cargo build --release --workspace
               BANNER
             '';
           };
-      in {
+      in
+      rec {
         devShells.default = mkXeniaShell {
           name = "xenia-peer-dev";
           includeDevTools = true;
@@ -162,10 +192,29 @@
 
         formatter = pkgs.nixpkgs-fmt;
 
-        checks.hygiene = pkgs.runCommand "xenia-hygiene-audit" {
-          src = self;
-          nativeBuildInputs = with pkgs; [ bash coreutils findutils gnugrep gnused ripgrep ];
-        } ''
+        apps.fast = mkValidationApp "xenia-fast-check" "Fast Xenia Rust/protocol validation gate" ''
+          scripts/xenia-fast-check.sh .
+        '';
+
+        apps.audio = mkValidationApp "xenia-audio-check" "Xenia audio feature validation gate" ''
+          scripts/xenia-audio-check.sh .
+        '';
+
+        apps.full = mkValidationApp "xenia-full-check" "Full Xenia workspace validation gate" ''
+          scripts/xenia-full-check.sh .
+        '';
+
+        apps.ci = mkValidationApp "xenia-ci-check" "Default Xenia CI validation gate" ''
+          scripts/xenia-ci-check.sh .
+        '';
+
+        apps.default = apps.ci;
+
+        checks.hygiene = pkgs.runCommand "xenia-hygiene-audit"
+          {
+            src = self;
+            nativeBuildInputs = with pkgs; [ bash cargo coreutils findutils gnugrep gnused ripgrep ];
+          } ''
           cp -R "$src" source
           chmod -R +w source
           cd source
