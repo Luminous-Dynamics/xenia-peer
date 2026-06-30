@@ -40,6 +40,10 @@ xenia-handshake = { path = "../../crates/xenia-handshake" }
 
 [features]
 scap = ["xenia-capture/scap-backend"]
+# Viewer/daemon protocol path for real host audio capture. Requires
+# system audio headers on Linux; off by default.
+audio-capture = ["xenia-capture/audio-cpal"]
+audio-opus = ["xenia-peer-core/opus"]
 # Pass-through: rebuild xenia-video with the h264 feature so the
 # daemon can select `--codec h264` at runtime. Requires libav dev
 # headers (enable inside nix develop).
@@ -47,3 +51,6 @@ h264 = ["xenia-video/h264"]
 # HDC hybrid tile-delta codec (ported from Symthaea). Pure Rust,
 # no external libs. Grayscale output.
 hdc = ["xenia-video/hdc"]
+# Local smoke/demo-only fixtures. Required for flags that bypass a real
+# operator consent source; never enable for production or design-partner builds.
+preprod-fixtures = []

@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license = "Apache-2.0 OR MIT"
-description = "Post-quantum hybrid handshake (Ed25519 + ML-KEM-768 + HKDF-SHA-256) for the Xenia remote-session stack. Fresh implementation against RustCrypto primitives; API-aligned with Symthaea's pqc_handshake but self-contained."
+description = "ML-KEM-768 session key establishment with classical Ed25519 transcript authentication for the Xenia remote-session stack. Final PQ authentication via ML-DSA/SLH-DSA is a future migration lane."
 repository.workspace = true
 homepage.workspace = true
 publish = false
@@ -14,6 +14,8 @@ publish = false
 thiserror.workspace = true
 tracing.workspace = true
 serde = { version = "1", features = ["derive"] }
+bincode = { workspace = true }
+blake3 = "1.5"
 
 ml-kem = { version = "0.3.0-rc.2", default-features = false, features = ["zeroize", "getrandom"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
@@ -22,5 +24,3 @@ sha2 = "0.10"
 rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }
 
-[dev-dependencies]
-bincode = "1.3"

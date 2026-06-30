@@ -62,6 +62,55 @@ if [[ -x scripts/check-secure-defaults.py ]]; then
   fi
 fi
 
+if [[ -x scripts/check-pqc-claims.sh ]]; then
+  run scripts/check-pqc-claims.sh .
+fi
+
+if [[ -x scripts/check-evidence-crypto-profile.sh ]]; then
+  run scripts/check-evidence-crypto-profile.sh .
+fi
+
+if [[ -x scripts/check-evidence-manifests.py ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    run python3 scripts/check-evidence-manifests.py .
+  else
+    echo "WARN: python3 not found; skipping evidence manifest check" >&2
+  fi
+fi
+
+if [[ -x scripts/check-signature-envelope-agility.sh ]]; then
+  run scripts/check-signature-envelope-agility.sh .
+fi
+
+if [[ -x scripts/check-evidence-bundle-verification.sh ]]; then
+  run scripts/check-evidence-bundle-verification.sh .
+fi
+
+if [[ -x scripts/check-transcript-bound-evidence.sh ]]; then
+  run scripts/check-transcript-bound-evidence.sh .
+fi
+
+if [[ -x scripts/check-canonical-handshake-transcript.sh ]]; then
+  run scripts/check-canonical-handshake-transcript.sh .
+fi
+
+
+if [[ -x scripts/check-m1-evidence-bundle-export.sh ]]; then
+  run scripts/check-m1-evidence-bundle-export.sh .
+fi
+
+if [[ -x scripts/check-m1-evidence-bundle-verifier.sh ]]; then
+  run scripts/check-m1-evidence-bundle-verifier.sh .
+fi
+
+if [[ -x scripts/check-pqc-signature-backend-boundary.sh ]]; then
+  run scripts/check-pqc-signature-backend-boundary.sh .
+fi
+
+if [[ -x scripts/check-full-pqc-runtime-refusal.sh ]]; then
+  run scripts/check-full-pqc-runtime-refusal.sh .
+fi
+
 if [[ -x scripts/check-release-readiness.py ]]; then
   if command -v python3 >/dev/null 2>&1; then
     run python3 scripts/check-release-readiness.py .

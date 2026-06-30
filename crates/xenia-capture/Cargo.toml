@@ -32,6 +32,7 @@ tracing.workspace = true
 # libpipewire-0.3 + libspa-0.2 + libdbus-1 dev headers, provided by
 # `nix develop` inside the xenia-peer workspace.
 scap = { git = "https://github.com/Luminous-Dynamics/scap", branch = "fix/linux-engine-two-level-frame-enum", optional = true }
+cpal = { version = "0.15.3", optional = true }
 
 [features]
 default = []
@@ -40,6 +41,9 @@ default = []
 # Windows (Windows Graphics Capture). Linux builds require
 # libpipewire-0.3 + libspa-0.2 dev headers (provided by `nix develop`).
 scap-backend = ["dep:scap"]
+# Cross-platform host audio capture via CPAL. Linux builds require
+# ALSA development headers (`libasound2-dev` on Ubuntu).
+audio-cpal = ["dep:cpal"]
 # wlr-screencopy capture on wlroots-based compositors (Sway, Hyprland,
 # labwc). Pre-existing scaffold; superseded for most deployments by
 # `scap-backend` via the xdg-desktop-portal-wlr bridge. Retained for

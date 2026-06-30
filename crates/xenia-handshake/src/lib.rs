@@ -1,10 +1,14 @@
 // Copyright (C) 2024-2026 Tristan Stoltz / Luminous Dynamics
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! # xenia-handshake — post-quantum hybrid session establishment
+//! # xenia-handshake — ML-KEM session establishment
 //!
-//! Combines classical Ed25519 identity verification with ML-KEM-768
-//! (FIPS 203) key encapsulation to derive a 32-byte session key suitable
-//! for ChaCha20-Poly1305 AEAD sealing of the xenia-wire envelope.
+//! Combines ML-KEM-768 key encapsulation with classical Ed25519 identity
+//! verification to derive a 32-byte session key suitable for ChaCha20-Poly1305
+//! AEAD sealing of the xenia-wire envelope.
+//!
+//! This crate is **not at the final PQ profile yet**: Ed25519 remains the
+//! authentication signature. ML-DSA/SLH-DSA transcript authentication is
+//! tracked in `docs/crypto/FULL_PQC_MIGRATION_PLAN.md`.
 //!
 //! Fresh implementation against RustCrypto primitives (`ml-kem`,
 //! `ed25519-dalek`, `hkdf`, `sha2`). API shape aligned with Symthaea's
@@ -32,15 +36,16 @@
 //!   )
 //! ```
 //!
-//! Both classical (Ed25519 signature) and PQC (ML-KEM) must succeed. If
-//! a quantum computer breaks Ed25519, the ML-KEM shared secret still
-//! protects the session. If ML-KEM has an undiscovered flaw, Ed25519
-//! still authenticates. Hybrid KDF security per Bindel et al. 2019.
+//! Both classical authentication (Ed25519 signature) and PQ key establishment
+//! (ML-KEM) must succeed. ML-KEM mitigates passive harvest-now-decrypt-later
+//! risk for session key establishment, but Ed25519 is still quantum-vulnerable
+//! for active impersonation until transcript signatures move to ML-DSA/SLH-DSA.
 //!
 //! ## References
 //! - NIST FIPS 203 (2024) — ML-KEM specification
 //! - Bindel et al. (2019) — hybrid key exchange in TLS 1.3
-//! - RFC 8032 — Ed25519
+//! - RFC 8032 — Ed25519 (current classical authentication layer)
+//! - Full-PQC migration plan — `docs/crypto/FULL_PQC_MIGRATION_PLAN.md`
 
 use std::collections::HashMap;
 use std::time::SystemTime;
@@ -75,6 +80,167 @@ const HKDF_SALT: &[u8] = b"xenia-handshake-v1";
 /// HKDF-SHA-256 info (key-purpose label).
 const HKDF_INFO: &[u8] = b"xenia-session-key";
 
+/// Machine-readable KEM label for evidence manifests.
+pub const KEM_SUITE_LABEL: &str = "ml-kem-768-fips203";
+
+/// Machine-readable transcript-authentication label for the current implementation.
+pub const TRANSCRIPT_SIGNATURE_SUITE_LABEL: &str = "ed25519-rfc8032";
+
+/// Machine-readable KDF label for the current implementation.
+pub const KDF_SUITE_LABEL: &str = "hkdf-sha256";
+
+/// Machine-readable evidence profile represented by this crate today.
+pub const HANDSHAKE_POLICY_PROFILE: &str = "hybrid-pre-pqc-v1";
+
+/// Stable schema label for canonical handshake transcripts.
+pub const HANDSHAKE_TRANSCRIPT_SCHEMA: &str = "xenia-handshake-transcript-v1";
+
+/// Hash algorithm used for canonical handshake transcript hashes.
+pub const HANDSHAKE_TRANSCRIPT_HASH_ALGORITHM: &str = "blake3-256";
+
+/// Stable evidence-profile summary for the current handshake implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct HandshakeEvidenceProfile {
+    /// Schema label for this profile structure.
+    pub schema: &'static str,
+    /// Key-establishment suite.
+    pub kem: &'static str,
+    /// Signature suite authenticating the transcript today.
+    pub transcript_signature: &'static str,
+    /// Key derivation suite.
+    pub kdf: &'static str,
+    /// Policy class represented by the current implementation.
+    pub policy_profile: &'static str,
+    /// Whether the current transcript signature is post-quantum.
+    pub transcript_signature_post_quantum: bool,
+}
+
+/// Evidence profile for the current handshake implementation.
+pub const CURRENT_HANDSHAKE_EVIDENCE_PROFILE: HandshakeEvidenceProfile = HandshakeEvidenceProfile {
+    schema: "xenia-handshake-evidence-profile-v1",
+    kem: KEM_SUITE_LABEL,
+    transcript_signature: TRANSCRIPT_SIGNATURE_SUITE_LABEL,
+    kdf: KDF_SUITE_LABEL,
+    policy_profile: HANDSHAKE_POLICY_PROFILE,
+    transcript_signature_post_quantum: false,
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Canonical transcript evidence
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Public, non-secret handshake transcript material used for evidence binding.
+///
+/// This type intentionally contains only public handshake artifacts and stable
+/// crypto-suite labels. It does not contain the derived session key or any KEM
+/// shared secret. Its bincode-v1 serialization is the canonical byte stream used
+/// to produce the session transcript hash consumed by `xenia-ledger` evidence
+/// bindings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandshakeTranscriptV1 {
+    /// Stable schema label for the canonical transcript shape.
+    pub schema: String,
+    /// Key-establishment suite label.
+    pub kem: String,
+    /// Transcript-authentication signature suite label.
+    pub transcript_signature: String,
+    /// Key derivation suite label.
+    pub kdf: String,
+    /// Host Ed25519 verifying key.
+    pub host_ed25519_pk: [u8; 32],
+    /// Viewer Ed25519 verifying key.
+    pub viewer_ed25519_pk: [u8; 32],
+    /// Host ML-KEM-768 encapsulation key.
+    pub host_kem_pk: Vec<u8>,
+    /// Viewer ML-KEM-768 ciphertext sent to the host.
+    pub kem_ciphertext: Vec<u8>,
+    /// Host nonce used in the KDF binding.
+    pub host_nonce: [u8; 32],
+    /// Viewer nonce used in the KDF binding.
+    pub viewer_nonce: [u8; 32],
+    /// Viewer signature over the pre-finalize transcript.
+    pub viewer_signature: Vec<u8>,
+    /// Host signature over the finalized transcript.
+    pub host_signature: Vec<u8>,
+}
+
+impl HandshakeTranscriptV1 {
+    /// Build a canonical transcript from public handshake artifacts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        host_ed25519_pk: [u8; 32],
+        viewer_ed25519_pk: [u8; 32],
+        host_kem_pk: impl Into<Vec<u8>>,
+        kem_ciphertext: impl Into<Vec<u8>>,
+        host_nonce: [u8; 32],
+        viewer_nonce: [u8; 32],
+        viewer_signature: impl Into<Vec<u8>>,
+        host_signature: impl Into<Vec<u8>>,
+    ) -> Result<Self> {
+        let host_kem_pk = host_kem_pk.into();
+        let kem_ciphertext = kem_ciphertext.into();
+        let viewer_signature = viewer_signature.into();
+        let host_signature = host_signature.into();
+
+        validate_transcript_component("host_kem_pk", host_kem_pk.len(), ML_KEM_768_PK_LEN)?;
+        validate_transcript_component("kem_ciphertext", kem_ciphertext.len(), ML_KEM_768_CT_LEN)?;
+        validate_transcript_component("viewer_signature", viewer_signature.len(), 64)?;
+        validate_transcript_component("host_signature", host_signature.len(), 64)?;
+
+        Ok(Self {
+            schema: HANDSHAKE_TRANSCRIPT_SCHEMA.to_string(),
+            kem: KEM_SUITE_LABEL.to_string(),
+            transcript_signature: TRANSCRIPT_SIGNATURE_SUITE_LABEL.to_string(),
+            kdf: KDF_SUITE_LABEL.to_string(),
+            host_ed25519_pk,
+            viewer_ed25519_pk,
+            host_kem_pk,
+            kem_ciphertext,
+            host_nonce,
+            viewer_nonce,
+            viewer_signature,
+            host_signature,
+        })
+    }
+
+    /// Return the canonical bincode-v1 bytes for this transcript.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
+        canonical_session_transcript_bytes(self)
+    }
+
+    /// Return the stable transcript hash used by evidence bindings.
+    pub fn transcript_hash(&self) -> Result<[u8; 32]> {
+        compute_session_transcript_hash(self)
+    }
+}
+
+/// Serialize the canonical handshake transcript.
+pub fn canonical_session_transcript_bytes(transcript: &HandshakeTranscriptV1) -> Result<Vec<u8>> {
+    Ok(bincode::serialize(transcript)?)
+}
+
+/// Compute the canonical handshake transcript hash from the typed transcript.
+pub fn compute_session_transcript_hash(transcript: &HandshakeTranscriptV1) -> Result<[u8; 32]> {
+    let bytes = canonical_session_transcript_bytes(transcript)?;
+    Ok(compute_session_transcript_hash_from_bytes(&bytes))
+}
+
+/// Compute the canonical handshake transcript hash from already-serialized bytes.
+pub fn compute_session_transcript_hash_from_bytes(canonical_bytes: &[u8]) -> [u8; 32] {
+    *blake3::hash(canonical_bytes).as_bytes()
+}
+
+fn validate_transcript_component(name: &'static str, got: usize, expected: usize) -> Result<()> {
+    if got != expected {
+        return Err(HandshakeError::InvalidTranscriptComponent {
+            name,
+            expected,
+            got,
+        });
+    }
+    Ok(())
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Errors
 // ═══════════════════════════════════════════════════════════════════════════
@@ -101,6 +267,19 @@ pub enum HandshakeError {
 
     #[error("invalid Ed25519 public key")]
     InvalidVerifyingKey,
+
+    #[error("invalid handshake transcript component {name}: got {got}, expected {expected}")]
+    InvalidTranscriptComponent {
+        /// Transcript component name.
+        name: &'static str,
+        /// Expected byte length.
+        expected: usize,
+        /// Actual byte length.
+        got: usize,
+    },
+
+    #[error("canonical handshake transcript serialization failed: {0}")]
+    TranscriptSerialization(#[from] bincode::Error),
 }
 
 pub type Result<T> = std::result::Result<T, HandshakeError>;
@@ -181,6 +360,11 @@ pub struct HandshakeManager {
 }
 
 impl HandshakeManager {
+    /// Return machine-readable crypto-profile labels for evidence export.
+    pub const fn evidence_profile() -> HandshakeEvidenceProfile {
+        CURRENT_HANDSHAKE_EVIDENCE_PROFILE
+    }
+
     /// Generate a fresh identity + KEM keypair on this node.
     pub fn new() -> Self {
         let signing_key = SigningKey::generate(&mut OsRng);
@@ -398,6 +582,64 @@ mod tests {
     fn identity_public_key_is_32_bytes() {
         let mgr = HandshakeManager::new();
         assert_eq!(mgr.identity_public_key_bytes().len(), 32);
+    }
+
+    #[test]
+    fn evidence_profile_labels_current_hybrid_boundary() {
+        let profile = HandshakeManager::evidence_profile();
+        assert_eq!(profile.schema, "xenia-handshake-evidence-profile-v1");
+        assert_eq!(profile.kem, "ml-kem-768-fips203");
+        assert_eq!(profile.transcript_signature, "ed25519-rfc8032");
+        assert_eq!(profile.kdf, "hkdf-sha256");
+        assert_eq!(profile.policy_profile, "hybrid-pre-pqc-v1");
+        assert!(!profile.transcript_signature_post_quantum);
+    }
+
+    #[test]
+    fn canonical_transcript_hash_is_stable_and_sensitive() {
+        let transcript = HandshakeTranscriptV1::new(
+            [0xA1; 32],
+            [0xB2; 32],
+            vec![0xC3; ML_KEM_768_PK_LEN],
+            vec![0xD4; ML_KEM_768_CT_LEN],
+            [0xE5; 32],
+            [0xF6; 32],
+            vec![0x11; 64],
+            vec![0x22; 64],
+        )
+        .unwrap();
+
+        let first = transcript.transcript_hash().unwrap();
+        let second = compute_session_transcript_hash(&transcript).unwrap();
+        assert_eq!(first, second);
+        assert_ne!(first, [0u8; 32]);
+
+        let mut changed = transcript.clone();
+        changed.host_signature[0] ^= 0x01;
+        assert_ne!(first, changed.transcript_hash().unwrap());
+    }
+
+    #[test]
+    fn canonical_transcript_rejects_wrong_component_lengths() {
+        let err = HandshakeTranscriptV1::new(
+            [0xA1; 32],
+            [0xB2; 32],
+            vec![0xC3; ML_KEM_768_PK_LEN - 1],
+            vec![0xD4; ML_KEM_768_CT_LEN],
+            [0xE5; 32],
+            [0xF6; 32],
+            vec![0x11; 64],
+            vec![0x22; 64],
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            HandshakeError::InvalidTranscriptComponent {
+                name: "host_kem_pk",
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -54,6 +54,10 @@ mod scap_backend;
 pub use scap_backend::{ScapCapture, ScapOptions, ScapResolution};
 
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "audio-cpal")]
+use std::collections::VecDeque;
+#[cfg(feature = "audio-cpal")]
+use std::sync::{Arc, Mutex};
 use sysinfo::System;
 use thiserror::Error;
 
@@ -222,7 +226,11 @@ pub struct AudioFrame {
 }
 
 /// Platform-agnostic audio-capture interface.
-pub trait AudioCapture: Send {
+///
+/// Real device backends may be thread-affine. For example, CPAL
+/// streams are intentionally not `Send` on every platform, so callers
+/// should keep capture on the task/thread that owns the backend.
+pub trait AudioCapture {
     /// Capture the next audio frame, or `Ok(None)` when no data is
     /// currently available.
     fn capture_audio(&mut self) -> Result<Option<AudioFrame>, IngestionError>;
@@ -366,6 +374,189 @@ impl AudioCapture for SilentAudioCapture {
 
     fn backend_name(&self) -> &str {
         "silent-audio"
+    }
+}
+
+/// CPAL-backed host audio capture.
+///
+/// The backend captures from the default input device and emits 20 ms
+/// S16LE-equivalent frames. Linux builds require ALSA development
+/// headers because CPAL 0.15 uses ALSA on Linux.
+#[cfg(feature = "audio-cpal")]
+pub struct CpalAudioCapture {
+    sample_rate_hz: u32,
+    channels: u16,
+    frame_samples_per_channel: usize,
+    buffer: Arc<Mutex<VecDeque<i16>>>,
+    _stream: cpal::Stream,
+}
+
+#[cfg(feature = "audio-cpal")]
+impl CpalAudioCapture {
+    /// Create a capture stream from the default host input device.
+    pub fn new_default_input() -> Result<Self, IngestionError> {
+        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+        let host = cpal::default_host();
+        let device = host
+            .default_input_device()
+            .ok_or_else(|| IngestionError::Unavailable("no default audio input device".into()))?;
+        let device_name = device.name().unwrap_or_else(|_| "unknown".to_string());
+        let supported = device
+            .default_input_config()
+            .map_err(|err| IngestionError::Backend(err.to_string()))?;
+        let sample_rate_hz = supported.sample_rate().0;
+        let channels = supported.channels();
+        if channels == 0 {
+            return Err(IngestionError::Unavailable(
+                "default audio input reports zero channels".into(),
+            ));
+        }
+
+        if sample_rate_hz != 48_000 {
+            return Err(IngestionError::Unavailable(format!(
+                "default audio input uses {sample_rate_hz} Hz; RawAudio v0.1 capture requires 48000 Hz"
+            )));
+        }
+        if channels > 2 {
+            return Err(IngestionError::Unavailable(format!(
+                "default audio input reports {channels} channels; RawAudio v0.1 capture supports at most 2"
+            )));
+        }
+
+        let frame_samples_per_channel = usize::try_from(sample_rate_hz / 50)
+            .map_err(|_| IngestionError::Backend("sample rate does not fit usize".into()))?;
+
+        let config: cpal::StreamConfig = supported.clone().into();
+        let buffer = Arc::new(Mutex::new(VecDeque::<i16>::new()));
+        let err_fn = |err| tracing::warn!(error = %err, "audio input stream error");
+        let stream = match supported.sample_format() {
+            cpal::SampleFormat::F32 => {
+                let buffer = Arc::clone(&buffer);
+                device.build_input_stream(
+                    &config,
+                    move |data: &[f32], _| push_f32_samples(data, &buffer),
+                    err_fn,
+                    None,
+                )
+            }
+            cpal::SampleFormat::I16 => {
+                let buffer = Arc::clone(&buffer);
+                device.build_input_stream(
+                    &config,
+                    move |data: &[i16], _| push_i16_samples(data, &buffer),
+                    err_fn,
+                    None,
+                )
+            }
+            cpal::SampleFormat::U16 => {
+                let buffer = Arc::clone(&buffer);
+                device.build_input_stream(
+                    &config,
+                    move |data: &[u16], _| push_u16_samples(data, &buffer),
+                    err_fn,
+                    None,
+                )
+            }
+            other => {
+                return Err(IngestionError::Unavailable(format!(
+                    "unsupported input sample format: {other:?}"
+                )));
+            }
+        }
+        .map_err(|err| IngestionError::Backend(err.to_string()))?;
+        stream
+            .play()
+            .map_err(|err| IngestionError::Backend(err.to_string()))?;
+
+        tracing::info!(
+            device = %device_name,
+            sample_rate_hz,
+            channels,
+            sample_format = ?supported.sample_format(),
+            "audio input stream started"
+        );
+
+        Ok(Self {
+            sample_rate_hz,
+            channels,
+            frame_samples_per_channel,
+            buffer,
+            _stream: stream,
+        })
+    }
+}
+
+#[cfg(feature = "audio-cpal")]
+impl AudioCapture for CpalAudioCapture {
+    fn capture_audio(&mut self) -> Result<Option<AudioFrame>, IngestionError> {
+        let samples_needed = self
+            .frame_samples_per_channel
+            .checked_mul(usize::from(self.channels))
+            .ok_or_else(|| IngestionError::Backend("audio frame sample count overflow".into()))?;
+        let mut buffer = self
+            .buffer
+            .lock()
+            .map_err(|_| IngestionError::Backend("audio input buffer poisoned".into()))?;
+        if buffer.len() < samples_needed {
+            return Ok(None);
+        }
+
+        let mut samples_i16 = Vec::with_capacity(samples_needed);
+        for _ in 0..samples_needed {
+            if let Some(sample) = buffer.pop_front() {
+                samples_i16.push(sample);
+            }
+        }
+        drop(buffer);
+
+        Ok(Some(AudioFrame {
+            sample_rate_hz: self.sample_rate_hz,
+            channels: self.channels,
+            samples_i16,
+            timestamp_ms: now_ms(),
+        }))
+    }
+
+    fn backend_name(&self) -> &str {
+        "cpal-audio"
+    }
+}
+
+#[cfg(feature = "audio-cpal")]
+fn push_i16_samples(data: &[i16], buffer: &Arc<Mutex<VecDeque<i16>>>) {
+    push_samples(data.iter().copied(), buffer);
+}
+
+#[cfg(feature = "audio-cpal")]
+fn push_f32_samples(data: &[f32], buffer: &Arc<Mutex<VecDeque<i16>>>) {
+    push_samples(
+        data.iter()
+            .map(|sample| (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16),
+        buffer,
+    );
+}
+
+#[cfg(feature = "audio-cpal")]
+fn push_u16_samples(data: &[u16], buffer: &Arc<Mutex<VecDeque<i16>>>) {
+    push_samples(
+        data.iter()
+            .map(|sample| i32::from(*sample) - 32_768)
+            .map(|sample| sample.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16),
+        buffer,
+    );
+}
+
+#[cfg(feature = "audio-cpal")]
+fn push_samples(samples: impl IntoIterator<Item = i16>, buffer: &Arc<Mutex<VecDeque<i16>>>) {
+    const MAX_BUFFERED_SAMPLES: usize = 48_000 * 2;
+    if let Ok(mut buffer) = buffer.lock() {
+        for sample in samples {
+            if buffer.len() >= MAX_BUFFERED_SAMPLES {
+                buffer.pop_front();
+            }
+            buffer.push_back(sample);
+        }
     }
 }
 

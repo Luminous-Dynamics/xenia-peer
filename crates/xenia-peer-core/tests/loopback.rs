@@ -17,7 +17,10 @@ use std::time::Duration;
 
 use tokio::net::TcpListener;
 use tokio::time::timeout;
-use xenia_peer_core::handshake::{perform_host_handshake, perform_viewer_handshake};
+use xenia_peer_core::handshake::{
+    perform_host_handshake, perform_host_handshake_with_transcript, perform_viewer_handshake,
+    perform_viewer_handshake_with_transcript,
+};
 use xenia_peer_core::transport::{TcpTransport, Transport};
 use xenia_peer_core::{HandshakeManager, Session, SessionRole};
 
@@ -54,12 +57,13 @@ async fn hundred_frames_plus_inputs_roundtrip_over_tcp() {
         let mut transport = TcpTransport::new(stream);
 
         let mut handshake_mgr = HandshakeManager::new();
-        let session_key = perform_host_handshake(&mut transport, &mut handshake_mgr, "viewer")
-            .await
-            .expect("host handshake failed");
+        let handshake =
+            perform_host_handshake_with_transcript(&mut transport, &mut handshake_mgr, "viewer")
+                .await
+                .expect("host handshake failed");
 
         let mut host = Session::with_fixture(SessionRole::Host, [0x11; 8], 0x42);
-        host.install_key(session_key);
+        host.install_key(handshake.session_key);
 
         // Forward path: send FRAMES frames.
         for frame_id in 0..FRAMES {
@@ -80,7 +84,7 @@ async fn hundred_frames_plus_inputs_roundtrip_over_tcp() {
             let input = host.open_input(&envelope).expect("open input");
             received_inputs.push(input);
         }
-        received_inputs
+        (received_inputs, handshake.transcript_hash)
     });
 
     let viewer_task = tokio::spawn(async move {
@@ -89,12 +93,13 @@ async fn hundred_frames_plus_inputs_roundtrip_over_tcp() {
             .expect("connect");
 
         let mut handshake_mgr = HandshakeManager::new();
-        let session_key = perform_viewer_handshake(&mut transport, &mut handshake_mgr, "host")
-            .await
-            .expect("viewer handshake failed");
+        let handshake =
+            perform_viewer_handshake_with_transcript(&mut transport, &mut handshake_mgr, "host")
+                .await
+                .expect("viewer handshake failed");
 
         let mut viewer = Session::with_fixture(SessionRole::Viewer, [0x11; 8], 0x42);
-        viewer.install_key(session_key);
+        viewer.install_key(handshake.session_key);
 
         // Receive FRAMES frames on the forward path.
         let mut received_frames = Vec::with_capacity(FRAMES as usize);
@@ -113,13 +118,15 @@ async fn hundred_frames_plus_inputs_roundtrip_over_tcp() {
                 .await
                 .expect("send input");
         }
-        received_frames
+        (received_frames, handshake.transcript_hash)
     });
 
     // Both tasks must finish within a generous timeout.
     let (server_result, viewer_result) = tokio::try_join!(server_task, viewer_task).expect("join");
-    let received_inputs = server_result;
-    let received_frames = viewer_result;
+    let (received_inputs, host_transcript_hash) = server_result;
+    let (received_frames, viewer_transcript_hash) = viewer_result;
+    assert_eq!(host_transcript_hash, viewer_transcript_hash);
+    assert_ne!(host_transcript_hash, [0u8; 32]);
 
     // Validate frames: each one decoded correctly, pixels match what
     // the synth function would produce for that frame_id.
