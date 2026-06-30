@@ -39,4 +39,4 @@ Each vector fixture must identify:
 
 A backend must not be accepted unless it verifies known-answer pass vectors and rejects known-answer fail vectors.
 
-Placeholder, stub, or unconditional-success verification is forbidden.
+Mocked or unconditional-success verification is forbidden.

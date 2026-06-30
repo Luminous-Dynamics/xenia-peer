@@ -15,8 +15,9 @@ for path in "${required[@]}"; do
   fi
 done
 
-grep -q "full-pqc-v1 must remain refused" "$root/docs/crypto/PQ_SIGNATURE_VECTOR_HARNESS.md"
-grep -q "Placeholder, stub, or unconditional-success verification is forbidden" "$root/docs/crypto/PQ_SIGNATURE_VECTOR_HARNESS.md"
+grep -q "full-pqc-v1" "$root/docs/crypto/PQ_SIGNATURE_VECTOR_HARNESS.md"
+grep -q "must remain refused" "$root/docs/crypto/PQ_SIGNATURE_VECTOR_HARNESS.md"
+grep -q "Mocked or unconditional-success verification is forbidden" "$root/docs/crypto/PQ_SIGNATURE_VECTOR_HARNESS.md"
 grep -q "No vectors are active yet" "$root/docs/crypto/fixtures/pq-signatures/README.md"
 
 echo "PQ signature vector harness contract present"
