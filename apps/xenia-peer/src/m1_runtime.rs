@@ -16,13 +16,15 @@
 
 use std::error::Error;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use xenia_ledger::{
-    CURRENT_EVIDENCE_CRYPTO_MANIFEST, Chain, ConsentKind, EvidenceBundleVerifyError, LedgerEntry,
-    LedgerEntryExport, LedgerError, SessionTranscriptBinding, Verifier, VerifyError,
+    CURRENT_EVIDENCE_CRYPTO_MANIFEST, Chain, ConsentKind, CryptoPolicyProfile, DowngradePolicy,
+    EvidenceBundleVerifyError, EvidenceCryptoManifest, LedgerEntry, LedgerEntryExport, LedgerError,
+    SessionTranscriptBinding, SignatureSuite, Verifier, VerifyError,
 };
 use xenia_peer_core::{M1Permission, M1SessionError, M1SessionMachine, M1SessionState};
 
@@ -35,8 +37,15 @@ pub(crate) enum M1RuntimeError {
     Verify(VerifyError),
     EvidenceBundle(EvidenceBundleVerifyError),
     MissingTranscriptBinding,
+    FullPqcRuntimeUnavailable {
+        transcript_signature: String,
+        ledger_signature: String,
+    },
+    UnsupportedEvidenceExportProfile(String),
+    EvidenceManifest(String),
     PersistIo(std::io::Error),
     PersistCodec(bincode::Error),
+    PersistJson(serde_json::Error),
 }
 
 impl fmt::Display for M1RuntimeError {
@@ -50,8 +59,20 @@ impl fmt::Display for M1RuntimeError {
                 f,
                 "M1 session has no canonical handshake transcript hash bound"
             ),
+            Self::FullPqcRuntimeUnavailable {
+                transcript_signature,
+                ledger_signature,
+            } => write!(
+                f,
+                "full-pqc-v1 evidence export is unavailable: transcript_signature={transcript_signature}, ledger_signature={ledger_signature}"
+            ),
+            Self::UnsupportedEvidenceExportProfile(profile) => {
+                write!(f, "unsupported evidence export profile: {profile}")
+            }
+            Self::EvidenceManifest(err) => write!(f, "M1 evidence manifest error: {err}"),
             Self::PersistIo(err) => write!(f, "M1 ledger persistence I/O error: {err}"),
             Self::PersistCodec(err) => write!(f, "M1 ledger persistence codec error: {err}"),
+            Self::PersistJson(err) => write!(f, "M1 evidence JSON persistence error: {err}"),
         }
     }
 }
@@ -92,6 +113,143 @@ impl From<bincode::Error> for M1RuntimeError {
     fn from(err: bincode::Error) -> Self {
         Self::PersistCodec(err)
     }
+}
+
+impl From<serde_json::Error> for M1RuntimeError {
+    fn from(err: serde_json::Error) -> Self {
+        Self::PersistJson(err)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct EvidenceCryptoManifestExport {
+    pub schema: String,
+    pub profile: String,
+    pub kem: String,
+    pub transcript_signature: String,
+    pub ledger_signature: String,
+    pub hash_chain: String,
+    pub kdf: String,
+    pub aead: String,
+    pub downgrade_policy: String,
+}
+
+impl EvidenceCryptoManifestExport {
+    pub(crate) fn current() -> Self {
+        let manifest = CURRENT_EVIDENCE_CRYPTO_MANIFEST;
+        Self {
+            schema: manifest.schema.to_string(),
+            profile: manifest.profile.stable_label().to_string(),
+            kem: manifest.kem.to_string(),
+            transcript_signature: manifest.transcript_signature.stable_label().to_string(),
+            ledger_signature: manifest.ledger_signature.stable_label().to_string(),
+            hash_chain: manifest.hash_chain.to_string(),
+            kdf: manifest.kdf.to_string(),
+            aead: manifest.aead.to_string(),
+            downgrade_policy: manifest.downgrade_policy.stable_label().to_string(),
+        }
+    }
+
+    fn to_manifest(&self) -> Result<EvidenceCryptoManifest, M1RuntimeError> {
+        let current = CURRENT_EVIDENCE_CRYPTO_MANIFEST;
+        require_label("schema", &self.schema, current.schema)?;
+        require_label("kem", &self.kem, current.kem)?;
+        require_label("hash_chain", &self.hash_chain, current.hash_chain)?;
+        require_label("kdf", &self.kdf, current.kdf)?;
+        require_label("aead", &self.aead, current.aead)?;
+
+        let profile = match self.profile.as_str() {
+            "hybrid-pre-pqc-v1" => CryptoPolicyProfile::HybridPrePqcV1,
+            "full-pqc-v1" => CryptoPolicyProfile::FullPqcV1,
+            other => {
+                return Err(M1RuntimeError::EvidenceManifest(format!(
+                    "unsupported profile label {other:?}"
+                )));
+            }
+        };
+        let transcript_signature = SignatureSuite::from_stable_label(&self.transcript_signature)
+            .ok_or_else(|| {
+                M1RuntimeError::EvidenceManifest(format!(
+                    "unsupported transcript_signature label {:?}",
+                    self.transcript_signature
+                ))
+            })?;
+        let ledger_signature = SignatureSuite::from_stable_label(&self.ledger_signature)
+            .ok_or_else(|| {
+                M1RuntimeError::EvidenceManifest(format!(
+                    "unsupported ledger_signature label {:?}",
+                    self.ledger_signature
+                ))
+            })?;
+        let downgrade_policy = match self.downgrade_policy.as_str() {
+            "explicit-classical-signature-allowance" => {
+                DowngradePolicy::ExplicitClassicalSignatureAllowance
+            }
+            "reject-classical-signatures" => DowngradePolicy::RejectClassicalSignatures,
+            other => {
+                return Err(M1RuntimeError::EvidenceManifest(format!(
+                    "unsupported downgrade_policy label {other:?}"
+                )));
+            }
+        };
+
+        Ok(EvidenceCryptoManifest {
+            schema: current.schema,
+            profile,
+            kem: current.kem,
+            transcript_signature,
+            ledger_signature,
+            hash_chain: current.hash_chain,
+            kdf: current.kdf,
+            aead: current.aead,
+            downgrade_policy,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct EvidenceVerificationReport {
+    pub schema: String,
+    pub verifier: String,
+    pub verified: bool,
+    pub profile: String,
+    pub ledger_entries: usize,
+    pub session_id: Uuid,
+    pub transcript_hash_algorithm: String,
+    pub transcript_signature: String,
+    pub ledger_signature: String,
+    pub operator_public_key_hex: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct M1EvidenceBundlePaths {
+    pub dir: PathBuf,
+    pub manifest: PathBuf,
+    pub ledger_entries: PathBuf,
+    pub session_transcript_binding: PathBuf,
+    pub verification_report: PathBuf,
+}
+
+pub(crate) fn verify_transcript_bound_evidence_bundle_dir(
+    dir: impl AsRef<Path>,
+    public_key: &VerifyingKey,
+) -> Result<EvidenceVerificationReport, M1RuntimeError> {
+    let dir = dir.as_ref();
+    let manifest_export: EvidenceCryptoManifestExport =
+        read_json(&dir.join("evidence_manifest.json"))?;
+    let manifest = manifest_export.to_manifest()?;
+    let binding: SessionTranscriptBinding =
+        read_json(&dir.join("session_transcript_binding.json"))?;
+    let entries: Vec<LedgerEntryExport> = read_json(&dir.join("ledger_entries.json"))?;
+
+    Verifier::verify_transcript_bound_evidence_bundle(manifest, &binding, &entries, public_key)?;
+
+    Ok(evidence_verification_report(
+        &manifest_export,
+        &binding,
+        entries.len(),
+        public_key,
+    ))
 }
 
 pub(crate) struct M1RuntimeSession {
@@ -201,6 +359,59 @@ impl M1RuntimeSession {
             public_key,
         )?;
         Ok(())
+    }
+
+    pub(crate) fn write_transcript_bound_evidence_bundle(
+        &self,
+        public_key: &VerifyingKey,
+        dir: impl AsRef<Path>,
+    ) -> Result<M1EvidenceBundlePaths, M1RuntimeError> {
+        self.write_transcript_bound_evidence_bundle_for_profile(
+            public_key,
+            dir,
+            CURRENT_EVIDENCE_CRYPTO_MANIFEST.profile.stable_label(),
+        )
+    }
+
+    pub(crate) fn write_transcript_bound_evidence_bundle_for_profile(
+        &self,
+        public_key: &VerifyingKey,
+        dir: impl AsRef<Path>,
+        requested_profile: &str,
+    ) -> Result<M1EvidenceBundlePaths, M1RuntimeError> {
+        let manifest = EvidenceCryptoManifestExport::current();
+        ensure_runtime_can_emit_profile(requested_profile, &manifest)?;
+
+        let dir = dir.as_ref();
+        std::fs::create_dir_all(dir)?;
+
+        let Some(binding) = self.session_transcript_binding() else {
+            return Err(M1RuntimeError::MissingTranscriptBinding);
+        };
+        let entries = self.export_entries();
+        Verifier::verify_transcript_bound_evidence_bundle(
+            CURRENT_EVIDENCE_CRYPTO_MANIFEST,
+            &binding,
+            &entries,
+            public_key,
+        )?;
+
+        let report = evidence_verification_report(&manifest, &binding, entries.len(), public_key);
+
+        let paths = M1EvidenceBundlePaths {
+            dir: dir.to_path_buf(),
+            manifest: dir.join("evidence_manifest.json"),
+            ledger_entries: dir.join("ledger_entries.json"),
+            session_transcript_binding: dir.join("session_transcript_binding.json"),
+            verification_report: dir.join("verification_report.json"),
+        };
+
+        write_json(&paths.manifest, &manifest)?;
+        write_json(&paths.ledger_entries, &entries)?;
+        write_json(&paths.session_transcript_binding, &binding)?;
+        write_json(&paths.verification_report, &report)?;
+
+        Ok(paths)
     }
 
     pub(crate) fn ledger_len(&self) -> usize {
@@ -341,6 +552,68 @@ impl M1RuntimeSession {
     }
 }
 
+fn write_json(path: &Path, value: &impl Serialize) -> Result<(), M1RuntimeError> {
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
+fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, M1RuntimeError> {
+    let bytes = std::fs::read(path)?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn evidence_verification_report(
+    manifest: &EvidenceCryptoManifestExport,
+    binding: &SessionTranscriptBinding,
+    ledger_entries: usize,
+    public_key: &VerifyingKey,
+) -> EvidenceVerificationReport {
+    EvidenceVerificationReport {
+        schema: "xenia-evidence-verification-report-v1".to_string(),
+        verifier: "xenia-ledger::Verifier::verify_transcript_bound_evidence_bundle".to_string(),
+        verified: true,
+        profile: manifest.profile.clone(),
+        ledger_entries,
+        session_id: binding.session_id,
+        transcript_hash_algorithm: binding.transcript_hash_algorithm.clone(),
+        transcript_signature: manifest.transcript_signature.clone(),
+        ledger_signature: manifest.ledger_signature.clone(),
+        operator_public_key_hex: hex::encode(public_key.to_bytes()),
+    }
+}
+
+fn require_label(field: &str, found: &str, expected: &str) -> Result<(), M1RuntimeError> {
+    if found == expected {
+        Ok(())
+    } else {
+        Err(M1RuntimeError::EvidenceManifest(format!(
+            "{field} label {found:?} did not match supported label {expected:?}"
+        )))
+    }
+}
+
+fn ensure_runtime_can_emit_profile(
+    requested_profile: &str,
+    current_manifest: &EvidenceCryptoManifestExport,
+) -> Result<(), M1RuntimeError> {
+    if requested_profile == current_manifest.profile {
+        return Ok(());
+    }
+
+    if requested_profile == "full-pqc-v1" {
+        return Err(M1RuntimeError::FullPqcRuntimeUnavailable {
+            transcript_signature: current_manifest.transcript_signature.clone(),
+            ledger_signature: current_manifest.ledger_signature.clone(),
+        });
+    }
+
+    Err(M1RuntimeError::UnsupportedEvidenceExportProfile(
+        requested_profile.to_string(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,6 +672,106 @@ mod tests {
         runtime
             .verify_transcript_bound_export(&verifying_key)
             .expect("transcript-bound export should verify");
+    }
+
+    #[test]
+    fn runtime_writes_verifier_consumable_evidence_bundle() {
+        let (mut runtime, verifying_key) = runtime(23);
+        runtime.bind_session_transcript_hash([0x6B; 32]);
+
+        runtime.offer().unwrap();
+        runtime.grant_consent().unwrap();
+        runtime.revoke().unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "xenia-m1-evidence-bundle-{}-{}",
+            std::process::id(),
+            23
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let paths = runtime
+            .write_transcript_bound_evidence_bundle(&verifying_key, &dir)
+            .expect("evidence bundle should write after verification");
+
+        assert_eq!(paths.dir, dir);
+        assert!(paths.manifest.exists());
+        assert!(paths.ledger_entries.exists());
+        assert!(paths.session_transcript_binding.exists());
+        assert!(paths.verification_report.exists());
+
+        let manifest = std::fs::read_to_string(&paths.manifest).unwrap();
+        assert!(manifest.contains("hybrid-pre-pqc-v1"));
+        assert!(manifest.contains("ed25519-rfc8032"));
+
+        let report = std::fs::read_to_string(&paths.verification_report).unwrap();
+        assert!(report.contains("\"verified\": true"));
+        assert!(report.contains("xenia-ledger::Verifier::verify_transcript_bound_evidence_bundle"));
+
+        let _ = std::fs::remove_dir_all(&paths.dir);
+    }
+
+    #[test]
+    fn verifier_reads_bundle_without_trusting_export_report() {
+        let (mut runtime, verifying_key) = runtime(24);
+        runtime.bind_session_transcript_hash([0x7C; 32]);
+
+        runtime.offer().unwrap();
+        runtime.grant_consent().unwrap();
+        runtime.revoke().unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "xenia-m1-evidence-verify-{}-{}",
+            std::process::id(),
+            24
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let paths = runtime
+            .write_transcript_bound_evidence_bundle(&verifying_key, &dir)
+            .unwrap();
+        std::fs::write(
+            &paths.verification_report,
+            b"not trusted by verifier
+",
+        )
+        .unwrap();
+
+        let report = verify_transcript_bound_evidence_bundle_dir(&dir, &verifying_key)
+            .expect("bundle verifier should recompute trust from manifest, binding, entries");
+
+        assert!(report.verified);
+        assert_eq!(report.ledger_entries, 3);
+        assert_eq!(report.session_id, Uuid::from_bytes([1; 16]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn runtime_refuses_full_pqc_export_until_pq_signatures_land() {
+        let (mut runtime, verifying_key) = runtime(25);
+        runtime.bind_session_transcript_hash([0x8D; 32]);
+        runtime.offer().unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "xenia-m1-full-pqc-refusal-{}-{}",
+            std::process::id(),
+            25
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(matches!(
+            runtime.write_transcript_bound_evidence_bundle_for_profile(
+                &verifying_key,
+                &dir,
+                "full-pqc-v1"
+            ),
+            Err(M1RuntimeError::FullPqcRuntimeUnavailable {
+                transcript_signature,
+                ledger_signature
+            }) if transcript_signature == "ed25519-rfc8032" && ledger_signature == "ed25519-rfc8032"
+        ));
+        assert!(!dir.exists());
     }
 
     #[test]
