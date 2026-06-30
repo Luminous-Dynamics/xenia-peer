@@ -1,0 +1,11 @@
+{
+  "schema": "xenia-evidence-crypto-manifest-v1",
+  "profile": "full-pqc-v1",
+  "kem": "ml-kem-768-fips203",
+  "transcript_signature": "ed25519-rfc8032",
+  "ledger_signature": "ed25519-rfc8032",
+  "hash_chain": "blake3-256",
+  "kdf": "hkdf-sha256",
+  "aead": "chacha20-poly1305",
+  "downgrade_policy": "reject-classical-signatures"
+}

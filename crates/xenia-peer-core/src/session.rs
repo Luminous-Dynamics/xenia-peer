@@ -223,6 +223,20 @@ impl Session {
         xenia_wire::seal_frame(&frame_as_wire(frame)?, &mut self.wire).map_err(Into::into)
     }
 
+    /// Seal a session-control metadata frame on the forward path.
+    ///
+    /// This is intentionally limited to non-media setup metadata so
+    /// post-handshake capabilities can be exchanged before runtime
+    /// consent authorizes capture/audio/video flow.
+    pub fn seal_control_frame(&mut self, frame: &RawFrame) -> Result<Vec<u8>, SessionError> {
+        if frame.pixel_format != crate::frame::PixelFormat::Capabilities {
+            return Err(SessionError::Wire(WireError::decode(
+                "control frame must use a session-control pixel format",
+            )));
+        }
+        xenia_wire::seal_frame(&frame_as_wire(frame)?, &mut self.wire).map_err(Into::into)
+    }
+
     fn check_consent_for_frame(&self) -> Result<(), SessionError> {
         use xenia_wire::consent::ConsentState;
         match self.consent_state() {
@@ -412,6 +426,42 @@ mod tests {
         let opened = viewer.open_frame(&sealed).unwrap();
         assert_eq!(opened.pixel_format, crate::frame::PixelFormat::Audio);
         assert_eq!(crate::frame::RawAudio::from_frame(&opened).unwrap(), audio);
+    }
+
+    #[test]
+    fn capabilities_control_frame_seal_open_roundtrip() {
+        let (mut host, mut viewer) = paired();
+        let capabilities = crate::frame::RawCapabilities {
+            frame_id: host.next_frame_id(),
+            timestamp_ms: 1_700_000_000_900,
+            audio: Some(crate::advertisement::AudioAdvertisement {
+                codecs: vec![crate::advertisement::AdvertisedAudioCodec::RawPcm],
+                selected_codec: crate::advertisement::AdvertisedAudioCodec::RawPcm,
+                sample_rate_hz: crate::frame::RAW_AUDIO_SAMPLE_RATE_HZ,
+                max_channels: crate::frame::RAW_AUDIO_MAX_CHANNELS,
+                frame_duration_ms: vec![10, 20],
+            }),
+            video_format: crate::frame::PixelFormat::Passthrough,
+            telemetry_enabled: true,
+            input_control_enabled: false,
+        };
+        let frame = capabilities.clone().into_frame().unwrap();
+        let sealed = host.seal_control_frame(&frame).unwrap();
+        let opened = viewer.open_frame(&sealed).unwrap();
+
+        assert_eq!(opened.pixel_format, crate::frame::PixelFormat::Capabilities);
+        assert_eq!(
+            crate::frame::RawCapabilities::from_frame(&opened).unwrap(),
+            capabilities
+        );
+    }
+
+    #[test]
+    fn control_frame_rejects_media_formats() {
+        let (mut host, _) = paired();
+        let frame = RawFrame::rgba8(0, 1_700_000_000_900, 1, 1, vec![0, 0, 0, 255]);
+
+        assert!(host.seal_control_frame(&frame).is_err());
     }
 
     #[test]

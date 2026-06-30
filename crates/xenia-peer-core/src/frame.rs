@@ -7,6 +7,7 @@
 //! Real codecs land in `xenia-video` (M1).
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use xenia_wire::{Sealable, WireError};
 
 /// Pixel layout of a [`RawFrame`]. M0 supports RGBA8 only; other
@@ -39,6 +40,9 @@ pub enum PixelFormat {
     /// Reserved forward-path audio frame carrying bincode-serialized
     /// [`RawAudio`].
     Audio = 241,
+    /// Reserved sealed session metadata frame carrying bincode-
+    /// serialized [`RawCapabilities`].
+    Capabilities = 242,
 }
 
 /// Scalar telemetry value carried inside a [`RawTelemetry`] payload.
@@ -82,12 +86,31 @@ pub struct RawTelemetry {
     pub samples: Vec<TelemetrySample>,
 }
 
+/// Session capabilities sealed immediately after handshake.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawCapabilities {
+    /// Monotonic metadata frame identifier.
+    pub frame_id: u64,
+    /// Host timestamp in milliseconds since Unix epoch.
+    pub timestamp_ms: u64,
+    /// Audio lane capabilities selected for this session.
+    pub audio: Option<crate::advertisement::AudioAdvertisement>,
+    /// Selected video pixel/codec format.
+    pub video_format: PixelFormat,
+    /// Telemetry lane is enabled for this session.
+    pub telemetry_enabled: bool,
+    /// Input-control lane is enabled for this session.
+    pub input_control_enabled: bool,
+}
+
 /// Audio sample payload format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum AudioSampleFormat {
     /// Signed 16-bit little-endian interleaved PCM.
     PcmS16Le = 0,
+    /// Opus packet payload. Timing metadata remains in [`RawAudio`].
+    Opus = 1,
 }
 
 /// Raw audio frame flags.
@@ -100,11 +123,39 @@ pub mod audio_flags {
     pub const MUTED: u16 = 1 << 1;
     /// Audio stream configuration changed at this frame.
     pub const CONFIG_CHANGE: u16 = 1 << 2;
+
+    /// Synthetic audio source, not host/device capture.
+    pub const SYNTHETIC: u16 = 1 << 3;
+
+    /// End of this logical audio stream.
+    pub const END_OF_STREAM: u16 = 1 << 4;
+
+    /// All currently understood flags.
+    pub const KNOWN_MASK: u16 = DISCONTINUITY | MUTED | CONFIG_CHANGE | SYNTHETIC | END_OF_STREAM;
 }
+
+/// Raw audio schema version used by the v0.1 timing lane.
+pub const RAW_AUDIO_SCHEMA_VERSION: u16 = 1;
+/// v0.1 audio clock domain: host capture timestamps in Unix epoch milliseconds.
+pub const RAW_AUDIO_CLOCK_UNIX_MS: u16 = 1;
+/// v0.1 synthetic/raw lane sample rate.
+pub const RAW_AUDIO_SAMPLE_RATE_HZ: u32 = 48_000;
+/// v0.1 maximum channel count.
+pub const RAW_AUDIO_MAX_CHANNELS: u16 = 2;
+/// v0.1 maximum frame duration.
+pub const RAW_AUDIO_MAX_FRAME_DURATION_MS: u16 = 20;
+/// v0.1 maximum raw PCM payload bytes.
+pub const RAW_AUDIO_MAX_PAYLOAD_BYTES: usize = 48_000 / 1_000 * 20 * 2 * 2;
+/// v0.1 maximum single Opus packet bytes.
+pub const RAW_AUDIO_MAX_OPUS_PAYLOAD_BYTES: usize = 1_275;
 
 /// Raw audio packet sealed on the forward path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawAudio {
+    /// RawAudio schema version.
+    pub schema_version: u16,
+    /// Clock domain for capture timestamps.
+    pub clock_domain: u16,
     /// Logical audio stream identifier.
     pub stream_id: u32,
     /// Monotonic per-stream sequence.
@@ -134,10 +185,12 @@ impl RawAudio {
         payload: Vec<u8>,
     ) -> Self {
         Self {
+            schema_version: RAW_AUDIO_SCHEMA_VERSION,
+            clock_domain: RAW_AUDIO_CLOCK_UNIX_MS,
             stream_id,
             sequence,
             capture_timestamp_ms,
-            sample_rate_hz: 48_000,
+            sample_rate_hz: RAW_AUDIO_SAMPLE_RATE_HZ,
             channels: 2,
             sample_format: AudioSampleFormat::PcmS16Le,
             frame_duration_ms: 20,
@@ -150,9 +203,14 @@ impl RawAudio {
     pub fn expected_payload_len(&self) -> Option<usize> {
         let bytes_per_sample = match self.sample_format {
             AudioSampleFormat::PcmS16Le => 2usize,
+            AudioSampleFormat::Opus => return None,
         };
-        let samples_per_channel =
-            u64::from(self.sample_rate_hz) * u64::from(self.frame_duration_ms) / 1_000;
+        let sample_ms =
+            u64::from(self.sample_rate_hz).checked_mul(u64::from(self.frame_duration_ms))?;
+        if sample_ms % 1_000 != 0 {
+            return None;
+        }
+        let samples_per_channel = sample_ms / 1_000;
         let bytes = samples_per_channel
             .checked_mul(u64::from(self.channels))?
             .checked_mul(bytes_per_sample as u64)?;
@@ -161,11 +219,25 @@ impl RawAudio {
 
     /// Validate timing/configuration and payload length.
     pub fn validate(&self) -> bool {
-        self.stream_id != 0
-            && self.sample_rate_hz != 0
-            && self.channels != 0
-            && self.frame_duration_ms != 0
-            && self.expected_payload_len() == Some(self.payload.len())
+        let allowed_duration = matches!(self.frame_duration_ms, 10 | 20);
+        let payload_valid = match self.sample_format {
+            AudioSampleFormat::PcmS16Le => {
+                self.payload.len() <= RAW_AUDIO_MAX_PAYLOAD_BYTES
+                    && self.expected_payload_len() == Some(self.payload.len())
+            }
+            AudioSampleFormat::Opus => {
+                !self.payload.is_empty() && self.payload.len() <= RAW_AUDIO_MAX_OPUS_PAYLOAD_BYTES
+            }
+        };
+        self.schema_version == RAW_AUDIO_SCHEMA_VERSION
+            && self.clock_domain == RAW_AUDIO_CLOCK_UNIX_MS
+            && self.stream_id != 0
+            && self.sample_rate_hz == RAW_AUDIO_SAMPLE_RATE_HZ
+            && (1..=RAW_AUDIO_MAX_CHANNELS).contains(&self.channels)
+            && allowed_duration
+            && self.frame_duration_ms <= RAW_AUDIO_MAX_FRAME_DURATION_MS
+            && self.flags & !audio_flags::KNOWN_MASK == 0
+            && payload_valid
     }
 
     /// Build an audio metadata frame.
@@ -188,6 +260,227 @@ impl RawAudio {
             return Err(WireError::decode("RawFrame is not audio"));
         }
         bincode::deserialize(&frame.pixels).map_err(WireError::decode)
+    }
+}
+
+/// Errors produced by audio codec adapters.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum AudioCodecError {
+    /// The frame does not satisfy the RawAudio lane contract.
+    #[error("invalid RawAudio frame")]
+    InvalidRawAudio,
+    /// The codec does not support the declared frame format.
+    #[error("unsupported audio format: {0}")]
+    UnsupportedFormat(&'static str),
+    /// Codec backend failure.
+    #[error("audio codec failure: {0}")]
+    CodecFailure(String),
+}
+
+/// Audio codec boundary for the RawAudio timing lane.
+///
+/// The codec operates on validated [`RawAudio`] frames so capture,
+/// timing, transport, and playback can evolve independently.
+pub trait AudioCodec: Send {
+    /// Codec label used in logs and future capability negotiation.
+    fn name(&self) -> &'static str;
+
+    /// Encode a captured PCM frame for transport.
+    fn encode(&mut self, frame: RawAudio) -> Result<RawAudio, AudioCodecError>;
+
+    /// Decode a received frame back to PCM-compatible RawAudio.
+    fn decode(&mut self, frame: RawAudio) -> Result<RawAudio, AudioCodecError>;
+}
+
+/// Raw PCM passthrough codec for v0.1 timing bring-up.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RawPcmAudioCodec;
+
+impl RawPcmAudioCodec {
+    /// Create a raw PCM passthrough codec.
+    pub fn new() -> Self {
+        Self
+    }
+
+    fn require_supported(frame: RawAudio) -> Result<RawAudio, AudioCodecError> {
+        if frame.sample_format != AudioSampleFormat::PcmS16Le {
+            return Err(AudioCodecError::UnsupportedFormat("expected pcm_s16le"));
+        }
+        if !frame.validate() {
+            return Err(AudioCodecError::InvalidRawAudio);
+        }
+        Ok(frame)
+    }
+}
+
+impl AudioCodec for RawPcmAudioCodec {
+    fn name(&self) -> &'static str {
+        "raw-pcm-s16le"
+    }
+
+    fn encode(&mut self, frame: RawAudio) -> Result<RawAudio, AudioCodecError> {
+        Self::require_supported(frame)
+    }
+
+    fn decode(&mut self, frame: RawAudio) -> Result<RawAudio, AudioCodecError> {
+        Self::require_supported(frame)
+    }
+}
+
+#[cfg(feature = "opus")]
+fn opus_channels(channels: u16) -> Result<opus::Channels, AudioCodecError> {
+    match channels {
+        1 => Ok(opus::Channels::Mono),
+        2 => Ok(opus::Channels::Stereo),
+        _ => Err(AudioCodecError::UnsupportedFormat(
+            "opus supports mono or stereo",
+        )),
+    }
+}
+
+#[cfg(feature = "opus")]
+fn raw_audio_i16_samples(frame: &RawAudio) -> Vec<i16> {
+    frame
+        .payload
+        .chunks_exact(2)
+        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect()
+}
+
+/// Opus codec for production audio transport.
+#[cfg(feature = "opus")]
+pub struct OpusAudioCodec {
+    encoder_channels: Option<u16>,
+    decoder_channels: Option<u16>,
+    encoder: Option<opus::Encoder>,
+    decoder: Option<opus::Decoder>,
+    bitrate_bps: i32,
+    complexity: i32,
+}
+
+#[cfg(feature = "opus")]
+impl OpusAudioCodec {
+    /// Create an Opus codec with Xenia's default interactive-audio settings.
+    pub fn new() -> Result<Self, AudioCodecError> {
+        Ok(Self {
+            encoder_channels: None,
+            decoder_channels: None,
+            encoder: None,
+            decoder: None,
+            bitrate_bps: 64_000,
+            complexity: 5,
+        })
+    }
+
+    /// Set Opus encoder bitrate in bits per second.
+    pub fn with_bitrate_bps(mut self, bitrate_bps: i32) -> Self {
+        self.bitrate_bps = bitrate_bps;
+        self
+    }
+
+    /// Set Opus encoder complexity from 0 to 10.
+    pub fn with_complexity(mut self, complexity: i32) -> Self {
+        self.complexity = complexity.clamp(0, 10);
+        self
+    }
+
+    fn encoder(&mut self, channels: u16) -> Result<&mut opus::Encoder, AudioCodecError> {
+        if self.encoder_channels != Some(channels) {
+            let mut encoder = opus::Encoder::new(
+                RAW_AUDIO_SAMPLE_RATE_HZ,
+                opus_channels(channels)?,
+                opus::Application::Audio,
+            )
+            .map_err(|err| AudioCodecError::CodecFailure(err.to_string()))?;
+            encoder
+                .set_bitrate(opus::Bitrate::Bits(self.bitrate_bps))
+                .map_err(|err| AudioCodecError::CodecFailure(err.to_string()))?;
+            encoder
+                .set_complexity(self.complexity)
+                .map_err(|err| AudioCodecError::CodecFailure(err.to_string()))?;
+            self.encoder = Some(encoder);
+            self.encoder_channels = Some(channels);
+        }
+        self.encoder
+            .as_mut()
+            .ok_or_else(|| AudioCodecError::CodecFailure("opus encoder unavailable".to_string()))
+    }
+
+    fn decoder(&mut self, channels: u16) -> Result<&mut opus::Decoder, AudioCodecError> {
+        if self.decoder_channels != Some(channels) {
+            self.decoder = Some(
+                opus::Decoder::new(RAW_AUDIO_SAMPLE_RATE_HZ, opus_channels(channels)?)
+                    .map_err(|err| AudioCodecError::CodecFailure(err.to_string()))?,
+            );
+            self.decoder_channels = Some(channels);
+        }
+        self.decoder
+            .as_mut()
+            .ok_or_else(|| AudioCodecError::CodecFailure("opus decoder unavailable".to_string()))
+    }
+}
+
+#[cfg(feature = "opus")]
+impl AudioCodec for OpusAudioCodec {
+    fn name(&self) -> &'static str {
+        "opus"
+    }
+
+    fn encode(&mut self, mut frame: RawAudio) -> Result<RawAudio, AudioCodecError> {
+        if frame.sample_format != AudioSampleFormat::PcmS16Le {
+            return Err(AudioCodecError::UnsupportedFormat(
+                "opus encoder expects pcm_s16le",
+            ));
+        }
+        if !frame.validate() {
+            return Err(AudioCodecError::InvalidRawAudio);
+        }
+        let channels = frame.channels;
+        let samples = raw_audio_i16_samples(&frame);
+        let packet = self
+            .encoder(channels)?
+            .encode_vec(&samples, RAW_AUDIO_MAX_OPUS_PAYLOAD_BYTES)
+            .map_err(|err| AudioCodecError::CodecFailure(err.to_string()))?;
+
+        frame.sample_format = AudioSampleFormat::Opus;
+        frame.payload = packet;
+        if frame.validate() {
+            Ok(frame)
+        } else {
+            Err(AudioCodecError::InvalidRawAudio)
+        }
+    }
+
+    fn decode(&mut self, mut frame: RawAudio) -> Result<RawAudio, AudioCodecError> {
+        if frame.sample_format != AudioSampleFormat::Opus {
+            return Err(AudioCodecError::UnsupportedFormat(
+                "opus decoder expects opus",
+            ));
+        }
+        if !frame.validate() {
+            return Err(AudioCodecError::InvalidRawAudio);
+        }
+        let channels = frame.channels;
+        let samples_per_channel =
+            usize::from(frame.frame_duration_ms) * RAW_AUDIO_SAMPLE_RATE_HZ as usize / 1_000;
+        let mut decoded = vec![0i16; samples_per_channel * usize::from(channels)];
+        let decoded_per_channel = self
+            .decoder(channels)?
+            .decode(&frame.payload, &mut decoded, false)
+            .map_err(|err| AudioCodecError::CodecFailure(err.to_string()))?;
+        decoded.truncate(decoded_per_channel * usize::from(channels));
+
+        let mut payload = Vec::with_capacity(decoded.len() * 2);
+        for sample in decoded {
+            payload.extend_from_slice(&sample.to_le_bytes());
+        }
+        frame.sample_format = AudioSampleFormat::PcmS16Le;
+        frame.payload = payload;
+        if frame.validate() {
+            Ok(frame)
+        } else {
+            Err(AudioCodecError::InvalidRawAudio)
+        }
     }
 }
 
@@ -255,6 +548,10 @@ impl SyntheticAudioSource {
             capture_timestamp_ms,
             payload,
         );
+        let frame = RawAudio {
+            flags: audio_flags::SYNTHETIC,
+            ..frame
+        };
         self.sequence = self.sequence.wrapping_add(1);
         frame
     }
@@ -276,10 +573,14 @@ pub enum JitterInsert {
 pub struct JitterStats {
     /// Accepted frames.
     pub inserted: u64,
+    /// Frames emitted in sequence order.
+    pub emitted: u64,
     /// Duplicate frames.
     pub duplicates: u64,
     /// Late frames.
     pub late: u64,
+    /// Buffered frames dropped by depth policy.
+    pub dropped: u64,
     /// Pop attempts where expected sequence was not available.
     pub underruns: u64,
     /// Missing sequence gaps observed on insert.
@@ -290,6 +591,7 @@ pub struct JitterStats {
 pub struct AudioJitterBuffer {
     expected_sequence: u64,
     max_depth: usize,
+    target_delay_frames: usize,
     frames: std::collections::BTreeMap<u64, RawAudio>,
     stats: JitterStats,
 }
@@ -300,6 +602,24 @@ impl AudioJitterBuffer {
         Self {
             expected_sequence: initial_sequence,
             max_depth: max_depth.max(1),
+            target_delay_frames: 0,
+            frames: std::collections::BTreeMap::new(),
+            stats: JitterStats::default(),
+        }
+    }
+
+    /// Create a jitter buffer that waits for `target_delay_frames` buffered frames
+    /// before releasing the next expected sequence.
+    pub fn with_playout_delay(
+        initial_sequence: u64,
+        max_depth: usize,
+        target_delay_frames: usize,
+    ) -> Self {
+        let max_depth = max_depth.max(1);
+        Self {
+            expected_sequence: initial_sequence,
+            max_depth,
+            target_delay_frames: target_delay_frames.min(max_depth.saturating_sub(1)),
             frames: std::collections::BTreeMap::new(),
             stats: JitterStats::default(),
         }
@@ -328,6 +648,7 @@ impl AudioJitterBuffer {
                 break;
             };
             self.frames.remove(&sequence);
+            self.stats.dropped += 1;
             if sequence == self.expected_sequence {
                 self.expected_sequence = self.expected_sequence.wrapping_add(1);
                 self.stats.underruns += 1;
@@ -340,6 +661,7 @@ impl AudioJitterBuffer {
     pub fn pop_next(&mut self) -> Option<RawAudio> {
         if let Some(frame) = self.frames.remove(&self.expected_sequence) {
             self.expected_sequence = self.expected_sequence.wrapping_add(1);
+            self.stats.emitted += 1;
             Some(frame)
         } else {
             self.stats.underruns += 1;
@@ -347,9 +669,19 @@ impl AudioJitterBuffer {
         }
     }
 
+    /// Pop the next frame only when enough buffered depth exists for playout.
+    pub fn pop_ready(&mut self) -> Option<RawAudio> {
+        if self.next_ready() {
+            self.pop_next()
+        } else {
+            None
+        }
+    }
+
     /// Return true when the next expected frame is ready.
     pub fn next_ready(&self) -> bool {
         self.frames.contains_key(&self.expected_sequence)
+            && self.frames.len() > self.target_delay_frames
     }
 
     /// Return the next expected sequence number.
@@ -439,6 +771,7 @@ impl RawFrame {
                     | PixelFormat::Hdc
                     | PixelFormat::Telemetry
                     | PixelFormat::Audio
+                    | PixelFormat::Capabilities
             ),
             "RawFrame::encoded requires an encoded PixelFormat variant",
         );
@@ -464,7 +797,8 @@ impl RawFrame {
             | PixelFormat::Vp9
             | PixelFormat::Passthrough
             | PixelFormat::Hdc
-            | PixelFormat::Telemetry => {
+            | PixelFormat::Telemetry
+            | PixelFormat::Capabilities => {
                 // Encoded and metadata formats are opaque here; the
                 // relevant decoder has the actual say.
                 !self.pixels.is_empty()
@@ -492,6 +826,29 @@ impl RawTelemetry {
     pub fn from_frame(frame: &RawFrame) -> Result<Self, WireError> {
         if frame.pixel_format != PixelFormat::Telemetry {
             return Err(WireError::decode("RawFrame is not telemetry"));
+        }
+        bincode::deserialize(&frame.pixels).map_err(WireError::decode)
+    }
+}
+
+impl RawCapabilities {
+    /// Build a capabilities metadata frame.
+    pub fn into_frame(self) -> Result<RawFrame, WireError> {
+        let payload = bincode::serialize(&self).map_err(WireError::encode)?;
+        Ok(RawFrame::encoded(
+            self.frame_id,
+            self.timestamp_ms,
+            0,
+            0,
+            PixelFormat::Capabilities,
+            payload,
+        ))
+    }
+
+    /// Decode a capabilities metadata frame.
+    pub fn from_frame(frame: &RawFrame) -> Result<Self, WireError> {
+        if frame.pixel_format != PixelFormat::Capabilities {
+            return Err(WireError::decode("RawFrame is not capabilities"));
         }
         bincode::deserialize(&frame.pixels).map_err(WireError::decode)
     }
@@ -621,6 +978,132 @@ mod tests {
     }
 
     #[test]
+    fn raw_pcm_audio_codec_roundtrips_valid_audio() {
+        let mut source = SyntheticAudioSource::new(1, SyntheticAudioKind::Sine);
+        let audio = source.next_frame(1_700_000_000_100);
+        let mut codec = RawPcmAudioCodec::new();
+
+        let encoded = codec.encode(audio.clone()).unwrap();
+        let decoded = codec.decode(encoded).unwrap();
+
+        assert_eq!(codec.name(), "raw-pcm-s16le");
+        assert_eq!(decoded, audio);
+    }
+
+    #[test]
+    fn raw_pcm_audio_codec_rejects_invalid_audio() {
+        let mut source = SyntheticAudioSource::new(1, SyntheticAudioKind::Sine);
+        let mut audio = source.next_frame(1_700_000_000_100);
+        audio.payload.pop();
+        let mut codec = RawPcmAudioCodec::new();
+
+        assert_eq!(codec.encode(audio), Err(AudioCodecError::InvalidRawAudio));
+    }
+
+    #[cfg(feature = "opus")]
+    #[test]
+    fn opus_audio_codec_compresses_and_decodes_to_valid_pcm() {
+        let mut source = SyntheticAudioSource::new(1, SyntheticAudioKind::Sine);
+        let audio = source.next_frame(1_700_000_000_100);
+        let mut codec = OpusAudioCodec::new().unwrap();
+
+        let encoded = codec.encode(audio.clone()).unwrap();
+        assert_eq!(encoded.sample_format, AudioSampleFormat::Opus);
+        assert!(encoded.payload.len() < audio.payload.len());
+        assert!(encoded.validate());
+
+        let decoded = codec.decode(encoded).unwrap();
+        assert_eq!(decoded.sample_format, AudioSampleFormat::PcmS16Le);
+        assert_eq!(decoded.stream_id, audio.stream_id);
+        assert_eq!(decoded.sequence, audio.sequence);
+        assert_eq!(decoded.capture_timestamp_ms, audio.capture_timestamp_ms);
+        assert_eq!(decoded.frame_duration_ms, audio.frame_duration_ms);
+        assert!(decoded.validate());
+        assert_eq!(decoded.payload.len(), audio.payload.len());
+    }
+
+    #[cfg(feature = "opus")]
+    #[test]
+    fn opus_audio_codec_rejects_raw_decode_input() {
+        let mut source = SyntheticAudioSource::new(1, SyntheticAudioKind::Sine);
+        let audio = source.next_frame(1_700_000_000_100);
+        let mut codec = OpusAudioCodec::new().unwrap();
+
+        assert_eq!(
+            codec.decode(audio),
+            Err(AudioCodecError::UnsupportedFormat(
+                "opus decoder expects opus"
+            ))
+        );
+    }
+
+    #[test]
+    fn raw_audio_rejects_unsupported_schema_and_clock() {
+        let mut source = SyntheticAudioSource::new(1, SyntheticAudioKind::Sine);
+        let audio = source.next_frame(1_700_000_000_200);
+        assert!(audio.validate());
+
+        let mut bad_schema = audio.clone();
+        bad_schema.schema_version = RAW_AUDIO_SCHEMA_VERSION + 1;
+        assert!(!bad_schema.validate());
+
+        let mut bad_clock = audio;
+        bad_clock.clock_domain = RAW_AUDIO_CLOCK_UNIX_MS + 1;
+        assert!(!bad_clock.validate());
+    }
+
+    #[test]
+    fn raw_audio_rejects_out_of_policy_config_and_flags() {
+        let mut source = SyntheticAudioSource::new(1, SyntheticAudioKind::Sine);
+        let audio = source.next_frame(1_700_000_000_200);
+
+        let mut bad_rate = audio.clone();
+        bad_rate.sample_rate_hz = 96_000;
+        assert!(!bad_rate.validate());
+
+        let mut bad_channels = audio.clone();
+        bad_channels.channels = RAW_AUDIO_MAX_CHANNELS + 1;
+        bad_channels.payload.resize(48_000 / 50 * 3 * 2, 0);
+        assert!(!bad_channels.validate());
+
+        let mut bad_duration = audio.clone();
+        bad_duration.frame_duration_ms = 30;
+        bad_duration.payload.resize(48_000 / 1_000 * 30 * 2 * 2, 0);
+        assert!(!bad_duration.validate());
+
+        let mut bad_flags = audio;
+        bad_flags.flags = audio_flags::KNOWN_MASK | (1 << 15);
+        assert!(!bad_flags.validate());
+    }
+
+    #[test]
+    fn raw_audio_rejects_oversized_and_truncated_payloads() {
+        let mut source = SyntheticAudioSource::new(1, SyntheticAudioKind::Sine);
+        let mut audio = source.next_frame(1_700_000_000_200);
+        audio.payload.push(0);
+        assert!(!audio.validate());
+
+        let mut source = SyntheticAudioSource::new(1, SyntheticAudioKind::Sine);
+        let mut audio = source.next_frame(1_700_000_000_200);
+        audio.payload.pop();
+        assert!(!audio.validate());
+    }
+
+    #[test]
+    fn raw_audio_frame_rejects_malformed_bincode_payload() {
+        let frame = RawFrame::encoded(
+            12,
+            1_700_000_000_200,
+            0,
+            0,
+            PixelFormat::Audio,
+            vec![1, 2, 3],
+        );
+        assert!(!frame.validate());
+        assert!(RawAudio::from_frame(&frame).is_err());
+    }
+
+    #[test]
     fn synthetic_audio_is_deterministic() {
         let mut a = SyntheticAudioSource::new(1, SyntheticAudioKind::Noise);
         let mut b = SyntheticAudioSource::new(1, SyntheticAudioKind::Noise);
@@ -641,6 +1124,7 @@ mod tests {
         assert_eq!(jitter.pop_next().unwrap().sequence, 0);
         assert_eq!(jitter.pop_next().unwrap().sequence, 1);
         assert_eq!(jitter.expected_sequence(), 2);
+        assert_eq!(jitter.stats().emitted, 2);
     }
 
     #[test]
@@ -663,5 +1147,38 @@ mod tests {
         assert_eq!(stats.late, 1);
         assert!(stats.gaps >= 1);
         assert!(stats.underruns >= 1);
+    }
+
+    #[test]
+    fn jitter_buffer_honors_target_playout_delay() {
+        let mut source = SyntheticAudioSource::new(1, SyntheticAudioKind::Sine);
+        let f0 = source.next_frame(0);
+        let f1 = source.next_frame(20);
+        let f2 = source.next_frame(40);
+        let mut jitter = AudioJitterBuffer::with_playout_delay(0, 8, 2);
+
+        assert_eq!(jitter.push(f0), JitterInsert::Inserted);
+        assert!(!jitter.next_ready());
+        assert_eq!(jitter.push(f1), JitterInsert::Inserted);
+        assert!(!jitter.next_ready());
+        assert_eq!(jitter.push(f2), JitterInsert::Inserted);
+        assert_eq!(jitter.pop_ready().unwrap().sequence, 0);
+        assert_eq!(jitter.stats().emitted, 1);
+    }
+
+    #[test]
+    fn jitter_buffer_counts_depth_drops() {
+        let mut source = SyntheticAudioSource::new(1, SyntheticAudioKind::Sine);
+        let f0 = source.next_frame(0);
+        let f1 = source.next_frame(20);
+        let f2 = source.next_frame(40);
+        let mut jitter = AudioJitterBuffer::new(0, 2);
+
+        assert_eq!(jitter.push(f0), JitterInsert::Inserted);
+        assert_eq!(jitter.push(f1), JitterInsert::Inserted);
+        assert_eq!(jitter.push(f2), JitterInsert::Inserted);
+        assert_eq!(jitter.stats().dropped, 1);
+        assert_eq!(jitter.stats().underruns, 1);
+        assert_eq!(jitter.expected_sequence(), 1);
     }
 }

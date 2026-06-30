@@ -23,6 +23,30 @@ pub enum AdvertisedTransport {
     Quic,
 }
 
+/// Audio codecs a daemon can advertise before the session handshake starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AdvertisedAudioCodec {
+    /// Raw 48 kHz S16LE PCM inside RawAudio.
+    RawPcm,
+    /// Opus packets inside RawAudio timing metadata.
+    Opus,
+}
+
+/// Non-secret audio lane capabilities.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioAdvertisement {
+    /// Supported audio codecs.
+    pub codecs: Vec<AdvertisedAudioCodec>,
+    /// Daemon-selected codec for this session.
+    pub selected_codec: AdvertisedAudioCodec,
+    /// Audio lane sample rate in Hz.
+    pub sample_rate_hz: u32,
+    /// Maximum supported channel count.
+    pub max_channels: u16,
+    /// Supported frame durations in milliseconds.
+    pub frame_duration_ms: Vec<u16>,
+}
+
 /// A daemon-side transport advertisement.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransportAdvertisement {
@@ -30,6 +54,8 @@ pub struct TransportAdvertisement {
     pub transports: Vec<AdvertisedTransport>,
     /// Optional Iroh endpoint address encoded for CLI use.
     pub quic_connect: Option<String>,
+    /// Optional audio lane capabilities.
+    pub audio: Option<AudioAdvertisement>,
 }
 
 impl TransportAdvertisement {
@@ -42,7 +68,14 @@ impl TransportAdvertisement {
                 AdvertisedTransport::Quic,
             ],
             quic_connect: Some(quic_connect),
+            audio: None,
         }
+    }
+
+    /// Attach audio lane capabilities.
+    pub fn with_audio(mut self, audio: AudioAdvertisement) -> Self {
+        self.audio = Some(audio);
+        self
     }
 
     /// Encode as a magic-prefixed envelope payload.
@@ -70,7 +103,14 @@ mod tests {
 
     #[test]
     fn advertisement_round_trips_with_magic_prefix() {
-        let advert = TransportAdvertisement::auto("iroh:test".to_string());
+        let advert =
+            TransportAdvertisement::auto("iroh:test".to_string()).with_audio(AudioAdvertisement {
+                codecs: vec![AdvertisedAudioCodec::RawPcm, AdvertisedAudioCodec::Opus],
+                selected_codec: AdvertisedAudioCodec::Opus,
+                sample_rate_hz: 48_000,
+                max_channels: 2,
+                frame_duration_ms: vec![10, 20],
+            });
         let bytes = advert.encode().unwrap();
         assert!(bytes.starts_with(MAGIC));
         assert_eq!(

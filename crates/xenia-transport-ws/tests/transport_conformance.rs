@@ -4,8 +4,10 @@ use tokio::sync::oneshot;
 use tokio_tungstenite::{accept_async, tungstenite::protocol::Message};
 use xenia_peer_core::transport::{MAX_ENVELOPE_BYTES, TcpTransport, Transport, TransportError};
 use xenia_peer_core::{
-    RawAudio, RawTelemetry, Session, SessionRole, SyntheticAudioKind, SyntheticAudioSource,
-    TelemetrySample, TelemetryValue, frame::PixelFormat,
+    RawAudio, RawCapabilities, RawTelemetry, Session, SessionRole, SyntheticAudioKind,
+    SyntheticAudioSource, TelemetrySample, TelemetryValue,
+    advertisement::{AdvertisedAudioCodec, AudioAdvertisement},
+    frame::PixelFormat,
 };
 use xenia_transport_ws::WsTransport;
 
@@ -154,6 +156,39 @@ where
     assert_eq!(RawAudio::from_frame(&opened).unwrap(), audio);
 }
 
+async fn assert_capabilities_roundtrip<S, C>(mut server: S, mut client: C)
+where
+    S: Transport,
+    C: Transport,
+{
+    let mut host = Session::with_fixture(SessionRole::Host, [0xAD; 8], 0x01);
+    let mut viewer = Session::with_fixture(SessionRole::Viewer, [0xAD; 8], 0x01);
+    host.install_key([0x77; 32]);
+    viewer.install_key([0x77; 32]);
+
+    let capabilities = RawCapabilities {
+        frame_id: host.next_frame_id(),
+        timestamp_ms: 1_700_000_005_000,
+        audio: Some(AudioAdvertisement {
+            codecs: vec![AdvertisedAudioCodec::RawPcm],
+            selected_codec: AdvertisedAudioCodec::RawPcm,
+            sample_rate_hz: 48_000,
+            max_channels: 2,
+            frame_duration_ms: vec![10, 20],
+        }),
+        video_format: PixelFormat::Passthrough,
+        telemetry_enabled: true,
+        input_control_enabled: false,
+    };
+    let frame = capabilities.clone().into_frame().unwrap();
+    let envelope = host.seal_control_frame(&frame).unwrap();
+    server.send_envelope(&envelope).await.unwrap();
+    let received = client.recv_envelope().await.unwrap();
+    let opened = viewer.open_frame(&received).unwrap();
+    assert_eq!(opened.pixel_format, PixelFormat::Capabilities);
+    assert_eq!(RawCapabilities::from_frame(&opened).unwrap(), capabilities);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tcp_preserves_envelope_boundaries_and_order() {
     let (server, client) = tcp_pair().await;
@@ -200,6 +235,18 @@ async fn tcp_carries_sealed_audio_metadata() {
 async fn websocket_carries_sealed_audio_metadata() {
     let (server, client) = ws_pair().await;
     assert_audio_metadata_roundtrip(server, client).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tcp_carries_sealed_capabilities_metadata() {
+    let (server, client) = tcp_pair().await;
+    assert_capabilities_roundtrip(server, client).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_carries_sealed_capabilities_metadata() {
+    let (server, client) = ws_pair().await;
+    assert_capabilities_roundtrip(server, client).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
