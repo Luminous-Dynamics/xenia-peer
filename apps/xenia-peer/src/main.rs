@@ -104,6 +104,28 @@ struct Args {
     #[arg(long)]
     m1_runtime_smoke: bool,
 
+    /// Optional directory for `--m1-runtime-smoke` to write a verifier-consumable
+    /// transcript-bound evidence bundle.
+    #[arg(long, requires = "m1_runtime_smoke")]
+    m1_runtime_smoke_evidence_dir: Option<std::path::PathBuf>,
+
+    /// Evidence profile requested by `--m1-runtime-smoke-evidence-dir`.
+    /// `full-pqc-v1` is intentionally refused until PQ signatures land.
+    #[arg(
+        long,
+        default_value = "hybrid-pre-pqc-v1",
+        requires = "m1_runtime_smoke_evidence_dir"
+    )]
+    m1_runtime_smoke_evidence_profile: String,
+
+    /// Verify a transcript-bound M1 evidence bundle directory and exit.
+    #[arg(long, value_name = "DIR")]
+    verify_evidence_bundle: Option<std::path::PathBuf>,
+
+    /// Hex-encoded Ed25519 public key for `--verify-evidence-bundle`.
+    #[arg(long, requires = "verify_evidence_bundle")]
+    evidence_public_key_hex: Option<String>,
+
     /// PRE-PRODUCTION ONLY: auto-grant the local M1 runtime gate after handshake.
     ///
     /// This exists until the real consent approval source drives the M1 runtime.
@@ -647,7 +669,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let source_id = parse_source_id(&args.source_id_hex)?;
 
     if args.m1_runtime_smoke {
-        run_m1_runtime_smoke(source_id)?;
+        run_m1_runtime_smoke(
+            source_id,
+            args.m1_runtime_smoke_evidence_dir.as_deref(),
+            &args.m1_runtime_smoke_evidence_profile,
+        )?;
+        return Ok(());
+    }
+
+    if let Some(bundle_dir) = args.verify_evidence_bundle.as_deref() {
+        let public_key_hex = args
+            .evidence_public_key_hex
+            .as_deref()
+            .ok_or("--verify-evidence-bundle requires --evidence-public-key-hex")?;
+        let public_key = parse_ed25519_public_key_hex(public_key_hex)?;
+        let report = crate::m1_runtime::verify_transcript_bound_evidence_bundle_dir(
+            bundle_dir,
+            &public_key,
+        )?;
+        println!("evidence bundle verified");
+        println!("profile: {}", report.profile);
+        println!("entries: {}", report.ledger_entries);
+        println!("session: {}", report.session_id);
         return Ok(());
     }
 
@@ -1014,13 +1057,27 @@ fn grant_preprod_auto_consent(
     }
 }
 
+fn parse_ed25519_public_key_hex(
+    hex_text: &str,
+) -> Result<ed25519_dalek::VerifyingKey, Box<dyn std::error::Error>> {
+    let bytes = hex::decode(hex_text)?;
+    let public_key_bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| "Ed25519 public key must be exactly 32 bytes")?;
+    Ok(ed25519_dalek::VerifyingKey::from_bytes(&public_key_bytes)?)
+}
+
 fn expand_source_id_for_m1(source_id_short: [u8; 8]) -> [u8; 32] {
     let mut source_id = [0u8; 32];
     source_id[..8].copy_from_slice(&source_id_short);
     source_id
 }
 
-fn run_m1_runtime_smoke(source_id_short: [u8; 8]) -> Result<(), Box<dyn std::error::Error>> {
+fn run_m1_runtime_smoke(
+    source_id_short: [u8; 8],
+    evidence_dir: Option<&std::path::Path>,
+    evidence_profile: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let signing_key = SigningKey::from_bytes(&[0x4Du8; 32]);
     let verifying_key = signing_key.verifying_key();
 
@@ -1033,6 +1090,7 @@ fn run_m1_runtime_smoke(source_id_short: [u8; 8]) -> Result<(), Box<dyn std::err
         Uuid::from_bytes([0x22; 16]),
         "m1 runtime cli smoke",
     );
+    runtime.bind_session_transcript_hash([0x33; 32]);
 
     runtime.offer()?;
     runtime.grant_consent()?;
@@ -1055,6 +1113,25 @@ fn run_m1_runtime_smoke(source_id_short: [u8; 8]) -> Result<(), Box<dyn std::err
     let entries = runtime.entries();
     if entries != persisted_entries {
         return Err("M1 persisted transcript mismatch".into());
+    }
+
+    if let Some(dir) = evidence_dir {
+        let paths = runtime.write_transcript_bound_evidence_bundle_for_profile(
+            &verifying_key,
+            dir,
+            evidence_profile,
+        )?;
+        println!("evidence bundle: {}", paths.dir.display());
+        println!("manifest: {}", paths.manifest.display());
+        println!("ledger entries: {}", paths.ledger_entries.display());
+        println!(
+            "session transcript binding: {}",
+            paths.session_transcript_binding.display()
+        );
+        println!(
+            "verification report: {}",
+            paths.verification_report.display()
+        );
     }
 
     println!("M1 runtime smoke passed");

@@ -18,7 +18,7 @@ patterns=(
   "PQC-by-default at every layer"
 )
 
-allow_re='(^|/)(docs/crypto/FULL_PQC_MIGRATION_PLAN\.md|docs/crypto/EVIDENCE_CRYPTO_PROFILE\.md|scripts/check-pqc-claims\.sh|scripts/check-evidence-crypto-profile\.sh)$'
+allow_re='(^|/)(docs/crypto/FULL_PQC_MIGRATION_PLAN\.md|docs/crypto/EVIDENCE_CRYPTO_PROFILE\.md|docs/crypto/FULL_PQC_RUNTIME_REFUSAL_GATE\.md|scripts/check-pqc-claims\.sh|scripts/check-evidence-crypto-profile\.sh|scripts/check-full-pqc-runtime-refusal\.sh)$'
 failures=0
 
 for pattern in "${patterns[@]}"; do

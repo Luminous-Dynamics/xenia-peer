@@ -203,6 +203,97 @@ impl SignatureEnvelope {
     }
 }
 
+/// Verification backend boundary for algorithm-tagged evidence signatures.
+///
+/// This trait is the implementation bridge from today's Ed25519 verifier to
+/// future ML-DSA/SLH-DSA backends. It is intentionally byte-oriented so PQ
+/// public keys and signatures can be carried without another evidence-schema
+/// break.
+pub trait EvidenceSignatureBackend {
+    /// Signature suite handled by this backend.
+    fn suite(&self) -> SignatureSuite;
+
+    /// Verify `signature` over `message` under `public_key`.
+    fn verify_signature(
+        &self,
+        public_key: &[u8],
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), EvidenceSignatureBackendError>;
+}
+
+/// Ed25519 evidence-signature backend used by the current hybrid/pre-PQC profile.
+pub struct Ed25519EvidenceSignatureBackend;
+
+impl EvidenceSignatureBackend for Ed25519EvidenceSignatureBackend {
+    fn suite(&self) -> SignatureSuite {
+        SignatureSuite::Ed25519Rfc8032
+    }
+
+    fn verify_signature(
+        &self,
+        public_key: &[u8],
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), EvidenceSignatureBackendError> {
+        let public_key: [u8; 32] = public_key.try_into().map_err(|_| {
+            EvidenceSignatureBackendError::BadPublicKeyLength {
+                expected: 32,
+                found: public_key.len(),
+            }
+        })?;
+        let signature: [u8; 64] = signature.try_into().map_err(|_| {
+            EvidenceSignatureBackendError::BadSignatureLength {
+                expected: 64,
+                found: signature.len(),
+            }
+        })?;
+
+        let verifying_key = VerifyingKey::from_bytes(&public_key)
+            .map_err(|_| EvidenceSignatureBackendError::BadPublicKey)?;
+        let signature = Signature::from_bytes(&signature);
+        verifying_key
+            .verify(message, &signature)
+            .map_err(|_| EvidenceSignatureBackendError::BadSignature)
+    }
+}
+
+/// Errors returned by evidence-signature backends.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum EvidenceSignatureBackendError {
+    /// The public key had the wrong byte length for the backend.
+    #[error("bad public-key length: expected {expected}, found {found}")]
+    BadPublicKeyLength {
+        /// Expected length in bytes.
+        expected: usize,
+        /// Actual length in bytes.
+        found: usize,
+    },
+    /// The signature had the wrong byte length for the backend.
+    #[error("bad signature length: expected {expected}, found {found}")]
+    BadSignatureLength {
+        /// Expected length in bytes.
+        expected: usize,
+        /// Actual length in bytes.
+        found: usize,
+    },
+    /// The public key bytes could not be parsed by the backend.
+    #[error("bad public key")]
+    BadPublicKey,
+    /// Signature verification failed.
+    #[error("bad signature")]
+    BadSignature,
+}
+
+/// PQ signature feature status.
+///
+/// Enabling `pqc-signatures` compiles the integration boundary only. It does not
+/// silently accept ML-DSA/SLH-DSA signatures before a vetted backend and test
+/// vectors land.
+#[cfg(feature = "pqc-signatures")]
+pub const PQC_SIGNATURE_BACKEND_STATUS: &str =
+    "pqc-signatures feature enabled; PQ verification remains unsupported until vectors land";
+
 /// Errors surfaced when parsing or adapting a signature envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SignatureEnvelopeError {
@@ -1063,11 +1154,12 @@ impl Verifier {
                 });
             }
 
-            let mut signature_bytes = [0u8; 64];
-            signature_bytes.copy_from_slice(&entry.signature.signature);
-            let sig = Signature::from_bytes(&signature_bytes);
-            public_key
-                .verify(&entry.entry_hash, &sig)
+            Ed25519EvidenceSignatureBackend
+                .verify_signature(
+                    &public_key.to_bytes(),
+                    &entry.entry_hash,
+                    &entry.signature.signature,
+                )
                 .map_err(|_| VerifyError::BadSignature { seq: entry.seq })?;
 
             expected_prev = entry.entry_hash;
@@ -1222,6 +1314,40 @@ mod tests {
         assert!(matches!(
             envelope.to_legacy_ed25519(),
             Err(SignatureEnvelopeError::UnsupportedLegacySuite { .. })
+        ));
+    }
+
+    #[test]
+    fn ed25519_evidence_signature_backend_verifies_current_entries() {
+        let sk = new_signing_key();
+        let pk = sk.verifying_key();
+        let mut chain = Chain::new(sk);
+        let entry = chain.append(sample_event(ConsentKind::Request)).unwrap();
+        let backend = Ed25519EvidenceSignatureBackend;
+
+        assert_eq!(backend.suite(), SignatureSuite::Ed25519Rfc8032);
+        backend
+            .verify_signature(&pk.to_bytes(), &entry.entry_hash, &entry.signature)
+            .expect("current Ed25519 backend should verify ledger entry signatures");
+    }
+
+    #[test]
+    fn ed25519_evidence_signature_backend_rejects_bad_lengths() {
+        let backend = Ed25519EvidenceSignatureBackend;
+
+        assert!(matches!(
+            backend.verify_signature(&[0u8; 31], b"message", &[0u8; 64]),
+            Err(EvidenceSignatureBackendError::BadPublicKeyLength {
+                expected: 32,
+                found: 31
+            })
+        ));
+        assert!(matches!(
+            backend.verify_signature(&[0u8; 32], b"message", &[0u8; 63]),
+            Err(EvidenceSignatureBackendError::BadSignatureLength {
+                expected: 64,
+                found: 63
+            })
         ));
     }
 

@@ -94,6 +94,23 @@ if [[ -x scripts/check-canonical-handshake-transcript.sh ]]; then
   run scripts/check-canonical-handshake-transcript.sh .
 fi
 
+
+if [[ -x scripts/check-m1-evidence-bundle-export.sh ]]; then
+  run scripts/check-m1-evidence-bundle-export.sh .
+fi
+
+if [[ -x scripts/check-m1-evidence-bundle-verifier.sh ]]; then
+  run scripts/check-m1-evidence-bundle-verifier.sh .
+fi
+
+if [[ -x scripts/check-pqc-signature-backend-boundary.sh ]]; then
+  run scripts/check-pqc-signature-backend-boundary.sh .
+fi
+
+if [[ -x scripts/check-full-pqc-runtime-refusal.sh ]]; then
+  run scripts/check-full-pqc-runtime-refusal.sh .
+fi
+
 if [[ -x scripts/check-release-readiness.py ]]; then
   if command -v python3 >/dev/null 2>&1; then
     run python3 scripts/check-release-readiness.py .
