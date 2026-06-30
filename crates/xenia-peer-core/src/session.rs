@@ -89,6 +89,26 @@ impl Session {
         }
     }
 
+    /// Construct with deterministic `source_id` + `epoch` and require
+    /// the xenia-wire consent ceremony before application frame/input
+    /// payloads can flow.
+    ///
+    /// This is intended for pre-production daemon/runtime wiring and
+    /// tests. It preserves fixture determinism while avoiding
+    /// `LegacyBypass`.
+    pub fn with_fixture_require_consent(role: SessionRole, source_id: [u8; 8], epoch: u8) -> Self {
+        Self {
+            role,
+            wire: WireSession::builder()
+                .with_source_id(source_id, epoch)
+                .require_consent(true)
+                .build(),
+            next_frame_id: 0,
+            next_input_seq: 0,
+            last_frame_sent_ms: 0,
+        }
+    }
+
     /// Install a 32-byte session key. Must be called before any
     /// `seal_*` or `open_*` call.
     pub fn install_key(&mut self, key: [u8; 32]) {
@@ -108,6 +128,38 @@ impl Session {
         event: xenia_wire::consent::ConsentEvent,
     ) -> Result<xenia_wire::consent::ConsentState, xenia_wire::consent::ConsentViolation> {
         self.wire.observe_consent(event)
+    }
+
+    /// Observe a local consent request event.
+    pub fn observe_consent_request(
+        &mut self,
+        request_id: u64,
+    ) -> Result<xenia_wire::consent::ConsentState, xenia_wire::consent::ConsentViolation> {
+        self.observe_consent(xenia_wire::consent::ConsentEvent::Request { request_id })
+    }
+
+    /// Observe a local consent approval event.
+    pub fn observe_consent_approved(
+        &mut self,
+        request_id: u64,
+    ) -> Result<xenia_wire::consent::ConsentState, xenia_wire::consent::ConsentViolation> {
+        self.observe_consent(xenia_wire::consent::ConsentEvent::ResponseApproved { request_id })
+    }
+
+    /// Observe a local consent denial event.
+    pub fn observe_consent_denied(
+        &mut self,
+        request_id: u64,
+    ) -> Result<xenia_wire::consent::ConsentState, xenia_wire::consent::ConsentViolation> {
+        self.observe_consent(xenia_wire::consent::ConsentEvent::ResponseDenied { request_id })
+    }
+
+    /// Observe a local consent revocation event.
+    pub fn observe_consent_revocation(
+        &mut self,
+        request_id: u64,
+    ) -> Result<xenia_wire::consent::ConsentState, xenia_wire::consent::ConsentViolation> {
+        self.observe_consent(xenia_wire::consent::ConsentEvent::Revocation { request_id })
     }
 
     /// Current consent state from the underlying wire session.
