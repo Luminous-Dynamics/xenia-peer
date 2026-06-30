@@ -111,6 +111,10 @@ if [[ -x scripts/check-full-pqc-runtime-refusal.sh ]]; then
   run scripts/check-full-pqc-runtime-refusal.sh .
 fi
 
+if [[ -x scripts/check-pq-signature-vector-harness.sh ]]; then
+  run scripts/check-pq-signature-vector-harness.sh .
+fi
+
 if [[ -x scripts/check-release-readiness.py ]]; then
   if command -v python3 >/dev/null 2>&1; then
     run python3 scripts/check-release-readiness.py .
