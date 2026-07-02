@@ -14,9 +14,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 use xenia_handshake::{RekeyEpochKeys, SessionKeySchedule};
-use xenia_wire::{Session as WireSession, WireError, open_frame, open_input};
+use xenia_wire::{open_frame, open_input, Session as WireSession, WireError};
 
-use crate::frame::{LANE_ENVELOPE_MAGIC, RawFrame, RawInput};
+use crate::frame::{RawFrame, RawInput, LANE_ENVELOPE_MAGIC};
 
 const LANE_ENVELOPE_HEADER_LEN: usize = 5;
 
@@ -97,6 +97,7 @@ pub struct LaneSession {
     audio: WireSession,
     telemetry: WireSession,
     next_frame_id: u64,
+    next_input_seq: u64,
     last_frame_sent_ms: u64,
 }
 
@@ -109,6 +110,7 @@ impl LaneSession {
             audio: WireSession::with_source_id(source_id, epoch),
             telemetry: WireSession::with_source_id(source_id, epoch),
             next_frame_id: 0,
+            next_input_seq: 0,
             last_frame_sent_ms: 0,
         }
     }
@@ -144,9 +146,40 @@ impl LaneSession {
         id
     }
 
+    /// Allocate the next outbound input sequence.
+    fn next_input_seq(&mut self) -> u64 {
+        let seq = self.next_input_seq;
+        self.next_input_seq = self.next_input_seq.wrapping_add(1);
+        seq
+    }
+
     /// Return telemetry: time since last frame was sent (in ms).
     pub fn last_frame_latency_ms(&self) -> u64 {
         now_ms().saturating_sub(self.last_frame_sent_ms)
+    }
+
+    /// Seal a captured input event on the reverse path (viewer →
+    /// host). Input does not ride the lane-envelope system used by
+    /// [`LaneSession::seal_frame`] — it seals directly under the
+    /// control lane's key, since input is a control-plane-adjacent
+    /// concern and that lane's key is already installed immediately
+    /// post-handshake. Fills in `sequence` and `timestamp_ms`
+    /// automatically. See [`LaneSession::open_input`].
+    pub fn seal_input_event(&mut self, payload: Vec<u8>) -> Result<Vec<u8>, SessionError> {
+        let input = RawInput {
+            sequence: self.next_input_seq(),
+            timestamp_ms: now_ms(),
+            payload,
+        };
+        xenia_wire::seal_input(&input_as_wire(&input)?, &mut self.control).map_err(Into::into)
+    }
+
+    /// Open a sealed input envelope on the host side. See
+    /// [`LaneSession::seal_input_event`] for why this uses the control
+    /// lane's key directly rather than the `XLN1` lane-envelope format.
+    pub fn open_input(&mut self, envelope: &[u8]) -> Result<RawInput, SessionError> {
+        let wire_input = open_input(envelope, &mut self.control)?;
+        input_from_wire(&wire_input).map_err(Into::into)
     }
 
     /// Seal a captured raw-RGBA frame on the video lane.
@@ -651,6 +684,35 @@ mod tests {
         let opened = viewer.open_frame(&sealed).unwrap();
         assert_eq!(opened.pixel_format, crate::frame::PixelFormat::Audio);
         assert_eq!(crate::frame::RawAudio::from_frame(&opened).unwrap(), audio);
+    }
+
+    #[test]
+    fn lane_session_input_seal_open_roundtrip_uses_control_key_unwrapped() {
+        let schedule = xenia_handshake::derive_session_key_schedule(&[0xA5; 32], &[0x5A; 32]);
+        let mut viewer = LaneSession::with_fixture([0x44; 8], 0xDE);
+        viewer.install_schedule(&schedule);
+        let mut host = LaneSession::with_fixture([0x44; 8], 0xDE);
+        host.install_schedule(&schedule);
+
+        let payload = br#"{"type":"mousemove","x":0.4,"y":0.6}"#.to_vec();
+        let sealed = viewer.seal_input_event(payload.clone()).unwrap();
+
+        // Input is NOT lane-enveloped -- no XLN1 magic prefix.
+        assert_ne!(
+            &sealed[..LANE_ENVELOPE_MAGIC.len().min(sealed.len())],
+            &LANE_ENVELOPE_MAGIC
+        );
+
+        let opened = host.open_input(&sealed).unwrap();
+        assert_eq!(opened.payload, payload);
+        assert_eq!(opened.sequence, 0);
+
+        // Wrong key (e.g. video lane's) must not open it.
+        let mut wrong_key_host = LaneSession::with_fixture([0x44; 8], 0xDE);
+        let mut tampered_schedule = schedule;
+        tampered_schedule.control[0] ^= 0x01;
+        wrong_key_host.install_schedule(&tampered_schedule);
+        assert!(wrong_key_host.open_input(&sealed).is_err());
     }
 
     #[test]
