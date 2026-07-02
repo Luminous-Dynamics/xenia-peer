@@ -2,8 +2,9 @@
 
 Single source of truth for what's shipped, what's next, and what's
 deferred. Updated by humans, not by commits. Last refresh:
-2026-07-02 (B2/B3 real-capture + consent-ceremony wiring and first
-live validation — see B2/B3/M1.2c/M2 below).
+2026-07-02 (B1/B2/B3 real handshake/capture/consent wiring, first live
+validations, and a real `XdgPortalInjector` input backend — see
+B1/B2/B3/M1.2c/M2 below).
 
 If this file disagrees with reality, the file is wrong.
 
@@ -136,7 +137,7 @@ Recapitulated from VIEWER_PLAN §3 with today's-actual status:
 | **M1.1** | xenia-capture + xenia-video scaffold + pipeline wired end-to-end with passthrough | ✅ `bd081cf` |
 | **M1.2b** | Real H.264 encode/decode via ffmpeg-next | ✅ `21d8cf3` |
 | **M1.2c** | Real host display capture | ✅ ScapCapture wired + validated on KDE-Wayland 2026-07-02 (real 1920×1080 frames, zero errors, 16.76fps, `VERDICT: PASS`) — see **B2** above. Other OSes/compositors unmeasured. |
-| **M2** | Input injection + consent-ceremony UI | 🟡 `xenia-inject` crate shipped (`23a49a9`); consent-ceremony gate wired end-to-end 2026-07-02 (**B3**); real input backend still pending |
+| **M2** | Input injection + consent-ceremony UI | 🟡 consent-ceremony gate wired end-to-end 2026-07-02 (**B3**). Input: `XdgPortalInjector` (`org.freedesktop.portal.RemoteDesktop` via `ashpd`) landed 2026-07-02 and validated on KDE-Wayland — 8/8 real pointer/key/touch injections succeeded (see `mycelix-sovereign/docs/input-injection-validation-runbook.md`). That's one of three layers: the daemon has no receive-loop for inbound viewer `RawInput` yet (`xenia-inject` isn't even a dependency of `xenia-peer` today), and `apps/xenia-viewer/src/gui.rs` explicitly hasn't wired real mouse/keyboard capture ("that's M2"). `WaylandInputInjector`/`UinputInjector` remain scaffold stubs. |
 | **M3.1** | WebSocket transport | ✅ `e765459` |
 | **M3.2** | Iroh QUIC primary transport | ✅ library crate + conformance tests + daemon/viewer CLI smoke |
 | **M4.0** | egui GUI on xenia-viewer | ✅ `fd28bc3` |
@@ -208,12 +209,15 @@ autonomous shipping:
    — neither of which existed (or this repo's author was aware of) when
    this row was first written. See B1's row above for detail. Browser
    sessions are not deployment-grade until that lands.
-2. **Universal ingestion vs B3 ordering:** with B1 at the crate layer,
-   real display/audio/telemetry backends (B2) and the consent UI (B3)
-   are the last two blockers for real deployment. B2 unblocks visible
-   host content and metrics; B3 unblocks the consent-ceremony promise.
-   Neither depends strictly on the other, but production input
-   injection should wait for B3.
+2. **Universal ingestion vs B3 ordering: resolved, B3 landed 2026-07-02.**
+   Consent-ceremony gate is wired end-to-end (real `--consent-port`
+   Approve/Deny, no more crash-on-unapproved). `XdgPortalInjector` (a
+   real input backend, see M2) was built after B3 per this note's
+   original guidance — but its portal `Start()` call completed with no
+   visible consent dialog (see `input-injection-validation-runbook.md`'s
+   "open finding" section), which needs resolving before treating input
+   injection as properly consent-gated in practice, independent of
+   xenia-peer's own B3 gate being correct.
 3. **Phone → Desktop leg: Path A or Path B?** Path B is faster but
    requires a USB-tethered phone every time. Path A is real-world
    deployable but multi-week.
