@@ -15,6 +15,15 @@ thiserror.workspace = true
 tracing.workspace = true
 serde = { version = "1", features = ["derive"] }
 
+# xdg-desktop-portal RemoteDesktop backend (see src/xdg_portal.rs).
+# High-level async bindings -- deliberately not the low-level `dbus`
+# crate xenia-capture's scap dependency uses, whose hand-rolled
+# request/response signal matching has a real, confirmed race (see
+# xenia-capture's MAX_BUILD_ATTEMPTS retry and mycelix-sovereign's
+# capture-validation-runbook.md).
+ashpd = { version = "0.9", optional = true, default-features = false, features = ["tokio"] }
+tokio = { version = "1", optional = true, features = ["rt", "sync", "time"] }
+
 [features]
 default = []
 # wlr-virtual-pointer-v1 + zwp-virtual-keyboard-v1 backend for
@@ -25,6 +34,18 @@ wayland-virtual = []
 # uinput kernel-level backend. Works on any Linux with
 # /dev/uinput accessible (root, `input` group, or udev rule).
 uinput = []
+# xdg-desktop-portal RemoteDesktop backend for GNOME/KDE (portal-based,
+# no host permissions beyond the interactive consent dialog). Primary
+# backend per the xenia-capture precedent for portal-based Linux paths.
+xdg-portal = ["dep:ashpd", "dep:tokio"]
 
 [dev-dependencies]
 bincode = "1.3"
+
+# RemoteDesktop portal real-hardware validation harness. Only builds
+# when xdg-portal is enabled -- no-op in default `cargo build`/`cargo
+# test` runs, matching xenia-capture's capture_bench pattern.
+[[example]]
+name = "inject_bench"
+path = "examples/inject_bench.rs"
+required-features = ["xdg-portal"]

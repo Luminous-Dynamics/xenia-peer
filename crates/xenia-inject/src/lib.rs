@@ -46,6 +46,11 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+#[cfg(feature = "xdg-portal")]
+mod xdg_portal;
+#[cfg(feature = "xdg-portal")]
+pub use xdg_portal::XdgPortalInjector;
+
 /// Errors from an input backend.
 #[derive(Debug, Error)]
 pub enum InjectError {
