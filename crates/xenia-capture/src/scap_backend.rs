@@ -155,39 +155,94 @@ impl ScapCapture {
     }
 }
 
+/// Attempts to build a scap `Capturer` before giving up.
+///
+/// Upstream `scap`'s Linux portal D-Bus code has a request/response race:
+/// `handle_req_response` (portal.rs) sends the D-Bus method call and only
+/// registers the signal match for its reply afterward. If the portal
+/// replies before the match is registered — plausible for steps that need
+/// no user interaction, like session creation — the reply is silently
+/// missed and `LinuxCapturer::new` panics with "Failed to get screencast
+/// stream: ... Did not get response" despite the portal having actually
+/// succeeded. Observed non-deterministically (roughly every other attempt
+/// in one session, every attempt in another) on real KDE-Wayland hardware;
+/// a full restart of both xdg-desktop-portal.service and
+/// plasma-xdg-desktop-portal-kde.service did not affect its frequency,
+/// which rules out stale portal state and points at the race above.
+/// Retrying the whole build from scratch reliably gets past it.
+const MAX_BUILD_ATTEMPTS: u32 = 5;
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
+}
+
 fn scap_worker(
     options: ScapOptions,
     frame_tx: mpsc::Sender<Result<CapturedFrame, CaptureError>>,
     stop_rx: mpsc::Receiver<()>,
 ) {
-    let scap_options = scap::capturer::Options {
-        fps: options.fps,
-        show_cursor: options.show_cursor,
-        show_highlight: false,
-        target: None, // primary display
-        crop_area: None,
-        output_type: scap::frame::FrameType::BGRAFrame,
-        output_resolution: options.resolution.to_scap(),
-        excluded_targets: None,
-        captures_audio: false,
-        exclude_current_process_audio: false,
-    };
+    let mut capturer = None;
+    for attempt in 1..=MAX_BUILD_ATTEMPTS {
+        let scap_options = scap::capturer::Options {
+            fps: options.fps,
+            show_cursor: options.show_cursor,
+            show_highlight: false,
+            target: None, // primary display
+            crop_area: None,
+            output_type: scap::frame::FrameType::BGRAFrame,
+            output_resolution: options.resolution.to_scap(),
+            excluded_targets: None,
+            captures_audio: false,
+            exclude_current_process_audio: false,
+        };
 
-    let mut capturer = match scap::capturer::Capturer::build(scap_options) {
-        Ok(c) => c,
-        Err(e) => {
-            let err = match e {
-                scap::capturer::CapturerBuildError::NotSupported => {
-                    CaptureError::Unavailable(format!("scap build: {e:?}"))
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            scap::capturer::Capturer::build(scap_options)
+        })) {
+            Ok(Ok(c)) => {
+                capturer = Some(c);
+                break;
+            }
+            Ok(Err(e)) => {
+                // A real (non-panic) build error — support/permission, not
+                // the D-Bus race. Retrying won't help.
+                let err = match e {
+                    scap::capturer::CapturerBuildError::NotSupported => {
+                        CaptureError::Unavailable(format!("scap build: {e:?}"))
+                    }
+                    scap::capturer::CapturerBuildError::PermissionNotGranted => {
+                        CaptureError::ConsentDenied
+                    }
+                };
+                let _ = frame_tx.send(Err(err));
+                return;
+            }
+            Err(panic_payload) => {
+                let msg = panic_message(&*panic_payload);
+                if attempt == MAX_BUILD_ATTEMPTS {
+                    let _ = frame_tx.send(Err(CaptureError::Backend(format!(
+                        "scap capturer build panicked after {MAX_BUILD_ATTEMPTS} attempts \
+                         (known upstream D-Bus request/response race): {msg}"
+                    ))));
+                    return;
                 }
-                scap::capturer::CapturerBuildError::PermissionNotGranted => {
-                    CaptureError::ConsentDenied
-                }
-            };
-            let _ = frame_tx.send(Err(err));
-            return;
+                tracing::warn!(
+                    attempt,
+                    max_attempts = MAX_BUILD_ATTEMPTS,
+                    %msg,
+                    "scap capturer build panicked (known upstream D-Bus race); retrying"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
         }
-    };
+    }
+    let mut capturer = capturer.expect("loop exits only via break or early return");
 
     capturer.start_capture();
 
