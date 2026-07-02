@@ -905,10 +905,10 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             let capabilities = RawCapabilities::from_frame(&raw_frame)?;
             let negotiated_context_hash =
                 negotiated_session_context_hash(negotiated_transport, capabilities.clone())?;
-            if let Some(expected_hash) = handshake.negotiated_context_hash {
-                if expected_hash != negotiated_context_hash {
-                    return Err("sealed capabilities do not match handshake context hash".into());
-                }
+            if let Some(expected_hash) = handshake.negotiated_context_hash
+                && expected_hash != negotiated_context_hash
+            {
+                return Err("sealed capabilities do not match handshake context hash".into());
             }
             if !capabilities.supports_current_lane_envelope() {
                 return Err("daemon advertised unsupported lane envelope version".into());
@@ -1210,10 +1210,10 @@ async fn gui_receive_loop(
                     .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
                         e.to_string().into()
                     })?;
-            if let Some(expected_hash) = handshake.negotiated_context_hash {
-                if expected_hash != negotiated_context_hash {
-                    return Err("sealed capabilities do not match handshake context hash".into());
-                }
+            if let Some(expected_hash) = handshake.negotiated_context_hash
+                && expected_hash != negotiated_context_hash
+            {
+                return Err("sealed capabilities do not match handshake context hash".into());
             }
             if !capabilities.supports_current_lane_envelope() {
                 return Err("daemon advertised unsupported lane envelope version".into());
