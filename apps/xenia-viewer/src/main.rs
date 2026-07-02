@@ -1175,6 +1175,11 @@ fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let audio_sink = ViewerAudioSink::new(args.play_audio, args.audio_output_device.as_deref())
         .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
     let (audio_tx, audio_rx) = mpsc::sync_channel(64);
+    // Captured pointer/keyboard events flow GUI thread -> network
+    // task. `UnboundedSender::send` is a sync method, so the egui
+    // thread can call it directly without needing to be inside an
+    // async context.
+    let (input_tx, input_rx) = tokio::sync::mpsc::unbounded_channel::<xenia_inject::InputEvent>();
 
     // Spawn the receive/decode pipeline on a dedicated tokio thread.
     // eframe wants to own the main thread; tokio runs beside it.
@@ -1185,7 +1190,9 @@ fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let slot_for_task = Arc::clone(&slot);
     let args_for_task = args.clone();
     rt.spawn(async move {
-        if let Err(err) = gui_receive_loop(args_for_task, slot_for_task, audio_tx).await {
+        if let Err(err) =
+            gui_receive_loop(args_for_task, slot_for_task, audio_tx, input_rx).await
+        {
             tracing::error!(error = %err, "gui receive loop exited with error");
         }
     });
@@ -1208,6 +1215,7 @@ fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 config,
                 Some(audio_rx),
                 Box::new(audio_sink),
+                Some(input_tx),
             )))
         }),
     )
@@ -1222,6 +1230,7 @@ async fn gui_receive_loop(
     args: Args,
     slot: Arc<FrameSlot>,
     audio_tx: mpsc::SyncSender<RawAudio>,
+    mut input_rx: tokio::sync::mpsc::UnboundedReceiver<xenia_inject::InputEvent>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let source_id = parse_source_id(&args.source_id_hex)
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
@@ -1246,6 +1255,48 @@ async fn gui_receive_loop(
     );
     let mut session = LaneSession::with_fixture(source_id, args.epoch);
     session.install_schedule(&handshake.key_schedule);
+    let negotiated_transport = transport.negotiated_transport();
+
+    // Split the transport so captured input can be sent concurrently
+    // with the frame-receive loop below. `session` and the send half
+    // move behind async mutexes shared with the spawned input-sender
+    // task: `session` because sealing an outbound input event and
+    // opening/installing an inbound rekey share the same control-lane
+    // key state, and the send half because both this loop's rekey
+    // acks and the input task's sealed events go out over it.
+    let (send_half, mut recv_half) = transport.split();
+    let session = Arc::new(tokio::sync::Mutex::new(session));
+    let send_half = Arc::new(tokio::sync::Mutex::new(send_half));
+
+    {
+        let session = Arc::clone(&session);
+        let send_half = Arc::clone(&send_half);
+        tokio::spawn(async move {
+            while let Some(event) = input_rx.recv().await {
+                let payload = match bincode::serialize(&event) {
+                    Ok(bytes) => bytes,
+                    Err(err) => {
+                        warn!(error = %err, "failed to encode captured InputEvent");
+                        continue;
+                    }
+                };
+                let envelope = {
+                    let mut session = session.lock().await;
+                    match session.seal_input_event(payload) {
+                        Ok(envelope) => envelope,
+                        Err(err) => {
+                            warn!(error = %err, "failed to seal captured input event");
+                            continue;
+                        }
+                    }
+                };
+                if let Err(err) = send_half.lock().await.send_envelope(&envelope).await {
+                    info!(error = %err, "input send loop ending (daemon disconnected)");
+                    break;
+                }
+            }
+        });
+    }
 
     let mut decoder = make_decoder(args.codec)
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
@@ -1263,7 +1314,6 @@ async fn gui_receive_loop(
     );
     let mut audio_sink: Box<dyn AudioPlaybackSink + Send> =
         Box::new(ChannelAudioSink::new(audio_tx));
-    let negotiated_transport = transport.negotiated_transport();
     let mut capabilities_received = false;
     let mut epoch_state = SessionEpochState::new(handshake.transcript_hash, RekeyPolicy::smoke());
     loop {
@@ -1271,7 +1321,7 @@ async fn gui_receive_loop(
             info!(received, "reached --frames, closing receive loop");
             break;
         }
-        let envelope = match transport.recv_envelope().await {
+        let envelope = match recv_half.recv_envelope().await {
             Ok(e) => e,
             Err(err) => {
                 info!(error = %err, received, "daemon disconnected");
@@ -1279,7 +1329,7 @@ async fn gui_receive_loop(
             }
         };
         let wire_bytes = envelope.len();
-        let raw_frame = match session.open_frame(&envelope) {
+        let raw_frame = match session.lock().await.open_frame(&envelope) {
             Ok(f) => f,
             Err(err) => {
                 warn!(error = %err, "failed to open frame");
@@ -1363,17 +1413,17 @@ async fn gui_receive_loop(
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
                     e.to_string().into()
                 })?;
-            session.install_rekey_keys(&keys);
+            session.lock().await.install_rekey_keys(&keys);
             let ack = RawRekey::Ack {
                 key_epoch: epoch_state.current_epoch(),
                 epoch_hash,
             }
             .into_frame(0, 0)
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
-            let envelope = session.seal_control_frame(&ack).map_err(
+            let envelope = session.lock().await.seal_control_frame(&ack).map_err(
                 |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
             )?;
-            transport.send_envelope(&envelope).await.map_err(
+            send_half.lock().await.send_envelope(&envelope).await.map_err(
                 |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
             )?;
             info!(key_epoch = epoch_state.current_epoch(), epoch_hash = ?epoch_hash, "session rekey installed");
@@ -1423,6 +1473,9 @@ async fn gui_receive_loop(
             });
         }
     }
+    send_half.lock().await.close().await.map_err(
+        |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
+    )?;
     Ok(())
 }
 
