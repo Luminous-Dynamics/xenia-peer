@@ -2,7 +2,8 @@
 
 Single source of truth for what's shipped, what's next, and what's
 deferred. Updated by humans, not by commits. Last refresh:
-2026-06-22 (transport conformance + auto transport selection).
+2026-07-02 (B2/B3 real-capture + consent-ceremony wiring and first
+live validation — see B2/B3/M1.2c/M2 below).
 
 If this file disagrees with reality, the file is wrong.
 
@@ -74,8 +75,8 @@ deployment-grade.
 | # | Item | Status | Estimate | Why it blocks |
 |---|---|---|---|---|
 | B1 | **PQC handshake** (ML-KEM-768 + Ed25519 + HKDF-SHA256) | 🟡 native daemon/viewer wired; browser viewer pending | 0.5 day to finish browser path | Fresh-impl against RustCrypto `ml-kem` 0.3.0-rc.2 + `ed25519-dalek` 2 + `hkdf` 0.12. Not a Symthaea carry — symthaea's version depended on `mycelix-crypto`. Native CLI/egui paths derive and install a session key; browser viewer still needs the same handshake. |
-| B2 | **Universal host ingestion** | 🟡 telemetry backend + GUI panel wired; RawAudio timing lane wired; display/audio/input real backends pending | 3–7 days per display/audio/input backend | Without this, daemon only shares synthetic TestCapture frames. `xenia-capture` now exposes host-agnostic display, audio, input, and telemetry traits; native daemon/viewer already stream sealed `sysinfo` telemetry metadata with explicit `basic` / `system` / `off` policy, plus synthetic RawAudio frames for jitter/timing validation. |
-| B3 | **Consent ceremony UI on the host** | ❌ Uses draft-03 SPEC §12 from xenia-wire | 2–3 days | The wire-level state machine exists; the UX to prompt a user "technician-X wants to share your screen, approve?" does not. |
+| B2 | **Universal host ingestion** | 🟡 display backend (ScapCapture) wired into the daemon and validated end-to-end for the first time 2026-07-02: real 1920×1080 frames, zero decode errors, but effective fps (1.0–2.6) is 6–15× under the 15fps bar — see `mycelix-sovereign/docs/capture-validation-runbook.md`. A separate integration bug (encoder built from `--width`/`--height` CLI defaults, silently dropping every real-resolution frame) was found and fixed the same day. Audio/input real backends still pending. | Root-cause the fps gap (unknown effort); 3–7 days per remaining audio/input backend | Capture is no longer purely synthetic, but isn't yet fast enough for real use. `xenia-capture` exposes host-agnostic display, audio, input, and telemetry traits; native daemon/viewer stream sealed `sysinfo` telemetry with explicit `basic`/`system`/`off` policy, plus synthetic RawAudio frames for jitter/timing validation. |
+| B3 | **Consent ceremony UI on the host** | 🟡 wire-level state machine + M1RuntimeSession gate wired end-to-end 2026-07-02: `--consent-port` now parses real Approve/Deny decisions (blocking with a new `--consent-timeout-secs`, graceful exit on deny/timeout instead of a crash), and the actual request scope is broadcast over `--admin-port` so a connected UI has real content. `apps/sovereign-admin`'s `ConsentModal` already speaks this exact protocol. Covered by new smoke-test cases in `scripts/xenia-audio-e2e-smoke.sh`. | Done for the CLI/wire path; `sovereign-admin` itself still needs to ship as part of xenia-peer's own UX rather than a separate incubator app | Uses draft-03 SPEC §12 from xenia-wire. What's left is packaging/UX polish, not the underlying gate. |
 
 ---
 
@@ -134,8 +135,8 @@ Recapitulated from VIEWER_PLAN §3 with today's-actual status:
 | **M0** | Workspace + loopback TCP roundtrip | ✅ `cf4e37a` |
 | **M1.1** | xenia-capture + xenia-video scaffold + pipeline wired end-to-end with passthrough | ✅ `bd081cf` |
 | **M1.2b** | Real H.264 encode/decode via ffmpeg-next | ✅ `21d8cf3` |
-| **M1.2c** | Real host display capture | ❌ not started — this is the display part of **B2** above |
-| **M2** | Input injection + consent-ceremony UI | 🟡 `xenia-inject` crate shipped (`23a49a9`); real backend + consent UI pending (**B3**) |
+| **M1.2c** | Real host display capture | 🟡 ScapCapture wired + first real validation run 2026-07-02 (real 1920×1080 frames, zero errors, fps below target) — see **B2** above |
+| **M2** | Input injection + consent-ceremony UI | 🟡 `xenia-inject` crate shipped (`23a49a9`); consent-ceremony gate wired end-to-end 2026-07-02 (**B3**); real input backend still pending |
 | **M3.1** | WebSocket transport | ✅ `e765459` |
 | **M3.2** | Iroh QUIC primary transport | ✅ library crate + conformance tests + daemon/viewer CLI smoke |
 | **M4.0** | egui GUI on xenia-viewer | ✅ `fd28bc3` |
@@ -157,8 +158,10 @@ This is the concrete goal organizing the next round of work:
 
 Two machines on the same LAN / Tailscale, both running the native
 binaries. All three codecs, all native transports, CLI or GUI viewer.
-Only caveat: real screen content requires **B2** (Wayland capture);
-today both ends use the synthetic `TestCapture` gradient.
+By default both ends use the synthetic `TestCapture` gradient. Real
+screen content works when built with `--features scap` (see **B2**),
+but is not yet fast enough to use by default — 1–2.6 effective fps
+against a 15fps target as of the 2026-07-02 validation.
 
 ### ✅ Desktop → Phone browser (works today)
 
