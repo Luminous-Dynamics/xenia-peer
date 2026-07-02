@@ -90,6 +90,11 @@ struct Args {
     #[arg(long, default_value_t = 8082)]
     consent_port: u16,
 
+    /// Seconds to wait for an Approve/Deny decision on --consent-port before
+    /// giving up and exiting. Ignored when --m1-preprod-auto-consent is set.
+    #[arg(long, default_value_t = 120)]
+    consent_timeout_secs: u64,
+
     #[arg(long, default_value_t = 1_000)]
     telemetry_interval_ms: u64,
 
@@ -1189,10 +1194,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     info!("Handshake successful, session key established and transcript hash computed");
 
-    // Consent Ceremony: Simple CLI prompt
-    // In a real implementation, this would be a GUI-based consent flow
-    // integrated with a desktop portal or the admin crate.
+    // Consent Ceremony: the real decision arrives over --consent-port as a
+    // plain "Approve" / "Deny" text message — the same convention already
+    // spoken by apps/sovereign-admin's ConsentModal (a browser-based
+    // operator console). The request itself is broadcast on --admin-port
+    // (below, once m1_runtime.offer() succeeds) so a connected ConsentModal
+    // has something real to show instead of an empty prompt.
     info!("Waiting for consent request...");
+
+    let (consent_decision_tx, consent_decision_rx) = tokio::sync::oneshot::channel::<bool>();
+    let mut consent_decision_tx = Some(consent_decision_tx);
 
     // Server task for processing consent responses.
     let consent_addr = format!("127.0.0.1:{}", args.consent_port);
@@ -1212,8 +1223,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         match result {
                             Ok(msg) => {
                                 if let Ok(text) = msg.to_text() {
-                                    info!("Received consent response: {}", text);
-                                    // Process Approve/Deny...
+                                    let decision = match text {
+                                        "Approve" => Some(true),
+                                        "Deny" => Some(false),
+                                        other => {
+                                            info!(
+                                                text = other,
+                                                "ignoring unrecognized consent message"
+                                            );
+                                            None
+                                        }
+                                    };
+                                    if let Some(decision) = decision {
+                                        info!(approved = decision, "consent decision received");
+                                        if let Some(tx) = consent_decision_tx.take() {
+                                            let _ = tx.send(decision);
+                                        }
+                                        break;
+                                    }
                                 }
                             }
                             Err(err) => {
@@ -1274,17 +1301,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.m1_preprod_auto_consent {
         grant_preprod_auto_consent(&mut m1_runtime)?;
     } else {
-        warn!("M1 runtime gate offered but not approved; live frame flow will fail closed");
+        bridge.broadcast(&m1_scope_for_log);
+        info!(
+            consent_port = args.consent_port,
+            timeout_secs = args.consent_timeout_secs,
+            "consent request broadcast; waiting for Approve/Deny on --consent-port"
+        );
+        let timeout = Duration::from_secs(args.consent_timeout_secs.max(1));
+        match tokio::time::timeout(timeout, consent_decision_rx).await {
+            Ok(Ok(true)) => {
+                m1_runtime.grant_consent()?;
+                info!("M1 consent granted; frame flow unlocked");
+            }
+            Ok(Ok(false)) => {
+                m1_runtime.deny_consent()?;
+                warn!("M1 consent denied; exiting");
+                return Ok(());
+            }
+            Ok(Err(_)) => {
+                warn!("consent channel closed before a decision arrived; exiting");
+                return Ok(());
+            }
+            Err(_) => {
+                warn!(
+                    timeout_secs = args.consent_timeout_secs,
+                    "M1 consent timed out waiting for a decision; exiting"
+                );
+                return Ok(());
+            }
+        }
     }
 
-    let params = EncodeParams {
-        width: args.width,
-        height: args.height,
-        pixel_format: VideoPixelFormat::Rgba,
-        target_fps: args.fps.max(1),
-        bitrate_kbps: 2_000,
-    };
-    let mut encoder = make_encoder(args.codec, params)?;
+    // The encoder is built lazily from the first captured frame's real
+    // dimensions rather than --width/--height. TestCapture/BlankCapture
+    // frames already match those CLI defaults, so this is a no-op for the
+    // synthetic path; a real backend like ScapCapture doesn't know its
+    // output size until the first frame arrives (see
+    // xenia-capture::ScapCapture's width()/height() doc comments), and its
+    // native resolution essentially never matches the 320x200 CLI default.
+    let mut effective_width = args.width;
+    let mut effective_height = args.height;
+    let mut encoder: Option<Box<dyn Encoder>> = None;
     let frame_interval = Duration::from_millis(1_000 / u64::from(args.fps.max(1)));
     let mut ticker = tokio::time::interval(frame_interval);
     let telemetry_interval = Duration::from_millis(args.telemetry_interval_ms.max(1));
@@ -1372,16 +1429,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
         };
-        if frame.width != args.width || frame.height != args.height {
-            warn!(
-                width = frame.width,
-                height = frame.height,
-                expected_width = args.width,
-                expected_height = args.height,
-                "capture dimensions changed; dropping frame"
-            );
-            continue;
+        if encoder.is_none() || frame.width != effective_width || frame.height != effective_height {
+            if encoder.is_some() {
+                info!(
+                    old_width = effective_width,
+                    old_height = effective_height,
+                    new_width = frame.width,
+                    new_height = frame.height,
+                    "capture dimensions changed; rebuilding encoder"
+                );
+            }
+            effective_width = frame.width;
+            effective_height = frame.height;
+            let params = EncodeParams {
+                width: effective_width,
+                height: effective_height,
+                pixel_format: VideoPixelFormat::Rgba,
+                target_fps: args.fps.max(1),
+                bitrate_kbps: 2_000,
+            };
+            encoder = Some(make_encoder(args.codec, params)?);
         }
+        let encoder = encoder.as_mut().expect("encoder built above");
 
         let captured_at = now_ms();
         let packets = encoder.encode(&pixels, captured_at)?;
@@ -1390,8 +1459,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let raw = RawFrame::encoded(
                 frame_id,
                 packet.pts_ms,
-                args.width,
-                args.height,
+                effective_width,
+                effective_height,
                 frame_format,
                 packet.bytes,
             );

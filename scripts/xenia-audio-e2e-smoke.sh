@@ -85,6 +85,24 @@ sys.exit(1)
   return 1
 }
 
+send_consent_decision() {
+  local port="$1"
+  local decision="$2"
+  PORT="$port" DECISION="$decision" python3 - <<'PY'
+import asyncio
+import os
+import websockets
+
+async def main():
+    port = os.environ["PORT"]
+    decision = os.environ["DECISION"]
+    async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+        await ws.send(decision)
+
+asyncio.run(main())
+PY
+}
+
 cleanup_pid() {
   local pid="${1:-}"
   if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
@@ -277,6 +295,7 @@ run_negative_consent_smoke() {
     --listen "127.0.0.1:${listen_port}" \
     --admin-port "$admin_port" \
     --consent-port "$consent_port" \
+    --consent-timeout-secs 2 \
     --frames 4 \
     --fps 30 \
     --audio sine \
@@ -317,12 +336,94 @@ run_negative_consent_smoke() {
   echo "audio negative consent smoke passed"
 }
 
+run_consent_decision_smoke() {
+  local decision="$1" # "Approve" or "Deny"
+  local label listen_port admin_port consent_port peer_log viewer_log daemon_pid viewer_pid
+  label="consent-$(echo "$decision" | tr '[:upper:]' '[:lower:]')"
+  listen_port="$(pick_port)"
+  admin_port="$(pick_port)"
+  consent_port="$(pick_port)"
+  peer_log="$LOG_DIR/${label}-peer.log"
+  viewer_log="$LOG_DIR/${label}-viewer.log"
+  rm -f "$peer_log" "$viewer_log"
+
+  RUST_LOG="${RUST_LOG:-info}" "$PEER_BIN" \
+    --transport tcp \
+    --listen "127.0.0.1:${listen_port}" \
+    --admin-port "$admin_port" \
+    --consent-port "$consent_port" \
+    --consent-timeout-secs 15 \
+    --frames 4 \
+    --fps 30 \
+    --telemetry-level off \
+    --operator-key-path "$LOG_DIR/${label}-operator.key" \
+    >"$peer_log" 2>&1 &
+  daemon_pid="$!"
+  viewer_pid=""
+  trap 'cleanup_pid "$daemon_pid"; cleanup_pid "$viewer_pid"' RETURN
+
+  if ! wait_for_tcp_listen "$listen_port"; then
+    dump_logs "$label" "$peer_log" "$viewer_log"
+    return 1
+  fi
+
+  # Run the viewer in the background — it blocks waiting for the first real
+  # frame, which only arrives (or never arrives) depending on the decision
+  # we send below. The handshake it drives is also what makes the daemon
+  # spawn its consent websocket listener in the first place.
+  timeout 20 "$VIEWER_BIN" \
+    --transport tcp \
+    --connect "127.0.0.1:${listen_port}" \
+    --frames 1 \
+    >"$viewer_log" 2>&1 &
+  viewer_pid="$!"
+
+  if ! wait_for_tcp_listen "$consent_port"; then
+    dump_logs "$label" "$peer_log" "$viewer_log"
+    return 1
+  fi
+  send_consent_decision "$consent_port" "$decision"
+
+  wait "$viewer_pid" 2>/dev/null || true
+  viewer_pid=""
+  wait "$daemon_pid" 2>/dev/null || true
+  daemon_pid=""
+  trap - RETURN
+
+  if [[ "$decision" == "Approve" ]]; then
+    if ! grep -q "M1 consent granted" "$peer_log"; then
+      dump_logs "$label" "$peer_log" "$viewer_log"
+      echo "expected M1 consent granted evidence in peer log" >&2
+      return 1
+    fi
+    if ! grep -q "frame encoded, sealed, and sent" "$peer_log"; then
+      dump_logs "$label" "$peer_log" "$viewer_log"
+      echo "expected frames to flow after consent approval" >&2
+      return 1
+    fi
+  else
+    if ! grep -q "M1 consent denied; exiting" "$peer_log"; then
+      dump_logs "$label" "$peer_log" "$viewer_log"
+      echo "expected M1 consent denied evidence in peer log" >&2
+      return 1
+    fi
+    if grep -q "frame encoded, sealed, and sent" "$peer_log"; then
+      dump_logs "$label" "$peer_log" "$viewer_log"
+      echo "frames flowed despite consent denial" >&2
+      return 1
+    fi
+  fi
+  echo "$label smoke passed"
+}
+
 build_binaries
 
 run_smoke tcp raw-pcm
 run_smoke ws raw-pcm
 run_smoke quic raw-pcm
 run_negative_consent_smoke
+run_consent_decision_smoke Approve
+run_consent_decision_smoke Deny
 
 if [[ "$WITH_OPUS" -eq 1 ]]; then
   run_smoke tcp opus
