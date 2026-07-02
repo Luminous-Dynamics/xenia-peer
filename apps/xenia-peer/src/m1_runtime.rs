@@ -23,7 +23,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use xenia_ledger::{
     CURRENT_EVIDENCE_CRYPTO_MANIFEST, Chain, ConsentKind, CryptoPolicyProfile, DowngradePolicy,
-    EvidenceBundleVerifyError, EvidenceCryptoManifest, LedgerEntry, LedgerEntryExport, LedgerError,
+    Ed25519EvidenceSignatureBackend, EvidenceBundleVerifyError, EvidenceCryptoManifest,
+    EvidenceSignatureBackend, LedgerEntry, LedgerEntryExport, LedgerError,
     SessionTranscriptBinding, SignatureSuite, Verifier, VerifyError,
 };
 use xenia_peer_core::{M1Permission, M1SessionError, M1SessionMachine, M1SessionState};
@@ -208,6 +209,16 @@ impl EvidenceCryptoManifestExport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct EvidenceArtifactDigests {
+    pub schema: String,
+    pub hash_algorithm: String,
+    pub evidence_manifest_blake3: String,
+    pub ledger_entries_blake3: String,
+    pub session_transcript_binding_blake3: String,
+    pub artifact_set_blake3: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct EvidenceVerificationReport {
     pub schema: String,
     pub verifier: String,
@@ -219,6 +230,7 @@ pub(crate) struct EvidenceVerificationReport {
     pub transcript_signature: String,
     pub ledger_signature: String,
     pub operator_public_key_hex: String,
+    pub artifacts: EvidenceArtifactDigests,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,21 +246,72 @@ pub(crate) fn verify_transcript_bound_evidence_bundle_dir(
     dir: impl AsRef<Path>,
     public_key: &VerifyingKey,
 ) -> Result<EvidenceVerificationReport, M1RuntimeError> {
-    let dir = dir.as_ref();
-    let manifest_export: EvidenceCryptoManifestExport =
-        read_json(&dir.join("evidence_manifest.json"))?;
-    let manifest = manifest_export.to_manifest()?;
-    let binding: SessionTranscriptBinding =
-        read_json(&dir.join("session_transcript_binding.json"))?;
-    let entries: Vec<LedgerEntryExport> = read_json(&dir.join("ledger_entries.json"))?;
+    verify_transcript_bound_evidence_bundle_dir_with_backend(
+        dir,
+        &public_key.to_bytes(),
+        &Ed25519EvidenceSignatureBackend,
+    )
+}
 
-    Verifier::verify_transcript_bound_evidence_bundle(manifest, &binding, &entries, public_key)?;
+pub(crate) fn read_evidence_crypto_manifest_export_dir(
+    dir: impl AsRef<Path>,
+) -> Result<EvidenceCryptoManifestExport, M1RuntimeError> {
+    read_json(&dir.as_ref().join("evidence_manifest.json"))
+}
+
+pub(crate) fn read_evidence_verification_report_dir(
+    dir: impl AsRef<Path>,
+) -> Result<EvidenceVerificationReport, M1RuntimeError> {
+    read_json(&evidence_bundle_paths(dir.as_ref()).verification_report)
+}
+
+pub(crate) fn audit_evidence_verification_report_artifacts_dir(
+    dir: impl AsRef<Path>,
+) -> Result<EvidenceVerificationReport, M1RuntimeError> {
+    let dir = dir.as_ref();
+    let paths = evidence_bundle_paths(dir);
+    let report = read_evidence_verification_report_dir(dir)?;
+    require_evidence_verification_report_schema(&report)?;
+
+    let actual_artifacts = evidence_artifact_digests(
+        &paths.manifest,
+        &paths.ledger_entries,
+        &paths.session_transcript_binding,
+    )?;
+    require_evidence_report_artifacts_match_current_bundle(&report.artifacts, &actual_artifacts)?;
+
+    Ok(report)
+}
+
+pub(crate) fn verify_transcript_bound_evidence_bundle_dir_with_backend(
+    dir: impl AsRef<Path>,
+    public_key: &[u8],
+    backend: &impl EvidenceSignatureBackend,
+) -> Result<EvidenceVerificationReport, M1RuntimeError> {
+    let dir = dir.as_ref();
+    let paths = evidence_bundle_paths(dir);
+    let manifest_export = read_evidence_crypto_manifest_export_dir(dir)?;
+    let manifest = manifest_export.to_manifest()?;
+    let binding: SessionTranscriptBinding = read_json(&paths.session_transcript_binding)?;
+    let entries: Vec<LedgerEntryExport> = read_json(&paths.ledger_entries)?;
+
+    Verifier::verify_transcript_bound_evidence_bundle_with_backend(
+        manifest, &binding, &entries, public_key, backend,
+    )?;
+
+    let artifacts = evidence_artifact_digests(
+        &paths.manifest,
+        &paths.ledger_entries,
+        &paths.session_transcript_binding,
+    )?;
 
     Ok(evidence_verification_report(
         &manifest_export,
         &binding,
         entries.len(),
-        public_key,
+        "xenia-ledger::Verifier::verify_transcript_bound_evidence_bundle_with_backend",
+        hex::encode(public_key),
+        artifacts,
     ))
 }
 
@@ -396,19 +459,25 @@ impl M1RuntimeSession {
             public_key,
         )?;
 
-        let report = evidence_verification_report(&manifest, &binding, entries.len(), public_key);
-
-        let paths = M1EvidenceBundlePaths {
-            dir: dir.to_path_buf(),
-            manifest: dir.join("evidence_manifest.json"),
-            ledger_entries: dir.join("ledger_entries.json"),
-            session_transcript_binding: dir.join("session_transcript_binding.json"),
-            verification_report: dir.join("verification_report.json"),
-        };
+        let paths = evidence_bundle_paths(dir);
 
         write_json(&paths.manifest, &manifest)?;
         write_json(&paths.ledger_entries, &entries)?;
         write_json(&paths.session_transcript_binding, &binding)?;
+
+        let artifacts = evidence_artifact_digests(
+            &paths.manifest,
+            &paths.ledger_entries,
+            &paths.session_transcript_binding,
+        )?;
+        let report = evidence_verification_report(
+            &manifest,
+            &binding,
+            entries.len(),
+            "xenia-ledger::Verifier::verify_transcript_bound_evidence_bundle",
+            hex::encode(public_key.to_bytes()),
+            artifacts,
+        );
         write_json(&paths.verification_report, &report)?;
 
         Ok(paths)
@@ -552,6 +621,16 @@ impl M1RuntimeSession {
     }
 }
 
+fn evidence_bundle_paths(dir: &Path) -> M1EvidenceBundlePaths {
+    M1EvidenceBundlePaths {
+        dir: dir.to_path_buf(),
+        manifest: dir.join("evidence_manifest.json"),
+        ledger_entries: dir.join("ledger_entries.json"),
+        session_transcript_binding: dir.join("session_transcript_binding.json"),
+        verification_report: dir.join("verification_report.json"),
+    }
+}
+
 fn write_json(path: &Path, value: &impl Serialize) -> Result<(), M1RuntimeError> {
     let mut bytes = serde_json::to_vec_pretty(value)?;
     bytes.push(b'\n');
@@ -564,15 +643,115 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, M1RuntimeEr
     Ok(serde_json::from_slice(&bytes)?)
 }
 
+fn evidence_artifact_digests(
+    manifest_path: &Path,
+    ledger_entries_path: &Path,
+    session_transcript_binding_path: &Path,
+) -> Result<EvidenceArtifactDigests, M1RuntimeError> {
+    let evidence_manifest_blake3 = blake3_file_hex(manifest_path)?;
+    let ledger_entries_blake3 = blake3_file_hex(ledger_entries_path)?;
+    let session_transcript_binding_blake3 = blake3_file_hex(session_transcript_binding_path)?;
+    let artifact_set_blake3 = evidence_artifact_set_digest(
+        &evidence_manifest_blake3,
+        &ledger_entries_blake3,
+        &session_transcript_binding_blake3,
+    );
+
+    Ok(EvidenceArtifactDigests {
+        schema: "xenia-evidence-artifact-digests-v1".to_string(),
+        hash_algorithm: "blake3-256".to_string(),
+        evidence_manifest_blake3,
+        ledger_entries_blake3,
+        session_transcript_binding_blake3,
+        artifact_set_blake3,
+    })
+}
+
+fn blake3_file_hex(path: &Path) -> Result<String, M1RuntimeError> {
+    let bytes = std::fs::read(path)?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
+fn evidence_artifact_set_digest(
+    evidence_manifest_blake3: &str,
+    ledger_entries_blake3: &str,
+    session_transcript_binding_blake3: &str,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for (name, digest) in [
+        ("evidence_manifest.json", evidence_manifest_blake3),
+        ("ledger_entries.json", ledger_entries_blake3),
+        (
+            "session_transcript_binding.json",
+            session_transcript_binding_blake3,
+        ),
+    ] {
+        hasher.update(name.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(digest.as_bytes());
+        hasher.update(b"\n");
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn require_evidence_verification_report_schema(
+    report: &EvidenceVerificationReport,
+) -> Result<(), M1RuntimeError> {
+    if report.schema != "xenia-evidence-verification-report-v1" {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "unsupported verification report schema {:?}",
+            report.schema
+        )));
+    }
+
+    if !report.verified {
+        return Err(M1RuntimeError::EvidenceManifest(
+            "verification_report.json does not record a successful verification".to_string(),
+        ));
+    }
+
+    if report.artifacts.schema != "xenia-evidence-artifact-digests-v1" {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "unsupported verification report artifact digest schema {:?}",
+            report.artifacts.schema
+        )));
+    }
+
+    if report.artifacts.hash_algorithm != "blake3-256" {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "unsupported verification report artifact digest algorithm {:?}",
+            report.artifacts.hash_algorithm
+        )));
+    }
+
+    Ok(())
+}
+
+fn require_evidence_report_artifacts_match_current_bundle(
+    expected: &EvidenceArtifactDigests,
+    actual: &EvidenceArtifactDigests,
+) -> Result<(), M1RuntimeError> {
+    if expected != actual {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "verification_report artifact digests do not match current bundle artifacts: report artifact_set_blake3={}, current artifact_set_blake3={}",
+            expected.artifact_set_blake3, actual.artifact_set_blake3
+        )));
+    }
+
+    Ok(())
+}
+
 fn evidence_verification_report(
     manifest: &EvidenceCryptoManifestExport,
     binding: &SessionTranscriptBinding,
     ledger_entries: usize,
-    public_key: &VerifyingKey,
+    verifier: impl Into<String>,
+    operator_public_key_hex: String,
+    artifacts: EvidenceArtifactDigests,
 ) -> EvidenceVerificationReport {
     EvidenceVerificationReport {
         schema: "xenia-evidence-verification-report-v1".to_string(),
-        verifier: "xenia-ledger::Verifier::verify_transcript_bound_evidence_bundle".to_string(),
+        verifier: verifier.into(),
         verified: true,
         profile: manifest.profile.clone(),
         ledger_entries,
@@ -580,7 +759,8 @@ fn evidence_verification_report(
         transcript_hash_algorithm: binding.transcript_hash_algorithm.clone(),
         transcript_signature: manifest.transcript_signature.clone(),
         ledger_signature: manifest.ledger_signature.clone(),
-        operator_public_key_hex: hex::encode(public_key.to_bytes()),
+        operator_public_key_hex,
+        artifacts,
     }
 }
 
@@ -743,8 +923,76 @@ mod tests {
         assert!(report.verified);
         assert_eq!(report.ledger_entries, 3);
         assert_eq!(report.session_id, Uuid::from_bytes([1; 16]));
+        assert_eq!(
+            report.artifacts.evidence_manifest_blake3,
+            blake3_file_hex(&paths.manifest).unwrap()
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verification_report_carries_verified_artifact_digests() {
+        let (mut runtime, verifying_key) = runtime(26);
+        runtime.bind_session_transcript_hash([0x9E; 32]);
+
+        runtime.offer().unwrap();
+        runtime.grant_consent().unwrap();
+        runtime.revoke().unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "xenia-m1-evidence-artifact-digests-{}-{}",
+            std::process::id(),
+            26
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let paths = runtime
+            .write_transcript_bound_evidence_bundle(&verifying_key, &dir)
+            .expect("evidence bundle should write artifact digests");
+        let report: EvidenceVerificationReport = read_json(&paths.verification_report).unwrap();
+
+        let manifest_digest = blake3_file_hex(&paths.manifest).unwrap();
+        let ledger_digest = blake3_file_hex(&paths.ledger_entries).unwrap();
+        let binding_digest = blake3_file_hex(&paths.session_transcript_binding).unwrap();
+
+        assert_eq!(
+            report.artifacts.schema,
+            "xenia-evidence-artifact-digests-v1"
+        );
+        assert_eq!(report.artifacts.hash_algorithm, "blake3-256");
+        assert_eq!(report.artifacts.evidence_manifest_blake3, manifest_digest);
+        assert_eq!(report.artifacts.ledger_entries_blake3, ledger_digest);
+        assert_eq!(
+            report.artifacts.session_transcript_binding_blake3,
+            binding_digest
+        );
+        assert_eq!(
+            report.artifacts.artifact_set_blake3,
+            evidence_artifact_set_digest(
+                &report.artifacts.evidence_manifest_blake3,
+                &report.artifacts.ledger_entries_blake3,
+                &report.artifacts.session_transcript_binding_blake3,
+            )
+        );
+
+        let verifier_report = verify_transcript_bound_evidence_bundle_dir(&dir, &verifying_key)
+            .expect("verifier should recompute matching artifact digests");
+        assert_eq!(verifier_report.artifacts, report.artifacts);
+
+        let audited_report = audit_evidence_verification_report_artifacts_dir(&dir)
+            .expect("report audit should accept unchanged artifact digests");
+        assert_eq!(audited_report.artifacts, report.artifacts);
+
+        std::fs::write(&paths.ledger_entries, b"[]").unwrap();
+        let err = audit_evidence_verification_report_artifacts_dir(&dir)
+            .expect_err("report audit should reject a swapped artifact");
+        assert!(
+            err.to_string()
+                .contains("verification_report artifact digests do not match")
+        );
+
+        let _ = std::fs::remove_dir_all(&paths.dir);
     }
 
     #[test]

@@ -17,7 +17,9 @@ use xenia_capture::{
     TestCapture,
 };
 use xenia_handshake::{HandshakeManager, derive_negotiated_context_key};
-use xenia_ledger::{Chain, LedgerEntry};
+use xenia_ledger::{Chain, Ed25519EvidenceSignatureBackend, LedgerEntry};
+#[cfg(feature = "pqc-signatures")]
+use xenia_ledger::{MlDsa65EvidenceSignatureBackend, MlDsa87EvidenceSignatureBackend};
 #[cfg(feature = "audio-opus")]
 use xenia_peer_core::OpusAudioCodec;
 #[cfg(any(feature = "audio-capture", test))]
@@ -139,9 +141,31 @@ struct Args {
     #[arg(long, value_name = "DIR")]
     verify_evidence_bundle: Option<std::path::PathBuf>,
 
-    /// Hex-encoded Ed25519 public key for `--verify-evidence-bundle`.
+    /// Hex-encoded evidence verifier public key for `--verify-evidence-bundle`.
+    /// Ed25519 keys are 32 bytes; ML-DSA key lengths depend on the selected suite.
     #[arg(long, requires = "verify_evidence_bundle")]
     evidence_public_key_hex: Option<String>,
+
+    /// Signature suite/backend to use when verifying an evidence bundle.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = EvidenceVerifierSuite::Ed25519Rfc8032,
+        requires = "verify_evidence_bundle"
+    )]
+    evidence_signature_suite: EvidenceVerifierSuite,
+
+    /// Refuse verification unless the evidence manifest declares this profile.
+    /// Use this when an operator intends to require `full-pqc-v1` and must not
+    /// accidentally accept a weaker hybrid evidence bundle.
+    #[arg(long, value_enum, requires = "verify_evidence_bundle")]
+    require_evidence_profile: Option<EvidenceProfileRequirement>,
+
+    /// Audit a stored verification_report.json against the current bundle artifact bytes.
+    /// Use as `--audit-evidence-report DIR`. This recomputes artifact digests only;
+    /// use --verify-evidence-bundle for signature verification.
+    #[arg(long, value_name = "DIR")]
+    audit_evidence_report: Option<std::path::PathBuf>,
 
     /// PRE-PRODUCTION ONLY: auto-grant the local M1 runtime gate after handshake.
     ///
@@ -162,6 +186,49 @@ enum CodecChoice {
     Passthrough,
     H264,
     Hdc,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum EvidenceVerifierSuite {
+    Ed25519Rfc8032,
+    MlDsa65Fips204,
+    MlDsa87Fips204,
+}
+
+impl EvidenceVerifierSuite {
+    const fn stable_label(self) -> &'static str {
+        match self {
+            Self::Ed25519Rfc8032 => "ed25519-rfc8032",
+            Self::MlDsa65Fips204 => "ml-dsa-65-fips204",
+            Self::MlDsa87Fips204 => "ml-dsa-87-fips204",
+        }
+    }
+
+    const fn is_post_quantum(self) -> bool {
+        !matches!(self, Self::Ed25519Rfc8032)
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum EvidenceProfileRequirement {
+    HybridPrePqcV1,
+    FullPqcV1,
+}
+
+impl EvidenceProfileRequirement {
+    const fn stable_label(self) -> &'static str {
+        match self {
+            Self::HybridPrePqcV1 => "hybrid-pre-pqc-v1",
+            Self::FullPqcV1 => "full-pqc-v1",
+        }
+    }
+
+    const fn expected_downgrade_policy_label(self) -> &'static str {
+        match self {
+            Self::HybridPrePqcV1 => "explicit-classical-signature-allowance",
+            Self::FullPqcV1 => "reject-classical-signatures",
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -760,15 +827,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .evidence_public_key_hex
             .as_deref()
             .ok_or("--verify-evidence-bundle requires --evidence-public-key-hex")?;
-        let public_key = parse_ed25519_public_key_hex(public_key_hex)?;
-        let report = crate::m1_runtime::verify_transcript_bound_evidence_bundle_dir(
+        let public_key = parse_evidence_public_key_hex(public_key_hex)?;
+        let report = verify_evidence_bundle_with_selected_suite(
             bundle_dir,
             &public_key,
+            args.evidence_signature_suite,
+            args.require_evidence_profile,
         )?;
         println!("evidence bundle verified");
         println!("profile: {}", report.profile);
+        println!("ledger signature: {}", report.ledger_signature);
         println!("entries: {}", report.ledger_entries);
         println!("session: {}", report.session_id);
+        println!(
+            "artifact set blake3: {}",
+            report.artifacts.artifact_set_blake3
+        );
+        return Ok(());
+    }
+
+    if let Some(bundle_dir) = args.audit_evidence_report.as_deref() {
+        let report =
+            crate::m1_runtime::audit_evidence_verification_report_artifacts_dir(bundle_dir)?;
+        println!("evidence verification report artifact audit passed");
+        println!("profile: {}", report.profile);
+        println!("ledger signature: {}", report.ledger_signature);
+        println!("entries: {}", report.ledger_entries);
+        println!("session: {}", report.session_id);
+        println!(
+            "artifact set blake3: {}",
+            report.artifacts.artifact_set_blake3
+        );
         return Ok(());
     }
 
@@ -1179,14 +1268,168 @@ fn grant_preprod_auto_consent(
     }
 }
 
-fn parse_ed25519_public_key_hex(
-    hex_text: &str,
-) -> Result<ed25519_dalek::VerifyingKey, Box<dyn std::error::Error>> {
+fn parse_evidence_public_key_hex(hex_text: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let bytes = hex::decode(hex_text)?;
+    if bytes.is_empty() {
+        return Err("evidence public key must not be empty".into());
+    }
+    Ok(bytes)
+}
+
+fn parse_ed25519_public_key_bytes(
+    bytes: &[u8],
+) -> Result<ed25519_dalek::VerifyingKey, Box<dyn std::error::Error>> {
     let public_key_bytes: [u8; 32] = bytes
         .try_into()
         .map_err(|_| "Ed25519 public key must be exactly 32 bytes")?;
     Ok(ed25519_dalek::VerifyingKey::from_bytes(&public_key_bytes)?)
+}
+
+fn verify_evidence_bundle_with_selected_suite(
+    bundle_dir: &std::path::Path,
+    public_key: &[u8],
+    suite: EvidenceVerifierSuite,
+    required_profile: Option<EvidenceProfileRequirement>,
+) -> Result<crate::m1_runtime::EvidenceVerificationReport, Box<dyn std::error::Error>> {
+    preflight_evidence_verifier_selection(bundle_dir, suite, required_profile)?;
+
+    match suite {
+        EvidenceVerifierSuite::Ed25519Rfc8032 => {
+            let public_key = parse_ed25519_public_key_bytes(public_key)?;
+            let backend = Ed25519EvidenceSignatureBackend;
+            Ok(
+                crate::m1_runtime::verify_transcript_bound_evidence_bundle_dir_with_backend(
+                    bundle_dir,
+                    &public_key.to_bytes(),
+                    &backend,
+                )?,
+            )
+        }
+        EvidenceVerifierSuite::MlDsa65Fips204 => {
+            verify_ml_dsa_65_evidence_bundle(bundle_dir, public_key)
+        }
+        EvidenceVerifierSuite::MlDsa87Fips204 => {
+            verify_ml_dsa_87_evidence_bundle(bundle_dir, public_key)
+        }
+    }
+}
+
+fn preflight_evidence_verifier_selection(
+    bundle_dir: &std::path::Path,
+    suite: EvidenceVerifierSuite,
+    required_profile: Option<EvidenceProfileRequirement>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let manifest = crate::m1_runtime::read_evidence_crypto_manifest_export_dir(bundle_dir)?;
+    let selected_label = suite.stable_label();
+
+    if let Some(required_profile) = required_profile {
+        validate_required_profile_suite(required_profile, suite)?;
+
+        let required_label = required_profile.stable_label();
+        if manifest.profile != required_label {
+            return Err(format!(
+                "evidence profile {:?} does not satisfy required evidence profile {required_label:?}",
+                manifest.profile
+            )
+            .into());
+        }
+
+        let expected_downgrade_policy = required_profile.expected_downgrade_policy_label();
+        if manifest.downgrade_policy != expected_downgrade_policy {
+            return Err(format!(
+                "evidence downgrade policy {:?} does not satisfy required evidence profile {required_label:?}; expected {expected_downgrade_policy:?}",
+                manifest.downgrade_policy
+            )
+            .into());
+        }
+    }
+
+    if manifest.transcript_signature != selected_label {
+        return Err(format!(
+            "evidence transcript signature {:?} does not match requested verifier suite {selected_label:?}",
+            manifest.transcript_signature
+        )
+        .into());
+    }
+
+    if manifest.ledger_signature != selected_label {
+        return Err(format!(
+            "evidence ledger signature {:?} does not match requested verifier suite {selected_label:?}",
+            manifest.ledger_signature
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
+fn validate_required_profile_suite(
+    required_profile: EvidenceProfileRequirement,
+    suite: EvidenceVerifierSuite,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match required_profile {
+        EvidenceProfileRequirement::HybridPrePqcV1
+            if suite == EvidenceVerifierSuite::Ed25519Rfc8032 =>
+        {
+            Ok(())
+        }
+        EvidenceProfileRequirement::HybridPrePqcV1 => Err(format!(
+            "evidence profile {:?} requires verifier suite {:?}, got {:?}",
+            required_profile.stable_label(),
+            EvidenceVerifierSuite::Ed25519Rfc8032.stable_label(),
+            suite.stable_label()
+        )
+        .into()),
+        EvidenceProfileRequirement::FullPqcV1 if suite.is_post_quantum() => Ok(()),
+        EvidenceProfileRequirement::FullPqcV1 => Err(format!(
+            "evidence profile {:?} requires a post-quantum verifier suite, got {:?}",
+            required_profile.stable_label(),
+            suite.stable_label()
+        )
+        .into()),
+    }
+}
+
+#[cfg(feature = "pqc-signatures")]
+fn verify_ml_dsa_65_evidence_bundle(
+    bundle_dir: &std::path::Path,
+    public_key: &[u8],
+) -> Result<crate::m1_runtime::EvidenceVerificationReport, Box<dyn std::error::Error>> {
+    let backend = MlDsa65EvidenceSignatureBackend;
+    Ok(
+        crate::m1_runtime::verify_transcript_bound_evidence_bundle_dir_with_backend(
+            bundle_dir, public_key, &backend,
+        )?,
+    )
+}
+
+#[cfg(not(feature = "pqc-signatures"))]
+fn verify_ml_dsa_65_evidence_bundle(
+    _bundle_dir: &std::path::Path,
+    _public_key: &[u8],
+) -> Result<crate::m1_runtime::EvidenceVerificationReport, Box<dyn std::error::Error>> {
+    Err("--evidence-signature-suite ml-dsa-65-fips204 requires building xenia-peer with feature `pqc-signatures`".into())
+}
+
+#[cfg(feature = "pqc-signatures")]
+fn verify_ml_dsa_87_evidence_bundle(
+    bundle_dir: &std::path::Path,
+    public_key: &[u8],
+) -> Result<crate::m1_runtime::EvidenceVerificationReport, Box<dyn std::error::Error>> {
+    let backend = MlDsa87EvidenceSignatureBackend;
+    Ok(
+        crate::m1_runtime::verify_transcript_bound_evidence_bundle_dir_with_backend(
+            bundle_dir, public_key, &backend,
+        )?,
+    )
+}
+
+#[cfg(not(feature = "pqc-signatures"))]
+fn verify_ml_dsa_87_evidence_bundle(
+    _bundle_dir: &std::path::Path,
+    _public_key: &[u8],
+) -> Result<crate::m1_runtime::EvidenceVerificationReport, Box<dyn std::error::Error>> {
+    Err("--evidence-signature-suite ml-dsa-87-fips204 requires building xenia-peer with feature `pqc-signatures`".into())
 }
 
 fn expand_source_id_for_m1(source_id_short: [u8; 8]) -> [u8; 32] {
@@ -1264,6 +1507,127 @@ fn run_m1_runtime_smoke(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod evidence_verifier_preflight_tests {
+    use super::*;
+    use std::fs;
+    use std::path::Path;
+
+    fn manifest_dir(test_name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "xenia-peer-pqc-preflight-{test_name}-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_manifest(
+        dir: &Path,
+        profile: &str,
+        transcript_signature: &str,
+        ledger_signature: &str,
+        downgrade_policy: &str,
+    ) {
+        let manifest = serde_json::json!({
+            "schema": "xenia-evidence-crypto-manifest-v1",
+            "profile": profile,
+            "kem": "ml-kem-768-fips203",
+            "transcript_signature": transcript_signature,
+            "ledger_signature": ledger_signature,
+            "hash_chain": "blake3-256",
+            "kdf": "hkdf-sha256",
+            "aead": "chacha20-poly1305",
+            "downgrade_policy": downgrade_policy,
+        });
+        let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+        fs::write(dir.join("evidence_manifest.json"), bytes).unwrap();
+    }
+
+    #[test]
+    fn preflight_accepts_matching_hybrid_profile_and_ed25519_suite() {
+        let dir = manifest_dir("hybrid-ok");
+        write_manifest(
+            &dir,
+            "hybrid-pre-pqc-v1",
+            "ed25519-rfc8032",
+            "ed25519-rfc8032",
+            "explicit-classical-signature-allowance",
+        );
+
+        preflight_evidence_verifier_selection(
+            &dir,
+            EvidenceVerifierSuite::Ed25519Rfc8032,
+            Some(EvidenceProfileRequirement::HybridPrePqcV1),
+        )
+        .unwrap();
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preflight_rejects_transcript_suite_mismatch() {
+        let dir = manifest_dir("transcript-mismatch");
+        write_manifest(
+            &dir,
+            "full-pqc-v1",
+            "ml-dsa-87-fips204",
+            "ml-dsa-65-fips204",
+            "reject-classical-signatures",
+        );
+
+        let err = preflight_evidence_verifier_selection(
+            &dir,
+            EvidenceVerifierSuite::MlDsa65Fips204,
+            Some(EvidenceProfileRequirement::FullPqcV1),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("evidence transcript signature"));
+        assert!(err.contains("requested verifier suite"));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preflight_rejects_full_pqc_requirement_with_classical_suite() {
+        let err = validate_required_profile_suite(
+            EvidenceProfileRequirement::FullPqcV1,
+            EvidenceVerifierSuite::Ed25519Rfc8032,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("requires a post-quantum verifier suite"));
+    }
+
+    #[test]
+    fn preflight_rejects_required_profile_downgrade_policy_mismatch() {
+        let dir = manifest_dir("downgrade-policy-mismatch");
+        write_manifest(
+            &dir,
+            "full-pqc-v1",
+            "ml-dsa-65-fips204",
+            "ml-dsa-65-fips204",
+            "explicit-classical-signature-allowance",
+        );
+
+        let err = preflight_evidence_verifier_selection(
+            &dir,
+            EvidenceVerifierSuite::MlDsa65Fips204,
+            Some(EvidenceProfileRequirement::FullPqcV1),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("evidence downgrade policy"));
+        assert!(err.contains("reject-classical-signatures"));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 #[cfg(test)]

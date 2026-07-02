@@ -33,7 +33,7 @@ done
 required_main=(
   "verify_evidence_bundle"
   "evidence_public_key_hex"
-  "parse_ed25519_public_key_hex"
+  "parse_evidence_public_key_hex"
   "verify_transcript_bound_evidence_bundle_dir"
 )
 

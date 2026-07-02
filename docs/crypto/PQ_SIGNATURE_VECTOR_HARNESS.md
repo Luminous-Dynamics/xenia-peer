@@ -8,15 +8,18 @@ The harness exists to prove that a future PQ signature backend verifies known-an
 
 ## Current state
 
-No production PQ signature backend is enabled yet.
+A real ML-DSA verifier backend is available behind the non-default
+`pqc-signatures` feature for explicit evidence-verifier entry points. Production
+acceptance still requires pinned external known-answer vectors and dependency
+review.
 
-Current evidence signatures remain:
+Current default evidence signatures remain:
 
 - transcript signature: Ed25519
 - ledger signature: Ed25519
 - evidence profile: `hybrid-pre-pqc-v1`
 
-`full-pqc-v1` must remain refused until PQ signature vectors pass through a real backend.
+`full-pqc-v1` must remain refused by default. A full-PQC evidence bundle may only be accepted through an explicit PQ backend path whose suite matches the manifest and every entry envelope.
 
 ## Required future vector fields
 

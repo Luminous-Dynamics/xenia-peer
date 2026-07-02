@@ -70,6 +70,13 @@ use serde_big_array::BigArray;
 use thiserror::Error;
 use uuid::Uuid;
 
+#[cfg(feature = "pqc-signatures")]
+use ml_dsa::{
+    EncodedSignature as MlDsaEncodedSignature, EncodedVerifyingKey as MlDsaEncodedVerifyingKey,
+    MlDsa65, MlDsa87, MlDsaParams, Signature as MlDsaSignature, Verifier as MlDsaVerifier,
+    VerifyingKey as MlDsaVerifyingKey,
+};
+
 /// Stable signature-suite labels used in evidence exports and verifier output.
 ///
 /// These labels are used by evidence manifests and signature envelopes. The
@@ -79,12 +86,16 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignatureSuite {
     /// Ed25519 / RFC 8032. Classical signature suite; not quantum-resistant for signatures.
+    #[serde(rename = "ed25519-rfc8032")]
     Ed25519Rfc8032,
     /// ML-DSA-65 / NIST FIPS 204. Planned online PQ signature baseline.
+    #[serde(rename = "ml-dsa-65-fips204")]
     MlDsa65Fips204,
     /// ML-DSA-87 / NIST FIPS 204. Planned high-sensitivity PQ signature option.
+    #[serde(rename = "ml-dsa-87-fips204")]
     MlDsa87Fips204,
     /// SLH-DSA / NIST FIPS 205. Planned conservative/offline PQ signature option.
+    #[serde(rename = "slh-dsa-fips205")]
     SlhDsaFips205,
 }
 
@@ -122,6 +133,19 @@ impl SignatureSuite {
             Self::Ed25519Rfc8032 => Some(64),
             Self::MlDsa65Fips204 => Some(3309),
             Self::MlDsa87Fips204 => Some(4627),
+            // FIPS 205 exposes multiple SLH-DSA parameter sets. Xenia's label is
+            // intentionally family-level until a concrete parameter set is chosen.
+            Self::SlhDsaFips205 => None,
+        }
+    }
+
+    /// Public-key byte length when this suite has a fixed-size verifying key in
+    /// the current evidence profile.
+    pub const fn fixed_public_key_len(self) -> Option<usize> {
+        match self {
+            Self::Ed25519Rfc8032 => Some(32),
+            Self::MlDsa65Fips204 => Some(1952),
+            Self::MlDsa87Fips204 => Some(2592),
             // FIPS 205 exposes multiple SLH-DSA parameter sets. Xenia's label is
             // intentionally family-level until a concrete parameter set is chosen.
             Self::SlhDsaFips205 => None,
@@ -280,19 +304,109 @@ pub enum EvidenceSignatureBackendError {
     /// The public key bytes could not be parsed by the backend.
     #[error("bad public key")]
     BadPublicKey,
+    /// Signature bytes had the right length but could not be decoded by the backend.
+    #[error("bad signature encoding")]
+    BadSignatureEncoding,
     /// Signature verification failed.
     #[error("bad signature")]
     BadSignature,
 }
 
+/// ML-DSA-65 evidence-signature backend enabled by the `pqc-signatures` feature.
+///
+/// This is real FIPS-204 ML-DSA verification via the RustCrypto `ml-dsa` crate,
+/// but production enablement still requires dependency review, vector pinning,
+/// and release-policy approval.
+#[cfg(feature = "pqc-signatures")]
+pub struct MlDsa65EvidenceSignatureBackend;
+
+#[cfg(feature = "pqc-signatures")]
+impl EvidenceSignatureBackend for MlDsa65EvidenceSignatureBackend {
+    fn suite(&self) -> SignatureSuite {
+        SignatureSuite::MlDsa65Fips204
+    }
+
+    fn verify_signature(
+        &self,
+        public_key: &[u8],
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), EvidenceSignatureBackendError> {
+        verify_ml_dsa::<MlDsa65>(self.suite(), public_key, message, signature)
+    }
+}
+
+/// ML-DSA-87 evidence-signature backend enabled by the `pqc-signatures` feature.
+///
+/// This backend is intended for high-sensitivity profiles where the larger key
+/// and signature sizes are acceptable.
+#[cfg(feature = "pqc-signatures")]
+pub struct MlDsa87EvidenceSignatureBackend;
+
+#[cfg(feature = "pqc-signatures")]
+impl EvidenceSignatureBackend for MlDsa87EvidenceSignatureBackend {
+    fn suite(&self) -> SignatureSuite {
+        SignatureSuite::MlDsa87Fips204
+    }
+
+    fn verify_signature(
+        &self,
+        public_key: &[u8],
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), EvidenceSignatureBackendError> {
+        verify_ml_dsa::<MlDsa87>(self.suite(), public_key, message, signature)
+    }
+}
+
+#[cfg(feature = "pqc-signatures")]
+fn verify_ml_dsa<P: MlDsaParams>(
+    suite: SignatureSuite,
+    public_key: &[u8],
+    message: &[u8],
+    signature: &[u8],
+) -> Result<(), EvidenceSignatureBackendError> {
+    let expected_public_key_len = suite
+        .fixed_public_key_len()
+        .expect("ML-DSA key length pinned");
+    let expected_signature_len = suite
+        .fixed_signature_len()
+        .expect("ML-DSA signature length pinned");
+
+    if public_key.len() != expected_public_key_len {
+        return Err(EvidenceSignatureBackendError::BadPublicKeyLength {
+            expected: expected_public_key_len,
+            found: public_key.len(),
+        });
+    }
+    if signature.len() != expected_signature_len {
+        return Err(EvidenceSignatureBackendError::BadSignatureLength {
+            expected: expected_signature_len,
+            found: signature.len(),
+        });
+    }
+
+    let public_key = MlDsaEncodedVerifyingKey::<P>::try_from(public_key)
+        .map_err(|_| EvidenceSignatureBackendError::BadPublicKey)?;
+    let signature = MlDsaEncodedSignature::<P>::try_from(signature)
+        .map_err(|_| EvidenceSignatureBackendError::BadSignatureEncoding)?;
+    let verifying_key = MlDsaVerifyingKey::<P>::decode(&public_key);
+    let signature = MlDsaSignature::<P>::decode(&signature)
+        .ok_or(EvidenceSignatureBackendError::BadSignatureEncoding)?;
+
+    verifying_key
+        .verify(message, &signature)
+        .map_err(|_| EvidenceSignatureBackendError::BadSignature)
+}
+
 /// PQ signature feature status.
 ///
-/// Enabling `pqc-signatures` compiles the integration boundary only. It does not
-/// silently accept ML-DSA/SLH-DSA signatures before a vetted backend and test
-/// vectors land.
+/// Enabling `pqc-signatures` compiles the ML-DSA verifier backend. Runtime
+/// acceptance remains gated by the selected evidence profile and verifier entry
+/// point; legacy verifier entry points continue to reject PQ envelopes.
 #[cfg(feature = "pqc-signatures")]
 pub const PQC_SIGNATURE_BACKEND_STATUS: &str =
-    "pqc-signatures feature enabled; PQ verification remains unsupported until vectors land";
+    "pqc-signatures feature enabled; ML-DSA evidence verification backend compiled";
 
 /// Errors surfaced when parsing or adapting a signature envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -363,8 +477,10 @@ pub const CURRENT_LEDGER_EVIDENCE_PROFILE: LedgerEvidenceProfile = LedgerEvidenc
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CryptoPolicyProfile {
     /// Current honest status: PQ key establishment with classical Ed25519 signatures.
+    #[serde(rename = "hybrid-pre-pqc-v1")]
     HybridPrePqcV1,
     /// Target policy: PQ key establishment and PQ signatures on authority surfaces.
+    #[serde(rename = "full-pqc-v1")]
     FullPqcV1,
 }
 
@@ -387,8 +503,10 @@ impl CryptoPolicyProfile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DowngradePolicy {
     /// Current compatibility mode: Ed25519 is allowed only because the manifest says so.
+    #[serde(rename = "explicit-classical-signature-allowance")]
     ExplicitClassicalSignatureAllowance,
     /// Full-PQC mode: classical signature/authentication suites are rejected.
+    #[serde(rename = "reject-classical-signatures")]
     RejectClassicalSignatures,
 }
 
@@ -432,18 +550,36 @@ pub struct EvidenceCryptoManifest {
 impl EvidenceCryptoManifest {
     /// Validate that the manifest algorithms satisfy the declared policy.
     pub const fn validate_against_policy(self) -> Result<(), EvidencePolicyError> {
-        if self.profile.requires_post_quantum_signatures() {
-            if !self.transcript_signature.is_post_quantum() {
-                return Err(EvidencePolicyError::ClassicalTranscriptSignatureInFullPqc);
+        match self.profile {
+            CryptoPolicyProfile::HybridPrePqcV1 => {
+                if self.transcript_signature.is_post_quantum() {
+                    return Err(EvidencePolicyError::PqTranscriptSignatureInHybridPrePqc);
+                }
+                if self.ledger_signature.is_post_quantum() {
+                    return Err(EvidencePolicyError::PqLedgerSignatureInHybridPrePqc);
+                }
+                if !matches!(
+                    self.downgrade_policy,
+                    DowngradePolicy::ExplicitClassicalSignatureAllowance
+                ) {
+                    return Err(
+                        EvidencePolicyError::HybridPrePqcRequiresExplicitClassicalAllowance,
+                    );
+                }
             }
-            if !self.ledger_signature.is_post_quantum() {
-                return Err(EvidencePolicyError::ClassicalLedgerSignatureInFullPqc);
-            }
-            if !matches!(
-                self.downgrade_policy,
-                DowngradePolicy::RejectClassicalSignatures
-            ) {
-                return Err(EvidencePolicyError::DowngradePolicyAllowsClassicalInFullPqc);
+            CryptoPolicyProfile::FullPqcV1 => {
+                if !self.transcript_signature.is_post_quantum() {
+                    return Err(EvidencePolicyError::ClassicalTranscriptSignatureInFullPqc);
+                }
+                if !self.ledger_signature.is_post_quantum() {
+                    return Err(EvidencePolicyError::ClassicalLedgerSignatureInFullPqc);
+                }
+                if !matches!(
+                    self.downgrade_policy,
+                    DowngradePolicy::RejectClassicalSignatures
+                ) {
+                    return Err(EvidencePolicyError::DowngradePolicyAllowsClassicalInFullPqc);
+                }
             }
         }
 
@@ -459,6 +595,15 @@ impl EvidenceCryptoManifest {
 /// Evidence-policy validation failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum EvidencePolicyError {
+    /// A `hybrid-pre-pqc-v1` manifest declared a PQ transcript signature suite.
+    #[error("hybrid-pre-pqc-v1 requires classical transcript signatures")]
+    PqTranscriptSignatureInHybridPrePqc,
+    /// A `hybrid-pre-pqc-v1` manifest declared a PQ ledger signature suite.
+    #[error("hybrid-pre-pqc-v1 requires classical ledger signatures")]
+    PqLedgerSignatureInHybridPrePqc,
+    /// A `hybrid-pre-pqc-v1` manifest did not explicitly allow classical signatures.
+    #[error("hybrid-pre-pqc-v1 requires explicit-classical-signature-allowance downgrade policy")]
+    HybridPrePqcRequiresExplicitClassicalAllowance,
     /// A `full-pqc-v1` manifest declared a classical transcript signature suite.
     #[error("full-pqc-v1 rejects classical transcript signatures")]
     ClassicalTranscriptSignatureInFullPqc,
@@ -827,6 +972,26 @@ pub enum VerifyError {
         /// Actual signature length in bytes.
         found: usize,
     },
+    /// The provided public key was rejected by the selected signature backend.
+    #[error("signature public key rejected for {signature_suite:?} at seq {seq}")]
+    BadSignaturePublicKey {
+        /// Sequence number of the offending entry.
+        seq: u64,
+        /// Signature suite selected for verification.
+        signature_suite: SignatureSuite,
+    },
+    /// The selected backend does not match the entry's signature suite.
+    #[error(
+        "signature backend {backend_suite:?} does not match entry envelope {entry_suite:?} at seq {seq}"
+    )]
+    SignatureBackendSuiteMismatch {
+        /// Sequence number of the offending entry.
+        seq: u64,
+        /// Signature suite declared by the entry signature envelope.
+        entry_suite: SignatureSuite,
+        /// Signature suite handled by the selected backend.
+        backend_suite: SignatureSuite,
+    },
     /// The genesis entry's `prev_hash` was not all zeros.
     #[error("genesis prev_hash must be all zeros")]
     BadGenesis,
@@ -859,6 +1024,16 @@ pub enum EvidenceBundleVerifyError {
     /// The exported chain failed structural, hash-link, or signature verification.
     #[error("exported chain verification failed: {0}")]
     ExportedChain(#[from] VerifyError),
+    /// The selected signature backend does not satisfy the manifest's ledger signature suite.
+    #[error(
+        "manifest ledger signature {manifest_suite:?} does not match verifier backend {backend_suite:?}"
+    )]
+    LedgerBackendSuiteMismatch {
+        /// Signature suite declared by the evidence manifest.
+        manifest_suite: SignatureSuite,
+        /// Signature suite handled by the selected backend.
+        backend_suite: SignatureSuite,
+    },
     /// The manifest's ledger signature suite did not match an entry signature envelope.
     #[error(
         "manifest ledger signature {manifest_suite:?} does not match entry envelope {entry_suite:?} at seq {seq}"
@@ -1043,7 +1218,35 @@ impl Verifier {
         entries: &[LedgerEntryExport],
         public_key: &VerifyingKey,
     ) -> Result<(), EvidenceBundleVerifyError> {
+        Self::verify_evidence_bundle_with_backend(
+            manifest,
+            entries,
+            &public_key.to_bytes(),
+            &Ed25519EvidenceSignatureBackend,
+        )
+    }
+
+    /// Verify an evidence manifest and exported ledger entries using an explicit
+    /// signature backend.
+    ///
+    /// This is the verifier entry point for full-PQC evidence once a reviewed
+    /// ML-DSA/SLH-DSA backend is selected. The manifest policy, the backend
+    /// suite, and every entry envelope must agree before any signature bytes are
+    /// trusted.
+    pub fn verify_evidence_bundle_with_backend(
+        manifest: EvidenceCryptoManifest,
+        entries: &[LedgerEntryExport],
+        public_key: &[u8],
+        backend: &impl EvidenceSignatureBackend,
+    ) -> Result<(), EvidenceBundleVerifyError> {
         Self::verify_evidence_crypto_manifest(manifest)?;
+
+        if backend.suite() != manifest.ledger_signature {
+            return Err(EvidenceBundleVerifyError::LedgerBackendSuiteMismatch {
+                manifest_suite: manifest.ledger_signature,
+                backend_suite: backend.suite(),
+            });
+        }
 
         for entry in entries {
             let entry_suite = entry_signature_suite(entry)?;
@@ -1056,7 +1259,7 @@ impl Verifier {
             }
         }
 
-        Self::verify_exported_chain(entries, public_key)?;
+        Self::verify_exported_chain_with_backend(entries, public_key, backend)?;
         Ok(())
     }
 
@@ -1072,6 +1275,27 @@ impl Verifier {
         transcript_binding: &SessionTranscriptBinding,
         entries: &[LedgerEntryExport],
         public_key: &VerifyingKey,
+    ) -> Result<(), EvidenceBundleVerifyError> {
+        Self::verify_transcript_bound_evidence_bundle_with_backend(
+            manifest,
+            transcript_binding,
+            entries,
+            &public_key.to_bytes(),
+            &Ed25519EvidenceSignatureBackend,
+        )
+    }
+
+    /// Verify a transcript-bound evidence bundle with an explicit signature backend.
+    ///
+    /// Use this for future full-PQC bundles whose ledger entries are ML-DSA or
+    /// SLH-DSA signed. It keeps transcript binding, manifest policy, entry-suite
+    /// matching, and backend selection in one fail-closed path.
+    pub fn verify_transcript_bound_evidence_bundle_with_backend(
+        manifest: EvidenceCryptoManifest,
+        transcript_binding: &SessionTranscriptBinding,
+        entries: &[LedgerEntryExport],
+        public_key: &[u8],
+        backend: &impl EvidenceSignatureBackend,
     ) -> Result<(), EvidenceBundleVerifyError> {
         transcript_binding.validate_against_manifest(manifest)?;
 
@@ -1089,7 +1313,7 @@ impl Verifier {
             }
         }
 
-        Self::verify_evidence_bundle(manifest, entries, public_key)
+        Self::verify_evidence_bundle_with_backend(manifest, entries, public_key, backend)
     }
 
     /// Verify an export-safe chain whose signatures are algorithm-tagged.
@@ -1100,6 +1324,33 @@ impl Verifier {
     pub fn verify_exported_chain(
         entries: &[LedgerEntryExport],
         public_key: &VerifyingKey,
+    ) -> Result<(), VerifyError> {
+        for entry in entries {
+            let suite = entry_signature_suite_for_verify(entry)?;
+            if suite != SignatureSuite::Ed25519Rfc8032 {
+                return Err(VerifyError::UnsupportedSignatureSuite {
+                    seq: entry.seq,
+                    signature_suite: suite,
+                });
+            }
+        }
+
+        Self::verify_exported_chain_with_backend(
+            entries,
+            &public_key.to_bytes(),
+            &Ed25519EvidenceSignatureBackend,
+        )
+    }
+
+    /// Verify an export-safe chain whose signatures are algorithm-tagged using
+    /// an explicit signature backend and raw backend public key bytes.
+    ///
+    /// This keeps the legacy Ed25519 verifier stable while allowing full-PQC
+    /// evidence verification to use ML-DSA backends under `pqc-signatures`.
+    pub fn verify_exported_chain_with_backend(
+        entries: &[LedgerEntryExport],
+        public_key: &[u8],
+        backend: &impl EvidenceSignatureBackend,
     ) -> Result<(), VerifyError> {
         let mut expected_prev = [0u8; 32];
         for (index, entry) in entries.iter().enumerate() {
@@ -1126,45 +1377,54 @@ impl Verifier {
                 return Err(VerifyError::EntryHashMismatch { seq: entry.seq });
             }
 
-            let suite = match entry.signature.validate_shape() {
-                Ok(suite) => suite,
-                Err(SignatureEnvelopeError::UnknownSignatureSuite { algorithm }) => {
-                    return Err(VerifyError::UnknownSignatureSuite {
-                        seq: entry.seq,
-                        algorithm,
-                    });
-                }
-                Err(SignatureEnvelopeError::BadSignatureLength {
-                    expected, found, ..
-                }) => {
-                    return Err(VerifyError::BadSignatureLength {
-                        seq: entry.seq,
-                        expected,
-                        found,
-                    });
-                }
-                Err(SignatureEnvelopeError::UnsupportedLegacySuite { .. }) => {
-                    return Err(VerifyError::BadSignature { seq: entry.seq });
-                }
-            };
-            if suite != SignatureSuite::Ed25519Rfc8032 {
-                return Err(VerifyError::UnsupportedSignatureSuite {
+            let suite = entry_signature_suite_for_verify(entry)?;
+            if suite != backend.suite() {
+                return Err(VerifyError::SignatureBackendSuiteMismatch {
                     seq: entry.seq,
-                    signature_suite: suite,
+                    entry_suite: suite,
+                    backend_suite: backend.suite(),
                 });
             }
 
-            Ed25519EvidenceSignatureBackend
-                .verify_signature(
-                    &public_key.to_bytes(),
-                    &entry.entry_hash,
-                    &entry.signature.signature,
-                )
-                .map_err(|_| VerifyError::BadSignature { seq: entry.seq })?;
+            backend
+                .verify_signature(public_key, &entry.entry_hash, &entry.signature.signature)
+                .map_err(|err| backend_error_to_verify_error(entry.seq, suite, err))?;
 
             expected_prev = entry.entry_hash;
         }
         Ok(())
+    }
+}
+
+fn entry_signature_suite_for_verify(
+    entry: &LedgerEntryExport,
+) -> Result<SignatureSuite, VerifyError> {
+    entry
+        .signature
+        .validate_shape()
+        .map_err(|err| signature_envelope_error_to_verify_error(entry.seq, err))
+}
+
+fn backend_error_to_verify_error(
+    seq: u64,
+    signature_suite: SignatureSuite,
+    err: EvidenceSignatureBackendError,
+) -> VerifyError {
+    match err {
+        EvidenceSignatureBackendError::BadPublicKeyLength { .. }
+        | EvidenceSignatureBackendError::BadPublicKey => VerifyError::BadSignaturePublicKey {
+            seq,
+            signature_suite,
+        },
+        EvidenceSignatureBackendError::BadSignatureLength {
+            expected, found, ..
+        } => VerifyError::BadSignatureLength {
+            seq,
+            expected,
+            found,
+        },
+        EvidenceSignatureBackendError::BadSignatureEncoding
+        | EvidenceSignatureBackendError::BadSignature => VerifyError::BadSignature { seq },
     }
 }
 
@@ -1296,6 +1556,59 @@ mod tests {
     }
 
     #[test]
+    fn stable_crypto_labels_are_used_for_json_serialization() {
+        assert_eq!(
+            serde_json::to_value(SignatureSuite::Ed25519Rfc8032).unwrap(),
+            "ed25519-rfc8032"
+        );
+        assert_eq!(
+            serde_json::to_value(SignatureSuite::MlDsa65Fips204).unwrap(),
+            "ml-dsa-65-fips204"
+        );
+        assert_eq!(
+            serde_json::to_value(CryptoPolicyProfile::HybridPrePqcV1).unwrap(),
+            "hybrid-pre-pqc-v1"
+        );
+        assert_eq!(
+            serde_json::to_value(CryptoPolicyProfile::FullPqcV1).unwrap(),
+            "full-pqc-v1"
+        );
+        assert_eq!(
+            serde_json::to_value(DowngradePolicy::ExplicitClassicalSignatureAllowance).unwrap(),
+            "explicit-classical-signature-allowance"
+        );
+        assert_eq!(
+            serde_json::to_value(DowngradePolicy::RejectClassicalSignatures).unwrap(),
+            "reject-classical-signatures"
+        );
+
+        let manifest = serde_json::to_value(CURRENT_EVIDENCE_CRYPTO_MANIFEST).unwrap();
+        assert_eq!(manifest["profile"], "hybrid-pre-pqc-v1");
+        assert_eq!(manifest["transcript_signature"], "ed25519-rfc8032");
+        assert_eq!(manifest["ledger_signature"], "ed25519-rfc8032");
+        assert_eq!(
+            manifest["downgrade_policy"],
+            "explicit-classical-signature-allowance"
+        );
+    }
+
+    #[test]
+    fn stable_crypto_labels_are_used_for_json_deserialization() {
+        assert_eq!(
+            serde_json::from_str::<SignatureSuite>(r#""ml-dsa-65-fips204""#).unwrap(),
+            SignatureSuite::MlDsa65Fips204
+        );
+        assert_eq!(
+            serde_json::from_str::<CryptoPolicyProfile>(r#""full-pqc-v1""#).unwrap(),
+            CryptoPolicyProfile::FullPqcV1
+        );
+        assert_eq!(
+            serde_json::from_str::<DowngradePolicy>(r#""reject-classical-signatures""#).unwrap(),
+            DowngradePolicy::RejectClassicalSignatures
+        );
+    }
+
+    #[test]
     fn signature_envelope_uses_stable_algorithm_label() {
         let envelope = SignatureEnvelope::ed25519([0xA5; 64]);
         assert_eq!(envelope.algorithm, "ed25519-rfc8032");
@@ -1351,6 +1664,88 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "pqc-signatures")]
+    #[test]
+    fn ml_dsa_65_backend_verifies_real_signature_bytes() {
+        use ml_dsa::{Keypair, MlDsa65, Signer, SigningKey};
+
+        let seed = ml_dsa::B32::default();
+        let signing_key = SigningKey::<MlDsa65>::from_seed(&seed);
+        let message = b"xenia-ledger ml-dsa-65 evidence backend smoke";
+        let signature = signing_key.sign(message);
+        let verifying_key = signing_key.verifying_key();
+        let public_key_bytes = verifying_key.encode();
+        let signature_bytes = signature.encode();
+        let backend = MlDsa65EvidenceSignatureBackend;
+
+        backend
+            .verify_signature(public_key_bytes.as_ref(), message, signature_bytes.as_ref())
+            .unwrap();
+    }
+
+    #[cfg(feature = "pqc-signatures")]
+    #[test]
+    fn ml_dsa_65_backend_rejects_tampered_signature() {
+        use ml_dsa::{Keypair, MlDsa65, Signer, SigningKey};
+
+        let seed = ml_dsa::B32::default();
+        let signing_key = SigningKey::<MlDsa65>::from_seed(&seed);
+        let message = b"xenia-ledger ml-dsa tamper test";
+        let signature = signing_key.sign(message);
+        let verifying_key = signing_key.verifying_key();
+        let public_key_bytes = verifying_key.encode();
+        let mut signature_bytes = signature.encode().to_vec();
+        signature_bytes[0] ^= 0x80;
+        let backend = MlDsa65EvidenceSignatureBackend;
+
+        assert_eq!(
+            backend.verify_signature(public_key_bytes.as_ref(), message, &signature_bytes),
+            Err(EvidenceSignatureBackendError::BadSignature)
+        );
+    }
+
+    #[cfg(feature = "pqc-signatures")]
+    #[test]
+    fn full_pqc_evidence_bundle_can_verify_with_ml_dsa_backend() {
+        use ml_dsa::{Keypair, MlDsa65, Signer, SigningKey};
+
+        let seed = ml_dsa::B32::default();
+        let signing_key = SigningKey::<MlDsa65>::from_seed(&seed);
+        let verifying_key = signing_key.verifying_key();
+        let public_key_bytes = verifying_key.encode();
+        let timestamp = SystemTime::UNIX_EPOCH;
+        let event = sample_event(ConsentKind::Approval);
+        let entry_hash = compute_entry_hash(0, &[0u8; 32], &timestamp, &event).unwrap();
+        let signature = signing_key.sign(&entry_hash).encode();
+        let entry = LedgerEntryExport {
+            seq: 0,
+            prev_hash: [0u8; 32],
+            timestamp,
+            event,
+            entry_hash,
+            signature: SignatureEnvelope::new(SignatureSuite::MlDsa65Fips204, {
+                let signature_bytes: &[u8] = signature.as_ref();
+                signature_bytes.to_vec()
+            }),
+        };
+        let manifest = EvidenceCryptoManifest {
+            profile: CryptoPolicyProfile::FullPqcV1,
+            transcript_signature: SignatureSuite::MlDsa65Fips204,
+            ledger_signature: SignatureSuite::MlDsa65Fips204,
+            downgrade_policy: DowngradePolicy::RejectClassicalSignatures,
+            ..CURRENT_EVIDENCE_CRYPTO_MANIFEST
+        };
+        let backend = MlDsa65EvidenceSignatureBackend;
+
+        Verifier::verify_evidence_bundle_with_backend(
+            manifest,
+            &[entry],
+            public_key_bytes.as_ref(),
+            &backend,
+        )
+        .unwrap();
+    }
+
     #[test]
     fn current_evidence_profile_is_explicitly_hybrid_pre_pqc() {
         let profile = Verifier::evidence_profile();
@@ -1378,6 +1773,40 @@ mod tests {
         );
         assert!(!manifest.signatures_are_post_quantum());
         Verifier::verify_evidence_crypto_manifest(manifest).unwrap();
+    }
+
+    #[test]
+    fn hybrid_pre_pqc_manifest_rejects_pq_signature_surfaces() {
+        let invalid_transcript = EvidenceCryptoManifest {
+            transcript_signature: SignatureSuite::MlDsa65Fips204,
+            ..CURRENT_EVIDENCE_CRYPTO_MANIFEST
+        };
+        assert_eq!(
+            Verifier::verify_evidence_crypto_manifest(invalid_transcript),
+            Err(EvidencePolicyError::PqTranscriptSignatureInHybridPrePqc)
+        );
+
+        let invalid_ledger = EvidenceCryptoManifest {
+            ledger_signature: SignatureSuite::MlDsa65Fips204,
+            ..CURRENT_EVIDENCE_CRYPTO_MANIFEST
+        };
+        assert_eq!(
+            Verifier::verify_evidence_crypto_manifest(invalid_ledger),
+            Err(EvidencePolicyError::PqLedgerSignatureInHybridPrePqc)
+        );
+    }
+
+    #[test]
+    fn hybrid_pre_pqc_manifest_requires_explicit_classical_allowance() {
+        let invalid = EvidenceCryptoManifest {
+            downgrade_policy: DowngradePolicy::RejectClassicalSignatures,
+            ..CURRENT_EVIDENCE_CRYPTO_MANIFEST
+        };
+
+        assert_eq!(
+            Verifier::verify_evidence_crypto_manifest(invalid),
+            Err(EvidencePolicyError::HybridPrePqcRequiresExplicitClassicalAllowance)
+        );
     }
 
     #[test]
@@ -1516,6 +1945,29 @@ mod tests {
             Err(VerifyError::UnsupportedSignatureSuite {
                 seq: 0,
                 signature_suite: SignatureSuite::MlDsa65Fips204,
+            })
+        );
+    }
+
+    #[test]
+    fn explicit_backend_rejects_entry_suite_mismatch() {
+        let sk = new_signing_key();
+        let mut chain = Chain::new(sk);
+        chain.append(sample_event(ConsentKind::Request)).unwrap();
+        let mut exported = chain.export_entries();
+        exported[0].signature =
+            SignatureEnvelope::new(SignatureSuite::MlDsa65Fips204, vec![0x42; 3309]);
+
+        assert_eq!(
+            Verifier::verify_exported_chain_with_backend(
+                &exported,
+                &[0u8; 32],
+                &Ed25519EvidenceSignatureBackend,
+            ),
+            Err(VerifyError::SignatureBackendSuiteMismatch {
+                seq: 0,
+                entry_suite: SignatureSuite::MlDsa65Fips204,
+                backend_suite: SignatureSuite::Ed25519Rfc8032,
             })
         );
     }
@@ -1701,7 +2153,7 @@ mod tests {
     }
 
     #[test]
-    fn evidence_bundle_verification_rejects_manifest_entry_suite_mismatch() {
+    fn evidence_bundle_verification_rejects_manifest_backend_suite_mismatch() {
         let sk = SigningKey::from_bytes(&[43u8; 32]);
         let pk = sk.verifying_key();
         let mut chain = Chain::new(sk);
@@ -1709,16 +2161,18 @@ mod tests {
 
         let exported = chain.export_entries();
         let overstated_manifest = EvidenceCryptoManifest {
+            profile: CryptoPolicyProfile::FullPqcV1,
+            transcript_signature: SignatureSuite::MlDsa65Fips204,
             ledger_signature: SignatureSuite::MlDsa65Fips204,
+            downgrade_policy: DowngradePolicy::RejectClassicalSignatures,
             ..CURRENT_EVIDENCE_CRYPTO_MANIFEST
         };
 
         assert_eq!(
             Verifier::verify_evidence_bundle(overstated_manifest, &exported, &pk),
-            Err(EvidenceBundleVerifyError::LedgerSignatureSuiteMismatch {
-                seq: 0,
+            Err(EvidenceBundleVerifyError::LedgerBackendSuiteMismatch {
                 manifest_suite: SignatureSuite::MlDsa65Fips204,
-                entry_suite: SignatureSuite::Ed25519Rfc8032,
+                backend_suite: SignatureSuite::Ed25519Rfc8032,
             })
         );
     }

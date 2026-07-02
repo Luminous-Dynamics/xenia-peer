@@ -16,8 +16,9 @@ for path in "${required[@]}"; do
 done
 
 grep -q "full-pqc-v1" "$root/docs/crypto/PQ_SIGNATURE_VECTOR_HARNESS.md"
-grep -q "must remain refused" "$root/docs/crypto/PQ_SIGNATURE_VECTOR_HARNESS.md"
+grep -q "must remain refused by default" "$root/docs/crypto/PQ_SIGNATURE_VECTOR_HARNESS.md"
 grep -q "Mocked or unconditional-success verification is forbidden" "$root/docs/crypto/PQ_SIGNATURE_VECTOR_HARNESS.md"
-grep -q "No vectors are active yet" "$root/docs/crypto/fixtures/pq-signatures/README.md"
+grep -q "Generated ML-DSA backend smoke tests are active" "$root/docs/crypto/fixtures/pq-signatures/README.md"
+grep -q "External known-answer vectors are still required" "$root/docs/crypto/fixtures/pq-signatures/README.md"
 
 echo "PQ signature vector harness contract present"

@@ -10,7 +10,7 @@ Every privileged Xenia session produces a sequence of consent events — request
 2. **Hash-chained** — blake3 over `(seq, prev_hash, timestamp, event)` per entry.
 3. **Signed** — Ed25519 over each entry's hash today, using the operator's key. Exported evidence carries an algorithm-tagged `SignatureEnvelope` so ML-DSA/SLH-DSA can be added without another export-schema break.
 
-The effect: an auditor holding only the operator's public key can verify, offline, that the ledger has not been rewritten since each entry was signed. The current verifier accepts Ed25519 envelopes and explicitly rejects PQ signature envelopes until a real ML-DSA/SLH-DSA backend lands. Long-lived evidence exports should use `Verifier::verify_evidence_bundle(...)` so the manifest cannot overstate the signature suite carried by the entry envelopes.
+The effect: an auditor holding only the operator's public key can verify, offline, that the ledger has not been rewritten since each entry was signed. The default verifier accepts Ed25519 envelopes. ML-DSA evidence verification is available only through the explicit `pqc-signatures` feature and explicit backend APIs such as `Verifier::verify_evidence_bundle_with_backend(...)`, so long-lived evidence exports cannot overstate the signature suite carried by the entry envelopes.
 
 This is the enforcement layer behind the Mycelix Sovereign threat-model claim that **an administrator cannot silently rewrite the audit log of their own privileged sessions**.
 
@@ -87,7 +87,7 @@ Not yet:
 
 - Persistent storage integration (intentional — callers pick their own)
 - External `xenia-ledger-verify` binary (planned; AGPL)
-- PQC signature verification backend (ML-DSA / SLH-DSA) — the export envelope exists, but verification is intentionally not faked
+- Runtime PQC signing/export — ML-DSA verification exists behind `pqc-signatures`, but the current runtime still signs M1 evidence with Ed25519
 - Chain-to-chain merkle anchoring for inter-operator attestation
 
 ## See also
