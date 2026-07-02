@@ -1598,12 +1598,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let height = screen_dims.1.load(Ordering::Relaxed);
                 let injector = injector
                     .get_or_insert_with(|| build_input_injector(input_backend, width, height));
-                if let Err(err) = injector.process_events(std::slice::from_ref(&event)) {
-                    warn!(
-                        error = %err,
-                        backend = injector.backend_name(),
-                        "input injection failed"
-                    );
+                match injector.process_events(std::slice::from_ref(&event)) {
+                    Ok(()) => {
+                        info!(?event, backend = injector.backend_name(), "input event injected");
+                    }
+                    Err(err) => {
+                        warn!(
+                            error = %err,
+                            backend = injector.backend_name(),
+                            "input injection failed"
+                        );
+                    }
                 }
             }
         });
