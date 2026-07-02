@@ -4,10 +4,14 @@
 /// `xenia-peer` — headless daemon that hosts a Xenia session.
 use clap::{Parser, ValueEnum};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex as AsyncMutex;
 use tracing::{info, warn};
 use uuid::Uuid;
+
+use xenia_inject::{InputInjector, LoggingInjector, NoopInjector};
 
 use ed25519_dalek::SigningKey;
 #[cfg(any(feature = "audio-capture", test))]
@@ -28,9 +32,9 @@ use xenia_peer_core::{
     AudioCodec, LaneSession, RawPcmAudioCodec, RekeyPolicy, SessionEpochState,
     advertisement::{AdvertisedAudioCodec, AudioAdvertisement, TransportAdvertisement},
     frame::{
-        PixelFormat as FramePixelFormat, RawAudio, RawFrame, RawRekey, RawTelemetry,
-        SyntheticAudioKind, SyntheticAudioSource, TelemetrySample as WireTelemetrySample,
-        TelemetryValue as WireTelemetryValue,
+        LANE_ENVELOPE_MAGIC, PixelFormat as FramePixelFormat, RawAudio, RawFrame, RawRekey,
+        RawTelemetry, SyntheticAudioKind, SyntheticAudioSource,
+        TelemetrySample as WireTelemetrySample, TelemetryValue as WireTelemetryValue,
     },
     handshake::{
         NegotiatedTransport, negotiated_session_context_hash,
@@ -281,6 +285,17 @@ struct Args {
     /// so runtime keys are not written into the repository root.
     #[arg(long, default_value = "operator.key")]
     operator_key_path: std::path::PathBuf,
+
+    /// Inbound viewer-input backend. `noop` (default) discards every
+    /// input event -- a connected viewer is view-only and no OS-level
+    /// injector is ever constructed, so no consent dialog appears.
+    /// `log` records denormalized events for verification (no host
+    /// permissions needed). `xdg-portal` actually moves the mouse /
+    /// types keys via the RemoteDesktop portal (requires the
+    /// `xdg-portal` build feature and triggers its own interactive
+    /// consent dialog on first real input event).
+    #[arg(long, value_enum, default_value_t = InputBackendChoice::Noop)]
+    input_backend: InputBackendChoice,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -288,6 +303,14 @@ enum CodecChoice {
     Passthrough,
     H264,
     Hdc,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum InputBackendChoice {
+    Noop,
+    Log,
+    #[cfg(feature = "xdg-portal")]
+    XdgPortal,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -418,20 +441,6 @@ impl AnyTransport {
             AnyTransport::Ws(_) => NegotiatedTransport::WebSocket,
             AnyTransport::Quic { .. } => NegotiatedTransport::Quic,
         }
-    }
-
-    async fn close(&mut self) -> Result<(), xenia_peer_core::transport::TransportError> {
-        if let AnyTransport::Quic {
-            _endpoint,
-            transport,
-        } = self
-        {
-            let finish_result = transport.finish();
-            let _ = tokio::time::timeout(Duration::from_secs(3), transport.closed()).await;
-            _endpoint.close().await;
-            finish_result?;
-        }
-        Ok(())
     }
 
     /// Split into independently-owned send/recv halves so a dedicated
@@ -738,6 +747,7 @@ fn session_capabilities_frame(
     audio: AudioAdvertisement,
     video_format: FramePixelFormat,
     telemetry_level: TelemetryLevel,
+    input_backend: InputBackendChoice,
 ) -> Result<RawFrame, Box<dyn std::error::Error>> {
     xenia_peer_core::RawCapabilities {
         frame_id,
@@ -745,7 +755,7 @@ fn session_capabilities_frame(
         audio: Some(audio),
         video_format,
         telemetry_enabled: telemetry_level != TelemetryLevel::Off,
-        input_control_enabled: false,
+        input_control_enabled: input_backend != InputBackendChoice::Noop,
         lane_envelope_version: xenia_peer_core::frame::LANE_ENVELOPE_SCHEMA_VERSION,
         lane_envelope_magic: xenia_peer_core::frame::LANE_ENVELOPE_MAGIC,
     }
@@ -804,6 +814,97 @@ async fn perform_rekey(
             Ok(())
         }
         other => Err(format!("unexpected rekey ack: {other:?}").into()),
+    }
+}
+
+/// Mirrors [`perform_rekey`] for use after the transport has been
+/// split (`AnyTransport::split`): sends the proposal on the send half
+/// and waits for the ack on `rekey_ack_rx` instead of a direct
+/// `recv_envelope` -- once split, only the dedicated recv task may
+/// call `recv_envelope`, so the ack has to reach this function via the
+/// channel that task feeds. `session` is behind an async mutex because
+/// the recv task also opens control-lane envelopes (input events)
+/// concurrently with this function installing new rekey-epoch keys.
+async fn perform_rekey_split(
+    send_half: &mut AnySendHalf,
+    session: &AsyncMutex<LaneSession>,
+    rekey_ack_rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>,
+    epoch_state: &mut SessionEpochState,
+    schedule: &xenia_handshake::SessionKeySchedule,
+    context: xenia_handshake::RekeyEpochContextV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let epoch_hash = context.epoch_hash()?;
+    let proposal = RawRekey::Proposal {
+        key_epoch: context.key_epoch,
+        base_transcript_hash: context.base_transcript_hash,
+        previous_epoch_hash: context.previous_epoch_hash,
+        reason: context.reason,
+        epoch_hash,
+    }
+    .into_frame(session.lock().await.next_frame_id(), now_ms())?;
+    let envelope = session.lock().await.seal_control_frame(&proposal)?;
+    send_half.send_envelope(&envelope).await?;
+
+    let frames_before_rekey = epoch_state.frames_in_epoch();
+    let bytes_before_rekey = epoch_state.bytes_in_epoch();
+    let audio_frames_before_rekey = epoch_state.audio_frames_in_epoch();
+    let keys = epoch_state.derive_and_install(schedule, &context)?;
+    session.lock().await.install_rekey_keys(&keys);
+
+    let ack_envelope = rekey_ack_rx
+        .recv()
+        .await
+        .ok_or("rekey ack channel closed before an ack arrived (recv task ended)")?;
+    let ack_frame = session.lock().await.open_frame(&ack_envelope)?;
+    match RawRekey::from_frame(&ack_frame)? {
+        RawRekey::Ack {
+            key_epoch,
+            epoch_hash: ack_epoch_hash,
+        } if key_epoch == epoch_state.current_epoch() && ack_epoch_hash == epoch_hash => {
+            info!(
+                key_epoch,
+                reason = ?context.reason,
+                frames_before_rekey,
+                bytes_before_rekey,
+                audio_frames_before_rekey,
+                epoch_hash = ?epoch_hash,
+                "session rekey acknowledged"
+            );
+            Ok(())
+        }
+        other => Err(format!("unexpected rekey ack: {other:?}").into()),
+    }
+}
+
+/// Construct the input-injection backend selected by `--input-backend`.
+/// Called lazily on the first real inbound `InputEvent` (see the recv
+/// task in `main`), not eagerly at startup, so a view-only session
+/// never triggers `XdgPortalInjector`'s consent dialog.
+fn build_input_injector(
+    choice: InputBackendChoice,
+    screen_width: u32,
+    screen_height: u32,
+) -> Box<dyn InputInjector> {
+    match choice {
+        InputBackendChoice::Noop => Box::new(NoopInjector),
+        InputBackendChoice::Log => Box::new(LoggingInjector::new(screen_width, screen_height)),
+        #[cfg(feature = "xdg-portal")]
+        InputBackendChoice::XdgPortal => {
+            match xenia_inject::XdgPortalInjector::new(
+                screen_width,
+                screen_height,
+                Duration::from_secs(60),
+            ) {
+                Ok(injector) => Box::new(injector),
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        "XdgPortalInjector construction failed; input events will be discarded"
+                    );
+                    Box::new(NoopInjector)
+                }
+            }
+        }
     }
 }
 
@@ -1260,6 +1361,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         audio_advertisement.clone(),
         frame_format,
         args.telemetry_level,
+        args.input_backend,
     )?;
     let negotiated_context_hash = negotiated_session_context_hash(
         negotiated_transport,
@@ -1414,6 +1516,99 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Split the transport so a dedicated task can drain inbound
+    // envelopes (viewer input events + rekey acks) concurrently with
+    // the outbound video/audio/telemetry send loop below. `session`
+    // and `m1_runtime` move behind async mutexes because both this
+    // loop and the recv task need to seal/open lane traffic and gate
+    // input through the M1 consent state.
+    let (mut send_half, recv_half) = transport.split();
+    let session = Arc::new(AsyncMutex::new(session));
+    let m1_runtime = Arc::new(AsyncMutex::new(m1_runtime));
+    let (rekey_ack_tx, mut rekey_ack_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+    // Updated by the send loop below whenever the encoder is (re)built
+    // from a real captured frame, so a lazily-constructed input
+    // injector denormalizes coordinates against the actual screen
+    // size rather than the --width/--height CLI defaults.
+    let screen_dims = Arc::new((AtomicU32::new(args.width), AtomicU32::new(args.height)));
+
+    {
+        let session = Arc::clone(&session);
+        let m1_runtime = Arc::clone(&m1_runtime);
+        let screen_dims = Arc::clone(&screen_dims);
+        let input_backend = args.input_backend;
+        tokio::spawn(async move {
+            let mut recv_half = recv_half;
+            // Constructed lazily on the first real InputEvent, not at
+            // task start -- a view-only session (`--input-backend
+            // noop`, the default) never triggers `XdgPortalInjector`'s
+            // consent dialog because it's simply never built.
+            let mut injector: Option<Box<dyn InputInjector>> = None;
+            loop {
+                let envelope = match recv_half.recv_envelope().await {
+                    Ok(envelope) => envelope,
+                    Err(err) => {
+                        info!(error = %err, "input/rekey-ack receive loop ending");
+                        break;
+                    }
+                };
+
+                if envelope.len() >= LANE_ENVELOPE_MAGIC.len()
+                    && envelope[..LANE_ENVELOPE_MAGIC.len()] == LANE_ENVELOPE_MAGIC
+                {
+                    // Lane-enveloped control frame. The only thing a
+                    // viewer sends this direction on the control lane
+                    // today is a RawRekey::Ack -- forward the raw
+                    // envelope to perform_rekey_split, which owns
+                    // opening + validating it. Drop silently if nobody
+                    // is currently waiting on one.
+                    let _ = rekey_ack_tx.send(envelope).await;
+                    continue;
+                }
+
+                // Bare (non-lane-wrapped) envelope: a viewer-captured
+                // input event sealed directly under the control lane's
+                // key (see `LaneSession::seal_input_event`).
+                let input = {
+                    let mut session = session.lock().await;
+                    match session.open_input(&envelope) {
+                        Ok(input) => input,
+                        Err(err) => {
+                            warn!(error = %err, "failed to open inbound input envelope");
+                            continue;
+                        }
+                    }
+                };
+                let event: xenia_inject::InputEvent = match bincode::deserialize(&input.payload) {
+                    Ok(event) => event,
+                    Err(err) => {
+                        warn!(error = %err, "failed to decode InputEvent payload");
+                        continue;
+                    }
+                };
+                {
+                    let mut m1_runtime = m1_runtime.lock().await;
+                    if let Err(err) = m1_runtime.allow_input_flow() {
+                        warn!(error = %err, "input event rejected by M1 consent gate");
+                        continue;
+                    }
+                }
+
+                let width = screen_dims.0.load(Ordering::Relaxed);
+                let height = screen_dims.1.load(Ordering::Relaxed);
+                let injector = injector
+                    .get_or_insert_with(|| build_input_injector(input_backend, width, height));
+                if let Err(err) = injector.process_events(std::slice::from_ref(&event)) {
+                    warn!(
+                        error = %err,
+                        backend = injector.backend_name(),
+                        "input injection failed"
+                    );
+                }
+            }
+        });
+    }
+
     // The encoder is built lazily from the first captured frame's real
     // dimensions rather than --width/--height. TestCapture/BlankCapture
     // frames already match those CLI defaults, so this is a no-op for the
@@ -1444,7 +1639,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if args.telemetry_level != TelemetryLevel::Off
             && last_telemetry_sent.elapsed() >= telemetry_interval
         {
-            m1_runtime.preflight_frame_flow()?;
+            m1_runtime.lock().await.preflight_frame_flow()?;
             match telemetry.poll_samples() {
                 Ok(samples) if !samples.is_empty() => {
                     let samples: Vec<_> = samples
@@ -1455,7 +1650,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         last_telemetry_sent = std::time::Instant::now();
                         continue;
                     }
-                    let frame_id = session.next_frame_id();
+                    let frame_id = session.lock().await.next_frame_id();
                     let telemetry_frame = RawTelemetry {
                         frame_id,
                         timestamp_ms: now_ms(),
@@ -1463,9 +1658,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         samples: samples.into_iter().map(telemetry_sample_to_wire).collect(),
                     }
                     .into_frame()?;
-                    let envelope = session.seal_frame(&telemetry_frame)?;
-                    m1_runtime.allow_frame_flow()?;
-                    transport.send_envelope(&envelope).await?;
+                    let envelope = session.lock().await.seal_frame(&telemetry_frame)?;
+                    m1_runtime.lock().await.allow_frame_flow()?;
+                    send_half.send_envelope(&envelope).await?;
                     sent_telemetry += 1;
                     last_telemetry_sent = std::time::Instant::now();
                     if sent_telemetry <= 3 || sent_telemetry.is_multiple_of(10) {
@@ -1483,14 +1678,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(audio) = &mut audio
             && last_audio_sent.elapsed() >= audio_interval
         {
-            m1_runtime.preflight_frame_flow()?;
+            m1_runtime.lock().await.preflight_frame_flow()?;
             if let Some(raw_audio) = audio.next_raw_audio(now_ms())? {
                 let raw_audio = audio_codec.encode(raw_audio)?;
-                let frame_id = session.next_frame_id();
+                let frame_id = session.lock().await.next_frame_id();
                 let audio_frame = raw_audio.into_frame(frame_id)?;
-                let envelope = session.seal_frame(&audio_frame)?;
-                m1_runtime.allow_frame_flow()?;
-                transport.send_envelope(&envelope).await?;
+                let envelope = session.lock().await.seal_frame(&audio_frame)?;
+                m1_runtime.lock().await.allow_frame_flow()?;
+                send_half.send_envelope(&envelope).await?;
                 epoch_state.record_audio_frame(envelope.len());
                 sent_audio += 1;
                 last_audio_sent = std::time::Instant::now();
@@ -1500,7 +1695,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        m1_runtime.preflight_frame_flow()?;
+        m1_runtime.lock().await.preflight_frame_flow()?;
         let Some(frame) = capture.capture()? else {
             continue;
         };
@@ -1523,6 +1718,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             effective_width = frame.width;
             effective_height = frame.height;
+            screen_dims.0.store(effective_width, Ordering::Relaxed);
+            screen_dims.1.store(effective_height, Ordering::Relaxed);
             let params = EncodeParams {
                 width: effective_width,
                 height: effective_height,
@@ -1537,7 +1734,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let captured_at = now_ms();
         let packets = encoder.encode(&pixels, captured_at)?;
         for packet in packets {
-            let frame_id = session.next_frame_id();
+            let frame_id = session.lock().await.next_frame_id();
             let raw = RawFrame::encoded(
                 frame_id,
                 packet.pts_ms,
@@ -1546,9 +1743,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 frame_format,
                 packet.bytes,
             );
-            let envelope = session.seal_frame(&raw)?;
-            m1_runtime.allow_frame_flow()?;
-            transport.send_envelope(&envelope).await?;
+            let envelope = session.lock().await.seal_frame(&raw)?;
+            m1_runtime.lock().await.allow_frame_flow()?;
+            send_half.send_envelope(&envelope).await?;
             epoch_state.record_video_frame(envelope.len());
             sent_frames += 1;
             if sent_frames <= 3 || sent_frames.is_multiple_of(10) {
@@ -1558,9 +1755,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
             if let Some(rekey_context) = epoch_state.next_rekey_due() {
-                perform_rekey(
-                    &mut transport,
-                    &mut session,
+                perform_rekey_split(
+                    &mut send_half,
+                    &session,
+                    &mut rekey_ack_rx,
                     &mut epoch_state,
                     &handshake.key_schedule,
                     rekey_context,
@@ -1573,7 +1771,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    transport.close().await?;
+    send_half.close().await?;
     Ok(())
 }
 

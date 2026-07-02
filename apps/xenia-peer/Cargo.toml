@@ -17,6 +17,7 @@ xenia-video = { path = "../../crates/xenia-video" }
 xenia-transport-ws = { path = "../../crates/xenia-transport-ws" }
 xenia-transport-quic = { path = "../../crates/xenia-transport-quic" }
 xenia-ledger = { path = "../../crates/xenia-ledger" }
+xenia-inject = { path = "../../crates/xenia-inject" }
 tokio-tungstenite = "0.24"
 
 xenia-wire = { workspace = true, features = ["consent", "reference-frame"] }
@@ -42,6 +43,12 @@ xenia-handshake = { path = "../../crates/xenia-handshake" }
 
 [features]
 scap = ["xenia-capture/scap-backend"]
+# xdg-desktop-portal RemoteDesktop input-injection backend
+# (--input-backend xdg-portal). Requires a live Wayland session with
+# a RemoteDesktop-capable portal backend (GNOME/KDE); triggers an
+# interactive consent dialog on first use. Off by default -- the
+# `noop`/`log` backends need no extra system deps.
+xdg-portal = ["xenia-inject/xdg-portal"]
 # Viewer/daemon protocol path for real host audio capture. Requires
 # system audio headers on Linux; off by default.
 audio-capture = ["xenia-capture/audio-cpal"]
