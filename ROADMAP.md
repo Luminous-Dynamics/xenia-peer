@@ -74,7 +74,7 @@ deployment-grade.
 
 | # | Item | Status | Estimate | Why it blocks |
 |---|---|---|---|---|
-| B1 | **PQC handshake** (ML-KEM-768 + Ed25519 + HKDF-SHA256) | 🟡 native daemon/viewer wired; browser viewer pending | 0.5 day to finish browser path | Fresh-impl against RustCrypto `ml-kem` 0.3.0-rc.2 + `ed25519-dalek` 2 + `hkdf` 0.12. Not a Symthaea carry — symthaea's version depended on `mycelix-crypto`. Native CLI/egui paths derive and install a session key; browser viewer still needs the same handshake. |
+| B1 | **PQC handshake** (ML-KEM-768 + Ed25519 + HKDF-SHA256) | ✅ browser handshake landed 2026-07-02 in `xenia-wire`'s `xenia-viewer-web` crate (`src/handshake.rs`, `WasmHandshake`) — a from-scratch reimplementation (can't cross-repo-depend on `xenia-handshake` at runtime), proven byte-identical to the native host via a dev-dependency cross-compat test AND a live end-to-end run against a real `xenia-peer --transport ws` daemon (real `HostHello`→`ViewerResponse`→`HostFinalize` exchange, daemon accepted the derived key). 🟡 **new scope discovered, not yet done:** decoding real frames additionally requires `LaneSession`'s lane-envelope wire format (4 separately-keyed sub-sessions — control/video/audio/telemetry, each `xenia_wire::Session` with its own `SessionKeySchedule`-derived key, wrapped in a 5-byte lane tag) plus rekey-epoch key derivation (the daemon always does one mandatory rekey immediately post-handshake, regardless of `--rekey-disabled`, which only affects *later* automatic rekeys) — `xenia-viewer-web` implements neither today, so `openDaemonFrame` still fails on real daemon traffic once past the handshake. This is new information: the original "0.5 day" estimate covered only the handshake as scoped when this row was written, before `LaneSession` existed. | Handshake: done. Lane-envelope + rekey support: unscoped, likely 1-2 days | Fresh-impl against RustCrypto `ml-kem` 0.3.0-rc.2 + `ed25519-dalek` 2 + `hkdf` 0.12, exact-pinned to match `xenia-handshake`'s resolved versions (a plain semver range silently resolved a newer, API-incompatible `ml-kem`/`kem` in testing). Not a Symthaea carry — symthaea's version depended on `mycelix-crypto`. |
 | B2 | **Universal host ingestion** | ✅ display backend (ScapCapture) wired into the daemon and validated on KDE-Wayland 2026-07-02: real 1920×1080 frames, zero decode errors, **16.76 effective fps — clears the 15fps bar** (`VERDICT: PASS`). Earlier same-day runs measured 0.33–8.70fps against a static desktop; root-caused to PipeWire's damage-driven ScreenCast (only pushes frames on visible screen changes), not a code defect — see `mycelix-sovereign/docs/capture-validation-runbook.md`. A separate real integration bug (encoder built from `--width`/`--height` CLI defaults, silently dropping every real-resolution frame) was also found and fixed the same day. GNOME/wlroots/macOS/Windows still unmeasured; audio/input real backends still pending. | Done for display on KDE-Wayland; 3–7 days per remaining audio/input backend; unknown for other display OSes/compositors | Capture is no longer synthetic-only and meets its own performance bar on the one platform measured so far. `xenia-capture` exposes host-agnostic display, audio, input, and telemetry traits; native daemon/viewer stream sealed `sysinfo` telemetry with explicit `basic`/`system`/`off` policy, plus synthetic RawAudio frames for jitter/timing validation. |
 | B3 | **Consent ceremony UI on the host** | 🟡 wire-level state machine + M1RuntimeSession gate wired end-to-end 2026-07-02: `--consent-port` now parses real Approve/Deny decisions (blocking with a new `--consent-timeout-secs`, graceful exit on deny/timeout instead of a crash), and the actual request scope is broadcast over `--admin-port` so a connected UI has real content. `apps/sovereign-admin`'s `ConsentModal` already speaks this exact protocol. Covered by new smoke-test cases in `scripts/xenia-audio-e2e-smoke.sh`. | Done for the CLI/wire path; `sovereign-admin` itself still needs to ship as part of xenia-peer's own UX rather than a separate incubator app | Uses draft-03 SPEC §12 from xenia-wire. What's left is packaging/UX polish, not the underlying gate. |
 
@@ -198,10 +198,16 @@ but multi-week.
 Things the maintainer should explicitly decide before more
 autonomous shipping:
 
-1. **Browser handshake wiring:** native daemon/viewer paths now use
-   `xenia-handshake::HandshakeManager`; the browser viewer still needs
-   the equivalent flow before browser sessions should be considered
-   deployment-grade.
+1. **Browser handshake wiring: done, but frame decode still needs
+   lane-envelope + rekey support.** `xenia-viewer-web`'s `WasmHandshake`
+   (2026-07-02) reimplements the same ML-KEM-768 + Ed25519 + HKDF flow as
+   native `xenia-handshake::HandshakeManager`, proven byte-identical via a
+   cross-compat test and a real end-to-end run against a live daemon.
+   What's still missing, discovered during that live test: `LaneSession`'s
+   4-key lane-envelope wire format and the mandatory post-handshake rekey
+   — neither of which existed (or this repo's author was aware of) when
+   this row was first written. See B1's row above for detail. Browser
+   sessions are not deployment-grade until that lands.
 2. **Universal ingestion vs B3 ordering:** with B1 at the crate layer,
    real display/audio/telemetry backends (B2) and the consent UI (B3)
    are the last two blockers for real deployment. B2 unblocks visible
