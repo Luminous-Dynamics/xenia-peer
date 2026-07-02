@@ -30,7 +30,7 @@
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
-use crate::{CaptureError, CapturedFrame, ScreenCapture};
+use crate::{CaptureError, CapturedFrame, FrameData, ScreenCapture};
 
 /// Output resolution for scap. Maps to [`scap::capturer::Resolution`] at
 /// construction time.
