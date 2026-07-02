@@ -18,14 +18,16 @@ use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use xenia_ledger::{
     CURRENT_EVIDENCE_CRYPTO_MANIFEST, Chain, ConsentKind, CryptoPolicyProfile, DowngradePolicy,
-    Ed25519EvidenceSignatureBackend, EvidenceBundleVerifyError, EvidenceCryptoManifest,
-    EvidenceSignatureBackend, LedgerEntry, LedgerEntryExport, LedgerError,
-    SessionTranscriptBinding, SignatureSuite, Verifier, VerifyError,
+    Ed25519EvidenceSignatureBackend, EvidenceBundleSeal, EvidenceBundleVerifyError,
+    EvidenceCryptoManifest, EvidencePublicKeyBinding, EvidenceSignatureBackend, LedgerEntry,
+    LedgerEntryExport, LedgerError, SessionTranscriptBinding, SessionTranscriptSignature,
+    SignatureEnvelope, SignatureSuite, Verifier, VerifyError,
 };
 use xenia_peer_core::{M1Permission, M1SessionError, M1SessionMachine, M1SessionState};
 
@@ -44,6 +46,11 @@ pub(crate) enum M1RuntimeError {
     },
     UnsupportedEvidenceExportProfile(String),
     EvidenceManifest(String),
+    TrustedKeyFingerprintMismatch {
+        surface: &'static str,
+        trusted: [u8; 32],
+        bundle: [u8; 32],
+    },
     PersistIo(std::io::Error),
     PersistCodec(bincode::Error),
     PersistJson(serde_json::Error),
@@ -71,6 +78,16 @@ impl fmt::Display for M1RuntimeError {
                 write!(f, "unsupported evidence export profile: {profile}")
             }
             Self::EvidenceManifest(err) => write!(f, "M1 evidence manifest error: {err}"),
+            Self::TrustedKeyFingerprintMismatch {
+                surface,
+                trusted,
+                bundle,
+            } => write!(
+                f,
+                "M1 sealed evidence {surface} key fingerprint did not match trust anchor: trusted={}, bundle={}",
+                hex::encode(trusted),
+                hex::encode(bundle)
+            ),
             Self::PersistIo(err) => write!(f, "M1 ledger persistence I/O error: {err}"),
             Self::PersistCodec(err) => write!(f, "M1 ledger persistence codec error: {err}"),
             Self::PersistJson(err) => write!(f, "M1 evidence JSON persistence error: {err}"),
@@ -219,6 +236,20 @@ pub(crate) struct EvidenceArtifactDigests {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SealedEvidenceArtifactDigests {
+    pub schema: String,
+    pub hash_algorithm: String,
+    pub evidence_manifest_blake3: String,
+    pub session_transcript_binding_blake3: String,
+    pub session_transcript_signature_blake3: String,
+    pub transcript_public_key_binding_blake3: String,
+    pub ledger_public_key_binding_blake3: String,
+    pub ledger_entries_blake3: String,
+    pub evidence_bundle_seal_blake3: String,
+    pub artifact_set_blake3: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct EvidenceVerificationReport {
     pub schema: String,
     pub verifier: String,
@@ -233,12 +264,163 @@ pub(crate) struct EvidenceVerificationReport {
     pub artifacts: EvidenceArtifactDigests,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SealedEvidenceTrustPolicyReceipt {
+    pub schema: String,
+    pub source: String,
+    pub profile: String,
+    pub signature_suite: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_blake3: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_epoch: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_until: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_signature_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_signature_blake3: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_root_key_fingerprint_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_roots_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_roots_blake3: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_root_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_root_valid_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_root_valid_until: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_root_supersedes_root_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SealedEvidenceVerificationReport {
+    pub schema: String,
+    pub verifier: String,
+    pub verified: bool,
+    pub profile: String,
+    pub ledger_entries: usize,
+    pub session_id: Uuid,
+    pub transcript_hash_algorithm: String,
+    pub transcript_signature: String,
+    pub ledger_signature: String,
+    pub transcript_public_key_fingerprint_hex: String,
+    pub ledger_public_key_fingerprint_hex: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_policy: Option<SealedEvidenceTrustPolicyReceipt>,
+    pub artifacts: SealedEvidenceArtifactDigests,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SealedEvidenceTrustPolicy {
+    pub schema: String,
+    pub profile: String,
+    pub signature_suite: String,
+    pub trusted_transcript_key_fingerprint_hex: String,
+    pub trusted_ledger_key_fingerprint_hex: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_epoch: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_until: Option<String>,
+    #[serde(default)]
+    pub revoked_policy_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SealedEvidenceTrustPolicySignature {
+    pub schema: String,
+    pub policy_schema: String,
+    pub profile: String,
+    pub signature_suite: String,
+    pub policy_blake3: String,
+    pub root_public_key_binding: EvidencePublicKeyBinding,
+    pub signature: SignatureEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SealedEvidencePolicyRoots {
+    pub schema: String,
+    pub profile: String,
+    pub signature_suite: String,
+    pub roots: Vec<SealedEvidencePolicyRoot>,
+    #[serde(default)]
+    pub revoked_root_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SealedEvidencePolicyRoot {
+    pub root_id: String,
+    pub root_key_fingerprint_hex: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_until: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes_root_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SealedEvidencePolicyRootReceipt {
+    pub policy_roots_path: String,
+    pub policy_roots_blake3: String,
+    pub policy_root_id: String,
+    pub policy_root_key_fingerprint_hex: String,
+    pub policy_root_valid_from: Option<String>,
+    pub policy_root_valid_until: Option<String>,
+    pub policy_root_supersedes_root_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SealedEvidenceTrustPolicySignatureReceipt {
+    pub policy_signature_path: String,
+    pub policy_signature_blake3: String,
+    pub policy_root_key_fingerprint_hex: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SealedEvidenceTrustAnchors {
+    pub trusted_transcript_key_fingerprint: [u8; 32],
+    pub trusted_ledger_key_fingerprint: [u8; 32],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct M1EvidenceBundlePaths {
     pub dir: PathBuf,
     pub manifest: PathBuf,
     pub ledger_entries: PathBuf,
     pub session_transcript_binding: PathBuf,
+    pub verification_report: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct M1SealedEvidenceBundlePaths {
+    pub dir: PathBuf,
+    pub manifest: PathBuf,
+    pub session_transcript_binding: PathBuf,
+    pub session_transcript_signature: PathBuf,
+    pub transcript_public_key_binding: PathBuf,
+    pub ledger_public_key_binding: PathBuf,
+    pub ledger_entries: PathBuf,
+    pub evidence_bundle_seal: PathBuf,
     pub verification_report: PathBuf,
 }
 
@@ -265,6 +447,169 @@ pub(crate) fn read_evidence_verification_report_dir(
     read_json(&evidence_bundle_paths(dir.as_ref()).verification_report)
 }
 
+pub(crate) fn read_sealed_evidence_verification_report_dir(
+    dir: impl AsRef<Path>,
+) -> Result<SealedEvidenceVerificationReport, M1RuntimeError> {
+    read_json(&sealed_evidence_bundle_paths(dir.as_ref()).verification_report)
+}
+
+pub(crate) fn read_sealed_evidence_trust_policy_file(
+    path: impl AsRef<Path>,
+) -> Result<SealedEvidenceTrustPolicy, M1RuntimeError> {
+    read_json(path.as_ref())
+}
+
+pub(crate) fn read_sealed_evidence_trust_policy_signature_file(
+    path: impl AsRef<Path>,
+) -> Result<SealedEvidenceTrustPolicySignature, M1RuntimeError> {
+    read_json(path.as_ref())
+}
+
+pub(crate) fn read_sealed_evidence_policy_roots_file(
+    path: impl AsRef<Path>,
+) -> Result<SealedEvidencePolicyRoots, M1RuntimeError> {
+    read_json(path.as_ref())
+}
+
+pub(crate) fn sealed_evidence_policy_root_receipt_file_for_signature(
+    roots_path: impl AsRef<Path>,
+    signature_path: impl AsRef<Path>,
+    expected_signature_suite: &str,
+    required_root_id: Option<&str>,
+) -> Result<SealedEvidencePolicyRootReceipt, M1RuntimeError> {
+    let roots_path = roots_path.as_ref();
+    let signature = read_sealed_evidence_trust_policy_signature_file(signature_path.as_ref())?;
+    let roots = read_sealed_evidence_policy_roots_file(roots_path)?;
+    let root_fingerprint_hex =
+        hex::encode(signature.root_public_key_binding.public_key_fingerprint);
+    let root = require_sealed_evidence_policy_root_at(
+        &roots,
+        expected_signature_suite,
+        &root_fingerprint_hex,
+        required_root_id,
+        Utc::now(),
+    )?;
+
+    Ok(SealedEvidencePolicyRootReceipt {
+        policy_roots_path: roots_path.display().to_string(),
+        policy_roots_blake3: blake3_file_hex(roots_path)?,
+        policy_root_id: root.root_id.clone(),
+        policy_root_key_fingerprint_hex: root.root_key_fingerprint_hex.clone(),
+        policy_root_valid_from: root.valid_from.clone(),
+        policy_root_valid_until: root.valid_until.clone(),
+        policy_root_supersedes_root_id: root.supersedes_root_id.clone(),
+    })
+}
+
+pub(crate) fn sealed_evidence_trust_policy_anchors(
+    policy: &SealedEvidenceTrustPolicy,
+    expected_signature_suite: &str,
+) -> Result<SealedEvidenceTrustAnchors, M1RuntimeError> {
+    require_sealed_evidence_trust_policy(policy, expected_signature_suite)?;
+
+    Ok(SealedEvidenceTrustAnchors {
+        trusted_transcript_key_fingerprint: parse_trust_policy_fingerprint_hex(
+            "transcript",
+            &policy.trusted_transcript_key_fingerprint_hex,
+        )?,
+        trusted_ledger_key_fingerprint: parse_trust_policy_fingerprint_hex(
+            "ledger",
+            &policy.trusted_ledger_key_fingerprint_hex,
+        )?,
+    })
+}
+
+pub(crate) fn sealed_evidence_trust_policy_receipt_file(
+    path: impl AsRef<Path>,
+    policy: &SealedEvidenceTrustPolicy,
+    expected_signature_suite: &str,
+) -> Result<SealedEvidenceTrustPolicyReceipt, M1RuntimeError> {
+    let path = path.as_ref();
+    require_sealed_evidence_trust_policy(policy, expected_signature_suite)?;
+
+    Ok(SealedEvidenceTrustPolicyReceipt {
+        schema: "xenia-sealed-evidence-trust-policy-receipt-v1".to_string(),
+        source: "enrolled-policy".to_string(),
+        profile: policy.profile.clone(),
+        signature_suite: policy.signature_suite.clone(),
+        policy_path: Some(path.display().to_string()),
+        policy_blake3: Some(blake3_file_hex(path)?),
+        policy_id: policy.policy_id.clone(),
+        operator_id: policy.operator_id.clone(),
+        policy_epoch: policy.policy_epoch,
+        valid_from: policy.valid_from.clone(),
+        valid_until: policy.valid_until.clone(),
+        policy_signature_path: None,
+        policy_signature_blake3: None,
+        policy_root_key_fingerprint_hex: None,
+        policy_roots_path: None,
+        policy_roots_blake3: None,
+        policy_root_id: None,
+        policy_root_valid_from: None,
+        policy_root_valid_until: None,
+        policy_root_supersedes_root_id: None,
+    })
+}
+
+pub(crate) fn attach_sealed_evidence_trust_policy_signature_receipt(
+    receipt: &mut SealedEvidenceTrustPolicyReceipt,
+    signature_receipt: SealedEvidenceTrustPolicySignatureReceipt,
+) {
+    receipt.source = "signed-enrolled-policy".to_string();
+    receipt.policy_signature_path = Some(signature_receipt.policy_signature_path);
+    receipt.policy_signature_blake3 = Some(signature_receipt.policy_signature_blake3);
+    receipt.policy_root_key_fingerprint_hex =
+        Some(signature_receipt.policy_root_key_fingerprint_hex);
+}
+
+pub(crate) fn attach_sealed_evidence_policy_root_receipt(
+    receipt: &mut SealedEvidenceTrustPolicyReceipt,
+    root_receipt: SealedEvidencePolicyRootReceipt,
+) {
+    receipt.policy_roots_path = Some(root_receipt.policy_roots_path);
+    receipt.policy_roots_blake3 = Some(root_receipt.policy_roots_blake3);
+    receipt.policy_root_id = Some(root_receipt.policy_root_id);
+    receipt.policy_root_valid_from = root_receipt.policy_root_valid_from;
+    receipt.policy_root_valid_until = root_receipt.policy_root_valid_until;
+    receipt.policy_root_supersedes_root_id = root_receipt.policy_root_supersedes_root_id;
+}
+
+pub(crate) fn verify_sealed_evidence_trust_policy_signature_file_with_backend(
+    policy_path: impl AsRef<Path>,
+    signature_path: impl AsRef<Path>,
+    expected_signature_suite: &str,
+    trusted_policy_root_fingerprint: [u8; 32],
+    backend: &impl EvidenceSignatureBackend,
+) -> Result<SealedEvidenceTrustPolicySignatureReceipt, M1RuntimeError> {
+    let policy_path = policy_path.as_ref();
+    let signature_path = signature_path.as_ref();
+    let signature = read_sealed_evidence_trust_policy_signature_file(signature_path)?;
+    require_sealed_evidence_trust_policy_signature(
+        &signature,
+        expected_signature_suite,
+        policy_path,
+        trusted_policy_root_fingerprint,
+        backend,
+    )?;
+
+    Ok(SealedEvidenceTrustPolicySignatureReceipt {
+        policy_signature_path: signature_path.display().to_string(),
+        policy_signature_blake3: blake3_file_hex(signature_path)?,
+        policy_root_key_fingerprint_hex: hex::encode(
+            signature.root_public_key_binding.public_key_fingerprint,
+        ),
+    })
+}
+
+pub(crate) fn write_sealed_evidence_verification_report_dir(
+    dir: impl AsRef<Path>,
+    report: &SealedEvidenceVerificationReport,
+) -> Result<PathBuf, M1RuntimeError> {
+    let path = sealed_evidence_bundle_paths(dir.as_ref()).verification_report;
+    write_json(&path, report)?;
+    Ok(path)
+}
+
 pub(crate) fn audit_evidence_verification_report_artifacts_dir(
     dir: impl AsRef<Path>,
 ) -> Result<EvidenceVerificationReport, M1RuntimeError> {
@@ -279,6 +624,23 @@ pub(crate) fn audit_evidence_verification_report_artifacts_dir(
         &paths.session_transcript_binding,
     )?;
     require_evidence_report_artifacts_match_current_bundle(&report.artifacts, &actual_artifacts)?;
+
+    Ok(report)
+}
+
+pub(crate) fn audit_sealed_evidence_verification_report_artifacts_dir(
+    dir: impl AsRef<Path>,
+) -> Result<SealedEvidenceVerificationReport, M1RuntimeError> {
+    let dir = dir.as_ref();
+    let paths = sealed_evidence_bundle_paths(dir);
+    let report = read_sealed_evidence_verification_report_dir(dir)?;
+    require_sealed_evidence_verification_report_schema(&report)?;
+
+    let actual_artifacts = sealed_evidence_artifact_digests(&paths)?;
+    require_sealed_evidence_report_artifacts_match_current_bundle(
+        &report.artifacts,
+        &actual_artifacts,
+    )?;
 
     Ok(report)
 }
@@ -311,6 +673,69 @@ pub(crate) fn verify_transcript_bound_evidence_bundle_dir_with_backend(
         entries.len(),
         "xenia-ledger::Verifier::verify_transcript_bound_evidence_bundle_with_backend",
         hex::encode(public_key),
+        artifacts,
+    ))
+}
+
+pub(crate) fn verify_sealed_transcript_bound_evidence_bundle_dir_with_backend(
+    dir: impl AsRef<Path>,
+    trusted_transcript_key_fingerprint: [u8; 32],
+    trusted_ledger_key_fingerprint: [u8; 32],
+    backend: &impl EvidenceSignatureBackend,
+) -> Result<SealedEvidenceVerificationReport, M1RuntimeError> {
+    let dir = dir.as_ref();
+    let paths = sealed_evidence_bundle_paths(dir);
+    let manifest_export = read_evidence_crypto_manifest_export_dir(dir)?;
+    let manifest = manifest_export.to_manifest()?;
+
+    if manifest.profile != CryptoPolicyProfile::FullPqcV1 {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "sealed evidence verifier requires full-pqc-v1, found {:?}",
+            manifest_export.profile
+        )));
+    }
+
+    let binding: SessionTranscriptBinding = read_json(&paths.session_transcript_binding)?;
+    let transcript_signature: SessionTranscriptSignature =
+        read_json(&paths.session_transcript_signature)?;
+    let transcript_key_binding: EvidencePublicKeyBinding =
+        read_json(&paths.transcript_public_key_binding)?;
+    let ledger_key_binding: EvidencePublicKeyBinding = read_json(&paths.ledger_public_key_binding)?;
+    let entries: Vec<LedgerEntryExport> = read_json(&paths.ledger_entries)?;
+    let bundle_seal: EvidenceBundleSeal = read_json(&paths.evidence_bundle_seal)?;
+
+    require_trusted_key_fingerprint(
+        "transcript",
+        trusted_transcript_key_fingerprint,
+        transcript_key_binding.public_key_fingerprint,
+    )?;
+    require_trusted_key_fingerprint(
+        "ledger",
+        trusted_ledger_key_fingerprint,
+        ledger_key_binding.public_key_fingerprint,
+    )?;
+
+    Verifier::verify_sealed_signed_transcript_bound_evidence_bundle_with_key_bindings(
+        manifest,
+        &binding,
+        &transcript_signature,
+        &bundle_seal,
+        &transcript_key_binding,
+        &entries,
+        &ledger_key_binding,
+        backend,
+        backend,
+    )?;
+
+    let artifacts = sealed_evidence_artifact_digests(&paths)?;
+
+    Ok(sealed_evidence_verification_report(
+        &manifest_export,
+        &binding,
+        entries.len(),
+        "xenia-ledger::Verifier::verify_sealed_signed_transcript_bound_evidence_bundle_with_key_bindings",
+        transcript_key_binding.public_key_fingerprint,
+        ledger_key_binding.public_key_fingerprint,
         artifacts,
     ))
 }
@@ -631,6 +1056,20 @@ fn evidence_bundle_paths(dir: &Path) -> M1EvidenceBundlePaths {
     }
 }
 
+fn sealed_evidence_bundle_paths(dir: &Path) -> M1SealedEvidenceBundlePaths {
+    M1SealedEvidenceBundlePaths {
+        dir: dir.to_path_buf(),
+        manifest: dir.join("evidence_manifest.json"),
+        session_transcript_binding: dir.join("session_transcript_binding.json"),
+        session_transcript_signature: dir.join("session_transcript_signature.json"),
+        transcript_public_key_binding: dir.join("transcript_public_key_binding.json"),
+        ledger_public_key_binding: dir.join("ledger_public_key_binding.json"),
+        ledger_entries: dir.join("ledger_entries.json"),
+        evidence_bundle_seal: dir.join("evidence_bundle_seal.json"),
+        verification_report: dir.join("verification_report.json"),
+    }
+}
+
 fn write_json(path: &Path, value: &impl Serialize) -> Result<(), M1RuntimeError> {
     let mut bytes = serde_json::to_vec_pretty(value)?;
     bytes.push(b'\n');
@@ -677,21 +1116,552 @@ fn evidence_artifact_set_digest(
     ledger_entries_blake3: &str,
     session_transcript_binding_blake3: &str,
 ) -> String {
-    let mut hasher = blake3::Hasher::new();
-    for (name, digest) in [
+    artifact_set_digest(&[
         ("evidence_manifest.json", evidence_manifest_blake3),
         ("ledger_entries.json", ledger_entries_blake3),
         (
             "session_transcript_binding.json",
             session_transcript_binding_blake3,
         ),
-    ] {
+    ])
+}
+
+fn sealed_evidence_artifact_digests(
+    paths: &M1SealedEvidenceBundlePaths,
+) -> Result<SealedEvidenceArtifactDigests, M1RuntimeError> {
+    let evidence_manifest_blake3 = blake3_file_hex(&paths.manifest)?;
+    let session_transcript_binding_blake3 = blake3_file_hex(&paths.session_transcript_binding)?;
+    let session_transcript_signature_blake3 = blake3_file_hex(&paths.session_transcript_signature)?;
+    let transcript_public_key_binding_blake3 =
+        blake3_file_hex(&paths.transcript_public_key_binding)?;
+    let ledger_public_key_binding_blake3 = blake3_file_hex(&paths.ledger_public_key_binding)?;
+    let ledger_entries_blake3 = blake3_file_hex(&paths.ledger_entries)?;
+    let evidence_bundle_seal_blake3 = blake3_file_hex(&paths.evidence_bundle_seal)?;
+    let artifact_set_blake3 = artifact_set_digest(&[
+        ("evidence_manifest.json", &evidence_manifest_blake3),
+        (
+            "session_transcript_binding.json",
+            &session_transcript_binding_blake3,
+        ),
+        (
+            "session_transcript_signature.json",
+            &session_transcript_signature_blake3,
+        ),
+        (
+            "transcript_public_key_binding.json",
+            &transcript_public_key_binding_blake3,
+        ),
+        (
+            "ledger_public_key_binding.json",
+            &ledger_public_key_binding_blake3,
+        ),
+        ("ledger_entries.json", &ledger_entries_blake3),
+        ("evidence_bundle_seal.json", &evidence_bundle_seal_blake3),
+    ]);
+
+    Ok(SealedEvidenceArtifactDigests {
+        schema: "xenia-sealed-evidence-artifact-digests-v1".to_string(),
+        hash_algorithm: "blake3-256".to_string(),
+        evidence_manifest_blake3,
+        session_transcript_binding_blake3,
+        session_transcript_signature_blake3,
+        transcript_public_key_binding_blake3,
+        ledger_public_key_binding_blake3,
+        ledger_entries_blake3,
+        evidence_bundle_seal_blake3,
+        artifact_set_blake3,
+    })
+}
+
+fn artifact_set_digest(named_digests: &[(&str, &str)]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for (name, digest) in named_digests {
         hasher.update(name.as_bytes());
         hasher.update(b"\0");
         hasher.update(digest.as_bytes());
         hasher.update(b"\n");
     }
     hasher.finalize().to_hex().to_string()
+}
+
+fn require_trusted_key_fingerprint(
+    surface: &'static str,
+    trusted: [u8; 32],
+    bundle: [u8; 32],
+) -> Result<(), M1RuntimeError> {
+    if trusted == bundle {
+        Ok(())
+    } else {
+        Err(M1RuntimeError::TrustedKeyFingerprintMismatch {
+            surface,
+            trusted,
+            bundle,
+        })
+    }
+}
+
+pub(crate) fn require_sealed_evidence_trust_policy_minimum_epoch(
+    policy: &SealedEvidenceTrustPolicy,
+    minimum_policy_epoch: u64,
+) -> Result<(), M1RuntimeError> {
+    if minimum_policy_epoch == 0 {
+        return Err(M1RuntimeError::EvidenceManifest(
+            "minimum sealed evidence policy epoch must be greater than zero".to_string(),
+        ));
+    }
+
+    let policy_epoch = policy.policy_epoch.ok_or_else(|| {
+        M1RuntimeError::EvidenceManifest(format!(
+            "sealed evidence trust policy does not declare policy_epoch; required minimum is {minimum_policy_epoch}"
+        ))
+    })?;
+
+    if policy_epoch < minimum_policy_epoch {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "sealed evidence trust policy policy_epoch {policy_epoch} is below required minimum {minimum_policy_epoch}"
+        )));
+    }
+
+    Ok(())
+}
+
+fn require_sealed_evidence_trust_policy(
+    policy: &SealedEvidenceTrustPolicy,
+    expected_signature_suite: &str,
+) -> Result<(), M1RuntimeError> {
+    require_sealed_evidence_trust_policy_at(policy, expected_signature_suite, Utc::now())
+}
+
+fn require_sealed_evidence_trust_policy_at(
+    policy: &SealedEvidenceTrustPolicy,
+    expected_signature_suite: &str,
+    now: DateTime<Utc>,
+) -> Result<(), M1RuntimeError> {
+    if policy.schema != "xenia-sealed-evidence-trust-policy-v1" {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "unsupported sealed evidence trust policy schema {:?}",
+            policy.schema
+        )));
+    }
+
+    if policy.profile != "full-pqc-v1" {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "sealed evidence trust policy must require profile full-pqc-v1, found {:?}",
+            policy.profile
+        )));
+    }
+
+    if policy.signature_suite != expected_signature_suite {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "sealed evidence trust policy signature suite {:?} did not match selected verifier suite {:?}",
+            policy.signature_suite, expected_signature_suite
+        )));
+    }
+
+    if policy.policy_epoch == Some(0) {
+        return Err(M1RuntimeError::EvidenceManifest(
+            "sealed evidence trust policy policy_epoch must be greater than zero".to_string(),
+        ));
+    }
+
+    if let Some(policy_id) = policy.policy_id.as_deref() {
+        if policy
+            .revoked_policy_ids
+            .iter()
+            .any(|revoked| revoked == policy_id)
+        {
+            return Err(M1RuntimeError::EvidenceManifest(format!(
+                "sealed evidence trust policy id {policy_id:?} is revoked by policy"
+            )));
+        }
+    }
+
+    let valid_from = policy
+        .valid_from
+        .as_deref()
+        .map(|value| parse_policy_rfc3339("valid_from", value))
+        .transpose()?;
+    let valid_until = policy
+        .valid_until
+        .as_deref()
+        .map(|value| parse_policy_rfc3339("valid_until", value))
+        .transpose()?;
+
+    if let (Some(valid_from), Some(valid_until)) = (&valid_from, &valid_until) {
+        if valid_from >= valid_until {
+            return Err(M1RuntimeError::EvidenceManifest(
+                "sealed evidence trust policy valid_from must be before valid_until".to_string(),
+            ));
+        }
+    }
+
+    if let Some(valid_from) = valid_from {
+        if now < valid_from {
+            return Err(M1RuntimeError::EvidenceManifest(format!(
+                "sealed evidence trust policy is not valid until {valid_from}"
+            )));
+        }
+    }
+
+    if let Some(valid_until) = valid_until {
+        if now >= valid_until {
+            return Err(M1RuntimeError::EvidenceManifest(format!(
+                "sealed evidence trust policy expired at {valid_until}"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn require_sealed_evidence_trust_policy_signature(
+    signature: &SealedEvidenceTrustPolicySignature,
+    expected_signature_suite: &str,
+    policy_path: &Path,
+    trusted_policy_root_fingerprint: [u8; 32],
+    backend: &impl EvidenceSignatureBackend,
+) -> Result<(), M1RuntimeError> {
+    if signature.schema != "xenia-sealed-evidence-trust-policy-signature-v1" {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "unsupported sealed evidence trust policy signature schema {:?}",
+            signature.schema
+        )));
+    }
+
+    if signature.policy_schema != "xenia-sealed-evidence-trust-policy-v1" {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "sealed evidence trust policy signature covers unsupported policy schema {:?}",
+            signature.policy_schema
+        )));
+    }
+
+    if signature.profile != "full-pqc-v1" {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "sealed evidence trust policy signature must require profile full-pqc-v1, found {:?}",
+            signature.profile
+        )));
+    }
+
+    if signature.signature_suite != expected_signature_suite {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "sealed evidence trust policy signature suite {:?} did not match selected verifier suite {:?}",
+            signature.signature_suite, expected_signature_suite
+        )));
+    }
+
+    let signature_suite = SignatureSuite::from_stable_label(&signature.signature_suite)
+        .ok_or_else(|| {
+            M1RuntimeError::EvidenceManifest(format!(
+                "unsupported sealed evidence trust policy signature suite {:?}",
+                signature.signature_suite
+            ))
+        })?;
+
+    signature
+        .root_public_key_binding
+        .validate_against_signature_suite_and_backend(signature_suite, backend)
+        .map_err(|err| {
+            M1RuntimeError::EvidenceManifest(format!(
+                "sealed evidence trust policy root public key binding rejected: {err}"
+            ))
+        })?;
+
+    require_trusted_key_fingerprint(
+        "trust-policy-root",
+        trusted_policy_root_fingerprint,
+        signature.root_public_key_binding.public_key_fingerprint,
+    )?;
+
+    let envelope_suite = signature.signature.validate_shape().map_err(|err| {
+        M1RuntimeError::EvidenceManifest(format!(
+            "sealed evidence trust policy signature envelope rejected: {err}"
+        ))
+    })?;
+    if envelope_suite != signature_suite {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "sealed evidence trust policy signature envelope suite {:?} did not match signature suite {:?}",
+            envelope_suite, signature_suite
+        )));
+    }
+
+    let policy_blake3 = blake3_file_hex(policy_path)?;
+    if policy_blake3 != signature.policy_blake3 {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "sealed evidence trust policy signature policy_blake3 {:?} did not match current policy file {:?}",
+            signature.policy_blake3, policy_blake3
+        )));
+    }
+
+    let message = sealed_evidence_trust_policy_signature_message(signature);
+    backend
+        .verify_signature(
+            &signature.root_public_key_binding.public_key,
+            &message,
+            &signature.signature.signature,
+        )
+        .map_err(|err| {
+            M1RuntimeError::EvidenceManifest(format!(
+                "sealed evidence trust policy signature verification failed: {err}"
+            ))
+        })?;
+
+    Ok(())
+}
+
+fn sealed_evidence_trust_policy_signature_message(
+    signature: &SealedEvidenceTrustPolicySignature,
+) -> Vec<u8> {
+    let mut message = Vec::new();
+    message.extend_from_slice(b"xenia:sealed-evidence-trust-policy-signature:v1");
+    message.push(0);
+    message.extend_from_slice(signature.policy_schema.as_bytes());
+    message.push(0);
+    message.extend_from_slice(signature.profile.as_bytes());
+    message.push(0);
+    message.extend_from_slice(signature.signature_suite.as_bytes());
+    message.push(0);
+    message.extend_from_slice(signature.policy_blake3.as_bytes());
+    message
+}
+
+fn require_sealed_evidence_policy_root_at<'a>(
+    roots: &'a SealedEvidencePolicyRoots,
+    expected_signature_suite: &str,
+    root_fingerprint_hex: &str,
+    required_root_id: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<&'a SealedEvidencePolicyRoot, M1RuntimeError> {
+    if roots.schema != "xenia-sealed-evidence-policy-roots-v1" {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "unsupported sealed evidence policy-roots schema {:?}",
+            roots.schema
+        )));
+    }
+
+    if roots.profile != "full-pqc-v1" {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "sealed evidence policy-roots must require profile full-pqc-v1, found {:?}",
+            roots.profile
+        )));
+    }
+
+    if roots.signature_suite != expected_signature_suite {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "sealed evidence policy-roots signature suite {:?} did not match selected verifier suite {:?}",
+            roots.signature_suite, expected_signature_suite
+        )));
+    }
+
+    if roots.roots.is_empty() {
+        return Err(M1RuntimeError::EvidenceManifest(
+            "sealed evidence policy-roots registry must contain at least one root".to_string(),
+        ));
+    }
+
+    let mut seen_root_ids = Vec::new();
+    let mut matched = None;
+    for root in &roots.roots {
+        if root.root_id.trim().is_empty() {
+            return Err(M1RuntimeError::EvidenceManifest(
+                "sealed evidence policy-root id must not be empty".to_string(),
+            ));
+        }
+        if seen_root_ids.iter().any(|seen| seen == &root.root_id) {
+            return Err(M1RuntimeError::EvidenceManifest(format!(
+                "duplicate sealed evidence policy-root id {:?}",
+                root.root_id
+            )));
+        }
+        seen_root_ids.push(root.root_id.clone());
+
+        parse_trust_policy_fingerprint_hex("policy-root", &root.root_key_fingerprint_hex)?;
+
+        if root.supersedes_root_id.as_deref() == Some(root.root_id.as_str()) {
+            return Err(M1RuntimeError::EvidenceManifest(format!(
+                "sealed evidence policy-root {:?} cannot supersede itself",
+                root.root_id
+            )));
+        }
+
+        if root
+            .root_key_fingerprint_hex
+            .eq_ignore_ascii_case(root_fingerprint_hex)
+        {
+            matched = Some(root);
+        }
+    }
+
+    let root = matched.ok_or_else(|| {
+        M1RuntimeError::EvidenceManifest(format!(
+            "sealed evidence policy-root fingerprint {root_fingerprint_hex:?} is not enrolled"
+        ))
+    })?;
+
+    if let Some(required_root_id) = required_root_id {
+        if root.root_id != required_root_id {
+            return Err(M1RuntimeError::EvidenceManifest(format!(
+                "sealed evidence policy-root id {:?} did not match required root id {:?}",
+                root.root_id, required_root_id
+            )));
+        }
+    }
+
+    if roots
+        .revoked_root_ids
+        .iter()
+        .any(|revoked| revoked == &root.root_id)
+    {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "sealed evidence policy-root id {:?} is revoked",
+            root.root_id
+        )));
+    }
+
+    let valid_from = root
+        .valid_from
+        .as_deref()
+        .map(|value| parse_policy_root_rfc3339("valid_from", value))
+        .transpose()?;
+    let valid_until = root
+        .valid_until
+        .as_deref()
+        .map(|value| parse_policy_root_rfc3339("valid_until", value))
+        .transpose()?;
+
+    if let (Some(valid_from), Some(valid_until)) = (&valid_from, &valid_until) {
+        if valid_from >= valid_until {
+            return Err(M1RuntimeError::EvidenceManifest(
+                "sealed evidence policy-root valid_from must be before valid_until".to_string(),
+            ));
+        }
+    }
+
+    if let Some(valid_from) = valid_from {
+        if now < valid_from {
+            return Err(M1RuntimeError::EvidenceManifest(format!(
+                "sealed evidence policy-root {:?} is not valid until {valid_from}",
+                root.root_id
+            )));
+        }
+    }
+
+    if let Some(valid_until) = valid_until {
+        if now >= valid_until {
+            return Err(M1RuntimeError::EvidenceManifest(format!(
+                "sealed evidence policy-root {:?} expired at {valid_until}",
+                root.root_id
+            )));
+        }
+    }
+
+    Ok(root)
+}
+
+fn parse_policy_root_rfc3339(
+    field: &'static str,
+    value: &str,
+) -> Result<DateTime<Utc>, M1RuntimeError> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|err| {
+            M1RuntimeError::EvidenceManifest(format!(
+                "sealed evidence policy-root {field} is not RFC3339: {err}"
+            ))
+        })
+}
+
+fn parse_policy_rfc3339(field: &'static str, value: &str) -> Result<DateTime<Utc>, M1RuntimeError> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|err| {
+            M1RuntimeError::EvidenceManifest(format!(
+                "sealed evidence trust policy {field} is not RFC3339: {err}"
+            ))
+        })
+}
+
+fn parse_trust_policy_fingerprint_hex(
+    surface: &'static str,
+    value: &str,
+) -> Result<[u8; 32], M1RuntimeError> {
+    let bytes = hex::decode(value).map_err(|err| {
+        M1RuntimeError::EvidenceManifest(format!(
+            "sealed evidence trust policy {surface} fingerprint is not valid hex: {err}"
+        ))
+    })?;
+    let found = bytes.len();
+    bytes.try_into().map_err(|_| {
+        M1RuntimeError::EvidenceManifest(format!(
+            "sealed evidence trust policy {surface} fingerprint must be exactly 32 bytes, found {found}"
+        ))
+    })
+}
+
+fn require_sealed_evidence_verification_report_schema(
+    report: &SealedEvidenceVerificationReport,
+) -> Result<(), M1RuntimeError> {
+    if report.schema != "xenia-sealed-evidence-verification-report-v1" {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "unsupported sealed verification report schema {:?}",
+            report.schema
+        )));
+    }
+
+    if !report.verified {
+        return Err(M1RuntimeError::EvidenceManifest(
+            "sealed verification_report.json does not record a successful verification".to_string(),
+        ));
+    }
+
+    if report.artifacts.schema != "xenia-sealed-evidence-artifact-digests-v1" {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "unsupported sealed verification report artifact digest schema {:?}",
+            report.artifacts.schema
+        )));
+    }
+
+    if report.artifacts.hash_algorithm != "blake3-256" {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "unsupported sealed verification report artifact digest algorithm {:?}",
+            report.artifacts.hash_algorithm
+        )));
+    }
+
+    if let Some(trust_policy) = &report.trust_policy {
+        require_sealed_evidence_trust_policy_receipt_schema(trust_policy)?;
+    }
+
+    Ok(())
+}
+
+fn require_sealed_evidence_trust_policy_receipt_schema(
+    receipt: &SealedEvidenceTrustPolicyReceipt,
+) -> Result<(), M1RuntimeError> {
+    if receipt.schema != "xenia-sealed-evidence-trust-policy-receipt-v1" {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "unsupported sealed evidence trust policy receipt schema {:?}",
+            receipt.schema
+        )));
+    }
+
+    match receipt.source.as_str() {
+        "enrolled-policy" => Ok(()),
+        "signed-enrolled-policy" => {
+            if receipt.policy_signature_path.is_none()
+                || receipt.policy_signature_blake3.is_none()
+                || receipt.policy_root_key_fingerprint_hex.is_none()
+            {
+                return Err(M1RuntimeError::EvidenceManifest(
+                    "signed sealed evidence trust policy receipt is missing policy signature fields"
+                        .to_string(),
+                ));
+            }
+            Ok(())
+        }
+        other => Err(M1RuntimeError::EvidenceManifest(format!(
+            "unsupported sealed evidence trust policy receipt source {other:?}"
+        ))),
+    }
 }
 
 fn require_evidence_verification_report_schema(
@@ -741,6 +1711,20 @@ fn require_evidence_report_artifacts_match_current_bundle(
     Ok(())
 }
 
+fn require_sealed_evidence_report_artifacts_match_current_bundle(
+    expected: &SealedEvidenceArtifactDigests,
+    actual: &SealedEvidenceArtifactDigests,
+) -> Result<(), M1RuntimeError> {
+    if expected != actual {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "sealed verification_report artifact digests do not match current sealed bundle artifacts: report artifact_set_blake3={}, current artifact_set_blake3={}",
+            expected.artifact_set_blake3, actual.artifact_set_blake3
+        )));
+    }
+
+    Ok(())
+}
+
 fn evidence_verification_report(
     manifest: &EvidenceCryptoManifestExport,
     binding: &SessionTranscriptBinding,
@@ -760,6 +1744,32 @@ fn evidence_verification_report(
         transcript_signature: manifest.transcript_signature.clone(),
         ledger_signature: manifest.ledger_signature.clone(),
         operator_public_key_hex,
+        artifacts,
+    }
+}
+
+fn sealed_evidence_verification_report(
+    manifest: &EvidenceCryptoManifestExport,
+    binding: &SessionTranscriptBinding,
+    ledger_entries: usize,
+    verifier: impl Into<String>,
+    transcript_key_fingerprint: [u8; 32],
+    ledger_key_fingerprint: [u8; 32],
+    artifacts: SealedEvidenceArtifactDigests,
+) -> SealedEvidenceVerificationReport {
+    SealedEvidenceVerificationReport {
+        schema: "xenia-sealed-evidence-verification-report-v1".to_string(),
+        verifier: verifier.into(),
+        verified: true,
+        profile: manifest.profile.clone(),
+        ledger_entries,
+        session_id: binding.session_id,
+        transcript_hash_algorithm: binding.transcript_hash_algorithm.clone(),
+        transcript_signature: manifest.transcript_signature.clone(),
+        ledger_signature: manifest.ledger_signature.clone(),
+        transcript_public_key_fingerprint_hex: hex::encode(transcript_key_fingerprint),
+        ledger_public_key_fingerprint_hex: hex::encode(ledger_key_fingerprint),
+        trust_policy: None,
         artifacts,
     }
 }
@@ -993,6 +2003,375 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&paths.dir);
+    }
+
+    #[test]
+    fn sealed_verification_report_audit_rejects_swapped_artifacts() {
+        let dir = std::env::temp_dir().join(format!(
+            "xenia-m1-sealed-report-audit-{}-{}",
+            std::process::id(),
+            27
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let paths = sealed_evidence_bundle_paths(&dir);
+        for (path, content) in [
+            (&paths.manifest, b"{\"artifact\":\"manifest\"}\n".as_slice()),
+            (
+                &paths.session_transcript_binding,
+                b"{\"artifact\":\"session_transcript_binding\"}\n".as_slice(),
+            ),
+            (
+                &paths.session_transcript_signature,
+                b"{\"artifact\":\"session_transcript_signature\"}\n".as_slice(),
+            ),
+            (
+                &paths.transcript_public_key_binding,
+                b"{\"artifact\":\"transcript_public_key_binding\"}\n".as_slice(),
+            ),
+            (
+                &paths.ledger_public_key_binding,
+                b"{\"artifact\":\"ledger_public_key_binding\"}\n".as_slice(),
+            ),
+            (&paths.ledger_entries, b"[]\n".as_slice()),
+            (
+                &paths.evidence_bundle_seal,
+                b"{\"artifact\":\"evidence_bundle_seal\"}\n".as_slice(),
+            ),
+        ] {
+            std::fs::write(path, content).unwrap();
+        }
+
+        let artifacts = sealed_evidence_artifact_digests(&paths).unwrap();
+        let report = SealedEvidenceVerificationReport {
+            schema: "xenia-sealed-evidence-verification-report-v1".to_string(),
+            verifier: "test sealed verifier".to_string(),
+            verified: true,
+            profile: "full-pqc-v1".to_string(),
+            ledger_entries: 3,
+            session_id: Uuid::from_bytes([3; 16]),
+            transcript_hash_algorithm: "blake3-256".to_string(),
+            transcript_signature: "ml-dsa-65-fips204".to_string(),
+            ledger_signature: "ml-dsa-65-fips204".to_string(),
+            transcript_public_key_fingerprint_hex: hex::encode([0xA5; 32]),
+            ledger_public_key_fingerprint_hex: hex::encode([0x5A; 32]),
+            trust_policy: None,
+            artifacts: artifacts.clone(),
+        };
+        write_json(&paths.verification_report, &report).unwrap();
+
+        let audited_report = audit_sealed_evidence_verification_report_artifacts_dir(&dir)
+            .expect("sealed report audit should accept unchanged artifact digests");
+        assert_eq!(audited_report.artifacts, artifacts);
+
+        std::fs::write(
+            &paths.evidence_bundle_seal,
+            b"{\"artifact\":\"tampered\"}\n",
+        )
+        .unwrap();
+        let err = audit_sealed_evidence_verification_report_artifacts_dir(&dir)
+            .expect_err("sealed report audit should reject a swapped sealed artifact");
+        assert!(
+            err.to_string()
+                .contains("sealed verification_report artifact digests do not match")
+        );
+
+        let _ = std::fs::remove_dir_all(&paths.dir);
+    }
+
+    #[test]
+    fn sealed_trust_policy_accepts_matching_full_pqc_suite() {
+        let policy = SealedEvidenceTrustPolicy {
+            schema: "xenia-sealed-evidence-trust-policy-v1".to_string(),
+            profile: "full-pqc-v1".to_string(),
+            signature_suite: "ml-dsa-65-fips204".to_string(),
+            trusted_transcript_key_fingerprint_hex: hex::encode([0xA5; 32]),
+            trusted_ledger_key_fingerprint_hex: hex::encode([0x5A; 32]),
+            policy_id: Some("test-policy".to_string()),
+            operator_id: Some("test-operator".to_string()),
+            policy_epoch: Some(1),
+            valid_from: None,
+            valid_until: None,
+            revoked_policy_ids: Vec::new(),
+        };
+
+        let anchors = sealed_evidence_trust_policy_anchors(&policy, "ml-dsa-65-fips204")
+            .expect("matching full-PQC trust policy should parse");
+
+        assert_eq!(anchors.trusted_transcript_key_fingerprint, [0xA5; 32]);
+        assert_eq!(anchors.trusted_ledger_key_fingerprint, [0x5A; 32]);
+    }
+
+    #[test]
+    fn sealed_trust_policy_receipt_records_policy_source() {
+        let dir = std::env::temp_dir().join(format!(
+            "xenia-sealed-trust-policy-receipt-{}-{}",
+            std::process::id(),
+            12
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("trusted_keys.json");
+        let policy = SealedEvidenceTrustPolicy {
+            schema: "xenia-sealed-evidence-trust-policy-v1".to_string(),
+            profile: "full-pqc-v1".to_string(),
+            signature_suite: "ml-dsa-65-fips204".to_string(),
+            trusted_transcript_key_fingerprint_hex: hex::encode([0xA5; 32]),
+            trusted_ledger_key_fingerprint_hex: hex::encode([0x5A; 32]),
+            policy_id: Some("test-policy".to_string()),
+            operator_id: Some("test-operator".to_string()),
+            policy_epoch: Some(1),
+            valid_from: Some("2026-01-01T00:00:00Z".to_string()),
+            valid_until: Some("2099-01-01T00:00:00Z".to_string()),
+            revoked_policy_ids: Vec::new(),
+        };
+        write_json(&path, &policy).unwrap();
+
+        let receipt =
+            sealed_evidence_trust_policy_receipt_file(&path, &policy, "ml-dsa-65-fips204")
+                .expect("matching policy should produce a report receipt");
+
+        assert_eq!(
+            receipt.schema,
+            "xenia-sealed-evidence-trust-policy-receipt-v1"
+        );
+        assert_eq!(receipt.source, "enrolled-policy");
+        assert_eq!(receipt.signature_suite, "ml-dsa-65-fips204");
+        assert_eq!(receipt.policy_id.as_deref(), Some("test-policy"));
+        assert_eq!(receipt.operator_id.as_deref(), Some("test-operator"));
+        assert_eq!(receipt.policy_epoch, Some(1));
+        assert_eq!(receipt.valid_from.as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(receipt.valid_until.as_deref(), Some("2099-01-01T00:00:00Z"));
+        assert_eq!(receipt.policy_blake3, Some(blake3_file_hex(&path).unwrap()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sealed_trust_policy_signature_receipt_records_policy_root() {
+        let mut receipt = SealedEvidenceTrustPolicyReceipt {
+            schema: "xenia-sealed-evidence-trust-policy-receipt-v1".to_string(),
+            source: "enrolled-policy".to_string(),
+            profile: "full-pqc-v1".to_string(),
+            signature_suite: "ml-dsa-65-fips204".to_string(),
+            policy_path: Some("trusted_keys.json".to_string()),
+            policy_blake3: Some(hex::encode([0x11; 32])),
+            policy_id: Some("test-policy".to_string()),
+            operator_id: Some("test-operator".to_string()),
+            policy_epoch: Some(7),
+            valid_from: None,
+            valid_until: None,
+            policy_signature_path: None,
+            policy_signature_blake3: None,
+            policy_root_key_fingerprint_hex: None,
+            policy_roots_path: None,
+            policy_roots_blake3: None,
+            policy_root_id: None,
+            policy_root_valid_from: None,
+            policy_root_valid_until: None,
+            policy_root_supersedes_root_id: None,
+        };
+
+        attach_sealed_evidence_trust_policy_signature_receipt(
+            &mut receipt,
+            SealedEvidenceTrustPolicySignatureReceipt {
+                policy_signature_path: "trusted_keys.signature.json".to_string(),
+                policy_signature_blake3: hex::encode([0x22; 32]),
+                policy_root_key_fingerprint_hex: hex::encode([0x33; 32]),
+            },
+        );
+
+        assert_eq!(receipt.source, "signed-enrolled-policy");
+        assert_eq!(
+            receipt.policy_signature_path.as_deref(),
+            Some("trusted_keys.signature.json")
+        );
+        let expected_root = hex::encode([0x33; 32]);
+        assert_eq!(
+            receipt.policy_root_key_fingerprint_hex.as_deref(),
+            Some(expected_root.as_str())
+        );
+    }
+
+    #[test]
+    fn sealed_policy_roots_authorize_matching_current_root() {
+        let now = DateTime::parse_from_rfc3339("2026-07-02T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let roots = SealedEvidencePolicyRoots {
+            schema: "xenia-sealed-evidence-policy-roots-v1".to_string(),
+            profile: "full-pqc-v1".to_string(),
+            signature_suite: "ml-dsa-65-fips204".to_string(),
+            roots: vec![SealedEvidencePolicyRoot {
+                root_id: "root-2026-q3".to_string(),
+                root_key_fingerprint_hex: hex::encode([0x44; 32]),
+                operator_id: Some("ops".to_string()),
+                valid_from: Some("2026-01-01T00:00:00Z".to_string()),
+                valid_until: Some("2027-01-01T00:00:00Z".to_string()),
+                supersedes_root_id: Some("root-2026-q2".to_string()),
+            }],
+            revoked_root_ids: Vec::new(),
+        };
+
+        let root = require_sealed_evidence_policy_root_at(
+            &roots,
+            "ml-dsa-65-fips204",
+            &hex::encode([0x44; 32]),
+            Some("root-2026-q3"),
+            now,
+        )
+        .expect("matching enrolled root should authorize signed policy verification");
+
+        assert_eq!(root.root_id, "root-2026-q3");
+        assert_eq!(root.supersedes_root_id.as_deref(), Some("root-2026-q2"));
+    }
+
+    #[test]
+    fn sealed_policy_roots_reject_revoked_required_and_stale_roots() {
+        let now = DateTime::parse_from_rfc3339("2026-07-02T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut roots = SealedEvidencePolicyRoots {
+            schema: "xenia-sealed-evidence-policy-roots-v1".to_string(),
+            profile: "full-pqc-v1".to_string(),
+            signature_suite: "ml-dsa-65-fips204".to_string(),
+            roots: vec![SealedEvidencePolicyRoot {
+                root_id: "root-2026-q3".to_string(),
+                root_key_fingerprint_hex: hex::encode([0x44; 32]),
+                operator_id: Some("ops".to_string()),
+                valid_from: Some("2026-01-01T00:00:00Z".to_string()),
+                valid_until: Some("2027-01-01T00:00:00Z".to_string()),
+                supersedes_root_id: None,
+            }],
+            revoked_root_ids: Vec::new(),
+        };
+
+        let err = require_sealed_evidence_policy_root_at(
+            &roots,
+            "ml-dsa-65-fips204",
+            &hex::encode([0x44; 32]),
+            Some("root-2026-q4"),
+            now,
+        )
+        .expect_err("required root id mismatch must fail closed");
+        assert!(err.to_string().contains("did not match required root id"));
+
+        roots.revoked_root_ids = vec!["root-2026-q3".to_string()];
+        let err = require_sealed_evidence_policy_root_at(
+            &roots,
+            "ml-dsa-65-fips204",
+            &hex::encode([0x44; 32]),
+            None,
+            now,
+        )
+        .expect_err("revoked policy root must fail closed");
+        assert!(err.to_string().contains("is revoked"));
+
+        roots.revoked_root_ids.clear();
+        roots.roots[0].valid_until = Some("2026-07-02T12:00:00Z".to_string());
+        let err = require_sealed_evidence_policy_root_at(
+            &roots,
+            "ml-dsa-65-fips204",
+            &hex::encode([0x44; 32]),
+            None,
+            now,
+        )
+        .expect_err("expired policy root must fail closed");
+        assert!(err.to_string().contains("expired"));
+    }
+
+    #[test]
+    fn sealed_trust_policy_rejects_wrong_suite() {
+        let policy = SealedEvidenceTrustPolicy {
+            schema: "xenia-sealed-evidence-trust-policy-v1".to_string(),
+            profile: "full-pqc-v1".to_string(),
+            signature_suite: "ml-dsa-65-fips204".to_string(),
+            trusted_transcript_key_fingerprint_hex: hex::encode([0xA5; 32]),
+            trusted_ledger_key_fingerprint_hex: hex::encode([0x5A; 32]),
+            policy_id: None,
+            operator_id: None,
+            policy_epoch: Some(1),
+            valid_from: None,
+            valid_until: None,
+            revoked_policy_ids: Vec::new(),
+        };
+
+        let err = sealed_evidence_trust_policy_anchors(&policy, "ml-dsa-87-fips204")
+            .expect_err("mismatched trust policy suite must fail closed");
+        assert!(
+            err.to_string()
+                .contains("did not match selected verifier suite")
+        );
+    }
+
+    #[test]
+    fn sealed_trust_policy_rejects_expired_future_and_revoked_policy() {
+        let now = DateTime::parse_from_rfc3339("2026-07-02T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut policy = SealedEvidenceTrustPolicy {
+            schema: "xenia-sealed-evidence-trust-policy-v1".to_string(),
+            profile: "full-pqc-v1".to_string(),
+            signature_suite: "ml-dsa-65-fips204".to_string(),
+            trusted_transcript_key_fingerprint_hex: hex::encode([0xA5; 32]),
+            trusted_ledger_key_fingerprint_hex: hex::encode([0x5A; 32]),
+            policy_id: Some("test-policy".to_string()),
+            operator_id: Some("test-operator".to_string()),
+            policy_epoch: Some(7),
+            valid_from: Some("2026-01-01T00:00:00Z".to_string()),
+            valid_until: Some("2027-01-01T00:00:00Z".to_string()),
+            revoked_policy_ids: Vec::new(),
+        };
+
+        require_sealed_evidence_trust_policy_at(&policy, "ml-dsa-65-fips204", now)
+            .expect("policy should be valid inside its window");
+
+        policy.valid_until = Some("2026-07-02T12:00:00Z".to_string());
+        let err = require_sealed_evidence_trust_policy_at(&policy, "ml-dsa-65-fips204", now)
+            .expect_err("expired policy must fail closed");
+        assert!(err.to_string().contains("expired"));
+
+        policy.valid_until = Some("2027-01-01T00:00:00Z".to_string());
+        policy.valid_from = Some("2026-08-01T00:00:00Z".to_string());
+        let err = require_sealed_evidence_trust_policy_at(&policy, "ml-dsa-65-fips204", now)
+            .expect_err("future policy must fail closed");
+        assert!(err.to_string().contains("not valid until"));
+
+        policy.valid_from = Some("2026-01-01T00:00:00Z".to_string());
+        policy.revoked_policy_ids = vec!["test-policy".to_string()];
+        let err = require_sealed_evidence_trust_policy_at(&policy, "ml-dsa-65-fips204", now)
+            .expect_err("revoked policy id must fail closed");
+        assert!(err.to_string().contains("is revoked by policy"));
+    }
+
+    #[test]
+    fn sealed_trust_policy_minimum_epoch_fails_closed() {
+        let mut policy = SealedEvidenceTrustPolicy {
+            schema: "xenia-sealed-evidence-trust-policy-v1".to_string(),
+            profile: "full-pqc-v1".to_string(),
+            signature_suite: "ml-dsa-65-fips204".to_string(),
+            trusted_transcript_key_fingerprint_hex: hex::encode([0xA5; 32]),
+            trusted_ledger_key_fingerprint_hex: hex::encode([0x5A; 32]),
+            policy_id: Some("test-policy".to_string()),
+            operator_id: Some("test-operator".to_string()),
+            policy_epoch: Some(7),
+            valid_from: None,
+            valid_until: None,
+            revoked_policy_ids: Vec::new(),
+        };
+
+        require_sealed_evidence_trust_policy_minimum_epoch(&policy, 7)
+            .expect("matching minimum policy epoch should pass");
+
+        let err = require_sealed_evidence_trust_policy_minimum_epoch(&policy, 8)
+            .expect_err("stale policy epoch must fail closed");
+        assert!(err.to_string().contains("below required minimum"));
+
+        policy.policy_epoch = None;
+        let err = require_sealed_evidence_trust_policy_minimum_epoch(&policy, 1)
+            .expect_err("missing policy epoch must fail closed when a minimum is required");
+        assert!(err.to_string().contains("does not declare policy_epoch"));
     }
 
     #[test]

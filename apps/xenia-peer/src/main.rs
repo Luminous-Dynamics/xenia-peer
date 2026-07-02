@@ -161,11 +161,106 @@ struct Args {
     #[arg(long, value_enum, requires = "verify_evidence_bundle")]
     require_evidence_profile: Option<EvidenceProfileRequirement>,
 
+    /// Verify a seven-file sealed full-PQC evidence bundle and exit.
+    /// Requires explicit trusted key fingerprints; public-key binding files are
+    /// not treated as self-authenticating identity claims.
+    #[arg(long, value_name = "DIR")]
+    verify_sealed_evidence_bundle: Option<std::path::PathBuf>,
+
+    /// Trusted BLAKE3 fingerprint for the transcript verifier key.
+    #[arg(long, requires = "verify_sealed_evidence_bundle")]
+    trusted_transcript_key_fingerprint_hex: Option<String>,
+
+    /// Trusted BLAKE3 fingerprint for the ledger verifier key.
+    #[arg(long, requires = "verify_sealed_evidence_bundle")]
+    trusted_ledger_key_fingerprint_hex: Option<String>,
+
+    /// Signature suite/backend to use when verifying a sealed full-PQC bundle.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = EvidenceVerifierSuite::MlDsa65Fips204,
+        requires = "verify_sealed_evidence_bundle"
+    )]
+    sealed_evidence_signature_suite: EvidenceVerifierSuite,
+
+    /// Read trusted sealed full-PQC key fingerprints from an enrolled policy file.
+    /// This is preferred for CI/operator workflows because it avoids copying
+    /// fingerprints by hand. Do not combine with the manual trusted fingerprint flags.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "verify_sealed_evidence_bundle",
+        conflicts_with_all = [
+            "trusted_transcript_key_fingerprint_hex",
+            "trusted_ledger_key_fingerprint_hex"
+        ]
+    )]
+    sealed_evidence_trust_policy: Option<std::path::PathBuf>,
+
+    /// Detached signature authenticating `--sealed-evidence-trust-policy` under
+    /// an enrolled local policy-root key.
+    #[arg(long, value_name = "FILE", requires = "sealed_evidence_trust_policy")]
+    sealed_evidence_trust_policy_signature: Option<std::path::PathBuf>,
+
+    /// Trusted BLAKE3 fingerprint for the policy-root key that signs the sealed
+    /// evidence trust policy. Use either this manual root fingerprint or
+    /// `--sealed-evidence-policy-roots`, not both.
+    #[arg(
+        long,
+        requires = "sealed_evidence_trust_policy_signature",
+        conflicts_with = "sealed_evidence_policy_roots"
+    )]
+    trusted_sealed_evidence_policy_root_fingerprint_hex: Option<String>,
+
+    /// Enrolled policy-root registry used to authorize the root that signed the
+    /// sealed evidence trust policy. This avoids manually pasting the trusted
+    /// root fingerprint during CI/operator verification.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "sealed_evidence_trust_policy_signature",
+        conflicts_with = "trusted_sealed_evidence_policy_root_fingerprint_hex"
+    )]
+    sealed_evidence_policy_roots: Option<std::path::PathBuf>,
+
+    /// Require the signed policy to be authorized by this enrolled policy-root id.
+    #[arg(long, value_name = "ID", requires = "sealed_evidence_policy_roots")]
+    required_sealed_evidence_policy_root_id: Option<String>,
+
+    /// Refuse an unsigned sealed evidence trust policy.
+    #[arg(long, requires = "sealed_evidence_trust_policy")]
+    require_signed_sealed_evidence_trust_policy: bool,
+
+    /// Refuse a sealed trust policy whose policy_epoch is missing or below this value (`--minimum-sealed-evidence-policy-epoch`).
+    #[arg(
+        long = "minimum-sealed-evidence-policy-epoch",
+        requires = "sealed_evidence_trust_policy"
+    )]
+    minimum_sealed_evidence_policy_epoch: Option<u64>,
+
+    /// Write a sealed full-PQC verification_report.json after successful verification.
+    /// Use `--write-sealed-evidence-report` only when the operator wants an
+    /// archival audit handle. This report is an audit aid only; trust is still recomputed from the seven
+    /// sealed artifacts and operator-supplied fingerprints.
+    #[arg(
+        long = "write-sealed-evidence-report",
+        requires = "verify_sealed_evidence_bundle"
+    )]
+    write_sealed_evidence_report: bool,
+
     /// Audit a stored verification_report.json against the current bundle artifact bytes.
     /// Use as `--audit-evidence-report DIR`. This recomputes artifact digests only;
     /// use --verify-evidence-bundle for signature verification.
     #[arg(long, value_name = "DIR")]
     audit_evidence_report: Option<std::path::PathBuf>,
+
+    /// Audit a stored sealed full-PQC verification_report.json against the current
+    /// seven-file sealed bundle artifact bytes with `--audit-sealed-evidence-report`.
+    /// This recomputes digests only; use
+    /// --verify-sealed-evidence-bundle for signature and trust-anchor verification.
+    #[arg(long = "audit-sealed-evidence-report", value_name = "DIR")]
+    audit_sealed_evidence_report: Option<std::path::PathBuf>,
 
     /// PRE-PRODUCTION ONLY: auto-grant the local M1 runtime gate after handshake.
     ///
@@ -846,6 +941,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if let Some(bundle_dir) = args.verify_sealed_evidence_bundle.as_deref() {
+        let trust = resolve_sealed_evidence_trust_anchors(
+            args.sealed_evidence_trust_policy.as_deref(),
+            args.sealed_evidence_trust_policy_signature.as_deref(),
+            args.trusted_sealed_evidence_policy_root_fingerprint_hex
+                .as_deref(),
+            args.sealed_evidence_policy_roots.as_deref(),
+            args.required_sealed_evidence_policy_root_id.as_deref(),
+            args.trusted_transcript_key_fingerprint_hex.as_deref(),
+            args.trusted_ledger_key_fingerprint_hex.as_deref(),
+            args.sealed_evidence_signature_suite,
+            args.minimum_sealed_evidence_policy_epoch,
+            args.require_signed_sealed_evidence_trust_policy,
+        )?;
+
+        let mut report = verify_sealed_evidence_bundle_with_selected_suite(
+            bundle_dir,
+            trust.trusted_transcript_key_fingerprint,
+            trust.trusted_ledger_key_fingerprint,
+            args.sealed_evidence_signature_suite,
+        )?;
+        report.trust_policy = trust.trust_policy;
+        println!("sealed evidence bundle verified");
+        println!("profile: {}", report.profile);
+        println!("transcript signature: {}", report.transcript_signature);
+        println!("ledger signature: {}", report.ledger_signature);
+        println!("entries: {}", report.ledger_entries);
+        println!("session: {}", report.session_id);
+        println!(
+            "transcript key fingerprint: {}",
+            report.transcript_public_key_fingerprint_hex
+        );
+        println!(
+            "ledger key fingerprint: {}",
+            report.ledger_public_key_fingerprint_hex
+        );
+        println!(
+            "sealed artifact set blake3: {}",
+            report.artifacts.artifact_set_blake3
+        );
+        if let Some(trust_policy) = &report.trust_policy {
+            println!("trust policy source: {}", trust_policy.source);
+            if let Some(policy_id) = trust_policy.policy_id.as_deref() {
+                println!("trust policy id: {policy_id}");
+            }
+            if let Some(policy_blake3) = trust_policy.policy_blake3.as_deref() {
+                println!("trust policy blake3: {policy_blake3}");
+            }
+            if let Some(policy_root_id) = trust_policy.policy_root_id.as_deref() {
+                println!("policy root id: {policy_root_id}");
+            }
+            if let Some(policy_roots_blake3) = trust_policy.policy_roots_blake3.as_deref() {
+                println!("policy roots blake3: {policy_roots_blake3}");
+            }
+        }
+        if args.write_sealed_evidence_report {
+            let report_path = crate::m1_runtime::write_sealed_evidence_verification_report_dir(
+                bundle_dir, &report,
+            )?;
+            println!("sealed verification report: {}", report_path.display());
+        }
+        return Ok(());
+    }
+
     if let Some(bundle_dir) = args.audit_evidence_report.as_deref() {
         let report =
             crate::m1_runtime::audit_evidence_verification_report_artifacts_dir(bundle_dir)?;
@@ -856,6 +1015,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("session: {}", report.session_id);
         println!(
             "artifact set blake3: {}",
+            report.artifacts.artifact_set_blake3
+        );
+        return Ok(());
+    }
+
+    if let Some(bundle_dir) = args.audit_sealed_evidence_report.as_deref() {
+        let report =
+            crate::m1_runtime::audit_sealed_evidence_verification_report_artifacts_dir(bundle_dir)?;
+        println!("sealed evidence verification report artifact audit passed");
+        println!("profile: {}", report.profile);
+        println!("transcript signature: {}", report.transcript_signature);
+        println!("ledger signature: {}", report.ledger_signature);
+        println!("entries: {}", report.ledger_entries);
+        println!("session: {}", report.session_id);
+        println!(
+            "sealed artifact set blake3: {}",
             report.artifacts.artifact_set_blake3
         );
         return Ok(());
@@ -1276,6 +1451,146 @@ fn parse_evidence_public_key_hex(hex_text: &str) -> Result<Vec<u8>, Box<dyn std:
     Ok(bytes)
 }
 
+fn parse_evidence_key_fingerprint_hex(
+    hex_text: &str,
+) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    let bytes = hex::decode(hex_text)?;
+    let found = bytes.len();
+    let fingerprint: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| format!("evidence key fingerprint must be exactly 32 bytes, found {found}"))?;
+    Ok(fingerprint)
+}
+
+struct ResolvedSealedEvidenceTrust {
+    trusted_transcript_key_fingerprint: [u8; 32],
+    trusted_ledger_key_fingerprint: [u8; 32],
+    trust_policy: Option<crate::m1_runtime::SealedEvidenceTrustPolicyReceipt>,
+}
+
+fn resolve_sealed_evidence_trust_anchors(
+    trust_policy_path: Option<&std::path::Path>,
+    trust_policy_signature_path: Option<&std::path::Path>,
+    trusted_policy_root_fingerprint_hex: Option<&str>,
+    policy_roots_path: Option<&std::path::Path>,
+    required_policy_root_id: Option<&str>,
+    trusted_transcript_key_fingerprint_hex: Option<&str>,
+    trusted_ledger_key_fingerprint_hex: Option<&str>,
+    suite: EvidenceVerifierSuite,
+    minimum_policy_epoch: Option<u64>,
+    require_signed_policy: bool,
+) -> Result<ResolvedSealedEvidenceTrust, Box<dyn std::error::Error>> {
+    if let Some(path) = trust_policy_path {
+        let policy = crate::m1_runtime::read_sealed_evidence_trust_policy_file(path)?;
+        if let Some(minimum_policy_epoch) = minimum_policy_epoch {
+            crate::m1_runtime::require_sealed_evidence_trust_policy_minimum_epoch(
+                &policy,
+                minimum_policy_epoch,
+            )?;
+        }
+        let trust_anchors =
+            crate::m1_runtime::sealed_evidence_trust_policy_anchors(&policy, suite.stable_label())?;
+        let mut trust_policy = crate::m1_runtime::sealed_evidence_trust_policy_receipt_file(
+            path,
+            &policy,
+            suite.stable_label(),
+        )?;
+        if let Some(signature_path) = trust_policy_signature_path {
+            let (trusted_policy_root_fingerprint, root_receipt) = if let Some(roots_path) =
+                policy_roots_path
+            {
+                if trusted_policy_root_fingerprint_hex.is_some() {
+                    return Err("use either --sealed-evidence-policy-roots or --trusted-sealed-evidence-policy-root-fingerprint-hex, not both".into());
+                }
+                let root_receipt =
+                    crate::m1_runtime::sealed_evidence_policy_root_receipt_file_for_signature(
+                        roots_path,
+                        signature_path,
+                        suite.stable_label(),
+                        required_policy_root_id,
+                    )?;
+                let trusted_policy_root_fingerprint = parse_evidence_key_fingerprint_hex(
+                    &root_receipt.policy_root_key_fingerprint_hex,
+                )?;
+                (trusted_policy_root_fingerprint, Some(root_receipt))
+            } else {
+                if required_policy_root_id.is_some() {
+                    return Err("--required-sealed-evidence-policy-root-id requires --sealed-evidence-policy-roots".into());
+                }
+                let root_fingerprint_hex = trusted_policy_root_fingerprint_hex.ok_or(
+                        "--sealed-evidence-trust-policy-signature requires either --sealed-evidence-policy-roots or --trusted-sealed-evidence-policy-root-fingerprint-hex",
+                    )?;
+                (
+                    parse_evidence_key_fingerprint_hex(root_fingerprint_hex)?,
+                    None,
+                )
+            };
+
+            let signature_receipt =
+                verify_sealed_evidence_trust_policy_signature_with_selected_suite(
+                    path,
+                    signature_path,
+                    suite,
+                    trusted_policy_root_fingerprint,
+                )?;
+            crate::m1_runtime::attach_sealed_evidence_trust_policy_signature_receipt(
+                &mut trust_policy,
+                signature_receipt,
+            );
+            if let Some(root_receipt) = root_receipt {
+                crate::m1_runtime::attach_sealed_evidence_policy_root_receipt(
+                    &mut trust_policy,
+                    root_receipt,
+                );
+            }
+        } else if require_signed_policy {
+            return Err("--require-signed-sealed-evidence-trust-policy requires --sealed-evidence-trust-policy-signature".into());
+        } else if trusted_policy_root_fingerprint_hex.is_some() {
+            return Err("--trusted-sealed-evidence-policy-root-fingerprint-hex requires --sealed-evidence-trust-policy-signature".into());
+        } else if policy_roots_path.is_some() {
+            return Err(
+                "--sealed-evidence-policy-roots requires --sealed-evidence-trust-policy-signature"
+                    .into(),
+            );
+        } else if required_policy_root_id.is_some() {
+            return Err(
+                "--required-sealed-evidence-policy-root-id requires --sealed-evidence-policy-roots"
+                    .into(),
+            );
+        }
+        return Ok(ResolvedSealedEvidenceTrust {
+            trusted_transcript_key_fingerprint: trust_anchors.trusted_transcript_key_fingerprint,
+            trusted_ledger_key_fingerprint: trust_anchors.trusted_ledger_key_fingerprint,
+            trust_policy: Some(trust_policy),
+        });
+    }
+
+    if trust_policy_signature_path.is_some()
+        || trusted_policy_root_fingerprint_hex.is_some()
+        || policy_roots_path.is_some()
+        || required_policy_root_id.is_some()
+        || require_signed_policy
+    {
+        return Err(
+            "signed sealed evidence trust policy flags require --sealed-evidence-trust-policy"
+                .into(),
+        );
+    }
+
+    let transcript_fingerprint_hex = trusted_transcript_key_fingerprint_hex
+        .ok_or("--verify-sealed-evidence-bundle requires either --sealed-evidence-trust-policy or --trusted-transcript-key-fingerprint-hex")?;
+    let ledger_fingerprint_hex = trusted_ledger_key_fingerprint_hex
+        .ok_or("--verify-sealed-evidence-bundle requires either --sealed-evidence-trust-policy or --trusted-ledger-key-fingerprint-hex")?;
+
+    Ok(ResolvedSealedEvidenceTrust {
+        trusted_transcript_key_fingerprint: parse_evidence_key_fingerprint_hex(
+            transcript_fingerprint_hex,
+        )?,
+        trusted_ledger_key_fingerprint: parse_evidence_key_fingerprint_hex(ledger_fingerprint_hex)?,
+        trust_policy: None,
+    })
+}
+
 fn parse_ed25519_public_key_bytes(
     bytes: &[u8],
 ) -> Result<ed25519_dalek::VerifyingKey, Box<dyn std::error::Error>> {
@@ -1311,6 +1626,71 @@ fn verify_evidence_bundle_with_selected_suite(
         EvidenceVerifierSuite::MlDsa87Fips204 => {
             verify_ml_dsa_87_evidence_bundle(bundle_dir, public_key)
         }
+    }
+}
+
+fn verify_sealed_evidence_bundle_with_selected_suite(
+    bundle_dir: &std::path::Path,
+    trusted_transcript_key_fingerprint: [u8; 32],
+    trusted_ledger_key_fingerprint: [u8; 32],
+    suite: EvidenceVerifierSuite,
+) -> Result<crate::m1_runtime::SealedEvidenceVerificationReport, Box<dyn std::error::Error>> {
+    validate_sealed_evidence_verifier_suite(suite)?;
+
+    match suite {
+        EvidenceVerifierSuite::Ed25519Rfc8032 => unreachable!(
+            "validate_sealed_evidence_verifier_suite rejects classical sealed full-PQC verification"
+        ),
+        EvidenceVerifierSuite::MlDsa65Fips204 => verify_sealed_ml_dsa_65_evidence_bundle(
+            bundle_dir,
+            trusted_transcript_key_fingerprint,
+            trusted_ledger_key_fingerprint,
+        ),
+        EvidenceVerifierSuite::MlDsa87Fips204 => verify_sealed_ml_dsa_87_evidence_bundle(
+            bundle_dir,
+            trusted_transcript_key_fingerprint,
+            trusted_ledger_key_fingerprint,
+        ),
+    }
+}
+
+fn verify_sealed_evidence_trust_policy_signature_with_selected_suite(
+    policy_path: &std::path::Path,
+    signature_path: &std::path::Path,
+    suite: EvidenceVerifierSuite,
+    trusted_policy_root_fingerprint: [u8; 32],
+) -> Result<crate::m1_runtime::SealedEvidenceTrustPolicySignatureReceipt, Box<dyn std::error::Error>>
+{
+    validate_sealed_evidence_verifier_suite(suite)?;
+
+    match suite {
+        EvidenceVerifierSuite::Ed25519Rfc8032 => unreachable!(
+            "validate_sealed_evidence_verifier_suite rejects classical sealed full-PQC verification"
+        ),
+        EvidenceVerifierSuite::MlDsa65Fips204 => {
+            verify_ml_dsa_65_sealed_evidence_trust_policy_signature(
+                policy_path,
+                signature_path,
+                trusted_policy_root_fingerprint,
+            )
+        }
+        EvidenceVerifierSuite::MlDsa87Fips204 => {
+            verify_ml_dsa_87_sealed_evidence_trust_policy_signature(
+                policy_path,
+                signature_path,
+                trusted_policy_root_fingerprint,
+            )
+        }
+    }
+}
+
+fn validate_sealed_evidence_verifier_suite(
+    suite: EvidenceVerifierSuite,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if suite.is_post_quantum() {
+        Ok(())
+    } else {
+        Err("sealed full-PQC evidence verification requires an ML-DSA verifier suite".into())
     }
 }
 
@@ -1430,6 +1810,116 @@ fn verify_ml_dsa_87_evidence_bundle(
     _public_key: &[u8],
 ) -> Result<crate::m1_runtime::EvidenceVerificationReport, Box<dyn std::error::Error>> {
     Err("--evidence-signature-suite ml-dsa-87-fips204 requires building xenia-peer with feature `pqc-signatures`".into())
+}
+
+#[cfg(feature = "pqc-signatures")]
+fn verify_sealed_ml_dsa_65_evidence_bundle(
+    bundle_dir: &std::path::Path,
+    trusted_transcript_key_fingerprint: [u8; 32],
+    trusted_ledger_key_fingerprint: [u8; 32],
+) -> Result<crate::m1_runtime::SealedEvidenceVerificationReport, Box<dyn std::error::Error>> {
+    let backend = MlDsa65EvidenceSignatureBackend;
+    Ok(
+        crate::m1_runtime::verify_sealed_transcript_bound_evidence_bundle_dir_with_backend(
+            bundle_dir,
+            trusted_transcript_key_fingerprint,
+            trusted_ledger_key_fingerprint,
+            &backend,
+        )?,
+    )
+}
+
+#[cfg(not(feature = "pqc-signatures"))]
+fn verify_sealed_ml_dsa_65_evidence_bundle(
+    _bundle_dir: &std::path::Path,
+    _trusted_transcript_key_fingerprint: [u8; 32],
+    _trusted_ledger_key_fingerprint: [u8; 32],
+) -> Result<crate::m1_runtime::SealedEvidenceVerificationReport, Box<dyn std::error::Error>> {
+    Err("--sealed-evidence-signature-suite ml-dsa-65-fips204 requires building xenia-peer with feature `pqc-signatures`".into())
+}
+
+#[cfg(feature = "pqc-signatures")]
+fn verify_ml_dsa_65_sealed_evidence_trust_policy_signature(
+    policy_path: &std::path::Path,
+    signature_path: &std::path::Path,
+    trusted_policy_root_fingerprint: [u8; 32],
+) -> Result<crate::m1_runtime::SealedEvidenceTrustPolicySignatureReceipt, Box<dyn std::error::Error>>
+{
+    let backend = MlDsa65EvidenceSignatureBackend;
+    Ok(
+        crate::m1_runtime::verify_sealed_evidence_trust_policy_signature_file_with_backend(
+            policy_path,
+            signature_path,
+            EvidenceVerifierSuite::MlDsa65Fips204.stable_label(),
+            trusted_policy_root_fingerprint,
+            &backend,
+        )?,
+    )
+}
+
+#[cfg(not(feature = "pqc-signatures"))]
+fn verify_ml_dsa_65_sealed_evidence_trust_policy_signature(
+    _policy_path: &std::path::Path,
+    _signature_path: &std::path::Path,
+    _trusted_policy_root_fingerprint: [u8; 32],
+) -> Result<crate::m1_runtime::SealedEvidenceTrustPolicySignatureReceipt, Box<dyn std::error::Error>>
+{
+    Err("--sealed-evidence-trust-policy-signature with ml-dsa-65-fips204 requires building xenia-peer with feature `pqc-signatures`".into())
+}
+
+#[cfg(feature = "pqc-signatures")]
+fn verify_sealed_ml_dsa_87_evidence_bundle(
+    bundle_dir: &std::path::Path,
+    trusted_transcript_key_fingerprint: [u8; 32],
+    trusted_ledger_key_fingerprint: [u8; 32],
+) -> Result<crate::m1_runtime::SealedEvidenceVerificationReport, Box<dyn std::error::Error>> {
+    let backend = MlDsa87EvidenceSignatureBackend;
+    Ok(
+        crate::m1_runtime::verify_sealed_transcript_bound_evidence_bundle_dir_with_backend(
+            bundle_dir,
+            trusted_transcript_key_fingerprint,
+            trusted_ledger_key_fingerprint,
+            &backend,
+        )?,
+    )
+}
+
+#[cfg(not(feature = "pqc-signatures"))]
+fn verify_sealed_ml_dsa_87_evidence_bundle(
+    _bundle_dir: &std::path::Path,
+    _trusted_transcript_key_fingerprint: [u8; 32],
+    _trusted_ledger_key_fingerprint: [u8; 32],
+) -> Result<crate::m1_runtime::SealedEvidenceVerificationReport, Box<dyn std::error::Error>> {
+    Err("--sealed-evidence-signature-suite ml-dsa-87-fips204 requires building xenia-peer with feature `pqc-signatures`".into())
+}
+
+#[cfg(feature = "pqc-signatures")]
+fn verify_ml_dsa_87_sealed_evidence_trust_policy_signature(
+    policy_path: &std::path::Path,
+    signature_path: &std::path::Path,
+    trusted_policy_root_fingerprint: [u8; 32],
+) -> Result<crate::m1_runtime::SealedEvidenceTrustPolicySignatureReceipt, Box<dyn std::error::Error>>
+{
+    let backend = MlDsa87EvidenceSignatureBackend;
+    Ok(
+        crate::m1_runtime::verify_sealed_evidence_trust_policy_signature_file_with_backend(
+            policy_path,
+            signature_path,
+            EvidenceVerifierSuite::MlDsa87Fips204.stable_label(),
+            trusted_policy_root_fingerprint,
+            &backend,
+        )?,
+    )
+}
+
+#[cfg(not(feature = "pqc-signatures"))]
+fn verify_ml_dsa_87_sealed_evidence_trust_policy_signature(
+    _policy_path: &std::path::Path,
+    _signature_path: &std::path::Path,
+    _trusted_policy_root_fingerprint: [u8; 32],
+) -> Result<crate::m1_runtime::SealedEvidenceTrustPolicySignatureReceipt, Box<dyn std::error::Error>>
+{
+    Err("--sealed-evidence-trust-policy-signature with ml-dsa-87-fips204 requires building xenia-peer with feature `pqc-signatures`".into())
 }
 
 fn expand_source_id_for_m1(source_id_short: [u8; 8]) -> [u8; 32] {
@@ -1627,6 +2117,27 @@ mod evidence_verifier_preflight_tests {
         assert!(err.contains("reject-classical-signatures"));
 
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn sealed_verifier_rejects_classical_suite() {
+        let err = validate_sealed_evidence_verifier_suite(EvidenceVerifierSuite::Ed25519Rfc8032)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("sealed full-PQC"));
+        assert!(err.contains("ML-DSA"));
+    }
+
+    #[test]
+    fn evidence_key_fingerprint_parser_requires_32_bytes() {
+        let ok = parse_evidence_key_fingerprint_hex(&"ab".repeat(32)).unwrap();
+        assert_eq!(ok, [0xAB; 32]);
+
+        let err = parse_evidence_key_fingerprint_hex(&"ab".repeat(31))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exactly 32 bytes"));
     }
 }
 
