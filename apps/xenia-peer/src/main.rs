@@ -1276,10 +1276,6 @@ fn parse_evidence_public_key_hex(hex_text: &str) -> Result<Vec<u8>, Box<dyn std:
     Ok(bytes)
 }
 
-fn parse_ed25519_public_key_hex(hex_text: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    parse_evidence_public_key_hex(hex_text)
-}
-
 fn parse_ed25519_public_key_bytes(
     bytes: &[u8],
 ) -> Result<ed25519_dalek::VerifyingKey, Box<dyn std::error::Error>> {
