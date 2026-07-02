@@ -32,6 +32,26 @@ PQ_SIGNATURES = {
 }
 CLASSICAL_SIGNATURES = {"ed25519-rfc8032"}
 ALL_SIGNATURES = PQ_SIGNATURES | CLASSICAL_SIGNATURES
+ALLOWED_KEMS = {"ml-kem-768-fips203"}
+ALLOWED_HASH_CHAINS = {"blake3-256"}
+ALLOWED_KDFS = {"hkdf-sha256"}
+ALLOWED_AEADS = {"chacha20-poly1305"}
+
+REQUIRED_VALID_FIXTURES = {
+    "hybrid-pre-pqc-v1.manifest.json",
+    "full-pqc-v1.valid.manifest.json",
+}
+REQUIRED_INVALID_FIXTURES = {
+    "full-pqc-v1.invalid-classical-allowance.manifest.json",
+    "full-pqc-v1.invalid-ed25519.manifest.json",
+    "full-pqc-v1.invalid-unknown-kem.manifest.json",
+    "full-pqc-v1.invalid-unknown-signature.manifest.json",
+    "hybrid-pre-pqc-v1.invalid-pq-ledger.manifest.json",
+    "hybrid-pre-pqc-v1.invalid-pq-transcript.manifest.json",
+    "hybrid-pre-pqc-v1.invalid-reject-classical.manifest.json",
+    "hybrid-pre-pqc-v1.invalid-unknown-profile.manifest.json",
+}
+EXPECTED_FIXTURES = REQUIRED_VALID_FIXTURES | REQUIRED_INVALID_FIXTURES
 
 
 def fail(message: str) -> None:
@@ -49,8 +69,14 @@ def validate_manifest(path: Path) -> None:
 
     if data["schema"] != SCHEMA:
         fail(f"{path}: unsupported schema {data['schema']!r}")
-    if not data["kem"].startswith("ml-kem-"):
-        fail(f"{path}: kem must be ML-KEM for Xenia evidence")
+    if data["kem"] not in ALLOWED_KEMS:
+        fail(f"{path}: unsupported kem {data['kem']!r}")
+    if data["hash_chain"] not in ALLOWED_HASH_CHAINS:
+        fail(f"{path}: unsupported hash_chain {data['hash_chain']!r}")
+    if data["kdf"] not in ALLOWED_KDFS:
+        fail(f"{path}: unsupported kdf {data['kdf']!r}")
+    if data["aead"] not in ALLOWED_AEADS:
+        fail(f"{path}: unsupported aead {data['aead']!r}")
     if data["transcript_signature"] not in ALL_SIGNATURES:
         fail(f"{path}: unknown transcript_signature {data['transcript_signature']!r}")
     if data["ledger_signature"] not in ALL_SIGNATURES:
@@ -62,6 +88,10 @@ def validate_manifest(path: Path) -> None:
     if profile == "hybrid-pre-pqc-v1":
         if downgrade_policy != "explicit-classical-signature-allowance":
             fail(f"{path}: hybrid-pre-pqc-v1 requires explicit classical allowance")
+        if data["transcript_signature"] not in CLASSICAL_SIGNATURES:
+            fail(f"{path}: hybrid-pre-pqc-v1 requires classical transcript signatures")
+        if data["ledger_signature"] not in CLASSICAL_SIGNATURES:
+            fail(f"{path}: hybrid-pre-pqc-v1 requires classical ledger signatures")
         return
 
     if profile == "full-pqc-v1":
@@ -87,6 +117,28 @@ def main() -> int:
     manifests = sorted(fixture_dir.glob("*.manifest.json"))
     if not manifests:
         print(f"no manifest fixtures found in {fixture_dir}", file=sys.stderr)
+        return 1
+
+    fixture_names = {manifest.name for manifest in manifests}
+    missing_valid = sorted(REQUIRED_VALID_FIXTURES - fixture_names)
+    missing_invalid = sorted(REQUIRED_INVALID_FIXTURES - fixture_names)
+    unexpected = sorted(fixture_names - EXPECTED_FIXTURES)
+    if missing_valid or missing_invalid or unexpected:
+        if missing_valid:
+            print(
+                f"missing required valid manifest fixtures: {', '.join(missing_valid)}",
+                file=sys.stderr,
+            )
+        if missing_invalid:
+            print(
+                f"missing required invalid manifest fixtures: {', '.join(missing_invalid)}",
+                file=sys.stderr,
+            )
+        if unexpected:
+            print(
+                f"unexpected unregistered manifest fixtures: {', '.join(unexpected)}",
+                file=sys.stderr,
+            )
         return 1
 
     for manifest in manifests:

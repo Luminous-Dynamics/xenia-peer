@@ -15,6 +15,7 @@ Describe the user-visible or architecture-visible change.
 Paste the relevant output or attach a preflight report:
 
 ```text
+scripts/check-pqc-evidence-boundary.sh .
 scripts/xenia-validate.sh .
 scripts/xenia-preflight-report.sh . /tmp/xenia-preflight-report.md
 ```

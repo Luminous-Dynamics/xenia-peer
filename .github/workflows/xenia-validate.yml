@@ -20,6 +20,12 @@ jobs:
         run: |
           chmod +x scripts/*.sh scripts/*.py || true
           scripts/xenia-validate.sh .
+      - name: Ledger PQC signature feature
+        run: |
+          cargo test -p xenia-ledger --features pqc-signatures --lib --no-fail-fast
+      - name: Peer PQC verifier feature
+        run: |
+          cargo test -p xenia-peer --features pqc-signatures --no-fail-fast
 
 
   nix:

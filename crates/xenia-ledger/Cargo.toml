@@ -19,13 +19,16 @@ bincode = { workspace = true }
 thiserror = "2.0"
 tracing = "0.1"
 uuid = { version = "1", features = ["serde"] }
+ml-dsa = { version = "0.1.1", optional = true, default-features = true }
 
 [dev-dependencies]
 rand = "0.8"
 rand_core = "0.6"
+serde_json = { workspace = true }
 
 [features]
 default = []
-# Enables compilation of PQ-signature integration boundaries. The ML-DSA/SLH-DSA
-# verifier backend remains unsupported until vetted vectors and dependencies land.
-pqc-signatures = []
+# Enables the real ML-DSA evidence-signature verifier backend. This is still
+# release-gated by evidence manifests, fixtures, claim guards, and operator policy;
+# the dependency must receive local review before production enablement.
+pqc-signatures = ["dep:ml-dsa"]
