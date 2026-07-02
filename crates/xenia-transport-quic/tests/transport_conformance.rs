@@ -171,6 +171,8 @@ where
         video_format: PixelFormat::Passthrough,
         telemetry_enabled: true,
         input_control_enabled: false,
+        lane_envelope_version: xenia_peer_core::frame::LANE_ENVELOPE_SCHEMA_VERSION,
+        lane_envelope_magic: xenia_peer_core::frame::LANE_ENVELOPE_MAGIC,
     };
     let frame = capabilities.clone().into_frame().unwrap();
     let envelope = host.seal_control_frame(&frame).unwrap();
