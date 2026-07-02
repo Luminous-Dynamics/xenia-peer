@@ -62,14 +62,18 @@ pub mod transport;
 pub use frame::OpusAudioCodec;
 pub use frame::{
     AudioCodec, AudioCodecError, AudioJitterBuffer, AudioSampleFormat, JitterInsert, JitterStats,
-    PixelFormat, RawAudio, RawCapabilities, RawFrame, RawInput, RawPcmAudioCodec, RawTelemetry,
-    SyntheticAudioKind, SyntheticAudioSource, TelemetrySample, TelemetryValue,
+    PixelFormat, RawAudio, RawCapabilities, RawFrame, RawInput, RawPcmAudioCodec, RawRekey,
+    RawTelemetry, SyntheticAudioKind, SyntheticAudioSource, TelemetrySample, TelemetryValue,
 };
+pub use handshake::{RekeyPolicy, SessionEpochState};
 pub use m1_session::{
     M1AuditEvent, M1Permission, M1SessionError, M1SessionMachine, M1SessionState,
 };
-pub use session::{Session, SessionError, SessionRole};
-pub use xenia_handshake::HandshakeManager;
+pub use session::{FrameLane, LaneSession, Session, SessionError, SessionRole};
+pub use xenia_handshake::{
+    HandshakeManager, RekeyEpochContextV1, RekeyReason, derive_negotiated_context_key,
+    derive_rekey_epoch_keys,
+};
 
 /// Semantic-version string for the xenia-wire crate this server
 /// binds against. Exposed so the transport layer can log it on

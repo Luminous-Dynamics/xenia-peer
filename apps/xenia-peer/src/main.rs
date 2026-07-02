@@ -16,21 +16,24 @@ use xenia_capture::{
     FrameData as CaptureFrameData, ScreenCapture, SysinfoTelemetryStream, TelemetryStream,
     TestCapture,
 };
-use xenia_handshake::HandshakeManager;
+use xenia_handshake::{HandshakeManager, derive_negotiated_context_key};
 use xenia_ledger::{Chain, LedgerEntry};
 #[cfg(feature = "audio-opus")]
 use xenia_peer_core::OpusAudioCodec;
 #[cfg(any(feature = "audio-capture", test))]
 use xenia_peer_core::frame::audio_flags;
 use xenia_peer_core::{
-    AudioCodec, RawPcmAudioCodec, Session, SessionRole,
+    AudioCodec, LaneSession, RawPcmAudioCodec, RekeyPolicy, SessionEpochState,
     advertisement::{AdvertisedAudioCodec, AudioAdvertisement, TransportAdvertisement},
     frame::{
-        PixelFormat as FramePixelFormat, RawAudio, RawFrame, RawTelemetry, SyntheticAudioKind,
-        SyntheticAudioSource, TelemetrySample as WireTelemetrySample,
+        PixelFormat as FramePixelFormat, RawAudio, RawFrame, RawRekey, RawTelemetry,
+        SyntheticAudioKind, SyntheticAudioSource, TelemetrySample as WireTelemetrySample,
         TelemetryValue as WireTelemetryValue,
     },
-    handshake::perform_host_handshake_with_transcript,
+    handshake::{
+        NegotiatedTransport, negotiated_session_context_hash,
+        perform_host_handshake_with_transcript_and_context,
+    },
     transport::{TcpTransport, Transport},
 };
 use xenia_transport_quic::{QuicTransport, bind_xenia_endpoint, encode_endpoint_addr};
@@ -99,6 +102,20 @@ struct Args {
 
     #[arg(long, default_value_t = 20)]
     audio_interval_ms: u64,
+
+    /// Rekey after this many video frames in the current epoch. 0 disables
+    /// frame-count rekeying.
+    #[arg(long, default_value_t = 4)]
+    rekey_frames: u64,
+
+    /// Rekey after this many sealed bytes in the current epoch. 0 disables
+    /// byte-count rekeying.
+    #[arg(long, default_value_t = 0)]
+    rekey_bytes: u64,
+
+    /// Disable automatic post-handshake rekeys after the initial epoch-1 rekey.
+    #[arg(long)]
+    rekey_disabled: bool,
 
     /// Run a deterministic M1 runtime smoke check and exit.
     #[arg(long)]
@@ -226,6 +243,14 @@ impl Transport for AnyTransport {
 }
 
 impl AnyTransport {
+    fn negotiated_transport(&self) -> NegotiatedTransport {
+        match self {
+            AnyTransport::Tcp(_) => NegotiatedTransport::Tcp,
+            AnyTransport::Ws(_) => NegotiatedTransport::WebSocket,
+            AnyTransport::Quic { .. } => NegotiatedTransport::Quic,
+        }
+    }
+
     async fn close(&mut self) -> Result<(), xenia_peer_core::transport::TransportError> {
         if let AnyTransport::Quic {
             _endpoint,
@@ -472,6 +497,8 @@ fn session_capabilities_frame(
         video_format,
         telemetry_enabled: telemetry_level != TelemetryLevel::Off,
         input_control_enabled: false,
+        lane_envelope_version: xenia_peer_core::frame::LANE_ENVELOPE_SCHEMA_VERSION,
+        lane_envelope_magic: xenia_peer_core::frame::LANE_ENVELOPE_MAGIC,
     }
     .into_frame()
     .map_err(Into::into)
@@ -482,6 +509,53 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_millis() as u64
+}
+
+async fn perform_rekey(
+    transport: &mut AnyTransport,
+    session: &mut LaneSession,
+    epoch_state: &mut SessionEpochState,
+    schedule: &xenia_handshake::SessionKeySchedule,
+    context: xenia_handshake::RekeyEpochContextV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let epoch_hash = context.epoch_hash()?;
+    let proposal = RawRekey::Proposal {
+        key_epoch: context.key_epoch,
+        base_transcript_hash: context.base_transcript_hash,
+        previous_epoch_hash: context.previous_epoch_hash,
+        reason: context.reason,
+        epoch_hash,
+    }
+    .into_frame(session.next_frame_id(), now_ms())?;
+    let envelope = session.seal_control_frame(&proposal)?;
+    transport.send_envelope(&envelope).await?;
+
+    let frames_before_rekey = epoch_state.frames_in_epoch();
+    let bytes_before_rekey = epoch_state.bytes_in_epoch();
+    let audio_frames_before_rekey = epoch_state.audio_frames_in_epoch();
+    let keys = epoch_state.derive_and_install(schedule, &context)?;
+    session.install_rekey_keys(&keys);
+
+    let ack_envelope = transport.recv_envelope().await?;
+    let ack_frame = session.open_frame(&ack_envelope)?;
+    match RawRekey::from_frame(&ack_frame)? {
+        RawRekey::Ack {
+            key_epoch,
+            epoch_hash: ack_epoch_hash,
+        } if key_epoch == epoch_state.current_epoch() && ack_epoch_hash == epoch_hash => {
+            info!(
+                key_epoch,
+                reason = ?context.reason,
+                frames_before_rekey,
+                bytes_before_rekey,
+                audio_frames_before_rekey,
+                epoch_hash = ?epoch_hash,
+                "session rekey acknowledged"
+            );
+            Ok(())
+        }
+        other => Err(format!("unexpected rekey ack: {other:?}").into()),
+    }
 }
 
 fn telemetry_value_to_wire(value: xenia_capture::TelemetryValue) -> WireTelemetryValue {
@@ -827,11 +901,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut transport = accept_transport(&args, audio_advertisement.clone()).await?;
+    let negotiated_transport = transport.negotiated_transport();
+    let mut session = LaneSession::with_fixture(source_id, args.epoch);
+    let frame_format = codec_to_frame_format(args.codec);
+    let capabilities = session_capabilities_frame(
+        session.next_frame_id(),
+        audio_advertisement.clone(),
+        frame_format,
+        args.telemetry_level,
+    )?;
+    let negotiated_context_hash = negotiated_session_context_hash(
+        negotiated_transport,
+        xenia_peer_core::RawCapabilities::from_frame(&capabilities)?,
+    )?;
 
     let mut mgr = HandshakeManager::new();
-    let handshake =
-        perform_host_handshake_with_transcript(&mut transport, &mut mgr, "viewer").await?;
-    let session_key = handshake.session_key;
+    let handshake = perform_host_handshake_with_transcript_and_context(
+        &mut transport,
+        &mut mgr,
+        "viewer",
+        Some(negotiated_context_hash),
+    )
+    .await?;
     info!("Handshake successful, session key established and transcript hash computed");
 
     // Consent Ceremony: Simple CLI prompt
@@ -874,18 +965,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let mut session = Session::with_fixture(SessionRole::Host, source_id, args.epoch);
-    session.install_key(session_key);
-    let frame_format = codec_to_frame_format(args.codec);
-    let capabilities = session_capabilities_frame(
-        session.next_frame_id(),
-        audio_advertisement.clone(),
-        frame_format,
-        args.telemetry_level,
-    )?;
+    session.install_schedule(&handshake.key_schedule);
+    let _negotiated_context_key =
+        derive_negotiated_context_key(&handshake.key_schedule, &negotiated_context_hash);
+    info!(
+        transport = ?negotiated_transport,
+        context_hash = ?negotiated_context_hash,
+        "negotiated session context bound"
+    );
     let envelope = session.seal_control_frame(&capabilities)?;
     transport.send_envelope(&envelope).await?;
     info!("sealed session capabilities sent");
+
+    let rekey_policy = if args.rekey_disabled {
+        RekeyPolicy::from_limits(0, 0)
+    } else {
+        RekeyPolicy::from_limits(args.rekey_frames, args.rekey_bytes)
+    };
+    let mut epoch_state = SessionEpochState::new(handshake.transcript_hash, rekey_policy);
+    let initial_rekey = epoch_state.next_rekey_context(xenia_peer_core::RekeyReason::FrameCount);
+    perform_rekey(
+        &mut transport,
+        &mut session,
+        &mut epoch_state,
+        &handshake.key_schedule,
+        initial_rekey,
+    )
+    .await?;
 
     let m1_signing_key = SigningKey::from_bytes(&[0x41u8; 32]);
     let m1_scope = m1_consent_scope(args.telemetry_level, args.audio);
@@ -982,6 +1088,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let envelope = session.seal_frame(&audio_frame)?;
                 m1_runtime.allow_frame_flow()?;
                 transport.send_envelope(&envelope).await?;
+                epoch_state.record_audio_frame(envelope.len());
                 sent_audio += 1;
                 last_audio_sent = std::time::Instant::now();
                 if sent_audio <= 3 || sent_audio.is_multiple_of(50) {
@@ -1027,12 +1134,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let envelope = session.seal_frame(&raw)?;
             m1_runtime.allow_frame_flow()?;
             transport.send_envelope(&envelope).await?;
+            epoch_state.record_video_frame(envelope.len());
             sent_frames += 1;
             if sent_frames <= 3 || sent_frames.is_multiple_of(10) {
                 info!(
                     sent = sent_frames,
                     frame_id, "frame encoded, sealed, and sent"
                 );
+            }
+            if let Some(rekey_context) = epoch_state.next_rekey_due() {
+                perform_rekey(
+                    &mut transport,
+                    &mut session,
+                    &mut epoch_state,
+                    &handshake.key_schedule,
+                    rekey_context,
+                )
+                .await?;
             }
             if args.frames != 0 && sent_frames >= args.frames {
                 break;

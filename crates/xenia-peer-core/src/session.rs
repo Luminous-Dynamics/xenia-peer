@@ -13,9 +13,12 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
+use xenia_handshake::{RekeyEpochKeys, SessionKeySchedule};
 use xenia_wire::{Session as WireSession, WireError, open_frame, open_input};
 
-use crate::frame::{RawFrame, RawInput};
+use crate::frame::{LANE_ENVELOPE_MAGIC, RawFrame, RawInput};
+
+const LANE_ENVELOPE_HEADER_LEN: usize = 5;
 
 /// Role played by a session instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +31,51 @@ pub enum SessionRole {
     Viewer,
 }
 
+/// Forward-path lane used to select the AEAD key for a [`RawFrame`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameLane {
+    /// Session setup/control metadata such as capabilities and rekey.
+    Control,
+    /// Video/captured display frames.
+    Video,
+    /// Audio timing/media frames.
+    Audio,
+    /// System telemetry frames.
+    Telemetry,
+}
+
+impl FrameLane {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::Control => 0,
+            Self::Video => 1,
+            Self::Audio => 2,
+            Self::Telemetry => 3,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Result<Self, WireError> {
+        match tag {
+            0 => Ok(Self::Control),
+            1 => Ok(Self::Video),
+            2 => Ok(Self::Audio),
+            3 => Ok(Self::Telemetry),
+            _ => Err(WireError::decode("unknown lane envelope tag")),
+        }
+    }
+
+    fn for_frame(frame: &RawFrame) -> Self {
+        match frame.pixel_format {
+            crate::frame::PixelFormat::Capabilities | crate::frame::PixelFormat::Rekey => {
+                Self::Control
+            }
+            crate::frame::PixelFormat::Audio => Self::Audio,
+            crate::frame::PixelFormat::Telemetry => Self::Telemetry,
+            _ => Self::Video,
+        }
+    }
+}
+
 /// Session errors surfaced from the host-side wrapper.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -35,6 +83,180 @@ pub enum SessionError {
     /// Underlying `xenia-wire` operation failed.
     #[error("xenia-wire: {0}")]
     Wire(#[from] WireError),
+}
+
+/// Lane-separated forward-path session.
+///
+/// `xenia-wire` currently exposes one traffic key per [`WireSession`]. This
+/// wrapper composes four wire sessions so Xenia can use the transcript-derived
+/// control/video/audio/telemetry keys independently while keeping the existing
+/// sealed-envelope transport unchanged.
+pub struct LaneSession {
+    control: WireSession,
+    video: WireSession,
+    audio: WireSession,
+    telemetry: WireSession,
+    next_frame_id: u64,
+    last_frame_sent_ms: u64,
+}
+
+impl LaneSession {
+    /// Construct a lane-separated session with deterministic source metadata.
+    pub fn with_fixture(source_id: [u8; 8], epoch: u8) -> Self {
+        Self {
+            control: WireSession::with_source_id(source_id, epoch),
+            video: WireSession::with_source_id(source_id, epoch),
+            audio: WireSession::with_source_id(source_id, epoch),
+            telemetry: WireSession::with_source_id(source_id, epoch),
+            next_frame_id: 0,
+            last_frame_sent_ms: 0,
+        }
+    }
+
+    /// Install initial transcript-derived lane keys.
+    pub fn install_schedule(&mut self, schedule: &SessionKeySchedule) {
+        self.control.install_key(schedule.control);
+        self.video.install_key(schedule.video);
+        self.audio.install_key(schedule.audio);
+        self.telemetry.install_key(schedule.telemetry);
+    }
+
+    /// Install rekey-epoch lane keys.
+    pub fn install_rekey_keys(&mut self, keys: &RekeyEpochKeys) {
+        self.control.install_key(keys.control);
+        self.video.install_key(keys.video);
+        self.audio.install_key(keys.audio);
+        self.telemetry.install_key(keys.telemetry);
+    }
+
+    /// Advance previous-key grace expiry on every lane.
+    pub fn tick(&mut self) {
+        self.control.tick();
+        self.video.tick();
+        self.audio.tick();
+        self.telemetry.tick();
+    }
+
+    /// Allocate the next outbound frame ID.
+    pub fn next_frame_id(&mut self) -> u64 {
+        let id = self.next_frame_id;
+        self.next_frame_id = self.next_frame_id.wrapping_add(1);
+        id
+    }
+
+    /// Return telemetry: time since last frame was sent (in ms).
+    pub fn last_frame_latency_ms(&self) -> u64 {
+        now_ms().saturating_sub(self.last_frame_sent_ms)
+    }
+
+    /// Seal a captured raw-RGBA frame on the video lane.
+    pub fn seal_captured_rgba(
+        &mut self,
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+    ) -> Result<Vec<u8>, SessionError> {
+        let now = now_ms();
+        let frame = RawFrame::rgba8(self.next_frame_id(), now, width, height, pixels);
+        self.last_frame_sent_ms = now;
+        self.seal_frame(&frame)
+    }
+
+    /// Seal a frame on its semantic lane.
+    pub fn seal_frame(&mut self, frame: &RawFrame) -> Result<Vec<u8>, SessionError> {
+        let lane = FrameLane::for_frame(frame);
+        let wire = self.lane_mut(lane);
+        let sealed = xenia_wire::seal_frame(&frame_as_wire(frame)?, wire)?;
+        Ok(wrap_lane_envelope(lane, sealed))
+    }
+
+    /// Seal a session-control metadata frame on the control lane.
+    pub fn seal_control_frame(&mut self, frame: &RawFrame) -> Result<Vec<u8>, SessionError> {
+        if FrameLane::for_frame(frame) != FrameLane::Control {
+            return Err(SessionError::Wire(WireError::decode(
+                "control frame must use a session-control pixel format",
+            )));
+        }
+        self.seal_frame(frame)
+    }
+
+    /// Open a sealed envelope using explicit lane metadata.
+    ///
+    /// Unwrapped envelopes are still accepted by trying the bounded lane set as
+    /// a compatibility path for older local tests and pre-lane peers.
+    pub fn open_frame(&mut self, envelope: &[u8]) -> Result<RawFrame, SessionError> {
+        self.tick();
+        if let Some((lane, sealed)) = unwrap_lane_envelope(envelope)? {
+            return self.open_frame_on_lane(sealed, lane);
+        }
+        let lanes = [
+            FrameLane::Control,
+            FrameLane::Audio,
+            FrameLane::Telemetry,
+            FrameLane::Video,
+        ];
+        let mut last_error = WireError::OpenFailed;
+        for lane in lanes {
+            match self.open_frame_on_lane(envelope, lane) {
+                Ok(frame) => return Ok(frame),
+                Err(SessionError::Wire(err)) => {
+                    last_error = err;
+                }
+            }
+        }
+        Err(SessionError::Wire(last_error))
+    }
+
+    fn open_frame_on_lane(
+        &mut self,
+        envelope: &[u8],
+        lane: FrameLane,
+    ) -> Result<RawFrame, SessionError> {
+        let opened = {
+            let wire = self.lane_mut(lane);
+            open_frame(envelope, wire)
+        }?;
+        let frame = frame_from_wire(&opened)?;
+        if FrameLane::for_frame(&frame) != lane {
+            return Err(SessionError::Wire(WireError::decode(
+                "frame opened on an unexpected lane",
+            )));
+        }
+        if !frame.validate() {
+            return Err(SessionError::Wire(WireError::decode(
+                "RawFrame buffer does not match declared dimensions",
+            )));
+        }
+        Ok(frame)
+    }
+
+    fn lane_mut(&mut self, lane: FrameLane) -> &mut WireSession {
+        match lane {
+            FrameLane::Control => &mut self.control,
+            FrameLane::Video => &mut self.video,
+            FrameLane::Audio => &mut self.audio,
+            FrameLane::Telemetry => &mut self.telemetry,
+        }
+    }
+}
+
+fn wrap_lane_envelope(lane: FrameLane, sealed: Vec<u8>) -> Vec<u8> {
+    let mut envelope = Vec::with_capacity(LANE_ENVELOPE_HEADER_LEN + sealed.len());
+    envelope.extend_from_slice(&LANE_ENVELOPE_MAGIC);
+    envelope.push(lane.tag());
+    envelope.extend_from_slice(&sealed);
+    envelope
+}
+
+fn unwrap_lane_envelope(envelope: &[u8]) -> Result<Option<(FrameLane, &[u8])>, SessionError> {
+    if envelope.len() < LANE_ENVELOPE_HEADER_LEN {
+        return Ok(None);
+    }
+    if envelope[..LANE_ENVELOPE_MAGIC.len()] != LANE_ENVELOPE_MAGIC {
+        return Ok(None);
+    }
+    let lane = FrameLane::from_tag(envelope[LANE_ENVELOPE_MAGIC.len()])?;
+    Ok(Some((lane, &envelope[LANE_ENVELOPE_HEADER_LEN..])))
 }
 
 /// A host or viewer session.
@@ -226,10 +448,13 @@ impl Session {
     /// Seal a session-control metadata frame on the forward path.
     ///
     /// This is intentionally limited to non-media setup metadata so
-    /// post-handshake capabilities can be exchanged before runtime
+    /// post-handshake capabilities/rekey messages can be exchanged before runtime
     /// consent authorizes capture/audio/video flow.
     pub fn seal_control_frame(&mut self, frame: &RawFrame) -> Result<Vec<u8>, SessionError> {
-        if frame.pixel_format != crate::frame::PixelFormat::Capabilities {
+        if !matches!(
+            frame.pixel_format,
+            crate::frame::PixelFormat::Capabilities | crate::frame::PixelFormat::Rekey
+        ) {
             return Err(SessionError::Wire(WireError::decode(
                 "control frame must use a session-control pixel format",
             )));
@@ -429,6 +654,89 @@ mod tests {
     }
 
     #[test]
+    fn lane_session_separates_audio_and_video_keys() {
+        let mut schedule = xenia_handshake::derive_session_key_schedule(&[0xA5; 32], &[0x5A; 32]);
+        let mut host = LaneSession::with_fixture([0x22; 8], 0xBC);
+        host.install_schedule(&schedule);
+
+        let mut viewer = LaneSession::with_fixture([0x22; 8], 0xBC);
+        viewer.install_schedule(&schedule);
+
+        let video = host.seal_captured_rgba(1, 1, solid_blue(1, 1)).unwrap();
+        assert_eq!(&video[..LANE_ENVELOPE_MAGIC.len()], &LANE_ENVELOPE_MAGIC);
+        assert_eq!(video[LANE_ENVELOPE_MAGIC.len()], FrameLane::Video.tag());
+        assert_eq!(
+            viewer.open_frame(&video).unwrap().pixel_format,
+            crate::frame::PixelFormat::Rgba8
+        );
+
+        schedule.audio[0] ^= 0x01;
+        let mut wrong_audio_viewer = LaneSession::with_fixture([0x22; 8], 0xBC);
+        wrong_audio_viewer.install_schedule(&schedule);
+
+        let mut source =
+            crate::frame::SyntheticAudioSource::new(1, crate::frame::SyntheticAudioKind::Sine);
+        let audio = source.next_frame(1_700_000_000_700);
+        let audio_frame = audio.into_frame(host.next_frame_id()).unwrap();
+        let sealed_audio = host.seal_frame(&audio_frame).unwrap();
+        assert_eq!(
+            sealed_audio[LANE_ENVELOPE_MAGIC.len()],
+            FrameLane::Audio.tag()
+        );
+
+        assert!(wrong_audio_viewer.open_frame(&sealed_audio).is_err());
+        assert_eq!(
+            viewer.open_frame(&sealed_audio).unwrap().pixel_format,
+            crate::frame::PixelFormat::Audio
+        );
+    }
+
+    #[test]
+    fn lane_session_rejects_tampered_lane_tag() {
+        let schedule = xenia_handshake::derive_session_key_schedule(&[0xA5; 32], &[0x5A; 32]);
+        let mut host = LaneSession::with_fixture([0x33; 8], 0xCD);
+        host.install_schedule(&schedule);
+        let mut viewer = LaneSession::with_fixture([0x33; 8], 0xCD);
+        viewer.install_schedule(&schedule);
+
+        let mut source =
+            crate::frame::SyntheticAudioSource::new(1, crate::frame::SyntheticAudioKind::Sine);
+        let audio = source.next_frame(1_700_000_000_700);
+        let audio_frame = audio.into_frame(host.next_frame_id()).unwrap();
+        let mut sealed_audio = host.seal_frame(&audio_frame).unwrap();
+        sealed_audio[LANE_ENVELOPE_MAGIC.len()] = FrameLane::Video.tag();
+
+        assert!(viewer.open_frame(&sealed_audio).is_err());
+    }
+
+    #[test]
+    fn installed_rekey_rejects_old_epoch_envelope_after_grace() {
+        let mut host = Session::with_fixture(SessionRole::Host, [0x11; 8], 0xAB);
+        let mut viewer = Session {
+            role: SessionRole::Viewer,
+            wire: WireSession::with_source_id([0x11; 8], 0xAB)
+                .with_rekey_grace(Duration::from_millis(1)),
+            next_frame_id: 0,
+            next_input_seq: 0,
+            last_frame_sent_ms: 0,
+        };
+        host.install_key(fixture_key());
+        viewer.install_key(fixture_key());
+
+        let old_epoch = host.seal_captured_rgba(1, 1, solid_blue(1, 1)).unwrap();
+
+        let new_key = [0x99; 32];
+        host.install_key(new_key);
+        viewer.install_key(new_key);
+        std::thread::sleep(Duration::from_millis(5));
+        viewer.wire.tick();
+
+        let new_epoch = host.seal_captured_rgba(1, 1, solid_blue(1, 1)).unwrap();
+        assert!(viewer.open_frame(&new_epoch).is_ok());
+        assert!(viewer.open_frame(&old_epoch).is_err());
+    }
+
+    #[test]
     fn capabilities_control_frame_seal_open_roundtrip() {
         let (mut host, mut viewer) = paired();
         let capabilities = crate::frame::RawCapabilities {
@@ -444,6 +752,8 @@ mod tests {
             video_format: crate::frame::PixelFormat::Passthrough,
             telemetry_enabled: true,
             input_control_enabled: false,
+            lane_envelope_version: crate::frame::LANE_ENVELOPE_SCHEMA_VERSION,
+            lane_envelope_magic: crate::frame::LANE_ENVELOPE_MAGIC,
         };
         let frame = capabilities.clone().into_frame().unwrap();
         let sealed = host.seal_control_frame(&frame).unwrap();

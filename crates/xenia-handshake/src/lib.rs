@@ -3,8 +3,9 @@
 //! # xenia-handshake — ML-KEM session establishment
 //!
 //! Combines ML-KEM-768 key encapsulation with classical Ed25519 identity
-//! verification to derive a 32-byte session key suitable for ChaCha20-Poly1305
-//! AEAD sealing of the xenia-wire envelope.
+//! verification to derive a hybrid root key, then derives transcript-bound
+//! session keys suitable for ChaCha20-Poly1305 AEAD sealing of the xenia-wire
+//! envelope.
 //!
 //! This crate is **not at the final PQ profile yet**: Ed25519 remains the
 //! authentication signature. ML-DSA/SLH-DSA transcript authentication is
@@ -28,11 +29,18 @@
 //!   Responder calls `decapsulate()`: recovers shared secret from the
 //!   ciphertext, derives the same session key.
 //!
-//! Phase 3 — Key derivation
-//!   session_key = HKDF-SHA256(
+//! Phase 3 — Root key derivation
+//!   root_key = HKDF-SHA256(
 //!       ikm  = classical_nonce || kem_shared_secret,
 //!       salt = b"xenia-handshake-v1",
 //!       info = b"xenia-session-key",
+//!   )
+//!
+//! Phase 4 — Transcript-bound key schedule
+//!   lane_key = HKDF-SHA256(
+//!       ikm  = root_key,
+//!       salt = b"xenia-session-key-schedule-v1",
+//!       info = lane_label || b":" || canonical_transcript_hash,
 //!   )
 //! ```
 //!
@@ -98,6 +106,30 @@ pub const HANDSHAKE_TRANSCRIPT_SCHEMA: &str = "xenia-handshake-transcript-v1";
 /// Hash algorithm used for canonical handshake transcript hashes.
 pub const HANDSHAKE_TRANSCRIPT_HASH_ALGORITHM: &str = "blake3-256";
 
+/// HKDF-SHA-256 salt for transcript-bound session-lane derivation.
+pub const SESSION_KEY_SCHEDULE_SCHEMA: &str = "xenia-session-key-schedule-v1";
+
+/// Default AEAD key label used by the current xenia-wire session API.
+pub const SESSION_AEAD_KEY_LABEL: &[u8] = b"xenia/session/aead";
+
+/// Control-lane key label reserved for future per-lane sealing.
+pub const SESSION_CONTROL_KEY_LABEL: &[u8] = b"xenia/session/control";
+
+/// Video-lane key label reserved for future per-lane sealing.
+pub const SESSION_VIDEO_KEY_LABEL: &[u8] = b"xenia/session/video";
+
+/// Audio-lane key label reserved for future per-lane sealing.
+pub const SESSION_AUDIO_KEY_LABEL: &[u8] = b"xenia/session/audio";
+
+/// Telemetry-lane key label reserved for future per-lane sealing.
+pub const SESSION_TELEMETRY_KEY_LABEL: &[u8] = b"xenia/session/telemetry";
+
+/// Rekey-lane key label reserved for future rekey authentication.
+pub const SESSION_REKEY_KEY_LABEL: &[u8] = b"xenia/session/rekey";
+
+/// Post-handshake negotiated context key label.
+pub const SESSION_CONTEXT_KEY_LABEL: &[u8] = b"xenia/session/context";
+
 /// Stable evidence-profile summary for the current handshake implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct HandshakeEvidenceProfile {
@@ -125,6 +157,80 @@ pub const CURRENT_HANDSHAKE_EVIDENCE_PROFILE: HandshakeEvidenceProfile = Handsha
     transcript_signature_post_quantum: false,
 };
 
+/// Runtime crypto profile requested for a handshake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HandshakeCryptoProfile {
+    /// Current hybrid/pre-PQC authentication profile.
+    HybridPrePqcV1,
+    /// Future post-quantum transcript-authentication profile. Refused by this implementation.
+    FullPqcV1,
+}
+
+impl HandshakeCryptoProfile {
+    /// Stable manifest label.
+    pub const fn stable_label(self) -> &'static str {
+        match self {
+            Self::HybridPrePqcV1 => "hybrid-pre-pqc-v1",
+            Self::FullPqcV1 => "full-pqc-v1",
+        }
+    }
+}
+
+/// Explicit runtime policy for accepting the current handshake implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandshakeCryptoPolicy {
+    /// Requested crypto profile.
+    pub profile: HandshakeCryptoProfile,
+    /// Whether the policy permits the current classical Ed25519 transcript
+    /// signature suite.
+    pub allow_classical_transcript_signature: bool,
+}
+
+impl HandshakeCryptoPolicy {
+    /// Current stable runtime policy.
+    pub const fn current() -> Self {
+        Self {
+            profile: HandshakeCryptoProfile::HybridPrePqcV1,
+            allow_classical_transcript_signature: true,
+        }
+    }
+
+    /// Strict future policy. This intentionally refuses the current runtime
+    /// until ML-DSA/SLH-DSA transcript signatures land.
+    pub const fn full_pqc() -> Self {
+        Self {
+            profile: HandshakeCryptoProfile::FullPqcV1,
+            allow_classical_transcript_signature: false,
+        }
+    }
+
+    /// Validate this policy against the compiled handshake implementation.
+    pub const fn validate_current_runtime(self) -> std::result::Result<(), HandshakePolicyError> {
+        match self.profile {
+            HandshakeCryptoProfile::HybridPrePqcV1 => {
+                if !self.allow_classical_transcript_signature {
+                    return Err(HandshakePolicyError::ClassicalSignatureNotAllowed);
+                }
+                Ok(())
+            }
+            HandshakeCryptoProfile::FullPqcV1 => {
+                Err(HandshakePolicyError::FullPqcRequiresPostQuantumTranscriptSignature)
+            }
+        }
+    }
+}
+
+/// Handshake policy validation failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum HandshakePolicyError {
+    /// Current runtime still uses Ed25519 transcript signatures.
+    #[error("current handshake uses classical Ed25519 transcript signatures")]
+    ClassicalSignatureNotAllowed,
+    /// The strict post-quantum transcript-authentication profile cannot be enabled until PQ transcript signatures land.
+    #[error("full-pqc-v1 requires post-quantum transcript signatures")]
+    FullPqcRequiresPostQuantumTranscriptSignature,
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Canonical transcript evidence
 // ═══════════════════════════════════════════════════════════════════════════
@@ -146,6 +252,8 @@ pub struct HandshakeTranscriptV1 {
     pub transcript_signature: String,
     /// Key derivation suite label.
     pub kdf: String,
+    /// Optional negotiated session context hash supplied by the runtime.
+    pub negotiated_context_hash: Option<[u8; 32]>,
     /// Host Ed25519 verifying key.
     pub host_ed25519_pk: [u8; 32],
     /// Viewer Ed25519 verifying key.
@@ -176,6 +284,7 @@ impl HandshakeTranscriptV1 {
         viewer_nonce: [u8; 32],
         viewer_signature: impl Into<Vec<u8>>,
         host_signature: impl Into<Vec<u8>>,
+        negotiated_context_hash: Option<[u8; 32]>,
     ) -> Result<Self> {
         let host_kem_pk = host_kem_pk.into();
         let kem_ciphertext = kem_ciphertext.into();
@@ -192,6 +301,7 @@ impl HandshakeTranscriptV1 {
             kem: KEM_SUITE_LABEL.to_string(),
             transcript_signature: TRANSCRIPT_SIGNATURE_SUITE_LABEL.to_string(),
             kdf: KDF_SUITE_LABEL.to_string(),
+            negotiated_context_hash,
             host_ed25519_pk,
             viewer_ed25519_pk,
             host_kem_pk,
@@ -317,6 +427,90 @@ impl std::fmt::Debug for SessionKey {
             .field("established_at", &self.established_at)
             .finish()
     }
+}
+
+/// Transcript-bound keys derived from the hybrid handshake root key.
+///
+/// `aead` is the key installed into the current xenia-wire session API. The
+/// additional lane keys are exposed so future control/audio/video sealing can
+/// move to explicit key separation without changing the handshake transcript.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionKeySchedule {
+    pub aead: [u8; 32],
+    pub control: [u8; 32],
+    pub video: [u8; 32],
+    pub audio: [u8; 32],
+    pub telemetry: [u8; 32],
+    pub rekey: [u8; 32],
+    pub context: [u8; 32],
+}
+
+/// Reason a rekey epoch was created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RekeyReason {
+    /// Operator/admin initiated rekey.
+    Manual,
+    /// Rekey after a frame-count threshold.
+    FrameCount,
+    /// Rekey after a byte-count threshold.
+    ByteCount,
+    /// Rekey after a time threshold.
+    Time,
+    /// Rekey after transport context changed.
+    TransportChange,
+}
+
+/// Canonical context for deriving one rekey epoch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RekeyEpochContextV1 {
+    /// Stable schema label.
+    pub schema: String,
+    /// New epoch number. Epoch 0 is the initial handshake key.
+    pub key_epoch: u64,
+    /// Original canonical handshake transcript hash.
+    pub base_transcript_hash: [u8; 32],
+    /// Previous rekey epoch hash, or base transcript hash for epoch 1.
+    pub previous_epoch_hash: [u8; 32],
+    /// Rekey trigger reason.
+    pub reason: RekeyReason,
+}
+
+impl RekeyEpochContextV1 {
+    /// Build a canonical rekey context.
+    pub fn new(
+        key_epoch: u64,
+        base_transcript_hash: [u8; 32],
+        previous_epoch_hash: [u8; 32],
+        reason: RekeyReason,
+    ) -> Self {
+        Self {
+            schema: "xenia-rekey-epoch-context-v1".to_string(),
+            key_epoch,
+            base_transcript_hash,
+            previous_epoch_hash,
+            reason,
+        }
+    }
+
+    /// Return canonical bincode-v1 bytes.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
+        Ok(bincode::serialize(self)?)
+    }
+
+    /// Return BLAKE3-256 hash over canonical context bytes.
+    pub fn epoch_hash(&self) -> Result<[u8; 32]> {
+        Ok(*blake3::hash(&self.canonical_bytes()?).as_bytes())
+    }
+}
+
+/// Transcript-bound keys for one rekey epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RekeyEpochKeys {
+    pub aead: [u8; 32],
+    pub control: [u8; 32],
+    pub video: [u8; 32],
+    pub audio: [u8; 32],
+    pub telemetry: [u8; 32],
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -564,6 +758,84 @@ pub fn hkdf_derive(classical_nonce: &[u8], kem_shared_secret: &[u8]) -> [u8; 32]
     okm
 }
 
+/// Derive transcript-bound session keys from a hybrid root key.
+///
+/// The transcript hash binds the installed traffic key to the actual public
+/// handshake artifacts and suite labels. This prevents a valid KEM result from
+/// being replayed under a different public transcript or downgraded suite
+/// context without changing the final AEAD key.
+pub fn derive_session_key_schedule(
+    root_key: &[u8; 32],
+    transcript_hash: &[u8; 32],
+) -> SessionKeySchedule {
+    SessionKeySchedule {
+        aead: derive_labeled_session_key(root_key, transcript_hash, SESSION_AEAD_KEY_LABEL),
+        control: derive_labeled_session_key(root_key, transcript_hash, SESSION_CONTROL_KEY_LABEL),
+        video: derive_labeled_session_key(root_key, transcript_hash, SESSION_VIDEO_KEY_LABEL),
+        audio: derive_labeled_session_key(root_key, transcript_hash, SESSION_AUDIO_KEY_LABEL),
+        telemetry: derive_labeled_session_key(
+            root_key,
+            transcript_hash,
+            SESSION_TELEMETRY_KEY_LABEL,
+        ),
+        rekey: derive_labeled_session_key(root_key, transcript_hash, SESSION_REKEY_KEY_LABEL),
+        context: derive_labeled_session_key(root_key, transcript_hash, SESSION_CONTEXT_KEY_LABEL),
+    }
+}
+
+/// Derive a key that binds the transcript-bound session schedule to negotiated
+/// post-handshake context such as selected transport and capabilities.
+pub fn derive_negotiated_context_key(
+    schedule: &SessionKeySchedule,
+    context_hash: &[u8; 32],
+) -> [u8; 32] {
+    derive_labeled_session_key(
+        &schedule.context,
+        context_hash,
+        b"xenia/session/context-binding",
+    )
+}
+
+/// Derive lane keys for a rekey epoch from the transcript-bound rekey lane.
+pub fn derive_rekey_epoch_keys(
+    schedule: &SessionKeySchedule,
+    context: &RekeyEpochContextV1,
+) -> Result<RekeyEpochKeys> {
+    let context_hash = context.epoch_hash()?;
+    Ok(RekeyEpochKeys {
+        aead: derive_labeled_session_key(&schedule.rekey, &context_hash, b"xenia/rekey/aead"),
+        control: derive_labeled_session_key(&schedule.rekey, &context_hash, b"xenia/rekey/control"),
+        video: derive_labeled_session_key(&schedule.rekey, &context_hash, b"xenia/rekey/video"),
+        audio: derive_labeled_session_key(&schedule.rekey, &context_hash, b"xenia/rekey/audio"),
+        telemetry: derive_labeled_session_key(
+            &schedule.rekey,
+            &context_hash,
+            b"xenia/rekey/telemetry",
+        ),
+    })
+}
+
+fn derive_labeled_session_key(
+    root_key: &[u8; 32],
+    transcript_hash: &[u8; 32],
+    label: &[u8],
+) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(Some(SESSION_KEY_SCHEDULE_SCHEMA.as_bytes()), root_key);
+    let mut info = Vec::with_capacity(label.len() + 1 + transcript_hash.len());
+    info.extend_from_slice(label);
+    info.extend_from_slice(b":");
+    info.extend_from_slice(transcript_hash);
+
+    let mut okm = [0u8; 32];
+    if hk.expand(&info, &mut okm).is_err() {
+        debug_assert!(
+            false,
+            "HKDF-SHA256 32-byte expand failed for labeled session key"
+        );
+    }
+    okm
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════
@@ -596,6 +868,34 @@ mod tests {
     }
 
     #[test]
+    fn current_handshake_policy_accepts_current_runtime() {
+        assert_eq!(
+            HandshakeCryptoPolicy::current().validate_current_runtime(),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn full_pqc_policy_refuses_current_classical_transcript_signature() {
+        assert_eq!(
+            HandshakeCryptoPolicy::full_pqc().validate_current_runtime(),
+            Err(HandshakePolicyError::FullPqcRequiresPostQuantumTranscriptSignature)
+        );
+    }
+
+    #[test]
+    fn hybrid_policy_can_refuse_classical_signature_downgrade() {
+        let policy = HandshakeCryptoPolicy {
+            profile: HandshakeCryptoProfile::HybridPrePqcV1,
+            allow_classical_transcript_signature: false,
+        };
+        assert_eq!(
+            policy.validate_current_runtime(),
+            Err(HandshakePolicyError::ClassicalSignatureNotAllowed)
+        );
+    }
+
+    #[test]
     fn canonical_transcript_hash_is_stable_and_sensitive() {
         let transcript = HandshakeTranscriptV1::new(
             [0xA1; 32],
@@ -606,6 +906,7 @@ mod tests {
             [0xF6; 32],
             vec![0x11; 64],
             vec![0x22; 64],
+            None,
         )
         .unwrap();
 
@@ -630,6 +931,7 @@ mod tests {
             [0xF6; 32],
             vec![0x11; 64],
             vec![0x22; 64],
+            None,
         )
         .unwrap_err();
 
@@ -803,6 +1105,78 @@ mod tests {
         let k3 = hkdf_derive(&n, &[0xCDu8; 32]);
         let k4 = hkdf_derive(&n, &[0xCEu8; 32]);
         assert_ne!(k3, k4);
+    }
+
+    #[test]
+    fn session_key_schedule_is_deterministic() {
+        let root = [0xA5u8; 32];
+        let transcript_hash = [0x5Au8; 32];
+
+        let first = derive_session_key_schedule(&root, &transcript_hash);
+        let second = derive_session_key_schedule(&root, &transcript_hash);
+
+        assert_eq!(first, second);
+        assert_ne!(first.aead, [0u8; 32]);
+    }
+
+    #[test]
+    fn session_key_schedule_separates_lanes() {
+        let root = [0xA5u8; 32];
+        let transcript_hash = [0x5Au8; 32];
+        let schedule = derive_session_key_schedule(&root, &transcript_hash);
+
+        assert_ne!(schedule.aead, schedule.control);
+        assert_ne!(schedule.aead, schedule.video);
+        assert_ne!(schedule.aead, schedule.audio);
+        assert_ne!(schedule.aead, schedule.telemetry);
+        assert_ne!(schedule.aead, schedule.rekey);
+        assert_ne!(schedule.aead, schedule.context);
+    }
+
+    #[test]
+    fn session_key_schedule_binds_transcript_hash() {
+        let root = [0xA5u8; 32];
+        let first_hash = [0x5Au8; 32];
+        let mut second_hash = first_hash;
+        second_hash[0] ^= 0x01;
+
+        let first = derive_session_key_schedule(&root, &first_hash);
+        let second = derive_session_key_schedule(&root, &second_hash);
+
+        assert_ne!(first.aead, second.aead);
+        assert_ne!(first.audio, second.audio);
+        assert_ne!(first.control, second.control);
+    }
+
+    #[test]
+    fn negotiated_context_key_binds_context_hash() {
+        let root = [0xA5u8; 32];
+        let transcript_hash = [0x5Au8; 32];
+        let schedule = derive_session_key_schedule(&root, &transcript_hash);
+        let first = derive_negotiated_context_key(&schedule, &[0x11; 32]);
+        let second = derive_negotiated_context_key(&schedule, &[0x12; 32]);
+
+        assert_ne!(first, second);
+        assert_ne!(first, schedule.context);
+        assert_ne!(first, [0u8; 32]);
+    }
+
+    #[test]
+    fn rekey_epoch_keys_are_deterministic_and_epoch_bound() {
+        let schedule = derive_session_key_schedule(&[0xA5; 32], &[0x5A; 32]);
+        let epoch1 = RekeyEpochContextV1::new(1, [0x11; 32], [0x11; 32], RekeyReason::FrameCount);
+        let epoch1_again =
+            RekeyEpochContextV1::new(1, [0x11; 32], [0x11; 32], RekeyReason::FrameCount);
+        let epoch2 = RekeyEpochContextV1::new(2, [0x11; 32], [0x22; 32], RekeyReason::FrameCount);
+
+        let keys1 = derive_rekey_epoch_keys(&schedule, &epoch1).unwrap();
+        let keys1_again = derive_rekey_epoch_keys(&schedule, &epoch1_again).unwrap();
+        let keys2 = derive_rekey_epoch_keys(&schedule, &epoch2).unwrap();
+
+        assert_eq!(keys1, keys1_again);
+        assert_ne!(keys1.aead, keys2.aead);
+        assert_ne!(keys1.aead, schedule.aead);
+        assert_ne!(keys1.aead, keys1.audio);
     }
 
     #[test]

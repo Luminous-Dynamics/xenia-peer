@@ -32,12 +32,15 @@ use xenia_peer_core::advertisement::{
     AdvertisedAudioCodec, AdvertisedTransport, TransportAdvertisement,
 };
 use xenia_peer_core::frame::{
-    PixelFormat as FramePixelFormat, RawAudio, RawCapabilities, RawTelemetry, audio_flags,
+    PixelFormat as FramePixelFormat, RawAudio, RawCapabilities, RawRekey, RawTelemetry, audio_flags,
 };
-use xenia_peer_core::handshake::perform_viewer_handshake;
+use xenia_peer_core::handshake::{
+    NegotiatedTransport, negotiated_session_context_hash, perform_viewer_handshake_with_transcript,
+};
 use xenia_peer_core::transport::{TcpTransport, Transport, TransportError};
 use xenia_peer_core::{
-    AudioCodec, AudioJitterBuffer, HandshakeManager, RawPcmAudioCodec, Session, SessionRole,
+    AudioCodec, AudioJitterBuffer, HandshakeManager, LaneSession, RawPcmAudioCodec, RekeyPolicy,
+    SessionEpochState, derive_negotiated_context_key,
 };
 use xenia_transport_quic::{QuicTransport, bind_xenia_endpoint, decode_endpoint_addr};
 use xenia_transport_ws::WsTransport;
@@ -101,6 +104,14 @@ impl Transport for AnyTransport {
 }
 
 impl AnyTransport {
+    fn negotiated_transport(&self) -> NegotiatedTransport {
+        match self {
+            AnyTransport::Tcp(_) | AnyTransport::PreloadedTcp { .. } => NegotiatedTransport::Tcp,
+            AnyTransport::Ws(_) => NegotiatedTransport::WebSocket,
+            AnyTransport::Quic { .. } => NegotiatedTransport::Quic,
+        }
+    }
+
     async fn close(&mut self) -> Result<(), TransportError> {
         if let AnyTransport::Quic {
             _endpoint,
@@ -828,11 +839,15 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
     let mut transport = connected.transport;
     let mut handshake_mgr = HandshakeManager::new();
-    let session_key =
-        perform_viewer_handshake(&mut transport, &mut handshake_mgr, "daemon").await?;
-
-    let mut session = Session::with_fixture(SessionRole::Viewer, source_id, args.epoch);
-    session.install_key(session_key);
+    let handshake =
+        perform_viewer_handshake_with_transcript(&mut transport, &mut handshake_mgr, "daemon")
+            .await?;
+    info!(
+        transcript_hash = ?handshake.transcript_hash,
+        "viewer handshake transcript bound"
+    );
+    let mut session = LaneSession::with_fixture(source_id, args.epoch);
+    session.install_schedule(&handshake.key_schedule);
 
     let mut decoder = make_decoder(args.codec)?;
     let expected_frame_fmt = codec_to_frame_format(args.codec);
@@ -859,6 +874,9 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     );
     let mut audio_sink = ViewerAudioSink::new(args.play_audio, args.audio_output_device.as_deref())
         .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+    let negotiated_transport = transport.negotiated_transport();
+    let mut capabilities_received = false;
+    let mut epoch_state = SessionEpochState::new(handshake.transcript_hash, RekeyPolicy::smoke());
     loop {
         if frame_limit != 0 && received >= frame_limit {
             info!(received, "reached --frames, exiting");
@@ -885,6 +903,24 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         }
         if raw_frame.pixel_format == FramePixelFormat::Capabilities {
             let capabilities = RawCapabilities::from_frame(&raw_frame)?;
+            let negotiated_context_hash =
+                negotiated_session_context_hash(negotiated_transport, capabilities.clone())?;
+            if let Some(expected_hash) = handshake.negotiated_context_hash
+                && expected_hash != negotiated_context_hash
+            {
+                return Err("sealed capabilities do not match handshake context hash".into());
+            }
+            if !capabilities.supports_current_lane_envelope() {
+                return Err("daemon advertised unsupported lane envelope version".into());
+            }
+            let _negotiated_context_key =
+                derive_negotiated_context_key(&handshake.key_schedule, &negotiated_context_hash);
+            capabilities_received = true;
+            info!(
+                transport = ?negotiated_transport,
+                context_hash = ?negotiated_context_hash,
+                "negotiated session context accepted"
+            );
             let negotiated_audio_codec =
                 choose_audio_codec_from_capabilities(args.audio_codec, &capabilities)
                     .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
@@ -897,6 +933,39 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 input_control_enabled = capabilities.input_control_enabled,
                 "sealed session capabilities applied"
             );
+            continue;
+        }
+        if !capabilities_received {
+            return Err("daemon sent media before sealed session capabilities".into());
+        }
+        if raw_frame.pixel_format == FramePixelFormat::Rekey {
+            let RawRekey::Proposal {
+                key_epoch: proposed_epoch,
+                base_transcript_hash,
+                previous_epoch_hash: proposed_previous_hash,
+                reason,
+                epoch_hash,
+            } = RawRekey::from_frame(&raw_frame)?
+            else {
+                return Err("viewer received unexpected rekey ack".into());
+            };
+            let context = epoch_state.validate_proposal(
+                proposed_epoch,
+                base_transcript_hash,
+                proposed_previous_hash,
+                reason,
+                epoch_hash,
+            )?;
+            let keys = epoch_state.derive_and_install(&handshake.key_schedule, &context)?;
+            session.install_rekey_keys(&keys);
+            let ack = RawRekey::Ack {
+                key_epoch: epoch_state.current_epoch(),
+                epoch_hash,
+            }
+            .into_frame(0, 0)?;
+            let envelope = session.seal_control_frame(&ack)?;
+            transport.send_envelope(&envelope).await?;
+            info!(key_epoch = epoch_state.current_epoch(), epoch_hash = ?epoch_hash, "session rekey installed");
             continue;
         }
         if raw_frame.pixel_format == FramePixelFormat::Audio {
@@ -1076,12 +1145,16 @@ async fn gui_receive_loop(
     let mut transport = connected.transport;
 
     let mut handshake_mgr = HandshakeManager::new();
-    let session_key = perform_viewer_handshake(&mut transport, &mut handshake_mgr, "daemon")
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
-
-    let mut session = Session::with_fixture(SessionRole::Viewer, source_id, args.epoch);
-    session.install_key(session_key);
+    let handshake =
+        perform_viewer_handshake_with_transcript(&mut transport, &mut handshake_mgr, "daemon")
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
+    info!(
+        transcript_hash = ?handshake.transcript_hash,
+        "viewer handshake transcript bound"
+    );
+    let mut session = LaneSession::with_fixture(source_id, args.epoch);
+    session.install_schedule(&handshake.key_schedule);
 
     let mut decoder = make_decoder(args.codec)
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
@@ -1099,6 +1172,9 @@ async fn gui_receive_loop(
     );
     let mut audio_sink: Box<dyn AudioPlaybackSink + Send> =
         Box::new(ChannelAudioSink::new(audio_tx));
+    let negotiated_transport = transport.negotiated_transport();
+    let mut capabilities_received = false;
+    let mut epoch_state = SessionEpochState::new(handshake.transcript_hash, RekeyPolicy::smoke());
     loop {
         if frame_limit != 0 && received >= frame_limit {
             info!(received, "reached --frames, closing receive loop");
@@ -1129,6 +1205,27 @@ async fn gui_receive_loop(
             let capabilities = RawCapabilities::from_frame(&raw_frame).map_err(
                 |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
             )?;
+            let negotiated_context_hash =
+                negotiated_session_context_hash(negotiated_transport, capabilities.clone())
+                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                        e.to_string().into()
+                    })?;
+            if let Some(expected_hash) = handshake.negotiated_context_hash
+                && expected_hash != negotiated_context_hash
+            {
+                return Err("sealed capabilities do not match handshake context hash".into());
+            }
+            if !capabilities.supports_current_lane_envelope() {
+                return Err("daemon advertised unsupported lane envelope version".into());
+            }
+            let _negotiated_context_key =
+                derive_negotiated_context_key(&handshake.key_schedule, &negotiated_context_hash);
+            capabilities_received = true;
+            info!(
+                transport = ?negotiated_transport,
+                context_hash = ?negotiated_context_hash,
+                "negotiated session context accepted"
+            );
             let negotiated_audio_codec =
                 choose_audio_codec_from_capabilities(args.audio_codec, &capabilities)?;
             audio_codec = make_audio_codec(negotiated_audio_codec).map_err(
@@ -1141,6 +1238,54 @@ async fn gui_receive_loop(
                 input_control_enabled = capabilities.input_control_enabled,
                 "sealed session capabilities applied"
             );
+            continue;
+        }
+        if !capabilities_received {
+            return Err("daemon sent media before sealed session capabilities".into());
+        }
+        if raw_frame.pixel_format == FramePixelFormat::Rekey {
+            let RawRekey::Proposal {
+                key_epoch: proposed_epoch,
+                base_transcript_hash,
+                previous_epoch_hash: proposed_previous_hash,
+                reason,
+                epoch_hash,
+            } = RawRekey::from_frame(&raw_frame).map_err(
+                |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
+            )?
+            else {
+                return Err("viewer received unexpected rekey ack".into());
+            };
+            let context = epoch_state
+                .validate_proposal(
+                    proposed_epoch,
+                    base_transcript_hash,
+                    proposed_previous_hash,
+                    reason,
+                    epoch_hash,
+                )
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                    e.to_string().into()
+                })?;
+            let keys = epoch_state
+                .derive_and_install(&handshake.key_schedule, &context)
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                    e.to_string().into()
+                })?;
+            session.install_rekey_keys(&keys);
+            let ack = RawRekey::Ack {
+                key_epoch: epoch_state.current_epoch(),
+                epoch_hash,
+            }
+            .into_frame(0, 0)
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
+            let envelope = session.seal_control_frame(&ack).map_err(
+                |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
+            )?;
+            transport.send_envelope(&envelope).await.map_err(
+                |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
+            )?;
+            info!(key_epoch = epoch_state.current_epoch(), epoch_hash = ?epoch_hash, "session rekey installed");
             continue;
         }
         if raw_frame.pixel_format == FramePixelFormat::Audio {

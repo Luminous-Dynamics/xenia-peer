@@ -17,6 +17,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde-big-array = "0.5"
 ed25519-dalek = "2"
 bincode = { workspace = true }
+blake3 = "1"
 thiserror = "2.0"
 tracing = "0.1"
 rand = "0.8"

@@ -47,6 +47,44 @@ wait_for_pattern() {
   return 1
 }
 
+wait_for_tcp_listen() {
+  local port="$1"
+  local deadline=$((SECONDS + 20))
+  while (( SECONDS < deadline )); do
+    if PORT="$port" python3 -c '
+import os
+import sys
+
+target = int(os.environ["PORT"])
+want = f"{target:04X}"
+for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+    try:
+        lines = open(path, "r", encoding="utf-8").read().splitlines()[1:]
+    except FileNotFoundError:
+        continue
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        local = parts[1]
+        state = parts[3]
+        try:
+            port_hex = local.rsplit(":", 1)[1].upper()
+        except IndexError:
+            continue
+        if port_hex == want and state == "0A":
+            sys.exit(0)
+sys.exit(1)
+'
+    then
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "timed out waiting for TCP listen on port $port" >&2
+  return 1
+}
+
 cleanup_pid() {
   local pid="${1:-}"
   if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
@@ -85,6 +123,26 @@ if values.get("duplicates", 0) != 0 or values.get("late", 0) != 0:
     print(f"unexpected duplicate/late frames: {summary}", file=sys.stderr)
     sys.exit(1)
 PY
+}
+
+assert_rekey_epochs() {
+  local viewer_log="$1"
+  for epoch in 1 2; do
+    if ! grep -qE "session rekey installed key_epoch=${epoch}\\b" "$viewer_log"; then
+      echo "missing rekey epoch ${epoch} in $viewer_log" >&2
+      return 1
+    fi
+  done
+}
+
+assert_host_rekey_acks() {
+  local peer_log="$1"
+  for epoch in 1 2; do
+    if ! grep -qE "session rekey acknowledged key_epoch=${epoch}\\b" "$peer_log"; then
+      echo "missing host rekey ack epoch ${epoch} in $peer_log" >&2
+      return 1
+    fi
+  done
 }
 
 assert_no_audio_summary() {
@@ -130,7 +188,7 @@ run_smoke() {
   viewer_log="$LOG_DIR/${audio_codec}-${transport}-viewer.log"
   rm -f "$peer_log" "$viewer_log"
 
-  "$PEER_BIN" \
+  RUST_LOG="${RUST_LOG:-info}" "$PEER_BIN" \
     --transport "$transport" \
     --listen "127.0.0.1:${listen_port}" \
     --admin-port "$admin_port" \
@@ -146,21 +204,27 @@ run_smoke() {
     >"$peer_log" 2>&1 &
   daemon_pid="$!"
   trap 'cleanup_pid "$daemon_pid"' RETURN
-  sleep 2
-  if ! kill -0 "$daemon_pid" 2>/dev/null; then
-    dump_logs "$transport" "$peer_log" "$viewer_log"
-    return 1
-  fi
 
   case "$transport" in
     tcp)
+      if ! wait_for_tcp_listen "$listen_port"; then
+        dump_logs "$transport" "$peer_log" "$viewer_log"
+        return 1
+      fi
       connect_arg="127.0.0.1:${listen_port}"
       ;;
     ws)
+      if ! wait_for_tcp_listen "$listen_port"; then
+        dump_logs "$transport" "$peer_log" "$viewer_log"
+        return 1
+      fi
       connect_arg="ws://127.0.0.1:${listen_port}"
       ;;
     quic)
-      wait_for_pattern 'iroh:' "$peer_log"
+      if ! wait_for_pattern 'iroh:' "$peer_log"; then
+        dump_logs "$transport" "$peer_log" "$viewer_log"
+        return 1
+      fi
       connect_arg="$(grep -o 'iroh:[^[:space:]]*' "$peer_log" | tail -1)"
       ;;
     *)
@@ -188,6 +252,14 @@ run_smoke() {
     dump_logs "$transport" "$peer_log" "$viewer_log"
     return 1
   fi
+  if ! assert_rekey_epochs "$viewer_log"; then
+    dump_logs "$transport" "$peer_log" "$viewer_log"
+    return 1
+  fi
+  if ! assert_host_rekey_acks "$peer_log"; then
+    dump_logs "$transport" "$peer_log" "$viewer_log"
+    return 1
+  fi
   echo "audio e2e smoke passed: $audio_codec/$transport"
 }
 
@@ -200,7 +272,7 @@ run_negative_consent_smoke() {
   viewer_log="$LOG_DIR/no-consent-viewer.log"
   rm -f "$peer_log" "$viewer_log"
 
-  "$PEER_BIN" \
+  RUST_LOG="${RUST_LOG:-info}" "$PEER_BIN" \
     --transport tcp \
     --listen "127.0.0.1:${listen_port}" \
     --admin-port "$admin_port" \
@@ -214,8 +286,7 @@ run_negative_consent_smoke() {
     >"$peer_log" 2>&1 &
   daemon_pid="$!"
   trap 'cleanup_pid "$daemon_pid"' RETURN
-  sleep 2
-  if ! kill -0 "$daemon_pid" 2>/dev/null; then
+  if ! wait_for_tcp_listen "$listen_port"; then
     dump_logs "no-consent" "$peer_log" "$viewer_log"
     return 1
   fi

@@ -43,6 +43,9 @@ pub enum PixelFormat {
     /// Reserved sealed session metadata frame carrying bincode-
     /// serialized [`RawCapabilities`].
     Capabilities = 242,
+    /// Reserved sealed session metadata frame carrying bincode-
+    /// serialized [`RawRekey`].
+    Rekey = 243,
 }
 
 /// Scalar telemetry value carried inside a [`RawTelemetry`] payload.
@@ -101,6 +104,43 @@ pub struct RawCapabilities {
     pub telemetry_enabled: bool,
     /// Input-control lane is enabled for this session.
     pub input_control_enabled: bool,
+    /// Lane envelope schema version used by this session.
+    pub lane_envelope_version: u16,
+    /// Cleartext lane envelope magic used before sealed lane payloads.
+    pub lane_envelope_magic: [u8; 4],
+}
+
+impl RawCapabilities {
+    /// Return true when capabilities advertise the supported lane envelope.
+    pub fn supports_current_lane_envelope(&self) -> bool {
+        self.lane_envelope_version == LANE_ENVELOPE_SCHEMA_VERSION
+            && self.lane_envelope_magic == LANE_ENVELOPE_MAGIC
+    }
+}
+
+/// Rekey control payload sealed on the control path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RawRekey {
+    /// Host proposes switching to a new key epoch.
+    Proposal {
+        /// New epoch number. Epoch 0 is the initial handshake key.
+        key_epoch: u64,
+        /// Original canonical handshake transcript hash.
+        base_transcript_hash: [u8; 32],
+        /// Previous epoch hash, or base transcript hash for epoch 1.
+        previous_epoch_hash: [u8; 32],
+        /// Rekey trigger reason.
+        reason: xenia_handshake::RekeyReason,
+        /// Canonical rekey epoch hash.
+        epoch_hash: [u8; 32],
+    },
+    /// Viewer acknowledges it installed the proposed epoch.
+    Ack {
+        /// Installed epoch number.
+        key_epoch: u64,
+        /// Canonical rekey epoch hash.
+        epoch_hash: [u8; 32],
+    },
 }
 
 /// Audio sample payload format.
@@ -148,6 +188,10 @@ pub const RAW_AUDIO_MAX_FRAME_DURATION_MS: u16 = 20;
 pub const RAW_AUDIO_MAX_PAYLOAD_BYTES: usize = 48_000 / 1_000 * 20 * 2 * 2;
 /// v0.1 maximum single Opus packet bytes.
 pub const RAW_AUDIO_MAX_OPUS_PAYLOAD_BYTES: usize = 1_275;
+/// Current lane-envelope schema version.
+pub const LANE_ENVELOPE_SCHEMA_VERSION: u16 = 1;
+/// Current lane-envelope magic carried before sealed lane payloads.
+pub const LANE_ENVELOPE_MAGIC: [u8; 4] = *b"XLN1";
 
 /// Raw audio packet sealed on the forward path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -772,6 +816,7 @@ impl RawFrame {
                     | PixelFormat::Telemetry
                     | PixelFormat::Audio
                     | PixelFormat::Capabilities
+                    | PixelFormat::Rekey
             ),
             "RawFrame::encoded requires an encoded PixelFormat variant",
         );
@@ -803,6 +848,7 @@ impl RawFrame {
                 // relevant decoder has the actual say.
                 !self.pixels.is_empty()
             }
+            PixelFormat::Rekey => RawRekey::from_frame(self).is_ok(),
             PixelFormat::Audio => RawAudio::from_frame(self).is_ok_and(|audio| audio.validate()),
         }
     }
@@ -849,6 +895,29 @@ impl RawCapabilities {
     pub fn from_frame(frame: &RawFrame) -> Result<Self, WireError> {
         if frame.pixel_format != PixelFormat::Capabilities {
             return Err(WireError::decode("RawFrame is not capabilities"));
+        }
+        bincode::deserialize(&frame.pixels).map_err(WireError::decode)
+    }
+}
+
+impl RawRekey {
+    /// Build a rekey metadata frame.
+    pub fn into_frame(self, frame_id: u64, timestamp_ms: u64) -> Result<RawFrame, WireError> {
+        let payload = bincode::serialize(&self).map_err(WireError::encode)?;
+        Ok(RawFrame::encoded(
+            frame_id,
+            timestamp_ms,
+            0,
+            0,
+            PixelFormat::Rekey,
+            payload,
+        ))
+    }
+
+    /// Decode a rekey metadata frame.
+    pub fn from_frame(frame: &RawFrame) -> Result<Self, WireError> {
+        if frame.pixel_format != PixelFormat::Rekey {
+            return Err(WireError::decode("RawFrame is not rekey"));
         }
         bincode::deserialize(&frame.pixels).map_err(WireError::decode)
     }
