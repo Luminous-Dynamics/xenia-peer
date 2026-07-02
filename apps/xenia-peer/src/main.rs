@@ -36,10 +36,12 @@ use xenia_peer_core::{
         NegotiatedTransport, negotiated_session_context_hash,
         perform_host_handshake_with_transcript_and_context,
     },
-    transport::{TcpTransport, Transport},
+    transport::{RecvEnvelope, SendEnvelope, TcpRecvHalf, TcpSendHalf, TcpTransport, Transport},
 };
-use xenia_transport_quic::{QuicTransport, bind_xenia_endpoint, encode_endpoint_addr};
-use xenia_transport_ws::WsTransport;
+use xenia_transport_quic::{
+    QuicRecvHalf, QuicSendHalf, QuicTransport, bind_xenia_endpoint, encode_endpoint_addr,
+};
+use xenia_transport_ws::{WsRecvHalf, WsSendHalf, WsTransport};
 use xenia_video::{
     EncodeParams, Encoder, PixelFormat as VideoPixelFormat, passthrough::PassthroughEncoder,
 };
@@ -430,6 +432,86 @@ impl AnyTransport {
             finish_result?;
         }
         Ok(())
+    }
+
+    /// Split into independently-owned send/recv halves so a dedicated
+    /// task can run an inbound `RawInput` receive loop concurrently
+    /// with the outbound video/audio/telemetry send loop. See
+    /// [`Transport`]'s doc comment for why splitting exists.
+    fn split(self) -> (AnySendHalf, AnyRecvHalf) {
+        match self {
+            AnyTransport::Tcp(t) => {
+                let (send, recv) = t.split();
+                (AnySendHalf::Tcp(send), AnyRecvHalf::Tcp(recv))
+            }
+            AnyTransport::Ws(t) => {
+                let (send, recv) = t.split();
+                (AnySendHalf::Ws(send), AnyRecvHalf::Ws(recv))
+            }
+            AnyTransport::Quic {
+                _endpoint,
+                transport,
+            } => {
+                let (send, recv) = transport.split();
+                (AnySendHalf::Quic { _endpoint, send }, AnyRecvHalf::Quic(recv))
+            }
+        }
+    }
+}
+
+/// Send-only half of a split [`AnyTransport`].
+enum AnySendHalf {
+    Tcp(TcpSendHalf),
+    Ws(WsSendHalf),
+    Quic {
+        _endpoint: xenia_transport_quic::iroh::Endpoint,
+        send: QuicSendHalf,
+    },
+}
+
+impl SendEnvelope for AnySendHalf {
+    async fn send_envelope(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(), xenia_peer_core::transport::TransportError> {
+        match self {
+            AnySendHalf::Tcp(t) => t.send_envelope(bytes).await,
+            AnySendHalf::Ws(t) => t.send_envelope(bytes).await,
+            AnySendHalf::Quic { send, .. } => send.send_envelope(bytes).await,
+        }
+    }
+}
+
+impl AnySendHalf {
+    /// Mirrors `AnyTransport::close` for the post-split send half —
+    /// only the QUIC variant needs an explicit teardown sequence.
+    async fn close(&mut self) -> Result<(), xenia_peer_core::transport::TransportError> {
+        if let AnySendHalf::Quic { _endpoint, send } = self {
+            let finish_result = send.finish();
+            let _ = tokio::time::timeout(Duration::from_secs(3), send.closed()).await;
+            _endpoint.close().await;
+            finish_result?;
+        }
+        Ok(())
+    }
+}
+
+/// Receive-only half of a split [`AnyTransport`].
+enum AnyRecvHalf {
+    Tcp(TcpRecvHalf),
+    Ws(WsRecvHalf),
+    Quic(QuicRecvHalf),
+}
+
+impl RecvEnvelope for AnyRecvHalf {
+    async fn recv_envelope(
+        &mut self,
+    ) -> Result<Vec<u8>, xenia_peer_core::transport::TransportError> {
+        match self {
+            AnyRecvHalf::Tcp(t) => t.recv_envelope().await,
+            AnyRecvHalf::Ws(t) => t.recv_envelope().await,
+            AnyRecvHalf::Quic(t) => t.recv_envelope().await,
+        }
     }
 }
 

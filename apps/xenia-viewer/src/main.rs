@@ -37,13 +37,17 @@ use xenia_peer_core::frame::{
 use xenia_peer_core::handshake::{
     NegotiatedTransport, negotiated_session_context_hash, perform_viewer_handshake_with_transcript,
 };
-use xenia_peer_core::transport::{TcpTransport, Transport, TransportError};
+use xenia_peer_core::transport::{
+    RecvEnvelope, SendEnvelope, TcpRecvHalf, TcpSendHalf, TcpTransport, Transport, TransportError,
+};
 use xenia_peer_core::{
     AudioCodec, AudioJitterBuffer, HandshakeManager, LaneSession, RawPcmAudioCodec, RekeyPolicy,
     SessionEpochState, derive_negotiated_context_key,
 };
-use xenia_transport_quic::{QuicTransport, bind_xenia_endpoint, decode_endpoint_addr};
-use xenia_transport_ws::WsTransport;
+use xenia_transport_quic::{
+    QuicRecvHalf, QuicSendHalf, QuicTransport, bind_xenia_endpoint, decode_endpoint_addr,
+};
+use xenia_transport_ws::{WsRecvHalf, WsSendHalf, WsTransport};
 use xenia_video::passthrough::PassthroughDecoder;
 use xenia_video::{Decoder, EncodedPacket};
 
@@ -123,6 +127,93 @@ impl AnyTransport {
             finish_result?;
         }
         Ok(())
+    }
+
+    /// Split into independently-owned send/recv halves so a dedicated
+    /// task can keep receiving frames while the main loop sends
+    /// captured input events. See [`Transport`]'s doc comment for why
+    /// splitting exists.
+    ///
+    /// Must only be called after any buffered `PreloadedTcp` first
+    /// envelope has already been consumed (true by construction — the
+    /// preload only exists to let transport auto-detection peek at
+    /// the first envelope during the handshake, long before a caller
+    /// would split).
+    fn split(self) -> (AnySendHalf, AnyRecvHalf) {
+        match self {
+            AnyTransport::Tcp(t) => {
+                let (send, recv) = t.split();
+                (AnySendHalf::Tcp(send), AnyRecvHalf::Tcp(recv))
+            }
+            AnyTransport::PreloadedTcp { first, transport } => {
+                debug_assert!(
+                    first.is_none(),
+                    "split() called before preloaded envelope was consumed"
+                );
+                let (send, recv) = transport.split();
+                (AnySendHalf::Tcp(send), AnyRecvHalf::Tcp(recv))
+            }
+            AnyTransport::Ws(t) => {
+                let (send, recv) = t.split();
+                (AnySendHalf::Ws(send), AnyRecvHalf::Ws(recv))
+            }
+            AnyTransport::Quic {
+                _endpoint,
+                transport,
+            } => {
+                let (send, recv) = transport.split();
+                (AnySendHalf::Quic { _endpoint, send }, AnyRecvHalf::Quic(recv))
+            }
+        }
+    }
+}
+
+/// Send-only half of a split [`AnyTransport`].
+enum AnySendHalf {
+    Tcp(TcpSendHalf),
+    Ws(WsSendHalf),
+    Quic {
+        _endpoint: xenia_transport_quic::iroh::Endpoint,
+        send: QuicSendHalf,
+    },
+}
+
+impl SendEnvelope for AnySendHalf {
+    async fn send_envelope(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
+        match self {
+            AnySendHalf::Tcp(t) => t.send_envelope(bytes).await,
+            AnySendHalf::Ws(t) => t.send_envelope(bytes).await,
+            AnySendHalf::Quic { send, .. } => send.send_envelope(bytes).await,
+        }
+    }
+}
+
+impl AnySendHalf {
+    /// Mirrors `AnyTransport::close` for the post-split send half.
+    async fn close(&mut self) -> Result<(), TransportError> {
+        if let AnySendHalf::Quic { _endpoint, send } = self {
+            let finish_result = send.finish();
+            _endpoint.close().await;
+            finish_result?;
+        }
+        Ok(())
+    }
+}
+
+/// Receive-only half of a split [`AnyTransport`].
+enum AnyRecvHalf {
+    Tcp(TcpRecvHalf),
+    Ws(WsRecvHalf),
+    Quic(QuicRecvHalf),
+}
+
+impl RecvEnvelope for AnyRecvHalf {
+    async fn recv_envelope(&mut self) -> Result<Vec<u8>, TransportError> {
+        match self {
+            AnyRecvHalf::Tcp(t) => t.recv_envelope().await,
+            AnyRecvHalf::Ws(t) => t.recv_envelope().await,
+            AnyRecvHalf::Quic(t) => t.recv_envelope().await,
+        }
     }
 }
 
