@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# tracing_subscriber's ANSI-color auto-detection isn't reliable across every
+# execution environment (observed: emits color codes even though stdout is
+# redirected to a log file here), which corrupts the literal substrings this
+# script's assert_* helpers grep for (e.g. "key_epoch=1" arrives as
+# "key_epoch\x1b[0m\x1b[2m=\x1b[0m1"). Force it off unconditionally so the
+# log greps are robust regardless of how color detection behaves.
+export NO_COLOR=1
+
 ROOT="${1:-.}"
 WITH_OPUS=0
 if [[ "${2:-}" == "--with-opus" ]]; then

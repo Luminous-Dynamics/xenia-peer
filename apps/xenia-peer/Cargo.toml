@@ -40,6 +40,8 @@ chrono.workspace = true
 blake3 = "1.5"
 reqwest = { version = "0.13", features = ["json"] }
 xenia-handshake = { path = "../../crates/xenia-handshake" }
+rust-embed = { version = "8.11.0", features = ["axum", "mime-guess"] }
+mime_guess = "2.0.5"
 
 [features]
 scap = ["xenia-capture/scap-backend"]

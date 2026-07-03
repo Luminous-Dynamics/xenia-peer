@@ -55,6 +55,7 @@ use xenia_capture::CpalAudioCapture;
 #[cfg(feature = "scap")]
 use xenia_capture::ScapCapture;
 
+mod admin_ui;
 mod governance;
 mod m1_ledger;
 mod m1_runtime;
@@ -1300,7 +1301,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     bridge.start_signal_listener();
     bridge.broadcast("daemon ready");
 
-    let app = Router::new().route(
+    let app = crate::admin_ui::mount(Router::new()).route(
         "/ws",
         get({
             let bridge = bridge.clone();
