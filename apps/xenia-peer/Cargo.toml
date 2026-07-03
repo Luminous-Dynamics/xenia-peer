@@ -51,6 +51,11 @@ scap = ["xenia-capture/scap-backend"]
 # interactive consent dialog on first use. Off by default -- the
 # `noop`/`log` backends need no extra system deps.
 xdg-portal = ["xenia-inject/xdg-portal"]
+# Kernel-level /dev/uinput input-injection backend (--input-backend
+# uinput). Works without any compositor/portal/desktop session --
+# needs root, `input` group membership, or a udev rule granting
+# /dev/uinput access. Off by default.
+uinput = ["xenia-inject/uinput"]
 # Viewer/daemon protocol path for real host audio capture. Requires
 # system audio headers on Linux; off by default.
 audio-capture = ["xenia-capture/audio-cpal"]

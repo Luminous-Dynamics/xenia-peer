@@ -24,6 +24,12 @@ serde = { version = "1", features = ["derive"] }
 ashpd = { version = "0.9", optional = true, default-features = false, features = ["tokio"] }
 tokio = { version = "1", optional = true, features = ["rt", "sync", "time"] }
 
+# uinput backend (see the "uinput" feature below). Actively maintained,
+# clean dependency tree -- deliberately not the older `uinput` crate
+# (0.1.3), which pulls in a ~2018-era `nix 0.10`/`gcc` chain.
+input-linux = { version = "0.7.1", optional = true }
+nix = { version = "0.29", optional = true }
+
 [features]
 default = []
 # wlr-virtual-pointer-v1 + zwp-virtual-keyboard-v1 backend for
@@ -33,7 +39,7 @@ default = []
 wayland-virtual = []
 # uinput kernel-level backend. Works on any Linux with
 # /dev/uinput accessible (root, `input` group, or udev rule).
-uinput = []
+uinput = ["dep:input-linux", "dep:nix"]
 # xdg-desktop-portal RemoteDesktop backend for GNOME/KDE (portal-based,
 # no host permissions beyond the interactive consent dialog). Primary
 # backend per the xenia-capture precedent for portal-based Linux paths.
@@ -49,3 +55,10 @@ bincode = "1.3"
 name = "inject_bench"
 path = "examples/inject_bench.rs"
 required-features = ["xdg-portal"]
+
+# uinput real-hardware validation harness. Only builds when uinput is
+# enabled.
+[[example]]
+name = "uinput_smoke"
+path = "examples/uinput_smoke.rs"
+required-features = ["uinput"]

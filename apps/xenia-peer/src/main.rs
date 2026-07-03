@@ -294,7 +294,11 @@ struct Args {
     /// permissions needed). `xdg-portal` actually moves the mouse /
     /// types keys via the RemoteDesktop portal (requires the
     /// `xdg-portal` build feature and triggers its own interactive
-    /// consent dialog on first real input event).
+    /// consent dialog on first real input event). `uinput` injects via
+    /// a real kernel-level `/dev/uinput` virtual device (requires the
+    /// `uinput` build feature and `/dev/uinput` access -- root, `input`
+    /// group membership, or a udev rule); unlike `xdg-portal`, this
+    /// needs no compositor, portal, or active desktop session at all.
     #[arg(long, value_enum, default_value_t = InputBackendChoice::Noop)]
     input_backend: InputBackendChoice,
 }
@@ -312,6 +316,8 @@ enum InputBackendChoice {
     Log,
     #[cfg(feature = "xdg-portal")]
     XdgPortal,
+    #[cfg(feature = "uinput")]
+    Uinput,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -901,6 +907,19 @@ fn build_input_injector(
                     warn!(
                         error = %err,
                         "XdgPortalInjector construction failed; input events will be discarded"
+                    );
+                    Box::new(NoopInjector)
+                }
+            }
+        }
+        #[cfg(feature = "uinput")]
+        InputBackendChoice::Uinput => {
+            match xenia_inject::UinputInjector::new(screen_width, screen_height) {
+                Ok(injector) => Box::new(injector),
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        "UinputInjector construction failed; input events will be discarded"
                     );
                     Box::new(NoopInjector)
                 }

@@ -35,7 +35,7 @@
 //! | `NoopInjector` | always available | ✅ discards all events |
 //! | `LoggingInjector` | always available | ✅ records events for test verification |
 //! | `WaylandInputInjector` | `wayland-virtual` | 🚧 scaffold — returns Unavailable |
-//! | `UinputInjector` | `uinput` | 🚧 scaffold — returns Unavailable |
+//! | `UinputInjector` | `uinput` | ✅ real `/dev/uinput` virtual device: absolute pointer + keyboard + single-point touch |
 //!
 //! X11 injection (via XTest) is deliberately out of scope per
 //! ADR-001 Decision 2 (Wayland-only).
@@ -402,29 +402,152 @@ impl InputInjector for WaylandInputInjector {
 
 // ───────────────────────── uinput backend ──────────────────────────
 
+/// Absolute-axis range registered for `ABS_X`/`ABS_Y`. Pointer/touch
+/// coordinates are denormalized from `[0.0, 1.0]` into `0..=UINPUT_ABS_MAX`
+/// -- an arbitrary but common convention for absolute-positioning virtual
+/// devices (matches how USB touchscreens/tablets report position; the
+/// compositor maps it back to actual screen pixels via the device's
+/// reported ABS_X/ABS_Y range).
+#[cfg(feature = "uinput")]
+const UINPUT_ABS_MAX: i32 = 65_535;
+
 /// Kernel-level `uinput` injection. Creates a virtual evdev device
-/// that pipes synthetic events into the kernel's input subsystem.
+/// (absolute pointer + keyboard + single-point touch) that pipes
+/// synthetic events directly into the kernel's input subsystem --
+/// no compositor, portal, or Wayland session required. This is the
+/// backend for headless hosts or compositors without a working
+/// `xdg-desktop-portal` RemoteDesktop implementation.
 ///
-/// **Scaffold only** today. Requires `/dev/uinput` access: root,
-/// membership in the `input` group, or a `udev` rule granting the
-/// daemon's user access.
+/// Requires `/dev/uinput` access: root, membership in the `input`
+/// group, or a `udev` rule granting the daemon's user access.
 ///
 /// Requires the `uinput` feature.
 #[cfg(feature = "uinput")]
 pub struct UinputInjector {
+    handle: input_linux::UInputHandle<std::fs::File>,
+    #[allow(dead_code)] // kept for parity with other backends' constructor shape
     screen_width: u32,
+    #[allow(dead_code)]
     screen_height: u32,
 }
 
 #[cfg(feature = "uinput")]
 impl UinputInjector {
     /// Open `/dev/uinput` and register a virtual device with
-    /// pointer + keyboard + touch capabilities. **Currently
-    /// unimplemented.**
-    pub fn new(_screen_width: u32, _screen_height: u32) -> Result<Self, InjectError> {
-        Err(InjectError::Unavailable(
-            "uinput backend not yet implemented".into(),
-        ))
+    /// absolute-pointer + keyboard + single-point-touch capabilities.
+    pub fn new(screen_width: u32, screen_height: u32) -> Result<Self, InjectError> {
+        use input_linux::sys as raw;
+        use input_linux::{
+            AbsoluteAxis, AbsoluteInfo, AbsoluteInfoSetup, EventKind, InputId, UInputHandle,
+        };
+        use std::fs::OpenOptions;
+        use std::os::fd::AsRawFd;
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/uinput")
+            .map_err(|err| {
+                InjectError::Unavailable(format!(
+                    "open /dev/uinput failed: {err} (needs root, `input` group membership, or a udev rule)"
+                ))
+            })?;
+        let handle = UInputHandle::new(file);
+        let fd = handle.as_inner().as_raw_fd();
+        let ioctl_err = |what: &'static str| {
+            move |err: nix::Error| InjectError::Unavailable(format!("uinput {what}: {err}"))
+        };
+
+        handle
+            .set_evbit(EventKind::Key)
+            .map_err(|err| InjectError::Unavailable(format!("uinput UI_SET_EVBIT(Key): {err}")))?;
+        // Register the full standard keycode range so any evdev code
+        // xenia-viewer's keymap sends is deliverable -- bypasses the
+        // crate's typed `Key` enum (which would need an unsafe transmute
+        // to cover arbitrary raw codes) in favor of the raw ioctl, which
+        // the kernel itself treats as a plain integer.
+        for code in 1u16..=248 {
+            unsafe { raw::ui_set_keybit(fd, u64::from(code)) }
+                .map_err(ioctl_err("UI_SET_KEYBIT"))?;
+        }
+        for code in [
+            raw::BTN_LEFT,
+            raw::BTN_RIGHT,
+            raw::BTN_MIDDLE,
+            raw::BTN_SIDE,
+            raw::BTN_EXTRA,
+            raw::BTN_TOUCH,
+        ] {
+            unsafe { raw::ui_set_keybit(fd, code as u64) }.map_err(ioctl_err("UI_SET_KEYBIT"))?;
+        }
+
+        handle.set_evbit(EventKind::Absolute).map_err(|err| {
+            InjectError::Unavailable(format!("uinput UI_SET_EVBIT(Absolute): {err}"))
+        })?;
+        unsafe { raw::ui_set_absbit(fd, raw::ABS_X as u64) }
+            .map_err(ioctl_err("UI_SET_ABSBIT(ABS_X)"))?;
+        unsafe { raw::ui_set_absbit(fd, raw::ABS_Y as u64) }
+            .map_err(ioctl_err("UI_SET_ABSBIT(ABS_Y)"))?;
+
+        let id = InputId {
+            bustype: raw::BUS_VIRTUAL,
+            vendor: 0,
+            product: 0,
+            version: 0,
+        };
+        let abs_info = AbsoluteInfo {
+            value: 0,
+            minimum: 0,
+            maximum: UINPUT_ABS_MAX,
+            fuzz: 0,
+            flat: 0,
+            resolution: 0,
+        };
+        let abs = [
+            AbsoluteInfoSetup {
+                axis: AbsoluteAxis::X,
+                info: abs_info,
+            },
+            AbsoluteInfoSetup {
+                axis: AbsoluteAxis::Y,
+                info: abs_info,
+            },
+        ];
+        handle
+            .create(&id, b"xenia-virtual-input", 0, &abs)
+            .map_err(|err| InjectError::Unavailable(format!("uinput UI_DEV_CREATE: {err}")))?;
+
+        Ok(Self {
+            handle,
+            screen_width,
+            screen_height,
+        })
+    }
+
+    /// Write a batch of raw `(type_, code, value)` events followed by a
+    /// `SYN_REPORT`, so the kernel/compositor applies them atomically.
+    fn emit(&self, events: &[(u16, u16, i32)]) -> Result<(), InjectError> {
+        use input_linux::sys::{input_event, EV_SYN, SYN_REPORT};
+
+        let mut raw_events: Vec<input_event> = events
+            .iter()
+            .map(|&(type_, code, value)| input_event {
+                time: unsafe { std::mem::zeroed() },
+                type_,
+                code,
+                value,
+            })
+            .collect();
+        raw_events.push(input_event {
+            time: unsafe { std::mem::zeroed() },
+            type_: EV_SYN as u16,
+            code: SYN_REPORT as u16,
+            value: 0,
+        });
+        self.handle
+            .write(&raw_events)
+            .map(|_| ())
+            .map_err(|err| InjectError::Unavailable(format!("uinput write: {err}")))
     }
 }
 
@@ -432,37 +555,70 @@ impl UinputInjector {
 impl InputInjector for UinputInjector {
     fn inject_pointer(
         &mut self,
-        _x: f32,
-        _y: f32,
-        _button: u8,
-        _pressed: bool,
+        x: f32,
+        y: f32,
+        button: u8,
+        pressed: bool,
     ) -> Result<(), InjectError> {
-        Err(InjectError::Unavailable(
-            "uinput backend not yet implemented".into(),
-        ))
+        use input_linux::sys::{
+            ABS_X, ABS_Y, BTN_EXTRA, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, BTN_SIDE, EV_ABS, EV_KEY,
+        };
+
+        let abs_x = (x.clamp(0.0, 1.0) * UINPUT_ABS_MAX as f32) as i32;
+        let abs_y = (y.clamp(0.0, 1.0) * UINPUT_ABS_MAX as f32) as i32;
+        // Matches XdgPortalInjector's evdev_button mapping (see
+        // xdg_portal.rs): 0=left, 1=middle, 2=right, 3+ aux buttons.
+        let btn_code = match button {
+            0 => BTN_LEFT,
+            1 => BTN_MIDDLE,
+            2 => BTN_RIGHT,
+            3 => BTN_SIDE,
+            _ => BTN_EXTRA,
+        };
+        self.emit(&[
+            (EV_ABS as u16, ABS_X as u16, abs_x),
+            (EV_ABS as u16, ABS_Y as u16, abs_y),
+            (EV_KEY as u16, btn_code as u16, i32::from(pressed)),
+        ])
     }
-    fn inject_key(
-        &mut self,
-        _code: u32,
-        _pressed: bool,
-        _modifiers: u8,
-    ) -> Result<(), InjectError> {
-        Err(InjectError::Unavailable(
-            "uinput backend not yet implemented".into(),
-        ))
+
+    fn inject_key(&mut self, code: u32, pressed: bool, _modifiers: u8) -> Result<(), InjectError> {
+        use input_linux::sys::EV_KEY;
+
+        let code = u16::try_from(code)
+            .map_err(|_| InjectError::Unavailable(format!("key code {code} out of range")))?;
+        self.emit(&[(EV_KEY as u16, code, i32::from(pressed))])
     }
+
     fn inject_touch(
         &mut self,
-        _index: u8,
-        _x: f32,
-        _y: f32,
-        _phase: u8,
+        index: u8,
+        x: f32,
+        y: f32,
+        phase: u8,
         _pressure: f32,
     ) -> Result<(), InjectError> {
-        Err(InjectError::Unavailable(
-            "uinput backend not yet implemented".into(),
-        ))
+        use input_linux::sys::{ABS_X, ABS_Y, BTN_TOUCH, EV_ABS, EV_KEY};
+
+        if index != 0 {
+            return Err(InjectError::Unavailable(
+                "uinput backend supports single-point touch only (index 0); \
+                 multi-touch needs ABS_MT_* slot protocol, not yet implemented"
+                    .into(),
+            ));
+        }
+        let abs_x = (x.clamp(0.0, 1.0) * UINPUT_ABS_MAX as f32) as i32;
+        let abs_y = (y.clamp(0.0, 1.0) * UINPUT_ABS_MAX as f32) as i32;
+        // Phase convention matches XdgPortalInjector: 0=down, 1=motion,
+        // anything else=up.
+        let touch_down = phase != 2 && phase != 255;
+        self.emit(&[
+            (EV_ABS as u16, ABS_X as u16, abs_x),
+            (EV_ABS as u16, ABS_Y as u16, abs_y),
+            (EV_KEY as u16, BTN_TOUCH as u16, i32::from(touch_down)),
+        ])
     }
+
     fn backend_name(&self) -> &str {
         "uinput"
     }
