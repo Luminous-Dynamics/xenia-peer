@@ -185,7 +185,7 @@ Recapitulated from VIEWER_PLAN §3 with today's-actual status:
 | **M4.1b** | WebCodecs H.264 decode in browser | ❌ not started |
 | **M4.1c** | HDC codec in the browser viewer | ❌ not started (~50 LOC WASM) |
 | **M4.2** | HDC hybrid codec (port from Symthaea) | ✅ `9bb831f` |
-| **M4.2b** | HDC codec RGB output (not grayscale-only) | ❌ not started |
+| **M4.2b** | HDC codec RGB output (not grayscale-only) | ✅ **done 2026-07-04** — `extract_tile_grayscale` replaced with `extract_tile_rgb` (3 bytes/pixel, no alpha); decoder expands RGB straight into the RGBA canvas (A=255) instead of replicating a single luminance byte across R/G/B. Change-detection/classification still run on HDC features computed from the original pixels (unaffected) — only the *transmitted* tile payload changed. Caught and fixed a real correctness bug in the same pass: `HdcEncoder` accepts both RGBA and BGRA input, and grayscale output was accidentally order-invariant (luminance sums are symmetric), but true RGB isn't — added an explicit channel swap for BGRA-tagged frames so colors don't come out with red/blue swapped. Two new tests (`decoded_output_preserves_true_color_not_just_luminance`, `bgra_input_normalizes_to_true_rgb_on_the_wire`) assert real non-grayscale color round-trips correctly for both input orders. `cargo test -p xenia-video --features hdc` (13/13) and full `cargo test --workspace --features "xenia-peer/hdc xenia-viewer/hdc"` both clean. |
 | **M4.3** | RawAudio timing lane | ✅ sealed RawAudio + jitter buffer + synthetic source + native transport conformance |
 | **M4.3b** | Opus audio payload | ❌ not started |
 

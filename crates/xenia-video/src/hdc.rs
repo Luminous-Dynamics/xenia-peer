@@ -31,20 +31,21 @@
 //!         ↓ else
 //!     Classify (Text / Photo / Video / Static) via pixel stats
 //!         ↓
-//!     Grayscale-quantize tile (i8 values, TILE_SIZE² bytes)
+//!     Extract tile pixels as RGB (TILE_SIZE² × 3 bytes, no alpha)
 //!         ↓
 //!     Emit tile-delta packet: (keyframe flag, frame_id, changed
-//!     tiles [(index, grayscale_bytes)…])
+//!     tiles [(index, rgb_bytes)…])
 //! ```
 //!
 //! On the decoder side the previous full frame is held in a buffer;
 //! each new packet patches in the changed tiles. First packet of a
 //! stream is a **keyframe** covering every tile.
 //!
-//! Output is currently **grayscale only**. The underlying Symthaea
-//! codec made this trade-off deliberately for sovereign-RDP
-//! bandwidth; extending to RGB (or RGB-for-photo-tiles + grayscale-
-//! for-text-tiles) is a follow-up.
+//! Output is full RGB (decoded back out as RGBA with A=255). Change
+//! detection and content classification (used only for future
+//! adaptive encoding, not yet consumed) still run on HDC features
+//! computed from the original RGB pixels — only the *transmitted*
+//! tile payload changed from grayscale to RGB.
 //!
 //! ## Wire format
 //!
@@ -130,8 +131,8 @@ pub const DEFAULT_CHANGE_THRESHOLD: f32 = 0.92;
 pub const MAX_DELTA_PATCHES: usize = 512;
 
 /// Content type detected by HDC classification. Used for future
-/// adaptive encoding (grayscale for text, JPEG for photos, etc.);
-/// currently all non-skipped tiles emit as grayscale.
+/// adaptive encoding (e.g. lower-fidelity for text, JPEG for photos);
+/// currently all non-skipped tiles emit as full RGB regardless.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TileContentType {
     /// Static UI / icons / backgrounds — skippable.
@@ -152,9 +153,9 @@ pub struct TilePatch {
     /// Cosine-similarity surprise score `1.0 - similarity`. Higher
     /// means more changed. Receivers can prioritize by this value.
     pub surprise: f32,
-    /// Grayscale pixel bytes, `TILE_SIZE * TILE_SIZE` of them for
-    /// edge-aligned tiles (shorter at the right/bottom image edges
-    /// where the tile is clipped).
+    /// RGB pixel bytes (3 bytes/pixel, no alpha), `TILE_SIZE *
+    /// TILE_SIZE * 3` of them for edge-aligned tiles (shorter at the
+    /// right/bottom image edges where the tile is clipped).
     pub values: Vec<u8>,
     /// Detected content type for adaptive future encoding.
     pub content_type: TileContentType,
@@ -216,9 +217,8 @@ pub struct HdcEncoder {
 
 impl HdcEncoder {
     /// Construct a new HDC encoder sized to the given frame params.
-    /// Pixel format must be RGBA or BGRA (both produce the same
-    /// grayscale output since luminance is computed from all three
-    /// channels).
+    /// Pixel format must be RGBA or BGRA; both are handled correctly
+    /// (channel order is normalized to true RGB on the wire).
     pub fn new(params: EncodeParams) -> Self {
         // Tile grid dimensions (ceil-divide at image edges).
         let tile_cols = params.width.div_ceil(TILE_SIZE as u32) as u16;
@@ -322,13 +322,14 @@ impl Encoder for HdcEncoder {
                 // Emit the patch if it's a keyframe OR the tile
                 // changed. Keyframes cover everything regardless.
                 if is_keyframe || changed {
-                    let (values, tile_w, tile_h) = extract_tile_grayscale(
+                    let (values, tile_w, tile_h) = extract_tile_rgb(
                         raw,
                         width as usize,
                         height as usize,
                         tile_x,
                         tile_y,
                         TILE_SIZE,
+                        self.params.pixel_format == XvPixelFormat::Bgra,
                     );
                     patches.push(TilePatch {
                         index: idx as u16,
@@ -477,9 +478,9 @@ impl Decoder for HdcDecoder {
             let tile_y = row * TILE_SIZE;
             let tw = patch.tile_w as usize;
             let th = patch.tile_h as usize;
-            if patch.values.len() != tw * th {
+            if patch.values.len() != tw * th * 3 {
                 return Err(CodecError::DecodeFailed(format!(
-                    "hdc: tile {} has {} bytes, declared {}×{}",
+                    "hdc: tile {} has {} bytes, declared {}×{}×3",
                     idx,
                     patch.values.len(),
                     tw,
@@ -488,13 +489,12 @@ impl Decoder for HdcDecoder {
             }
             for dy in 0..th {
                 for dx in 0..tw {
-                    let src = patch.values[dy * tw + dx];
+                    let src_off = (dy * tw + dx) * 3;
                     let dst_off = ((tile_y + dy) * self.width as usize + (tile_x + dx)) * 4;
                     if dst_off + 3 < self.canvas.len() {
-                        // Expand grayscale to RGBA (R=G=B=src, A=255).
-                        self.canvas[dst_off] = src;
-                        self.canvas[dst_off + 1] = src;
-                        self.canvas[dst_off + 2] = src;
+                        self.canvas[dst_off] = patch.values[src_off];
+                        self.canvas[dst_off + 1] = patch.values[src_off + 1];
+                        self.canvas[dst_off + 2] = patch.values[src_off + 2];
                         self.canvas[dst_off + 3] = 255;
                     }
                 }
@@ -700,36 +700,49 @@ fn classify_tile_content(
     }
 }
 
-/// Extract a tile's pixels as 8-bit grayscale (row-major). Returns
-/// the bytes + the logical (width, height) of the tile, which may be
-/// less than `tile_size` at the image's right/bottom edge where the
-/// tile is clipped.
-fn extract_tile_grayscale(
+/// Extract a tile's pixels as 8-bit-per-channel RGB (row-major,
+/// 3 bytes/pixel — no alpha, since decoded output always sets
+/// A=255). Returns the bytes + the logical (width, height) of the
+/// tile, which may be less than `tile_size` at the image's
+/// right/bottom edge where the tile is clipped.
+///
+/// `bgra` must reflect the source frame's actual channel order —
+/// unlike the old grayscale extraction (luminance is symmetric in
+/// R/B), true RGB output needs the right order or red/blue channels
+/// come out swapped for BGRA-sourced frames.
+fn extract_tile_rgb(
     pixels: &[u8],
     img_width: usize,
     img_height: usize,
     tile_x: usize,
     tile_y: usize,
     tile_size: usize,
+    bgra: bool,
 ) -> (Vec<u8>, u16, u16) {
     let tw = tile_size.min(img_width.saturating_sub(tile_x));
     let th = tile_size.min(img_height.saturating_sub(tile_y));
-    let mut out = Vec::with_capacity(tw * th);
+    let mut out = Vec::with_capacity(tw * th * 3);
     for dy in 0..th {
         let y = tile_y + dy;
         for dx in 0..tw {
             let x = tile_x + dx;
             let offset = (y * img_width + x) * 4;
             if offset + 3 >= pixels.len() {
-                out.push(0);
+                out.extend_from_slice(&[0, 0, 0]);
                 continue;
             }
-            let r = pixels[offset] as u32;
-            let g = pixels[offset + 1] as u32;
-            let b = pixels[offset + 2] as u32;
-            // BT.601-ish integer luminance.
-            let lum = ((299 * r + 587 * g + 114 * b) / 1000).min(255) as u8;
-            out.push(lum);
+            let (c0, c1, c2) = (pixels[offset], pixels[offset + 1], pixels[offset + 2]);
+            if bgra {
+                // Source order is B,G,R -> emit R,G,B.
+                out.push(c2);
+                out.push(c1);
+                out.push(c0);
+            } else {
+                // Source order is already R,G,B.
+                out.push(c0);
+                out.push(c1);
+                out.push(c2);
+            }
         }
     }
     (out, tw as u16, th as u16)
@@ -877,5 +890,90 @@ mod tests {
         let c = generate_position_hv(1, 42);
         // Same seed different index => different HV.
         assert!(a.similarity(&c) < 0.99);
+    }
+
+    /// A frame with distinct, non-grayscale R/G/B channels (pure
+    /// red on one half, pure blue on the other) — verifies the codec
+    /// actually round-trips color, not just luminance. A pre-RGB-output
+    /// codec would flatten both halves to different-but-colorless
+    /// gray levels; this catches that regression directly.
+    fn two_tone_rgba_frame(w: u32, h: u32) -> Vec<u8> {
+        let mut p = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let i = (y * w as usize + x) * 4;
+                if x < w as usize / 2 {
+                    p[i] = 255; // R
+                    p[i + 1] = 0;
+                    p[i + 2] = 0;
+                } else {
+                    p[i] = 0;
+                    p[i + 1] = 0;
+                    p[i + 2] = 255; // B
+                }
+                p[i + 3] = 255;
+            }
+        }
+        p
+    }
+
+    #[test]
+    fn decoded_output_preserves_true_color_not_just_luminance() {
+        let w = 128;
+        let h = 128;
+        let p = params(w, h);
+        let mut enc = HdcEncoder::new(p);
+        let mut dec = HdcDecoder::new();
+
+        let frame = two_tone_rgba_frame(w, h);
+        let pkt = enc.encode(&frame, 0).unwrap();
+        let decoded = dec.decode(&pkt[0]).unwrap();
+        let pixels = &decoded[0].pixels;
+
+        // Sample a pixel well inside the red half.
+        let red_off = (10 * w as usize + 10) * 4;
+        assert_eq!(pixels[red_off], 255, "red channel");
+        assert_eq!(pixels[red_off + 1], 0, "green channel");
+        assert_eq!(pixels[red_off + 2], 0, "blue channel");
+
+        // Sample a pixel well inside the blue half.
+        let blue_off = (10 * w as usize + (w as usize - 10)) * 4;
+        assert_eq!(pixels[blue_off], 0, "red channel");
+        assert_eq!(pixels[blue_off + 1], 0, "green channel");
+        assert_eq!(pixels[blue_off + 2], 255, "blue channel");
+    }
+
+    #[test]
+    fn bgra_input_normalizes_to_true_rgb_on_the_wire() {
+        // Same two-tone image, but stored in BGRA byte order (as if
+        // sourced from a BGRA capture backend). Swap R<->B on top of
+        // the RGBA test fixture to build a real BGRA buffer.
+        let w = 128;
+        let h = 128;
+        let mut frame = two_tone_rgba_frame(w, h);
+        for chunk in frame.chunks_exact_mut(4) {
+            chunk.swap(0, 2);
+        }
+
+        let mut p = params(w, h);
+        p.pixel_format = XvPixelFormat::Bgra;
+        let mut enc = HdcEncoder::new(p);
+        let mut dec = HdcDecoder::new();
+
+        let pkt = enc.encode(&frame, 0).unwrap();
+        let decoded = dec.decode(&pkt[0]).unwrap();
+        let pixels = &decoded[0].pixels;
+
+        // Decoded output is always RGBA regardless of input order —
+        // must match the same true colors as the RGBA-input test.
+        let red_off = (10 * w as usize + 10) * 4;
+        assert_eq!(pixels[red_off], 255, "red channel");
+        assert_eq!(pixels[red_off + 1], 0, "green channel");
+        assert_eq!(pixels[red_off + 2], 0, "blue channel");
+
+        let blue_off = (10 * w as usize + (w as usize - 10)) * 4;
+        assert_eq!(pixels[blue_off], 0, "red channel");
+        assert_eq!(pixels[blue_off + 1], 0, "green channel");
+        assert_eq!(pixels[blue_off + 2], 255, "blue channel");
     }
 }
