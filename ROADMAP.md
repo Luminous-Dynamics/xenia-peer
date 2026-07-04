@@ -112,11 +112,12 @@ this):
    noise, unrelated to frame data) — the `process_callback` leak site is
    completely gone from the profile. `cargo test -p xenia-capture
    --features scap-backend` (11/11) still passes against the patched dep.
-   Wired in via a temporary `[patch."https://github.com/Luminous-Dynamics/scap"]`
-   pointing at a local clone
-   (`scratchpad/scap` under this session's temp dir) — **not yet pushed to
-   the upstream fork**; needs explicit go-ahead before pushing since it's an
-   external repo, per this project's standing rule on external-repo pushes.
+   **Pushed 2026-07-04** to `Luminous-Dynamics/scap`'s
+   `fix/linux-engine-two-level-frame-enum` branch (`42e0745..be78534`) —
+   `xenia-capture/Cargo.toml`'s existing git dependency on that branch
+   picks it up directly; the temporary local `[patch]` override has been
+   removed and `cargo build`/`cargo test`/`cargo clippy` all re-verified
+   clean against the real upstream commit (`#be785343`).
 
 ---
 
