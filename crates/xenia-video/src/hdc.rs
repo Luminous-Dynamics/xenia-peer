@@ -39,7 +39,11 @@
 //!
 //! On the decoder side the previous full frame is held in a buffer;
 //! each new packet patches in the changed tiles. First packet of a
-//! stream is a **keyframe** covering every tile.
+//! stream is a **keyframe** covering every tile, and one is also
+//! forced periodically thereafter (`DEFAULT_KEYFRAME_INTERVAL_MS`) as
+//! an error-recovery safety net — the per-tile change detector is a
+//! coarse statistical comparison, not an exact pixel hash, and can
+//! occasionally miss a real change (alias it as "unchanged").
 //!
 //! Output is full RGB (decoded back out as RGBA with A=255). Change
 //! detection and content classification (used only for future
@@ -130,6 +134,19 @@ pub const DEFAULT_CHANGE_THRESHOLD: f32 = 0.92;
 /// envelope under the replay-window-friendly size limit.
 pub const MAX_DELTA_PATCHES: usize = 512;
 
+/// Default interval between forced keyframes, in presentation-time
+/// milliseconds. HDC's per-tile change detection is a coarse
+/// 8-feature statistical comparison (see `encode_tile_hdc`), not an
+/// exact pixel hash — genuinely different content can occasionally
+/// alias to a similar-enough feature vector and be misclassified as
+/// unchanged. Without periodic re-sync, a single missed tile-change
+/// stays wrong for the rest of the session (verified live 2026-07-04:
+/// a real window rearrangement left stale tiles on screen indefinitely).
+/// A time-based (not frame-count-based) interval is used because HDC's
+/// own frame rate is inherently irregular — it only encodes when the
+/// damage-driven capture backend actually delivers a changed frame.
+pub const DEFAULT_KEYFRAME_INTERVAL_MS: u64 = 10_000;
+
 /// Content type detected by HDC classification. Used for future
 /// adaptive encoding (e.g. lower-fidelity for text, JPEG for photos);
 /// currently all non-skipped tiles emit as full RGB regardless.
@@ -213,6 +230,8 @@ pub struct HdcEncoder {
     frame_count: u64,
     change_threshold: f32,
     static_threshold: u32,
+    keyframe_interval_ms: u64,
+    last_keyframe_pts_ms: u64,
 }
 
 impl HdcEncoder {
@@ -250,6 +269,8 @@ impl HdcEncoder {
             frame_count: 0,
             change_threshold: DEFAULT_CHANGE_THRESHOLD,
             static_threshold: params.target_fps.max(1), // ~1s of stillness = Static
+            keyframe_interval_ms: DEFAULT_KEYFRAME_INTERVAL_MS,
+            last_keyframe_pts_ms: 0,
         }
     }
 
@@ -257,6 +278,13 @@ impl HdcEncoder {
     /// range `[0.5, 0.999]`.
     pub fn set_change_threshold(&mut self, t: f32) {
         self.change_threshold = t.clamp(0.5, 0.999);
+    }
+
+    /// Adjust the forced-keyframe interval at runtime (presentation-time
+    /// milliseconds). `0` disables periodic re-sync entirely (not
+    /// recommended — see `DEFAULT_KEYFRAME_INTERVAL_MS`'s doc comment).
+    pub fn set_keyframe_interval_ms(&mut self, interval_ms: u64) {
+        self.keyframe_interval_ms = interval_ms;
     }
 }
 
@@ -274,7 +302,21 @@ impl Encoder for HdcEncoder {
             )));
         }
 
-        let is_keyframe = self.frame_count == 0;
+        // Periodic re-sync: force a keyframe on the first frame, or once
+        // `keyframe_interval_ms` has elapsed since the last one, to bound
+        // how long a missed/aliased tile-change detection can leave
+        // stale content on screen. `pts_ms` is presentation time, not
+        // wall-clock capture time, but the two track closely enough for
+        // this purpose (a coarse periodic safety net, not a precise
+        // timer). `saturating_sub` handles a `pts_ms` that resets/goes
+        // backward (e.g. after an encoder rebuild on a resolution
+        // change) by simply forcing a keyframe rather than underflowing.
+        let is_keyframe = self.frame_count == 0
+            || (self.keyframe_interval_ms > 0
+                && pts_ms.saturating_sub(self.last_keyframe_pts_ms) >= self.keyframe_interval_ms);
+        if is_keyframe {
+            self.last_keyframe_pts_ms = pts_ms;
+        }
         let width = self.params.width;
         let height = self.params.height;
         let mut patches: Vec<TilePatch> = Vec::new();
@@ -857,6 +899,64 @@ mod tests {
         let pkt1 = enc.encode(&f, 33).unwrap();
         let body1: HdcPacket = bincode::deserialize(&pkt1[0].bytes).unwrap();
         assert_eq!(body1.patches.len(), 0);
+    }
+
+    #[test]
+    fn periodic_keyframe_forces_resync_even_with_no_visible_change() {
+        // Regression test for a real bug found live 2026-07-04: without
+        // periodic re-sync, a tile-change detector miss (or an
+        // intentionally-unchanged screen) means the decoder's canvas
+        // can never self-correct. A constant (never-changing) frame
+        // should still get a fresh keyframe once keyframe_interval_ms
+        // has elapsed, purely from the passage of presentation time.
+        let w = 128;
+        let h = 128;
+        let p = params(w, h);
+        let mut enc = HdcEncoder::new(p);
+        enc.set_keyframe_interval_ms(1_000);
+        let f = constant_frame(w, h, 64);
+
+        let pkt0 = enc.encode(&f, 0).unwrap();
+        assert!(pkt0[0].is_keyframe, "frame 0 is always a keyframe");
+
+        // Still well inside the interval: identical content, zero patches.
+        let pkt1 = enc.encode(&f, 500).unwrap();
+        assert!(!pkt1[0].is_keyframe);
+        let body1: HdcPacket = bincode::deserialize(&pkt1[0].bytes).unwrap();
+        assert_eq!(body1.patches.len(), 0);
+
+        // Past the interval: must force a fresh keyframe covering every
+        // tile, even though the frame content hasn't changed at all.
+        let pkt2 = enc.encode(&f, 1_500).unwrap();
+        assert!(
+            pkt2[0].is_keyframe,
+            "expected a forced keyframe once keyframe_interval_ms elapsed"
+        );
+        let body2: HdcPacket = bincode::deserialize(&pkt2[0].bytes).unwrap();
+        assert_eq!(
+            body2.patches.len() as u16,
+            body2.tile_cols * body2.tile_rows
+        );
+
+        // Interval resets from the forced keyframe, not the original one.
+        let pkt3 = enc.encode(&f, 1_600).unwrap();
+        assert!(!pkt3[0].is_keyframe);
+    }
+
+    #[test]
+    fn zero_keyframe_interval_disables_periodic_resync() {
+        let w = 64;
+        let h = 64;
+        let p = params(w, h);
+        let mut enc = HdcEncoder::new(p);
+        enc.set_keyframe_interval_ms(0);
+        let f = constant_frame(w, h, 200);
+
+        let _ = enc.encode(&f, 0).unwrap();
+        // Even a huge pts_ms gap must not force a keyframe when the
+        // interval is explicitly disabled.
+        let pkt = enc.encode(&f, 1_000_000).unwrap();
+        assert!(!pkt[0].is_keyframe);
     }
 
     #[test]
