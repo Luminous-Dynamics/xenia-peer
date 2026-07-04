@@ -11,9 +11,21 @@
 //
 // - scap's `Capturer::get_next_frame()` is BLOCKING (no `try_recv` exposed
 //   upstream as of 0.1.0-beta.1), so we run the Capturer on a dedicated
-//   worker thread and forward frames via a bounded mpsc channel. The
-//   trait's `capture() -> Ok(None)` when no frame is ready is implemented
-//   via `Receiver::try_recv`.
+//   worker thread and forward frames via a bounded (`sync_channel`, cap 1)
+//   mpsc channel. The trait's `capture() -> Ok(None)` when no frame is
+//   ready is implemented via `Receiver::try_recv`, which drains at most
+//   one frame per call -- the consumer (the daemon's `--fps`-paced main
+//   loop) calls `capture()` once per tick, so if the channel were
+//   unbounded and the real capture rate exceeded `--fps` (very possible:
+//   PipeWire's damage-driven ScreenCast pace has nothing to do with
+//   `--fps`, and real-resolution BGRA frames are large), frames would
+//   queue up faster than they drain and memory would grow without limit.
+//   Bounding at 1 makes `frame_tx.send()` in the worker thread block once
+//   a frame is waiting to be consumed, which throttles capture to the
+//   consumer's actual drain rate -- exactly the backpressure a live
+//   video feed needs (always the latest frame, never a growing backlog
+//   of stale ones). Confirmed live: real capture without this bound grew
+//   to 7.5GB+ RSS within ~15-20s against a normal desktop.
 //
 // - scap's `Capturer` is `!Send` on Windows (upstream issue #145). The
 //   worker thread CONSTRUCTS the Capturer locally (inside the thread
@@ -128,7 +140,7 @@ impl ScapCapture {
             return Err(CaptureError::ConsentDenied);
         }
 
-        let (frame_tx, frame_rx) = mpsc::channel::<Result<CapturedFrame, CaptureError>>();
+        let (frame_tx, frame_rx) = mpsc::sync_channel::<Result<CapturedFrame, CaptureError>>(1);
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
 
         // Capturer is `!Send` on Windows — build it INSIDE the worker thread.
@@ -184,7 +196,7 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 
 fn scap_worker(
     options: ScapOptions,
-    frame_tx: mpsc::Sender<Result<CapturedFrame, CaptureError>>,
+    frame_tx: mpsc::SyncSender<Result<CapturedFrame, CaptureError>>,
     stop_rx: mpsc::Receiver<()>,
 ) {
     let mut capturer = None;
@@ -253,11 +265,11 @@ fn scap_worker(
 
         match capturer.get_next_frame() {
             Ok(frame) => {
-                if let Some(captured) = frame_to_rgba(frame) {
-                    if frame_tx.send(Ok(captured)).is_err() {
-                        // Consumer dropped — main thread is gone; shut down.
-                        break;
-                    }
+                if let Some(captured) = frame_to_rgba(frame)
+                    && frame_tx.send(Ok(captured)).is_err()
+                {
+                    // Consumer dropped — main thread is gone; shut down.
+                    break;
                 }
                 // Non-BGRA frames are discarded; we requested BGRA so
                 // this is an upstream API surprise rather than normal flow.
