@@ -308,7 +308,7 @@ fn frame_to_rgba(frame: scap::frame::Frame) -> Option<CapturedFrame> {
         Frame::Audio(_) => return None,
     };
 
-    match video {
+    let (mut pixels, width, height) = match video {
         VideoFrame::BGRA(f) => {
             // B-G-R-A → R-G-B-A: swap bytes 0 and 2.
             let mut pixels = f.data;
@@ -318,11 +318,7 @@ fn frame_to_rgba(frame: scap::frame::Frame) -> Option<CapturedFrame> {
             for chunk in pixels.chunks_exact_mut(4) {
                 chunk.swap(0, 2);
             }
-            Some(CapturedFrame {
-                data: FrameData::Pixels(pixels),
-                width: f.width as u32,
-                height: f.height as u32,
-            })
+            (pixels, f.width as u32, f.height as u32)
         }
         VideoFrame::BGRx(f) => {
             // B-G-R-X → R-G-B-A: swap 0 and 2, force alpha to 255.
@@ -334,11 +330,7 @@ fn frame_to_rgba(frame: scap::frame::Frame) -> Option<CapturedFrame> {
                 chunk.swap(0, 2);
                 chunk[3] = 255;
             }
-            Some(CapturedFrame {
-                data: FrameData::Pixels(pixels),
-                width: f.width as u32,
-                height: f.height as u32,
-            })
+            (pixels, f.width as u32, f.height as u32)
         }
         VideoFrame::RGBx(f) => {
             // R-G-B-X → R-G-B-A: force alpha to 255, no channel swap.
@@ -349,11 +341,7 @@ fn frame_to_rgba(frame: scap::frame::Frame) -> Option<CapturedFrame> {
             for chunk in pixels.chunks_exact_mut(4) {
                 chunk[3] = 255;
             }
-            Some(CapturedFrame {
-                data: FrameData::Pixels(pixels),
-                width: f.width as u32,
-                height: f.height as u32,
-            })
+            (pixels, f.width as u32, f.height as u32)
         }
         VideoFrame::XBGR(f) => {
             // X-B-G-R → R-G-B-A: rotate bytes, set alpha to 255.
@@ -368,11 +356,7 @@ fn frame_to_rgba(frame: scap::frame::Frame) -> Option<CapturedFrame> {
                 chunk[2] = b;
                 chunk[3] = 255;
             }
-            Some(CapturedFrame {
-                data: FrameData::Pixels(pixels),
-                width: f.width as u32,
-                height: f.height as u32,
-            })
+            (pixels, f.width as u32, f.height as u32)
         }
         VideoFrame::RGB(f) => {
             // R-G-B → R-G-B-A: expand to 4 bytes per pixel, alpha 255.
@@ -383,11 +367,7 @@ fn frame_to_rgba(frame: scap::frame::Frame) -> Option<CapturedFrame> {
             for chunk in f.data.chunks_exact(3) {
                 pixels.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
             }
-            Some(CapturedFrame {
-                data: FrameData::Pixels(pixels),
-                width: f.width as u32,
-                height: f.height as u32,
-            })
+            (pixels, f.width as u32, f.height as u32)
         }
         VideoFrame::BGR0(f) => {
             // B-G-R-0 → R-G-B-A: swap 0 and 2, force alpha to 255.
@@ -401,18 +381,46 @@ fn frame_to_rgba(frame: scap::frame::Frame) -> Option<CapturedFrame> {
                 chunk.swap(0, 2);
                 chunk[3] = 255;
             }
-            Some(CapturedFrame {
-                data: FrameData::Pixels(pixels),
-                width: f.width as u32,
-                height: f.height as u32,
-            })
+            (pixels, f.width as u32, f.height as u32)
         }
         VideoFrame::YUVFrame(_) => {
             // NV12 YUV → RGBA conversion is non-trivial (420 subsampling,
             // BT.601 vs BT.709 color-matrix choice). Out of scope for this
             // wrapper — request BGRAFrame upstream and let scap handle it.
-            None
+            return None;
         }
+    };
+
+    // scap's Linux/PipeWire engine delivers buffers bottom-up (verified
+    // live 2026-07-04: a raw capture dump rendered upside-down --
+    // readable text, correctly proportioned windows, just vertically
+    // reversed, with no shearing -- ruling out a stride/padding bug and
+    // confirming a clean row-order flip is the whole fix). Every branch
+    // above produces tightly-packed RGBA (no stride padding), so a
+    // plain per-row reversal is exact.
+    flip_rows_vertically(&mut pixels, width, height);
+
+    Some(CapturedFrame {
+        data: FrameData::Pixels(pixels),
+        width,
+        height,
+    })
+}
+
+/// Reverse row order in-place for a tightly-packed (no stride padding)
+/// RGBA buffer. See `frame_to_rgba`'s doc comment for why this exists.
+fn flip_rows_vertically(pixels: &mut [u8], width: u32, height: u32) {
+    let row_len = width as usize * 4;
+    if row_len == 0 || pixels.len() != row_len * height as usize {
+        return;
+    }
+    let (mut top, mut bottom) = (0usize, height as usize - 1);
+    while top < bottom {
+        let (top_off, bottom_off) = (top * row_len, bottom * row_len);
+        let (head, tail) = pixels.split_at_mut(bottom_off);
+        head[top_off..top_off + row_len].swap_with_slice(&mut tail[..row_len]);
+        top += 1;
+        bottom -= 1;
     }
 }
 
@@ -487,6 +495,54 @@ mod tests {
         // Only contract: the probe returns a bool. On headless CI the
         // answer is almost certainly `false` and that's fine.
         let _ = ScapCapture::is_available();
+    }
+
+    #[test]
+    fn flip_rows_vertically_reverses_row_order() {
+        // 2x3 RGBA image (width=2, height=3): rows tagged 0/1/2 by their
+        // red channel so we can assert exact row order after flipping.
+        let mut pixels = vec![
+            0, 0, 0, 255, 0, 0, 0, 255, // row 0
+            1, 0, 0, 255, 1, 0, 0, 255, // row 1
+            2, 0, 0, 255, 2, 0, 0, 255, // row 2
+        ];
+        flip_rows_vertically(&mut pixels, 2, 3);
+        let expected = vec![
+            2, 0, 0, 255, 2, 0, 0, 255, // former row 2 now first
+            1, 0, 0, 255, 1, 0, 0, 255, // row 1 unchanged (middle)
+            0, 0, 0, 255, 0, 0, 0, 255, // former row 0 now last
+        ];
+        assert_eq!(pixels, expected);
+    }
+
+    #[test]
+    fn flip_rows_vertically_handles_odd_row_count() {
+        // 1x1 and 1x3 (odd height, has an untouched middle row) should
+        // not panic or corrupt data.
+        let mut single_row = vec![9, 8, 7, 255];
+        flip_rows_vertically(&mut single_row, 1, 1);
+        assert_eq!(single_row, vec![9, 8, 7, 255]);
+
+        let mut odd = vec![
+            0, 0, 0, 255, // row 0
+            1, 0, 0, 255, // row 1 (middle, stays put)
+            2, 0, 0, 255, // row 2
+        ];
+        flip_rows_vertically(&mut odd, 1, 3);
+        assert_eq!(
+            odd,
+            vec![2, 0, 0, 255, 1, 0, 0, 255, 0, 0, 0, 255]
+        );
+    }
+
+    #[test]
+    fn flip_rows_vertically_rejects_mismatched_length() {
+        // Defensive: a length that doesn't match width*height*4 must be
+        // a no-op, not a panic (mirrors length_matches' own defensive
+        // posture against malformed frames).
+        let mut pixels = vec![1, 2, 3, 4, 5, 6];
+        flip_rows_vertically(&mut pixels, 2, 2);
+        assert_eq!(pixels, vec![1, 2, 3, 4, 5, 6]);
     }
 
     #[test]
