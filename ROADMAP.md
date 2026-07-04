@@ -80,6 +80,44 @@ deployment-grade.
 | B3 | **Consent ceremony UI on the host** | ✅ **fully done 2026-07-03** — wire-level state machine + M1RuntimeSession gate wired end-to-end 2026-07-02: `--consent-port` parses real Approve/Deny decisions (blocking with `--consent-timeout-secs`, graceful exit on deny/timeout instead of a crash), and the actual request scope is broadcast over `--admin-port`. Packaging gap closed 2026-07-03: `apps/sovereign-admin`'s built console is now embedded directly into the `xenia-peer` binary (`admin_ui.rs`, via `rust-embed`) and served from the same axum router as `/ws` — visiting `http://127.0.0.1:<admin-port>/` gets the real operator console straight from the daemon, no separate `trunk serve` process or standalone app required. Two real bugs caught and fixed while closing this: `sovereign-admin/index.html` referenced the crate's old name (`xenia-admin` vs. the actual `sovereign-admin`), which meant `trunk build` had never actually succeeded before — nothing had run it for real until this pass; and `scripts/xenia-audio-e2e-smoke.sh`'s log-grep assertions were fragile to `tracing_subscriber`'s ANSI auto-detection corrupting the literal substrings they grep for (fixed with a forced `NO_COLOR=1`). Verified live: real `xenia-peer` binary curled for its embedded HTML/CSS/JS/WASM (correct content-types, byte-identical sizes, 404 on unknown paths, `/ws` still upgrades correctly alongside the new routes), and the full smoke test (tcp/ws/quic + negative-consent + real consent-approve/consent-deny) passes clean against the same router. | Done | Uses draft-03 SPEC §12 from xenia-wire. All three "hard blockers for real deployment" (B1, B2's KDE leg, B3) are now cleared. |
 | B4 | **PQC signature agility** (`docs/crypto/FULL_PQC_MIGRATION_PLAN.md` Stage 2: ML-DSA-65 transcript signing) | ✅ **native + browser both done 2026-07-03** — `xenia-handshake`'s `HandshakeManager` gained an ML-DSA-65 identity (`ml_dsa_public_key_bytes`/`sign_ml_dsa`/`verify_ml_dsa`), and the live `xenia-peer-core` handshake driver (`perform_host_handshake_with_transcript_and_context`/`perform_viewer_handshake_with_transcript`) dual-signs: `HostHello`/`ViewerResponse`/`HostFinalize` all carry an ML-DSA-65 public key and/or signature alongside the existing Ed25519 ones, both signature transcripts (`viewer_signature_transcript`/`host_signature_transcript`) bind the new fields, and verification requires **both** algorithms to pass (AND composition, no classical-only fallback). This is "Hybrid PQ/T" per the migration plan's claim-boundary vocabulary, not yet "Full-PQC" — Ed25519 stays as a co-signer until a later stage removes it. `xenia-viewer-web`'s `WasmHandshake` (separate `xenia-wire` repo) now mirrors this exactly — verified via the real `handshake_cross_compat` test (drives a REAL native host handshake against the WASM implementation, not a mock) after catching a real interop bug: two label constants (`TRANSCRIPT_SIGNATURE_SUITE_LABEL`, `HANDSHAKE_POLICY_PROFILE`) had been updated natively for Stage 2 but not mirrored in the WASM copy, causing a genuine transcript-hash mismatch the cross-compat test caught immediately. `cargo test --workspace`/`cargo clippy` clean natively; `cargo test`/`cargo clippy`/`cargo build --release --target wasm32-unknown-unknown` clean in `xenia-viewer-web`. | Done, both native and browser | Interop gap from the native-only Stage 2 landing (2026-07-02) is now closed — a dual-signing native peer and the browser viewer can complete a real handshake together. |
 
+### B2 follow-up: two real capture memory leaks found and fixed (2026-07-04)
+
+Live capture on KDE-Wayland was found to grow RSS unboundedly under heaptrack
+(738MB+ within ~80s). Two distinct, real bugs, found via heaptrack profiling
+(not source-reading guesses — an earlier D-Bus `remove_match`-token-leak
+hypothesis was investigated and disproven via a live A/B isolation test before
+this):
+
+1. **Fixed, in this repo**: `xenia-capture`'s own `scap_backend.rs` used an
+   unbounded `std::sync::mpsc::channel()` to ferry frames from the scap
+   worker thread to the daemon. Bounded it to `mpsc::sync_channel(1)`.
+   Verified clean (`cargo test`/`cargo clippy` both pass).
+2. **Root-caused via heaptrack, fixed only in a local patch (not pushed)**:
+   `scap` itself (the `Luminous-Dynamics/scap` fork,
+   `fix/linux-engine-two-level-frame-enum` branch) has its own *separate*
+   unbounded `mpsc::channel()` in `capturer/mod.rs`, ferrying frames from the
+   PipeWire callback thread (`engine::linux::process_callback`, which
+   unconditionally `to_vec()`s every frame buffer PipeWire delivers,
+   independent of whether `get_next_frame()` is being called) to
+   `Capturer::get_next_frame()`. Any time the daemon's downstream
+   (encode/network) lags PipeWire's delivery rate even briefly, frames pile
+   up here with zero backpressure. heaptrack confirmed this as ~1.44G of
+   1.47G total leaked in a 25.76s repro, 100% attributed to that call site.
+   Patched locally to `mpsc::sync_channel(2)` (propagated through
+   `Engine::new`'s `tx` parameter type and the Linux engine's
+   `ListenerUserData`/`pipewire_capturer`/`LinuxCapturer::new`). Re-verified:
+   same repro run 5x longer (136.74s) now leaks only ~77.6MB total, and that
+   remaining figure is dominated by `gimli`/`addr2line` panic-backtrace
+   formatting overhead from the retry loop's `catch_unwind` (debug-build
+   noise, unrelated to frame data) — the `process_callback` leak site is
+   completely gone from the profile. `cargo test -p xenia-capture
+   --features scap-backend` (11/11) still passes against the patched dep.
+   Wired in via a temporary `[patch."https://github.com/Luminous-Dynamics/scap"]`
+   pointing at a local clone
+   (`scratchpad/scap` under this session's temp dir) — **not yet pushed to
+   the upstream fork**; needs explicit go-ahead before pushing since it's an
+   external repo, per this project's standing rule on external-repo pushes.
+
 ---
 
 ## From Symthaea: carry-wholesale backlog (per VIEWER_PLAN §0.1)
