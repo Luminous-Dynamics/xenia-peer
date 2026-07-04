@@ -188,6 +188,7 @@ Recapitulated from VIEWER_PLAN §3 with today's-actual status:
 | **M4.2b** | HDC codec RGB output (not grayscale-only) | ✅ **done 2026-07-04** — `extract_tile_grayscale` replaced with `extract_tile_rgb` (3 bytes/pixel, no alpha); decoder expands RGB straight into the RGBA canvas (A=255) instead of replicating a single luminance byte across R/G/B. Change-detection/classification still run on HDC features computed from the original pixels (unaffected) — only the *transmitted* tile payload changed. Caught and fixed a real correctness bug in the same pass: `HdcEncoder` accepts both RGBA and BGRA input, and grayscale output was accidentally order-invariant (luminance sums are symmetric), but true RGB isn't — added an explicit channel swap for BGRA-tagged frames so colors don't come out with red/blue swapped. Two new tests (`decoded_output_preserves_true_color_not_just_luminance`, `bgra_input_normalizes_to_true_rgb_on_the_wire`) assert real non-grayscale color round-trips correctly for both input orders. `cargo test -p xenia-video --features hdc` (13/13) and full `cargo test --workspace --features "xenia-peer/hdc xenia-viewer/hdc"` both clean. |
 | **M4.3** | RawAudio timing lane | ✅ sealed RawAudio + jitter buffer + synthetic source + native transport conformance |
 | **M4.3b** | Opus audio payload | ❌ not started |
+| **M4.4** | Migrate xenia-viewer-web frontend to Leptos | 🟡 **in progress 2026-07-05** (in the `xenia-wire` repo, new `xenia-viewer-web/leptos-app` Trunk-built CSR crate) — wraps the existing `xenia-viewer-web` WASM handshake/lane-session/decode APIs (`WasmHandshake::begin_inner`/`finish_inner`, `WasmLaneSession`, `WasmRekeyState`, `open_lane_frame_inner`) in a small reactive UI; connection state and frame count are `RwSignal`s, but the `web_sys::WebSocket`-holding `Connection` itself is a plain `Rc<RefCell<Option<Connection>>>` outside the signal system (it isn't `Send`, which `RwSignal`'s default `SyncStorage` requires even in single-threaded WASM). Needed `#[wasm_bindgen(start)] fn main()` + `#![no_main]` at the crate root — a plain `fn main()` in a wasm32 bin-target crate is never invoked by wasm-bindgen's JS glue, and the attribute alone conflicts with Rust's implicit binary entry point without `#![no_main]`. Verified live: real `xenia-peer --transport ws` daemon, completes the full PQC handshake, decodes and canvas-renders a real HDC frame (1920×1080). WebCodecs H.264 decode and a clipboard UI are explicit follow-up scope — daemon-side clipboard wire protocol (forward + reverse path) and the rekey state machine already exist and work from the vanilla-JS viewer, just not yet exercised from this crate. |
 
 ---
 
@@ -210,9 +211,15 @@ dev headers); other display OSes/compositors are unmeasured.
 Native daemon + `xenia-viewer-web/daemon.html` on the phone's
 browser. Real screen content works via `--codec passthrough` (B2)
 and now also via `--codec hdc` (M4.1c) or `--codec h264` (M4.1b) --
-both decode fully in-browser as of 2026-07-04. Real end-to-end
-live-phone-browser testing (as opposed to the automated/headless
-verification each milestone entry describes) is still unmeasured.
+both decode fully in-browser as of 2026-07-04. **Real live-phone-browser
+test done 2026-07-04**: real Pixel 8 Pro (Brave browser, USB/ADB
+reverse-forwarded to the daemon's port) connected to a real `xenia-peer`
+daemon and rendered live passthrough frames correctly — confirmed
+correct orientation/content, not just automated headless verification.
+Frame cadence was very slow (~1 frame/30s+) during this run, but that's
+attributed to severe host CPU contention from concurrent sessions (see
+M1.2c/B2's damage-driven-capture note), not a phone/browser-path defect;
+a clean FPS re-measurement on an idle host is still pending (task #32).
 
 ### ❌ Phone → Desktop (not yet)
 
