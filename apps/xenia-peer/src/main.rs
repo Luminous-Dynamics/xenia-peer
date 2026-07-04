@@ -301,6 +301,15 @@ struct Args {
     /// needs no compositor, portal, or active desktop session at all.
     #[arg(long, value_enum, default_value_t = InputBackendChoice::Noop)]
     input_backend: InputBackendChoice,
+
+    /// Clipboard sync mode. `off` (default, view-only) never touches
+    /// the real OS clipboard. `host-to-viewer` pushes host clipboard
+    /// changes to the viewer only. `bidirectional` also applies
+    /// viewer-originated clipboard updates to the real host clipboard
+    /// -- this lets a remote viewer write to the host's clipboard, so
+    /// it needs the same M1 consent gate as input injection.
+    #[arg(long, value_enum, default_value_t = ClipboardMode::Off)]
+    clipboard: ClipboardMode,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -308,6 +317,13 @@ enum CodecChoice {
     Passthrough,
     H264,
     Hdc,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ClipboardMode {
+    Off,
+    HostToViewer,
+    Bidirectional,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -755,6 +771,7 @@ fn session_capabilities_frame(
     video_format: FramePixelFormat,
     telemetry_level: TelemetryLevel,
     input_backend: InputBackendChoice,
+    clipboard: ClipboardMode,
 ) -> Result<RawFrame, Box<dyn std::error::Error>> {
     xenia_peer_core::RawCapabilities {
         frame_id,
@@ -763,6 +780,7 @@ fn session_capabilities_frame(
         video_format,
         telemetry_enabled: telemetry_level != TelemetryLevel::Off,
         input_control_enabled: input_backend != InputBackendChoice::Noop,
+        clipboard_enabled: clipboard != ClipboardMode::Off,
         lane_envelope_version: xenia_peer_core::frame::LANE_ENVELOPE_SCHEMA_VERSION,
         lane_envelope_magic: xenia_peer_core::frame::LANE_ENVELOPE_MAGIC,
     }
@@ -1382,6 +1400,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         frame_format,
         args.telemetry_level,
         args.input_backend,
+        args.clipboard,
     )?;
     let negotiated_context_hash = negotiated_session_context_hash(
         negotiated_transport,

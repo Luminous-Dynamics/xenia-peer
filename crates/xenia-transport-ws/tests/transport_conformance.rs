@@ -2,12 +2,12 @@ use futures_util::SinkExt;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_tungstenite::{accept_async, tungstenite::protocol::Message};
-use xenia_peer_core::transport::{MAX_ENVELOPE_BYTES, TcpTransport, Transport, TransportError};
+use xenia_peer_core::transport::{TcpTransport, Transport, TransportError, MAX_ENVELOPE_BYTES};
 use xenia_peer_core::{
-    RawAudio, RawCapabilities, RawTelemetry, Session, SessionRole, SyntheticAudioKind,
-    SyntheticAudioSource, TelemetrySample, TelemetryValue,
     advertisement::{AdvertisedAudioCodec, AudioAdvertisement},
     frame::PixelFormat,
+    RawAudio, RawCapabilities, RawTelemetry, Session, SessionRole, SyntheticAudioKind,
+    SyntheticAudioSource, TelemetrySample, TelemetryValue,
 };
 use xenia_transport_ws::WsTransport;
 
@@ -179,6 +179,7 @@ where
         video_format: PixelFormat::Passthrough,
         telemetry_enabled: true,
         input_control_enabled: false,
+        clipboard_enabled: false,
         lane_envelope_version: xenia_peer_core::frame::LANE_ENVELOPE_SCHEMA_VERSION,
         lane_envelope_magic: xenia_peer_core::frame::LANE_ENVELOPE_MAGIC,
     };

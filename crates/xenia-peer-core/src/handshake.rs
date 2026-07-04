@@ -887,6 +887,7 @@ mod tests {
             video_format: crate::frame::PixelFormat::Passthrough,
             telemetry_enabled: false,
             input_control_enabled: false,
+            clipboard_enabled: false,
             lane_envelope_version: crate::frame::LANE_ENVELOPE_SCHEMA_VERSION,
             lane_envelope_magic: crate::frame::LANE_ENVELOPE_MAGIC,
         };
@@ -909,6 +910,7 @@ mod tests {
             video_format: crate::frame::PixelFormat::Passthrough,
             telemetry_enabled: false,
             input_control_enabled: false,
+            clipboard_enabled: false,
             lane_envelope_version: crate::frame::LANE_ENVELOPE_SCHEMA_VERSION,
             lane_envelope_magic: crate::frame::LANE_ENVELOPE_MAGIC,
         };
@@ -931,6 +933,7 @@ mod tests {
             video_format: crate::frame::PixelFormat::Passthrough,
             telemetry_enabled: false,
             input_control_enabled: false,
+            clipboard_enabled: false,
             lane_envelope_version: crate::frame::LANE_ENVELOPE_SCHEMA_VERSION,
             lane_envelope_magic: crate::frame::LANE_ENVELOPE_MAGIC,
         };

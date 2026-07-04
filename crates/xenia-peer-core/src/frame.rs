@@ -46,6 +46,10 @@ pub enum PixelFormat {
     /// Reserved sealed session metadata frame carrying bincode-
     /// serialized [`RawRekey`].
     Rekey = 243,
+    /// Sealed clipboard-sync frame carrying bincode-serialized
+    /// [`RawClipboard`]. Bidirectional on the control lane (like
+    /// [`Self::Rekey`]) — either side can push a clipboard update.
+    Clipboard = 244,
 }
 
 /// Scalar telemetry value carried inside a [`RawTelemetry`] payload.
@@ -104,6 +108,8 @@ pub struct RawCapabilities {
     pub telemetry_enabled: bool,
     /// Input-control lane is enabled for this session.
     pub input_control_enabled: bool,
+    /// Clipboard sync is enabled for this session.
+    pub clipboard_enabled: bool,
     /// Lane envelope schema version used by this session.
     pub lane_envelope_version: u16,
     /// Cleartext lane envelope magic used before sealed lane payloads.
@@ -141,6 +147,86 @@ pub enum RawRekey {
         /// Canonical rekey epoch hash.
         epoch_hash: [u8; 32],
     },
+}
+
+/// Clipboard content carried inside a [`RawClipboard`] update.
+///
+/// Text-only for the initial cut — images/rich formats (HTML, file
+/// lists) are a documented follow-up, not included here to keep the
+/// wire format and the sensitivity-scrubbing story simple to reason
+/// about for a first real implementation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClipboardContent {
+    /// Plain UTF-8 text, as most clipboard managers surface it.
+    Text(String),
+    /// The clipboard was cleared (or its content is no longer
+    /// syncable, e.g. a password manager's sensitivity hint fired).
+    Cleared,
+}
+
+/// Clipboard-sync update, sealed bidirectionally on the control lane
+/// (either the host or the viewer may originate one, mirroring
+/// [`RawRekey`]'s Proposal/Ack bidirectionality — there's no
+/// "always this side" restriction here since either end's real OS
+/// clipboard can change independently).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawClipboard {
+    /// Monotonic per-originating-side sequence number. Lets a receiver
+    /// detect and discard an update that arrives out of order relative
+    /// to a more recent one it already applied (clipboard changes can
+    /// race with rekeys/reconnects); NOT a replacement for the wire's
+    /// own AEAD replay window, which is keyed by envelope, not by this
+    /// field.
+    pub sequence: u64,
+    /// Host or viewer timestamp in milliseconds since Unix epoch, from
+    /// whichever side originated this update.
+    pub timestamp_ms: u64,
+    /// The synced content.
+    pub content: ClipboardContent,
+}
+
+impl RawClipboard {
+    /// Build a clipboard-sync metadata frame.
+    pub fn into_frame(self, frame_id: u64) -> Result<RawFrame, WireError> {
+        let timestamp_ms = self.timestamp_ms;
+        let payload = bincode::serialize(&self).map_err(WireError::encode)?;
+        Ok(RawFrame::encoded(
+            frame_id,
+            timestamp_ms,
+            0,
+            0,
+            PixelFormat::Clipboard,
+            payload,
+        ))
+    }
+
+    /// Decode a clipboard-sync metadata frame.
+    pub fn from_frame(frame: &RawFrame) -> Result<Self, WireError> {
+        if frame.pixel_format != PixelFormat::Clipboard {
+            return Err(WireError::decode("RawFrame is not a clipboard update"));
+        }
+        bincode::deserialize(&frame.pixels).map_err(WireError::decode)
+    }
+}
+
+/// Wire payload type for the reverse-path (viewer → host) clipboard
+/// stream, sealed directly under the control lane's key via the
+/// generic [`xenia_wire::seal`]/[`xenia_wire::open`] -- mirrors
+/// [`RawInput`]'s bare-envelope reverse path, but with its own type
+/// byte so a receiver can distinguish the two bare-envelope streams by
+/// peeking [`xenia_wire::envelope_payload_type`] before opening,
+/// without wasting a decrypt attempt (and without double-consuming
+/// replay-window state) on the wrong stream. `0x30` is the first byte
+/// of `xenia_wire::payload_types`' reserved application range.
+pub const PAYLOAD_TYPE_CLIPBOARD: u8 = 0x30;
+
+impl Sealable for RawClipboard {
+    fn to_bin(&self) -> Result<Vec<u8>, WireError> {
+        bincode::serialize(self).map_err(WireError::encode)
+    }
+    fn from_bin(bytes: &[u8]) -> Result<Self, WireError> {
+        bincode::deserialize(bytes).map_err(WireError::decode)
+    }
 }
 
 /// Audio sample payload format.
@@ -817,6 +903,7 @@ impl RawFrame {
                     | PixelFormat::Audio
                     | PixelFormat::Capabilities
                     | PixelFormat::Rekey
+                    | PixelFormat::Clipboard
             ),
             "RawFrame::encoded requires an encoded PixelFormat variant",
         );
@@ -849,6 +936,7 @@ impl RawFrame {
                 !self.pixels.is_empty()
             }
             PixelFormat::Rekey => RawRekey::from_frame(self).is_ok(),
+            PixelFormat::Clipboard => RawClipboard::from_frame(self).is_ok(),
             PixelFormat::Audio => RawAudio::from_frame(self).is_ok_and(|audio| audio.validate()),
         }
     }

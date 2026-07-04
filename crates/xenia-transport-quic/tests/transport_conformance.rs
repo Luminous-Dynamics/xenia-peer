@@ -1,10 +1,10 @@
-use iroh::{Endpoint, endpoint::presets};
-use xenia_peer_core::transport::{MAX_ENVELOPE_BYTES, Transport, TransportError};
+use iroh::{endpoint::presets, Endpoint};
+use xenia_peer_core::transport::{Transport, TransportError, MAX_ENVELOPE_BYTES};
 use xenia_peer_core::{
-    RawAudio, RawCapabilities, RawTelemetry, Session, SessionRole, SyntheticAudioKind,
-    SyntheticAudioSource, TelemetrySample, TelemetryValue,
     advertisement::{AdvertisedAudioCodec, AudioAdvertisement},
     frame::PixelFormat,
+    RawAudio, RawCapabilities, RawTelemetry, Session, SessionRole, SyntheticAudioKind,
+    SyntheticAudioSource, TelemetrySample, TelemetryValue,
 };
 use xenia_transport_quic::{QuicTransport, XENIA_QUIC_ALPN};
 
@@ -171,6 +171,7 @@ where
         video_format: PixelFormat::Passthrough,
         telemetry_enabled: true,
         input_control_enabled: false,
+        clipboard_enabled: false,
         lane_envelope_version: xenia_peer_core::frame::LANE_ENVELOPE_SCHEMA_VERSION,
         lane_envelope_magic: xenia_peer_core::frame::LANE_ENVELOPE_MAGIC,
     };
