@@ -6,10 +6,11 @@
 // author); see ADR-002 for the library-vs-binary licensing split.
 // Faithful port of the 64x64 grayscale-tile HDC-delta codec, minus
 // the Symthaea-specific types and the consciousness-coupled framing.
-// `ContinuousHV` is inlined below as a minimal ~40-line struct —
-// the only HDC surface the codec touches is `from_values`,
-// `.similarity(&Self)`, and `.values` element access, so there's no
-// need to drag in `symthaea-core` as a dependency.
+// The original port materialized Symthaea's full 16,384-dim
+// `ContinuousHV` per tile per frame; since 2026-07-05 this crate
+// instead uses an exact 8-dimensional reduction of the same math
+// (see the "Tile features + band weighting" module comment below) —
+// there's still no need to drag in `symthaea-core` as a dependency.
 
 //! HDC hybrid tile-delta codec.
 //!
@@ -25,7 +26,7 @@
 //!         ↓
 //!     64×64 tile grid
 //!         ↓  (per tile)
-//!     HDC encoding → cosine sim vs prev frame's tile HV
+//!     HDC encoding → weighted cosine sim vs prev frame's tile features
 //!         ↓
 //!     if sim > threshold (0.92 default) → skip
 //!         ↓ else
@@ -66,48 +67,105 @@ use crate::{
 use serde::{Deserialize, Serialize};
 
 // ═══════════════════════════════════════════════════════════════════
-// Minimal ContinuousHV
+// Tile features + band weighting
 // ═══════════════════════════════════════════════════════════════════
+//
+// The original (ported-from-Symthaea) design materialized a dense
+// `TILE_HDC_DIM`-length "position HV" per tile, multiplied 8 scalar
+// pixel-statistics features into 8 equal-width bands of it, and took
+// the cosine similarity of that 16,384-element vector against the
+// previous frame's. That's exact but needlessly expensive: this
+// codec only ever compares a tile against *itself* at a later frame
+// (`HdcEncoder::prev_tiles[idx]` is indexed by tile position and never
+// cross-compared against a different position), so the same position
+// vector `pos` is reused on both sides of every similarity call.
+//
+// For two vectors built as `hv_a[i] = pos[i] * w_a[band(i)]` and
+// `hv_b[i] = pos[i] * w_b[band(i)]` sharing the same `pos`:
+//
+//   dot(hv_a, hv_b) = Σ_i pos[i]² · w_a[band(i)] · w_b[band(i)]
+//                   = Σ_band w_a[band] · w_b[band] · S[band]
+//
+// where `S[band] = Σ_{i in band} pos[i]²` depends only on the tile's
+// position and is constant across every frame. So `S` can be computed
+// **once per tile at encoder construction** (`N_BANDS` = 8 numbers,
+// not `TILE_HDC_DIM` = 16,384), and the per-frame hot loop only ever
+// needs the 8 scalar features — an exact (not approximate)
+// ~2,048x reduction in the per-tile, per-frame comparison cost.
+// Verified live 2026-07-05: at 1008×2244 (576 tiles), the pre-fix
+// dense-vector path measured 276–2083ms/frame even in `--release`
+// (see `examples/hdc_throughput.rs`) — unusable above ~1-3fps.
 
-/// 16,384-dimensional continuous-valued hyperdimensional vector.
-///
-/// Vendored minimal surface from `symthaea_core::hdc::unified_hv::ContinuousHV`.
-/// Only the operations the tile codec needs are implemented here —
-/// enough for change detection + content classification. Not a
-/// substitute for Symthaea's full HDC library.
-#[derive(Clone, Debug)]
-pub struct ContinuousHV {
-    /// Dense continuous values, length == [`TILE_HDC_DIM`].
-    pub values: Vec<f32>,
+/// Number of pixel-statistics feature bands (see module comment).
+/// Matches the original design's 8 bands of `TILE_HDC_DIM`.
+const N_BANDS: usize = 8;
+
+/// The 8 pixel-statistics features computed per tile. Order must
+/// match [`generate_band_sumsq`]'s per-band weighting.
+#[derive(Clone, Copy, Debug)]
+struct TileFeatures {
+    mean_lum: f32,
+    contrast: f32,
+    mean_r: f32,
+    mean_g: f32,
+    mean_b: f32,
+    edge_density: f32,
+    lum_contrast: f32,
+    rb_diff: f32,
 }
 
-impl ContinuousHV {
-    /// Construct from a pre-computed value vector.
-    pub fn from_values(values: Vec<f32>) -> Self {
-        Self { values }
-    }
+impl TileFeatures {
+    const ZERO: Self = Self {
+        mean_lum: 0.0,
+        contrast: 0.0,
+        mean_r: 0.0,
+        mean_g: 0.0,
+        mean_b: 0.0,
+        edge_density: 0.0,
+        lum_contrast: 0.0,
+        rb_diff: 0.0,
+    };
 
-    /// Cosine similarity in `[-1.0, 1.0]`. Undefined for zero-norm
-    /// vectors; returns `0.0` in that degenerate case (matches the
-    /// Symthaea-core behavior the caller expects).
-    pub fn similarity(&self, other: &Self) -> f32 {
-        if self.values.len() != other.values.len() {
-            return 0.0;
-        }
-        let mut dot = 0.0f32;
-        let mut n_a = 0.0f32;
-        let mut n_b = 0.0f32;
-        for (a, b) in self.values.iter().zip(other.values.iter()) {
-            dot += a * b;
-            n_a += a * a;
-            n_b += b * b;
-        }
-        let denom = (n_a * n_b).sqrt();
-        if denom <= f32::EPSILON {
-            0.0
-        } else {
-            dot / denom
-        }
+    fn as_array(&self) -> [f32; N_BANDS] {
+        [
+            self.mean_lum,
+            self.contrast,
+            self.mean_r,
+            self.mean_g,
+            self.mean_b,
+            self.edge_density,
+            self.lum_contrast,
+            self.rb_diff,
+        ]
+    }
+}
+
+/// Cosine similarity between two tiles' feature vectors, weighted by
+/// the shared tile position's per-band sum-of-squares (`band_sumsq`).
+/// Exactly equivalent to comparing the two tiles' full
+/// `TILE_HDC_DIM`-length position-modulated HVs (see module comment).
+/// Returns `0.0` for the degenerate zero-norm case (both features
+/// zero, e.g. the encoder's initial `prev_tiles` state).
+fn weighted_cosine_similarity(
+    a: &TileFeatures,
+    b: &TileFeatures,
+    band_sumsq: &[f32; N_BANDS],
+) -> f32 {
+    let (av, bv) = (a.as_array(), b.as_array());
+    let mut dot = 0.0f32;
+    let mut n_a = 0.0f32;
+    let mut n_b = 0.0f32;
+    for band in 0..N_BANDS {
+        let s = band_sumsq[band];
+        dot += av[band] * bv[band] * s;
+        n_a += av[band] * av[band] * s;
+        n_b += bv[band] * bv[band] * s;
+    }
+    let denom = (n_a * n_b).sqrt();
+    if denom <= f32::EPSILON {
+        0.0
+    } else {
+        dot / denom
     }
 }
 
@@ -119,8 +177,12 @@ impl ContinuousHV {
 /// between granularity and per-tile overhead.
 pub const TILE_SIZE: usize = 64;
 
-/// HDC vector dimension. Symthaea's default; smaller means faster
-/// similarity compute but coarser change detection.
+/// Conceptual HDC vector dimension inherited from Symthaea's default
+/// (smaller would mean faster similarity compute but coarser change
+/// detection). Since 2026-07-05 this is a construction-time-only cost
+/// (see the "Tile features + band weighting" module comment above,
+/// `generate_band_sumsq`) — the per-frame hot loop no longer
+/// materializes a vector of this length at all.
 pub const TILE_HDC_DIM: usize = 16_384;
 
 /// Default cosine-similarity threshold above which a tile is
@@ -209,9 +271,9 @@ pub struct HdcPacket {
 // Per-tile state tracked across frames
 // ═══════════════════════════════════════════════════════════════════
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct TileState {
-    hv: ContinuousHV,
+    features: TileFeatures,
     content_type: TileContentType,
     static_count: u32,
 }
@@ -226,7 +288,7 @@ pub struct HdcEncoder {
     tile_cols: u16,
     tile_rows: u16,
     prev_tiles: Vec<TileState>,
-    position_hvs: Vec<ContinuousHV>,
+    band_sumsq: Vec<[f32; N_BANDS]>,
     frame_count: u64,
     change_threshold: f32,
     static_threshold: u32,
@@ -244,16 +306,16 @@ impl HdcEncoder {
         let tile_rows = params.height.div_ceil(TILE_SIZE as u32) as u16;
         let n_tiles = tile_cols as usize * tile_rows as usize;
 
-        // Deterministic position-basis HVs, seeded per-tile so each
-        // tile index gets a unique "where am I" vector.
+        // Deterministic per-band position weighting, seeded per-tile
+        // so each tile index gets a unique "where am I" weighting.
+        // One-time construction cost only (see module comment above).
         let seed = (params.width as u64) * 0x100000000 + (params.height as u64);
-        let position_hvs: Vec<ContinuousHV> = (0..n_tiles)
-            .map(|i| generate_position_hv(i, seed))
-            .collect();
+        let band_sumsq: Vec<[f32; N_BANDS]> =
+            (0..n_tiles).map(|i| generate_band_sumsq(i, seed)).collect();
 
         let prev_tiles = vec![
             TileState {
-                hv: ContinuousHV::from_values(vec![0.0; TILE_HDC_DIM]),
+                features: TileFeatures::ZERO,
                 content_type: TileContentType::Static,
                 static_count: 0,
             };
@@ -265,7 +327,7 @@ impl HdcEncoder {
             tile_cols,
             tile_rows,
             prev_tiles,
-            position_hvs,
+            band_sumsq,
             frame_count: 0,
             change_threshold: DEFAULT_CHANGE_THRESHOLD,
             static_threshold: params.target_fps.max(1), // ~1s of stillness = Static
@@ -327,18 +389,21 @@ impl Encoder for HdcEncoder {
                 let tile_x = col * TILE_SIZE;
                 let tile_y = row * TILE_SIZE;
 
-                // HDC-encode the current tile.
-                let tile_hv = encode_tile_hdc(
+                // Compute the current tile's pixel-statistics features.
+                let tile_features = encode_tile_hdc(
                     raw,
                     width as usize,
                     height as usize,
                     tile_x,
                     tile_y,
                     TILE_SIZE,
-                    &self.position_hvs[idx],
                 );
 
-                let sim = self.prev_tiles[idx].hv.similarity(&tile_hv);
+                let sim = weighted_cosine_similarity(
+                    &self.prev_tiles[idx].features,
+                    &tile_features,
+                    &self.band_sumsq[idx],
+                );
                 let sim = if sim.is_finite() { sim } else { 0.0 };
                 let changed = sim <= self.change_threshold;
 
@@ -359,7 +424,7 @@ impl Encoder for HdcEncoder {
                         self.prev_tiles[idx].content_type = TileContentType::Static;
                     }
                 }
-                self.prev_tiles[idx].hv = tile_hv;
+                self.prev_tiles[idx].features = tile_features;
 
                 // Emit the patch if it's a keyframe OR the tile
                 // changed. Keyframes cover everything regardless.
@@ -565,30 +630,37 @@ impl Decoder for HdcDecoder {
 // Internal helpers — ported from Symthaea's rdp_codec.rs
 // ═══════════════════════════════════════════════════════════════════
 
-/// Deterministic position-basis HV. Same seed => same HV. Used to
-/// domain-separate tiles so two visually-identical tiles at different
-/// positions produce distinguishable HVs.
-fn generate_position_hv(index: usize, seed: u64) -> ContinuousHV {
+/// Deterministic per-band sum-of-squares weighting for one tile
+/// position. Same seed => same weighting. Used to domain-separate
+/// tiles so two visually-identical tiles at different positions
+/// compare with different band weights (exactly reproduces the
+/// original dense-position-HV design's behavior — see the "Tile
+/// features + band weighting" module comment above — at 1/2,048th
+/// the per-tile cost, and only at encoder-construction time, never
+/// per frame).
+fn generate_band_sumsq(index: usize, seed: u64) -> [f32; N_BANDS] {
     let combined = seed
         .wrapping_add(index as u64)
         .wrapping_mul(0x517cc1b727220a95);
-    let mut values = vec![0.0f32; TILE_HDC_DIM];
+    let band_size = TILE_HDC_DIM / N_BANDS;
+    let mut sumsq = [0.0f32; N_BANDS];
     let mut state = combined;
-    for v in values.iter_mut() {
+    for i in 0..TILE_HDC_DIM {
         let hash = blake3::hash(&state.to_le_bytes());
         let bytes = hash.as_bytes();
         let u =
             u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f32 / u32::MAX as f32;
-        *v = (u - 0.5) * 2.0; // centered in [-1, 1]
+        let v = (u - 0.5) * 2.0; // centered in [-1, 1]
+        sumsq[i / band_size] += v * v;
         state = state.wrapping_add(1);
     }
-    ContinuousHV::from_values(values)
+    sumsq
 }
 
-/// Feature-extract a tile's pixel content into an HDC vector. 8
-/// features (luminance mean, contrast, RGB means, edge density,
-/// and two interaction terms) modulate 8 equal-width bands of the
-/// position HV.
+/// Feature-extract a tile's pixel content into its 8 pixel-statistics
+/// features (luminance mean, contrast, RGB means, edge density, and
+/// two interaction terms). These correspond 1:1 with the original
+/// design's 8 equal-width position-HV bands (see module comment).
 fn encode_tile_hdc(
     pixels: &[u8],
     img_width: usize,
@@ -596,8 +668,7 @@ fn encode_tile_hdc(
     tile_x: usize,
     tile_y: usize,
     tile_size: usize,
-    position_hv: &ContinuousHV,
-) -> ContinuousHV {
+) -> TileFeatures {
     let mut lum_sum = 0.0f32;
     let mut lum_sq_sum = 0.0f32;
     let mut r_sum = 0.0f32;
@@ -653,23 +724,16 @@ fn encode_tile_hdc(
     let mean_b = b_sum / n;
     let edge_density = edge_energy / n;
 
-    let mut values = vec![0.0f32; TILE_HDC_DIM];
-    let band_size = TILE_HDC_DIM / 8;
-    for (i, (v_out, pos)) in values.iter_mut().zip(position_hv.values.iter()).enumerate() {
-        let band = i / band_size;
-        let feature_weight = match band {
-            0 => mean_lum,
-            1 => contrast,
-            2 => mean_r,
-            3 => mean_g,
-            4 => mean_b,
-            5 => edge_density,
-            6 => mean_lum * contrast,
-            _ => (mean_r - mean_b).abs(),
-        };
-        *v_out = pos * feature_weight;
+    TileFeatures {
+        mean_lum,
+        contrast,
+        mean_r,
+        mean_g,
+        mean_b,
+        edge_density,
+        lum_contrast: mean_lum * contrast,
+        rb_diff: (mean_r - mean_b).abs(),
     }
-    ContinuousHV::from_values(values)
 }
 
 /// Classify a tile's content type from its pixel statistics.
@@ -834,14 +898,104 @@ mod tests {
     }
 
     #[test]
-    fn continuous_hv_similarity_is_sane() {
-        let a = ContinuousHV::from_values(vec![1.0; 4]);
-        let b = ContinuousHV::from_values(vec![1.0; 4]);
-        let c = ContinuousHV::from_values(vec![-1.0; 4]);
-        assert!((a.similarity(&b) - 1.0).abs() < 1e-6);
-        assert!((a.similarity(&c) + 1.0).abs() < 1e-6);
-        let z = ContinuousHV::from_values(vec![0.0; 4]);
-        assert_eq!(a.similarity(&z), 0.0);
+    fn weighted_cosine_similarity_is_sane() {
+        let uniform_weights = [1.0f32; N_BANDS];
+        let a = TileFeatures {
+            mean_lum: 1.0,
+            contrast: 1.0,
+            mean_r: 1.0,
+            mean_g: 1.0,
+            mean_b: 1.0,
+            edge_density: 1.0,
+            lum_contrast: 1.0,
+            rb_diff: 1.0,
+        };
+        let b = a;
+        let c = TileFeatures {
+            mean_lum: -1.0,
+            contrast: -1.0,
+            mean_r: -1.0,
+            mean_g: -1.0,
+            mean_b: -1.0,
+            edge_density: -1.0,
+            lum_contrast: -1.0,
+            rb_diff: -1.0,
+        };
+        assert!((weighted_cosine_similarity(&a, &b, &uniform_weights) - 1.0).abs() < 1e-6);
+        assert!((weighted_cosine_similarity(&a, &c, &uniform_weights) + 1.0).abs() < 1e-6);
+        assert_eq!(
+            weighted_cosine_similarity(&a, &TileFeatures::ZERO, &uniform_weights),
+            0.0
+        );
+    }
+
+    #[test]
+    fn weighted_cosine_similarity_matches_dense_hv_reduction() {
+        // Directly verifies the module's core claim: comparing two
+        // 8-feature TileFeatures with band_sumsq weights gives the
+        // exact same result as materializing the original dense
+        // TILE_HDC_DIM-length position-modulated vectors and taking
+        // their plain cosine similarity.
+        let band_sumsq = generate_band_sumsq(7, 0xABCD_1234);
+        // Reconstruct the dense position vector this band_sumsq was
+        // derived from, band-by-band, to build reference dense HVs.
+        let seed = 0xABCD_1234u64;
+        let index = 7usize;
+        let combined = seed
+            .wrapping_add(index as u64)
+            .wrapping_mul(0x517cc1b727220a95);
+        let band_size = TILE_HDC_DIM / N_BANDS;
+        let mut pos = vec![0.0f32; TILE_HDC_DIM];
+        let mut state = combined;
+        for v in pos.iter_mut() {
+            let hash = blake3::hash(&state.to_le_bytes());
+            let bytes = hash.as_bytes();
+            let u = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f32
+                / u32::MAX as f32;
+            *v = (u - 0.5) * 2.0;
+            state = state.wrapping_add(1);
+        }
+
+        let a = TileFeatures {
+            mean_lum: 0.3,
+            contrast: 0.1,
+            mean_r: 0.5,
+            mean_g: 0.2,
+            mean_b: 0.4,
+            edge_density: 0.05,
+            lum_contrast: 0.03,
+            rb_diff: 0.1,
+        };
+        let b = TileFeatures {
+            mean_lum: 0.35,
+            contrast: 0.12,
+            mean_r: 0.45,
+            mean_g: 0.25,
+            mean_b: 0.38,
+            edge_density: 0.06,
+            lum_contrast: 0.042,
+            rb_diff: 0.07,
+        };
+
+        let dense = |f: &TileFeatures| -> Vec<f32> {
+            let w = f.as_array();
+            pos.iter()
+                .enumerate()
+                .map(|(i, p)| p * w[i / band_size])
+                .collect()
+        };
+        let dense_a = dense(&a);
+        let dense_b = dense(&b);
+        let dot: f32 = dense_a.iter().zip(dense_b.iter()).map(|(x, y)| x * y).sum();
+        let na: f32 = dense_a.iter().map(|x| x * x).sum();
+        let nb: f32 = dense_b.iter().map(|y| y * y).sum();
+        let reference_sim = dot / (na * nb).sqrt();
+
+        let fast_sim = weighted_cosine_similarity(&a, &b, &band_sumsq);
+        assert!(
+            (reference_sim - fast_sim).abs() < 1e-3,
+            "reference={reference_sim} fast={fast_sim}"
+        );
     }
 
     #[test]
@@ -983,13 +1137,13 @@ mod tests {
     }
 
     #[test]
-    fn position_hv_is_deterministic_per_seed() {
-        let a = generate_position_hv(0, 42);
-        let b = generate_position_hv(0, 42);
-        assert!((a.similarity(&b) - 1.0).abs() < 1e-6);
-        let c = generate_position_hv(1, 42);
-        // Same seed different index => different HV.
-        assert!(a.similarity(&c) < 0.99);
+    fn band_sumsq_is_deterministic_per_seed() {
+        let a = generate_band_sumsq(0, 42);
+        let b = generate_band_sumsq(0, 42);
+        assert_eq!(a, b);
+        let c = generate_band_sumsq(1, 42);
+        // Same seed, different index => different weighting.
+        assert_ne!(a, c);
     }
 
     /// A frame with distinct, non-grayscale R/G/B channels (pure
