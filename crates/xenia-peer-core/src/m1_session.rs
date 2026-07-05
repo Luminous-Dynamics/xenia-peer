@@ -37,6 +37,9 @@ pub enum M1Permission {
     /// Permission to apply a viewer-originated clipboard update to the
     /// real host clipboard (reverse path, bidirectional clipboard mode).
     ClipboardSync,
+    /// Permission to write a received file-transfer chunk to disk, or to
+    /// read a local file's bytes for an outbound transfer.
+    FileTransfer,
 }
 
 /// Audit event emitted by the M1 lifecycle.
@@ -54,6 +57,8 @@ pub enum M1AuditEvent {
     InputInjected,
     /// A viewer-originated clipboard update was applied to the host clipboard.
     ClipboardSynced,
+    /// A file-transfer chunk was allowed through (either direction).
+    FileTransferred,
     /// Consent was revoked.
     ConsentRevoked,
     /// The session ended normally.
@@ -233,6 +238,15 @@ impl M1SessionMachine {
         Ok(())
     }
 
+    /// Record that one file-transfer chunk was allowed through (either
+    /// direction: writing a received chunk to disk, or reading a local
+    /// chunk to send).
+    pub fn transfer_file(&mut self) -> Result<(), M1SessionError> {
+        self.require_active(M1Permission::FileTransfer)?;
+        self.audit.push(M1AuditEvent::FileTransferred);
+        Ok(())
+    }
+
     fn transition(
         &mut self,
         from: M1SessionState,
@@ -374,6 +388,40 @@ mod tests {
                 M1AuditEvent::SessionOffered,
                 M1AuditEvent::ConsentGranted,
                 M1AuditEvent::ClipboardSynced
+            ]
+        );
+    }
+
+    #[test]
+    fn cannot_transfer_file_before_consent() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+
+        let err = session.transfer_file().unwrap_err();
+
+        assert_eq!(
+            err,
+            M1SessionError::PermissionDenied {
+                state: M1SessionState::Offered,
+                permission: M1Permission::FileTransfer
+            }
+        );
+    }
+
+    #[test]
+    fn active_session_allows_file_transfer() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+        session.grant_consent().unwrap();
+
+        session.transfer_file().unwrap();
+
+        assert_eq!(
+            session.audit(),
+            &[
+                M1AuditEvent::SessionOffered,
+                M1AuditEvent::ConsentGranted,
+                M1AuditEvent::FileTransferred
             ]
         );
     }

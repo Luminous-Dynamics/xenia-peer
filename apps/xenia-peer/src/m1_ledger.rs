@@ -38,7 +38,8 @@ pub(crate) fn disposition_for_m1_event(event: M1AuditEvent) -> M1LedgerDispositi
         M1AuditEvent::SessionFailed => M1LedgerDisposition::Record(ConsentKind::Violation),
         M1AuditEvent::FrameStreamed
         | M1AuditEvent::InputInjected
-        | M1AuditEvent::ClipboardSynced => {
+        | M1AuditEvent::ClipboardSynced
+        | M1AuditEvent::FileTransferred => {
             M1LedgerDisposition::Skip(M1LedgerSkipReason::NotConsentBoundary)
         }
         M1AuditEvent::SessionEnded => {

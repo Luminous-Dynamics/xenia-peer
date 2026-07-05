@@ -991,6 +991,11 @@ impl M1RuntimeSession {
         self.flush_new_audit_events()
     }
 
+    pub(crate) fn transfer_file(&mut self) -> Result<(), M1RuntimeError> {
+        self.session.transfer_file()?;
+        self.flush_new_audit_events()
+    }
+
     pub(crate) fn allow_frame_flow(&mut self) -> Result<(), M1RuntimeError> {
         self.stream_frame()
     }
@@ -1012,6 +1017,10 @@ impl M1RuntimeSession {
 
     pub(crate) fn allow_clipboard_flow(&mut self) -> Result<(), M1RuntimeError> {
         self.sync_clipboard()
+    }
+
+    pub(crate) fn allow_file_transfer_flow(&mut self) -> Result<(), M1RuntimeError> {
+        self.transfer_file()
     }
 
     pub(crate) fn revoke(&mut self) -> Result<(), M1RuntimeError> {

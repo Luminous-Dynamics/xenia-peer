@@ -316,6 +316,23 @@ struct Args {
     /// direction). Ignored when `--clipboard off`.
     #[arg(long, default_value_t = 500)]
     clipboard_interval_ms: u64,
+
+    /// Directory to write files the viewer sends. Not set (default) means
+    /// the daemon rejects every inbound file-transfer offer -- the
+    /// feature is off unless a real destination is configured.
+    #[arg(long)]
+    recv_file_dir: Option<std::path::PathBuf>,
+
+    /// A local file to offer to the viewer once connected. One transfer
+    /// per daemon run in this first cut.
+    #[arg(long)]
+    send_file: Option<std::path::PathBuf>,
+
+    /// Reject/refuse to send any file larger than this many bytes. The
+    /// whole file is buffered in memory (both sending and receiving), so
+    /// this is also a memory-use cap, not just a policy knob.
+    #[arg(long, default_value_t = 200 * 1024 * 1024)]
+    file_transfer_max_bytes: u64,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -1007,6 +1024,188 @@ fn apply_clipboard_content(content: &ClipboardContent) {
     }
 }
 
+/// A transfer this side is sending. One at a time in this first cut --
+/// `--send-file` offers a single file per daemon run.
+struct OutgoingTransfer {
+    transfer_id: u64,
+    data: Vec<u8>,
+    started: bool,
+}
+
+/// A transfer this side is receiving.
+struct IncomingTransfer {
+    name: String,
+    expected_size: u64,
+    expected_hash: [u8; 32],
+    buffer: Vec<u8>,
+}
+
+/// Reduce a wire-provided filename to a bare basename with no path
+/// separators, so a received file always lands directly inside
+/// `--recv-file-dir` and never escapes it via `..` or an absolute path.
+/// Returns `None` for empty, `.`, or `..`.
+fn sanitize_transfer_filename(name: &str) -> Option<String> {
+    let candidate = std::path::Path::new(name)
+        .file_name()?
+        .to_str()?
+        .to_string();
+    if candidate.is_empty() || candidate == "." || candidate == ".." {
+        return None;
+    }
+    Some(candidate)
+}
+
+/// Decode and act on one file-transfer bare envelope. Runs inside the main
+/// send loop (not the recv task) so it can reuse the loop's own
+/// `send_half` for any reply -- see the recv task's comment on why
+/// file-transfer envelopes are forwarded here rather than handled inline.
+#[allow(clippy::too_many_arguments)]
+async fn handle_file_transfer_envelope(
+    envelope: &[u8],
+    send_half: &mut AnySendHalf,
+    session: &AsyncMutex<LaneSession>,
+    m1_runtime: &AsyncMutex<m1_runtime::M1RuntimeSession>,
+    outgoing: &mut Option<OutgoingTransfer>,
+    incoming: &mut std::collections::HashMap<u64, IncomingTransfer>,
+    recv_file_dir: Option<&std::path::Path>,
+    max_bytes: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let message = match session.lock().await.open_file_transfer_message(envelope) {
+        Ok(message) => message,
+        Err(err) => {
+            warn!(error = %err, "failed to open file-transfer envelope");
+            return Ok(());
+        }
+    };
+    match message {
+        xenia_peer_core::FileTransferMessage::Offer {
+            transfer_id,
+            name,
+            size,
+            blake3_hash,
+        } => {
+            let (accept, reason) = match (recv_file_dir, sanitize_transfer_filename(&name)) {
+                (None, _) => (false, "file transfer is disabled on this daemon".to_string()),
+                (Some(_), None) => (false, "unusable filename".to_string()),
+                (Some(_), Some(_)) if size > max_bytes => {
+                    (false, format!("file exceeds {max_bytes}-byte cap"))
+                }
+                (Some(_), Some(_)) => (true, String::new()),
+            };
+            if accept {
+                m1_runtime.lock().await.allow_file_transfer_flow()?;
+                let safe_name = sanitize_transfer_filename(&name).expect("checked above");
+                incoming.insert(
+                    transfer_id,
+                    IncomingTransfer {
+                        name: safe_name,
+                        expected_size: size,
+                        expected_hash: blake3_hash,
+                        buffer: Vec::with_capacity(size.min(max_bytes) as usize),
+                    },
+                );
+                info!(transfer_id, name, size, "file transfer offer accepted");
+            } else {
+                info!(transfer_id, name, size, reason, "file transfer offer rejected");
+            }
+            let reply = if accept {
+                xenia_peer_core::FileTransferMessage::Accept { transfer_id }
+            } else {
+                xenia_peer_core::FileTransferMessage::Reject {
+                    transfer_id,
+                    reason,
+                }
+            };
+            let envelope = session.lock().await.seal_file_transfer_message(reply, true)?;
+            send_half.send_envelope(&envelope).await?;
+        }
+        xenia_peer_core::FileTransferMessage::Accept { transfer_id } => {
+            let Some(transfer) = outgoing.as_mut().filter(|t| t.transfer_id == transfer_id) else {
+                warn!(transfer_id, "Accept for unknown/stale outgoing transfer");
+                return Ok(());
+            };
+            transfer.started = true;
+            info!(transfer_id, bytes = transfer.data.len(), "transfer accepted, sending chunks");
+            let chunk_size = xenia_peer_core::FILE_TRANSFER_CHUNK_SIZE;
+            for (i, chunk) in transfer.data.chunks(chunk_size).enumerate() {
+                m1_runtime.lock().await.allow_file_transfer_flow()?;
+                let offset = (i * chunk_size) as u64;
+                let msg = xenia_peer_core::FileTransferMessage::Chunk {
+                    transfer_id,
+                    offset,
+                    data: chunk.to_vec(),
+                };
+                let envelope = session.lock().await.seal_file_transfer_message(msg, true)?;
+                send_half.send_envelope(&envelope).await?;
+            }
+            let complete = xenia_peer_core::FileTransferMessage::Complete { transfer_id };
+            let envelope = session.lock().await.seal_file_transfer_message(complete, true)?;
+            send_half.send_envelope(&envelope).await?;
+            info!(transfer_id, "all chunks sent, awaiting verification");
+        }
+        xenia_peer_core::FileTransferMessage::Reject {
+            transfer_id,
+            reason,
+        } => {
+            if outgoing.as_ref().is_some_and(|t| t.transfer_id == transfer_id) {
+                warn!(transfer_id, reason, "outgoing transfer rejected by peer");
+                *outgoing = None;
+            }
+        }
+        xenia_peer_core::FileTransferMessage::Chunk {
+            transfer_id,
+            offset,
+            data,
+        } => {
+            let Some(transfer) = incoming.get_mut(&transfer_id) else {
+                warn!(transfer_id, "chunk for unknown/stale incoming transfer");
+                return Ok(());
+            };
+            m1_runtime.lock().await.allow_file_transfer_flow()?;
+            let off = offset as usize;
+            if off.saturating_add(data.len()) > transfer.expected_size as usize {
+                warn!(transfer_id, "chunk exceeds offered file size; dropping transfer");
+                incoming.remove(&transfer_id);
+                return Ok(());
+            }
+            if transfer.buffer.len() < off + data.len() {
+                transfer.buffer.resize(off + data.len(), 0);
+            }
+            transfer.buffer[off..off + data.len()].copy_from_slice(&data);
+        }
+        xenia_peer_core::FileTransferMessage::Complete { transfer_id } => {
+            let Some(transfer) = incoming.remove(&transfer_id) else {
+                warn!(transfer_id, "Complete for unknown/stale incoming transfer");
+                return Ok(());
+            };
+            let actual_hash = *blake3::hash(&transfer.buffer).as_bytes();
+            let ok = actual_hash == transfer.expected_hash;
+            if ok {
+                m1_runtime.lock().await.allow_file_transfer_flow()?;
+                let dest = recv_file_dir
+                    .expect("incoming transfer only exists when recv_file_dir is set")
+                    .join(&transfer.name);
+                match std::fs::write(&dest, &transfer.buffer) {
+                    Ok(()) => info!(transfer_id, path = %dest.display(), bytes = transfer.buffer.len(), "file transfer verified and written"),
+                    Err(err) => warn!(transfer_id, error = %err, "verified file failed to write to disk"),
+                }
+            } else {
+                warn!(transfer_id, "file transfer failed BLAKE3 verification, not written");
+            }
+            let verified = xenia_peer_core::FileTransferMessage::Verified { transfer_id, ok };
+            let envelope = session.lock().await.seal_file_transfer_message(verified, true)?;
+            send_half.send_envelope(&envelope).await?;
+        }
+        xenia_peer_core::FileTransferMessage::Verified { transfer_id, ok } => {
+            if outgoing.as_ref().is_some_and(|t| t.transfer_id == transfer_id) {
+                info!(transfer_id, ok, "outgoing transfer verification result");
+                *outgoing = None;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn telemetry_value_to_wire(value: xenia_capture::TelemetryValue) -> WireTelemetryValue {
     match value {
         xenia_capture::TelemetryValue::I64(value) => WireTelemetryValue::I64(value),
@@ -1626,6 +1825,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = Arc::new(AsyncMutex::new(session));
     let m1_runtime = Arc::new(AsyncMutex::new(m1_runtime));
     let (rekey_ack_tx, mut rekey_ack_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+    // File-transfer envelopes are forwarded here rather than opened in the
+    // recv task, because replying (Accept/Reject/Chunk/Verified) needs
+    // `send_half`, which the main send loop below owns exclusively (unlike
+    // xenia-viewer, which already wraps its send half in an Arc<Mutex>).
+    let (ft_tx, mut ft_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+
+    let mut outgoing_transfer: Option<OutgoingTransfer> = None;
+    let mut incoming_transfers: std::collections::HashMap<u64, IncomingTransfer> =
+        std::collections::HashMap::new();
+    if let Some(path) = &args.send_file {
+        let data = std::fs::read(path)?;
+        if data.len() as u64 > args.file_transfer_max_bytes {
+            return Err(format!(
+                "--send-file {} is {} bytes, exceeds --file-transfer-max-bytes {}",
+                path.display(),
+                data.len(),
+                args.file_transfer_max_bytes
+            )
+            .into());
+        }
+        let blake3_hash = *blake3::hash(&data).as_bytes();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("transfer")
+            .to_string();
+        let transfer_id = 1;
+        m1_runtime.lock().await.allow_file_transfer_flow()?;
+        let offer = xenia_peer_core::FileTransferMessage::Offer {
+            transfer_id,
+            name: name.clone(),
+            size: data.len() as u64,
+            blake3_hash,
+        };
+        let envelope = session.lock().await.seal_file_transfer_message(offer, true)?;
+        send_half.send_envelope(&envelope).await?;
+        info!(transfer_id, name, size = data.len(), "file transfer offered");
+        outgoing_transfer = Some(OutgoingTransfer {
+            transfer_id,
+            data,
+            started: false,
+        });
+    }
+
     // Updated by the send loop below whenever the encoder is (re)built
     // from a real captured frame, so a lazily-constructed input
     // injector denormalizes coordinates against the actual screen
@@ -1638,6 +1881,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let screen_dims = Arc::clone(&screen_dims);
         let input_backend = args.input_backend;
         let clipboard_mode = args.clipboard;
+        let ft_tx = ft_tx.clone();
         tokio::spawn(async move {
             let mut recv_half = recv_half;
             // Constructed lazily on the first real InputEvent, not at
@@ -1673,6 +1917,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // type byte is cleartext (nonce byte 6) so this is checked
                 // without attempting -- and potentially misfiring -- a
                 // decrypt against the wrong opener.
+                if matches!(
+                    xenia_wire::envelope_payload_type(&envelope),
+                    Some(xenia_peer_core::PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST)
+                        | Some(xenia_peer_core::PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER)
+                ) {
+                    let _ = ft_tx.send(envelope).await;
+                    continue;
+                }
+
                 if xenia_wire::envelope_payload_type(&envelope) == Some(PAYLOAD_TYPE_CLIPBOARD) {
                     let clipboard = {
                         let mut session = session.lock().await;
@@ -1778,6 +2031,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         ticker.tick().await;
+
+        while let Ok(envelope) = ft_rx.try_recv() {
+            handle_file_transfer_envelope(
+                &envelope,
+                &mut send_half,
+                &session,
+                &m1_runtime,
+                &mut outgoing_transfer,
+                &mut incoming_transfers,
+                args.recv_file_dir.as_deref(),
+                args.file_transfer_max_bytes,
+            )
+            .await?;
+        }
+
         if args.telemetry_level != TelemetryLevel::Off
             && last_telemetry_sent.elapsed() >= telemetry_interval
         {

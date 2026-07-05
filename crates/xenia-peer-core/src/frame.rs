@@ -229,6 +229,108 @@ impl Sealable for RawClipboard {
     }
 }
 
+/// Chunk size for file transfer. 64 KiB balances envelope overhead against
+/// per-chunk memory/latency; not tuned against a real transport benchmark.
+pub const FILE_TRANSFER_CHUNK_SIZE: usize = 64 * 1024;
+
+/// File-transfer protocol message, symmetric in both directions -- unlike
+/// [`RawClipboard`], a transfer can be initiated by either the host or the
+/// viewer, so both sides use the same [`crate::LaneSession::seal_file_transfer_message`]/
+/// [`crate::LaneSession::open_file_transfer_message`] pair rather than a
+/// forward/reverse split.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileTransferMessage {
+    /// Sender offers a file. `blake3_hash` covers the *whole* file so the
+    /// receiver can verify integrity once every chunk has arrived.
+    Offer {
+        /// Sender-chosen identifier, unique for the life of the session.
+        transfer_id: u64,
+        /// Sanitized to a bare filename by the receiver before writing --
+        /// never trusted as a path.
+        name: String,
+        /// Total file size in bytes.
+        size: u64,
+        /// BLAKE3-256 digest of the whole file.
+        blake3_hash: [u8; 32],
+    },
+    /// Receiver accepts the offer and is ready for chunks.
+    Accept {
+        /// Matches the `Offer`'s `transfer_id`.
+        transfer_id: u64,
+    },
+    /// Receiver rejects the offer (size cap, feature disabled, etc).
+    Reject {
+        /// Matches the `Offer`'s `transfer_id`.
+        transfer_id: u64,
+        /// Human-readable reason, logged but not otherwise interpreted.
+        reason: String,
+    },
+    /// One chunk of file data, at the given byte offset.
+    Chunk {
+        /// Matches the `Offer`'s `transfer_id`.
+        transfer_id: u64,
+        /// Byte offset of `data` within the reassembled file.
+        offset: u64,
+        /// Chunk bytes, at most [`FILE_TRANSFER_CHUNK_SIZE`].
+        data: Vec<u8>,
+    },
+    /// Sender indicates every chunk has been sent.
+    Complete {
+        /// Matches the `Offer`'s `transfer_id`.
+        transfer_id: u64,
+    },
+    /// Receiver reports whether the reassembled file's BLAKE3 hash matched
+    /// the `Offer`'s.
+    Verified {
+        /// Matches the `Offer`'s `transfer_id`.
+        transfer_id: u64,
+        /// Whether the reassembled file's hash matched.
+        ok: bool,
+    },
+}
+
+/// Wire payload type for file-transfer messages *sealed by the host*,
+/// directly under the control lane's key via the generic
+/// [`xenia_wire::seal`]/[`xenia_wire::open`] -- same bare-envelope shape as
+/// [`RawInput`] and [`RawClipboard`]'s reverse path.
+///
+/// Unlike input/clipboard-reverse (strictly viewer-only-outbound, so only
+/// one side ever calls `seal()` under that payload type), a file transfer
+/// can be offered by *either* side, and [`FileTransferMessage::Offer`] /
+/// `Accept` / `Chunk` / etc. can each flow in either direction depending on
+/// who's sending vs receiving. If both sides sealed under the *same*
+/// payload type, their independent per-session nonce counters would
+/// collide: `xenia_wire::Session::seal`'s nonce is
+/// `source_id[0..6] | payload_type | epoch | sequence[0..4]`, and host and
+/// viewer are configured with the *same* `source_id` (see `--source-id-hex`),
+/// so identical `(payload_type, epoch, sequence)` tuples from each side
+/// would produce byte-identical nonces under the same control-lane key --
+/// an actual AEAD nonce reuse, not just a replay-window false positive.
+/// Caught live: a real daemon+viewer run hit `Wire(OpenFailed)` the moment
+/// both sides tried to seal their own `Offer` under one shared payload
+/// type. The fix is this pair of payload types, one per *sealing side*
+/// (not per message semantics) -- `seal_file_transfer_message` always
+/// seals under the caller's own side, so each payload type's nonce space
+/// is written by exactly one session object, matching the safe pattern
+/// input/clipboard-reverse already rely on.
+///
+/// `0x31`/`0x32` are the second and third bytes of `xenia_wire::payload_types`'
+/// reserved application range (`0x30` is [`PAYLOAD_TYPE_CLIPBOARD`]).
+pub const PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST: u8 = 0x31;
+/// Wire payload type for file-transfer messages *sealed by the viewer* --
+/// see [`PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST`]'s doc comment for why this
+/// needs to be a distinct value rather than one shared payload type.
+pub const PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER: u8 = 0x32;
+
+impl Sealable for FileTransferMessage {
+    fn to_bin(&self) -> Result<Vec<u8>, WireError> {
+        bincode::serialize(self).map_err(WireError::encode)
+    }
+    fn from_bin(bytes: &[u8]) -> Result<Self, WireError> {
+        bincode::deserialize(bytes).map_err(WireError::decode)
+    }
+}
+
 /// Audio sample payload format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]

@@ -62,9 +62,11 @@ pub mod transport;
 pub use frame::OpusAudioCodec;
 pub use frame::{
     AudioCodec, AudioCodecError, AudioJitterBuffer, AudioSampleFormat, ClipboardContent,
-    JitterInsert, JitterStats, PixelFormat, RawAudio, RawCapabilities, RawClipboard, RawFrame,
-    RawInput, RawPcmAudioCodec, RawRekey, RawTelemetry, SyntheticAudioKind, SyntheticAudioSource,
-    TelemetrySample, TelemetryValue, PAYLOAD_TYPE_CLIPBOARD,
+    FileTransferMessage, JitterInsert, JitterStats, PixelFormat, RawAudio, RawCapabilities,
+    RawClipboard, RawFrame, RawInput, RawPcmAudioCodec, RawRekey, RawTelemetry, SyntheticAudioKind,
+    SyntheticAudioSource, TelemetrySample, TelemetryValue, FILE_TRANSFER_CHUNK_SIZE,
+    PAYLOAD_TYPE_CLIPBOARD, PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST,
+    PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER,
 };
 pub use handshake::{RekeyPolicy, SessionEpochState};
 pub use m1_session::{

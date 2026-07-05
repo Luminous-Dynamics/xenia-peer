@@ -229,6 +229,34 @@ impl LaneSession {
         xenia_wire::open(envelope, &mut self.control).map_err(Into::into)
     }
 
+    /// Seal a file-transfer protocol message under the control lane's key.
+    /// `is_host` selects which of the two payload types to seal under --
+    /// pass the caller's own fixed role (`true` for `xenia-peer`, `false`
+    /// for `xenia-viewer`), never the transfer's sender/receiver role;
+    /// see [`crate::frame::PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST`]'s doc
+    /// comment for why this can't be a single shared payload type.
+    pub fn seal_file_transfer_message(
+        &mut self,
+        message: crate::frame::FileTransferMessage,
+        is_host: bool,
+    ) -> Result<Vec<u8>, SessionError> {
+        let payload_type = if is_host {
+            crate::frame::PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST
+        } else {
+            crate::frame::PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER
+        };
+        xenia_wire::seal(&message, &mut self.control, payload_type).map_err(Into::into)
+    }
+
+    /// Open a bare file-transfer envelope sealed by
+    /// [`LaneSession::seal_file_transfer_message`].
+    pub fn open_file_transfer_message(
+        &mut self,
+        envelope: &[u8],
+    ) -> Result<crate::frame::FileTransferMessage, SessionError> {
+        xenia_wire::open(envelope, &mut self.control).map_err(Into::into)
+    }
+
     /// Seal a captured raw-RGBA frame on the video lane.
     pub fn seal_captured_rgba(
         &mut self,
@@ -787,6 +815,98 @@ mod tests {
             crate::frame::ClipboardContent::Text("hello xenia".into())
         );
         assert_eq!(opened.sequence, 0);
+    }
+
+    #[test]
+    fn lane_session_file_transfer_seal_open_roundtrip_is_symmetric() {
+        let schedule = xenia_handshake::derive_session_key_schedule(&[0xD8; 32], &[0x8D; 32]);
+        let mut host = LaneSession::with_fixture([0x77; 8], 0x22);
+        host.install_schedule(&schedule);
+        let mut viewer = LaneSession::with_fixture([0x77; 8], 0x22);
+        viewer.install_schedule(&schedule);
+
+        // Either side can originate a transfer -- host offers here, but
+        // the wire shape is identical if the viewer originates instead.
+        // `is_host` always reflects the *sealing* side, not who is
+        // logically sending/receiving this particular transfer.
+        let offer = crate::frame::FileTransferMessage::Offer {
+            transfer_id: 42,
+            name: "notes.txt".into(),
+            size: 11,
+            blake3_hash: [0x9A; 32],
+        };
+        let sealed = host
+            .seal_file_transfer_message(offer.clone(), true)
+            .unwrap();
+        assert_ne!(
+            &sealed[..LANE_ENVELOPE_MAGIC.len().min(sealed.len())],
+            &LANE_ENVELOPE_MAGIC
+        );
+        assert_eq!(
+            xenia_wire::envelope_payload_type(&sealed),
+            Some(crate::frame::PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST)
+        );
+        let opened = viewer.open_file_transfer_message(&sealed).unwrap();
+        assert_eq!(opened, offer);
+
+        // Viewer replies with an Accept -- same methods, opposite direction,
+        // sealed under the *other* payload type.
+        let accept = crate::frame::FileTransferMessage::Accept { transfer_id: 42 };
+        let sealed = viewer
+            .seal_file_transfer_message(accept.clone(), false)
+            .unwrap();
+        assert_eq!(
+            xenia_wire::envelope_payload_type(&sealed),
+            Some(crate::frame::PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER)
+        );
+        let opened = host.open_file_transfer_message(&sealed).unwrap();
+        assert_eq!(opened, accept);
+    }
+
+    #[test]
+    fn file_transfer_from_host_and_from_viewer_do_not_collide_on_first_nonce() {
+        // Regression test for a real bug caught via live testing: host and
+        // viewer share the same `source_id` (per --source-id-hex), and each
+        // side's session-object nonce counter starts at 0 independently.
+        // Sealing both sides' very first file-transfer message under one
+        // shared payload type produced byte-identical nonces (the same
+        // source_id, payload_type, epoch, and sequence=0) under the same
+        // control-lane key -- an actual AEAD nonce reuse, not just a
+        // replay-window false positive. Asserts the two sealed envelopes
+        // differ (in the payload_type nonce byte) even though both sides
+        // seal their very first message here.
+        let schedule = xenia_handshake::derive_session_key_schedule(&[0xE9; 32], &[0x9E; 32]);
+        let mut host = LaneSession::with_fixture([0x88; 8], 0x33);
+        host.install_schedule(&schedule);
+        let mut viewer = LaneSession::with_fixture([0x88; 8], 0x33);
+        viewer.install_schedule(&schedule);
+
+        let host_msg = crate::frame::FileTransferMessage::Offer {
+            transfer_id: 1,
+            name: "a.bin".into(),
+            size: 1,
+            blake3_hash: [0; 32],
+        };
+        let viewer_msg = crate::frame::FileTransferMessage::Offer {
+            transfer_id: 1,
+            name: "b.bin".into(),
+            size: 1,
+            blake3_hash: [0; 32],
+        };
+        let host_sealed = host.seal_file_transfer_message(host_msg, true).unwrap();
+        let viewer_sealed = viewer
+            .seal_file_transfer_message(viewer_msg, false)
+            .unwrap();
+
+        // Nonce is the first 12 bytes; must differ despite both being each
+        // side's first-ever seal under a shared source_id/epoch.
+        assert_ne!(host_sealed[..12], viewer_sealed[..12]);
+        // Each side must be able to open the OTHER's envelope but not its
+        // own confused-for-the-other's (opening still works generically
+        // here since open() doesn't care which of the two payload types it
+        // sees -- the real safety property is the nonce disjointness above).
+        assert!(viewer.open_file_transfer_message(&host_sealed).is_ok());
+        assert!(host.open_file_transfer_message(&viewer_sealed).is_ok());
     }
 
     #[test]
