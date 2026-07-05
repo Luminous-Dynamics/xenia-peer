@@ -80,6 +80,20 @@ struct Args {
     #[arg(long, default_value_t = 30)]
     fps: u32,
 
+    /// Capture a real Android phone's screen via scrcpy instead of the
+    /// host display -- the ADB serial of the device to use (`adb devices`
+    /// lists connected serials). Requires building with `--features
+    /// scrcpy` and a device connected over USB with debugging authorized.
+    /// Takes priority over the scap/TestCapture desktop backends when set.
+    #[arg(long)]
+    phone_serial: Option<String>,
+
+    /// Host-side TCP port for the scrcpy reverse tunnel (`adb reverse`
+    /// bridges the device's local abstract socket here). Only used with
+    /// `--phone-serial`. 27183 matches upstream scrcpy's own default.
+    #[arg(long, default_value_t = 27183)]
+    phone_tcp_port: u16,
+
     #[arg(long, default_value_t = 0)]
     frames: u64,
 
@@ -1614,7 +1628,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Initialize Capture Backend
-    let mut capture: Box<dyn ScreenCapture> = {
+    let mut capture: Box<dyn ScreenCapture> = 'backend: {
+        if let Some(serial) = &args.phone_serial {
+            #[cfg(feature = "scrcpy")]
+            {
+                info!(serial, tcp_port = args.phone_tcp_port, "Initializing ScrcpyScreenCapture backend (phone-as-source)");
+                break 'backend Box::new(xenia_capture_scrcpy::ScrcpyScreenCapture::launch(
+                    serial,
+                    args.phone_tcp_port,
+                )?);
+            }
+            #[cfg(not(feature = "scrcpy"))]
+            {
+                let _ = serial;
+                return Err(
+                    "--phone-serial requires building with feature `xenia-peer/scrcpy`".into(),
+                );
+            }
+        }
         #[cfg(feature = "scap")]
         if ScapCapture::is_available() {
             info!("Initializing ScapCapture backend");

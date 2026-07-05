@@ -43,6 +43,7 @@ xenia-handshake = { path = "../../crates/xenia-handshake" }
 rust-embed = { version = "8.11.0", features = ["axum", "mime-guess"] }
 mime_guess = "2.0.5"
 arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
+xenia-capture-scrcpy = { path = "../../crates/xenia-capture-scrcpy", optional = true }
 
 [features]
 scap = ["xenia-capture/scap-backend"]
@@ -68,6 +69,11 @@ h264 = ["xenia-video/h264"]
 # HDC hybrid tile-delta codec (ported from Symthaea). Pure Rust,
 # no external libs. Grayscale output.
 hdc = ["xenia-video/hdc"]
+# Phone-as-source capture (--phone-serial): streams a real Android
+# device's screen via scrcpy-server over ADB instead of the host
+# display. Requires libav dev headers (enable inside nix develop, same
+# as h264) plus a device connected over USB with debugging authorized.
+scrcpy = ["dep:xenia-capture-scrcpy"]
 # Local smoke/demo-only fixtures. Required for flags that bypass a real
 # operator consent source; never enable for production or design-partner builds.
 preprod-fixtures = []
