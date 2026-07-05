@@ -22,6 +22,7 @@ use std::sync::Arc;
 #[cfg(feature = "audio-output")]
 use std::sync::Mutex;
 use std::sync::mpsc;
+use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
 use tracing::{info, warn};
@@ -32,7 +33,8 @@ use xenia_peer_core::advertisement::{
     AdvertisedAudioCodec, AdvertisedTransport, TransportAdvertisement,
 };
 use xenia_peer_core::frame::{
-    PixelFormat as FramePixelFormat, RawAudio, RawCapabilities, RawRekey, RawTelemetry, audio_flags,
+    PixelFormat as FramePixelFormat, RawAudio, RawCapabilities, RawClipboard, RawRekey,
+    RawTelemetry, audio_flags,
 };
 use xenia_peer_core::handshake::{
     NegotiatedTransport, negotiated_session_context_hash, perform_viewer_handshake_with_transcript,
@@ -41,8 +43,8 @@ use xenia_peer_core::transport::{
     RecvEnvelope, SendEnvelope, TcpRecvHalf, TcpSendHalf, TcpTransport, Transport, TransportError,
 };
 use xenia_peer_core::{
-    AudioCodec, AudioJitterBuffer, HandshakeManager, LaneSession, RawPcmAudioCodec, RekeyPolicy,
-    SessionEpochState, derive_negotiated_context_key,
+    AudioCodec, AudioJitterBuffer, ClipboardContent, HandshakeManager, LaneSession,
+    RawPcmAudioCodec, RekeyPolicy, SessionEpochState, derive_negotiated_context_key,
 };
 use xenia_transport_quic::{
     QuicRecvHalf, QuicSendHalf, QuicTransport, bind_xenia_endpoint, decode_endpoint_addr,
@@ -702,6 +704,53 @@ fn choose_audio_codec_from_capabilities(
     }
 }
 
+/// Read the viewer's own OS clipboard text, if any. A fresh
+/// `arboard::Clipboard` is opened per call rather than cached across polls
+/// -- see `xenia-peer`'s `read_host_clipboard_text` for why (not `Send` on
+/// Linux, cheap enough to reopen at typical poll intervals).
+fn read_viewer_clipboard_text() -> Option<String> {
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(clipboard) => clipboard,
+        Err(err) => {
+            warn!(error = %err, "failed to open viewer clipboard for reading");
+            return None;
+        }
+    };
+    match clipboard.get_text() {
+        Ok(text) => Some(text),
+        Err(arboard::Error::ContentNotAvailable) => None,
+        Err(err) => {
+            warn!(error = %err, "failed to read viewer clipboard text");
+            None
+        }
+    }
+}
+
+/// Apply a daemon-originated clipboard update to the viewer's own OS
+/// clipboard. Called whenever `--clipboard` is not `off`.
+fn apply_clipboard_content_to_viewer(content: &ClipboardContent) {
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(clipboard) => clipboard,
+        Err(err) => {
+            warn!(error = %err, "failed to open viewer clipboard for writing");
+            return;
+        }
+    };
+    // `Cleared` deliberately uses `set_text("")` rather than `clipboard.clear()`
+    // -- see the matching comment in xenia-peer's `apply_clipboard_content`
+    // for why (`clear()` doesn't reliably override a selection still served
+    // by an earlier `set_text()` call, verified live on KDE-Wayland).
+    let result = match content {
+        ClipboardContent::Text(text) => clipboard.set_text(text.clone()),
+        ClipboardContent::Cleared => clipboard.set_text(String::new()),
+    };
+    if let Err(err) = result {
+        warn!(error = %err, "failed to apply daemon clipboard update to viewer clipboard");
+    } else {
+        info!(?content, "applied daemon clipboard update to viewer clipboard");
+    }
+}
+
 fn decode_telemetry_frame(raw_frame: &xenia_peer_core::RawFrame) -> Option<TelemetryData> {
     match RawTelemetry::from_frame(raw_frame) {
         Ok(telemetry) => {
@@ -874,6 +923,27 @@ struct Args {
     /// statistics to stdout.
     #[arg(long)]
     gui: bool,
+
+    /// Clipboard sync mode (GUI mode only). `off` (default) never
+    /// touches the viewer's real OS clipboard. `host-to-viewer` applies
+    /// daemon clipboard updates to the viewer's OS clipboard only.
+    /// `bidirectional` also polls the viewer's own OS clipboard and
+    /// sends its changes to the daemon (which needs a matching
+    /// `--clipboard bidirectional` to actually apply them).
+    #[arg(long, value_enum, default_value_t = ClipboardMode::Off)]
+    clipboard: ClipboardMode,
+
+    /// How often to poll the viewer's own clipboard for changes
+    /// (bidirectional mode only).
+    #[arg(long, default_value_t = 500)]
+    clipboard_interval_ms: u64,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ClipboardMode {
+    Off,
+    HostToViewer,
+    Bidirectional,
 }
 
 fn parse_source_id(hex: &str) -> Result<[u8; 8], String> {
@@ -1068,6 +1138,15 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 &mut audio_decoded,
             ) {
                 last_audio_data = Some(audio);
+            }
+            continue;
+        }
+        if raw_frame.pixel_format == FramePixelFormat::Clipboard {
+            if args.clipboard != ClipboardMode::Off {
+                match RawClipboard::from_frame(&raw_frame) {
+                    Ok(clipboard) => apply_clipboard_content_to_viewer(&clipboard.content),
+                    Err(err) => warn!(error = %err, "failed to decode clipboard frame"),
+                }
             }
             continue;
         }
@@ -1298,6 +1377,39 @@ async fn gui_receive_loop(
         });
     }
 
+    if args.clipboard == ClipboardMode::Bidirectional {
+        let session = Arc::clone(&session);
+        let send_half = Arc::clone(&send_half);
+        let poll_interval = Duration::from_millis(args.clipboard_interval_ms.max(1));
+        tokio::spawn(async move {
+            let mut last_sent: Option<String> = None;
+            loop {
+                tokio::time::sleep(poll_interval).await;
+                let Some(text) = read_viewer_clipboard_text() else {
+                    continue;
+                };
+                if Some(&text) == last_sent.as_ref() {
+                    continue;
+                }
+                let envelope = {
+                    let mut session = session.lock().await;
+                    match session.seal_clipboard_event(ClipboardContent::Text(text.clone())) {
+                        Ok(envelope) => envelope,
+                        Err(err) => {
+                            warn!(error = %err, "failed to seal captured clipboard update");
+                            continue;
+                        }
+                    }
+                };
+                if let Err(err) = send_half.lock().await.send_envelope(&envelope).await {
+                    info!(error = %err, "clipboard send loop ending (daemon disconnected)");
+                    break;
+                }
+                last_sent = Some(text);
+            }
+        });
+    }
+
     let mut decoder = make_decoder(args.codec)
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
     let expected_frame_fmt = codec_to_frame_format(args.codec);
@@ -1438,6 +1550,15 @@ async fn gui_receive_loop(
                 &mut audio_decoded,
             ) {
                 slot.put_audio(audio);
+            }
+            continue;
+        }
+        if raw_frame.pixel_format == FramePixelFormat::Clipboard {
+            if args.clipboard != ClipboardMode::Off {
+                match RawClipboard::from_frame(&raw_frame) {
+                    Ok(clipboard) => apply_clipboard_content_to_viewer(&clipboard.content),
+                    Err(err) => warn!(error = %err, "failed to decode clipboard frame"),
+                }
             }
             continue;
         }

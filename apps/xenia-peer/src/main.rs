@@ -29,11 +29,12 @@ use xenia_peer_core::OpusAudioCodec;
 #[cfg(any(feature = "audio-capture", test))]
 use xenia_peer_core::frame::audio_flags;
 use xenia_peer_core::{
-    AudioCodec, LaneSession, RawPcmAudioCodec, RekeyPolicy, SessionEpochState,
+    AudioCodec, ClipboardContent, LaneSession, PAYLOAD_TYPE_CLIPBOARD, RawPcmAudioCodec,
+    RekeyPolicy, SessionEpochState,
     advertisement::{AdvertisedAudioCodec, AudioAdvertisement, TransportAdvertisement},
     frame::{
-        LANE_ENVELOPE_MAGIC, PixelFormat as FramePixelFormat, RawAudio, RawFrame, RawRekey,
-        RawTelemetry, SyntheticAudioKind, SyntheticAudioSource,
+        LANE_ENVELOPE_MAGIC, PixelFormat as FramePixelFormat, RawAudio, RawClipboard, RawFrame,
+        RawRekey, RawTelemetry, SyntheticAudioKind, SyntheticAudioSource,
         TelemetrySample as WireTelemetrySample, TelemetryValue as WireTelemetryValue,
     },
     handshake::{
@@ -310,6 +311,11 @@ struct Args {
     /// it needs the same M1 consent gate as input injection.
     #[arg(long, value_enum, default_value_t = ClipboardMode::Off)]
     clipboard: ClipboardMode,
+
+    /// How often to poll the host clipboard for changes (host-to-viewer
+    /// direction). Ignored when `--clipboard off`.
+    #[arg(long, default_value_t = 500)]
+    clipboard_interval_ms: u64,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -946,6 +952,61 @@ fn build_input_injector(
     }
 }
 
+/// Read the current host clipboard text, if any.
+///
+/// A fresh `arboard::Clipboard` is opened per call rather than cached across
+/// polls: `Clipboard` is not `Send` on Linux (both the X11 and
+/// wayland-data-control backends hold non-thread-safe connection state), so
+/// it cannot be held across an `.await` point shared between the poll loop
+/// and the recv task. Opening a connection per poll (default every 500ms)
+/// is cheap enough not to matter.
+fn read_host_clipboard_text() -> Option<String> {
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(clipboard) => clipboard,
+        Err(err) => {
+            warn!(error = %err, "failed to open host clipboard for reading");
+            return None;
+        }
+    };
+    match clipboard.get_text() {
+        Ok(text) => Some(text),
+        Err(arboard::Error::ContentNotAvailable) => None,
+        Err(err) => {
+            warn!(error = %err, "failed to read host clipboard text");
+            None
+        }
+    }
+}
+
+/// Apply a viewer-originated clipboard update to the real host clipboard.
+/// Only called in `--clipboard bidirectional` mode, after the M1 consent
+/// gate has already allowed the flow.
+fn apply_clipboard_content(content: &ClipboardContent) {
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(clipboard) => clipboard,
+        Err(err) => {
+            warn!(error = %err, "failed to open host clipboard for writing");
+            return;
+        }
+    };
+    // `Cleared` deliberately uses `set_text("")` rather than `clipboard.clear()`.
+    // Verified live on a real KDE-Wayland session: `clear()` only unsets the
+    // calling connection's own (momentary) selection -- it does not preempt
+    // a selection still actively served by an *earlier* `set_text()` call's
+    // background wl-data-control server, so a stale value kept reading back
+    // after `clear()` returned `Ok`. `set_text("")` actively claims
+    // ownership with empty content, which does override it.
+    let result = match content {
+        ClipboardContent::Text(text) => clipboard.set_text(text.clone()),
+        ClipboardContent::Cleared => clipboard.set_text(String::new()),
+    };
+    if let Err(err) = result {
+        warn!(error = %err, "failed to apply viewer clipboard update to host clipboard");
+    } else {
+        info!(?content, "applied viewer clipboard update to host clipboard");
+    }
+}
+
 fn telemetry_value_to_wire(value: xenia_capture::TelemetryValue) -> WireTelemetryValue {
     match value {
         xenia_capture::TelemetryValue::I64(value) => WireTelemetryValue::I64(value),
@@ -1576,6 +1637,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let m1_runtime = Arc::clone(&m1_runtime);
         let screen_dims = Arc::clone(&screen_dims);
         let input_backend = args.input_backend;
+        let clipboard_mode = args.clipboard;
         tokio::spawn(async move {
             let mut recv_half = recv_half;
             // Constructed lazily on the first real InputEvent, not at
@@ -1605,9 +1667,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
-                // Bare (non-lane-wrapped) envelope: a viewer-captured
-                // input event sealed directly under the control lane's
-                // key (see `LaneSession::seal_input_event`).
+                // Bare (non-lane-wrapped) envelope: either a viewer-captured
+                // input event or a viewer-originated clipboard update, both
+                // sealed directly under the control lane's key. The payload
+                // type byte is cleartext (nonce byte 6) so this is checked
+                // without attempting -- and potentially misfiring -- a
+                // decrypt against the wrong opener.
+                if xenia_wire::envelope_payload_type(&envelope) == Some(PAYLOAD_TYPE_CLIPBOARD) {
+                    let clipboard = {
+                        let mut session = session.lock().await;
+                        match session.open_clipboard(&envelope) {
+                            Ok(clipboard) => clipboard,
+                            Err(err) => {
+                                warn!(error = %err, "failed to open inbound clipboard envelope");
+                                continue;
+                            }
+                        }
+                    };
+                    if clipboard_mode != ClipboardMode::Bidirectional {
+                        warn!(
+                            "ignoring viewer clipboard update: --clipboard is not bidirectional"
+                        );
+                        continue;
+                    }
+                    {
+                        let mut m1_runtime = m1_runtime.lock().await;
+                        if let Err(err) = m1_runtime.allow_clipboard_flow() {
+                            warn!(error = %err, "clipboard update rejected by M1 consent gate");
+                            continue;
+                        }
+                    }
+                    apply_clipboard_content(&clipboard.content);
+                    continue;
+                }
+
                 let input = {
                     let mut session = session.lock().await;
                     match session.open_input(&envelope) {
@@ -1669,9 +1762,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_telemetry_sent = std::time::Instant::now() - telemetry_interval;
     let audio_interval = Duration::from_millis(args.audio_interval_ms.max(1));
     let mut last_audio_sent = std::time::Instant::now() - audio_interval;
+    let clipboard_interval = Duration::from_millis(args.clipboard_interval_ms.max(1));
+    let mut last_clipboard_check = std::time::Instant::now() - clipboard_interval;
+    let mut last_sent_clipboard_text: Option<String> = None;
+    let mut clipboard_seq = 0u64;
     let mut sent_frames = 0u64;
     let mut sent_telemetry = 0u64;
     let mut sent_audio = 0u64;
+    let mut sent_clipboard = 0u64;
 
     loop {
         if args.frames != 0 && sent_frames >= args.frames {
@@ -1735,6 +1833,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 last_audio_sent = std::time::Instant::now();
                 if sent_audio <= 3 || sent_audio.is_multiple_of(50) {
                     info!(sent = sent_audio, frame_id, "audio frame sealed and sent");
+                }
+            }
+        }
+
+        if args.clipboard != ClipboardMode::Off
+            && last_clipboard_check.elapsed() >= clipboard_interval
+        {
+            last_clipboard_check = std::time::Instant::now();
+            if let Some(text) = read_host_clipboard_text()
+                && Some(&text) != last_sent_clipboard_text.as_ref()
+            {
+                m1_runtime.lock().await.preflight_frame_flow()?;
+                let frame_id = session.lock().await.next_frame_id();
+                let seq = clipboard_seq;
+                clipboard_seq += 1;
+                let clipboard_frame = RawClipboard {
+                    sequence: seq,
+                    timestamp_ms: now_ms(),
+                    content: ClipboardContent::Text(text.clone()),
+                }
+                .into_frame(frame_id)?;
+                let envelope = session.lock().await.seal_frame(&clipboard_frame)?;
+                m1_runtime.lock().await.allow_frame_flow()?;
+                send_half.send_envelope(&envelope).await?;
+                last_sent_clipboard_text = Some(text);
+                sent_clipboard += 1;
+                if sent_clipboard <= 3 || sent_clipboard.is_multiple_of(10) {
+                    info!(
+                        sent = sent_clipboard,
+                        frame_id, "clipboard update sealed and sent"
+                    );
                 }
             }
         }

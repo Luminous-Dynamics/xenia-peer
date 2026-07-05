@@ -23,11 +23,11 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use xenia_ledger::{
-    CURRENT_EVIDENCE_CRYPTO_MANIFEST, Chain, ConsentKind, CryptoPolicyProfile, DowngradePolicy,
-    Ed25519EvidenceSignatureBackend, EvidenceBundleSeal, EvidenceBundleVerifyError,
-    EvidenceCryptoManifest, EvidencePublicKeyBinding, EvidenceSignatureBackend, LedgerEntry,
-    LedgerEntryExport, LedgerError, SessionTranscriptBinding, SessionTranscriptSignature,
-    SignatureEnvelope, SignatureSuite, Verifier, VerifyError,
+    Chain, ConsentKind, CryptoPolicyProfile, DowngradePolicy, Ed25519EvidenceSignatureBackend,
+    EvidenceBundleSeal, EvidenceBundleVerifyError, EvidenceCryptoManifest,
+    EvidencePublicKeyBinding, EvidenceSignatureBackend, LedgerEntry, LedgerEntryExport,
+    LedgerError, SessionTranscriptBinding, SessionTranscriptSignature, SignatureEnvelope,
+    SignatureSuite, Verifier, VerifyError, CURRENT_EVIDENCE_CRYPTO_MANIFEST,
 };
 use xenia_peer_core::{M1Permission, M1SessionError, M1SessionMachine, M1SessionState};
 
@@ -986,6 +986,11 @@ impl M1RuntimeSession {
         self.flush_new_audit_events()
     }
 
+    pub(crate) fn sync_clipboard(&mut self) -> Result<(), M1RuntimeError> {
+        self.session.sync_clipboard()?;
+        self.flush_new_audit_events()
+    }
+
     pub(crate) fn allow_frame_flow(&mut self) -> Result<(), M1RuntimeError> {
         self.stream_frame()
     }
@@ -1003,6 +1008,10 @@ impl M1RuntimeSession {
 
     pub(crate) fn allow_input_flow(&mut self) -> Result<(), M1RuntimeError> {
         self.inject_input()
+    }
+
+    pub(crate) fn allow_clipboard_flow(&mut self) -> Result<(), M1RuntimeError> {
+        self.sync_clipboard()
     }
 
     pub(crate) fn revoke(&mut self) -> Result<(), M1RuntimeError> {
@@ -1997,10 +2006,9 @@ mod tests {
         std::fs::write(&paths.ledger_entries, b"[]").unwrap();
         let err = audit_evidence_verification_report_artifacts_dir(&dir)
             .expect_err("report audit should reject a swapped artifact");
-        assert!(
-            err.to_string()
-                .contains("verification_report artifact digests do not match")
-        );
+        assert!(err
+            .to_string()
+            .contains("verification_report artifact digests do not match"));
 
         let _ = std::fs::remove_dir_all(&paths.dir);
     }
@@ -2072,10 +2080,9 @@ mod tests {
         .unwrap();
         let err = audit_sealed_evidence_verification_report_artifacts_dir(&dir)
             .expect_err("sealed report audit should reject a swapped sealed artifact");
-        assert!(
-            err.to_string()
-                .contains("sealed verification_report artifact digests do not match")
-        );
+        assert!(err
+            .to_string()
+            .contains("sealed verification_report artifact digests do not match"));
 
         let _ = std::fs::remove_dir_all(&paths.dir);
     }
@@ -2299,10 +2306,9 @@ mod tests {
 
         let err = sealed_evidence_trust_policy_anchors(&policy, "ml-dsa-87-fips204")
             .expect_err("mismatched trust policy suite must fail closed");
-        assert!(
-            err.to_string()
-                .contains("did not match selected verifier suite")
-        );
+        assert!(err
+            .to_string()
+            .contains("did not match selected verifier suite"));
     }
 
     #[test]

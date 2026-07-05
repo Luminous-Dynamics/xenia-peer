@@ -61,9 +61,10 @@ pub mod transport;
 #[cfg(feature = "opus")]
 pub use frame::OpusAudioCodec;
 pub use frame::{
-    AudioCodec, AudioCodecError, AudioJitterBuffer, AudioSampleFormat, JitterInsert, JitterStats,
-    PixelFormat, RawAudio, RawCapabilities, RawFrame, RawInput, RawPcmAudioCodec, RawRekey,
-    RawTelemetry, SyntheticAudioKind, SyntheticAudioSource, TelemetrySample, TelemetryValue,
+    AudioCodec, AudioCodecError, AudioJitterBuffer, AudioSampleFormat, ClipboardContent,
+    JitterInsert, JitterStats, PixelFormat, RawAudio, RawCapabilities, RawClipboard, RawFrame,
+    RawInput, RawPcmAudioCodec, RawRekey, RawTelemetry, SyntheticAudioKind, SyntheticAudioSource,
+    TelemetrySample, TelemetryValue, PAYLOAD_TYPE_CLIPBOARD,
 };
 pub use handshake::{RekeyPolicy, SessionEpochState};
 pub use m1_session::{
@@ -71,8 +72,8 @@ pub use m1_session::{
 };
 pub use session::{FrameLane, LaneSession, Session, SessionError, SessionRole};
 pub use xenia_handshake::{
-    HandshakeManager, RekeyEpochContextV1, RekeyReason, derive_negotiated_context_key,
-    derive_rekey_epoch_keys,
+    derive_negotiated_context_key, derive_rekey_epoch_keys, HandshakeManager, RekeyEpochContextV1,
+    RekeyReason,
 };
 
 /// Semantic-version string for the xenia-wire crate this server

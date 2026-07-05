@@ -34,6 +34,9 @@ pub enum M1Permission {
     StreamFrame,
     /// Permission to inject viewer input on the reverse path.
     InjectInput,
+    /// Permission to apply a viewer-originated clipboard update to the
+    /// real host clipboard (reverse path, bidirectional clipboard mode).
+    ClipboardSync,
 }
 
 /// Audit event emitted by the M1 lifecycle.
@@ -49,6 +52,8 @@ pub enum M1AuditEvent {
     FrameStreamed,
     /// An input event was allowed through the active session.
     InputInjected,
+    /// A viewer-originated clipboard update was applied to the host clipboard.
+    ClipboardSynced,
     /// Consent was revoked.
     ConsentRevoked,
     /// The session ended normally.
@@ -220,6 +225,14 @@ impl M1SessionMachine {
         Ok(())
     }
 
+    /// Record that one viewer-originated clipboard update was applied to
+    /// the host clipboard on the reverse path.
+    pub fn sync_clipboard(&mut self) -> Result<(), M1SessionError> {
+        self.require_active(M1Permission::ClipboardSync)?;
+        self.audit.push(M1AuditEvent::ClipboardSynced);
+        Ok(())
+    }
+
     fn transition(
         &mut self,
         from: M1SessionState,
@@ -327,6 +340,40 @@ mod tests {
                 M1AuditEvent::ConsentGranted,
                 M1AuditEvent::FrameStreamed,
                 M1AuditEvent::InputInjected
+            ]
+        );
+    }
+
+    #[test]
+    fn cannot_sync_clipboard_before_consent() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+
+        let err = session.sync_clipboard().unwrap_err();
+
+        assert_eq!(
+            err,
+            M1SessionError::PermissionDenied {
+                state: M1SessionState::Offered,
+                permission: M1Permission::ClipboardSync
+            }
+        );
+    }
+
+    #[test]
+    fn active_session_allows_clipboard_sync() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+        session.grant_consent().unwrap();
+
+        session.sync_clipboard().unwrap();
+
+        assert_eq!(
+            session.audit(),
+            &[
+                M1AuditEvent::SessionOffered,
+                M1AuditEvent::ConsentGranted,
+                M1AuditEvent::ClipboardSynced
             ]
         );
     }
