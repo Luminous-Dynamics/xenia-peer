@@ -4,7 +4,7 @@
 /// `xenia-peer` — headless daemon that hosts a Xenia session.
 use clap::{Parser, ValueEnum};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex as AsyncMutex;
@@ -1806,6 +1806,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (consent_decision_tx, consent_decision_rx) = tokio::sync::oneshot::channel::<bool>();
     let mut consent_decision_tx = Some(consent_decision_tx);
 
+    // Set by the consent socket when the operator sends a later "Revoke" on
+    // the still-open connection (after an initial "Approve"). The main send
+    // loop polls this each tick, calls `M1RuntimeSession::revoke()` to record
+    // the boundary in the consent ledger and flip every gate fail-closed,
+    // then stops streaming -- so an operator can end a live session without
+    // killing the process. See the send loop's revocation check below.
+    let revoked = Arc::new(AtomicBool::new(false));
+    let revoked_for_consent = Arc::clone(&revoked);
+
     // Server task for processing consent responses.
     let consent_addr = format!("127.0.0.1:{}", args.consent_port);
     tokio::spawn(async move {
@@ -1824,23 +1833,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         match result {
                             Ok(msg) => {
                                 if let Ok(text) = msg.to_text() {
-                                    let decision = match text {
-                                        "Approve" => Some(true),
-                                        "Deny" => Some(false),
+                                    match text {
+                                        "Approve" => {
+                                            info!(approved = true, "consent decision received");
+                                            if let Some(tx) = consent_decision_tx.take() {
+                                                let _ = tx.send(true);
+                                            }
+                                            // Keep the socket open: the operator
+                                            // can still send "Revoke" to end the
+                                            // live session.
+                                        }
+                                        "Deny" => {
+                                            info!(approved = false, "consent decision received");
+                                            if let Some(tx) = consent_decision_tx.take() {
+                                                let _ = tx.send(false);
+                                            }
+                                            break;
+                                        }
+                                        "Revoke" => {
+                                            info!("consent revocation received");
+                                            revoked_for_consent.store(true, Ordering::SeqCst);
+                                            break;
+                                        }
                                         other => {
                                             info!(
                                                 text = other,
                                                 "ignoring unrecognized consent message"
                                             );
-                                            None
                                         }
-                                    };
-                                    if let Some(decision) = decision {
-                                        info!(approved = decision, "consent decision received");
-                                        if let Some(tx) = consent_decision_tx.take() {
-                                            let _ = tx.send(decision);
-                                        }
-                                        break;
                                     }
                                 }
                             }
@@ -2155,6 +2175,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         ticker.tick().await;
+
+        // Mid-session revocation: if the operator sent "Revoke" on the
+        // consent socket, record it in the consent ledger (which flips the
+        // M1 state to Revoked so every frame/input/clipboard/file gate now
+        // fails closed) and stop streaming with a graceful close.
+        if revoked.load(Ordering::SeqCst) {
+            if let Err(err) = m1_runtime.lock().await.revoke() {
+                warn!(error = %err, "failed to record consent revocation");
+            }
+            info!("session revoked by operator; stopping frame flow");
+            break;
+        }
 
         while let Ok(envelope) = ft_rx.try_recv() {
             handle_file_transfer_envelope(
