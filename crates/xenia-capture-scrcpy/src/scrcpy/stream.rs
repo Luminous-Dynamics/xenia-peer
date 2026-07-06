@@ -80,6 +80,9 @@ pub enum StreamError {
         expected: WireCodec,
         actual: WireCodec,
     },
+    /// A frame header declared a `packet_size` beyond [`wire::MAX_PACKET_SIZE`],
+    /// which would drive an unbounded allocation. Rejected before allocating.
+    OversizePacket { size: u32, max: u32 },
 }
 
 impl std::fmt::Display for StreamError {
@@ -92,6 +95,10 @@ impl std::fmt::Display for StreamError {
             StreamError::CodecMismatch { expected, actual } => write!(
                 f,
                 "scrcpy codec mismatch: requested {expected:?}, device sent {actual:?}"
+            ),
+            StreamError::OversizePacket { size, max } => write!(
+                f,
+                "scrcpy oversize packet: {size} bytes exceeds {max}-byte cap"
             ),
         }
     }
@@ -307,6 +314,12 @@ impl ScrcpyCaptureStream {
             Err(e) => return Err(StreamError::Io(e)),
         }
         let header = wire::parse_frame_header(&hdr_buf)?;
+        if header.packet_size > wire::MAX_PACKET_SIZE {
+            return Err(StreamError::OversizePacket {
+                size: header.packet_size,
+                max: wire::MAX_PACKET_SIZE,
+            });
+        }
         let mut payload = vec![0u8; header.packet_size as usize];
         match self.tcp.read_exact(&mut payload) {
             Ok(()) => {

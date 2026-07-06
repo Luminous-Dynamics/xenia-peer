@@ -61,6 +61,13 @@ pub const VIDEO_HEADER_LEN: usize = 12;
 /// Length of the per-frame header (pts_with_flags + packet_size).
 pub const FRAME_HEADER_LEN: usize = 12;
 
+/// Upper bound on a single frame's `packet_size`. The field is a raw `u32`
+/// off the device stream (up to ~4 GiB), and the reader allocates a buffer of
+/// exactly that size before reading. A misbehaving or compromised on-device
+/// scrcpy server could otherwise drive an unbounded allocation. 64 MiB is far
+/// above any real encoded video frame at phone resolutions.
+pub const MAX_PACKET_SIZE: u32 = 64 * 1024 * 1024;
+
 /// PTS-or-flags top bit: payload is a config packet.
 pub const PACKET_FLAG_CONFIG: u64 = 1u64 << 63;
 
