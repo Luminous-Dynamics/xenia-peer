@@ -11,6 +11,7 @@ members = [
     "crates/xenia-inject",
     "crates/xenia-handshake",
     "crates/xenia-ledger",
+    "crates/xenia-mobile-ffi",
     "apps/sovereign-admin",
 ]
 # sovereign-admin is a wasm32-unknown-unknown CSR bin; keep it out of
@@ -27,6 +28,7 @@ default-members = [
     "crates/xenia-inject",
     "crates/xenia-handshake",
     "crates/xenia-ledger",
+    "crates/xenia-mobile-ffi",
 ]
 resolver = "2"
 

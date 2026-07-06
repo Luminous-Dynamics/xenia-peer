@@ -1,0 +1,39 @@
+[package]
+name = "xenia-mobile-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "Apache-2.0 OR MIT"
+description = "Portable Rust viewer engine + C-ABI/JNI bridge for the Xenia Android app. Wraps xenia-peer-core/xenia-handshake/xenia-video (passthrough+hdc) — the same protocol code the native desktop viewer uses."
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lib]
+# cdylib for Android's JNI loader (System.loadLibrary); rlib so the
+# xenia_mobile_smoke binary and host-side tests can link the safe
+# `engine` module directly without going through the C ABI.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+xenia-peer-core = { path = "../xenia-peer-core" }
+xenia-handshake = { path = "../xenia-handshake" }
+xenia-video = { path = "../xenia-video", features = ["hdc"] }
+xenia-inject = { path = "../xenia-inject" }
+xenia-wire = { workspace = true, features = ["consent", "reference-frame"] }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror.workspace = true
+bincode.workspace = true
+
+[[bin]]
+name = "xenia_mobile_smoke"
+path = "src/bin/xenia_mobile_smoke.rs"
+
+# Deliberately does NOT opt into `[lints] workspace = true`: the JNI
+# C-ABI boundary in `lib.rs` requires raw-pointer `unsafe` blocks
+# (matching the precedent already set in `xenia-capture-scrcpy` for
+# its `unsafe impl Send`), which the workspace's `unsafe_code = "deny"`
+# lint would otherwise reject.
