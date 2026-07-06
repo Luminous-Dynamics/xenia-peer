@@ -5,10 +5,52 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+
+/**
+ * One thing that happened to a file transfer, mirroring
+ * `xenia_mobile_ffi::engine::FileTransferEvent` (see
+ * `NativeBindings.pollFileTransferEvent`'s doc comment for the wire
+ * packing this is unpacked from). File transfer is symmetric --
+ * either side can send or receive any given `transferId` -- so
+ * [Progress]/[Done] carry `outgoing` to disambiguate which role this
+ * side is playing for that transfer.
+ */
+sealed class FileTransferEvent {
+    /** The host offered a file; auto-accepted/rejected based on
+     * whether [XeniaSession] was constructed with a non-null
+     * `recvDir` (mirrors `xenia-viewer`'s own flag-driven, no-prompt
+     * consent model -- see the project plan). */
+    data class IncomingOffer(
+        val transferId: Long,
+        val name: String,
+        val totalBytes: Long,
+        val accepted: Boolean,
+        val reason: String,
+    ) : FileTransferEvent()
+
+    data class Progress(
+        val transferId: Long,
+        val name: String,
+        val doneBytes: Long,
+        val totalBytes: Long,
+        val outgoing: Boolean,
+    ) : FileTransferEvent()
+
+    data class Done(
+        val transferId: Long,
+        val name: String,
+        val outgoing: Boolean,
+        val ok: Boolean,
+        val detail: String,
+    ) : FileTransferEvent()
+}
 
 /** Mirrors [NativeBindings]'s `STATE_*` constants as a Kotlin enum. */
 enum class SessionState { CONNECTING, CONNECTED, DISCONNECTED, ERROR, INVALID }
@@ -37,8 +79,14 @@ private const val FRAME_HEADER_LEN = 17
  * conflate rapid `StateFlow` updates, which would desync a codec that
  * needs every frame in order.
  */
-class XeniaSession(hostPort: String, val codec: Int, private val scope: CoroutineScope) {
-    private val handle: Long = NativeBindings.connect(hostPort, codec)
+class XeniaSession(
+    hostPort: String,
+    val codec: Int,
+    private val scope: CoroutineScope,
+    recvDir: String?,
+    maxFileBytes: Long,
+) {
+    private val handle: Long = NativeBindings.connect(hostPort, codec, recvDir, maxFileBytes)
 
     private val _state = MutableStateFlow(SessionState.CONNECTING)
     val state: StateFlow<SessionState> = _state.asStateFlow()
@@ -58,6 +106,17 @@ class XeniaSession(hostPort: String, val codec: Int, private val scope: Coroutin
     private val _clipboard = MutableStateFlow<String?>(null)
     val clipboard: StateFlow<String?> = _clipboard.asStateFlow()
 
+    /** File-transfer offers/progress/completion, as they happen. A
+     * `SharedFlow` (not `StateFlow`) since these are one-shot events
+     * for potentially several distinct transfers in flight, not a
+     * single "current value" -- a UI collecting this should react to
+     * each emission rather than reading a snapshot. `extraBufferCapacity`
+     * so the poll loop's `tryEmit` never has to drop an event under
+     * normal collection (a slow/absent collector still can't back up
+     * the poll loop itself, which is the point of `tryEmit` over `emit`). */
+    private val _fileTransferEvents = MutableSharedFlow<FileTransferEvent>(extraBufferCapacity = 32)
+    val fileTransferEvents: SharedFlow<FileTransferEvent> = _fileTransferEvents.asSharedFlow()
+
     /** Set by the UI once its `SurfaceView`'s `Surface` is ready. Only
      * meaningful when `codec == NativeBindings.CODEC_H264`. [H264Decoder]
      * itself is constructed lazily on the first polled frame (see
@@ -67,6 +126,25 @@ class XeniaSession(hostPort: String, val codec: Int, private val scope: Coroutin
     @Volatile
     var h264Surface: android.view.Surface? = null
     private var h264Decoder: H264Decoder? = null
+
+    /** Must be called whenever the `SurfaceView`'s `Surface` is
+     * destroyed (its `SurfaceHolder.Callback.surfaceDestroyed`) -- a
+     * `Surface` can be torn down any time the window isn't visible
+     * (backgrounding the Activity, e.g. launching the system document
+     * picker for [sendFile]'s file-choosing UI), and a `MediaCodec`
+     * still configured to render into that now-abandoned `Surface`
+     * fails every subsequent frame forever (confirmed live: repeated
+     * `BufferQueue has been abandoned` / `queueBuffer failed: 13` in
+     * logcat after backgrounding for the file picker, with video
+     * frozen permanently even though the underlying file transfer and
+     * network session were both healthy). [handlePacked] recreates a
+     * fresh [H264Decoder] on the next keyframe once a new `Surface`
+     * arrives, since it only builds one `if (h264Decoder == null)`.
+     */
+    fun releaseH264Decoder() {
+        h264Decoder?.release()
+        h264Decoder = null
+    }
 
     private var pollJob: Job? = null
 
@@ -101,6 +179,9 @@ class XeniaSession(hostPort: String, val codec: Int, private val scope: Coroutin
 
             NativeBindings.pollFrame(handle)?.let { packed -> handlePacked(packed) }
             NativeBindings.pollClipboard(handle)?.let { text -> _clipboard.value = text }
+            NativeBindings.pollFileTransferEvent(handle)?.let { packed ->
+                unpackFileTransferEvent(packed)?.let { event -> _fileTransferEvents.tryEmit(event) }
+            }
 
             // ~60fps poll cadence. JNI calls here are cheap (a mutex
             // lock + pop from a bounded queue); the real frame rate
@@ -155,6 +236,15 @@ class XeniaSession(hostPort: String, val codec: Int, private val scope: Coroutin
         if (handle != 0L) NativeBindings.sendClipboard(handle, text)
     }
 
+    /** Offer `data` to the host under `name`. The caller must have
+     * already read the whole file into memory (see
+     * `FilePickerBridge` -- Storage Access Framework `Uri`s aren't
+     * plain filesystem paths). Only one outgoing transfer is in
+     * flight at a time; see [fileTransferEvents] for progress/result. */
+    fun sendFile(name: String, data: ByteArray) {
+        if (handle != 0L) NativeBindings.sendFile(handle, name, data)
+    }
+
     fun disconnect() {
         pollJob?.cancel()
         h264Decoder?.release()
@@ -197,4 +287,51 @@ private fun readU32LE(bytes: ByteArray, offset: Int): Int {
         ((bytes[offset + 1].toInt() and 0xFF) shl 8) or
         ((bytes[offset + 2].toInt() and 0xFF) shl 16) or
         ((bytes[offset + 3].toInt() and 0xFF) shl 24)
+}
+
+private fun readU64LE(bytes: ByteArray, offset: Int): Long {
+    var value = 0L
+    for (i in 0 until 8) {
+        value = value or ((bytes[offset + i].toLong() and 0xFF) shl (8 * i))
+    }
+    return value
+}
+
+private fun readU16LE(bytes: ByteArray, offset: Int): Int {
+    return (bytes[offset].toInt() and 0xFF) or ((bytes[offset + 1].toInt() and 0xFF) shl 8)
+}
+
+/**
+ * Unpack the header+strings byte array `xenia_jni.c`'s
+ * `pollFileTransferEvent` returns (see its doc comment for the exact
+ * 32-byte-header layout) into a [FileTransferEvent]. Returns `null`
+ * for an unrecognized `kind` (defensive -- shouldn't happen since the
+ * kind byte comes from the same enum on both sides of this JNI call).
+ */
+private fun unpackFileTransferEvent(packed: ByteArray): FileTransferEvent? {
+    if (packed.size < 32) return null
+    val kind = packed[0].toInt()
+    val outgoing = packed[1].toInt() != 0
+    val accepted = packed[2].toInt() != 0
+    val ok = packed[3].toInt() != 0
+    val transferId = readU64LE(packed, 4)
+    val doneBytes = readU64LE(packed, 12)
+    val totalBytes = readU64LE(packed, 20)
+    val nameLen = readU16LE(packed, 28)
+    val detailLen = readU16LE(packed, 30)
+    var offset = 32
+    if (packed.size < offset + nameLen + detailLen) return null
+    val name = String(packed, offset, nameLen, Charsets.UTF_8)
+    offset += nameLen
+    val detail = String(packed, offset, detailLen, Charsets.UTF_8)
+
+    return when (kind) {
+        NativeBindings.FT_EVENT_INCOMING_OFFER ->
+            FileTransferEvent.IncomingOffer(transferId, name, totalBytes, accepted, detail)
+        NativeBindings.FT_EVENT_PROGRESS ->
+            FileTransferEvent.Progress(transferId, name, doneBytes, totalBytes, outgoing)
+        NativeBindings.FT_EVENT_DONE ->
+            FileTransferEvent.Done(transferId, name, outgoing, ok, detail)
+        else -> null
+    }
 }

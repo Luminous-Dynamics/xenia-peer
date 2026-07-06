@@ -196,6 +196,7 @@ struct Shared {
     frames: Mutex<VecDeque<MobileFrame>>,
     last_error: Mutex<Option<String>>,
     clipboard: Mutex<Option<Option<String>>>,
+    file_transfer_events: Mutex<VecDeque<FileTransferEvent>>,
 }
 
 /// A live viewer session: owns a background tokio task running
@@ -205,6 +206,7 @@ pub struct ViewerEngine {
     shared: Arc<Shared>,
     input_tx: mpsc::Sender<InputEvent>,
     clipboard_tx: mpsc::Sender<ClipboardContent>,
+    ft_cmd_tx: mpsc::Sender<FileTransferCommand>,
     _task: tokio::task::JoinHandle<()>,
 }
 
@@ -214,12 +216,31 @@ impl ViewerEngine {
     /// / [`Self::poll_frame`] to observe progress. `rt` must be a
     /// running multi-thread tokio runtime handle (the JNI layer keeps
     /// one alive for the lifetime of the app's native library load).
-    pub fn connect(rt: &tokio::runtime::Handle, host_port: String, codec: MobileCodec) -> Self {
+    ///
+    /// `recv_dir`: `None` disables receiving files entirely (every
+    /// incoming `Offer` is auto-rejected), mirroring `xenia-viewer`'s
+    /// own "no `--recv-file-dir` means disabled" default. `Some(dir)`
+    /// must be a real, writable filesystem path -- on Android this is
+    /// expected to be an app-private directory (e.g.
+    /// `context.getExternalFilesDir(...)`), never an arbitrary
+    /// user-chosen location, since incoming files are written via
+    /// plain `std::fs::write`, not Storage Access Framework.
+    /// `max_file_bytes` caps both directions and is also a hard
+    /// in-memory buffering cap (the whole file lives in a `Vec<u8>`
+    /// on both ends, exactly like the desktop implementation).
+    pub fn connect(
+        rt: &tokio::runtime::Handle,
+        host_port: String,
+        codec: MobileCodec,
+        recv_dir: Option<PathBuf>,
+        max_file_bytes: u64,
+    ) -> Self {
         let shared = Arc::new(Shared {
             state: Mutex::new(SessionState::Connecting),
             frames: Mutex::new(VecDeque::with_capacity(FRAME_QUEUE_CAP)),
             last_error: Mutex::new(None),
             clipboard: Mutex::new(None),
+            file_transfer_events: Mutex::new(VecDeque::with_capacity(FILE_TRANSFER_EVENT_QUEUE_CAP)),
         });
         // Bounded so a stalled network task can't let viewer-generated input
         // and clipboard events accumulate without limit. These carry UI
@@ -227,12 +248,23 @@ impl ViewerEngine {
         // excess (via `try_send` in the send_* methods) is the right backpressure.
         let (input_tx, input_rx) = mpsc::channel(INPUT_QUEUE_CAP);
         let (clipboard_tx, clipboard_rx) = mpsc::channel(CLIPBOARD_QUEUE_CAP);
+        let (ft_cmd_tx, ft_cmd_rx) = mpsc::channel(FILE_TRANSFER_CMD_QUEUE_CAP);
         let shared_for_task = Arc::clone(&shared);
-        let task = rt.spawn(run_session(host_port, codec, shared_for_task, input_rx, clipboard_rx));
+        let task = rt.spawn(run_session(
+            host_port,
+            codec,
+            shared_for_task,
+            input_rx,
+            clipboard_rx,
+            ft_cmd_rx,
+            recv_dir,
+            max_file_bytes,
+        ));
         Self {
             shared,
             input_tx,
             clipboard_tx,
+            ft_cmd_tx,
             _task: task,
         }
     }
@@ -302,16 +334,47 @@ impl ViewerEngine {
             modifiers,
         });
     }
+
+    /// Offer `data` to the host under `name`. `data` must already be
+    /// fully read into memory by the caller (Android's Storage Access
+    /// Framework hands back a `Uri`, not a plain path, so the JNI
+    /// layer reads it via `ContentResolver` before calling this).
+    /// Only one outgoing transfer is in flight at a time -- calling
+    /// this while one is already active surfaces a `Done { ok: false
+    /// }` event rather than queuing a second one.
+    pub fn send_file(&self, name: String, data: Vec<u8>) {
+        let _ = self.ft_cmd_tx.try_send(FileTransferCommand::SendFile { name, data });
+    }
+
+    /// Pop the oldest queued file-transfer event, if any.
+    pub fn poll_file_transfer_event(&self) -> Option<FileTransferEvent> {
+        self.shared.file_transfer_events.blocking_lock().pop_front()
+    }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_session(
     host_port: String,
     codec: MobileCodec,
     shared: Arc<Shared>,
     input_rx: mpsc::Receiver<InputEvent>,
     clipboard_rx: mpsc::Receiver<ClipboardContent>,
+    ft_cmd_rx: mpsc::Receiver<FileTransferCommand>,
+    recv_dir: Option<PathBuf>,
+    max_file_bytes: u64,
 ) {
-    if let Err(err) = run_session_inner(host_port, codec, &shared, input_rx, clipboard_rx).await {
+    if let Err(err) = run_session_inner(
+        host_port,
+        codec,
+        &shared,
+        input_rx,
+        clipboard_rx,
+        ft_cmd_rx,
+        recv_dir,
+        max_file_bytes,
+    )
+    .await
+    {
         warn!(error = %err, "viewer session ended with error");
         *shared.last_error.lock().await = Some(err);
         *shared.state.lock().await = SessionState::Error;
@@ -320,12 +383,16 @@ async fn run_session(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_session_inner(
     host_port: String,
     codec: MobileCodec,
     shared: &Arc<Shared>,
     mut input_rx: mpsc::Receiver<InputEvent>,
     mut clipboard_rx: mpsc::Receiver<ClipboardContent>,
+    mut ft_cmd_rx: mpsc::Receiver<FileTransferCommand>,
+    recv_dir: Option<PathBuf>,
+    max_file_bytes: u64,
 ) -> Result<(), String> {
     info!(peer = %host_port, ?codec, "mobile viewer connecting");
 
@@ -432,14 +499,72 @@ async fn run_session_inner(
     let mut capabilities_received = false;
     let mut epoch_state = SessionEpochState::new(handshake.transcript_hash, RekeyPolicy::smoke());
 
+    // File-transfer state, owned exclusively by this loop (unlike
+    // input/clipboard, file transfer needs no separate sender task --
+    // a `send_file` command and an inbound file-transfer envelope both
+    // need access to the same `outgoing`/`incoming` state, so both are
+    // handled inline here via `tokio::select!` rather than splitting
+    // across tasks that would need their own `Arc<Mutex<...>>` around
+    // that state).
+    let mut outgoing: Option<OutgoingTransfer> = None;
+    let mut incoming: HashMap<u64, IncomingTransfer> = HashMap::new();
+    let mut next_transfer_id: u64 = 1;
+
     loop {
-        let envelope = match recv_half.recv_envelope().await {
-            Ok(e) => e,
-            Err(err) => {
-                info!(error = %err, "daemon disconnected");
-                return Ok(());
+        let envelope = tokio::select! {
+            biased;
+            Some(cmd) = ft_cmd_rx.recv() => {
+                handle_file_transfer_command(
+                    cmd,
+                    &session,
+                    &send_half,
+                    shared,
+                    &mut outgoing,
+                    &mut next_transfer_id,
+                )
+                .await;
+                continue;
             }
+            result = recv_half.recv_envelope() => match result {
+                Ok(e) => e,
+                Err(err) => {
+                    info!(error = %err, "daemon disconnected");
+                    return Ok(());
+                }
+            },
         };
+
+        // File-transfer messages are bare envelopes (like input/clipboard
+        // reverse-path), not lane-enveloped -- check before `open_frame`,
+        // which only understands the lane-envelope shape.
+        if matches!(
+            xenia_wire::envelope_payload_type(&envelope),
+            Some(PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST) | Some(PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER)
+        ) {
+            let message = {
+                let mut session = session.lock().await;
+                match session.open_file_transfer_message(&envelope) {
+                    Ok(m) => m,
+                    Err(err) => {
+                        warn!(error = %err, "failed to open file-transfer envelope");
+                        continue;
+                    }
+                }
+            };
+            handle_file_transfer_message(
+                message,
+                &session,
+                &send_half,
+                shared,
+                &mut outgoing,
+                &mut incoming,
+                recv_dir.as_deref(),
+                max_file_bytes,
+            )
+            .await;
+            continue;
+        }
+
         let raw_frame = {
             let mut session = session.lock().await;
             match session.open_frame(&envelope) {
@@ -589,6 +714,380 @@ async fn run_session_inner(
     }
 }
 
+/// Push a file-transfer event, dropping the oldest queued one if the
+/// UI has stopped polling and the bound is reached.
+async fn push_ft_event(shared: &Arc<Shared>, event: FileTransferEvent) {
+    let mut queue = shared.file_transfer_events.lock().await;
+    if queue.len() >= FILE_TRANSFER_EVENT_QUEUE_CAP {
+        queue.pop_front();
+    }
+    queue.push_back(event);
+}
+
+/// Seal `message` under the control lane (always `is_host = false` --
+/// this engine only ever plays the viewer role) and send it.
+async fn seal_and_send<S: SendEnvelope>(
+    session: &Arc<Mutex<LaneSession>>,
+    send_half: &Arc<Mutex<S>>,
+    message: FileTransferMessage,
+) -> Result<(), String> {
+    let envelope = {
+        let mut session = session.lock().await;
+        session
+            .seal_file_transfer_message(message, false)
+            .map_err(|e| e.to_string())?
+    };
+    send_half
+        .lock()
+        .await
+        .send_envelope(&envelope)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Handle a UI-initiated [`FileTransferCommand`] (currently only
+/// `SendFile`): hash + offer the file, then remember it as `outgoing`
+/// so a later `Accept` can find the buffered bytes to chunk-send.
+async fn handle_file_transfer_command<S: SendEnvelope>(
+    cmd: FileTransferCommand,
+    session: &Arc<Mutex<LaneSession>>,
+    send_half: &Arc<Mutex<S>>,
+    shared: &Arc<Shared>,
+    outgoing: &mut Option<OutgoingTransfer>,
+    next_transfer_id: &mut u64,
+) {
+    let FileTransferCommand::SendFile { name, data } = cmd;
+    if outgoing.is_some() {
+        warn!(name, "send_file while another outgoing transfer is in flight; dropping");
+        push_ft_event(
+            shared,
+            FileTransferEvent::Done {
+                transfer_id: 0,
+                name,
+                outgoing: true,
+                ok: false,
+                detail: "another outgoing transfer is already in progress".to_string(),
+            },
+        )
+        .await;
+        return;
+    }
+
+    let transfer_id = *next_transfer_id;
+    *next_transfer_id += 1;
+    let size = data.len() as u64;
+    let blake3_hash = *blake3::hash(&data).as_bytes();
+    let offer = FileTransferMessage::Offer {
+        transfer_id,
+        name: name.clone(),
+        size,
+        blake3_hash,
+    };
+    if let Err(err) = seal_and_send(session, send_half, offer).await {
+        warn!(error = %err, "failed to send file-transfer offer");
+        push_ft_event(
+            shared,
+            FileTransferEvent::Done {
+                transfer_id,
+                name,
+                outgoing: true,
+                ok: false,
+                detail: err,
+            },
+        )
+        .await;
+        return;
+    }
+    info!(transfer_id, name, size, "file transfer offered");
+    push_ft_event(
+        shared,
+        FileTransferEvent::Progress {
+            transfer_id,
+            name: name.clone(),
+            done_bytes: 0,
+            total_bytes: size,
+            outgoing: true,
+        },
+    )
+    .await;
+    *outgoing = Some(OutgoingTransfer { transfer_id, name, data });
+}
+
+/// Handle one already-opened [`FileTransferMessage`] arriving from the
+/// peer. Mirrors `xenia-viewer`'s `handle_file_transfer_message`
+/// almost verbatim (same protocol, same no-consent-UI philosophy --
+/// see its doc comment) with two adaptations: incoming files are
+/// capped at [`MAX_CONCURRENT_INCOMING_TRANSFERS`] (tighter than the
+/// daemon's own cap, since phones have less RAM to spare), and every
+/// transition is also surfaced as a [`FileTransferEvent`] for the UI.
+#[allow(clippy::too_many_arguments)]
+async fn handle_file_transfer_message<S: SendEnvelope>(
+    message: FileTransferMessage,
+    session: &Arc<Mutex<LaneSession>>,
+    send_half: &Arc<Mutex<S>>,
+    shared: &Arc<Shared>,
+    outgoing: &mut Option<OutgoingTransfer>,
+    incoming: &mut HashMap<u64, IncomingTransfer>,
+    recv_dir: Option<&std::path::Path>,
+    max_bytes: u64,
+) {
+    match message {
+        FileTransferMessage::Offer {
+            transfer_id,
+            name,
+            size,
+            blake3_hash,
+        } => {
+            let (accept, reason) = match (recv_dir, sanitize_transfer_filename(&name)) {
+                (None, _) => (false, "file transfer is disabled on this viewer".to_string()),
+                (Some(_), None) => (false, "unusable filename".to_string()),
+                (Some(_), Some(_)) if size > max_bytes => {
+                    (false, format!("file exceeds {max_bytes}-byte cap"))
+                }
+                (Some(_), Some(_)) if incoming.len() >= MAX_CONCURRENT_INCOMING_TRANSFERS => {
+                    (false, "too many concurrent incoming transfers".to_string())
+                }
+                (Some(_), Some(_)) => (true, String::new()),
+            };
+            if accept {
+                let safe_name = sanitize_transfer_filename(&name).expect("checked above");
+                incoming.insert(
+                    transfer_id,
+                    IncomingTransfer {
+                        name: safe_name.clone(),
+                        expected_size: size,
+                        expected_hash: blake3_hash,
+                        buffer: Vec::with_capacity(size.min(max_bytes) as usize),
+                    },
+                );
+                info!(transfer_id, name = safe_name, size, "file transfer offer accepted");
+                push_ft_event(
+                    shared,
+                    FileTransferEvent::IncomingOffer {
+                        transfer_id,
+                        name: safe_name,
+                        total_bytes: size,
+                        accepted: true,
+                        reason: String::new(),
+                    },
+                )
+                .await;
+            } else {
+                info!(transfer_id, name, size, reason, "file transfer offer rejected");
+                push_ft_event(
+                    shared,
+                    FileTransferEvent::IncomingOffer {
+                        transfer_id,
+                        name: name.clone(),
+                        total_bytes: size,
+                        accepted: false,
+                        reason: reason.clone(),
+                    },
+                )
+                .await;
+            }
+            let reply = if accept {
+                FileTransferMessage::Accept { transfer_id }
+            } else {
+                FileTransferMessage::Reject { transfer_id, reason }
+            };
+            if let Err(err) = seal_and_send(session, send_half, reply).await {
+                warn!(error = %err, "failed to reply to file-transfer offer");
+            }
+        }
+        FileTransferMessage::Accept { transfer_id } => {
+            let Some(transfer) = outgoing.as_ref().filter(|t| t.transfer_id == transfer_id) else {
+                warn!(transfer_id, "Accept for unknown/stale outgoing transfer");
+                return;
+            };
+            let name = transfer.name.clone();
+            let data = transfer.data.clone();
+            let total = data.len() as u64;
+            info!(transfer_id, bytes = total, "transfer accepted, sending chunks");
+            for (i, chunk) in data.chunks(FILE_TRANSFER_CHUNK_SIZE).enumerate() {
+                let msg = FileTransferMessage::Chunk {
+                    transfer_id,
+                    offset: (i * FILE_TRANSFER_CHUNK_SIZE) as u64,
+                    data: chunk.to_vec(),
+                };
+                if let Err(err) = seal_and_send(session, send_half, msg).await {
+                    warn!(error = %err, "failed to send file-transfer chunk");
+                    *outgoing = None;
+                    push_ft_event(
+                        shared,
+                        FileTransferEvent::Done {
+                            transfer_id,
+                            name,
+                            outgoing: true,
+                            ok: false,
+                            detail: err,
+                        },
+                    )
+                    .await;
+                    return;
+                }
+                let done = ((i + 1) * FILE_TRANSFER_CHUNK_SIZE).min(total as usize) as u64;
+                push_ft_event(
+                    shared,
+                    FileTransferEvent::Progress {
+                        transfer_id,
+                        name: name.clone(),
+                        done_bytes: done,
+                        total_bytes: total,
+                        outgoing: true,
+                    },
+                )
+                .await;
+            }
+            if let Err(err) = seal_and_send(session, send_half, FileTransferMessage::Complete { transfer_id }).await {
+                warn!(error = %err, "failed to send file-transfer completion");
+            }
+            info!(transfer_id, "all chunks sent, awaiting verification");
+        }
+        FileTransferMessage::Reject { transfer_id, reason } => {
+            if outgoing.as_ref().is_some_and(|t| t.transfer_id == transfer_id) {
+                warn!(transfer_id, reason, "outgoing transfer rejected by peer");
+                let name = outgoing.take().expect("checked is_some_and above").name;
+                push_ft_event(
+                    shared,
+                    FileTransferEvent::Done {
+                        transfer_id,
+                        name,
+                        outgoing: true,
+                        ok: false,
+                        detail: reason,
+                    },
+                )
+                .await;
+            }
+        }
+        FileTransferMessage::Chunk {
+            transfer_id,
+            offset,
+            data,
+        } => {
+            let Some(transfer) = incoming.get_mut(&transfer_id) else {
+                warn!(transfer_id, "chunk for unknown/stale incoming transfer");
+                return;
+            };
+            let off = offset as usize;
+            if off.saturating_add(data.len()) > transfer.expected_size as usize {
+                warn!(transfer_id, "chunk exceeds offered file size; dropping transfer");
+                let name = incoming.remove(&transfer_id).expect("just matched via get_mut").name;
+                push_ft_event(
+                    shared,
+                    FileTransferEvent::Done {
+                        transfer_id,
+                        name,
+                        outgoing: false,
+                        ok: false,
+                        detail: "chunk exceeded the offered file size".to_string(),
+                    },
+                )
+                .await;
+                return;
+            }
+            if transfer.buffer.len() < off + data.len() {
+                transfer.buffer.resize(off + data.len(), 0);
+            }
+            transfer.buffer[off..off + data.len()].copy_from_slice(&data);
+            push_ft_event(
+                shared,
+                FileTransferEvent::Progress {
+                    transfer_id,
+                    name: transfer.name.clone(),
+                    done_bytes: transfer.buffer.len() as u64,
+                    total_bytes: transfer.expected_size,
+                    outgoing: false,
+                },
+            )
+            .await;
+        }
+        FileTransferMessage::Complete { transfer_id } => {
+            let Some(transfer) = incoming.remove(&transfer_id) else {
+                warn!(transfer_id, "Complete for unknown/stale incoming transfer");
+                return;
+            };
+            let actual_hash = *blake3::hash(&transfer.buffer).as_bytes();
+            let hash_ok = actual_hash == transfer.expected_hash;
+            let mut local_ok = hash_ok;
+            let mut detail = String::new();
+            if hash_ok {
+                match recv_dir {
+                    Some(dir) => {
+                        let dest = dir.join(&transfer.name);
+                        match std::fs::write(&dest, &transfer.buffer) {
+                            Ok(()) => info!(
+                                transfer_id,
+                                path = %dest.display(),
+                                bytes = transfer.buffer.len(),
+                                "file transfer verified and written"
+                            ),
+                            Err(err) => {
+                                warn!(transfer_id, error = %err, "verified file failed to write to disk");
+                                local_ok = false;
+                                detail = err.to_string();
+                            }
+                        }
+                    }
+                    None => {
+                        // Can't actually happen: an Offer only ever
+                        // reaches `incoming` (above) when `recv_dir`
+                        // is `Some`. Kept as a defensive branch rather
+                        // than `unreachable!()` since this is a
+                        // cross-message invariant, not a
+                        // same-function one.
+                        local_ok = false;
+                        detail = "no receive directory configured".to_string();
+                    }
+                }
+            } else {
+                warn!(transfer_id, "file transfer failed BLAKE3 verification, not written");
+                detail = "BLAKE3 verification failed".to_string();
+            }
+            push_ft_event(
+                shared,
+                FileTransferEvent::Done {
+                    transfer_id,
+                    name: transfer.name.clone(),
+                    outgoing: false,
+                    ok: local_ok,
+                    detail,
+                },
+            )
+            .await;
+            // The wire reply's `ok` reflects only the hash comparison
+            // (matching `xenia-viewer`'s exact protocol behavior) even
+            // though the local `Done` event above also folds in
+            // whether the disk write itself succeeded.
+            if let Err(err) = seal_and_send(session, send_half, FileTransferMessage::Verified { transfer_id, ok: hash_ok }).await
+            {
+                warn!(error = %err, "failed to send file-transfer verification reply");
+            }
+        }
+        FileTransferMessage::Verified { transfer_id, ok } => {
+            if outgoing.as_ref().is_some_and(|t| t.transfer_id == transfer_id) {
+                info!(transfer_id, ok, "outgoing transfer verification result");
+                let name = outgoing.take().expect("checked is_some_and above").name;
+                push_ft_event(
+                    shared,
+                    FileTransferEvent::Done {
+                        transfer_id,
+                        name,
+                        outgoing: true,
+                        ok,
+                        detail: String::new(),
+                    },
+                )
+                .await;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+const DEFAULT_TEST_MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -604,7 +1103,13 @@ mod tests {
         // (privileged range, nothing listens there) -- exercises the
         // real `TcpTransport::connect` error path without needing a
         // live daemon.
-        let engine = ViewerEngine::connect(rt.handle(), "127.0.0.1:1".to_string(), MobileCodec::Passthrough);
+        let engine = ViewerEngine::connect(
+            rt.handle(),
+            "127.0.0.1:1".to_string(),
+            MobileCodec::Passthrough,
+            None,
+            DEFAULT_TEST_MAX_FILE_BYTES,
+        );
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
@@ -630,9 +1135,16 @@ mod tests {
             .unwrap();
         // A port nothing listens on, but give the assertions below no
         // time to race the background connect attempt.
-        let engine = ViewerEngine::connect(rt.handle(), "127.0.0.1:2".to_string(), MobileCodec::Hdc);
+        let engine = ViewerEngine::connect(
+            rt.handle(),
+            "127.0.0.1:2".to_string(),
+            MobileCodec::Hdc,
+            None,
+            DEFAULT_TEST_MAX_FILE_BYTES,
+        );
         assert!(engine.poll_frame().is_none());
         assert!(engine.poll_clipboard().is_none());
+        assert!(engine.poll_file_transfer_event().is_none());
     }
 
     #[test]
@@ -642,7 +1154,13 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let engine = ViewerEngine::connect(rt.handle(), "127.0.0.1:3".to_string(), MobileCodec::Passthrough);
+        let engine = ViewerEngine::connect(
+            rt.handle(),
+            "127.0.0.1:3".to_string(),
+            MobileCodec::Passthrough,
+            None,
+            DEFAULT_TEST_MAX_FILE_BYTES,
+        );
         // The outbound clipboard task isn't spawned until the
         // handshake completes -- sending before then should just
         // queue harmlessly on the unbounded channel, not panic or
@@ -650,4 +1168,36 @@ mod tests {
         engine.send_clipboard(Some("hello".to_string()));
         engine.send_clipboard(None);
     }
+
+    #[test]
+    fn send_file_before_any_connection_progress_does_not_panic() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let engine = ViewerEngine::connect(
+            rt.handle(),
+            "127.0.0.1:4".to_string(),
+            MobileCodec::Passthrough,
+            None,
+            DEFAULT_TEST_MAX_FILE_BYTES,
+        );
+        // Mirrors `send_clipboard_before_any_connection_progress_does_not_panic`:
+        // the file-transfer command isn't drained until the handshake
+        // completes -- sending before then must just queue harmlessly.
+        engine.send_file("test.txt".to_string(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn sanitize_transfer_filename_strips_path_components() {
+        assert_eq!(sanitize_transfer_filename("report.pdf"), Some("report.pdf".to_string()));
+        assert_eq!(sanitize_transfer_filename("/etc/passwd"), Some("passwd".to_string()));
+        assert_eq!(sanitize_transfer_filename("../../secret"), Some("secret".to_string()));
+        assert_eq!(sanitize_transfer_filename("a/b/c/thing.txt"), Some("thing.txt".to_string()));
+        assert_eq!(sanitize_transfer_filename(""), None);
+        assert_eq!(sanitize_transfer_filename("."), None);
+        assert_eq!(sanitize_transfer_filename(".."), None);
+    }
 }
+

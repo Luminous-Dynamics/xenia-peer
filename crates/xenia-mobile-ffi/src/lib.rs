@@ -23,7 +23,7 @@ pub mod engine;
 use std::ffi::{CStr, CString, c_char};
 use std::sync::OnceLock;
 
-use engine::{MobileCodec, SessionState, ViewerEngine};
+use engine::{FileTransferEvent, MobileCodec, SessionState, ViewerEngine};
 
 /// One shared multi-thread tokio runtime for the process lifetime —
 /// every connected session's background task runs on it. Matches
@@ -61,11 +61,26 @@ pub const XENIA_CODEC_H264: i32 = 2;
 /// The connection itself happens asynchronously in the background —
 /// poll [`xenia_session_state`] to observe progress.
 ///
+/// `recv_dir`: `NULL` disables receiving files (every incoming offer
+/// is auto-rejected); non-null must be a real, writable filesystem
+/// path -- on Android this should be an app-private directory (e.g.
+/// `context.getExternalFilesDir(...)`), since received files are
+/// written via plain `std::fs::write`, not Storage Access Framework.
+/// `max_file_bytes` caps both directions and is also a hard in-memory
+/// buffering cap (the whole file lives in memory on both ends).
+///
 /// # Safety
 /// `host_port` must be a valid, NUL-terminated C string pointer, live
 /// for the duration of this call (it is copied, not retained).
+/// `recv_dir`, if non-null, must likewise be a valid NUL-terminated C
+/// string pointer, live for the duration of this call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn xenia_connect(host_port: *const c_char, codec: i32) -> u64 {
+pub unsafe extern "C" fn xenia_connect(
+    host_port: *const c_char,
+    codec: i32,
+    recv_dir: *const c_char,
+    max_file_bytes: u64,
+) -> u64 {
     if host_port.is_null() {
         return 0;
     }
@@ -75,12 +90,21 @@ pub unsafe extern "C" fn xenia_connect(host_port: *const c_char, codec: i32) -> 
         Ok(s) => s.to_owned(),
         Err(_) => return 0,
     };
+    let recv_dir = if recv_dir.is_null() {
+        None
+    } else {
+        // SAFETY: caller contract above.
+        match unsafe { CStr::from_ptr(recv_dir) }.to_str() {
+            Ok(s) => Some(std::path::PathBuf::from(s)),
+            Err(_) => return 0,
+        }
+    };
     let codec = match codec {
         XENIA_CODEC_HDC => MobileCodec::Hdc,
         XENIA_CODEC_H264 => MobileCodec::H264,
         _ => MobileCodec::Passthrough,
     };
-    let engine = ViewerEngine::connect(runtime().handle(), host_port, codec);
+    let engine = ViewerEngine::connect(runtime().handle(), host_port, codec, recv_dir, max_file_bytes);
     Box::into_raw(Box::new(engine)) as u64
 }
 
@@ -324,6 +348,175 @@ pub unsafe extern "C" fn xenia_send_clipboard(handle: u64, text: *const c_char) 
     }
 }
 
+/// Offer `data` (`data_len` bytes) to the host under `name`. The
+/// caller must have already read the whole file into memory (e.g. via
+/// Android's `ContentResolver` against a Storage Access Framework
+/// `Uri`, since arbitrary user-picked files aren't necessarily
+/// reachable by a plain filesystem path). Only one outgoing transfer
+/// is in flight at a time -- calling this while one is already active
+/// surfaces a failed [`XeniaFileTransferEvent`] (kind
+/// [`XENIA_FT_EVENT_DONE`], `ok == false`) rather than queuing a
+/// second one.
+///
+/// # Safety
+/// `handle` must be a value previously returned by [`xenia_connect`]
+/// and not yet passed to [`xenia_disconnect`]. `name` must be a valid
+/// NUL-terminated C string pointer, live for the duration of this
+/// call. `data` must be a valid pointer to `data_len` readable bytes,
+/// live for the duration of this call (it is copied, not retained).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenia_send_file(
+    handle: u64,
+    name: *const c_char,
+    data: *const u8,
+    data_len: usize,
+) {
+    if handle == 0 || name.is_null() || (data.is_null() && data_len > 0) {
+        return;
+    }
+    // SAFETY: caller contract above.
+    let engine = unsafe { &*(handle as *const ViewerEngine) };
+    // SAFETY: caller contract above guarantees a valid NUL-terminated
+    // string for the duration of this call.
+    let Ok(name) = (unsafe { CStr::from_ptr(name) }).to_str() else {
+        return;
+    };
+    // SAFETY: caller contract above guarantees `data_len` readable
+    // bytes for the duration of this call; this copies them out.
+    let bytes = if data_len == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(data, data_len) }.to_vec()
+    };
+    engine.send_file(name.to_owned(), bytes);
+}
+
+/// Event kinds for [`XeniaFileTransferEvent::kind`].
+pub const XENIA_FT_EVENT_NONE: i32 = 0;
+pub const XENIA_FT_EVENT_INCOMING_OFFER: i32 = 1;
+pub const XENIA_FT_EVENT_PROGRESS: i32 = 2;
+pub const XENIA_FT_EVENT_DONE: i32 = 3;
+
+/// One file-transfer event, packed for the C ABI. `name`/`detail` are
+/// `NULL` when not meaningful for `kind`; both, if non-null, must be
+/// freed via [`xenia_file_transfer_event_free`]. `accepted` is only
+/// meaningful for [`XENIA_FT_EVENT_INCOMING_OFFER`]; `ok` only for
+/// [`XENIA_FT_EVENT_DONE`].
+#[repr(C)]
+pub struct XeniaFileTransferEvent {
+    pub kind: i32,
+    pub transfer_id: u64,
+    pub outgoing: bool,
+    pub accepted: bool,
+    pub ok: bool,
+    pub done_bytes: u64,
+    pub total_bytes: u64,
+    pub name: *mut c_char,
+    pub detail: *mut c_char,
+}
+
+fn opt_cstring(s: String) -> *mut c_char {
+    CString::new(s).map(CString::into_raw).unwrap_or(std::ptr::null_mut())
+}
+
+/// Pop the oldest queued file-transfer event for `handle`. Returns a
+/// event with `kind == XENIA_FT_EVENT_NONE` if none is available yet.
+///
+/// # Safety
+/// `handle` must be a value previously returned by [`xenia_connect`]
+/// and not yet passed to [`xenia_disconnect`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenia_poll_file_transfer_event(handle: u64) -> XeniaFileTransferEvent {
+    let empty = XeniaFileTransferEvent {
+        kind: XENIA_FT_EVENT_NONE,
+        transfer_id: 0,
+        outgoing: false,
+        accepted: false,
+        ok: false,
+        done_bytes: 0,
+        total_bytes: 0,
+        name: std::ptr::null_mut(),
+        detail: std::ptr::null_mut(),
+    };
+    if handle == 0 {
+        return empty;
+    }
+    // SAFETY: caller contract above.
+    let engine = unsafe { &*(handle as *const ViewerEngine) };
+    match engine.poll_file_transfer_event() {
+        None => empty,
+        Some(FileTransferEvent::IncomingOffer {
+            transfer_id,
+            name,
+            total_bytes,
+            accepted,
+            reason,
+        }) => XeniaFileTransferEvent {
+            kind: XENIA_FT_EVENT_INCOMING_OFFER,
+            transfer_id,
+            outgoing: false,
+            accepted,
+            ok: false,
+            done_bytes: 0,
+            total_bytes,
+            name: opt_cstring(name),
+            detail: opt_cstring(reason),
+        },
+        Some(FileTransferEvent::Progress {
+            transfer_id,
+            name,
+            done_bytes,
+            total_bytes,
+            outgoing,
+        }) => XeniaFileTransferEvent {
+            kind: XENIA_FT_EVENT_PROGRESS,
+            transfer_id,
+            outgoing,
+            accepted: false,
+            ok: false,
+            done_bytes,
+            total_bytes,
+            name: opt_cstring(name),
+            detail: std::ptr::null_mut(),
+        },
+        Some(FileTransferEvent::Done {
+            transfer_id,
+            name,
+            outgoing,
+            ok,
+            detail,
+        }) => XeniaFileTransferEvent {
+            kind: XENIA_FT_EVENT_DONE,
+            transfer_id,
+            outgoing,
+            accepted: false,
+            ok,
+            done_bytes: 0,
+            total_bytes: 0,
+            name: opt_cstring(name),
+            detail: opt_cstring(detail),
+        },
+    }
+}
+
+/// Free the strings inside a [`XeniaFileTransferEvent`] returned by
+/// [`xenia_poll_file_transfer_event`]. Safe to call on a `kind ==
+/// XENIA_FT_EVENT_NONE` event (both fields are already `NULL` --
+/// no-op).
+///
+/// # Safety
+/// `event.name`/`event.detail` must be exactly as returned by
+/// [`xenia_poll_file_transfer_event`], not already freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenia_file_transfer_event_free(event: XeniaFileTransferEvent) {
+    // SAFETY: caller contract above -- `xenia_string_free` itself
+    // handles NULL as a no-op.
+    unsafe {
+        xenia_string_free(event.name);
+        xenia_string_free(event.detail);
+    }
+}
+
 /// Disconnect and free the session. `handle` must not be used again
 /// after this call.
 ///
@@ -358,6 +551,12 @@ mod tests {
             xenia_send_pointer(0, 0.5, 0.5, 0, true);
             xenia_send_touch(0, 0, 0.5, 0.5, 0, 1.0);
             xenia_send_key(0, 30, true, 0);
+            let name = CString::new("test.txt").unwrap();
+            xenia_send_file(0, name.as_ptr(), std::ptr::null(), 0);
+            let empty_ft = xenia_poll_file_transfer_event(0);
+            assert_eq!(empty_ft.kind, XENIA_FT_EVENT_NONE);
+            assert!(empty_ft.name.is_null());
+            assert!(empty_ft.detail.is_null());
             xenia_disconnect(0); // must not panic/double-free
         }
     }
@@ -365,7 +564,10 @@ mod tests {
     #[test]
     fn null_host_port_rejected_without_connecting() {
         unsafe {
-            assert_eq!(xenia_connect(std::ptr::null(), XENIA_CODEC_PASSTHROUGH), 0);
+            assert_eq!(
+                xenia_connect(std::ptr::null(), XENIA_CODEC_PASSTHROUGH, std::ptr::null(), 0),
+                0
+            );
         }
     }
 
@@ -373,12 +575,28 @@ mod tests {
     fn connect_disconnect_round_trip_does_not_crash() {
         let host_port = CString::new("127.0.0.1:3").unwrap();
         unsafe {
-            let handle = xenia_connect(host_port.as_ptr(), XENIA_CODEC_HDC);
+            let handle = xenia_connect(host_port.as_ptr(), XENIA_CODEC_HDC, std::ptr::null(), 100 * 1024 * 1024);
             assert_ne!(handle, 0);
             // Immediately tear down -- the background task may or may
             // not have started connecting yet; this must be safe
             // either way (matches how a Kotlin Activity's onDestroy
             // could race a just-started connection).
+            xenia_disconnect(handle);
+        }
+    }
+
+    #[test]
+    fn connect_with_recv_dir_round_trip_does_not_crash() {
+        let host_port = CString::new("127.0.0.1:5").unwrap();
+        let recv_dir = CString::new("/tmp").unwrap();
+        unsafe {
+            let handle = xenia_connect(
+                host_port.as_ptr(),
+                XENIA_CODEC_PASSTHROUGH,
+                recv_dir.as_ptr(),
+                100 * 1024 * 1024,
+            );
+            assert_ne!(handle, 0);
             xenia_disconnect(handle);
         }
     }

@@ -28,7 +28,13 @@ internal object NativeBindings {
     const val STATE_ERROR: Int = 3
     const val STATE_INVALID_HANDLE: Int = -1
 
-    @JvmStatic external fun connect(hostPort: String, codec: Int): Long
+    // Event kinds returned by pollFileTransferEvent's packed header
+    // (byte 0) -- mirrors XENIA_FT_EVENT_* in xenia-mobile-ffi/src/lib.rs.
+    const val FT_EVENT_INCOMING_OFFER: Int = 1
+    const val FT_EVENT_PROGRESS: Int = 2
+    const val FT_EVENT_DONE: Int = 3
+
+    @JvmStatic external fun connect(hostPort: String, codec: Int, recvDir: String?, maxFileBytes: Long): Long
     @JvmStatic external fun sessionState(handle: Long): Int
     @JvmStatic external fun lastError(handle: Long): String?
     @JvmStatic external fun pollFrame(handle: Long): ByteArray?
@@ -37,5 +43,7 @@ internal object NativeBindings {
     @JvmStatic external fun sendKey(handle: Long, code: Int, pressed: Boolean, modifiers: Int)
     @JvmStatic external fun pollClipboard(handle: Long): String?
     @JvmStatic external fun sendClipboard(handle: Long, text: String?)
+    @JvmStatic external fun sendFile(handle: Long, name: String, data: ByteArray)
+    @JvmStatic external fun pollFileTransferEvent(handle: Long): ByteArray?
     @JvmStatic external fun disconnect(handle: Long)
 }

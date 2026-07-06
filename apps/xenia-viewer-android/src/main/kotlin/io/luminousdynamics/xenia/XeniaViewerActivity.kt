@@ -2,11 +2,14 @@ package io.luminousdynamics.xenia
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.net.Uri
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -33,6 +36,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,31 +53,64 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+/** Caps both directions; also a hard in-memory buffering cap (the
+ * whole file lives in a `ByteArray`/`Vec<u8>` on both ends -- see
+ * `xenia_mobile_ffi::engine::ViewerEngine::connect`'s doc comment).
+ * Lower than the desktop default (200 MiB) since phones have less RAM
+ * to spare for this. */
+private const val MAX_FILE_TRANSFER_BYTES = 100L * 1024 * 1024
 
 /**
  * Viewer: a connect screen (host:port + codec), then a full-screen
  * rendering of the remote desktop with tap/drag/type -> `InputEvent`,
- * plus bidirectional clipboard sync. No consent UI (host-side only,
- * see the project plan). Passthrough/HDC render via a Compose `Image`
- * (see [ViewerScreen]); H.264 renders via a real `SurfaceView` +
- * Android's hardware `MediaCodec` (see [H264Decoder]) since that
- * decode doesn't happen in Rust at all on this platform. File transfer
- * is the one Phase 3 item still not done (Storage Access Framework
- * integration is a substantially bigger, separate lift).
+ * plus bidirectional clipboard sync and file transfer. No consent UI
+ * for any of this (host-side only, see the project plan) -- incoming
+ * file offers are auto-accepted into an app-private directory exactly
+ * like `xenia-viewer`'s own flag-driven model. Passthrough/HDC render
+ * via a Compose `Image` (see [ViewerScreen]); H.264 renders via a real
+ * `SurfaceView` + Android's hardware `MediaCodec` (see [H264Decoder])
+ * since that decode doesn't happen in Rust at all on this platform.
  */
 class XeniaViewerActivity : ComponentActivity() {
     private var session: XeniaSession? = null
+    private var pendingFilePick: ((Uri) -> Unit)? = null
+
+    private val filePickerLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            val callback = pendingFilePick
+            pendingFilePick = null
+            if (uri != null) callback?.invoke(uri)
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // App-private directory (a real filesystem path, not a SAF
+        // Uri) for files the host sends us -- `ViewerEngine` writes
+        // to it directly via `std::fs::write`, matching
+        // `xenia-viewer`'s own `--recv-file-dir` semantics.
+        val recvDir = getExternalFilesDir("received")?.apply { mkdirs() }
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     XeniaViewerScreen(
                         onConnect = { hostPort, codec ->
-                            val s = XeniaSession(hostPort, codec, lifecycleScope)
+                            val s = XeniaSession(
+                                hostPort,
+                                codec,
+                                lifecycleScope,
+                                recvDir?.absolutePath,
+                                MAX_FILE_TRANSFER_BYTES,
+                            )
                             session = s
                             s
+                        },
+                        onPickFile = { onPicked ->
+                            pendingFilePick = onPicked
+                            filePickerLauncher.launch(arrayOf("*/*"))
                         },
                     )
                 }
@@ -88,14 +125,14 @@ class XeniaViewerActivity : ComponentActivity() {
 }
 
 @Composable
-private fun XeniaViewerScreen(onConnect: (String, Int) -> XeniaSession) {
+private fun XeniaViewerScreen(onConnect: (String, Int) -> XeniaSession, onPickFile: ((Uri) -> Unit) -> Unit) {
     var activeSession by remember { mutableStateOf<XeniaSession?>(null) }
 
     val current = activeSession
     if (current == null) {
         ConnectScreen(onConnect = { hostPort, codec -> activeSession = onConnect(hostPort, codec) })
     } else {
-        ViewerScreen(session = current)
+        ViewerScreen(session = current, onPickFile = onPickFile)
     }
 }
 
@@ -172,11 +209,13 @@ private fun CodecChoiceButton(
 private enum class InputMode { TAP, TRACKPAD }
 
 @Composable
-private fun ViewerScreen(session: XeniaSession) {
+private fun ViewerScreen(session: XeniaSession, onPickFile: ((Uri) -> Unit) -> Unit) {
     val state by session.state.collectAsState()
     val error by session.lastError.collectAsState()
     var inputMode by remember { mutableStateOf(InputMode.TAP) }
     var keyboardActive by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
 
     ClipboardBridge(session)
 
@@ -205,6 +244,10 @@ private fun ViewerScreen(session: XeniaSession) {
         }
 
         if (state == SessionState.CONNECTED) {
+            FileTransferStatusBar(
+                session = session,
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = 16.dp),
+            )
             Row(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -227,10 +270,85 @@ private fun ViewerScreen(session: XeniaSession) {
                     onClick = { keyboardActive = !keyboardActive },
                     modifier = Modifier.padding(start = 8.dp),
                 )
+                CodecChoiceButton(
+                    label = "Send",
+                    selected = false,
+                    onClick = {
+                        onPickFile { uri ->
+                            coroutineScope.launch {
+                                val picked = withContext(Dispatchers.IO) { readPickedFile(context, uri) }
+                                if (picked != null) session.sendFile(picked.first, picked.second)
+                            }
+                        }
+                    },
+                    modifier = Modifier.padding(start = 8.dp),
+                )
             }
             if (keyboardActive) {
                 VirtualKeyboardCapture(session)
             }
+        }
+    }
+}
+
+/**
+ * Read a Storage Access Framework-picked file fully into memory (SAF
+ * `Uri`s aren't plain filesystem paths, so this has to go through
+ * `ContentResolver`, unlike receiving -- see [XeniaViewerActivity]'s
+ * `recvDir`, which is a real path `ViewerEngine` writes to directly).
+ * Returns `null` if the stream can't be opened, the display name can't
+ * be resolved to anything usable, or the file exceeds
+ * [MAX_FILE_TRANSFER_BYTES] (rejected client-side too, not just by the
+ * peer, to avoid buffering an oversized file into memory for no reason).
+ */
+private fun readPickedFile(context: android.content.Context, uri: Uri): Pair<String, ByteArray>? {
+    val name = queryDisplayName(context, uri) ?: uri.lastPathSegment ?: return null
+    val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
+    if (bytes.size.toLong() > MAX_FILE_TRANSFER_BYTES) return null
+    return name to bytes
+}
+
+private fun queryDisplayName(context: android.content.Context, uri: Uri): String? {
+    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+        val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+        if (idx >= 0 && cursor.moveToFirst()) return cursor.getString(idx)
+    }
+    return null
+}
+
+/**
+ * Transient status line for the most recent [FileTransferEvent] --
+ * offer decision, send/receive progress percentage, or final result.
+ * Deliberately shows only the latest event rather than a scrollable
+ * history/queue: this is a lightweight status indicator, not a
+ * transfer manager UI.
+ */
+@Composable
+private fun FileTransferStatusBar(session: XeniaSession, modifier: Modifier = Modifier) {
+    var statusText by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(session) {
+        session.fileTransferEvents.collect { event ->
+            statusText = when (event) {
+                is FileTransferEvent.IncomingOffer ->
+                    if (event.accepted) "Receiving ${event.name}…" else "Rejected ${event.name}: ${event.reason}"
+                is FileTransferEvent.Progress -> {
+                    val pct = if (event.totalBytes > 0) (event.doneBytes * 100 / event.totalBytes) else 0
+                    val verb = if (event.outgoing) "Sending" else "Receiving"
+                    "$verb ${event.name}: $pct%"
+                }
+                is FileTransferEvent.Done -> {
+                    val verb = if (event.outgoing) "Sent" else "Received"
+                    if (event.ok) "$verb ${event.name}" else "Failed: ${event.name} (${event.detail})"
+                }
+            }
+        }
+    }
+    statusText?.let { text ->
+        Surface(
+            color = MaterialTheme.colorScheme.surface,
+            modifier = modifier,
+        ) {
+            Text(text, modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
         }
     }
 }
@@ -411,6 +529,14 @@ private fun H264ViewerSurface(session: XeniaSession, inputMode: InputMode) {
 
                         override fun surfaceDestroyed(holder: SurfaceHolder) {
                             session.h264Surface = null
+                            // The old Surface is about to become invalid --
+                            // release the MediaCodec bound to it now, rather
+                            // than leaving it to fail forever on every frame
+                            // once a *new* Surface arrives later (see
+                            // releaseH264Decoder's doc comment for the real
+                            // bug this fixes, caught via the Send-file
+                            // picker backgrounding the Activity).
+                            session.releaseH264Decoder()
                         }
                     },
                 )
