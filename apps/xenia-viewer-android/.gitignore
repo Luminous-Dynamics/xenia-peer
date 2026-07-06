@@ -1,0 +1,8 @@
+# Gradle build output and caches -- regenerable, not source.
+.gradle/
+build/
+local.properties
+
+# Native libs are build artifacts of build-jni.sh (Rust cdylib +
+# compiled JNI shim), not source -- regenerate via that script.
+src/main/jniLibs/

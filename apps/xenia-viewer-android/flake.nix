@@ -55,6 +55,7 @@
             pkgs.gradle
             pkgs.pkg-config
             pkgs.cacert
+            pkgs.jq
           ];
 
           ANDROID_NDK_HOME = ndkRoot;
@@ -78,10 +79,15 @@
             echo "  NDK:     ${ndkRoot}"
             echo "  SDK:     ${androidSdk}/libexec/android-sdk"
             echo ""
-            echo "  Phase 0 proof (no Gradle/JNI yet):"
+            echo "  Phase 0 proof (no Gradle/JNI):"
             echo "    cargo build --target aarch64-linux-android --release -p xenia-mobile-ffi --bin xenia_mobile_smoke"
-            echo "    adb push \$(cargo metadata --format-version1 --no-deps | jq -r '.target_directory')/aarch64-linux-android/release/xenia_mobile_smoke /data/local/tmp/"
+            echo "    adb push \$(cargo metadata --format-version 1 --no-deps | jq -r '.target_directory')/aarch64-linux-android/release/xenia_mobile_smoke /data/local/tmp/"
             echo "    adb shell /data/local/tmp/xenia_mobile_smoke <host:port> passthrough"
+            echo ""
+            echo "  Phase 1 — build + install the real app:"
+            echo "    ./build-jni.sh"
+            echo "    gradle assembleDebug"
+            echo "    adb install -r build/outputs/apk/debug/xenia-viewer-android-debug.apk"
             echo ""
           '';
         };
