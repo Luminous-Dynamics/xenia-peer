@@ -19,7 +19,8 @@
 //! (`MobileFrame::is_encoded == true`), for the Android app to feed
 //! into its own hardware `android.media.MediaCodec` decoder (Phase 2).
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, Mutex};
@@ -27,7 +28,10 @@ use tracing::{info, warn};
 
 use xenia_inject::InputEvent;
 use xenia_peer_core::frame::{PixelFormat as FramePixelFormat, RawCapabilities, RawRekey};
-use xenia_peer_core::{ClipboardContent, RawClipboard};
+use xenia_peer_core::{
+    ClipboardContent, FileTransferMessage, RawClipboard, FILE_TRANSFER_CHUNK_SIZE,
+    PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST, PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER,
+};
 use xenia_peer_core::handshake::{
     NegotiatedTransport, negotiated_session_context_hash, perform_viewer_handshake_with_transcript,
 };
@@ -83,6 +87,105 @@ pub struct MobileFrame {
 /// unbounded memory — oldest frame is dropped once full, matching a
 /// "show the latest, not a queued backlog" viewer UX.
 const FRAME_QUEUE_CAP: usize = 4;
+/// Bound on buffered viewer-to-host input events (pointer/touch/key) while
+/// the network task drains them. Excess is dropped rather than queued
+/// unboundedly under a stall.
+const INPUT_QUEUE_CAP: usize = 256;
+/// Bound on buffered viewer-to-host clipboard updates.
+const CLIPBOARD_QUEUE_CAP: usize = 16;
+/// Bound on queued file-transfer UI events (offers/progress/done). A UI
+/// that stops polling only loses stale progress ticks, not correctness --
+/// the underlying transfer state machine doesn't live in this queue.
+const FILE_TRANSFER_EVENT_QUEUE_CAP: usize = 64;
+/// Bound on queued outgoing "send this file" commands from the UI.
+/// Small: sending is a deliberate, rare user action (tap a picker
+/// button), not a stream -- and only one outgoing transfer is in
+/// flight at a time anyway (mirrors `xenia-viewer`'s `--send-file`,
+/// which supports exactly one transfer per run).
+const FILE_TRANSFER_CMD_QUEUE_CAP: usize = 2;
+/// Caps how many incoming transfers can be simultaneously buffered in
+/// memory. Lower than the daemon's own `MAX_CONCURRENT_INCOMING_TRANSFERS`
+/// (8) since phones have tighter RAM budgets than desktop hosts.
+const MAX_CONCURRENT_INCOMING_TRANSFERS: usize = 4;
+
+/// One thing that happened to a file transfer, surfaced to the UI via
+/// [`ViewerEngine::poll_file_transfer_event`]. File transfer is
+/// symmetric -- either side can send or receive any given
+/// `transfer_id` -- so every variant carries `outgoing` to disambiguate
+/// which role this side is playing for that transfer.
+#[derive(Clone, Debug)]
+pub enum FileTransferEvent {
+    /// The host offered `name` (`total_bytes` from its `Offer`).
+    /// Auto-accepted or auto-rejected based on whether a receive
+    /// directory was configured at connect time -- mirrors
+    /// `xenia-viewer`'s own no-prompt, flag-driven consent model (see
+    /// the project plan: the viewer has no consent UI of its own).
+    IncomingOffer {
+        transfer_id: u64,
+        name: String,
+        total_bytes: u64,
+        accepted: bool,
+        reason: String,
+    },
+    /// Byte-count progress tick.
+    Progress {
+        transfer_id: u64,
+        name: String,
+        done_bytes: u64,
+        total_bytes: u64,
+        outgoing: bool,
+    },
+    /// Terminal state: verified+written (incoming) or verified-by-peer
+    /// (outgoing), or failed for any reason (`detail` explains).
+    Done {
+        transfer_id: u64,
+        name: String,
+        outgoing: bool,
+        ok: bool,
+        detail: String,
+    },
+}
+
+/// A transfer this side is sending. Only one at a time, matching
+/// `xenia-viewer`'s own `--send-file` semantics (one transfer per
+/// run) -- a second `send_file` call while one is in flight is
+/// rejected rather than queued.
+struct OutgoingTransfer {
+    transfer_id: u64,
+    name: String,
+    data: Vec<u8>,
+}
+
+/// A transfer this side is receiving.
+struct IncomingTransfer {
+    name: String,
+    expected_size: u64,
+    expected_hash: [u8; 32],
+    buffer: Vec<u8>,
+}
+
+/// A UI-initiated file-transfer action, delivered to the background
+/// session task via [`ViewerEngine::send_file`].
+enum FileTransferCommand {
+    /// Offer `data` (already read fully into memory by the caller --
+    /// e.g. via Android's Storage Access Framework, since arbitrary
+    /// user-picked files aren't necessarily reachable by a plain
+    /// filesystem path) to the host under `name`.
+    SendFile { name: String, data: Vec<u8> },
+}
+
+/// Reduce a wire-provided filename to a bare basename with no path
+/// separators, exactly mirroring `xenia-peer`/`xenia-viewer`'s
+/// identically-named helper -- see their doc comments for why (a
+/// malicious/buggy peer could otherwise offer `"../../etc/passwd"` and
+/// have it joined onto `recv_dir` verbatim).
+fn sanitize_transfer_filename(name: &str) -> Option<String> {
+    let candidate = std::path::Path::new(name).file_name()?.to_str()?.to_string();
+    if candidate.is_empty() || candidate == "." || candidate == ".." {
+        return None;
+    }
+    Some(candidate)
+}
 
 /// Latest host-to-viewer clipboard state. `None` (the field, not this
 /// wrapper) means "cleared"; the wrapper itself distinguishes "no
@@ -100,8 +203,8 @@ struct Shared {
 /// the caller uses to observe/drive it.
 pub struct ViewerEngine {
     shared: Arc<Shared>,
-    input_tx: mpsc::UnboundedSender<InputEvent>,
-    clipboard_tx: mpsc::UnboundedSender<ClipboardContent>,
+    input_tx: mpsc::Sender<InputEvent>,
+    clipboard_tx: mpsc::Sender<ClipboardContent>,
     _task: tokio::task::JoinHandle<()>,
 }
 
@@ -118,8 +221,12 @@ impl ViewerEngine {
             last_error: Mutex::new(None),
             clipboard: Mutex::new(None),
         });
-        let (input_tx, input_rx) = mpsc::unbounded_channel();
-        let (clipboard_tx, clipboard_rx) = mpsc::unbounded_channel();
+        // Bounded so a stalled network task can't let viewer-generated input
+        // and clipboard events accumulate without limit. These carry UI
+        // actions that outpace the wire during a stall; dropping the oldest
+        // excess (via `try_send` in the send_* methods) is the right backpressure.
+        let (input_tx, input_rx) = mpsc::channel(INPUT_QUEUE_CAP);
+        let (clipboard_tx, clipboard_rx) = mpsc::channel(CLIPBOARD_QUEUE_CAP);
         let shared_for_task = Arc::clone(&shared);
         let task = rt.spawn(run_session(host_port, codec, shared_for_task, input_rx, clipboard_rx));
         Self {
@@ -166,11 +273,11 @@ impl ViewerEngine {
             Some(t) => ClipboardContent::Text(t),
             None => ClipboardContent::Cleared,
         };
-        let _ = self.clipboard_tx.send(content);
+        let _ = self.clipboard_tx.try_send(content);
     }
 
     pub fn send_pointer(&self, x: f32, y: f32, button: u8, pressed: bool) {
-        let _ = self.input_tx.send(InputEvent::Pointer {
+        let _ = self.input_tx.try_send(InputEvent::Pointer {
             x,
             y,
             button,
@@ -179,7 +286,7 @@ impl ViewerEngine {
     }
 
     pub fn send_touch(&self, index: u8, x: f32, y: f32, phase: u8, pressure: f32) {
-        let _ = self.input_tx.send(InputEvent::Touch {
+        let _ = self.input_tx.try_send(InputEvent::Touch {
             index,
             x,
             y,
@@ -189,7 +296,7 @@ impl ViewerEngine {
     }
 
     pub fn send_key(&self, code: u32, pressed: bool, modifiers: u8) {
-        let _ = self.input_tx.send(InputEvent::Key {
+        let _ = self.input_tx.try_send(InputEvent::Key {
             code,
             pressed,
             modifiers,
@@ -201,8 +308,8 @@ async fn run_session(
     host_port: String,
     codec: MobileCodec,
     shared: Arc<Shared>,
-    input_rx: mpsc::UnboundedReceiver<InputEvent>,
-    clipboard_rx: mpsc::UnboundedReceiver<ClipboardContent>,
+    input_rx: mpsc::Receiver<InputEvent>,
+    clipboard_rx: mpsc::Receiver<ClipboardContent>,
 ) {
     if let Err(err) = run_session_inner(host_port, codec, &shared, input_rx, clipboard_rx).await {
         warn!(error = %err, "viewer session ended with error");
@@ -217,8 +324,8 @@ async fn run_session_inner(
     host_port: String,
     codec: MobileCodec,
     shared: &Arc<Shared>,
-    mut input_rx: mpsc::UnboundedReceiver<InputEvent>,
-    mut clipboard_rx: mpsc::UnboundedReceiver<ClipboardContent>,
+    mut input_rx: mpsc::Receiver<InputEvent>,
+    mut clipboard_rx: mpsc::Receiver<ClipboardContent>,
 ) -> Result<(), String> {
     info!(peer = %host_port, ?codec, "mobile viewer connecting");
 
