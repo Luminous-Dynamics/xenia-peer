@@ -42,6 +42,49 @@ pub enum M1Permission {
     FileTransfer,
 }
 
+/// The set of privileged operations a granted session actually authorizes.
+///
+/// Consent is not a single boolean: a viewer may be allowed to see the
+/// screen without also being allowed to type, read the clipboard, or pull
+/// files. This set records exactly which tiers a grant unlocked so
+/// [`M1SessionMachine::require_active`] can deny an operation the operator
+/// never approved, even while the session is otherwise `Active`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct M1PermissionSet {
+    /// Forward-path frame streaming.
+    pub stream_frame: bool,
+    /// Reverse-path input injection.
+    pub inject_input: bool,
+    /// Reverse-path clipboard apply.
+    pub clipboard_sync: bool,
+    /// File-transfer read/write (either direction).
+    pub file_transfer: bool,
+}
+
+impl M1PermissionSet {
+    /// Grant every privileged operation. Retained for the transcript-replay
+    /// and test paths that reconstruct a session without a per-tier scope;
+    /// live daemons should grant exactly what the operator enabled.
+    pub fn all() -> Self {
+        Self {
+            stream_frame: true,
+            inject_input: true,
+            clipboard_sync: true,
+            file_transfer: true,
+        }
+    }
+
+    /// Whether `permission` is included in this set.
+    pub fn contains(&self, permission: M1Permission) -> bool {
+        match permission {
+            M1Permission::StreamFrame => self.stream_frame,
+            M1Permission::InjectInput => self.inject_input,
+            M1Permission::ClipboardSync => self.clipboard_sync,
+            M1Permission::FileTransfer => self.file_transfer,
+        }
+    }
+}
+
 /// Audit event emitted by the M1 lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum M1AuditEvent {
@@ -109,6 +152,7 @@ impl Error for M1SessionError {}
 pub struct M1SessionMachine {
     state: M1SessionState,
     audit: Vec<M1AuditEvent>,
+    granted: M1PermissionSet,
 }
 
 impl Default for M1SessionMachine {
@@ -123,7 +167,14 @@ impl M1SessionMachine {
         Self {
             state: M1SessionState::Idle,
             audit: Vec::new(),
+            granted: M1PermissionSet::default(),
         }
+    }
+
+    /// Permissions currently granted for the active session (empty unless
+    /// the session is `Active`).
+    pub fn granted_permissions(&self) -> M1PermissionSet {
+        self.granted
     }
 
     /// Current lifecycle state.
@@ -146,14 +197,32 @@ impl M1SessionMachine {
         )
     }
 
-    /// Viewer grants consent; M1 becomes active.
+    /// Viewer grants consent for every tier; M1 becomes active.
+    ///
+    /// This is the broad grant used by the deterministic transcript-replay
+    /// and test paths. Live daemons should prefer [`grant_consent_scoped`]
+    /// so a single approval does not silently authorize input, clipboard,
+    /// and file transfer alongside screen viewing.
+    ///
+    /// [`grant_consent_scoped`]: Self::grant_consent_scoped
     pub fn grant_consent(&mut self) -> Result<(), M1SessionError> {
+        self.grant_consent_scoped(M1PermissionSet::all())
+    }
+
+    /// Viewer grants consent for exactly the tiers in `granted`; M1 becomes
+    /// active. An operation whose permission is not in the set is denied by
+    /// [`require_active`] even though the session is `Active`.
+    ///
+    /// [`require_active`]: Self::require_active
+    pub fn grant_consent_scoped(&mut self, granted: M1PermissionSet) -> Result<(), M1SessionError> {
         self.transition(
             M1SessionState::Offered,
             M1SessionState::Active,
             "grant_consent",
             M1AuditEvent::ConsentGranted,
-        )
+        )?;
+        self.granted = granted;
+        Ok(())
     }
 
     /// Viewer denies consent.
@@ -171,6 +240,7 @@ impl M1SessionMachine {
         match self.state {
             M1SessionState::Offered | M1SessionState::Active => {
                 self.state = M1SessionState::Revoked;
+                self.granted = M1PermissionSet::default();
                 self.audit.push(M1AuditEvent::ConsentRevoked);
                 Ok(())
             }
@@ -189,6 +259,7 @@ impl M1SessionMachine {
             | M1SessionState::Active
             | M1SessionState::Revoked => {
                 self.state = M1SessionState::Ended;
+                self.granted = M1PermissionSet::default();
                 self.audit.push(M1AuditEvent::SessionEnded);
                 Ok(())
             }
@@ -210,6 +281,7 @@ impl M1SessionMachine {
             }
             _ => {
                 self.state = M1SessionState::Failed;
+                self.granted = M1PermissionSet::default();
                 self.audit.push(M1AuditEvent::SessionFailed);
                 Ok(())
             }
@@ -267,7 +339,7 @@ impl M1SessionMachine {
     }
 
     fn require_active(&self, permission: M1Permission) -> Result<(), M1SessionError> {
-        if self.state == M1SessionState::Active {
+        if self.state == M1SessionState::Active && self.granted.contains(permission) {
             Ok(())
         } else {
             Err(M1SessionError::PermissionDenied {
@@ -281,6 +353,69 @@ impl M1SessionMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scoped_grant_authorizes_only_the_requested_tiers() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+        session
+            .grant_consent_scoped(M1PermissionSet {
+                stream_frame: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        // The granted tier is allowed...
+        session.stream_frame().unwrap();
+
+        // ...but the ungranted tiers are denied even though Active.
+        let denied = |permission| M1SessionError::PermissionDenied {
+            state: M1SessionState::Active,
+            permission,
+        };
+        assert_eq!(
+            session.inject_input().unwrap_err(),
+            denied(M1Permission::InjectInput)
+        );
+        assert_eq!(
+            session.sync_clipboard().unwrap_err(),
+            denied(M1Permission::ClipboardSync)
+        );
+        assert_eq!(
+            session.transfer_file().unwrap_err(),
+            denied(M1Permission::FileTransfer)
+        );
+    }
+
+    #[test]
+    fn broad_grant_still_authorizes_every_tier() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+        session.grant_consent().unwrap();
+
+        session.stream_frame().unwrap();
+        session.inject_input().unwrap();
+        session.sync_clipboard().unwrap();
+        session.transfer_file().unwrap();
+        assert_eq!(session.granted_permissions(), M1PermissionSet::all());
+    }
+
+    #[test]
+    fn revocation_clears_granted_permissions() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+        session.grant_consent().unwrap();
+        session.revoke().unwrap();
+
+        assert_eq!(session.granted_permissions(), M1PermissionSet::default());
+        assert_eq!(
+            session.stream_frame().unwrap_err(),
+            M1SessionError::PermissionDenied {
+                state: M1SessionState::Revoked,
+                permission: M1Permission::StreamFrame,
+            }
+        );
+    }
 
     #[test]
     fn host_offer_creates_pending_session() {

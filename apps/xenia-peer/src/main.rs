@@ -29,8 +29,8 @@ use xenia_peer_core::OpusAudioCodec;
 #[cfg(any(feature = "audio-capture", test))]
 use xenia_peer_core::frame::audio_flags;
 use xenia_peer_core::{
-    AudioCodec, ClipboardContent, LaneSession, PAYLOAD_TYPE_CLIPBOARD, RawPcmAudioCodec,
-    RekeyPolicy, SessionEpochState,
+    AudioCodec, ClipboardContent, LaneSession, M1PermissionSet, PAYLOAD_TYPE_CLIPBOARD,
+    RawPcmAudioCodec, RekeyPolicy, SessionEpochState,
     advertisement::{AdvertisedAudioCodec, AudioAdvertisement, TransportAdvertisement},
     frame::{
         LANE_ENVELOPE_MAGIC, PixelFormat as FramePixelFormat, RawAudio, RawClipboard, RawFrame,
@@ -301,6 +301,13 @@ struct Args {
     /// so runtime keys are not written into the repository root.
     #[arg(long, default_value = "operator.key")]
     operator_key_path: std::path::PathBuf,
+
+    /// M1 consent-ledger signing key path. Signs the consent grant/deny/revoke
+    /// boundary events; generated on first run with owner-only (0600)
+    /// permissions. Must be a real per-host secret -- a shared or well-known
+    /// key lets anyone forge a fully-verifying consent transcript.
+    #[arg(long, default_value = "consent-ledger.key")]
+    m1_consent_key_path: std::path::PathBuf,
 
     /// Inbound viewer-input backend. `noop` (default) discards every
     /// input event -- a connected viewer is view-only and no OS-level
@@ -1012,7 +1019,24 @@ fn read_host_clipboard_text() -> Option<String> {
 /// Apply a viewer-originated clipboard update to the real host clipboard.
 /// Only called in `--clipboard bidirectional` mode, after the M1 consent
 /// gate has already allowed the flow.
+/// Cap on a single viewer-originated clipboard update applied to the host
+/// clipboard. Without a dedicated cap this is bounded only by the 16 MiB
+/// envelope limit, letting a bidirectional viewer stuff megabytes into the
+/// host clipboard on every update. 1 MiB is well above any realistic text
+/// clipboard.
+const MAX_INBOUND_CLIPBOARD_BYTES: usize = 1024 * 1024;
+
 fn apply_clipboard_content(content: &ClipboardContent) {
+    if let ClipboardContent::Text(text) = content {
+        if text.len() > MAX_INBOUND_CLIPBOARD_BYTES {
+            warn!(
+                len = text.len(),
+                cap = MAX_INBOUND_CLIPBOARD_BYTES,
+                "viewer clipboard update exceeds cap; ignoring"
+            );
+            return;
+        }
+    }
     let mut clipboard = match arboard::Clipboard::new() {
         Ok(clipboard) => clipboard,
         Err(err) => {
@@ -1053,6 +1077,13 @@ struct IncomingTransfer {
     expected_hash: [u8; 32],
     buffer: Vec<u8>,
 }
+
+/// Cap on simultaneously-open incoming transfers. Each accepted Offer can
+/// buffer up to `--file-transfer-max-bytes` in memory until it Completes, so
+/// without a cap an authenticated peer could open unbounded Offers and
+/// exhaust host memory. Bounds worst-case resident transfer state to
+/// `MAX_CONCURRENT_INCOMING_TRANSFERS * file_transfer_max_bytes`.
+const MAX_CONCURRENT_INCOMING_TRANSFERS: usize = 8;
 
 /// Reduce a wire-provided filename to a bare basename with no path
 /// separators, so a received file always lands directly inside
@@ -1104,10 +1135,17 @@ async fn handle_file_transfer_envelope(
                 (Some(_), Some(_)) if size > max_bytes => {
                     (false, format!("file exceeds {max_bytes}-byte cap"))
                 }
+                (Some(_), Some(_)) if incoming.len() >= MAX_CONCURRENT_INCOMING_TRANSFERS => (
+                    false,
+                    format!("too many concurrent transfers (max {MAX_CONCURRENT_INCOMING_TRANSFERS})"),
+                ),
                 (Some(_), Some(_)) => (true, String::new()),
             };
             if accept {
-                m1_runtime.lock().await.allow_file_transfer_flow()?;
+                if let Err(err) = m1_runtime.lock().await.allow_file_transfer_flow() {
+                    warn!(error = %err, "file transfer offer rejected by M1 consent gate");
+                    return Ok(());
+                }
                 let safe_name = sanitize_transfer_filename(&name).expect("checked above");
                 incoming.insert(
                     transfer_id,
@@ -1142,7 +1180,10 @@ async fn handle_file_transfer_envelope(
             info!(transfer_id, bytes = transfer.data.len(), "transfer accepted, sending chunks");
             let chunk_size = xenia_peer_core::FILE_TRANSFER_CHUNK_SIZE;
             for (i, chunk) in transfer.data.chunks(chunk_size).enumerate() {
-                m1_runtime.lock().await.allow_file_transfer_flow()?;
+                if let Err(err) = m1_runtime.lock().await.allow_file_transfer_flow() {
+                    warn!(error = %err, "outgoing file transfer halted by M1 consent gate");
+                    return Ok(());
+                }
                 let offset = (i * chunk_size) as u64;
                 let msg = xenia_peer_core::FileTransferMessage::Chunk {
                     transfer_id,
@@ -1171,11 +1212,15 @@ async fn handle_file_transfer_envelope(
             offset,
             data,
         } => {
+            if let Err(err) = m1_runtime.lock().await.allow_file_transfer_flow() {
+                warn!(error = %err, "incoming file chunk rejected by M1 consent gate; dropping transfer");
+                incoming.remove(&transfer_id);
+                return Ok(());
+            }
             let Some(transfer) = incoming.get_mut(&transfer_id) else {
                 warn!(transfer_id, "chunk for unknown/stale incoming transfer");
                 return Ok(());
             };
-            m1_runtime.lock().await.allow_file_transfer_flow()?;
             let off = offset as usize;
             if off.saturating_add(data.len()) > transfer.expected_size as usize {
                 warn!(transfer_id, "chunk exceeds offered file size; dropping transfer");
@@ -1195,7 +1240,10 @@ async fn handle_file_transfer_envelope(
             let actual_hash = *blake3::hash(&transfer.buffer).as_bytes();
             let ok = actual_hash == transfer.expected_hash;
             if ok {
-                m1_runtime.lock().await.allow_file_transfer_flow()?;
+                if let Err(err) = m1_runtime.lock().await.allow_file_transfer_flow() {
+                    warn!(error = %err, "completed file transfer rejected by M1 consent gate; not written");
+                    return Ok(());
+                }
                 let dest = recv_file_dir
                     .expect("incoming transfer only exists when recv_file_dir is set")
                     .join(&transfer.name);
@@ -1265,6 +1313,52 @@ fn m1_consent_scope(telemetry_level: TelemetryLevel, audio_mode: AudioMode) -> S
         AudioMode::Capture => "audio: host device capture",
     };
     format!("display: screen stream; {telemetry}; {audio}")
+}
+
+/// Load an Ed25519 signing key from `path`, or generate and persist a fresh
+/// one on first use. The persisted key file is created with owner-only (0600)
+/// permissions, and existing files are re-tightened to 0600 on load, so a
+/// signing secret is never left group/world-readable on disk.
+fn load_or_create_signing_key(
+    path: &std::path::Path,
+) -> Result<SigningKey, Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    fn restrict_permissions(path: &std::path::Path) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(not(unix))]
+    fn restrict_permissions(_path: &std::path::Path) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    if path.exists() {
+        let key_bytes = std::fs::read(path)?;
+        let key = SigningKey::from_bytes(&key_bytes.try_into().map_err(|_| "Invalid key length")?);
+        restrict_permissions(path)?;
+        Ok(key)
+    } else {
+        let key = SigningKey::generate(&mut rand::thread_rng());
+        std::fs::write(path, key.to_bytes())?;
+        restrict_permissions(path)?;
+        Ok(key)
+    }
+}
+
+/// Derive the consent tiers to grant from the operator's configured flags.
+///
+/// A single Approve should authorize only what the operator actually turned
+/// on: frame streaming is the daemon's core purpose and always granted, but
+/// input injection, clipboard apply, and file transfer are each unlocked only
+/// when their backing flag is enabled. This keeps an approval from silently
+/// authorizing capabilities the daemon isn't even wired to use.
+fn configured_permission_set(args: &Args) -> M1PermissionSet {
+    M1PermissionSet {
+        stream_frame: true,
+        inject_input: args.input_backend != InputBackendChoice::Noop,
+        clipboard_sync: args.clipboard == ClipboardMode::Bidirectional,
+        file_transfer: args.recv_file_dir.is_some() || args.send_file.is_some(),
+    }
 }
 
 fn synthetic_audio_kind(mode: AudioMode) -> Option<SyntheticAudioKind> {
@@ -1538,14 +1632,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!(addr = %args.listen, "xenia-peer daemon listening");
 
-    let signing_key = if args.operator_key_path.exists() {
-        let key_bytes = std::fs::read(&args.operator_key_path)?;
-        SigningKey::from_bytes(&key_bytes.try_into().map_err(|_| "Invalid key length")?)
-    } else {
-        let key = SigningKey::generate(&mut rand::thread_rng());
-        std::fs::write(&args.operator_key_path, key.to_bytes())?;
-        key
-    };
+    let signing_key = load_or_create_signing_key(&args.operator_key_path)?;
 
     let mut telemetry = SysinfoTelemetryStream::new();
     let mut audio = build_audio_source(args.audio)?;
@@ -1798,7 +1885,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    let m1_signing_key = SigningKey::from_bytes(&[0x41u8; 32]);
+    let m1_signing_key = load_or_create_signing_key(&args.m1_consent_key_path)?;
     let m1_scope = m1_consent_scope(args.telemetry_level, args.audio);
     let m1_scope_for_log = m1_scope.clone();
     let mut m1_runtime = crate::m1_runtime::M1RuntimeSession::new(
@@ -1824,8 +1911,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let timeout = Duration::from_secs(args.consent_timeout_secs.max(1));
         match tokio::time::timeout(timeout, consent_decision_rx).await {
             Ok(Ok(true)) => {
-                m1_runtime.grant_consent()?;
-                info!("M1 consent granted; frame flow unlocked");
+                let granted = configured_permission_set(&args);
+                m1_runtime.grant_consent_scoped(granted)?;
+                info!(
+                    inject_input = granted.inject_input,
+                    clipboard_sync = granted.clipboard_sync,
+                    file_transfer = granted.file_transfer,
+                    "M1 consent granted; only the operator-enabled tiers unlocked"
+                );
             }
             Ok(Ok(false)) => {
                 m1_runtime.deny_consent()?;
@@ -3064,5 +3157,101 @@ mod audio_tests {
         assert_eq!(first.flags & audio_flags::SYNTHETIC, 0);
         assert!(first.validate());
         assert!(second.validate());
+    }
+}
+
+#[cfg(test)]
+mod file_transfer_and_consent_tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_strips_path_components_to_a_bare_basename() {
+        assert_eq!(
+            sanitize_transfer_filename("report.pdf").as_deref(),
+            Some("report.pdf")
+        );
+        assert_eq!(
+            sanitize_transfer_filename("/etc/passwd").as_deref(),
+            Some("passwd")
+        );
+        assert_eq!(
+            sanitize_transfer_filename("../../secret").as_deref(),
+            Some("secret")
+        );
+        assert_eq!(
+            sanitize_transfer_filename("a/b/c/thing.txt").as_deref(),
+            Some("thing.txt")
+        );
+    }
+
+    #[test]
+    fn sanitize_rejects_traversal_only_and_empty_names() {
+        assert_eq!(sanitize_transfer_filename(""), None);
+        assert_eq!(sanitize_transfer_filename("."), None);
+        assert_eq!(sanitize_transfer_filename(".."), None);
+        assert_eq!(sanitize_transfer_filename("../.."), None);
+        assert_eq!(sanitize_transfer_filename("/"), None);
+    }
+
+    fn args_with(
+        input_backend: InputBackendChoice,
+        clipboard: ClipboardMode,
+        recv_file_dir: Option<std::path::PathBuf>,
+        send_file: Option<std::path::PathBuf>,
+    ) -> Args {
+        let mut args = Args::parse_from(["xenia-peer"]);
+        args.input_backend = input_backend;
+        args.clipboard = clipboard;
+        args.recv_file_dir = recv_file_dir;
+        args.send_file = send_file;
+        args
+    }
+
+    #[test]
+    fn view_only_daemon_grants_only_frame_streaming() {
+        let args = args_with(
+            InputBackendChoice::Noop,
+            ClipboardMode::Off,
+            None,
+            None,
+        );
+        let granted = configured_permission_set(&args);
+        assert!(granted.stream_frame);
+        assert!(!granted.inject_input);
+        assert!(!granted.clipboard_sync);
+        assert!(!granted.file_transfer);
+    }
+
+    #[test]
+    fn each_enabled_capability_unlocks_exactly_its_own_tier() {
+        let input = args_with(InputBackendChoice::Log, ClipboardMode::Off, None, None);
+        assert!(configured_permission_set(&input).inject_input);
+        assert!(!configured_permission_set(&input).clipboard_sync);
+
+        let clip = args_with(
+            InputBackendChoice::Noop,
+            ClipboardMode::Bidirectional,
+            None,
+            None,
+        );
+        assert!(configured_permission_set(&clip).clipboard_sync);
+        assert!(!configured_permission_set(&clip).inject_input);
+
+        // Host-to-viewer clipboard is not a host-write grant.
+        let clip_one_way = args_with(
+            InputBackendChoice::Noop,
+            ClipboardMode::HostToViewer,
+            None,
+            None,
+        );
+        assert!(!configured_permission_set(&clip_one_way).clipboard_sync);
+
+        let recv = args_with(
+            InputBackendChoice::Noop,
+            ClipboardMode::Off,
+            Some(std::path::PathBuf::from("/tmp/inbox")),
+            None,
+        );
+        assert!(configured_permission_set(&recv).file_transfer);
     }
 }

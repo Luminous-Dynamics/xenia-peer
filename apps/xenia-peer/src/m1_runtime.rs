@@ -29,7 +29,9 @@ use xenia_ledger::{
     LedgerError, SessionTranscriptBinding, SessionTranscriptSignature, SignatureEnvelope,
     SignatureSuite, Verifier, VerifyError, CURRENT_EVIDENCE_CRYPTO_MANIFEST,
 };
-use xenia_peer_core::{M1Permission, M1SessionError, M1SessionMachine, M1SessionState};
+use xenia_peer_core::{
+    M1Permission, M1PermissionSet, M1SessionError, M1SessionMachine, M1SessionState,
+};
 
 use crate::m1_ledger::consent_record_for_m1_event;
 
@@ -968,6 +970,17 @@ impl M1RuntimeSession {
 
     pub(crate) fn grant_consent(&mut self) -> Result<(), M1RuntimeError> {
         self.session.grant_consent()?;
+        self.flush_new_audit_events()
+    }
+
+    /// Grant consent for exactly the tiers in `granted`. Ungranted tiers
+    /// remain denied even while the session is active, so a screen-view
+    /// approval does not silently authorize input, clipboard, or files.
+    pub(crate) fn grant_consent_scoped(
+        &mut self,
+        granted: M1PermissionSet,
+    ) -> Result<(), M1RuntimeError> {
+        self.session.grant_consent_scoped(granted)?;
         self.flush_new_audit_events()
     }
 

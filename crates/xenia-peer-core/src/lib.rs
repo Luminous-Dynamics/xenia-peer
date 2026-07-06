@@ -70,7 +70,7 @@ pub use frame::{
 };
 pub use handshake::{RekeyPolicy, SessionEpochState};
 pub use m1_session::{
-    M1AuditEvent, M1Permission, M1SessionError, M1SessionMachine, M1SessionState,
+    M1AuditEvent, M1Permission, M1PermissionSet, M1SessionError, M1SessionMachine, M1SessionState,
 };
 pub use session::{FrameLane, LaneSession, Session, SessionError, SessionRole};
 pub use xenia_handshake::{
