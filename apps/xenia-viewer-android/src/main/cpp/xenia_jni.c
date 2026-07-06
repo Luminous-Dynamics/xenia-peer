@@ -45,7 +45,20 @@ void       xenia_frame_free(XeniaFrame frame);
 void xenia_send_pointer(uint64_t handle, float x, float y, uint8_t button, uint8_t pressed);
 void xenia_send_touch(uint64_t handle, uint8_t index, float x, float y, uint8_t phase, float pressure);
 void xenia_send_key(uint64_t handle, uint32_t code, uint8_t pressed, uint8_t modifiers);
+char *xenia_poll_clipboard(uint64_t handle);
+void  xenia_send_clipboard(uint64_t handle, const char *text);
 void xenia_disconnect(uint64_t handle);
+
+/* Helper: convert a Rust-allocated C string (or NULL) to a jstring,
+ * freeing the Rust allocation via xenia_string_free either way. */
+static jstring rust_string_to_jstring(JNIEnv *env, char *rust_str) {
+    if (rust_str == NULL) {
+        return NULL;
+    }
+    jstring result = (*env)->NewStringUTF(env, rust_str);
+    xenia_string_free(rust_str);
+    return result;
+}
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * JNI bindings
@@ -78,13 +91,7 @@ JNIEXPORT jstring JNICALL
 Java_io_luminousdynamics_xenia_NativeBindings_lastError(JNIEnv *env, jclass clazz,
                                                          jlong handle) {
     (void)clazz;
-    char *msg = xenia_last_error((uint64_t)handle);
-    if (msg == NULL) {
-        return NULL;
-    }
-    jstring result = (*env)->NewStringUTF(env, msg);
-    xenia_string_free(msg);
-    return result;
+    return rust_string_to_jstring(env, xenia_last_error((uint64_t)handle));
 }
 
 JNIEXPORT jbyteArray JNICALL
@@ -140,6 +147,30 @@ Java_io_luminousdynamics_xenia_NativeBindings_sendKey(JNIEnv *env, jclass clazz,
                                                        jint modifiers) {
     (void)env; (void)clazz;
     xenia_send_key((uint64_t)handle, (uint32_t)code, pressed ? 1 : 0, (uint8_t)modifiers);
+}
+
+JNIEXPORT jstring JNICALL
+Java_io_luminousdynamics_xenia_NativeBindings_pollClipboard(JNIEnv *env, jclass clazz,
+                                                             jlong handle) {
+    (void)clazz;
+    char *text = xenia_poll_clipboard((uint64_t)handle);
+    return rust_string_to_jstring(env, text);
+}
+
+JNIEXPORT void JNICALL
+Java_io_luminousdynamics_xenia_NativeBindings_sendClipboard(JNIEnv *env, jclass clazz,
+                                                             jlong handle, jstring text) {
+    (void)clazz;
+    if (text == NULL) {
+        xenia_send_clipboard((uint64_t)handle, NULL);
+        return;
+    }
+    const char *cstr = (*env)->GetStringUTFChars(env, text, NULL);
+    if (cstr == NULL) {
+        return;
+    }
+    xenia_send_clipboard((uint64_t)handle, cstr);
+    (*env)->ReleaseStringUTFChars(env, text, cstr);
 }
 
 JNIEXPORT void JNICALL

@@ -1,5 +1,7 @@
 package io.luminousdynamics.xenia
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.os.Bundle
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -14,6 +16,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
@@ -22,6 +26,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -30,23 +36,30 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
 
 /**
  * Viewer: a connect screen (host:port + codec), then a full-screen
- * rendering of the remote desktop with tap/drag -> `InputEvent::Touch`.
- * No consent UI (host-side only, see the project plan). Passthrough/
- * HDC render via a Compose `Image` (see [ViewerScreen]); H.264 renders
- * via a real `SurfaceView` + Android's hardware `MediaCodec` (see
- * [H264Decoder]) since that decode doesn't happen in Rust at all on
- * this platform. No clipboard/file transfer yet (Phase 3).
+ * rendering of the remote desktop with tap/drag/type -> `InputEvent`,
+ * plus bidirectional clipboard sync. No consent UI (host-side only,
+ * see the project plan). Passthrough/HDC render via a Compose `Image`
+ * (see [ViewerScreen]); H.264 renders via a real `SurfaceView` +
+ * Android's hardware `MediaCodec` (see [H264Decoder]) since that
+ * decode doesn't happen in Rust at all on this platform. File transfer
+ * is the one Phase 3 item still not done (Storage Access Framework
+ * integration is a substantially bigger, separate lift).
  */
 class XeniaViewerActivity : ComponentActivity() {
     private var session: XeniaSession? = null
@@ -151,16 +164,27 @@ private fun CodecChoiceButton(
     }
 }
 
+/** Absolute tap-to-cursor-position (existing Phase 1 model) vs. a
+ * relative drag-based virtual trackpad -- tap-to-click alone has no
+ * hover/precision-cursor concept, which matters once you're actually
+ * trying to use a real desktop rather than just proving the pipeline
+ * works (see the project plan's Phase 3 scope). */
+private enum class InputMode { TAP, TRACKPAD }
+
 @Composable
 private fun ViewerScreen(session: XeniaSession) {
     val state by session.state.collectAsState()
     val error by session.lastError.collectAsState()
+    var inputMode by remember { mutableStateOf(InputMode.TAP) }
+    var keyboardActive by remember { mutableStateOf(false) }
+
+    ClipboardBridge(session)
 
     Box(modifier = Modifier.fillMaxSize()) {
         if (session.codec == NativeBindings.CODEC_H264) {
-            H264ViewerSurface(session)
+            H264ViewerSurface(session, inputMode)
         } else {
-            BitmapViewer(session)
+            BitmapViewer(session, inputMode)
         }
 
         if (state != SessionState.CONNECTED) {
@@ -179,13 +203,164 @@ private fun ViewerScreen(session: XeniaSession) {
                 )
             }
         }
+
+        if (state == SessionState.CONNECTED) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 16.dp),
+            ) {
+                CodecChoiceButton(
+                    label = "Tap",
+                    selected = inputMode == InputMode.TAP,
+                    onClick = { inputMode = InputMode.TAP },
+                )
+                CodecChoiceButton(
+                    label = "Trackpad",
+                    selected = inputMode == InputMode.TRACKPAD,
+                    onClick = { inputMode = InputMode.TRACKPAD },
+                    modifier = Modifier.padding(start = 8.dp),
+                )
+                CodecChoiceButton(
+                    label = "Keyboard",
+                    selected = keyboardActive,
+                    onClick = { keyboardActive = !keyboardActive },
+                    modifier = Modifier.padding(start = 8.dp),
+                )
+            }
+            if (keyboardActive) {
+                VirtualKeyboardCapture(session)
+            }
+        }
     }
+}
+
+/**
+ * Bridges the OS clipboard both ways: applies host-to-viewer updates
+ * ([XeniaSession.clipboard]) to the real Android clipboard, and
+ * listens for local clipboard changes to send back
+ * ([XeniaSession.sendClipboardUpdate]). Requires the daemon to be
+ * running with `--clipboard host-to-viewer` or `bidirectional` --
+ * with clipboard sync off, this is a harmless no-op (nothing ever
+ * arrives to apply, and the daemon drops anything sent).
+ */
+@Composable
+private fun ClipboardBridge(session: XeniaSession) {
+    val context = LocalContext.current
+    val clipboardManager = remember {
+        context.getSystemService(ClipboardManager::class.java)
+    }
+    val hostClipboard by session.clipboard.collectAsState()
+
+    // Host -> viewer: apply whenever a new update arrives.
+    LaunchedEffect(hostClipboard) {
+        val text = hostClipboard ?: return@LaunchedEffect
+        clipboardManager.setPrimaryClip(ClipData.newPlainText("xenia", text))
+    }
+
+    // Viewer -> host: forward local clipboard changes. Guard against
+    // echoing back an update we ourselves just applied above (which
+    // would otherwise bounce forever) by comparing against the text
+    // we last received from the host.
+    DisposableEffect(session) {
+        val listener = ClipboardManager.OnPrimaryClipChangedListener {
+            val clip = clipboardManager.primaryClip
+            val text = if (clip != null && clip.itemCount > 0) {
+                clip.getItemAt(0).coerceToText(context).toString()
+            } else {
+                null
+            }
+            if (text != session.clipboard.value) {
+                session.sendClipboardUpdate(text)
+            }
+        }
+        clipboardManager.addPrimaryClipChangedListener(listener)
+        onDispose { clipboardManager.removePrimaryClipChangedListener(listener) }
+    }
+}
+
+/**
+ * Invisible IME-driven text capture: a `BasicTextField` kept at a
+ * fixed one-space "sentinel" value so backspace always has something
+ * to delete (detected as the field shrinking below the sentinel
+ * length), with typed characters mapped to [EvdevKeys] key events and
+ * the field reset to the sentinel after every change. This is the
+ * standard pattern for remote-input Android apps that don't have (or
+ * want to require) a physical keyboard -- most software keyboards
+ * don't reliably emit individual `KeyEvent`s per keystroke (autocomplete/
+ * predictive input can commit whole words at once), so capturing
+ * *committed text* and diffing it is far more reliable than trying to
+ * intercept raw `KeyEvent`s.
+ *
+ * The diff itself must NOT assume `new.text` is always `sentinel +
+ * appended suffix` -- IMEs mutate mid-string via composing regions
+ * (autocorrect, predictive commit) even for plain ASCII input, which
+ * broke a naive `substring(sentinel.length)` diff in practice (typing
+ * "hello" produced h, l x6, o -- the composing region rewrote "he" to
+ * "h" then re-inserted characters, and the naive diff re-sent whatever
+ * landed after the sentinel's fixed length instead of the actual
+ * change). A real common-prefix/common-suffix diff against the
+ * previous field value handles composing-region edits correctly no
+ * matter where in the string they land.
+ */
+@Composable
+private fun VirtualKeyboardCapture(session: XeniaSession) {
+    val sentinel = " "
+    var fieldValue by remember {
+        mutableStateOf(TextFieldValue(sentinel, TextRange(sentinel.length)))
+    }
+    val focusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(Unit) { focusRequester.requestFocus() }
+
+    BasicTextField(
+        value = fieldValue,
+        onValueChange = { new ->
+            val old = fieldValue.text
+            val text = new.text
+
+            var prefix = 0
+            while (prefix < old.length && prefix < text.length && old[prefix] == text[prefix]) prefix++
+            var suffix = 0
+            val maxSuffix = minOf(old.length - prefix, text.length - prefix)
+            while (suffix < maxSuffix && old[old.length - 1 - suffix] == text[text.length - 1 - suffix]) suffix++
+
+            val removedCount = old.length - prefix - suffix
+            val inserted = text.substring(prefix, text.length - suffix)
+
+            repeat(removedCount) {
+                session.sendKey(EvdevKeys.BACKSPACE, true)
+                session.sendKey(EvdevKeys.BACKSPACE, false)
+            }
+            for (c in inserted) {
+                if (c == '\n') {
+                    session.sendKey(EvdevKeys.ENTER, true)
+                    session.sendKey(EvdevKeys.ENTER, false)
+                    continue
+                }
+                val (code, needsShift) = EvdevKeys.charToKey(c) ?: continue
+                val mods = if (needsShift) EvdevKeys.MOD_SHIFT else 0
+                session.sendKey(code, true, mods)
+                session.sendKey(code, false, mods)
+            }
+
+            fieldValue = if (text.length < sentinel.length) {
+                TextFieldValue(sentinel, TextRange(sentinel.length))
+            } else {
+                new
+            }
+        },
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.None),
+        modifier = Modifier
+            .size(1.dp) // present (so it can hold focus + the IME open) but invisible
+            .focusRequester(focusRequester),
+    )
 }
 
 /** Renders `passthrough`/`hdc` sessions: already-decoded RGBA turned
  * into a Bitmap by [XeniaSession], shown via a plain Compose `Image`. */
 @Composable
-private fun BitmapViewer(session: XeniaSession) {
+private fun BitmapViewer(session: XeniaSession, inputMode: InputMode) {
     val frame by session.frame.collectAsState()
     var boxWidth by remember { mutableStateOf(1) }
     var boxHeight by remember { mutableStateOf(1) }
@@ -198,7 +373,13 @@ private fun BitmapViewer(session: XeniaSession) {
         modifier = Modifier
             .fillMaxSize()
             .onSizeChanged { boxWidth = it.width; boxHeight = it.height }
-            .forwardTouchTo(session) { boxWidth to boxHeight },
+            .let {
+                if (inputMode == InputMode.TAP) {
+                    it.forwardTouchTo(session, inputMode) { boxWidth to boxHeight }
+                } else {
+                    it.forwardTrackpadTo(session, inputMode)
+                }
+            },
     )
 }
 
@@ -207,7 +388,7 @@ private fun BitmapViewer(session: XeniaSession) {
  * [H264Decoder] for why this doesn't go through a Bitmap/Compose
  * `Image` like the other codecs). */
 @Composable
-private fun H264ViewerSurface(session: XeniaSession) {
+private fun H264ViewerSurface(session: XeniaSession, inputMode: InputMode) {
     var surfaceWidth by remember { mutableStateOf(1) }
     var surfaceHeight by remember { mutableStateOf(1) }
 
@@ -238,7 +419,13 @@ private fun H264ViewerSurface(session: XeniaSession) {
         modifier = Modifier
             .fillMaxSize()
             .onSizeChanged { surfaceWidth = it.width; surfaceHeight = it.height }
-            .forwardTouchTo(session) { surfaceWidth to surfaceHeight },
+            .let {
+                if (inputMode == InputMode.TAP) {
+                    it.forwardTouchTo(session, inputMode) { surfaceWidth to surfaceHeight }
+                } else {
+                    it.forwardTrackpadTo(session, inputMode)
+                }
+            },
     )
 }
 
@@ -256,10 +443,21 @@ private fun H264ViewerSurface(session: XeniaSession) {
  * emitting composable's own remembered width/height can still be `1`
  * (their initial value) on the very first gesture before `onSizeChanged`
  * has fired.
+ *
+ * Keys on both `session` and the caller's `InputMode`: `pointerInput`
+ * only restarts its gesture-handling coroutine when a key changes, and
+ * reuses the already-running one otherwise -- keying on `session`
+ * alone meant toggling Tap/Trackpad mid-session never actually
+ * switched which handler ran (confirmed live: the daemon kept logging
+ * `Touch` events after switching to Trackpad mode, since the original
+ * Tap-mode coroutine, started at first composition, just kept
+ * looping). The caller passes its own `inputMode` in as `modeKey` so
+ * both branches key on the same value and a switch in either
+ * direction forces a restart.
  */
 @Composable
-private fun Modifier.forwardTouchTo(session: XeniaSession, sizeProvider: () -> Pair<Int, Int>): Modifier =
-    pointerInput(session) {
+private fun Modifier.forwardTouchTo(session: XeniaSession, modeKey: Any, sizeProvider: () -> Pair<Int, Int>): Modifier =
+    pointerInput(session, modeKey) {
         awaitEachGesture {
             val (w0, h0) = sizeProvider()
             val down = awaitFirstDown()
@@ -278,3 +476,65 @@ private fun Modifier.forwardTouchTo(session: XeniaSession, sizeProvider: () -> P
             }
         }
     }
+
+/**
+ * Relative drag-based virtual trackpad: dragging moves a persistent
+ * virtual cursor by the drag *delta* (not to the touch point), and a
+ * short tap (below [TRACKPAD_TAP_SLOP_PX] of total movement) clicks at
+ * the cursor's *current* position -- the standard laptop-trackpad
+ * interaction model, needed because tap-to-position alone has no way
+ * to move the cursor without also "teleporting" it, making precise
+ * work (text cursors, small UI targets) impractical. `InputEvent::Pointer`
+ * (not `Touch`) is used here since it's the mouse-shaped event the
+ * daemon-side injectors treat as a real cursor position + click,
+ * matching how the desktop's own egui viewer drives the same wire
+ * event.
+ *
+ * Known simplification: no on-screen cursor indicator is drawn.
+ * Overlaying one on top of `H264ViewerSurface`'s `SurfaceView`
+ * specifically has real z-ordering risk (`SurfaceView` content is
+ * hardware-composited via a hole-punch, and a naive Compose-drawn
+ * overlay isn't guaranteed to land above it without further work) --
+ * not attempted here since the mode is still fully functional without
+ * one, just less discoverable.
+ */
+@Composable
+private fun Modifier.forwardTrackpadTo(session: XeniaSession, modeKey: Any): Modifier {
+    var cursorX by remember(session) { mutableStateOf(0.5f) }
+    var cursorY by remember(session) { mutableStateOf(0.5f) }
+
+    return pointerInput(session, modeKey) {
+        awaitEachGesture {
+            val down = awaitFirstDown()
+            var lastPos = down.position
+            var totalMovement = 0f
+            while (true) {
+                val event = awaitPointerEvent()
+                val change = event.changes.firstOrNull() ?: break
+                if (!change.pressed) {
+                    if (totalMovement < TRACKPAD_TAP_SLOP_PX) {
+                        session.sendPointer(cursorX, cursorY, 0, true) // click down
+                        session.sendPointer(cursorX, cursorY, 0, false) // click up
+                    }
+                    break
+                }
+                val dx = change.position.x - lastPos.x
+                val dy = change.position.y - lastPos.y
+                totalMovement += kotlin.math.abs(dx) + kotlin.math.abs(dy)
+                lastPos = change.position
+                cursorX = (cursorX + dx / size.width * TRACKPAD_SENSITIVITY).coerceIn(0f, 1f)
+                cursorY = (cursorY + dy / size.height * TRACKPAD_SENSITIVITY).coerceIn(0f, 1f)
+                session.sendPointer(cursorX, cursorY, 0, false) // motion, no button
+            }
+        }
+    }
+}
+
+/** Empirical: how much faster the virtual cursor moves than the
+ * physical finger drag, so a comfortable hand motion can reach the
+ * full screen without needing multiple drag strokes. */
+private const val TRACKPAD_SENSITIVITY = 2.5f
+
+/** Total accumulated drag distance (pixels) below which a gesture
+ * counts as "tap to click" rather than "drag to move the cursor." */
+private const val TRACKPAD_TAP_SLOP_PX = 12f

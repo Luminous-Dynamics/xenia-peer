@@ -271,6 +271,59 @@ pub unsafe extern "C" fn xenia_send_key(handle: u64, code: u32, pressed: bool, m
     engine.send_key(code, pressed, modifiers);
 }
 
+/// Take the latest host-to-viewer clipboard text update, if any.
+/// Returns `NULL` if nothing new has arrived *or* if the host cleared
+/// its clipboard -- this FFI boundary deliberately doesn't distinguish
+/// those two cases (unlike the safe `engine::ViewerEngine::poll_clipboard`,
+/// which returns `Option<Option<String>>` to a Rust caller that wants
+/// the full fidelity); propagating a *clear* to the Android system
+/// clipboard is a real but marginal feature not worth the extra FFI
+/// surface for v1. Caller must free with [`xenia_string_free`].
+///
+/// # Safety
+/// `handle` must be a value previously returned by [`xenia_connect`]
+/// and not yet passed to [`xenia_disconnect`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenia_poll_clipboard(handle: u64) -> *mut c_char {
+    if handle == 0 {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: caller contract above.
+    let engine = unsafe { &*(handle as *const ViewerEngine) };
+    match engine.poll_clipboard() {
+        Some(Some(text)) => CString::new(text).map(CString::into_raw).unwrap_or(std::ptr::null_mut()),
+        _ => std::ptr::null_mut(),
+    }
+}
+
+/// Send a viewer-to-host clipboard update. `text == NULL` means
+/// "cleared." Requires the daemon to be running with `--clipboard
+/// bidirectional`; a `host-to-viewer`-only daemon just logs and drops
+/// it.
+///
+/// # Safety
+/// `handle` must be a value previously returned by [`xenia_connect`]
+/// and not yet passed to [`xenia_disconnect`]. `text`, if non-null,
+/// must be a valid NUL-terminated C string pointer, live for the
+/// duration of this call (it is copied, not retained).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenia_send_clipboard(handle: u64, text: *const c_char) {
+    if handle == 0 {
+        return;
+    }
+    // SAFETY: caller contract above.
+    let engine = unsafe { &*(handle as *const ViewerEngine) };
+    if text.is_null() {
+        engine.send_clipboard(None);
+        return;
+    }
+    // SAFETY: caller contract above guarantees a valid NUL-terminated
+    // string for the duration of this call.
+    if let Ok(s) = unsafe { CStr::from_ptr(text) }.to_str() {
+        engine.send_clipboard(Some(s.to_owned()));
+    }
+}
+
 /// Disconnect and free the session. `handle` must not be used again
 /// after this call.
 ///

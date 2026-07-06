@@ -49,6 +49,15 @@ class XeniaSession(hostPort: String, val codec: Int, private val scope: Coroutin
     private val _lastError = MutableStateFlow<String?>(null)
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
 
+    /** Latest host-to-viewer clipboard text. The UI applies this to
+     * the Android system clipboard when it changes (see
+     * `xenia_poll_clipboard`'s doc comment for why a host-side
+     * *clear* isn't distinguished from "nothing new" here). Requires
+     * the daemon to be running with `--clipboard host-to-viewer` or
+     * `bidirectional`. */
+    private val _clipboard = MutableStateFlow<String?>(null)
+    val clipboard: StateFlow<String?> = _clipboard.asStateFlow()
+
     /** Set by the UI once its `SurfaceView`'s `Surface` is ready. Only
      * meaningful when `codec == NativeBindings.CODEC_H264`. [H264Decoder]
      * itself is constructed lazily on the first polled frame (see
@@ -91,6 +100,7 @@ class XeniaSession(hostPort: String, val codec: Int, private val scope: Coroutin
             }
 
             NativeBindings.pollFrame(handle)?.let { packed -> handlePacked(packed) }
+            NativeBindings.pollClipboard(handle)?.let { text -> _clipboard.value = text }
 
             // ~60fps poll cadence. JNI calls here are cheap (a mutex
             // lock + pop from a bounded queue); the real frame rate
@@ -122,6 +132,27 @@ class XeniaSession(hostPort: String, val codec: Int, private val scope: Coroutin
     /** Send a normalized tap/drag point. `phase`: 0=Down, 1=Move, 2=Up. */
     fun sendTouch(x: Float, y: Float, phase: Int) {
         if (handle != 0L) NativeBindings.sendTouch(handle, 0, x, y, phase, 1.0f)
+    }
+
+    /** Send a normalized mouse-style pointer event (used by precision/
+     * trackpad mode -- see `ViewerScreen`). `button` 0=left/1=middle/
+     * 2=right; motion-only events use `button=0, pressed=false`. */
+    fun sendPointer(x: Float, y: Float, button: Int, pressed: Boolean) {
+        if (handle != 0L) NativeBindings.sendPointer(handle, x, y, button, pressed)
+    }
+
+    /** Send a key event. `code` is an evdev/Linux keycode (see
+     * [EvdevKeys]); `modifiers` bit0=Shift, bit1=Ctrl, bit2=Alt,
+     * bit3=Meta. */
+    fun sendKey(code: Int, pressed: Boolean, modifiers: Int = 0) {
+        if (handle != 0L) NativeBindings.sendKey(handle, code, pressed, modifiers)
+    }
+
+    /** Send a viewer-to-host clipboard update (`null` = cleared).
+     * Requires the daemon to be running with `--clipboard
+     * bidirectional`. */
+    fun sendClipboardUpdate(text: String?) {
+        if (handle != 0L) NativeBindings.sendClipboard(handle, text)
     }
 
     fun disconnect() {

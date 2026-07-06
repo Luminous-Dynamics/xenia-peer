@@ -27,6 +27,7 @@ use tracing::{info, warn};
 
 use xenia_inject::InputEvent;
 use xenia_peer_core::frame::{PixelFormat as FramePixelFormat, RawCapabilities, RawRekey};
+use xenia_peer_core::{ClipboardContent, RawClipboard};
 use xenia_peer_core::handshake::{
     NegotiatedTransport, negotiated_session_context_hash, perform_viewer_handshake_with_transcript,
 };
@@ -83,10 +84,15 @@ pub struct MobileFrame {
 /// "show the latest, not a queued backlog" viewer UX.
 const FRAME_QUEUE_CAP: usize = 4;
 
+/// Latest host-to-viewer clipboard state. `None` (the field, not this
+/// wrapper) means "cleared"; the wrapper itself distinguishes "no
+/// update received yet" (nothing to apply to the OS clipboard) from
+/// "an update arrived, here it is."
 struct Shared {
     state: Mutex<SessionState>,
     frames: Mutex<VecDeque<MobileFrame>>,
     last_error: Mutex<Option<String>>,
+    clipboard: Mutex<Option<Option<String>>>,
 }
 
 /// A live viewer session: owns a background tokio task running
@@ -95,6 +101,7 @@ struct Shared {
 pub struct ViewerEngine {
     shared: Arc<Shared>,
     input_tx: mpsc::UnboundedSender<InputEvent>,
+    clipboard_tx: mpsc::UnboundedSender<ClipboardContent>,
     _task: tokio::task::JoinHandle<()>,
 }
 
@@ -109,13 +116,16 @@ impl ViewerEngine {
             state: Mutex::new(SessionState::Connecting),
             frames: Mutex::new(VecDeque::with_capacity(FRAME_QUEUE_CAP)),
             last_error: Mutex::new(None),
+            clipboard: Mutex::new(None),
         });
         let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let (clipboard_tx, clipboard_rx) = mpsc::unbounded_channel();
         let shared_for_task = Arc::clone(&shared);
-        let task = rt.spawn(run_session(host_port, codec, shared_for_task, input_rx));
+        let task = rt.spawn(run_session(host_port, codec, shared_for_task, input_rx, clipboard_rx));
         Self {
             shared,
             input_tx,
+            clipboard_tx,
             _task: task,
         }
     }
@@ -137,6 +147,26 @@ impl ViewerEngine {
     /// Pop the oldest queued decoded frame, if any.
     pub fn poll_frame(&self) -> Option<MobileFrame> {
         self.shared.frames.blocking_lock().pop_front()
+    }
+
+    /// Take the latest host-to-viewer clipboard update, if one has
+    /// arrived since the last call. `Some(None)` means "clipboard was
+    /// cleared"; `Some(Some(text))` is real text to apply to the OS
+    /// clipboard; `None` means nothing new.
+    pub fn poll_clipboard(&self) -> Option<Option<String>> {
+        self.shared.clipboard.blocking_lock().take()
+    }
+
+    /// Send a viewer-to-host clipboard update (`None` = cleared).
+    /// Requires the daemon side to be running with `--clipboard
+    /// bidirectional` -- a `host-to-viewer`-only daemon will just log
+    /// and drop it (mirrors `xenia-viewer`'s own behavior).
+    pub fn send_clipboard(&self, text: Option<String>) {
+        let content = match text {
+            Some(t) => ClipboardContent::Text(t),
+            None => ClipboardContent::Cleared,
+        };
+        let _ = self.clipboard_tx.send(content);
     }
 
     pub fn send_pointer(&self, x: f32, y: f32, button: u8, pressed: bool) {
@@ -172,8 +202,9 @@ async fn run_session(
     codec: MobileCodec,
     shared: Arc<Shared>,
     input_rx: mpsc::UnboundedReceiver<InputEvent>,
+    clipboard_rx: mpsc::UnboundedReceiver<ClipboardContent>,
 ) {
-    if let Err(err) = run_session_inner(host_port, codec, &shared, input_rx).await {
+    if let Err(err) = run_session_inner(host_port, codec, &shared, input_rx, clipboard_rx).await {
         warn!(error = %err, "viewer session ended with error");
         *shared.last_error.lock().await = Some(err);
         *shared.state.lock().await = SessionState::Error;
@@ -187,6 +218,7 @@ async fn run_session_inner(
     codec: MobileCodec,
     shared: &Arc<Shared>,
     mut input_rx: mpsc::UnboundedReceiver<InputEvent>,
+    mut clipboard_rx: mpsc::UnboundedReceiver<ClipboardContent>,
 ) -> Result<(), String> {
     info!(peer = %host_port, ?codec, "mobile viewer connecting");
 
@@ -242,6 +274,33 @@ async fn run_session_inner(
                 };
                 if let Err(err) = send_half.lock().await.send_envelope(&envelope).await {
                     info!(error = %err, "mobile input send loop ending (daemon disconnected)");
+                    break;
+                }
+            }
+        });
+    }
+
+    // Outbound clipboard-event sender task: mirrors the input task
+    // above, just sealing under seal_clipboard_event instead of
+    // seal_input_event (a real OS clipboard change is the trigger,
+    // not a captured InputEvent).
+    {
+        let session = Arc::clone(&session);
+        let send_half = Arc::clone(&send_half);
+        tokio::spawn(async move {
+            while let Some(content) = clipboard_rx.recv().await {
+                let envelope = {
+                    let mut session = session.lock().await;
+                    match session.seal_clipboard_event(content) {
+                        Ok(envelope) => envelope,
+                        Err(err) => {
+                            warn!(error = %err, "failed to seal captured clipboard update");
+                            continue;
+                        }
+                    }
+                };
+                if let Err(err) = send_half.lock().await.send_envelope(&envelope).await {
+                    info!(error = %err, "mobile clipboard send loop ending (daemon disconnected)");
                     break;
                 }
             }
@@ -354,11 +413,22 @@ async fn run_session_inner(
             info!(key_epoch = epoch_state.current_epoch(), "mobile viewer session rekeyed");
             continue;
         }
-        // Audio/clipboard frames are intentionally ignored in v1 (see
-        // the project plan's phasing) -- just skip past them.
-        if raw_frame.pixel_format == FramePixelFormat::Audio
-            || raw_frame.pixel_format == FramePixelFormat::Clipboard
-        {
+        // Audio is intentionally ignored (out of scope for this
+        // engine -- see the project plan's phasing).
+        if raw_frame.pixel_format == FramePixelFormat::Audio {
+            continue;
+        }
+        if raw_frame.pixel_format == FramePixelFormat::Clipboard {
+            match RawClipboard::from_frame(&raw_frame) {
+                Ok(clip) => {
+                    let text = match clip.content {
+                        ClipboardContent::Text(t) => Some(t),
+                        ClipboardContent::Cleared => None,
+                    };
+                    *shared.clipboard.lock().await = Some(text);
+                }
+                Err(err) => warn!(error = %err, "failed to decode clipboard frame"),
+            }
             continue;
         }
         if raw_frame.pixel_format != expected_frame_fmt {
@@ -455,5 +525,22 @@ mod tests {
         // time to race the background connect attempt.
         let engine = ViewerEngine::connect(rt.handle(), "127.0.0.1:2".to_string(), MobileCodec::Hdc);
         assert!(engine.poll_frame().is_none());
+        assert!(engine.poll_clipboard().is_none());
+    }
+
+    #[test]
+    fn send_clipboard_before_any_connection_progress_does_not_panic() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let engine = ViewerEngine::connect(rt.handle(), "127.0.0.1:3".to_string(), MobileCodec::Passthrough);
+        // The outbound clipboard task isn't spawned until the
+        // handshake completes -- sending before then should just
+        // queue harmlessly on the unbounded channel, not panic or
+        // block.
+        engine.send_clipboard(Some("hello".to_string()));
+        engine.send_clipboard(None);
     }
 }
