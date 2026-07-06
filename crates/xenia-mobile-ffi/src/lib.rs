@@ -53,6 +53,7 @@ pub const XENIA_STATE_INVALID_HANDLE: i32 = -1;
 /// Codec codes accepted by [`xenia_connect`]. Matches [`MobileCodec`].
 pub const XENIA_CODEC_PASSTHROUGH: i32 = 0;
 pub const XENIA_CODEC_HDC: i32 = 1;
+pub const XENIA_CODEC_H264: i32 = 2;
 
 /// Connect to a real `xenia-peer` daemon at `host:port` (e.g.
 /// `"192.168.1.20:7900"`) over TCP. Returns an opaque, non-zero
@@ -76,6 +77,7 @@ pub unsafe extern "C" fn xenia_connect(host_port: *const c_char, codec: i32) -> 
     };
     let codec = match codec {
         XENIA_CODEC_HDC => MobileCodec::Hdc,
+        XENIA_CODEC_H264 => MobileCodec::H264,
         _ => MobileCodec::Passthrough,
     };
     let engine = ViewerEngine::connect(runtime().handle(), host_port, codec);
@@ -146,6 +148,11 @@ pub struct XeniaFrame {
     pub width: u32,
     pub height: u32,
     pub pts_ms: u64,
+    /// `true`: `rgba` holds raw Annex-B H.264 NAL bytes for the caller
+    /// to feed into its own hardware decoder (e.g. Android's
+    /// `MediaCodec`). `false`: `rgba` holds decoded RGBA8 pixels
+    /// (`width * height * 4` bytes). See `engine::MobileFrame`'s doc.
+    pub is_encoded: bool,
     pub rgba: *mut u8,
     pub rgba_len: usize,
 }
@@ -163,6 +170,7 @@ pub unsafe extern "C" fn xenia_poll_frame(handle: u64) -> XeniaFrame {
         width: 0,
         height: 0,
         pts_ms: 0,
+        is_encoded: false,
         rgba: std::ptr::null_mut(),
         rgba_len: 0,
     };
@@ -182,6 +190,7 @@ pub unsafe extern "C" fn xenia_poll_frame(handle: u64) -> XeniaFrame {
         width: frame.width,
         height: frame.height,
         pts_ms: frame.pts_ms,
+        is_encoded: frame.is_encoded,
         rgba: rgba_ptr,
         rgba_len,
     }

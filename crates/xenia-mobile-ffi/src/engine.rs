@@ -11,11 +11,13 @@
 //! module is directly unit-testable on the host and directly usable
 //! from `bin/xenia_mobile_smoke.rs` without going through the C ABI.
 //!
-//! Scope for the Android app's v1 (see the project plan): TCP
-//! transport, `passthrough`/`hdc` codecs only. H.264 needs
-//! `ffmpeg-next`/libx264 which isn't portable to Android — the mobile
-//! app will use Android's own hardware `MediaCodec` for that instead
-//! (a later phase), not this crate.
+//! Scope: TCP transport. `passthrough`/`hdc` are decoded here (pure
+//! Rust, portable) into RGBA via `xenia_video`. `h264` is NOT decoded
+//! here -- `xenia_video::h264`'s decoder needs `ffmpeg-next`/libx264,
+//! which isn't portable to Android -- instead this engine passes the
+//! raw Annex-B NAL bytes straight through to the caller
+//! (`MobileFrame::is_encoded == true`), for the Android app to feed
+//! into its own hardware `android.media.MediaCodec` decoder (Phase 2).
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -34,12 +36,13 @@ use xenia_peer_core::{
 };
 use xenia_video::{Decoder, EncodedPacket};
 
-/// Codec choice for the viewer engine. See module doc for why H.264
-/// isn't here.
+/// Codec choice for the viewer engine. See module doc for how `H264`
+/// differs (raw pass-through, not decoded here).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum MobileCodec {
     Passthrough,
     Hdc,
+    H264,
 }
 
 /// Coarse session lifecycle, polled by the UI layer. Consent is
@@ -55,14 +58,24 @@ pub enum SessionState {
     Error,
 }
 
-/// One decoded frame ready for the UI layer to render.
+/// One frame ready for the UI layer, either decoded or raw-encoded.
 #[derive(Clone)]
 pub struct MobileFrame {
+    /// Logical frame width. For `is_encoded` frames this is the
+    /// *declared* dimension from the wire, not necessarily what the
+    /// bitstream's own SPS says (they should always agree, but the
+    /// Android-side H.264 decoder learns its real dimensions from the
+    /// SPS regardless, same as `xenia_video::h264::H264Decoder` does).
     pub width: u32,
     pub height: u32,
-    /// RGBA8, `width * height * 4` bytes.
+    /// RGBA8 (`width * height * 4` bytes) when `is_encoded` is false;
+    /// raw Annex-B H.264 NAL bytes straight off the wire when true
+    /// (see module doc). The field name predates H.264 support and
+    /// is kept to avoid an FFI/JNI/Kotlin-wide rename for a cosmetic
+    /// fix; `is_encoded` is the source of truth for how to interpret it.
     pub rgba: Vec<u8>,
     pub pts_ms: u64,
+    pub is_encoded: bool,
 }
 
 /// Bounded so a UI that stops polling (backgrounded app) can't leak
@@ -235,13 +248,19 @@ async fn run_session_inner(
         });
     }
 
-    let mut decoder: Box<dyn Decoder + Send> = match codec {
-        MobileCodec::Passthrough => Box::new(xenia_video::passthrough::PassthroughDecoder::new()),
-        MobileCodec::Hdc => Box::new(xenia_video::hdc::HdcDecoder::new()),
+    // No Decoder at all for H264 -- those frames pass through raw
+    // (see module doc); building one would need xenia_video's h264
+    // feature, which pulls in ffmpeg-next/libx264 and isn't portable
+    // to Android.
+    let mut decoder: Option<Box<dyn Decoder + Send>> = match codec {
+        MobileCodec::Passthrough => Some(Box::new(xenia_video::passthrough::PassthroughDecoder::new())),
+        MobileCodec::Hdc => Some(Box::new(xenia_video::hdc::HdcDecoder::new())),
+        MobileCodec::H264 => None,
     };
     let expected_frame_fmt = match codec {
         MobileCodec::Passthrough => FramePixelFormat::Passthrough,
         MobileCodec::Hdc => FramePixelFormat::Hdc,
+        MobileCodec::H264 => FramePixelFormat::H264,
     };
 
     let mut capabilities_received = false;
@@ -347,6 +366,24 @@ async fn run_session_inner(
             continue;
         }
 
+        let Some(decoder) = decoder.as_mut() else {
+            // H264: no software decode here (see module doc) -- pass
+            // the raw Annex-B bytes straight to the queue for the
+            // Android app's own MediaCodec to decode.
+            let mut queue = shared.frames.lock().await;
+            if queue.len() >= FRAME_QUEUE_CAP {
+                queue.pop_front();
+            }
+            queue.push_back(MobileFrame {
+                width: raw_frame.width,
+                height: raw_frame.height,
+                rgba: raw_frame.pixels,
+                pts_ms: raw_frame.timestamp_ms,
+                is_encoded: true,
+            });
+            continue;
+        };
+
         let packet = EncodedPacket {
             bytes: raw_frame.pixels,
             pts_ms: raw_frame.timestamp_ms,
@@ -369,6 +406,7 @@ async fn run_session_inner(
                 height: decoded.height,
                 rgba: decoded.pixels,
                 pts_ms: decoded.pts_ms,
+                is_encoded: false,
             });
         }
     }

@@ -13,14 +13,31 @@ import kotlinx.coroutines.launch
 /** Mirrors [NativeBindings]'s `STATE_*` constants as a Kotlin enum. */
 enum class SessionState { CONNECTING, CONNECTED, DISCONNECTED, ERROR, INVALID }
 
+/** Header layout `xenia_jni.c`'s `pollFrame` packs (see its doc comment). */
+private const val FRAME_HEADER_LEN = 17
+
 /**
  * Owns one native viewer session: connects on construction, polls
  * for decoded frames and state changes on a background coroutine, and
  * forwards touch input back to the daemon. Consent is entirely
  * host(desktop)-side (see the project plan) -- this class never shows
  * an approve/deny prompt of its own, only reflects [state].
+ *
+ * For `CODEC_PASSTHROUGH`/`CODEC_HDC`, polled frames are already
+ * decoded RGBA and get turned into a [Bitmap] on [frame]. For
+ * `CODEC_H264`, polled frames are raw Annex-B NAL bytes -- the daemon
+ * side's H.264 decoder needs `ffmpeg-next`, not portable to Android,
+ * so this session instead feeds them into an [H264Decoder] (Android's
+ * own hardware `MediaCodec`) that it constructs lazily once both
+ * prerequisites are available: [h264Surface] (set by the UI once its
+ * `SurfaceView` is ready) and the first frame's declared width/height
+ * (only known once a frame actually arrives). Frames are fed
+ * synchronously inside the poll loop, not via a `StateFlow`, so
+ * `MediaCodec` never silently misses one -- Compose recomposition can
+ * conflate rapid `StateFlow` updates, which would desync a codec that
+ * needs every frame in order.
  */
-class XeniaSession(hostPort: String, codec: Int, private val scope: CoroutineScope) {
+class XeniaSession(hostPort: String, val codec: Int, private val scope: CoroutineScope) {
     private val handle: Long = NativeBindings.connect(hostPort, codec)
 
     private val _state = MutableStateFlow(SessionState.CONNECTING)
@@ -31,6 +48,16 @@ class XeniaSession(hostPort: String, codec: Int, private val scope: CoroutineSco
 
     private val _lastError = MutableStateFlow<String?>(null)
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
+
+    /** Set by the UI once its `SurfaceView`'s `Surface` is ready. Only
+     * meaningful when `codec == NativeBindings.CODEC_H264`. [H264Decoder]
+     * itself is constructed lazily on the first polled frame (see
+     * [handlePacked]) since it needs the declared width/height, which
+     * only arrive with that first frame -- not available yet when the
+     * `Surface` itself becomes ready. */
+    @Volatile
+    var h264Surface: android.view.Surface? = null
+    private var h264Decoder: H264Decoder? = null
 
     private var pollJob: Job? = null
 
@@ -63,13 +90,32 @@ class XeniaSession(hostPort: String, codec: Int, private val scope: CoroutineSco
                 }
             }
 
-            NativeBindings.pollFrame(handle)?.let { packed -> _frame.value = unpackFrame(packed) }
+            NativeBindings.pollFrame(handle)?.let { packed -> handlePacked(packed) }
 
             // ~60fps poll cadence. JNI calls here are cheap (a mutex
             // lock + pop from a bounded queue); the real frame rate
             // is governed by the daemon's capture/encode/network path,
             // not this loop.
             delay(16)
+        }
+    }
+
+    private fun handlePacked(packed: ByteArray) {
+        if (packed.size < FRAME_HEADER_LEN) return
+        val isEncoded = packed[16].toInt() != 0
+        if (isEncoded) {
+            val nal = packed.copyOfRange(FRAME_HEADER_LEN, packed.size)
+            val isKeyframe = AnnexB.isKeyframeChunk(nal)
+            if (h264Decoder == null) {
+                val surface = h264Surface ?: return // UI not ready yet -- drop until it is
+                if (!isKeyframe) return // need a real keyframe to configure MediaCodec
+                val width = readU32LE(packed, 0)
+                val height = readU32LE(packed, 4)
+                h264Decoder = H264Decoder(surface, width, height)
+            }
+            h264Decoder?.feed(nal, isKeyframe)
+        } else {
+            unpackRgbaFrame(packed)?.let { _frame.value = it }
         }
     }
 
@@ -80,6 +126,7 @@ class XeniaSession(hostPort: String, codec: Int, private val scope: CoroutineSco
 
     fun disconnect() {
         pollJob?.cancel()
+        h264Decoder?.release()
         if (handle != 0L) NativeBindings.disconnect(handle)
     }
 }
@@ -91,16 +138,15 @@ class XeniaSession(hostPort: String, codec: Int, private val scope: CoroutineSco
  * assumed for the header fields -- this is a same-process JNI
  * marshalling format, not a network wire format.
  */
-private fun unpackFrame(packed: ByteArray): Bitmap? {
-    if (packed.size < 16) return null
+private fun unpackRgbaFrame(packed: ByteArray): Bitmap? {
     val width = readU32LE(packed, 0)
     val height = readU32LE(packed, 4)
     val expectedRgbaLen = width.toLong() * height.toLong() * 4L
-    if (packed.size.toLong() - 16L != expectedRgbaLen || width == 0 || height == 0) return null
+    if (packed.size.toLong() - FRAME_HEADER_LEN != expectedRgbaLen || width == 0 || height == 0) return null
 
     val pixelCount = width * height
     val argb = IntArray(pixelCount)
-    var src = 16
+    var src = FRAME_HEADER_LEN
     for (i in 0 until pixelCount) {
         val r = packed[src].toInt() and 0xFF
         val g = packed[src + 1].toInt() and 0xFF

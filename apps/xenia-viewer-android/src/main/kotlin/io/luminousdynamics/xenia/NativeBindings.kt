@@ -20,6 +20,7 @@ internal object NativeBindings {
 
     const val CODEC_PASSTHROUGH: Int = 0
     const val CODEC_HDC: Int = 1
+    const val CODEC_H264: Int = 2
 
     const val STATE_CONNECTING: Int = 0
     const val STATE_CONNECTED: Int = 1

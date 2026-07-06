@@ -7,15 +7,17 @@
  *
  * Frame marshalling: JNI has no way to return an arbitrary C struct
  * (XeniaFrame) directly, so `pollFrame` packs a small fixed header +
- * the RGBA payload into one jbyteArray instead of a multi-call/object
+ * the payload into one jbyteArray instead of a multi-call/object
  * dance: bytes [0..4)=width (u32 LE), [4..8)=height (u32 LE),
- * [8..16)=pts_ms (u64 LE), [16..)=RGBA pixels. Native-endian packing
- * is safe here because both sides of this JNI boundary run on the
- * same device (little-endian ARM64) -- this isn't a wire format.
- * Returns null if no frame is queued yet.
+ * [8..16)=pts_ms (u64 LE), [16]=is_encoded (0/1),
+ * [17..)=RGBA pixels or raw Annex-B H.264 NAL bytes (see
+ * is_encoded). Native-endian packing is safe here because both sides
+ * of this JNI boundary run on the same device (little-endian ARM64)
+ * -- this isn't a wire format. Returns null if no frame is queued yet.
  */
 
 #include <jni.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -32,6 +34,7 @@ typedef struct {
     uint32_t width;
     uint32_t height;
     uint64_t pts_ms;
+    bool     is_encoded;
     uint8_t *rgba;
     size_t   rgba_len;
 } XeniaFrame;
@@ -93,7 +96,7 @@ Java_io_luminousdynamics_xenia_NativeBindings_pollFrame(JNIEnv *env, jclass claz
         return NULL;
     }
 
-    const size_t header_len = 16;
+    const size_t header_len = 17;
     jsize total_len = (jsize)(header_len + frame.rgba_len);
     jbyteArray result = (*env)->NewByteArray(env, total_len);
     if (result == NULL) {
@@ -101,10 +104,11 @@ Java_io_luminousdynamics_xenia_NativeBindings_pollFrame(JNIEnv *env, jclass claz
         return NULL;
     }
 
-    uint8_t header[16];
+    uint8_t header[17];
     memcpy(&header[0], &frame.width, 4);
     memcpy(&header[4], &frame.height, 4);
     memcpy(&header[8], &frame.pts_ms, 8);
+    header[16] = frame.is_encoded ? 1 : 0;
 
     (*env)->SetByteArrayRegion(env, result, 0, (jsize)header_len, (const jbyte *)header);
     (*env)->SetByteArrayRegion(env, result, (jsize)header_len, (jsize)frame.rgba_len,
