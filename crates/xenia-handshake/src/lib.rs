@@ -63,8 +63,8 @@ use hkdf::Hkdf;
 use ml_dsa::{
     signature::{Keypair as MlDsaKeypair, Signer as MlDsaSigner, Verifier as MlDsaVerifier},
     EncodedSignature as MlDsaEncodedSignature, EncodedVerifyingKey as MlDsaEncodedVerifyingKey,
-    Generate as MlDsaGenerate, MlDsa65, Signature as MlDsaSignatureT,
-    SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey,
+    MlDsa65, Signature as MlDsaSignatureT, SigningKey as MlDsaSigningKey,
+    VerifyingKey as MlDsaVerifyingKey, B32,
 };
 use ml_kem::{
     kem::{Decapsulate, Encapsulate, Kem, KeyExport},
@@ -91,6 +91,20 @@ pub const ML_KEM_768_CT_LEN: usize = 1088;
 /// ML-DSA-65 verifying-key size in bytes (FIPS 204). Matches
 /// `xenia-ledger`'s `SignatureSuite::MlDsa65Fips204::fixed_public_key_len()`.
 pub const ML_DSA_65_PK_LEN: usize = 1952;
+
+/// BLAKE3-256 fingerprint binding a peer's full signing identity: its
+/// Ed25519 and ML-DSA-65 public keys together. This is the value a viewer
+/// pins for trust-on-first-use -- an active MITM that substitutes its own
+/// keypairs in `HostHello` produces a different fingerprint, so a mismatch
+/// against a previously-pinned host reveals the substitution. Domain-tagged
+/// so it can't collide with any other BLAKE3 use in the transcript.
+pub fn host_identity_fingerprint(ed25519_pk: &[u8; 32], ml_dsa_pk: &[u8]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"xenia-host-identity-fingerprint-v1");
+    hasher.update(ed25519_pk);
+    hasher.update(ml_dsa_pk);
+    *hasher.finalize().as_bytes()
+}
 
 /// ML-DSA-65 signature size in bytes (FIPS 204). Matches
 /// `xenia-ledger`'s `SignatureSuite::MlDsa65Fips204::fixed_signature_len()`.
@@ -660,7 +674,20 @@ impl HandshakeManager {
     /// Generate a fresh identity + ML-DSA-65 + KEM keypair set on this node.
     pub fn new() -> Self {
         let signing_key = SigningKey::generate(&mut OsRng);
-        let ml_dsa_signing_key = MlDsaSigningKey::<MlDsa65>::generate();
+        let ml_dsa_seed: [u8; 32] = rand::random();
+        Self::from_identity_seeds(signing_key.to_bytes(), ml_dsa_seed)
+    }
+
+    /// Reconstruct a manager from a *persisted* identity: a 32-byte Ed25519
+    /// secret and a 32-byte ML-DSA-65 seed (FIPS-204 ξ). The KEM
+    /// encapsulation key stays freshly generated -- only the signing
+    /// identity is stable, which is what a peer pins for trust-on-first-use.
+    /// Given the same two seeds, this produces the same public identity
+    /// (hence the same [`Self::identity_fingerprint`]) across restarts.
+    pub fn from_identity_seeds(ed25519_secret: [u8; 32], ml_dsa_seed: [u8; 32]) -> Self {
+        let signing_key = SigningKey::from_bytes(&ed25519_secret);
+        let seed: B32 = ml_dsa_seed.into();
+        let ml_dsa_signing_key = MlDsaSigningKey::<MlDsa65>::from_seed(&seed);
         let (kem_dk, kem_ek) = MlKem768::generate_keypair();
 
         let ek_encoded = kem_ek.to_bytes();
@@ -675,6 +702,16 @@ impl HandshakeManager {
             sessions: HashMap::new(),
             pending_kem: HashMap::new(),
         }
+    }
+
+    /// BLAKE3-256 fingerprint of this node's own signing identity
+    /// (Ed25519 || ML-DSA-65 public keys). Stable across restarts when
+    /// constructed from persisted seeds; a peer pins this value.
+    pub fn identity_fingerprint(&self) -> [u8; 32] {
+        host_identity_fingerprint(
+            &self.identity_public_key_bytes(),
+            &self.ml_dsa_public_key_bytes(),
+        )
     }
 
     // ─── Identity ────────────────────────────────────────────────────────
@@ -994,6 +1031,48 @@ mod tests {
     fn kem_public_key_is_1184_bytes() {
         let mgr = HandshakeManager::new();
         assert_eq!(mgr.kem_public_key_bytes().len(), ML_KEM_768_PK_LEN);
+    }
+
+    #[test]
+    fn persisted_identity_is_stable_across_reconstruction() {
+        let ed = [7u8; 32];
+        let seed = [9u8; 32];
+        let a = HandshakeManager::from_identity_seeds(ed, seed);
+        let b = HandshakeManager::from_identity_seeds(ed, seed);
+
+        // Same seeds -> same public identity and fingerprint (the KEM key
+        // differs, but it isn't part of the identity fingerprint).
+        assert_eq!(a.identity_public_key_bytes(), b.identity_public_key_bytes());
+        assert_eq!(a.ml_dsa_public_key_bytes(), b.ml_dsa_public_key_bytes());
+        assert_eq!(a.identity_fingerprint(), b.identity_fingerprint());
+    }
+
+    #[test]
+    fn different_seeds_yield_different_fingerprints() {
+        let a = HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]);
+        let b = HandshakeManager::from_identity_seeds([1u8; 32], [3u8; 32]);
+        let c = HandshakeManager::from_identity_seeds([4u8; 32], [2u8; 32]);
+        assert_ne!(a.identity_fingerprint(), b.identity_fingerprint());
+        assert_ne!(a.identity_fingerprint(), c.identity_fingerprint());
+    }
+
+    #[test]
+    fn fingerprint_helper_binds_both_keys() {
+        let mgr = HandshakeManager::from_identity_seeds([5u8; 32], [6u8; 32]);
+        let ed = mgr.identity_public_key_bytes();
+        let ml = mgr.ml_dsa_public_key_bytes();
+        // The free helper agrees with the method...
+        assert_eq!(
+            mgr.identity_fingerprint(),
+            host_identity_fingerprint(&ed, &ml)
+        );
+        // ...and changing either input changes the fingerprint.
+        let mut ed2 = ed;
+        ed2[0] ^= 1;
+        assert_ne!(
+            host_identity_fingerprint(&ed, &ml),
+            host_identity_fingerprint(&ed2, &ml)
+        );
     }
 
     #[test]

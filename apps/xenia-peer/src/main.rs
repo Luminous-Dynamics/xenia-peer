@@ -309,6 +309,14 @@ struct Args {
     #[arg(long, default_value = "consent-ledger.key")]
     m1_consent_key_path: std::path::PathBuf,
 
+    /// Host signing-identity path (Ed25519 secret + ML-DSA-65 seed, 64 bytes).
+    /// Generated on first run with owner-only (0600) permissions and reused
+    /// thereafter, giving the host a stable identity a viewer can pin
+    /// (trust-on-first-use). Its BLAKE3 fingerprint is logged at startup so
+    /// an operator can share it out-of-band for verification.
+    #[arg(long, default_value = "host-identity.key")]
+    host_identity_key_path: std::path::PathBuf,
+
     /// Inbound viewer-input backend. `noop` (default) discards every
     /// input event -- a connected viewer is view-only and no OS-level
     /// injector is ever constructed, so no consent dialog appears.
@@ -1345,6 +1353,49 @@ fn load_or_create_signing_key(
     }
 }
 
+/// Load the host's persistent signing identity from `path`, or generate and
+/// persist a fresh one (0600) on first use. The file is a 64-byte blob:
+/// 32-byte Ed25519 secret followed by a 32-byte ML-DSA-65 seed. Reconstructed
+/// deterministically so the host's public identity (and fingerprint) is stable
+/// across restarts -- the prerequisite for a viewer pinning it.
+fn load_or_create_host_identity(
+    path: &std::path::Path,
+) -> Result<HandshakeManager, Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    fn restrict_permissions(path: &std::path::Path) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(not(unix))]
+    fn restrict_permissions(_path: &std::path::Path) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    let blob: Vec<u8> = if path.exists() {
+        let bytes = std::fs::read(path)?;
+        restrict_permissions(path)?;
+        if bytes.len() != 64 {
+            return Err("host identity file must be exactly 64 bytes".into());
+        }
+        bytes
+    } else {
+        let mut blob = Vec::with_capacity(64);
+        blob.extend_from_slice(&rand::random::<[u8; 32]>());
+        blob.extend_from_slice(&rand::random::<[u8; 32]>());
+        std::fs::write(path, &blob)?;
+        restrict_permissions(path)?;
+        blob
+    };
+    let mut ed25519_secret = [0u8; 32];
+    let mut ml_dsa_seed = [0u8; 32];
+    ed25519_secret.copy_from_slice(&blob[..32]);
+    ml_dsa_seed.copy_from_slice(&blob[32..64]);
+    Ok(HandshakeManager::from_identity_seeds(
+        ed25519_secret,
+        ml_dsa_seed,
+    ))
+}
+
 /// Derive the consent tiers to grant from the operator's configured flags.
 ///
 /// A single Approve should authorize only what the operator actually turned
@@ -1785,7 +1836,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         xenia_peer_core::RawCapabilities::from_frame(&capabilities)?,
     )?;
 
-    let mut mgr = HandshakeManager::new();
+    let mut mgr = load_or_create_host_identity(&args.host_identity_key_path)?;
+    info!(
+        fingerprint = %hex::encode(mgr.identity_fingerprint()),
+        path = %args.host_identity_key_path.display(),
+        "host signing identity loaded; share this fingerprint out-of-band for viewer pinning"
+    );
     let handshake = perform_host_handshake_with_transcript_and_context(
         &mut transport,
         &mut mgr,

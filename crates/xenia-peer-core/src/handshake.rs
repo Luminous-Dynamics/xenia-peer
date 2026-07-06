@@ -87,6 +87,12 @@ pub struct HandshakeOutcome {
     pub key_schedule: SessionKeySchedule,
     /// Optional negotiated session context hash included in HostHello.
     pub negotiated_context_hash: Option<[u8; 32]>,
+    /// BLAKE3 fingerprint of the host's signing identity (Ed25519 ||
+    /// ML-DSA-65). On the viewer path this is the peer being pinned for
+    /// trust-on-first-use; on the host path it is the host's own identity.
+    /// A viewer compares this against a previously-pinned value to detect an
+    /// active MITM that substituted its own keys in HostHello.
+    pub host_identity_fingerprint: [u8; 32],
 }
 
 /// Transport selected for the authenticated session.
@@ -535,12 +541,16 @@ pub async fn perform_host_handshake_with_transcript_and_context<T: Transport>(
     let key_schedule = derive_session_key_schedule(&root_key, &transcript_hash);
     let session_key = key_schedule.aead;
 
+    let host_identity_fingerprint =
+        xenia_handshake::host_identity_fingerprint(&host_ed25519_pk, &host_ml_dsa_pk);
+
     info!("Host-side handshake complete");
     Ok(HandshakeOutcome {
         session_key,
         transcript_hash,
         key_schedule,
         negotiated_context_hash,
+        host_identity_fingerprint,
     })
 }
 
@@ -670,12 +680,16 @@ pub async fn perform_viewer_handshake_with_transcript<T: Transport>(
     let key_schedule = derive_session_key_schedule(&root_key, &transcript_hash);
     let session_key = key_schedule.aead;
 
+    let host_identity_fingerprint =
+        xenia_handshake::host_identity_fingerprint(&ed25519_pk, &ml_dsa_pk);
+
     info!("Viewer-side handshake complete");
     Ok(HandshakeOutcome {
         session_key,
         transcript_hash,
         key_schedule,
         negotiated_context_hash,
+        host_identity_fingerprint,
     })
 }
 

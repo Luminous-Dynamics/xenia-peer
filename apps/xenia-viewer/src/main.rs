@@ -1033,6 +1033,21 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:4747")]
     connect: String,
 
+    /// Known-hosts file for trust-on-first-use host verification. On the
+    /// first connection to a given `--connect` address the host's identity
+    /// fingerprint is recorded here; on later connections it must match, or
+    /// the viewer refuses (an active MITM presenting substitute keys yields a
+    /// different fingerprint). Off by default -- when unset, the host
+    /// fingerprint is logged but not pinned.
+    #[arg(long)]
+    known_hosts: Option<std::path::PathBuf>,
+
+    /// Require the host's identity fingerprint to equal this exact hex value
+    /// (64 hex chars). Verified out-of-band; a mismatch aborts the
+    /// connection. Takes precedence over `--known-hosts`.
+    #[arg(long)]
+    host_fingerprint: Option<String>,
+
     /// Fixed source_id (hex, 16 chars). MUST match daemon.
     #[arg(long, default_value = "7878656e69617068")]
     source_id_hex: String,
@@ -1129,6 +1144,95 @@ enum ClipboardMode {
     Bidirectional,
 }
 
+fn to_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+/// Verify the host's identity fingerprint against the viewer's trust policy
+/// before treating the session as authenticated. `--host-fingerprint` (an
+/// out-of-band pinned value) takes precedence; otherwise `--known-hosts`
+/// provides trust-on-first-use. With neither set the fingerprint is logged
+/// but the host is trusted blindly (documented, opt-in pinning).
+fn verify_host_identity(
+    fingerprint: &[u8; 32],
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fp_hex = to_hex(fingerprint);
+
+    if let Some(expected) = &args.host_fingerprint {
+        let expected = expected.trim();
+        if expected.eq_ignore_ascii_case(&fp_hex) {
+            info!(fingerprint = %fp_hex, "host identity matches --host-fingerprint");
+            return Ok(());
+        }
+        return Err(format!(
+            "host identity fingerprint mismatch: expected {expected}, got {fp_hex} -- \
+             refusing to connect (possible man-in-the-middle)"
+        )
+        .into());
+    }
+
+    if let Some(path) = &args.known_hosts {
+        return pin_or_verify_known_hosts(path, &args.connect, &fp_hex);
+    }
+
+    warn!(
+        fingerprint = %fp_hex,
+        "host identity is NOT pinned (pass --known-hosts or --host-fingerprint to verify it); \
+         trusting this host blindly"
+    );
+    Ok(())
+}
+
+/// Trust-on-first-use against a known-hosts file. Each line is
+/// `<connect-address> <fingerprint-hex>`. First contact for an address pins
+/// its fingerprint; a later mismatch is refused; a match passes silently.
+fn pin_or_verify_known_hosts(
+    path: &std::path::Path,
+    host_addr: &str,
+    fp_hex: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    for line in existing.lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(addr), Some(fp)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        if addr == host_addr {
+            if fp.eq_ignore_ascii_case(fp_hex) {
+                info!(host = host_addr, fingerprint = %fp_hex, "host identity matches known_hosts");
+                return Ok(());
+            }
+            return Err(format!(
+                "host {host_addr} identity fingerprint changed: known_hosts has {fp}, host \
+                 presented {fp_hex} -- refusing to connect (possible man-in-the-middle). \
+                 Remove the stale line from {} if this change is expected.",
+                path.display()
+            )
+            .into());
+        }
+    }
+
+    // First contact: pin it.
+    let mut updated = existing;
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(&format!("{host_addr} {fp_hex}\n"));
+    std::fs::write(path, updated)?;
+    info!(
+        host = host_addr,
+        fingerprint = %fp_hex,
+        path = %path.display(),
+        "pinned host identity on first use (trust-on-first-use)"
+    );
+    Ok(())
+}
+
 fn parse_source_id(hex: &str) -> Result<[u8; 8], String> {
     if hex.len() != 16 {
         return Err(format!("source_id must be 16 hex chars, got {}", hex.len()));
@@ -1194,6 +1298,7 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let handshake =
         perform_viewer_handshake_with_transcript(&mut transport, &mut handshake_mgr, "daemon")
             .await?;
+    verify_host_identity(&handshake.host_identity_fingerprint, &args)?;
     info!(
         transcript_hash = ?handshake.transcript_hash,
         "viewer handshake transcript bound"
@@ -1519,6 +1624,8 @@ async fn gui_receive_loop(
         perform_viewer_handshake_with_transcript(&mut transport, &mut handshake_mgr, "daemon")
             .await
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
+    verify_host_identity(&handshake.host_identity_fingerprint, &args)
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
     info!(
         transcript_hash = ?handshake.transcript_hash,
         "viewer handshake transcript bound"
@@ -1907,6 +2014,38 @@ async fn connect_transport(args: &Args) -> Result<ConnectedTransport, TransportE
 mod tests {
     use super::*;
     use xenia_peer_core::{SyntheticAudioKind, SyntheticAudioSource};
+
+    #[test]
+    fn to_hex_encodes_lowercase_fixed_width() {
+        assert_eq!(to_hex(&[0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
+    }
+
+    #[test]
+    fn known_hosts_pins_on_first_use_then_verifies() {
+        let dir = std::env::temp_dir().join(format!("xenia-known-hosts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("known_hosts");
+        let _ = std::fs::remove_file(&path);
+
+        // First contact: pins, succeeds, and writes the entry.
+        pin_or_verify_known_hosts(&path, "10.0.0.1:4747", "aabbcc").unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("10.0.0.1:4747 aabbcc"));
+
+        // Same fingerprint: passes (case-insensitive).
+        pin_or_verify_known_hosts(&path, "10.0.0.1:4747", "AABBCC").unwrap();
+
+        // Changed fingerprint for the same host: refused.
+        let err = pin_or_verify_known_hosts(&path, "10.0.0.1:4747", "deadbeef").unwrap_err();
+        assert!(err.to_string().contains("fingerprint changed"));
+
+        // A different host pins independently.
+        pin_or_verify_known_hosts(&path, "10.0.0.2:4747", "1234").unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("10.0.0.1:4747 aabbcc"));
+        assert!(contents.contains("10.0.0.2:4747 1234"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn synthetic_audio_sink_accepts_only_synthetic_frames() {
