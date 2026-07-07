@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/xenia-peer-core",
+    "crates/xenia-operator-proto",
     "apps/xenia-peer",
     "apps/xenia-viewer",
     "crates/xenia-capture",
@@ -18,6 +19,7 @@ members = [
 # host-only cargo check/build invocations.
 default-members = [
     "crates/xenia-peer-core",
+    "crates/xenia-operator-proto",
     "apps/xenia-peer",
     "apps/xenia-viewer",
     "crates/xenia-capture",
@@ -43,6 +45,7 @@ homepage = "https://github.com/Luminous-Dynamics/xenia-peer"
 
 [workspace.dependencies]
 xenia-wire = "0.2.0-alpha.3"
+xenia-operator-proto = { path = "crates/xenia-operator-proto" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time"] }
 bincode = "1.3"
 thiserror = "1"

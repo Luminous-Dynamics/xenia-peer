@@ -29,76 +29,12 @@ use serde::{Deserialize, Serialize};
 
 use xenia_handshake::ML_DSA_65_PK_LEN;
 
-/// An operator's role. Strictly hierarchical: a higher role can do everything
-/// a lower one can, plus more (see [`OperatorRole::rank`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum OperatorRole {
-    /// Read-only: see inventory and the audit ledger.
-    Viewer,
-    /// Viewer + approve/deny/revoke a consent ceremony.
-    Approver,
-    /// Approver + initiate sessions.
-    Operator,
-    /// Operator + enroll/revoke operators, change trust policy, rotate keys.
-    Admin,
-}
-
-impl OperatorRole {
-    /// Ordering rank. Authorization is `actor.rank() >= action.min_role().rank()`.
-    fn rank(self) -> u8 {
-        match self {
-            OperatorRole::Viewer => 0,
-            OperatorRole::Approver => 1,
-            OperatorRole::Operator => 2,
-            OperatorRole::Admin => 3,
-        }
-    }
-}
-
-/// A privileged operator action the daemon can be asked to perform.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OperatorAction {
-    /// View device/session inventory.
-    ViewInventory,
-    /// Read the audit ledger.
-    ReadAudit,
-    /// Approve a consent ceremony.
-    ApproveConsent,
-    /// Deny a consent ceremony.
-    DenyConsent,
-    /// Revoke consent for a live session.
-    RevokeConsent,
-    /// Initiate a new session.
-    InitiateSession,
-    /// Change the sealed-evidence / consent trust policy.
-    ChangePolicy,
-    /// Enroll or revoke an operator.
-    EnrollOperator,
-    /// Rotate the host / consent signing keys.
-    RotateKeys,
-}
-
-impl OperatorAction {
-    /// The minimum role that may perform this action.
-    fn min_role(self) -> OperatorRole {
-        match self {
-            OperatorAction::ViewInventory | OperatorAction::ReadAudit => OperatorRole::Viewer,
-            OperatorAction::ApproveConsent
-            | OperatorAction::DenyConsent
-            | OperatorAction::RevokeConsent => OperatorRole::Approver,
-            OperatorAction::InitiateSession => OperatorRole::Operator,
-            OperatorAction::ChangePolicy
-            | OperatorAction::EnrollOperator
-            | OperatorAction::RotateKeys => OperatorRole::Admin,
-        }
-    }
-}
-
-/// Whether `role` is permitted to perform `action`. Total, fail-closed by
-/// construction (a role strictly below the action's minimum is denied).
-pub(crate) fn role_permits(role: OperatorRole, action: OperatorAction) -> bool {
-    role.rank() >= action.min_role().rank()
-}
+// The role/action model + fail-closed authorization logic now live in the
+// shared `xenia-operator-proto` crate, so the daemon and the sovereign-admin
+// console authorize against *identical* rules: a role the console greys out is
+// exactly a role the daemon also refuses. Only the enrollment/policy-file
+// machinery below is daemon-specific.
+pub(crate) use xenia_operator_proto::{role_permits, OperatorAction, OperatorRole};
 
 /// The outcome of an authorization check, kept distinct so the caller can
 /// audit and message "not enrolled" separately from "enrolled but role too
