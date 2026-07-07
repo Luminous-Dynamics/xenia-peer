@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 use tracing::info;
 use xenia_handshake::{
-    derive_rekey_epoch_keys, derive_session_key_schedule, HandshakeManager, HandshakeTranscriptV1,
-    RekeyEpochContextV1, RekeyReason, SessionKeySchedule, HANDSHAKE_POLICY_PROFILE,
-    HANDSHAKE_TRANSCRIPT_SCHEMA, KDF_SUITE_LABEL, KEM_SUITE_LABEL, ML_DSA_65_PK_LEN,
-    ML_DSA_65_SIG_LEN, ML_KEM_768_CT_LEN, ML_KEM_768_PK_LEN, TRANSCRIPT_SIGNATURE_SUITE_LABEL,
+    HANDSHAKE_POLICY_PROFILE, HANDSHAKE_TRANSCRIPT_SCHEMA, HandshakeManager, HandshakeTranscriptV1,
+    KDF_SUITE_LABEL, KEM_SUITE_LABEL, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN, ML_KEM_768_CT_LEN,
+    ML_KEM_768_PK_LEN, RekeyEpochContextV1, RekeyReason, SessionKeySchedule,
+    TRANSCRIPT_SIGNATURE_SUITE_LABEL, derive_rekey_epoch_keys, derive_session_key_schedule,
 };
 
 const HANDSHAKE_SIGNATURE_CONTEXT_V1: &str = "xenia-handshake-signature-v1";
@@ -722,15 +722,21 @@ mod tests {
             &[0x66; 32],
         );
 
-        assert!(transcript
-            .windows(HANDSHAKE_SIGNATURE_CONTEXT_V1.len())
-            .any(|w| { w == HANDSHAKE_SIGNATURE_CONTEXT_V1.as_bytes() }));
-        assert!(transcript
-            .windows(HANDSHAKE_TRANSCRIPT_SCHEMA.len())
-            .any(|w| { w == HANDSHAKE_TRANSCRIPT_SCHEMA.as_bytes() }));
-        assert!(transcript
-            .windows(KEM_SUITE_LABEL.len())
-            .any(|w| { w == KEM_SUITE_LABEL.as_bytes() }));
+        assert!(
+            transcript
+                .windows(HANDSHAKE_SIGNATURE_CONTEXT_V1.len())
+                .any(|w| { w == HANDSHAKE_SIGNATURE_CONTEXT_V1.as_bytes() })
+        );
+        assert!(
+            transcript
+                .windows(HANDSHAKE_TRANSCRIPT_SCHEMA.len())
+                .any(|w| { w == HANDSHAKE_TRANSCRIPT_SCHEMA.as_bytes() })
+        );
+        assert!(
+            transcript
+                .windows(KEM_SUITE_LABEL.len())
+                .any(|w| { w == KEM_SUITE_LABEL.as_bytes() })
+        );
     }
 
     #[test]
@@ -1001,27 +1007,31 @@ mod tests {
     fn session_epoch_state_rejects_skipped_epoch_and_wrong_previous_hash() {
         let mut state = SessionEpochState::new([0x11; 32], RekeyPolicy::smoke());
         let skipped = RekeyEpochContextV1::new(2, [0x11; 32], [0x11; 32], RekeyReason::FrameCount);
-        assert!(state
-            .validate_proposal(
-                skipped.key_epoch,
-                skipped.base_transcript_hash,
-                skipped.previous_epoch_hash,
-                skipped.reason,
-                skipped.epoch_hash().unwrap(),
-            )
-            .is_err());
+        assert!(
+            state
+                .validate_proposal(
+                    skipped.key_epoch,
+                    skipped.base_transcript_hash,
+                    skipped.previous_epoch_hash,
+                    skipped.reason,
+                    skipped.epoch_hash().unwrap(),
+                )
+                .is_err()
+        );
 
         let wrong_prev =
             RekeyEpochContextV1::new(1, [0x11; 32], [0x22; 32], RekeyReason::FrameCount);
-        assert!(state
-            .validate_proposal(
-                wrong_prev.key_epoch,
-                wrong_prev.base_transcript_hash,
-                wrong_prev.previous_epoch_hash,
-                wrong_prev.reason,
-                wrong_prev.epoch_hash().unwrap(),
-            )
-            .is_err());
+        assert!(
+            state
+                .validate_proposal(
+                    wrong_prev.key_epoch,
+                    wrong_prev.base_transcript_hash,
+                    wrong_prev.previous_epoch_hash,
+                    wrong_prev.reason,
+                    wrong_prev.epoch_hash().unwrap(),
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -1031,15 +1041,17 @@ mod tests {
         let mut wrong_hash = context.epoch_hash().unwrap();
         wrong_hash[0] ^= 0x01;
 
-        assert!(state
-            .validate_proposal(
-                context.key_epoch,
-                context.base_transcript_hash,
-                context.previous_epoch_hash,
-                context.reason,
-                wrong_hash,
-            )
-            .is_err());
+        assert!(
+            state
+                .validate_proposal(
+                    context.key_epoch,
+                    context.base_transcript_hash,
+                    context.previous_epoch_hash,
+                    context.reason,
+                    wrong_hash,
+                )
+                .is_err()
+        );
     }
 
     #[test]

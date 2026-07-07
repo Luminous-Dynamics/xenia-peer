@@ -35,10 +35,10 @@ use xenia_ledger::{Chain, Verifier};
 use crate::operator::{EnrolledOperator, OperatorPolicy, OperatorRole};
 use crate::operator_audit::operator_consent_audit_event;
 use crate::operator_auth::{
-    challenge_transcript, consent_action_transcript, ChallengeStore, ConsentAction, RateLimiter,
-    AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS,
+    AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS, ChallengeStore, ConsentAction, RateLimiter,
+    challenge_transcript, consent_action_transcript,
 };
-use crate::operator_http::{router, OperatorAuthState};
+use crate::operator_http::{OperatorAuthState, router};
 
 async fn post(router: &axum::Router, path: &str, body: String) -> (u16, String) {
     let resp = router
