@@ -80,3 +80,8 @@ preprod-fixtures = []
 # Propagate the ledger's explicit ML-DSA evidence verifier feature to the daemon
 # verifier CLI. Off by default; this does not enable PQ runtime export.
 pqc-signatures = ["xenia-ledger/pqc-signatures"]
+
+[dev-dependencies]
+# `ServiceExt::oneshot` for driving the operator-auth axum routes in tests
+# without binding a real socket.
+tower = { version = "0.5", features = ["util"] }

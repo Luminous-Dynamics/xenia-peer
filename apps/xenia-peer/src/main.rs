@@ -63,6 +63,7 @@ mod m1_ledger;
 mod m1_runtime;
 mod operator;
 mod operator_auth;
+mod operator_http;
 use crate::governance::{GovernanceBridge, MitigationRule};
 
 #[derive(Parser, Debug)]
@@ -319,6 +320,14 @@ struct Args {
     /// an operator can share it out-of-band for verification.
     #[arg(long, default_value = "host-identity.key")]
     host_identity_key_path: std::path::PathBuf,
+
+    /// Operator enrollment file (JSON): the operators allowed to authenticate
+    /// to this daemon's admin surface, each an Ed25519 + ML-DSA-65 public key
+    /// bound to a role. When unset, the `/auth/*` endpoints still exist but no
+    /// operator can authenticate (empty policy = deny all). See
+    /// `docs/security/OPERATOR_RBAC_PLAN.md`.
+    #[arg(long)]
+    operators_file: Option<std::path::PathBuf>,
 
     /// Inbound viewer-input backend. `noop` (default) discards every
     /// input event -- a connected viewer is view-only and no OS-level
@@ -1556,13 +1565,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     bridge.start_signal_listener();
     bridge.broadcast("daemon ready");
 
-    let app = crate::admin_ui::mount(Router::new()).route(
-        "/ws",
-        get({
-            let bridge = bridge.clone();
-            move |ws| ws_handler(ws, bridge.clone())
-        }),
-    );
+    // Operator-auth state: the enrolled-operator policy (empty = deny all if
+    // no --operators-file), a challenge store, and the daemon's key for
+    // signing issued tokens.
+    let operator_policy = match &args.operators_file {
+        Some(path) => match crate::operator::OperatorPolicy::load(path) {
+            Ok(policy) => {
+                info!(operators = policy.len(), path = %path.display(), "operator policy loaded");
+                policy
+            }
+            Err(err) => {
+                return Err(
+                    format!("failed to load --operators-file {}: {err}", path.display()).into(),
+                );
+            }
+        },
+        None => crate::operator::OperatorPolicy::default(),
+    };
+    let operator_auth_state = Arc::new(crate::operator_http::OperatorAuthState {
+        policy: operator_policy,
+        challenges: AsyncMutex::new(crate::operator_auth::ChallengeStore::new()),
+        daemon_key: signing_key.clone(),
+    });
+
+    let app = crate::admin_ui::mount(Router::new())
+        .route(
+            "/ws",
+            get({
+                let bridge = bridge.clone();
+                move |ws| ws_handler(ws, bridge.clone())
+            }),
+        )
+        .merge(crate::operator_http::router(operator_auth_state));
 
     let listener = TcpListener::bind(format!("127.0.0.1:{}", args.admin_port)).await?;
     tokio::spawn(async move {
