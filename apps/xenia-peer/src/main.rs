@@ -62,6 +62,7 @@ mod governance;
 mod m1_ledger;
 mod m1_runtime;
 mod operator;
+mod operator_auth;
 use crate::governance::{GovernanceBridge, MitigationRule};
 
 #[derive(Parser, Debug)]
