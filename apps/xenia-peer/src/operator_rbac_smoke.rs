@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::Request;
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::SigningKey;
 use tokio::sync::Mutex;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -35,10 +35,10 @@ use xenia_ledger::{Chain, Verifier};
 use crate::operator::{EnrolledOperator, OperatorPolicy, OperatorRole};
 use crate::operator_audit::operator_consent_audit_event;
 use crate::operator_auth::{
-    AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS, ChallengeStore, ConsentAction, RateLimiter,
-    challenge_transcript, consent_action_transcript,
+    challenge_transcript, consent_action_transcript, ChallengeStore, ConsentAction, RateLimiter,
+    AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS,
 };
-use crate::operator_http::{OperatorAuthState, router};
+use crate::operator_http::{router, OperatorAuthState};
 
 async fn post(router: &axum::Router, path: &str, body: String) -> (u16, String) {
     let resp = router
