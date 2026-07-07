@@ -199,6 +199,16 @@ impl OperatorPolicy {
         self.by_ed25519.get(ed25519_pubkey)
     }
 
+    /// Look up an enrolled operator by operator id. Used to re-check
+    /// enrollment and recover the signing key at action time (so a token
+    /// issued to an operator who has since been de-enrolled no longer
+    /// authorizes anything).
+    pub(crate) fn lookup_by_id(&self, operator_id: &str) -> Option<&EnrolledOperator> {
+        self.by_ed25519
+            .values()
+            .find(|op| op.operator_id == operator_id)
+    }
+
     /// Authorize `action` for the operator holding `ed25519_pubkey`.
     /// Fail-closed: an unenrolled key or an insufficient role is denied.
     pub(crate) fn authorize(

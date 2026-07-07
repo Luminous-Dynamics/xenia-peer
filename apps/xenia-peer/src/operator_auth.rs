@@ -28,7 +28,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 
 use xenia_handshake::{HandshakeManager, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN};
 
-use crate::operator::{OperatorPolicy, OperatorRole};
+use crate::operator::{OperatorAction, OperatorPolicy, OperatorRole};
 
 const CHALLENGE_DOMAIN: &[u8] = b"xenia-operator-auth-challenge-v1";
 const TOKEN_DOMAIN: &[u8] = b"xenia-operator-token-v1";
@@ -114,6 +114,8 @@ pub(crate) enum AuthError {
     NotEnrolled,
     /// A token failed to verify (bad signature or expired).
     InvalidToken,
+    /// The token is valid but its role does not permit the requested action.
+    RoleNotPermitted,
 }
 
 impl std::fmt::Display for AuthError {
@@ -125,6 +127,7 @@ impl std::fmt::Display for AuthError {
             AuthError::MlDsaVerifyFailed => "ML-DSA signature verification failed",
             AuthError::NotEnrolled => "operator key is not enrolled",
             AuthError::InvalidToken => "invalid or expired operator token",
+            AuthError::RoleNotPermitted => "operator role does not permit this action",
         };
         f.write_str(s)
     }
@@ -262,6 +265,106 @@ fn role_tag(role: OperatorRole) -> u8 {
         OperatorRole::Operator => 2,
         OperatorRole::Admin => 3,
     }
+}
+
+const CONSENT_ACTION_DOMAIN: &[u8] = b"xenia-operator-consent-action-v1";
+
+/// A consent decision an operator can authorize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConsentAction {
+    Approve,
+    Deny,
+    Revoke,
+}
+
+impl ConsentAction {
+    fn tag(self) -> u8 {
+        match self {
+            ConsentAction::Approve => 1,
+            ConsentAction::Deny => 2,
+            ConsentAction::Revoke => 3,
+        }
+    }
+
+    /// The RBAC action a consent decision requires.
+    fn required_permission(self) -> OperatorAction {
+        match self {
+            ConsentAction::Approve => OperatorAction::ApproveConsent,
+            ConsentAction::Deny => OperatorAction::DenyConsent,
+            ConsentAction::Revoke => OperatorAction::RevokeConsent,
+        }
+    }
+}
+
+/// The bytes an operator signs to authorize a specific consent action. Binds
+/// the action to the exact session and token, so a captured signature can't be
+/// replayed for a different action, session, or token.
+fn consent_action_transcript(
+    action: ConsentAction,
+    session_id: &[u8; 16],
+    token_nonce: &[u8; 16],
+) -> Vec<u8> {
+    let mut t = Vec::with_capacity(CONSENT_ACTION_DOMAIN.len() + 1 + 16 + 16);
+    t.extend_from_slice(CONSENT_ACTION_DOMAIN);
+    t.push(action.tag());
+    t.extend_from_slice(session_id);
+    t.extend_from_slice(token_nonce);
+    t
+}
+
+/// An operator's authenticated request to perform a consent action: their
+/// session token plus a per-action signature (over the action + session +
+/// token nonce) proving they, not just a token bearer, authorized it.
+pub(crate) struct AuthenticatedConsentAction {
+    pub(crate) token: SignedOperatorToken,
+    pub(crate) action: ConsentAction,
+    pub(crate) action_signature: [u8; 64],
+}
+
+/// A consent action authorized to a specific operator, ready to apply + audit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuthorizedConsentAction {
+    pub(crate) action: ConsentAction,
+    pub(crate) operator_id: String,
+    pub(crate) role: OperatorRole,
+}
+
+/// Authorize a consent action, fail-closed at every step:
+/// 1. the token is daemon-signed and unexpired;
+/// 2. the token's role permits the action;
+/// 3. the operator is *still* enrolled (a de-enrolled operator's token is
+///    dead even if unexpired);
+/// 4. the per-action signature verifies against that operator's enrolled
+///    Ed25519 key over this exact action + session + token nonce.
+pub(crate) fn authorize_consent_action(
+    policy: &OperatorPolicy,
+    daemon_pubkey: &VerifyingKey,
+    now: u64,
+    session_id: &[u8; 16],
+    request: &AuthenticatedConsentAction,
+) -> Result<AuthorizedConsentAction, AuthError> {
+    let token = verify_token(daemon_pubkey, now, &request.token)?;
+
+    if !crate::operator::role_permits(token.role, request.action.required_permission()) {
+        return Err(AuthError::RoleNotPermitted);
+    }
+
+    let operator = policy
+        .lookup_by_id(&token.operator_id)
+        .ok_or(AuthError::NotEnrolled)?;
+
+    let transcript = consent_action_transcript(request.action, session_id, &token.token_nonce);
+    let ed_vk = HandshakeManager::parse_peer_public_key(&operator.ed25519_pubkey)
+        .map_err(|_| AuthError::MalformedKey)?;
+    let sig = Signature::from_bytes(&request.action_signature);
+    HandshakeManager::verify(&ed_vk, &transcript, &sig)
+        .map_err(|_| AuthError::Ed25519VerifyFailed)?;
+
+    Ok(AuthorizedConsentAction {
+        action: request.action,
+        operator_id: token.operator_id,
+        role: token.role,
+    })
 }
 
 #[cfg(test)]
@@ -407,6 +510,116 @@ mod tests {
         assert_eq!(
             verify_token(&daemon_pk, 2100, &signed),
             Err(AuthError::InvalidToken)
+        );
+    }
+
+    /// Build an authenticated consent action: a token for `op` at `role`,
+    /// plus `op`'s Ed25519 signature over the action + session + token nonce.
+    fn authed_action(
+        op: &HandshakeManager,
+        daemon: &SigningKey,
+        role: OperatorRole,
+        session_id: &[u8; 16],
+        action: ConsentAction,
+        now: u64,
+    ) -> AuthenticatedConsentAction {
+        let authed = AuthenticatedOperator {
+            operator_id: "op".to_string(),
+            role,
+        };
+        let signed = issue_token(daemon, &authed, now, TOKEN_TTL_SECS, [5u8; 16]);
+        let transcript = consent_action_transcript(action, session_id, &signed.token.token_nonce);
+        let action_signature = op.sign(&transcript).to_bytes();
+        AuthenticatedConsentAction {
+            token: signed,
+            action,
+            action_signature,
+        }
+    }
+
+    #[test]
+    fn consent_action_authorized_for_permitted_role() {
+        let op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let policy = policy_with(&op, OperatorRole::Approver);
+        let session = [7u8; 16];
+        let req = authed_action(
+            &op,
+            &daemon,
+            OperatorRole::Approver,
+            &session,
+            ConsentAction::Approve,
+            3000,
+        );
+        let authorized =
+            authorize_consent_action(&policy, &daemon.verifying_key(), 3010, &session, &req)
+                .unwrap();
+        assert_eq!(authorized.action, ConsentAction::Approve);
+        assert_eq!(authorized.operator_id, "op");
+        assert_eq!(authorized.role, OperatorRole::Approver);
+    }
+
+    #[test]
+    fn consent_action_denied_for_insufficient_role() {
+        let op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let policy = policy_with(&op, OperatorRole::Viewer);
+        let session = [7u8; 16];
+        // A Viewer-role token can't approve. (The token is honestly issued at
+        // Viewer -- a forged Approver token would fail token verification.)
+        let req = authed_action(
+            &op,
+            &daemon,
+            OperatorRole::Viewer,
+            &session,
+            ConsentAction::Approve,
+            3000,
+        );
+        assert_eq!(
+            authorize_consent_action(&policy, &daemon.verifying_key(), 3010, &session, &req),
+            Err(AuthError::RoleNotPermitted)
+        );
+    }
+
+    #[test]
+    fn consent_action_signature_bound_to_session() {
+        let op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let policy = policy_with(&op, OperatorRole::Admin);
+        // Signed for one session, presented against another: the per-action
+        // signature no longer verifies (replay across sessions is refused).
+        let req = authed_action(
+            &op,
+            &daemon,
+            OperatorRole::Admin,
+            &[1u8; 16],
+            ConsentAction::Revoke,
+            3000,
+        );
+        assert_eq!(
+            authorize_consent_action(&policy, &daemon.verifying_key(), 3010, &[2u8; 16], &req),
+            Err(AuthError::Ed25519VerifyFailed)
+        );
+    }
+
+    #[test]
+    fn consent_action_rejected_after_operator_de_enrolled() {
+        let op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        // Empty policy: the operator was de-enrolled after the token was issued.
+        let policy = OperatorPolicy::default();
+        let session = [7u8; 16];
+        let req = authed_action(
+            &op,
+            &daemon,
+            OperatorRole::Admin,
+            &session,
+            ConsentAction::Revoke,
+            3000,
+        );
+        assert_eq!(
+            authorize_consent_action(&policy, &daemon.verifying_key(), 3010, &session, &req),
+            Err(AuthError::NotEnrolled)
         );
     }
 }
