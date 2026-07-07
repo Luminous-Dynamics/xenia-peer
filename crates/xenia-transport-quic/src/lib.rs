@@ -21,13 +21,13 @@
 use std::io;
 
 use iroh::{
+    endpoint::{presets, Connection, RecvStream, SendStream},
     Endpoint, EndpointAddr,
-    endpoint::{Connection, RecvStream, SendStream, presets},
 };
 use thiserror::Error;
 use tracing::debug;
 use xenia_peer_core::transport::{
-    MAX_ENVELOPE_BYTES, RecvEnvelope, SendEnvelope, Transport, TransportError,
+    RecvEnvelope, SendEnvelope, Transport, TransportError, MAX_ENVELOPE_BYTES,
 };
 
 /// Re-export of the Iroh crate for endpoint ownership in callers.
@@ -315,5 +315,66 @@ pub struct QuicRecvHalf {
 impl RecvEnvelope for QuicRecvHalf {
     async fn recv_envelope(&mut self) -> Result<Vec<u8>, TransportError> {
         read_envelope(&mut self.recv).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wire_constants_are_stable() {
+        // These are on the wire; a change silently breaks interop with peers
+        // running an older build.
+        assert_eq!(XENIA_QUIC_ALPN, b"xenia/transport/quic/0");
+        assert_eq!(STREAM_PREFACE, b"XENIAQ0\0");
+        assert_eq!(STREAM_PREFACE.len(), 8);
+    }
+
+    #[test]
+    fn decode_endpoint_addr_rejects_garbage() {
+        // Non-base58 characters (0, O, I, l are not in the alphabet).
+        assert!(decode_endpoint_addr("iroh:0OIl").is_err());
+        // Empty.
+        assert!(decode_endpoint_addr("").is_err());
+        // Valid base58 whose decoded bytes are not an EndpointAddr JSON.
+        let token = format!("iroh:{}", bs58::encode(b"not endpoint json").into_string());
+        assert!(decode_endpoint_addr(&token).is_err());
+    }
+
+    #[test]
+    fn decode_endpoint_addr_tolerates_a_missing_prefix() {
+        // The prefix is stripped when present and ignored when absent; either
+        // way an un-decodable body errors rather than panicking.
+        let body = bs58::encode(b"still not json").into_string();
+        assert!(decode_endpoint_addr(&body).is_err());
+        assert!(decode_endpoint_addr(&format!("iroh:{body}")).is_err());
+    }
+
+    #[test]
+    fn is_stream_eof_classifies_teardown_messages() {
+        assert!(is_stream_eof("the connection was closed"));
+        assert!(is_stream_eof("stream reset by peer"));
+        assert!(is_stream_eof("reached end of stream"));
+        assert!(!is_stream_eof("permission denied"));
+        assert!(!is_stream_eof("timed out"));
+    }
+
+    #[test]
+    fn quic_error_maps_to_the_uniform_transport_error() {
+        // EndpointClosed is the graceful-shutdown signal -> UnexpectedEof.
+        assert!(matches!(
+            TransportError::from(QuicError::EndpointClosed),
+            TransportError::UnexpectedEof
+        ));
+        // Everything else collapses to Io so the trait contract stays uniform.
+        assert!(matches!(
+            TransportError::from(QuicError::Connect("x".into())),
+            TransportError::Io(_)
+        ));
+        assert!(matches!(
+            TransportError::from(QuicError::Stream("y".into())),
+            TransportError::Io(_)
+        ));
     }
 }

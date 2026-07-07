@@ -46,11 +46,11 @@ use futures_util::{SinkExt, StreamExt};
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::protocol::Message;
-use tokio_tungstenite::{WebSocketStream, accept_async, connect_async};
+use tokio_tungstenite::{accept_async, connect_async, WebSocketStream};
 use tracing::debug;
 
 use xenia_peer_core::transport::{
-    MAX_ENVELOPE_BYTES, RecvEnvelope, SendEnvelope, Transport, TransportError,
+    RecvEnvelope, SendEnvelope, Transport, TransportError, MAX_ENVELOPE_BYTES,
 };
 
 /// Errors specific to the WebSocket transport. Coerced into
@@ -291,6 +291,73 @@ mod tests {
     fn websocket_envelope_size_check_rejects_oversize_binary_payload() {
         let err = ensure_envelope_size(MAX_ENVELOPE_BYTES as usize + 1).unwrap_err();
         assert!(matches!(err, TransportError::EnvelopeTooLarge(_)));
+    }
+
+    #[test]
+    fn envelope_size_check_allows_the_boundary() {
+        assert!(ensure_envelope_size(MAX_ENVELOPE_BYTES as usize).is_ok());
+        assert!(ensure_envelope_size(0).is_ok());
+    }
+
+    #[test]
+    fn interpret_recv_returns_binary_payloads_verbatim() {
+        let msg = Some(Ok(Message::Binary(vec![1, 2, 3, 4].into())));
+        assert_eq!(interpret_recv(msg).unwrap(), Some(vec![1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn interpret_recv_rejects_oversize_binary() {
+        let big = vec![0u8; MAX_ENVELOPE_BYTES as usize + 1];
+        let err = interpret_recv(Some(Ok(Message::Binary(big.into())))).unwrap_err();
+        assert!(matches!(err, TransportError::EnvelopeTooLarge(_)));
+    }
+
+    #[test]
+    fn interpret_recv_treats_close_and_stream_end_as_eof() {
+        // Graceful peer close.
+        assert!(matches!(
+            interpret_recv(Some(Ok(Message::Close(None)))).unwrap_err(),
+            TransportError::UnexpectedEof
+        ));
+        // Stream exhausted (None).
+        assert!(matches!(
+            interpret_recv(None).unwrap_err(),
+            TransportError::UnexpectedEof
+        ));
+    }
+
+    #[test]
+    fn interpret_recv_skips_ping_and_pong() {
+        // Control frames yield no envelope; the caller loops to the next frame.
+        assert_eq!(
+            interpret_recv(Some(Ok(Message::Ping(Vec::new().into())))).unwrap(),
+            None
+        );
+        assert_eq!(
+            interpret_recv(Some(Ok(Message::Pong(Vec::new().into())))).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn interpret_recv_rejects_text_frames() {
+        // Xenia envelopes are always binary; a text frame means wrong protocol.
+        assert!(matches!(
+            interpret_recv(Some(Ok(Message::Text("hello".into())))).unwrap_err(),
+            TransportError::UnexpectedEof
+        ));
+    }
+
+    #[test]
+    fn wserror_maps_to_uniform_transport_error() {
+        assert!(matches!(
+            TransportError::from(WsError::Closed),
+            TransportError::UnexpectedEof
+        ));
+        assert!(matches!(
+            TransportError::from(WsError::NonBinaryMessage),
+            TransportError::UnexpectedEof
+        ));
     }
 
     /// Bind to an ephemeral port, listen on a background task,
