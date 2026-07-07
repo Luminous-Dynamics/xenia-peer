@@ -35,6 +35,14 @@ Design for closing review finding #17 (no server-side operator auth/RBAC).
   is now tamper-evident and offline-verifiable.
 - ⬜ **Phase 5**: console integration (real challenge/sign flow, role-gated
   pages, MFA).
+- ✅ **Full-chain smoke** (`operator_rbac_smoke.rs`, commit `e5b907d`): an
+  in-process end-to-end test drives the real paths wired together — enroll →
+  `/auth/challenge` (through the actual router) → sign both keys →
+  `/auth/verify` → token → authenticated Approve → the binary's own
+  `decode_consent_decision` → operator attribution → ledger append →
+  `verify_chain` passes; a wrong-session decision is refused. The ON-path is
+  now *observed* working, not just asserted (short of the browser/viewer
+  harness, which is Phase 5).
 - 🟡 **Phase 6** (partial, commit `3da46e3`): auth-surface **rate limiting**
   done — a pure, tested `RateLimiter` wired into `/auth/verify` (429 beyond
   `AUTH_RATE_MAX`/window, before verification). Remote operators and
