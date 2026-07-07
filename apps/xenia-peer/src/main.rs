@@ -1826,70 +1826,84 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        match listener.accept().await {
-            Ok((stream, _)) => match tokio_tungstenite::accept_async(stream).await {
-                Ok(mut ws_stream) => {
-                    while let Some(result) = ws_stream.next().await {
-                        match result {
-                            Ok(msg) => {
-                                if let Ok(text) = msg.to_text() {
-                                    let Some(decoded) = decode_consent_decision(
-                                        text,
-                                        require_operator_auth,
-                                        &consent_auth_state,
-                                        &consent_session_id,
-                                    ) else {
-                                        continue;
-                                    };
-                                    // Phase 4: attribute an authenticated
-                                    // decision in the tamper-evident ledger.
-                                    if let Some(authorized) = &decoded.authorized {
-                                        let event =
-                                            crate::operator_audit::operator_consent_audit_event(
-                                                authorized,
-                                                consent_session_uuid,
-                                                Uuid::new_v4(),
-                                            );
-                                        if let Err(err) = consent_ledger.lock().await.append(event)
-                                        {
-                                            tracing::warn!(error = %err, "failed to append operator-action audit entry");
-                                        }
-                                    }
-                                    match decoded.action {
-                                        crate::operator_auth::ConsentAction::Approve => {
-                                            info!(approved = true, "consent decision received");
-                                            if let Some(tx) = consent_decision_tx.take() {
-                                                let _ = tx.send(true);
-                                            }
-                                            // Keep the socket open: the operator
-                                            // can still send "Revoke" to end the
-                                            // live session.
-                                        }
-                                        crate::operator_auth::ConsentAction::Deny => {
-                                            info!(approved = false, "consent decision received");
-                                            if let Some(tx) = consent_decision_tx.take() {
-                                                let _ = tx.send(false);
-                                            }
-                                            break;
-                                        }
-                                        crate::operator_auth::ConsentAction::Revoke => {
-                                            info!("consent revocation received");
-                                            revoked_for_consent.store(true, Ordering::SeqCst);
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            Err(err) => {
-                                tracing::warn!(error = %err, "consent websocket receive failed");
-                                break;
-                            }
-                        }
+        // Accept consent connections for the life of the session. The first
+        // Approve/Deny resolves the grant; after an Approve we keep serving so
+        // the operator can later send "Revoke". Crucially we loop on accept():
+        // if the console's socket drops (tab closed, network blip) the operator
+        // can reconnect and still revoke -- otherwise the "revocation always
+        // nearby" property would silently lapse after the first disconnect.
+        'accept: loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(conn) => conn,
+                Err(err) => {
+                    tracing::warn!(error = %err, "consent websocket accept failed");
+                    break 'accept;
+                }
+            };
+            let mut ws_stream = match tokio_tungstenite::accept_async(stream).await {
+                Ok(ws) => ws,
+                Err(err) => {
+                    tracing::warn!(error = %err, "consent websocket handshake failed");
+                    continue 'accept;
+                }
+            };
+            while let Some(result) = ws_stream.next().await {
+                let msg = match result {
+                    Ok(msg) => msg,
+                    Err(err) => {
+                        tracing::warn!(error = %err, "consent websocket receive failed");
+                        break;
+                    }
+                };
+                let Ok(text) = msg.to_text() else {
+                    continue;
+                };
+                let Some(decoded) = decode_consent_decision(
+                    text,
+                    require_operator_auth,
+                    &consent_auth_state,
+                    &consent_session_id,
+                ) else {
+                    continue;
+                };
+                // Phase 4: attribute an authenticated decision in the
+                // tamper-evident ledger.
+                if let Some(authorized) = &decoded.authorized {
+                    let event = crate::operator_audit::operator_consent_audit_event(
+                        authorized,
+                        consent_session_uuid,
+                        Uuid::new_v4(),
+                    );
+                    if let Err(err) = consent_ledger.lock().await.append(event) {
+                        tracing::warn!(error = %err, "failed to append operator-action audit entry");
                     }
                 }
-                Err(err) => tracing::warn!(error = %err, "consent websocket handshake failed"),
-            },
-            Err(err) => tracing::warn!(error = %err, "consent websocket accept failed"),
+                match decoded.action {
+                    crate::operator_auth::ConsentAction::Approve => {
+                        info!(approved = true, "consent decision received");
+                        if let Some(tx) = consent_decision_tx.take() {
+                            let _ = tx.send(true);
+                        }
+                        // Keep the socket open: the operator can still send
+                        // "Revoke" to end the live session.
+                    }
+                    crate::operator_auth::ConsentAction::Deny => {
+                        info!(approved = false, "consent decision received");
+                        if let Some(tx) = consent_decision_tx.take() {
+                            let _ = tx.send(false);
+                        }
+                        break 'accept;
+                    }
+                    crate::operator_auth::ConsentAction::Revoke => {
+                        info!("consent revocation received");
+                        revoked_for_consent.store(true, Ordering::SeqCst);
+                        break 'accept;
+                    }
+                }
+            }
+            // The connection ended without a terminal decision (Deny/Revoke):
+            // loop back to accept the next socket so a reconnecting operator
+            // can still approve a pending grant or revoke a live session.
         }
     });
 
