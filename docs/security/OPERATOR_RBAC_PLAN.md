@@ -1,8 +1,25 @@
 # Operator Authentication & RBAC — Design Plan
 
-Status: planning. This is the design for closing review finding #17 (no
-server-side operator auth/RBAC in the operator console). It is not yet
-implemented.
+Status: **Phases 1–2 implemented and tested** (the cryptographic core);
+Phases 3–6 remaining (daemon integration, ledger audit, console, hardening).
+Design for closing review finding #17 (no server-side operator auth/RBAC).
+
+**Progress:**
+- ✅ **Phase 1** (`operator.rs`, commit `bda8b12`): `OperatorRole`/`OperatorAction`,
+  fail-closed `role_permits`, `OperatorPolicy` enrollment load/validate +
+  `authorize`. 5 unit tests.
+- ✅ **Phase 2** (`operator_auth.rs`, commit `d6a5bba`): single-use TTL'd
+  challenge store, domain-separated challenge transcript,
+  `verify_challenge_response` (both Ed25519 + ML-DSA, then enrollment,
+  fail-closed), daemon-signed role-scoped expiring `OperatorToken`. 6
+  end-to-end crypto tests.
+- ⬜ **Phase 3**: HTTP `/auth/challenge` + `/auth/verify` endpoints; rework the
+  single-shot unauthenticated consent socket into a token-authenticated
+  control channel; enforce `authorize` on every privileged action.
+- ⬜ **Phase 4**: operator-action audit entries in `xenia-ledger`.
+- ⬜ **Phase 5**: console integration (real challenge/sign flow, role-gated
+  pages, MFA).
+- ⬜ **Phase 6**: rate limiting, remote operators, session-recording integrity.
 
 ## The one-sentence problem
 
