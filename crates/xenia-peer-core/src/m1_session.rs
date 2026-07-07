@@ -47,8 +47,8 @@ pub enum M1Permission {
 /// Consent is not a single boolean: a viewer may be allowed to see the
 /// screen without also being allowed to type, read the clipboard, or pull
 /// files. This set records exactly which tiers a grant unlocked so
-/// [`M1SessionMachine::require_active`] can deny an operation the operator
-/// never approved, even while the session is otherwise `Active`.
+/// `require_active` can deny an operation the operator never approved, even
+/// while the session is otherwise `Active`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct M1PermissionSet {
     /// Forward-path frame streaming.
@@ -211,9 +211,7 @@ impl M1SessionMachine {
 
     /// Viewer grants consent for exactly the tiers in `granted`; M1 becomes
     /// active. An operation whose permission is not in the set is denied by
-    /// [`require_active`] even though the session is `Active`.
-    ///
-    /// [`require_active`]: Self::require_active
+    /// `require_active` even though the session is `Active`.
     pub fn grant_consent_scoped(&mut self, granted: M1PermissionSet) -> Result<(), M1SessionError> {
         self.transition(
             M1SessionState::Offered,
