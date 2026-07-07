@@ -51,6 +51,48 @@ fn challenge_transcript(nonce: &[u8; 32], ed_pubkey: &[u8; 32], ml_dsa_pubkey: &
     t
 }
 
+/// Default auth-attempt rate limit: attempts allowed per window, and window
+/// length. Bounds brute-force / flood attempts against the auth surface.
+pub(crate) const AUTH_RATE_MAX: u32 = 30;
+pub(crate) const AUTH_RATE_WINDOW_SECS: u64 = 60;
+
+/// A fixed-window rate limiter. `allow(now)` returns whether an attempt is
+/// permitted, consuming one slot; the window resets when it elapses. Pure and
+/// time-injectable for testing.
+#[derive(Debug)]
+pub(crate) struct RateLimiter {
+    window_secs: u64,
+    max: u32,
+    window_start: u64,
+    count: u32,
+}
+
+impl RateLimiter {
+    pub(crate) fn new(max: u32, window_secs: u64) -> Self {
+        Self {
+            window_secs,
+            max,
+            window_start: 0,
+            count: 0,
+        }
+    }
+
+    /// Record an attempt; return whether it is within the limit. Once the
+    /// window elapses the counter resets.
+    pub(crate) fn allow(&mut self, now: u64) -> bool {
+        if now.saturating_sub(self.window_start) >= self.window_secs {
+            self.window_start = now;
+            self.count = 0;
+        }
+        if self.count < self.max {
+            self.count += 1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Outstanding challenges awaiting a response: nonce -> expiry (unix secs).
 /// A challenge is single-use -- [`Self::consume`] removes it.
 #[derive(Debug, Default)]
@@ -398,6 +440,21 @@ mod tests {
             ed_signature: mgr.sign(&transcript).to_bytes(),
             ml_dsa_signature: mgr.sign_ml_dsa(&transcript),
         }
+    }
+
+    #[test]
+    fn rate_limiter_bounds_attempts_per_window_and_resets() {
+        let mut rl = RateLimiter::new(3, 60);
+        // 3 allowed in the first window.
+        assert!(rl.allow(1000));
+        assert!(rl.allow(1001));
+        assert!(rl.allow(1030));
+        // 4th within the same window is refused.
+        assert!(!rl.allow(1031));
+        assert!(!rl.allow(1059));
+        // Next window resets the count.
+        assert!(rl.allow(1060));
+        assert!(rl.allow(1061));
     }
 
     #[test]

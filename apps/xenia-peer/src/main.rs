@@ -1667,6 +1667,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         policy: operator_policy,
         challenges: AsyncMutex::new(crate::operator_auth::ChallengeStore::new()),
         daemon_key: signing_key.clone(),
+        rate_limiter: AsyncMutex::new(crate::operator_auth::RateLimiter::new(
+            crate::operator_auth::AUTH_RATE_MAX,
+            crate::operator_auth::AUTH_RATE_WINDOW_SECS,
+        )),
     });
 
     let app = crate::admin_ui::mount(Router::new())

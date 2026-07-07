@@ -28,7 +28,7 @@ use xenia_handshake::{ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN};
 use crate::operator::{OperatorPolicy, OperatorRole};
 use crate::operator_auth::{
     AuthenticatedConsentAction, CHALLENGE_TTL_SECS, ChallengeResponse, ChallengeStore,
-    ConsentAction, OperatorToken, SignedOperatorToken, TOKEN_TTL_SECS, issue_token,
+    ConsentAction, OperatorToken, RateLimiter, SignedOperatorToken, TOKEN_TTL_SECS, issue_token,
     verify_challenge_response,
 };
 
@@ -38,6 +38,8 @@ pub(crate) struct OperatorAuthState {
     pub(crate) challenges: Mutex<ChallengeStore>,
     /// The daemon's own signing key, used to sign issued tokens.
     pub(crate) daemon_key: SigningKey,
+    /// Bounds auth attempts against brute-force / flooding.
+    pub(crate) rate_limiter: Mutex<RateLimiter>,
 }
 
 fn unix_now_secs() -> u64 {
@@ -114,6 +116,14 @@ async fn verify_handler(
     State(state): State<Arc<OperatorAuthState>>,
     Json(req): Json<VerifyRequestDto>,
 ) -> Result<Json<TokenDto>, (StatusCode, String)> {
+    // Rate-limit auth attempts before doing any (relatively expensive)
+    // signature verification, to bound brute-force / flooding.
+    if !state.rate_limiter.lock().await.allow(unix_now_secs()) {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many authentication attempts; slow down".to_string(),
+        ));
+    }
     let nonce = decode_fixed::<32>(&req.nonce)?;
     let ed_pubkey = decode_fixed::<32>(&req.ed_pubkey)?;
     let ed_signature = decode_fixed::<64>(&req.ed_signature)?;
@@ -231,7 +241,50 @@ mod tests {
             policy,
             challenges: Mutex::new(ChallengeStore::new()),
             daemon_key: daemon,
+            rate_limiter: Mutex::new(RateLimiter::new(
+                crate::operator_auth::AUTH_RATE_MAX,
+                crate::operator_auth::AUTH_RATE_WINDOW_SECS,
+            )),
         })
+    }
+
+    #[tokio::test]
+    async fn verify_is_rate_limited() {
+        let op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        // A state that allows just one auth attempt per window.
+        let policy = OperatorPolicy::from_operators(vec![EnrolledOperator {
+            operator_id: "alice".to_string(),
+            ed25519_pubkey: op.identity_public_key_bytes(),
+            ml_dsa_pubkey: op.ml_dsa_public_key_bytes().to_vec(),
+            role: OperatorRole::Admin,
+        }])
+        .unwrap();
+        let state = Arc::new(OperatorAuthState {
+            policy,
+            challenges: Mutex::new(ChallengeStore::new()),
+            daemon_key: daemon,
+            rate_limiter: Mutex::new(RateLimiter::new(1, 3600)),
+        });
+        let router = router(state);
+        // A well-formed VerifyRequestDto (all fields present) so the handler
+        // runs -- the crypto is garbage, but the rate limiter fires before
+        // verification. (Malformed JSON is rejected by the extractor before
+        // the handler; brute-forcing requires well-formed requests anyway.)
+        let body = serde_json::json!({
+            "nonce": "",
+            "ed_pubkey": "",
+            "ml_dsa_pubkey": "",
+            "ed_signature": "",
+            "ml_dsa_signature": "",
+        })
+        .to_string();
+        // First attempt: rate limiter allows it (then fails to decode -> 400).
+        let (first, _) = post_json(&router, "/auth/verify", body.clone()).await;
+        assert_ne!(first, StatusCode::TOO_MANY_REQUESTS);
+        // Second attempt in the same window: rate-limited.
+        let (second, _) = post_json(&router, "/auth/verify", body).await;
+        assert_eq!(second, StatusCode::TOO_MANY_REQUESTS);
     }
 
     async fn post_json(router: &Router, path: &str, body: String) -> (StatusCode, String) {
