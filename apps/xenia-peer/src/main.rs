@@ -329,6 +329,15 @@ struct Args {
     #[arg(long)]
     operators_file: Option<std::path::PathBuf>,
 
+    /// Require an authenticated, role-authorized operator token for consent
+    /// decisions. When off (default), the consent port accepts the legacy
+    /// plain-text `Approve`/`Deny`/`Revoke` (backward compatible). When on,
+    /// each decision must be a signed `AuthenticatedConsentAction` (token +
+    /// per-action signature) from an enrolled operator whose role permits it;
+    /// plain-text decisions are refused. Requires `--operators-file`.
+    #[arg(long)]
+    require_operator_auth: bool,
+
     /// Inbound viewer-input backend. `noop` (default) discards every
     /// input event -- a connected viewer is view-only and no OS-level
     /// injector is ever constructed, so no consent dialog appears.
@@ -1224,6 +1233,63 @@ fn configured_permission_set(args: &Args) -> M1PermissionSet {
     }
 }
 
+/// Decode a consent-socket message into a decision. With operator auth off,
+/// this is the legacy plain-text `Approve`/`Deny`/`Revoke`. With it on, the
+/// message must be a signed `AuthenticatedConsentAction` from an enrolled
+/// operator whose role permits the action -- anything else is refused (logged
+/// and dropped), so an unauthenticated socket can no longer decide consent.
+fn decode_consent_decision(
+    text: &str,
+    require_operator_auth: bool,
+    auth_state: &crate::operator_http::OperatorAuthState,
+    session_id: &[u8; 16],
+) -> Option<crate::operator_auth::ConsentAction> {
+    if !require_operator_auth {
+        return match text {
+            "Approve" => Some(crate::operator_auth::ConsentAction::Approve),
+            "Deny" => Some(crate::operator_auth::ConsentAction::Deny),
+            "Revoke" => Some(crate::operator_auth::ConsentAction::Revoke),
+            other => {
+                info!(text = other, "ignoring unrecognized consent message");
+                None
+            }
+        };
+    }
+
+    let request = match crate::operator_http::parse_authenticated_consent_action(text) {
+        Ok(request) => request,
+        Err(err) => {
+            warn!(error = %err, "malformed authenticated consent action; refused");
+            return None;
+        }
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    match crate::operator_auth::authorize_consent_action(
+        &auth_state.policy,
+        &auth_state.daemon_key.verifying_key(),
+        now,
+        session_id,
+        &request,
+    ) {
+        Ok(authorized) => {
+            info!(
+                operator = %authorized.operator_id,
+                role = ?authorized.role,
+                action = ?authorized.action,
+                "authenticated consent action authorized"
+            );
+            Some(authorized.action)
+        }
+        Err(err) => {
+            warn!(error = %err, "consent action refused by operator auth");
+            None
+        }
+    }
+}
+
 fn synthetic_audio_kind(mode: AudioMode) -> Option<SyntheticAudioKind> {
     match mode {
         AudioMode::Off => None,
@@ -1596,7 +1662,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 move |ws| ws_handler(ws, bridge.clone())
             }),
         )
-        .merge(crate::operator_http::router(operator_auth_state));
+        .merge(crate::operator_http::router(operator_auth_state.clone()));
 
     let listener = TcpListener::bind(format!("127.0.0.1:{}", args.admin_port)).await?;
     tokio::spawn(async move {
@@ -1718,6 +1784,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let revoked = Arc::new(AtomicBool::new(false));
     let revoked_for_consent = Arc::clone(&revoked);
 
+    // When --require-operator-auth is set, consent decisions must be signed,
+    // role-authorized operator actions (see decode_consent_decision). The
+    // per-action signature binds to this session id.
+    let require_operator_auth = args.require_operator_auth;
+    let consent_auth_state = operator_auth_state.clone();
+    let consent_session_id = *session_id.as_bytes();
+
     // Server task for processing consent responses.
     let consent_addr = format!("127.0.0.1:{}", args.consent_port);
     tokio::spawn(async move {
@@ -1736,8 +1809,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         match result {
                             Ok(msg) => {
                                 if let Ok(text) = msg.to_text() {
-                                    match text {
-                                        "Approve" => {
+                                    match decode_consent_decision(
+                                        text,
+                                        require_operator_auth,
+                                        &consent_auth_state,
+                                        &consent_session_id,
+                                    ) {
+                                        Some(crate::operator_auth::ConsentAction::Approve) => {
                                             info!(approved = true, "consent decision received");
                                             if let Some(tx) = consent_decision_tx.take() {
                                                 let _ = tx.send(true);
@@ -1746,24 +1824,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             // can still send "Revoke" to end the
                                             // live session.
                                         }
-                                        "Deny" => {
+                                        Some(crate::operator_auth::ConsentAction::Deny) => {
                                             info!(approved = false, "consent decision received");
                                             if let Some(tx) = consent_decision_tx.take() {
                                                 let _ = tx.send(false);
                                             }
                                             break;
                                         }
-                                        "Revoke" => {
+                                        Some(crate::operator_auth::ConsentAction::Revoke) => {
                                             info!("consent revocation received");
                                             revoked_for_consent.store(true, Ordering::SeqCst);
                                             break;
                                         }
-                                        other => {
-                                            info!(
-                                                text = other,
-                                                "ignoring unrecognized consent message"
-                                            );
-                                        }
+                                        None => {}
                                     }
                                 }
                             }

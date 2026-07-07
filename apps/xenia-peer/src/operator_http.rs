@@ -27,8 +27,9 @@ use xenia_handshake::{ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN};
 
 use crate::operator::{OperatorPolicy, OperatorRole};
 use crate::operator_auth::{
-    CHALLENGE_TTL_SECS, ChallengeResponse, ChallengeStore, SignedOperatorToken, TOKEN_TTL_SECS,
-    issue_token, verify_challenge_response,
+    AuthenticatedConsentAction, CHALLENGE_TTL_SECS, ChallengeResponse, ChallengeStore,
+    ConsentAction, OperatorToken, SignedOperatorToken, TOKEN_TTL_SECS, issue_token,
+    verify_challenge_response,
 };
 
 /// Shared state for the operator-auth routes.
@@ -147,6 +148,56 @@ async fn verify_handler(
     let token_nonce: [u8; 16] = rand::random();
     let signed = issue_token(&state.daemon_key, &authed, now, TOKEN_TTL_SECS, token_nonce);
     Ok(Json(TokenDto::from_signed(&signed)))
+}
+
+impl TokenDto {
+    /// Reconstruct a `SignedOperatorToken` from the wire form (reverse of
+    /// [`Self::from_signed`]). Used when parsing an authenticated consent
+    /// action off the consent socket.
+    fn into_signed(self) -> Result<SignedOperatorToken, String> {
+        Ok(SignedOperatorToken {
+            token: OperatorToken {
+                operator_id: self.operator_id,
+                role: self.role,
+                issued_at: self.issued_at,
+                expires_at: self.expires_at,
+                token_nonce: decode_fixed::<16>(&self.token_nonce).map_err(|(_, m)| m)?,
+            },
+            signature: decode_fixed::<64>(&self.signature).map_err(|(_, m)| m)?,
+        })
+    }
+}
+
+/// The JSON an operator sends on the consent port when
+/// `--require-operator-auth` is on.
+#[derive(Deserialize)]
+struct AuthenticatedConsentActionDto {
+    token: TokenDto,
+    /// `"Approve"`, `"Deny"`, or `"Revoke"`.
+    action: String,
+    action_signature: String,
+}
+
+/// Parse a JSON authenticated consent action from the consent socket into the
+/// verifiable [`AuthenticatedConsentAction`]. Decode/shape errors only -- the
+/// cryptographic authorization is [`crate::operator_auth::authorize_consent_action`].
+pub(crate) fn parse_authenticated_consent_action(
+    json: &str,
+) -> Result<AuthenticatedConsentAction, String> {
+    let dto: AuthenticatedConsentActionDto =
+        serde_json::from_str(json).map_err(|e| e.to_string())?;
+    let action = match dto.action.as_str() {
+        "Approve" => ConsentAction::Approve,
+        "Deny" => ConsentAction::Deny,
+        "Revoke" => ConsentAction::Revoke,
+        other => return Err(format!("unknown consent action: {other:?}")),
+    };
+    let action_signature = decode_fixed::<64>(&dto.action_signature).map_err(|(_, m)| m)?;
+    Ok(AuthenticatedConsentAction {
+        token: dto.token.into_signed()?,
+        action,
+        action_signature,
+    })
 }
 
 /// A `Router` carrying the two auth routes with the state already applied, so
