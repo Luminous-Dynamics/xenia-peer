@@ -46,11 +46,11 @@ use futures_util::{SinkExt, StreamExt};
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::protocol::Message;
-use tokio_tungstenite::{accept_async, connect_async, WebSocketStream};
+use tokio_tungstenite::{WebSocketStream, accept_async, connect_async};
 use tracing::debug;
 
 use xenia_peer_core::transport::{
-    RecvEnvelope, SendEnvelope, Transport, TransportError, MAX_ENVELOPE_BYTES,
+    MAX_ENVELOPE_BYTES, RecvEnvelope, SendEnvelope, Transport, TransportError,
 };
 
 /// Errors specific to the WebSocket transport. Coerced into

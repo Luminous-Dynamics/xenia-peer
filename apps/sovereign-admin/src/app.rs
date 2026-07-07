@@ -7,14 +7,14 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::{
-    components::{Route, Router, Routes, A},
+    components::{A, Route, Router, Routes},
     path,
 };
 
 use crate::auth::AuthState;
 use crate::config::DaemonConfig;
 use crate::context::{auth_context, daemon_config_context, missing_context_view};
-use crate::operator_session::{authenticate, OperatorIdentity, OperatorSession};
+use crate::operator_session::{OperatorIdentity, OperatorSession, authenticate};
 use crate::pages::{
     ConsentModal, DevicesPage, GovernancePage, LoginPage, MonitorPage, PolicyPage, SessionsPage,
 };

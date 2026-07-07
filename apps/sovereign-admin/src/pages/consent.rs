@@ -13,14 +13,14 @@
 //! permitted operator.
 
 use futures_util::{SinkExt, StreamExt};
-use gloo_net::websocket::{futures::WebSocket, Message};
+use gloo_net::websocket::{Message, futures::WebSocket};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use xenia_operator_proto::ConsentAction;
 
 use crate::app::OperatorSessionCtx;
-use crate::operator_session::{build_consent_request, OperatorIdentity};
+use crate::operator_session::{OperatorIdentity, build_consent_request};
 
 /// Extract the `session_id` (hex, 16 bytes) a daemon may include in the consent
 /// prompt. Required to bind an *authenticated* decision to the exact session;

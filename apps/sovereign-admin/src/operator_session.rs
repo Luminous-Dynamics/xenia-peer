@@ -28,7 +28,7 @@ use web_sys::Storage;
 
 use xenia_handshake::HandshakeManager;
 use xenia_operator_proto::{
-    challenge_transcript, consent_action_transcript, ConsentAction, OperatorAction, OperatorRole,
+    ConsentAction, OperatorAction, OperatorRole, challenge_transcript, consent_action_transcript,
 };
 
 /// localStorage keys for the operator's persisted identity seeds (hex). Two

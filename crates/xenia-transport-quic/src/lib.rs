@@ -21,13 +21,13 @@
 use std::io;
 
 use iroh::{
-    endpoint::{presets, Connection, RecvStream, SendStream},
     Endpoint, EndpointAddr,
+    endpoint::{Connection, RecvStream, SendStream, presets},
 };
 use thiserror::Error;
 use tracing::debug;
 use xenia_peer_core::transport::{
-    RecvEnvelope, SendEnvelope, Transport, TransportError, MAX_ENVELOPE_BYTES,
+    MAX_ENVELOPE_BYTES, RecvEnvelope, SendEnvelope, Transport, TransportError,
 };
 
 /// Re-export of the Iroh crate for endpoint ownership in callers.

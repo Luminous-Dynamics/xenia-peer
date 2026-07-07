@@ -34,7 +34,7 @@ use xenia_handshake::ML_DSA_65_PK_LEN;
 // console authorize against *identical* rules: a role the console greys out is
 // exactly a role the daemon also refuses. Only the enrollment/policy-file
 // machinery below is daemon-specific.
-pub(crate) use xenia_operator_proto::{role_permits, OperatorAction, OperatorRole};
+pub(crate) use xenia_operator_proto::{OperatorAction, OperatorRole, role_permits};
 
 /// The outcome of an authorization check, kept distinct so the caller can
 /// audit and message "not enrolled" separately from "enrolled but role too
