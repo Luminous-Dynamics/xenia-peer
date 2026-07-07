@@ -1388,19 +1388,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(bundle_dir) = args.verify_sealed_evidence_bundle.as_deref() {
-        let trust = resolve_sealed_evidence_trust_anchors(
-            args.sealed_evidence_trust_policy.as_deref(),
-            args.sealed_evidence_trust_policy_signature.as_deref(),
-            args.trusted_sealed_evidence_policy_root_fingerprint_hex
+        let trust = resolve_sealed_evidence_trust_anchors(SealedEvidenceTrustInputs {
+            trust_policy_path: args.sealed_evidence_trust_policy.as_deref(),
+            trust_policy_signature_path: args.sealed_evidence_trust_policy_signature.as_deref(),
+            trusted_policy_root_fingerprint_hex: args
+                .trusted_sealed_evidence_policy_root_fingerprint_hex
                 .as_deref(),
-            args.sealed_evidence_policy_roots.as_deref(),
-            args.required_sealed_evidence_policy_root_id.as_deref(),
-            args.trusted_transcript_key_fingerprint_hex.as_deref(),
-            args.trusted_ledger_key_fingerprint_hex.as_deref(),
-            args.sealed_evidence_signature_suite,
-            args.minimum_sealed_evidence_policy_epoch,
-            args.require_signed_sealed_evidence_trust_policy,
-        )?;
+            policy_roots_path: args.sealed_evidence_policy_roots.as_deref(),
+            required_policy_root_id: args.required_sealed_evidence_policy_root_id.as_deref(),
+            trusted_transcript_key_fingerprint_hex: args
+                .trusted_transcript_key_fingerprint_hex
+                .as_deref(),
+            trusted_ledger_key_fingerprint_hex: args.trusted_ledger_key_fingerprint_hex.as_deref(),
+            suite: args.sealed_evidence_signature_suite,
+            minimum_policy_epoch: args.minimum_sealed_evidence_policy_epoch,
+            require_signed_policy: args.require_signed_sealed_evidence_trust_policy,
+        })?;
 
         let mut report = verify_sealed_evidence_bundle_with_selected_suite(
             bundle_dir,
@@ -1567,6 +1570,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Initialize Capture Backend
+    // The `'backend` label is only broken to from the `scrcpy`-gated arm
+    // below, so it reads as unused in a default (non-scrcpy) build.
+    #[cfg_attr(not(feature = "scrcpy"), allow(unused_labels))]
     let mut capture: Box<dyn ScreenCapture> = 'backend: {
         if let Some(serial) = &args.phone_serial {
             #[cfg(feature = "scrcpy")]
@@ -2285,18 +2291,38 @@ struct ResolvedSealedEvidenceTrust {
     trust_policy: Option<crate::m1_runtime::SealedEvidenceTrustPolicyReceipt>,
 }
 
-fn resolve_sealed_evidence_trust_anchors(
-    trust_policy_path: Option<&std::path::Path>,
-    trust_policy_signature_path: Option<&std::path::Path>,
-    trusted_policy_root_fingerprint_hex: Option<&str>,
-    policy_roots_path: Option<&std::path::Path>,
-    required_policy_root_id: Option<&str>,
-    trusted_transcript_key_fingerprint_hex: Option<&str>,
-    trusted_ledger_key_fingerprint_hex: Option<&str>,
+/// The sealed-evidence trust-anchor inputs, all derived from CLI flags.
+/// Bundled into one struct so [`resolve_sealed_evidence_trust_anchors`] takes
+/// a single argument rather than ten positional ones.
+#[derive(Clone, Copy)]
+struct SealedEvidenceTrustInputs<'a> {
+    trust_policy_path: Option<&'a std::path::Path>,
+    trust_policy_signature_path: Option<&'a std::path::Path>,
+    trusted_policy_root_fingerprint_hex: Option<&'a str>,
+    policy_roots_path: Option<&'a std::path::Path>,
+    required_policy_root_id: Option<&'a str>,
+    trusted_transcript_key_fingerprint_hex: Option<&'a str>,
+    trusted_ledger_key_fingerprint_hex: Option<&'a str>,
     suite: EvidenceVerifierSuite,
     minimum_policy_epoch: Option<u64>,
     require_signed_policy: bool,
+}
+
+fn resolve_sealed_evidence_trust_anchors(
+    inputs: SealedEvidenceTrustInputs,
 ) -> Result<ResolvedSealedEvidenceTrust, Box<dyn std::error::Error>> {
+    let SealedEvidenceTrustInputs {
+        trust_policy_path,
+        trust_policy_signature_path,
+        trusted_policy_root_fingerprint_hex,
+        policy_roots_path,
+        required_policy_root_id,
+        trusted_transcript_key_fingerprint_hex,
+        trusted_ledger_key_fingerprint_hex,
+        suite,
+        minimum_policy_epoch,
+        require_signed_policy,
+    } = inputs;
     if let Some(path) = trust_policy_path {
         let policy = crate::m1_runtime::read_sealed_evidence_trust_policy_file(path)?;
         if let Some(minimum_policy_epoch) = minimum_policy_epoch {

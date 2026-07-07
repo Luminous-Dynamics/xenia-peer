@@ -23,11 +23,11 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use xenia_ledger::{
-    Chain, ConsentKind, CryptoPolicyProfile, DowngradePolicy, Ed25519EvidenceSignatureBackend,
-    EvidenceBundleSeal, EvidenceBundleVerifyError, EvidenceCryptoManifest,
-    EvidencePublicKeyBinding, EvidenceSignatureBackend, LedgerEntry, LedgerEntryExport,
-    LedgerError, SessionTranscriptBinding, SessionTranscriptSignature, SignatureEnvelope,
-    SignatureSuite, Verifier, VerifyError, CURRENT_EVIDENCE_CRYPTO_MANIFEST,
+    CURRENT_EVIDENCE_CRYPTO_MANIFEST, Chain, ConsentKind, CryptoPolicyProfile, DowngradePolicy,
+    Ed25519EvidenceSignatureBackend, EvidenceBundleSeal, EvidenceBundleVerifyError,
+    EvidenceCryptoManifest, EvidencePublicKeyBinding, EvidenceSignatureBackend, LedgerEntry,
+    LedgerEntryExport, LedgerError, SessionTranscriptBinding, SessionTranscriptSignature,
+    SignatureEnvelope, SignatureSuite, Verifier, VerifyError,
 };
 use xenia_peer_core::{
     M1Permission, M1PermissionSet, M1SessionError, M1SessionMachine, M1SessionState,
@@ -1295,16 +1295,15 @@ fn require_sealed_evidence_trust_policy_at(
         ));
     }
 
-    if let Some(policy_id) = policy.policy_id.as_deref() {
-        if policy
+    if let Some(policy_id) = policy.policy_id.as_deref()
+        && policy
             .revoked_policy_ids
             .iter()
             .any(|revoked| revoked == policy_id)
-        {
-            return Err(M1RuntimeError::EvidenceManifest(format!(
-                "sealed evidence trust policy id {policy_id:?} is revoked by policy"
-            )));
-        }
+    {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "sealed evidence trust policy id {policy_id:?} is revoked by policy"
+        )));
     }
 
     let valid_from = policy
@@ -1318,28 +1317,28 @@ fn require_sealed_evidence_trust_policy_at(
         .map(|value| parse_policy_rfc3339("valid_until", value))
         .transpose()?;
 
-    if let (Some(valid_from), Some(valid_until)) = (&valid_from, &valid_until) {
-        if valid_from >= valid_until {
-            return Err(M1RuntimeError::EvidenceManifest(
-                "sealed evidence trust policy valid_from must be before valid_until".to_string(),
-            ));
-        }
+    if let (Some(valid_from), Some(valid_until)) = (&valid_from, &valid_until)
+        && valid_from >= valid_until
+    {
+        return Err(M1RuntimeError::EvidenceManifest(
+            "sealed evidence trust policy valid_from must be before valid_until".to_string(),
+        ));
     }
 
-    if let Some(valid_from) = valid_from {
-        if now < valid_from {
-            return Err(M1RuntimeError::EvidenceManifest(format!(
-                "sealed evidence trust policy is not valid until {valid_from}"
-            )));
-        }
+    if let Some(valid_from) = valid_from
+        && now < valid_from
+    {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "sealed evidence trust policy is not valid until {valid_from}"
+        )));
     }
 
-    if let Some(valid_until) = valid_until {
-        if now >= valid_until {
-            return Err(M1RuntimeError::EvidenceManifest(format!(
-                "sealed evidence trust policy expired at {valid_until}"
-            )));
-        }
+    if let Some(valid_until) = valid_until
+        && now >= valid_until
+    {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "sealed evidence trust policy expired at {valid_until}"
+        )));
     }
 
     Ok(())
@@ -1528,13 +1527,13 @@ fn require_sealed_evidence_policy_root_at<'a>(
         ))
     })?;
 
-    if let Some(required_root_id) = required_root_id {
-        if root.root_id != required_root_id {
-            return Err(M1RuntimeError::EvidenceManifest(format!(
-                "sealed evidence policy-root id {:?} did not match required root id {:?}",
-                root.root_id, required_root_id
-            )));
-        }
+    if let Some(required_root_id) = required_root_id
+        && root.root_id != required_root_id
+    {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "sealed evidence policy-root id {:?} did not match required root id {:?}",
+            root.root_id, required_root_id
+        )));
     }
 
     if roots
@@ -1559,30 +1558,30 @@ fn require_sealed_evidence_policy_root_at<'a>(
         .map(|value| parse_policy_root_rfc3339("valid_until", value))
         .transpose()?;
 
-    if let (Some(valid_from), Some(valid_until)) = (&valid_from, &valid_until) {
-        if valid_from >= valid_until {
-            return Err(M1RuntimeError::EvidenceManifest(
-                "sealed evidence policy-root valid_from must be before valid_until".to_string(),
-            ));
-        }
+    if let (Some(valid_from), Some(valid_until)) = (&valid_from, &valid_until)
+        && valid_from >= valid_until
+    {
+        return Err(M1RuntimeError::EvidenceManifest(
+            "sealed evidence policy-root valid_from must be before valid_until".to_string(),
+        ));
     }
 
-    if let Some(valid_from) = valid_from {
-        if now < valid_from {
-            return Err(M1RuntimeError::EvidenceManifest(format!(
-                "sealed evidence policy-root {:?} is not valid until {valid_from}",
-                root.root_id
-            )));
-        }
+    if let Some(valid_from) = valid_from
+        && now < valid_from
+    {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "sealed evidence policy-root {:?} is not valid until {valid_from}",
+            root.root_id
+        )));
     }
 
-    if let Some(valid_until) = valid_until {
-        if now >= valid_until {
-            return Err(M1RuntimeError::EvidenceManifest(format!(
-                "sealed evidence policy-root {:?} expired at {valid_until}",
-                root.root_id
-            )));
-        }
+    if let Some(valid_until) = valid_until
+        && now >= valid_until
+    {
+        return Err(M1RuntimeError::EvidenceManifest(format!(
+            "sealed evidence policy-root {:?} expired at {valid_until}",
+            root.root_id
+        )));
     }
 
     Ok(root)
@@ -2028,9 +2027,10 @@ mod tests {
         std::fs::write(&paths.ledger_entries, b"[]").unwrap();
         let err = audit_evidence_verification_report_artifacts_dir(&dir)
             .expect_err("report audit should reject a swapped artifact");
-        assert!(err
-            .to_string()
-            .contains("verification_report artifact digests do not match"));
+        assert!(
+            err.to_string()
+                .contains("verification_report artifact digests do not match")
+        );
 
         let _ = std::fs::remove_dir_all(&paths.dir);
     }
@@ -2102,9 +2102,10 @@ mod tests {
         .unwrap();
         let err = audit_sealed_evidence_verification_report_artifacts_dir(&dir)
             .expect_err("sealed report audit should reject a swapped sealed artifact");
-        assert!(err
-            .to_string()
-            .contains("sealed verification_report artifact digests do not match"));
+        assert!(
+            err.to_string()
+                .contains("sealed verification_report artifact digests do not match")
+        );
 
         let _ = std::fs::remove_dir_all(&paths.dir);
     }
@@ -2328,9 +2329,10 @@ mod tests {
 
         let err = sealed_evidence_trust_policy_anchors(&policy, "ml-dsa-87-fips204")
             .expect_err("mismatched trust policy suite must fail closed");
-        assert!(err
-            .to_string()
-            .contains("did not match selected verifier suite"));
+        assert!(
+            err.to_string()
+                .contains("did not match selected verifier suite")
+        );
     }
 
     #[test]
