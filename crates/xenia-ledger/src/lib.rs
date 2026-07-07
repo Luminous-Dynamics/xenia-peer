@@ -2304,6 +2304,7 @@ impl Verifier {
     /// signature over the transcript hash, validates the transcript verifier key
     /// against `manifest.transcript_signature`, validates the ledger verifier key
     /// against `manifest.ledger_signature`, and only then verifies ledger entries.
+    #[allow(clippy::too_many_arguments)] // distinct verification inputs (manifest, bindings, signatures, key fingerprints); a bundle struct would just re-spread them
     pub fn verify_signed_transcript_bound_evidence_bundle_with_key_bindings(
         manifest: EvidenceCryptoManifest,
         transcript_binding: &SessionTranscriptBinding,
@@ -2378,6 +2379,7 @@ impl Verifier {
     /// addition to the signed transcript and signed ledger entries, it verifies a
     /// bundle seal over the manifest profile, signature suites, transcript hash,
     /// verifier-key fingerprints, and ledger-chain endpoints.
+    #[allow(clippy::too_many_arguments)] // distinct verification inputs; a bundle struct would just re-spread them
     pub fn verify_sealed_signed_transcript_bound_evidence_bundle_with_key_bindings(
         manifest: EvidenceCryptoManifest,
         transcript_binding: &SessionTranscriptBinding,
