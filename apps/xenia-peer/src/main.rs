@@ -61,6 +61,7 @@ mod file_transfer;
 mod governance;
 mod m1_ledger;
 mod m1_runtime;
+mod operator;
 use crate::governance::{GovernanceBridge, MitigationRule};
 
 #[derive(Parser, Debug)]
