@@ -301,14 +301,14 @@ mod tests {
 
     #[test]
     fn interpret_recv_returns_binary_payloads_verbatim() {
-        let msg = Some(Ok(Message::Binary(vec![1, 2, 3, 4].into())));
+        let msg = Some(Ok(Message::Binary(vec![1, 2, 3, 4])));
         assert_eq!(interpret_recv(msg).unwrap(), Some(vec![1, 2, 3, 4]));
     }
 
     #[test]
     fn interpret_recv_rejects_oversize_binary() {
         let big = vec![0u8; MAX_ENVELOPE_BYTES as usize + 1];
-        let err = interpret_recv(Some(Ok(Message::Binary(big.into())))).unwrap_err();
+        let err = interpret_recv(Some(Ok(Message::Binary(big)))).unwrap_err();
         assert!(matches!(err, TransportError::EnvelopeTooLarge(_)));
     }
 
@@ -330,11 +330,11 @@ mod tests {
     fn interpret_recv_skips_ping_and_pong() {
         // Control frames yield no envelope; the caller loops to the next frame.
         assert_eq!(
-            interpret_recv(Some(Ok(Message::Ping(Vec::new().into())))).unwrap(),
+            interpret_recv(Some(Ok(Message::Ping(Vec::new())))).unwrap(),
             None
         );
         assert_eq!(
-            interpret_recv(Some(Ok(Message::Pong(Vec::new().into())))).unwrap(),
+            interpret_recv(Some(Ok(Message::Pong(Vec::new())))).unwrap(),
             None
         );
     }

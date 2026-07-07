@@ -28,7 +28,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 
 use xenia_handshake::{HandshakeManager, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN};
 
-use crate::operator::{OperatorAction, OperatorPolicy, OperatorRole};
+use crate::operator::{OperatorPolicy, OperatorRole};
 
 // The challenge/consent transcripts and the consent-action model come from the
 // shared `xenia-operator-proto` crate so the console signs exactly the bytes
