@@ -327,6 +327,9 @@ pub(crate) struct AuthorizedConsentAction {
     pub(crate) action: ConsentAction,
     pub(crate) operator_id: String,
     pub(crate) role: OperatorRole,
+    /// The operator's enrolled Ed25519 public key, for stable audit
+    /// attribution (used as the ledger entry's `source_id`).
+    pub(crate) ed25519_pubkey: [u8; 32],
 }
 
 /// Authorize a consent action, fail-closed at every step:
@@ -364,6 +367,7 @@ pub(crate) fn authorize_consent_action(
         action: request.action,
         operator_id: token.operator_id,
         role: token.role,
+        ed25519_pubkey: operator.ed25519_pubkey,
     })
 }
 

@@ -62,6 +62,7 @@ mod governance;
 mod m1_ledger;
 mod m1_runtime;
 mod operator;
+mod operator_audit;
 mod operator_auth;
 mod operator_http;
 use crate::governance::{GovernanceBridge, MitigationRule};
@@ -1233,6 +1234,13 @@ fn configured_permission_set(args: &Args) -> M1PermissionSet {
     }
 }
 
+/// A decoded consent-socket decision: the action to apply, plus the operator
+/// attribution when it came in authenticated (drives the Phase 4 audit entry).
+struct DecodedConsent {
+    action: crate::operator_auth::ConsentAction,
+    authorized: Option<crate::operator_auth::AuthorizedConsentAction>,
+}
+
 /// Decode a consent-socket message into a decision. With operator auth off,
 /// this is the legacy plain-text `Approve`/`Deny`/`Revoke`. With it on, the
 /// message must be a signed `AuthenticatedConsentAction` from an enrolled
@@ -1243,17 +1251,21 @@ fn decode_consent_decision(
     require_operator_auth: bool,
     auth_state: &crate::operator_http::OperatorAuthState,
     session_id: &[u8; 16],
-) -> Option<crate::operator_auth::ConsentAction> {
+) -> Option<DecodedConsent> {
     if !require_operator_auth {
-        return match text {
-            "Approve" => Some(crate::operator_auth::ConsentAction::Approve),
-            "Deny" => Some(crate::operator_auth::ConsentAction::Deny),
-            "Revoke" => Some(crate::operator_auth::ConsentAction::Revoke),
+        let action = match text {
+            "Approve" => crate::operator_auth::ConsentAction::Approve,
+            "Deny" => crate::operator_auth::ConsentAction::Deny,
+            "Revoke" => crate::operator_auth::ConsentAction::Revoke,
             other => {
                 info!(text = other, "ignoring unrecognized consent message");
-                None
+                return None;
             }
         };
+        return Some(DecodedConsent {
+            action,
+            authorized: None,
+        });
     }
 
     let request = match crate::operator_http::parse_authenticated_consent_action(text) {
@@ -1281,7 +1293,10 @@ fn decode_consent_decision(
                 action = ?authorized.action,
                 "authenticated consent action authorized"
             );
-            Some(authorized.action)
+            Some(DecodedConsent {
+                action: authorized.action,
+                authorized: Some(authorized),
+            })
         }
         Err(err) => {
             warn!(error = %err, "consent action refused by operator auth");
@@ -1786,10 +1801,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // When --require-operator-auth is set, consent decisions must be signed,
     // role-authorized operator actions (see decode_consent_decision). The
-    // per-action signature binds to this session id.
+    // per-action signature binds to this session id, and each authenticated
+    // decision is attributed in the ledger (Phase 4).
     let require_operator_auth = args.require_operator_auth;
     let consent_auth_state = operator_auth_state.clone();
     let consent_session_id = *session_id.as_bytes();
+    let consent_session_uuid = session_id;
+    let consent_ledger = shared_ledger.clone();
 
     // Server task for processing consent responses.
     let consent_addr = format!("127.0.0.1:{}", args.consent_port);
@@ -1809,13 +1827,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         match result {
                             Ok(msg) => {
                                 if let Ok(text) = msg.to_text() {
-                                    match decode_consent_decision(
+                                    let Some(decoded) = decode_consent_decision(
                                         text,
                                         require_operator_auth,
                                         &consent_auth_state,
                                         &consent_session_id,
-                                    ) {
-                                        Some(crate::operator_auth::ConsentAction::Approve) => {
+                                    ) else {
+                                        continue;
+                                    };
+                                    // Phase 4: attribute an authenticated
+                                    // decision in the tamper-evident ledger.
+                                    if let Some(authorized) = &decoded.authorized {
+                                        let event =
+                                            crate::operator_audit::operator_consent_audit_event(
+                                                authorized,
+                                                consent_session_uuid,
+                                                Uuid::new_v4(),
+                                            );
+                                        if let Err(err) = consent_ledger.lock().await.append(event)
+                                        {
+                                            tracing::warn!(error = %err, "failed to append operator-action audit entry");
+                                        }
+                                    }
+                                    match decoded.action {
+                                        crate::operator_auth::ConsentAction::Approve => {
                                             info!(approved = true, "consent decision received");
                                             if let Some(tx) = consent_decision_tx.take() {
                                                 let _ = tx.send(true);
@@ -1824,19 +1859,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             // can still send "Revoke" to end the
                                             // live session.
                                         }
-                                        Some(crate::operator_auth::ConsentAction::Deny) => {
+                                        crate::operator_auth::ConsentAction::Deny => {
                                             info!(approved = false, "consent decision received");
                                             if let Some(tx) = consent_decision_tx.take() {
                                                 let _ = tx.send(false);
                                             }
                                             break;
                                         }
-                                        Some(crate::operator_auth::ConsentAction::Revoke) => {
+                                        crate::operator_auth::ConsentAction::Revoke => {
                                             info!("consent revocation received");
                                             revoked_for_consent.store(true, Ordering::SeqCst);
                                             break;
                                         }
-                                        None => {}
                                     }
                                 }
                             }
