@@ -27,7 +27,12 @@ Design for closing review finding #17 (no server-side operator auth/RBAC).
   tested end-to-end (needs a running daemon + a client that presents a token —
   Phase 5). The single-`accept()` consent-transport fix and browser-console
   revocation are folded into Phase 5.
-- ⬜ **Phase 4**: operator-action audit entries in `xenia-ledger`.
+- ✅ **Phase 4** (`operator_audit.rs`, commit `296d4a2`): each authenticated
+  consent decision is appended to the daemon's hash-chained ledger,
+  attributing it to the operator (Ed25519 key as `source_id`, role + action in
+  scope). `operator_consent_audit_event` maps the action to `ConsentKind`;
+  pure and unit-tested. "Operator X (role Y) approved/denied/revoked session Z"
+  is now tamper-evident and offline-verifiable.
 - ⬜ **Phase 5**: console integration (real challenge/sign flow, role-gated
   pages, MFA).
 - ⬜ **Phase 6**: rate limiting, remote operators, session-recording integrity.
