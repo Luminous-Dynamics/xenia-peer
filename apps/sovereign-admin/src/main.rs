@@ -16,6 +16,7 @@ mod app;
 mod auth;
 mod config;
 mod context;
+mod operator_session;
 mod pages;
 
 fn main() {
