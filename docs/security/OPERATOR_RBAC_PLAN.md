@@ -35,7 +35,10 @@ Design for closing review finding #17 (no server-side operator auth/RBAC).
   is now tamper-evident and offline-verifiable.
 - ⬜ **Phase 5**: console integration (real challenge/sign flow, role-gated
   pages, MFA).
-- ⬜ **Phase 6**: rate limiting, remote operators, session-recording integrity.
+- 🟡 **Phase 6** (partial, commit `3da46e3`): auth-surface **rate limiting**
+  done — a pure, tested `RateLimiter` wired into `/auth/verify` (429 beyond
+  `AUTH_RATE_MAX`/window, before verification). Remote operators and
+  session-recording integrity remain.
 
 ## The one-sentence problem
 
