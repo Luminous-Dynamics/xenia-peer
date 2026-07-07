@@ -46,8 +46,8 @@
 //   inside the worker, so this should be transparent here.
 
 use std::env;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use xenia_capture::{ScapCapture, ScapOptions, ScapResolution, ScreenCapture};

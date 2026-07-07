@@ -19,8 +19,8 @@ use std::io;
 
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
 /// Maximum envelope size this transport will accept. Guards against
 /// a malicious peer sending a length prefix that would cause the

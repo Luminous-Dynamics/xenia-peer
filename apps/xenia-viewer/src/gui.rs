@@ -759,7 +759,10 @@ mod tests {
             egui::pos2(10.0, 10.0),
             egui::vec2(100.0, 50.0),
         ));
-        assert_eq!(app.normalize_in_image(egui::pos2(60.0, 35.0)), Some((0.5, 0.5)));
+        assert_eq!(
+            app.normalize_in_image(egui::pos2(60.0, 35.0)),
+            Some((0.5, 0.5))
+        );
         assert_eq!(app.normalize_in_image(egui::pos2(5.0, 5.0)), None);
     }
 }

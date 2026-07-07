@@ -104,7 +104,13 @@ pub unsafe extern "C" fn xenia_connect(
         XENIA_CODEC_H264 => MobileCodec::H264,
         _ => MobileCodec::Passthrough,
     };
-    let engine = ViewerEngine::connect(runtime().handle(), host_port, codec, recv_dir, max_file_bytes);
+    let engine = ViewerEngine::connect(
+        runtime().handle(),
+        host_port,
+        codec,
+        recv_dir,
+        max_file_bytes,
+    );
     Box::into_raw(Box::new(engine)) as u64
 }
 
@@ -143,7 +149,9 @@ pub unsafe extern "C" fn xenia_last_error(handle: u64) -> *mut c_char {
     // SAFETY: caller contract above.
     let engine = unsafe { &*(handle as *const ViewerEngine) };
     match engine.last_error() {
-        Some(msg) => CString::new(msg).map(CString::into_raw).unwrap_or(std::ptr::null_mut()),
+        Some(msg) => CString::new(msg)
+            .map(CString::into_raw)
+            .unwrap_or(std::ptr::null_mut()),
         None => std::ptr::null_mut(),
     }
 }
@@ -235,7 +243,10 @@ pub unsafe extern "C" fn xenia_frame_free(frame: XeniaFrame) {
     // SAFETY: caller contract above reconstructs exactly the boxed
     // slice `xenia_poll_frame` leaked via `mem::forget`.
     drop(unsafe {
-        Box::from_raw(std::ptr::slice_from_raw_parts_mut(frame.rgba, frame.rgba_len))
+        Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+            frame.rgba,
+            frame.rgba_len,
+        ))
     });
 }
 
@@ -246,7 +257,13 @@ pub unsafe extern "C" fn xenia_frame_free(frame: XeniaFrame) {
 /// `handle` must be a value previously returned by [`xenia_connect`]
 /// and not yet passed to [`xenia_disconnect`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn xenia_send_pointer(handle: u64, x: f32, y: f32, button: u8, pressed: bool) {
+pub unsafe extern "C" fn xenia_send_pointer(
+    handle: u64,
+    x: f32,
+    y: f32,
+    button: u8,
+    pressed: bool,
+) {
     if handle == 0 {
         return;
     }
@@ -315,7 +332,9 @@ pub unsafe extern "C" fn xenia_poll_clipboard(handle: u64) -> *mut c_char {
     // SAFETY: caller contract above.
     let engine = unsafe { &*(handle as *const ViewerEngine) };
     match engine.poll_clipboard() {
-        Some(Some(text)) => CString::new(text).map(CString::into_raw).unwrap_or(std::ptr::null_mut()),
+        Some(Some(text)) => CString::new(text)
+            .map(CString::into_raw)
+            .unwrap_or(std::ptr::null_mut()),
         _ => std::ptr::null_mut(),
     }
 }
@@ -416,7 +435,9 @@ pub struct XeniaFileTransferEvent {
 }
 
 fn opt_cstring(s: String) -> *mut c_char {
-    CString::new(s).map(CString::into_raw).unwrap_or(std::ptr::null_mut())
+    CString::new(s)
+        .map(CString::into_raw)
+        .unwrap_or(std::ptr::null_mut())
 }
 
 /// Pop the oldest queued file-transfer event for `handle`. Returns a
@@ -565,7 +586,12 @@ mod tests {
     fn null_host_port_rejected_without_connecting() {
         unsafe {
             assert_eq!(
-                xenia_connect(std::ptr::null(), XENIA_CODEC_PASSTHROUGH, std::ptr::null(), 0),
+                xenia_connect(
+                    std::ptr::null(),
+                    XENIA_CODEC_PASSTHROUGH,
+                    std::ptr::null(),
+                    0
+                ),
                 0
             );
         }
@@ -575,7 +601,12 @@ mod tests {
     fn connect_disconnect_round_trip_does_not_crash() {
         let host_port = CString::new("127.0.0.1:3").unwrap();
         unsafe {
-            let handle = xenia_connect(host_port.as_ptr(), XENIA_CODEC_HDC, std::ptr::null(), 100 * 1024 * 1024);
+            let handle = xenia_connect(
+                host_port.as_ptr(),
+                XENIA_CODEC_HDC,
+                std::ptr::null(),
+                100 * 1024 * 1024,
+            );
             assert_ne!(handle, 0);
             // Immediately tear down -- the background task may or may
             // not have started connecting yet; this must be safe

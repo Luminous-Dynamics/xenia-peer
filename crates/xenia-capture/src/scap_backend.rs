@@ -529,10 +529,7 @@ mod tests {
             2, 0, 0, 255, // row 2
         ];
         flip_rows_vertically(&mut odd, 1, 3);
-        assert_eq!(
-            odd,
-            vec![2, 0, 0, 255, 1, 0, 0, 255, 0, 0, 0, 255]
-        );
+        assert_eq!(odd, vec![2, 0, 0, 255, 1, 0, 0, 255, 0, 0, 0, 255]);
     }
 
     #[test]

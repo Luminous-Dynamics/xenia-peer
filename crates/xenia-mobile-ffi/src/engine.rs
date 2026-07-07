@@ -23,19 +23,19 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tracing::{info, warn};
 
 use xenia_inject::InputEvent;
 use xenia_peer_core::frame::{PixelFormat as FramePixelFormat, RawCapabilities, RawRekey};
-use xenia_peer_core::{
-    ClipboardContent, FileTransferMessage, RawClipboard, FILE_TRANSFER_CHUNK_SIZE,
-    PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST, PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER,
-};
 use xenia_peer_core::handshake::{
     NegotiatedTransport, negotiated_session_context_hash, perform_viewer_handshake_with_transcript,
 };
 use xenia_peer_core::transport::{RecvEnvelope, SendEnvelope, TcpTransport};
+use xenia_peer_core::{
+    ClipboardContent, FILE_TRANSFER_CHUNK_SIZE, FileTransferMessage,
+    PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST, PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER, RawClipboard,
+};
 use xenia_peer_core::{
     HandshakeManager, LaneSession, RekeyPolicy, SessionEpochState, derive_negotiated_context_key,
 };
@@ -180,7 +180,10 @@ enum FileTransferCommand {
 /// malicious/buggy peer could otherwise offer `"../../etc/passwd"` and
 /// have it joined onto `recv_dir` verbatim).
 fn sanitize_transfer_filename(name: &str) -> Option<String> {
-    let candidate = std::path::Path::new(name).file_name()?.to_str()?.to_string();
+    let candidate = std::path::Path::new(name)
+        .file_name()?
+        .to_str()?
+        .to_string();
     if candidate.is_empty() || candidate == "." || candidate == ".." {
         return None;
     }
@@ -240,7 +243,9 @@ impl ViewerEngine {
             frames: Mutex::new(VecDeque::with_capacity(FRAME_QUEUE_CAP)),
             last_error: Mutex::new(None),
             clipboard: Mutex::new(None),
-            file_transfer_events: Mutex::new(VecDeque::with_capacity(FILE_TRANSFER_EVENT_QUEUE_CAP)),
+            file_transfer_events: Mutex::new(VecDeque::with_capacity(
+                FILE_TRANSFER_EVENT_QUEUE_CAP,
+            )),
         });
         // Bounded so a stalled network task can't let viewer-generated input
         // and clipboard events accumulate without limit. These carry UI
@@ -343,7 +348,9 @@ impl ViewerEngine {
     /// this while one is already active surfaces a `Done { ok: false
     /// }` event rather than queuing a second one.
     pub fn send_file(&self, name: String, data: Vec<u8>) {
-        let _ = self.ft_cmd_tx.try_send(FileTransferCommand::SendFile { name, data });
+        let _ = self
+            .ft_cmd_tx
+            .try_send(FileTransferCommand::SendFile { name, data });
     }
 
     /// Pop the oldest queued file-transfer event, if any.
@@ -401,9 +408,10 @@ async fn run_session_inner(
         .map_err(|e| e.to_string())?;
 
     let mut handshake_mgr = HandshakeManager::new();
-    let handshake = perform_viewer_handshake_with_transcript(&mut transport, &mut handshake_mgr, "daemon")
-        .await
-        .map_err(|e| e.to_string())?;
+    let handshake =
+        perform_viewer_handshake_with_transcript(&mut transport, &mut handshake_mgr, "daemon")
+            .await
+            .map_err(|e| e.to_string())?;
     info!(transcript_hash = ?handshake.transcript_hash, "mobile viewer handshake complete");
 
     // Fixed source id / epoch, matching `xenia-viewer`'s CLI defaults
@@ -486,7 +494,9 @@ async fn run_session_inner(
     // feature, which pulls in ffmpeg-next/libx264 and isn't portable
     // to Android.
     let mut decoder: Option<Box<dyn Decoder + Send>> = match codec {
-        MobileCodec::Passthrough => Some(Box::new(xenia_video::passthrough::PassthroughDecoder::new())),
+        MobileCodec::Passthrough => {
+            Some(Box::new(xenia_video::passthrough::PassthroughDecoder::new()))
+        }
         MobileCodec::Hdc => Some(Box::new(xenia_video::hdc::HdcDecoder::new())),
         MobileCodec::H264 => None,
     };
@@ -539,7 +549,8 @@ async fn run_session_inner(
         // which only understands the lane-envelope shape.
         if matches!(
             xenia_wire::envelope_payload_type(&envelope),
-            Some(PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST) | Some(PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER)
+            Some(PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST)
+                | Some(PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER)
         ) {
             let message = {
                 let mut session = session.lock().await;
@@ -580,7 +591,8 @@ async fn run_session_inner(
             continue;
         }
         if raw_frame.pixel_format == FramePixelFormat::Capabilities {
-            let capabilities = RawCapabilities::from_frame(&raw_frame).map_err(|e| e.to_string())?;
+            let capabilities =
+                RawCapabilities::from_frame(&raw_frame).map_err(|e| e.to_string())?;
             let negotiated_context_hash =
                 negotiated_session_context_hash(negotiated_transport, capabilities.clone())
                     .map_err(|e| e.to_string())?;
@@ -634,7 +646,9 @@ async fn run_session_inner(
                 }
                 .into_frame(0, 0)
                 .map_err(|e| e.to_string())?;
-                session.seal_control_frame(&ack).map_err(|e| e.to_string())?
+                session
+                    .seal_control_frame(&ack)
+                    .map_err(|e| e.to_string())?
             };
             send_half
                 .lock()
@@ -642,7 +656,10 @@ async fn run_session_inner(
                 .send_envelope(&ack_envelope)
                 .await
                 .map_err(|e| e.to_string())?;
-            info!(key_epoch = epoch_state.current_epoch(), "mobile viewer session rekeyed");
+            info!(
+                key_epoch = epoch_state.current_epoch(),
+                "mobile viewer session rekeyed"
+            );
             continue;
         }
         // Audio is intentionally ignored (out of scope for this
@@ -758,7 +775,10 @@ async fn handle_file_transfer_command<S: SendEnvelope>(
 ) {
     let FileTransferCommand::SendFile { name, data } = cmd;
     if outgoing.is_some() {
-        warn!(name, "send_file while another outgoing transfer is in flight; dropping");
+        warn!(
+            name,
+            "send_file while another outgoing transfer is in flight; dropping"
+        );
         push_ft_event(
             shared,
             FileTransferEvent::Done {
@@ -810,7 +830,11 @@ async fn handle_file_transfer_command<S: SendEnvelope>(
         },
     )
     .await;
-    *outgoing = Some(OutgoingTransfer { transfer_id, name, data });
+    *outgoing = Some(OutgoingTransfer {
+        transfer_id,
+        name,
+        data,
+    });
 }
 
 /// Handle one already-opened [`FileTransferMessage`] arriving from the
@@ -839,7 +863,10 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
             blake3_hash,
         } => {
             let (accept, reason) = match (recv_dir, sanitize_transfer_filename(&name)) {
-                (None, _) => (false, "file transfer is disabled on this viewer".to_string()),
+                (None, _) => (
+                    false,
+                    "file transfer is disabled on this viewer".to_string(),
+                ),
                 (Some(_), None) => (false, "unusable filename".to_string()),
                 (Some(_), Some(_)) if size > max_bytes => {
                     (false, format!("file exceeds {max_bytes}-byte cap"))
@@ -860,7 +887,12 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
                         buffer: Vec::with_capacity(size.min(max_bytes) as usize),
                     },
                 );
-                info!(transfer_id, name = safe_name, size, "file transfer offer accepted");
+                info!(
+                    transfer_id,
+                    name = safe_name,
+                    size,
+                    "file transfer offer accepted"
+                );
                 push_ft_event(
                     shared,
                     FileTransferEvent::IncomingOffer {
@@ -873,7 +905,10 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
                 )
                 .await;
             } else {
-                info!(transfer_id, name, size, reason, "file transfer offer rejected");
+                info!(
+                    transfer_id,
+                    name, size, reason, "file transfer offer rejected"
+                );
                 push_ft_event(
                     shared,
                     FileTransferEvent::IncomingOffer {
@@ -889,7 +924,10 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
             let reply = if accept {
                 FileTransferMessage::Accept { transfer_id }
             } else {
-                FileTransferMessage::Reject { transfer_id, reason }
+                FileTransferMessage::Reject {
+                    transfer_id,
+                    reason,
+                }
             };
             if let Err(err) = seal_and_send(session, send_half, reply).await {
                 warn!(error = %err, "failed to reply to file-transfer offer");
@@ -903,7 +941,11 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
             let name = transfer.name.clone();
             let data = transfer.data.clone();
             let total = data.len() as u64;
-            info!(transfer_id, bytes = total, "transfer accepted, sending chunks");
+            info!(
+                transfer_id,
+                bytes = total,
+                "transfer accepted, sending chunks"
+            );
             for (i, chunk) in data.chunks(FILE_TRANSFER_CHUNK_SIZE).enumerate() {
                 let msg = FileTransferMessage::Chunk {
                     transfer_id,
@@ -939,13 +981,25 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
                 )
                 .await;
             }
-            if let Err(err) = seal_and_send(session, send_half, FileTransferMessage::Complete { transfer_id }).await {
+            if let Err(err) = seal_and_send(
+                session,
+                send_half,
+                FileTransferMessage::Complete { transfer_id },
+            )
+            .await
+            {
                 warn!(error = %err, "failed to send file-transfer completion");
             }
             info!(transfer_id, "all chunks sent, awaiting verification");
         }
-        FileTransferMessage::Reject { transfer_id, reason } => {
-            if outgoing.as_ref().is_some_and(|t| t.transfer_id == transfer_id) {
+        FileTransferMessage::Reject {
+            transfer_id,
+            reason,
+        } => {
+            if outgoing
+                .as_ref()
+                .is_some_and(|t| t.transfer_id == transfer_id)
+            {
                 warn!(transfer_id, reason, "outgoing transfer rejected by peer");
                 let name = outgoing.take().expect("checked is_some_and above").name;
                 push_ft_event(
@@ -972,8 +1026,14 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
             };
             let off = offset as usize;
             if off.saturating_add(data.len()) > transfer.expected_size as usize {
-                warn!(transfer_id, "chunk exceeds offered file size; dropping transfer");
-                let name = incoming.remove(&transfer_id).expect("just matched via get_mut").name;
+                warn!(
+                    transfer_id,
+                    "chunk exceeds offered file size; dropping transfer"
+                );
+                let name = incoming
+                    .remove(&transfer_id)
+                    .expect("just matched via get_mut")
+                    .name;
                 push_ft_event(
                     shared,
                     FileTransferEvent::Done {
@@ -1042,7 +1102,10 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
                     }
                 }
             } else {
-                warn!(transfer_id, "file transfer failed BLAKE3 verification, not written");
+                warn!(
+                    transfer_id,
+                    "file transfer failed BLAKE3 verification, not written"
+                );
                 detail = "BLAKE3 verification failed".to_string();
             }
             push_ft_event(
@@ -1060,13 +1123,24 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
             // (matching `xenia-viewer`'s exact protocol behavior) even
             // though the local `Done` event above also folds in
             // whether the disk write itself succeeded.
-            if let Err(err) = seal_and_send(session, send_half, FileTransferMessage::Verified { transfer_id, ok: hash_ok }).await
+            if let Err(err) = seal_and_send(
+                session,
+                send_half,
+                FileTransferMessage::Verified {
+                    transfer_id,
+                    ok: hash_ok,
+                },
+            )
+            .await
             {
                 warn!(error = %err, "failed to send file-transfer verification reply");
             }
         }
         FileTransferMessage::Verified { transfer_id, ok } => {
-            if outgoing.as_ref().is_some_and(|t| t.transfer_id == transfer_id) {
+            if outgoing
+                .as_ref()
+                .is_some_and(|t| t.transfer_id == transfer_id)
+            {
                 info!(transfer_id, ok, "outgoing transfer verification result");
                 let name = outgoing.take().expect("checked is_some_and above").name;
                 push_ft_event(
@@ -1191,13 +1265,24 @@ mod tests {
 
     #[test]
     fn sanitize_transfer_filename_strips_path_components() {
-        assert_eq!(sanitize_transfer_filename("report.pdf"), Some("report.pdf".to_string()));
-        assert_eq!(sanitize_transfer_filename("/etc/passwd"), Some("passwd".to_string()));
-        assert_eq!(sanitize_transfer_filename("../../secret"), Some("secret".to_string()));
-        assert_eq!(sanitize_transfer_filename("a/b/c/thing.txt"), Some("thing.txt".to_string()));
+        assert_eq!(
+            sanitize_transfer_filename("report.pdf"),
+            Some("report.pdf".to_string())
+        );
+        assert_eq!(
+            sanitize_transfer_filename("/etc/passwd"),
+            Some("passwd".to_string())
+        );
+        assert_eq!(
+            sanitize_transfer_filename("../../secret"),
+            Some("secret".to_string())
+        );
+        assert_eq!(
+            sanitize_transfer_filename("a/b/c/thing.txt"),
+            Some("thing.txt".to_string())
+        );
         assert_eq!(sanitize_transfer_filename(""), None);
         assert_eq!(sanitize_transfer_filename("."), None);
         assert_eq!(sanitize_transfer_filename(".."), None);
     }
 }
-

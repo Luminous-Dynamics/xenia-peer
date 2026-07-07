@@ -32,10 +32,10 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use ashpd::WindowIdentifier;
 use ashpd::desktop::remote_desktop::{DeviceType, RemoteDesktop};
 use ashpd::desktop::{PersistMode, Session};
 use ashpd::enumflags2::BitFlags;
-use ashpd::WindowIdentifier;
 
 use crate::{InjectError, InputInjector};
 

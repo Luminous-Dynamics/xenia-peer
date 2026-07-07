@@ -164,7 +164,10 @@ impl AnyTransport {
                 transport,
             } => {
                 let (send, recv) = transport.split();
-                (AnySendHalf::Quic { _endpoint, send }, AnyRecvHalf::Quic(recv))
+                (
+                    AnySendHalf::Quic { _endpoint, send },
+                    AnyRecvHalf::Quic(recv),
+                )
             }
         }
     }
@@ -747,7 +750,10 @@ fn apply_clipboard_content_to_viewer(content: &ClipboardContent) {
     if let Err(err) = result {
         warn!(error = %err, "failed to apply daemon clipboard update to viewer clipboard");
     } else {
-        info!(?content, "applied daemon clipboard update to viewer clipboard");
+        info!(
+            ?content,
+            "applied daemon clipboard update to viewer clipboard"
+        );
     }
 }
 
@@ -803,7 +809,10 @@ async fn handle_file_transfer_message(
             blake3_hash,
         } => {
             let (accept, reason) = match (recv_file_dir, sanitize_transfer_filename(&name)) {
-                (None, _) => (false, "file transfer is disabled on this viewer".to_string()),
+                (None, _) => (
+                    false,
+                    "file transfer is disabled on this viewer".to_string(),
+                ),
                 (Some(_), None) => (false, "unusable filename".to_string()),
                 (Some(_), Some(_)) if size > max_bytes => {
                     (false, format!("file exceeds {max_bytes}-byte cap"))
@@ -823,7 +832,10 @@ async fn handle_file_transfer_message(
                 );
                 info!(transfer_id, name, size, "file transfer offer accepted");
             } else {
-                info!(transfer_id, name, size, reason, "file transfer offer rejected");
+                info!(
+                    transfer_id,
+                    name, size, reason, "file transfer offer rejected"
+                );
             }
             let reply = if accept {
                 xenia_peer_core::FileTransferMessage::Accept { transfer_id }
@@ -833,7 +845,10 @@ async fn handle_file_transfer_message(
                     reason,
                 }
             };
-            let envelope = session.lock().await.seal_file_transfer_message(reply, false)?;
+            let envelope = session
+                .lock()
+                .await
+                .seal_file_transfer_message(reply, false)?;
             send_half.lock().await.send_envelope(&envelope).await?;
         }
         xenia_peer_core::FileTransferMessage::Accept { transfer_id } => {
@@ -841,7 +856,11 @@ async fn handle_file_transfer_message(
                 warn!(transfer_id, "Accept for unknown/stale outgoing transfer");
                 return Ok(());
             };
-            info!(transfer_id, bytes = transfer.data.len(), "transfer accepted, sending chunks");
+            info!(
+                transfer_id,
+                bytes = transfer.data.len(),
+                "transfer accepted, sending chunks"
+            );
             let chunk_size = xenia_peer_core::FILE_TRANSFER_CHUNK_SIZE;
             for (i, chunk) in transfer.data.chunks(chunk_size).enumerate() {
                 let msg = xenia_peer_core::FileTransferMessage::Chunk {
@@ -849,11 +868,17 @@ async fn handle_file_transfer_message(
                     offset: (i * chunk_size) as u64,
                     data: chunk.to_vec(),
                 };
-                let envelope = session.lock().await.seal_file_transfer_message(msg, false)?;
+                let envelope = session
+                    .lock()
+                    .await
+                    .seal_file_transfer_message(msg, false)?;
                 send_half.lock().await.send_envelope(&envelope).await?;
             }
             let complete = xenia_peer_core::FileTransferMessage::Complete { transfer_id };
-            let envelope = session.lock().await.seal_file_transfer_message(complete, false)?;
+            let envelope = session
+                .lock()
+                .await
+                .seal_file_transfer_message(complete, false)?;
             send_half.lock().await.send_envelope(&envelope).await?;
             info!(transfer_id, "all chunks sent, awaiting verification");
         }
@@ -861,7 +886,10 @@ async fn handle_file_transfer_message(
             transfer_id,
             reason,
         } => {
-            if outgoing.as_ref().is_some_and(|t| t.transfer_id == transfer_id) {
+            if outgoing
+                .as_ref()
+                .is_some_and(|t| t.transfer_id == transfer_id)
+            {
                 warn!(transfer_id, reason, "outgoing transfer rejected by peer");
                 *outgoing = None;
             }
@@ -877,7 +905,10 @@ async fn handle_file_transfer_message(
             };
             let off = offset as usize;
             if off.saturating_add(data.len()) > transfer.expected_size as usize {
-                warn!(transfer_id, "chunk exceeds offered file size; dropping transfer");
+                warn!(
+                    transfer_id,
+                    "chunk exceeds offered file size; dropping transfer"
+                );
                 incoming.remove(&transfer_id);
                 return Ok(());
             }
@@ -898,18 +929,31 @@ async fn handle_file_transfer_message(
                     .expect("incoming transfer only exists when recv_file_dir is set")
                     .join(&transfer.name);
                 match std::fs::write(&dest, &transfer.buffer) {
-                    Ok(()) => info!(transfer_id, path = %dest.display(), bytes = transfer.buffer.len(), "file transfer verified and written"),
-                    Err(err) => warn!(transfer_id, error = %err, "verified file failed to write to disk"),
+                    Ok(()) => {
+                        info!(transfer_id, path = %dest.display(), bytes = transfer.buffer.len(), "file transfer verified and written")
+                    }
+                    Err(err) => {
+                        warn!(transfer_id, error = %err, "verified file failed to write to disk")
+                    }
                 }
             } else {
-                warn!(transfer_id, "file transfer failed BLAKE3 verification, not written");
+                warn!(
+                    transfer_id,
+                    "file transfer failed BLAKE3 verification, not written"
+                );
             }
             let verified = xenia_peer_core::FileTransferMessage::Verified { transfer_id, ok };
-            let envelope = session.lock().await.seal_file_transfer_message(verified, false)?;
+            let envelope = session
+                .lock()
+                .await
+                .seal_file_transfer_message(verified, false)?;
             send_half.lock().await.send_envelope(&envelope).await?;
         }
         xenia_peer_core::FileTransferMessage::Verified { transfer_id, ok } => {
-            if outgoing.as_ref().is_some_and(|t| t.transfer_id == transfer_id) {
+            if outgoing
+                .as_ref()
+                .is_some_and(|t| t.transfer_id == transfer_id)
+            {
                 info!(transfer_id, ok, "outgoing transfer verification result");
                 *outgoing = None;
             }
@@ -1146,10 +1190,12 @@ enum ClipboardMode {
 
 fn to_hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-        let _ = write!(s, "{b:02x}");
-        s
-    })
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }
 
 /// Verify the host's identity fingerprint against the viewer's trust policy
@@ -1565,9 +1611,7 @@ fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let slot_for_task = Arc::clone(&slot);
     let args_for_task = args.clone();
     rt.spawn(async move {
-        if let Err(err) =
-            gui_receive_loop(args_for_task, slot_for_task, audio_tx, input_rx).await
-        {
+        if let Err(err) = gui_receive_loop(args_for_task, slot_for_task, audio_tx, input_rx).await {
             tracing::error!(error = %err, "gui receive loop exited with error");
         }
     });
@@ -1897,9 +1941,14 @@ async fn gui_receive_loop(
             let envelope = session.lock().await.seal_control_frame(&ack).map_err(
                 |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
             )?;
-            send_half.lock().await.send_envelope(&envelope).await.map_err(
-                |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
-            )?;
+            send_half
+                .lock()
+                .await
+                .send_envelope(&envelope)
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                    e.to_string().into()
+                })?;
             info!(key_epoch = epoch_state.current_epoch(), epoch_hash = ?epoch_hash, "session rekey installed");
 
             // Now safe to send: the initial rekey handshake (the daemon's
@@ -1922,10 +1971,20 @@ async fn gui_receive_loop(
                     .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
                         e.to_string().into()
                     })?;
-                send_half.lock().await.send_envelope(&envelope).await.map_err(
-                    |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
-                )?;
-                info!(transfer_id, name, size = data.len(), "file transfer offered");
+                send_half
+                    .lock()
+                    .await
+                    .send_envelope(&envelope)
+                    .await
+                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                        e.to_string().into()
+                    })?;
+                info!(
+                    transfer_id,
+                    name,
+                    size = data.len(),
+                    "file transfer offered"
+                );
                 outgoing_transfer = Some(OutgoingTransfer { transfer_id, data });
             }
             continue;
@@ -1983,9 +2042,12 @@ async fn gui_receive_loop(
             });
         }
     }
-    send_half.lock().await.close().await.map_err(
-        |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
-    )?;
+    send_half
+        .lock()
+        .await
+        .close()
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
     Ok(())
 }
 
@@ -2029,7 +2091,11 @@ mod tests {
 
         // First contact: pins, succeeds, and writes the entry.
         pin_or_verify_known_hosts(&path, "10.0.0.1:4747", "aabbcc").unwrap();
-        assert!(std::fs::read_to_string(&path).unwrap().contains("10.0.0.1:4747 aabbcc"));
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("10.0.0.1:4747 aabbcc")
+        );
 
         // Same fingerprint: passes (case-insensitive).
         pin_or_verify_known_hosts(&path, "10.0.0.1:4747", "AABBCC").unwrap();

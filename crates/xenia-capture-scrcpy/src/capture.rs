@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use xenia_capture::{CaptureError, CapturedFrame, FrameData, MonitorDescriptor, ScreenCapture};
 
-use crate::scrcpy::stream::{ScrcpyCaptureStream, StreamError};
 use crate::scrcpy::ScrcpyOptions;
+use crate::scrcpy::stream::{ScrcpyCaptureStream, StreamError};
 
 /// Path to the vendored scrcpy-server JAR this crate ships, resolved
 /// relative to the crate's own source location so callers don't need to

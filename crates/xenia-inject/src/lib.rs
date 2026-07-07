@@ -527,7 +527,7 @@ impl UinputInjector {
     /// Write a batch of raw `(type_, code, value)` events followed by a
     /// `SYN_REPORT`, so the kernel/compositor applies them atomically.
     fn emit(&self, events: &[(u16, u16, i32)]) -> Result<(), InjectError> {
-        use input_linux::sys::{input_event, EV_SYN, SYN_REPORT};
+        use input_linux::sys::{EV_SYN, SYN_REPORT, input_event};
 
         let mut raw_events: Vec<input_event> = events
             .iter()

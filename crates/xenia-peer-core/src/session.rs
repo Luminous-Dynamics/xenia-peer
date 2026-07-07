@@ -14,9 +14,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 use xenia_handshake::{RekeyEpochKeys, SessionKeySchedule};
-use xenia_wire::{open_frame, open_input, Session as WireSession, WireError};
+use xenia_wire::{Session as WireSession, WireError, open_frame, open_input};
 
-use crate::frame::{RawFrame, RawInput, LANE_ENVELOPE_MAGIC};
+use crate::frame::{LANE_ENVELOPE_MAGIC, RawFrame, RawInput};
 
 const LANE_ENVELOPE_HEADER_LEN: usize = 5;
 

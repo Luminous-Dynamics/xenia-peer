@@ -16,11 +16,11 @@
 //! compiled into the binary, not read from disk at runtime).
 
 use axum::{
+    Router,
     extract::Path,
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
-    Router,
 };
 use rust_embed::Embed;
 
