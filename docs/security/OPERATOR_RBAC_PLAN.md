@@ -18,12 +18,15 @@ Design for closing review finding #17 (no server-side operator auth/RBAC).
   loads the enrollment policy at startup; full HTTP challenge→verify→token
   round trip tested end-to-end through the real router. Additive — no existing
   behavior changed.
-- ⬜ **Phase 3b**: enforce the token on privileged actions. This *changes*
-  existing consent behavior and is coupled to the console (Phase 5) — the
-  browser `ConsentModal` sends plain `"Approve"` with no token today. Land it
-  behind a `--require-operator-auth` flag (default off preserves current
-  behavior; on requires a valid token + role), and fix the single-`accept()`
-  consent transport at the same time.
+- ✅ **Phase 3b** (core `05492b3`, wiring `74f8943`): `authorize_consent_action`
+  (token + role + still-enrolled + per-action signature, fail-closed, 4 tests)
+  wired into the consent listener behind `--require-operator-auth`. Off
+  (default) = legacy plain-text, no behavior change; on = signed
+  `AuthenticatedConsentAction` from an enrolled operator whose role permits the
+  action. **Caveat:** the on-path core is unit-tested but not yet live-smoke-
+  tested end-to-end (needs a running daemon + a client that presents a token —
+  Phase 5). The single-`accept()` consent-transport fix and browser-console
+  revocation are folded into Phase 5.
 - ⬜ **Phase 4**: operator-action audit entries in `xenia-ledger`.
 - ⬜ **Phase 5**: console integration (real challenge/sign flow, role-gated
   pages, MFA).
