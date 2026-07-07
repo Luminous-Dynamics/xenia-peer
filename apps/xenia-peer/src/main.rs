@@ -65,6 +65,8 @@ mod operator;
 mod operator_audit;
 mod operator_auth;
 mod operator_http;
+#[cfg(test)]
+mod operator_rbac_smoke;
 use crate::governance::{GovernanceBridge, MitigationRule};
 
 #[derive(Parser, Debug)]

@@ -42,7 +42,13 @@ pub(crate) const TOKEN_TTL_SECS: u64 = 15 * 60;
 /// The transcript an operator signs to prove possession of their key for a
 /// given challenge. Domain-separated and bound to the exact keys presented,
 /// so a signature can't be replayed against a different challenge or key.
-fn challenge_transcript(nonce: &[u8; 32], ed_pubkey: &[u8; 32], ml_dsa_pubkey: &[u8]) -> Vec<u8> {
+/// `pub(crate)` so a client (the console, or the smoke test) can produce the
+/// signature the daemon expects -- this is the signed message, not a secret.
+pub(crate) fn challenge_transcript(
+    nonce: &[u8; 32],
+    ed_pubkey: &[u8; 32],
+    ml_dsa_pubkey: &[u8],
+) -> Vec<u8> {
     let mut t = Vec::with_capacity(CHALLENGE_DOMAIN.len() + 32 + 32 + ml_dsa_pubkey.len());
     t.extend_from_slice(CHALLENGE_DOMAIN);
     t.extend_from_slice(nonce);
@@ -340,8 +346,9 @@ impl ConsentAction {
 
 /// The bytes an operator signs to authorize a specific consent action. Binds
 /// the action to the exact session and token, so a captured signature can't be
-/// replayed for a different action, session, or token.
-fn consent_action_transcript(
+/// replayed for a different action, session, or token. `pub(crate)` so a
+/// client can produce the per-action signature the daemon expects.
+pub(crate) fn consent_action_transcript(
     action: ConsentAction,
     session_id: &[u8; 16],
     token_nonce: &[u8; 16],
