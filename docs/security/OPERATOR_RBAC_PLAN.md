@@ -13,9 +13,17 @@ Design for closing review finding #17 (no server-side operator auth/RBAC).
   `verify_challenge_response` (both Ed25519 + ML-DSA, then enrollment,
   fail-closed), daemon-signed role-scoped expiring `OperatorToken`. 6
   end-to-end crypto tests.
-- ⬜ **Phase 3**: HTTP `/auth/challenge` + `/auth/verify` endpoints; rework the
-  single-shot unauthenticated consent socket into a token-authenticated
-  control channel; enforce `authorize` on every privileged action.
+- ✅ **Phase 3a** (`operator_http.rs`, commit `234cbf4`): `POST /auth/challenge`
+  + `POST /auth/verify` wired into the daemon admin router; `--operators-file`
+  loads the enrollment policy at startup; full HTTP challenge→verify→token
+  round trip tested end-to-end through the real router. Additive — no existing
+  behavior changed.
+- ⬜ **Phase 3b**: enforce the token on privileged actions. This *changes*
+  existing consent behavior and is coupled to the console (Phase 5) — the
+  browser `ConsentModal` sends plain `"Approve"` with no token today. Land it
+  behind a `--require-operator-auth` flag (default off preserves current
+  behavior; on requires a valid token + role), and fix the single-`accept()`
+  consent transport at the same time.
 - ⬜ **Phase 4**: operator-action audit entries in `xenia-ledger`.
 - ⬜ **Phase 5**: console integration (real challenge/sign flow, role-gated
   pages, MFA).
