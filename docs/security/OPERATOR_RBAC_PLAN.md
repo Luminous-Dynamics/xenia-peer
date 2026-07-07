@@ -43,6 +43,36 @@ Design for closing review finding #17 (no server-side operator auth/RBAC).
   `verify_chain` passes; a wrong-session decision is refused. The ON-path is
   now *observed* working, not just asserted (short of the browser/viewer
   harness, which is Phase 5).
+- 🟢 **Phase 5** (in progress): the **shared-protocol spine + browser ceremony
+  client are done**; browser E2E + MFA remain.
+  - **`xenia-operator-proto`** (new crate): the role/action model, fail-closed
+    authorization, and the *exact* signed transcripts
+    (`challenge_transcript`, `consent_action_transcript`) now live in one crate
+    that **both** the daemon and the console depend on. The daemon
+    (`operator.rs`, `operator_auth.rs`) was de-duplicated onto it, so a
+    signature the console produces is byte-identical to what the daemon
+    verifies — the console↔daemon drift class (review #13) is closed by
+    construction. Native unit-tested.
+  - **`operator_session.rs`** (console): the real challenge → sign(**both**
+    Ed25519 + ML-DSA-65) → verify → role-scoped-token ceremony against the
+    daemon's `/auth/*`, reusing `xenia_handshake::HandshakeManager` as the
+    signing engine (same keygen/signing the daemon enrolls) with a persisted
+    two-seed identity. Plus `build_consent_request` producing the exact
+    `{token, action, action_signature}` the daemon parses.
+  - **UI**: an `OperatorAuthPanel` runs the ceremony and surfaces the enrolled
+    role + fingerprint; the `ConsentModal` is now **role-gated** (only permitted
+    decisions render), grew a **Revoke** button, and sends the authenticated,
+    token-bearing payload when a session + session-id are present (legacy
+    plaintext fallback otherwise).
+  - **Remaining for E2E**: the daemon must include the `session_id` (hex) in
+    the consent prompt it pushes to the console so `Revoke`/`Approve` can bind
+    to the session; consent-port discovery should come from `DaemonConfig`
+    rather than the scaffold's hardcoded `8081/8082`; then a live daemon +
+    `trunk serve` walkthrough. MFA (TOTP/WebAuthn, `login.rs:16` TODO) is still
+    open.
+- ✅ **Consent transport single-`accept()`** (commit `725741d`): FIXED. The
+  consent server now loops on `accept()`, so a dropped console can reconnect
+  and still `Revoke` — closing the gap noted under "Current state" below.
 - 🟡 **Phase 6** (partial, commit `3da46e3`): auth-surface **rate limiting**
   done — a pure, tested `RateLimiter` wired into `/auth/verify` (429 beyond
   `AUTH_RATE_MAX`/window, before verification). Remote operators and
