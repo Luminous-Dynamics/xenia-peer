@@ -125,6 +125,22 @@ button.sign-out:hover { color: var(--err); border-color: var(--err); }
     color: var(--fg-dim);
 }
 .operator-error { font-size: 0.75rem; color: var(--err); max-width: 24ch; }
+.operator-enroll summary { cursor: pointer; }
+.operator-enroll-hint { font-size: 0.7rem; color: var(--fg-dim); margin: 0.4rem 0 0.2rem; }
+.operator-enroll-record {
+    display: block;
+    font-family: var(--mono);
+    font-size: 0.65rem;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.4rem;
+    max-width: 42ch;
+    max-height: 8rem;
+    overflow: auto;
+    word-break: break-all;
+    white-space: pre-wrap;
+}
 button.danger, .danger {
     color: var(--err);
     border-color: var(--err);

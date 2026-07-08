@@ -20,6 +20,7 @@ use leptos::task::spawn_local;
 use xenia_operator_proto::ConsentAction;
 
 use crate::app::OperatorSessionCtx;
+use crate::context::{daemon_config_context, missing_context_view};
 use crate::operator_session::{OperatorIdentity, build_consent_request};
 
 /// Extract the `session_id` (hex, 16 bytes) a daemon may include in the consent
@@ -31,14 +32,30 @@ fn parse_session_id(prompt: &str) -> Option<[u8; 16]> {
     hex::decode(hex).ok()?.try_into().ok()
 }
 
+/// The human-readable scope to show: the daemon now sends the prompt as JSON
+/// `{session_id, scope}`, so surface `scope`; fall back to the raw string for a
+/// legacy plaintext prompt.
+fn display_scope(prompt: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(prompt)
+        .ok()
+        .and_then(|v| v.get("scope").and_then(|s| s.as_str()).map(String::from))
+        .unwrap_or_else(|| prompt.to_string())
+}
+
 #[component]
 pub fn ConsentModal() -> impl IntoView {
     let session = use_context::<OperatorSessionCtx>();
+    let Ok(config) = daemon_config_context() else {
+        return missing_context_view("DaemonConfig").into_any();
+    };
 
     let (consent_req, set_consent_req) = signal(None::<String>);
     let (is_open, set_is_open) = signal(false);
 
-    if let Ok(ws) = WebSocket::open("ws://127.0.0.1:8081/ws") {
+    // Listen for consent prompts the daemon broadcasts on its admin `/ws`
+    // (derived from DaemonConfig, not hardcoded, so the console targets the
+    // configured daemon).
+    if let Ok(ws) = WebSocket::open(&config.admin_ws_url()) {
         let (_writer, mut reader) = ws.split();
         spawn_local(async move {
             while let Some(msg) = reader.next().await {
@@ -75,8 +92,9 @@ pub fn ConsentModal() -> impl IntoView {
             }
             _ => action.as_str().to_string(),
         };
+        let consent_url = config.consent_ws_url();
         spawn_local(async move {
-            if let Ok(ws) = WebSocket::open("ws://127.0.0.1:8082") {
+            if let Ok(ws) = WebSocket::open(&consent_url) {
                 let (mut writer, _) = ws.split();
                 let _ = writer.send(Message::Text(payload)).await;
             }
@@ -89,7 +107,7 @@ pub fn ConsentModal() -> impl IntoView {
             <div class="modal-overlay">
                 <div class="modal">
                     <h2>"New Session Request"</h2>
-                    <p>{move || consent_req.get().unwrap_or_default()}</p>
+                    <p>{move || consent_req.get().map(|p| display_scope(&p)).unwrap_or_default()}</p>
                     <div class="button-row">
                         <Show when=move || can(ConsentAction::Approve)>
                             <button class="primary" on:click=move |_| decide(ConsentAction::Approve)>
@@ -111,4 +129,5 @@ pub fn ConsentModal() -> impl IntoView {
             </div>
         </Show>
     }
+    .into_any()
 }

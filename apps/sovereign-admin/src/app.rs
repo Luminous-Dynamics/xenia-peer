@@ -18,6 +18,7 @@ use crate::operator_session::{OperatorIdentity, OperatorSession, authenticate};
 use crate::pages::{
     ConsentModal, DevicesPage, GovernancePage, LoginPage, MonitorPage, PolicyPage, SessionsPage,
 };
+use xenia_operator_proto::OperatorRole;
 
 /// Shared operator-RBAC session: `Some` once the operator completes the
 /// challenge/verify ceremony against the daemon, carrying the role the daemon
@@ -114,10 +115,14 @@ fn OperatorAuthPanel() -> impl IntoView {
     let (busy, set_busy) = signal(false);
     let (error, set_error) = signal(None::<String>);
 
-    // Compute the operator's enrollment fingerprint once at mount (constructing
-    // the identity does ML-KEM keygen, so we don't want it on every render).
-    let fingerprint = OperatorIdentity::load_or_generate().fingerprint_hex();
+    // Compute the operator's fingerprint + paste-ready enrollment record once at
+    // mount (constructing the identity does ML-KEM keygen, so not per render).
+    let identity = OperatorIdentity::load_or_generate();
+    let fingerprint = identity.fingerprint_hex();
     let fp_short = fingerprint.chars().take(16).collect::<String>();
+    // Template record: the admin sets operator_id + role, then adds it to the
+    // daemon's --operators-file. The two public keys are what matter.
+    let enrollment = identity.enrollment_record_json("your-operator-id", OperatorRole::Viewer);
 
     let sign_in = move |_| {
         set_busy.set(true);
@@ -142,6 +147,7 @@ fn OperatorAuthPanel() -> impl IntoView {
                 fallback=move || {
                     let fp = fingerprint.clone();
                     let short = fp_short.clone();
+                    let record = enrollment.clone();
                     view! {
                         <button
                             class="operator-signin"
@@ -150,9 +156,15 @@ fn OperatorAuthPanel() -> impl IntoView {
                         >
                             {move || if busy.get() { "Authenticating…" } else { "Operator sign-in" }}
                         </button>
-                        <span class="operator-fingerprint" title=fp>
-                            "key " {short} "…"
-                        </span>
+                        <details class="operator-enroll">
+                            <summary class="operator-fingerprint" title=fp>
+                                "key " {short} "…"
+                            </summary>
+                            <p class="operator-enroll-hint">
+                                "Add to the daemon's --operators-file (set operator_id + role):"
+                            </p>
+                            <code class="operator-enroll-record">{record}</code>
+                        </details>
                         {move || error.get().map(|e| view! {
                             <span class="operator-error">{e}</span>
                         })}

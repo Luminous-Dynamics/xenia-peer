@@ -90,6 +90,20 @@ impl OperatorIdentity {
     pub fn fingerprint_hex(&self) -> String {
         hex::encode(self.hm.identity_fingerprint())
     }
+
+    /// A paste-ready enrollment record for the daemon's `--operators-file`,
+    /// carrying both public keys. The admin adds this to the `operators` array
+    /// (with a chosen `operator_id` + `role`) so this browser identity becomes
+    /// an enrolled operator. Without this the fingerprint alone can't enroll.
+    pub fn enrollment_record_json(&self, operator_id: &str, role: OperatorRole) -> String {
+        serde_json::json!({
+            "operator_id": operator_id,
+            "ed25519_pubkey": self.ed_pubkey_hex(),
+            "ml_dsa_pubkey": self.ml_pubkey_hex(),
+            "role": role.as_str(),
+        })
+        .to_string()
+    }
 }
 
 fn generate_seeds() -> ([u8; 32], [u8; 32]) {
