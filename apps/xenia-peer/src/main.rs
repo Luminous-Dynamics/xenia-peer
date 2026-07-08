@@ -70,6 +70,8 @@ mod operator_http;
 mod operator_live_smoke;
 #[cfg(test)]
 mod operator_rbac_smoke;
+#[cfg(test)]
+mod operator_sealed_smoke;
 use crate::governance::{GovernanceBridge, MitigationRule};
 
 #[derive(Parser, Debug)]

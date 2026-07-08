@@ -101,6 +101,20 @@ pub struct HandshakeOutcome {
     pub host_identity_fingerprint: [u8; 32],
 }
 
+/// The peer identity a host authenticated during the handshake (both the
+/// Ed25519 and ML-DSA-65 signatures were verified). Lets the host authorize the
+/// peer against its own policy — e.g. look the keys up in an operator policy so
+/// the handshake itself proves *which* enrolled operator connected. Kept out of
+/// [`HandshakeOutcome`] because that type is `Copy` and small; the ML-DSA key is
+/// ~2 KB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedPeerIdentity {
+    /// The peer's Ed25519 verifying key (32 bytes).
+    pub ed25519_pk: [u8; 32],
+    /// The peer's ML-DSA-65 verifying key.
+    pub ml_dsa_pk: Vec<u8>,
+}
+
 /// Transport selected for the authenticated session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NegotiatedTransport {
@@ -446,12 +460,36 @@ pub async fn perform_host_handshake_with_transcript<T: Transport>(
 }
 
 /// Perform a host-side handshake and bind an optional negotiated context hash.
+/// Returns only the [`HandshakeOutcome`]; use
+/// [`perform_host_handshake_authenticating_peer`] when the host needs the
+/// authenticated peer identity (e.g. to authorize an operator).
 pub async fn perform_host_handshake_with_transcript_and_context<T: Transport>(
     transport: &mut T,
     mgr: &mut HandshakeManager,
     peer_id: &str,
     negotiated_context_hash: Option<[u8; 32]>,
 ) -> Result<HandshakeOutcome, Box<dyn std::error::Error>> {
+    let (outcome, _peer) = perform_host_handshake_authenticating_peer(
+        transport,
+        mgr,
+        peer_id,
+        negotiated_context_hash,
+    )
+    .await?;
+    Ok(outcome)
+}
+
+/// Perform a host-side handshake and return both the [`HandshakeOutcome`] and
+/// the [`VerifiedPeerIdentity`] whose Ed25519 + ML-DSA-65 signatures the host
+/// verified. The identity lets the host authorize the peer (e.g. the daemon can
+/// look the keys up in its operator policy — the handshake then *is* the
+/// operator proof-of-possession).
+pub async fn perform_host_handshake_authenticating_peer<T: Transport>(
+    transport: &mut T,
+    mgr: &mut HandshakeManager,
+    peer_id: &str,
+    negotiated_context_hash: Option<[u8; 32]>,
+) -> Result<(HandshakeOutcome, VerifiedPeerIdentity), Box<dyn std::error::Error>> {
     info!("Starting host-side handshake");
     let host_nonce = rand::random::<[u8; 32]>();
     let host_ed25519_pk = mgr.identity_public_key_bytes();
@@ -551,13 +589,19 @@ pub async fn perform_host_handshake_with_transcript_and_context<T: Transport>(
         xenia_handshake::host_identity_fingerprint(&host_ed25519_pk, &host_ml_dsa_pk);
 
     info!("Host-side handshake complete");
-    Ok(HandshakeOutcome {
-        session_key,
-        transcript_hash,
-        key_schedule,
-        negotiated_context_hash,
-        host_identity_fingerprint,
-    })
+    Ok((
+        HandshakeOutcome {
+            session_key,
+            transcript_hash,
+            key_schedule,
+            negotiated_context_hash,
+            host_identity_fingerprint,
+        },
+        VerifiedPeerIdentity {
+            ed25519_pk,
+            ml_dsa_pk: ml_dsa_pk.to_vec(),
+        },
+    ))
 }
 
 /// Perform a viewer-side handshake and return only the session key.

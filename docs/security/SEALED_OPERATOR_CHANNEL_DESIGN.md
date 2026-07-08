@@ -151,13 +151,27 @@ so this is already solved on the console side.
   must seal the prompt per live operator session (fine, but a change from the
   current single broadcast).
 
-## Recommended first slice (when this is greenlit)
+## First slice
 
-1. `WasmHandshake::from_identity(ed_seed, ml_seed)` in the viewer-web crate.
-2. Daemon: an `--operator-sealed` WebSocket that runs the host handshake and
-   verifies the viewer identity against `OperatorPolicy`.
-3. Move the consent decision path onto sealed `0x31` envelopes (smallest,
-   highest-value surface — it carries the Approve/Revoke), keeping the per-action
-   Ed25519 signature.
-4. Cross-compat test (mirror `handshake_cross_compat.rs`) asserting the console
-   and daemon derive identical operator-channel keys.
+- ✅ **Slice 0 — keystone proven (native).** Added
+  `perform_host_handshake_authenticating_peer` + `VerifiedPeerIdentity`
+  (`crates/xenia-peer-core/src/handshake.rs`): the host handshake now returns the
+  authenticated peer's Ed25519 + ML-DSA-65 keys, so the daemon can authorize the
+  operator straight from `OperatorPolicy`. `operator_sealed_smoke.rs` proves it:
+  an operator's *enrolled* identity (from the two seeds the console persists)
+  drives the viewer handshake, both sides derive identical sealed-channel keys,
+  the host learns the exact enrolled keys, and policy lookup yields the role
+  (stranger → fail-closed). The central claim — *the handshake IS the operator
+  auth* — is now test-backed. The existing function delegates to the new one, so
+  the video path is untouched.
+- ⬜ **Slice 1** — `WasmHandshake::from_identity(ed_seed, ml_seed)` in the
+  viewer-web crate (currently generates ephemeral keys), so the browser drives
+  the handshake with the console's persisted operator identity.
+- ⬜ **Slice 2** — daemon `--operator-sealed` WebSocket: run
+  `perform_host_handshake_authenticating_peer`, reject if the peer isn't in
+  `OperatorPolicy`, then serve `/auth`/consent as sealed envelopes.
+- ⬜ **Slice 3** — move the consent decision path onto sealed `0x31` envelopes
+  (smallest, highest-value surface — Approve/Revoke), keeping the per-action
+  Ed25519 signature for ledger non-repudiation.
+- ⬜ **Slice 4** — cross-compat test (mirror `handshake_cross_compat.rs`)
+  asserting the WASM console and daemon derive identical operator-channel keys.
