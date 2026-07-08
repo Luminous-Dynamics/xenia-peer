@@ -66,6 +66,7 @@ mod operator_audit;
 mod operator_auth;
 mod operator_exposure;
 mod operator_http;
+mod operator_sealed_channel;
 #[cfg(test)]
 mod operator_live_smoke;
 #[cfg(test)]

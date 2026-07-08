@@ -167,9 +167,17 @@ so this is already solved on the console side.
 - ⬜ **Slice 1** — `WasmHandshake::from_identity(ed_seed, ml_seed)` in the
   viewer-web crate (currently generates ephemeral keys), so the browser drives
   the handshake with the console's persisted operator identity.
-- ⬜ **Slice 2** — daemon `--operator-sealed` WebSocket: run
-  `perform_host_handshake_authenticating_peer`, reject if the peer isn't in
-  `OperatorPolicy`, then serve `/auth`/consent as sealed envelopes.
+- 🟢 **Slice 2 — establishment core done** (`operator_sealed_channel.rs`):
+  `establish_operator_channel(transport, host_mgr, policy)` runs the host
+  handshake and authorizes the authenticated peer against `OperatorPolicy`,
+  returning the operator id + role + key schedule (fail-closed: a valid
+  handshake from an un-enrolled key → `NotEnrolled`). Two tests prove it,
+  including a real consent payload sealed host-side and opened viewer-side over
+  the derived key (the channel carries data). **Remaining:** wire it into
+  `main.rs` behind an `--operator-sealed` flag — a new WS listener that accepts,
+  calls `establish_operator_channel`, then serves the consent path sealed. That
+  main.rs accept-loop plumbing pairs with the deferred `main.rs` extraction
+  (P3), so it's held for a quieter build window.
 - ⬜ **Slice 3** — move the consent decision path onto sealed `0x31` envelopes
   (smallest, highest-value surface — Approve/Revoke), keeping the per-action
   Ed25519 signature for ledger non-repudiation.
