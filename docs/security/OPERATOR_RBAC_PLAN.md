@@ -79,10 +79,21 @@ Design for closing review finding #17 (no server-side operator auth/RBAC).
 - ✅ **Consent transport single-`accept()`** (commit `725741d`): FIXED. The
   consent server now loops on `accept()`, so a dropped console can reconnect
   and still `Revoke` — closing the gap noted under "Current state" below.
-- 🟡 **Phase 6** (partial, commit `3da46e3`): auth-surface **rate limiting**
-  done — a pure, tested `RateLimiter` wired into `/auth/verify` (429 beyond
-  `AUTH_RATE_MAX`/window, before verification). Remote operators and
-  session-recording integrity remain.
+- 🟡 **Phase 6** (partial): hardening toward remote operators.
+  - **Rate limiting** (commit `3da46e3`): a pure, tested `RateLimiter` wired
+    into `/auth/verify` (429 beyond `AUTH_RATE_MAX`/window, before verification).
+  - **Remote-exposure guard** (`operator_exposure.rs`): the operator surface
+    (admin `/auth` + `/ws`, and the consent port) now takes a configurable
+    `--operator-bind` (default loopback). A **non-loopback bind is refused
+    unless `--require-operator-auth` is set** — otherwise any host on the
+    network could send `Approve` on the consent port. Fail-closed at startup,
+    pure + unit-tested. This makes it *safe* to expose the surface (the
+    app-layer signatures already prevent forgery); **confidentiality** still
+    wants TLS in front (reverse proxy / `wss`) — the app crypto stops forgery,
+    not eavesdropping.
+  - **Still remaining:** production transport security (in-daemon TLS or a
+    documented proxy pattern), NAT traversal / relay for operators off-LAN, and
+    **session-recording integrity** (tamper-evident recording into the ledger).
 
 ## Live walkthrough (manual browser E2E)
 

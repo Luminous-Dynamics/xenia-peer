@@ -64,6 +64,7 @@ mod m1_runtime;
 mod operator;
 mod operator_audit;
 mod operator_auth;
+mod operator_exposure;
 mod operator_http;
 #[cfg(test)]
 mod operator_live_smoke;
@@ -120,6 +121,16 @@ struct Args {
 
     #[arg(long, default_value_t = 8082)]
     consent_port: u16,
+
+    /// Bind address for the operator surface (the admin `/auth` + `/ws` port
+    /// and the consent port). Defaults to loopback. Binding to a non-loopback
+    /// address (e.g. `0.0.0.0`) exposes the surface to the network and is
+    /// **refused unless `--require-operator-auth` is set** — otherwise any host
+    /// could send `Approve` on the consent port. Even with auth, terminate TLS
+    /// in front for confidentiality (the app-layer signatures prevent forgery,
+    /// not eavesdropping). See `docs/security/OPERATOR_RBAC_PLAN.md`.
+    #[arg(long, default_value = "127.0.0.1")]
+    operator_bind: String,
 
     /// Seconds to wait for an Approve/Deny decision on --consent-port before
     /// giving up and exiting. Ignored when --m1-preprod-auto-consent is set.
@@ -1450,6 +1461,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let source_id = parse_source_id(&args.source_id_hex)?;
 
+    // Fail closed before doing any work: never expose the operator surface to
+    // the network without operator auth (Phase 6 — remote operators).
+    crate::operator_exposure::validate_operator_exposure(
+        &args.operator_bind,
+        args.require_operator_auth,
+    )?;
+    if !crate::operator_exposure::is_loopback_bind(&args.operator_bind) {
+        tracing::warn!(
+            bind = %args.operator_bind,
+            "operator surface bound to a NON-loopback address — reachable from the network. \
+             Operator auth is enforced (forgery-safe), but terminate TLS in front for \
+             confidentiality."
+        );
+    }
+
     if args.m1_runtime_smoke {
         run_m1_runtime_smoke(
             source_id,
@@ -1687,7 +1713,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .merge(crate::operator_http::router(operator_auth_state.clone()));
 
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", args.admin_port)).await?;
+    let listener = TcpListener::bind(format!("{}:{}", args.operator_bind, args.admin_port)).await?;
     tokio::spawn(async move {
         if let Err(err) = axum::serve(listener, app).await {
             tracing::error!(error = %err, "admin websocket server exited");
@@ -1818,7 +1844,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let consent_ledger = shared_ledger.clone();
 
     // Server task for processing consent responses.
-    let consent_addr = format!("127.0.0.1:{}", args.consent_port);
+    let consent_addr = format!("{}:{}", args.operator_bind, args.consent_port);
     tokio::spawn(async move {
         let listener = match TcpListener::bind(&consent_addr).await {
             Ok(listener) => listener,
