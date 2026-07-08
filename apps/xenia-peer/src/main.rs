@@ -66,6 +66,8 @@ mod operator_audit;
 mod operator_auth;
 mod operator_http;
 #[cfg(test)]
+mod operator_live_smoke;
+#[cfg(test)]
 mod operator_rbac_smoke;
 use crate::governance::{GovernanceBridge, MitigationRule};
 
@@ -1952,7 +1954,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.m1_preprod_auto_consent {
         grant_preprod_auto_consent(&mut m1_runtime)?;
     } else {
-        bridge.broadcast(&m1_scope_for_log);
+        // Broadcast the consent request as JSON carrying the session_id, so an
+        // authenticated operator console can bind its per-action signature to
+        // this exact session (see the console's
+        // operator_session::build_consent_request + consent_action_transcript).
+        // `scope` is the human-readable description for display. A legacy
+        // plaintext console just shows the text and still sends
+        // "Approve"/"Deny", which a daemon without --require-operator-auth
+        // accepts -- so this shape change is backward compatible.
+        let consent_prompt = serde_json::json!({
+            "session_id": hex::encode(session_id.as_bytes()),
+            "scope": m1_scope_for_log,
+        })
+        .to_string();
+        bridge.broadcast(&consent_prompt);
         info!(
             consent_port = args.consent_port,
             timeout_secs = args.consent_timeout_secs,
