@@ -64,12 +64,18 @@ Design for closing review finding #17 (no server-side operator auth/RBAC).
     decisions render), grew a **Revoke** button, and sends the authenticated,
     token-bearing payload when a session + session-id are present (legacy
     plaintext fallback otherwise).
-  - **Remaining for E2E**: the daemon must include the `session_id` (hex) in
-    the consent prompt it pushes to the console so `Revoke`/`Approve` can bind
-    to the session; consent-port discovery should come from `DaemonConfig`
-    rather than the scaffold's hardcoded `8081/8082`; then a live daemon +
-    `trunk serve` walkthrough. MFA (TOTP/WebAuthn, `login.rs:16` TODO) is still
-    open.
+  - **E2E wiring (DONE):** the daemon now broadcasts the consent prompt as JSON
+    `{session_id, scope}` so the console binds each decision to the exact
+    session; the `ConsentModal` derives its admin `/ws` + consent-port URLs from
+    `DaemonConfig` (no more hardcoded `8081/8082`); the `OperatorAuthPanel`
+    surfaces a paste-ready `--operators-file` enrollment record (both public
+    keys), so an operator can actually be enrolled. A **live-socket smoke test**
+    (`operator_live_smoke.rs`) serves the real `operator_http::router` over
+    `axum::serve` + `reqwest` and drives the full challenge→verify ceremony over
+    the wire — the automated stand-in for the browser walkthrough.
+  - **Still open:** the interactive browser click-through (see *Live
+    walkthrough* below — needs a running daemon + `trunk serve` + a human) and
+    MFA (TOTP/WebAuthn, `login.rs:16` TODO).
 - ✅ **Consent transport single-`accept()`** (commit `725741d`): FIXED. The
   consent server now loops on `accept()`, so a dropped console can reconnect
   and still `Revoke` — closing the gap noted under "Current state" below.
@@ -77,6 +83,35 @@ Design for closing review finding #17 (no server-side operator auth/RBAC).
   done — a pure, tested `RateLimiter` wired into `/auth/verify` (429 beyond
   `AUTH_RATE_MAX`/window, before verification). Remote operators and
   session-recording integrity remain.
+
+## Live walkthrough (manual browser E2E)
+
+The automated ceremony proof is `operator_live_smoke.rs` (real HTTP sockets).
+To exercise the *full* browser path, including a real Approve/Revoke on a live
+session:
+
+1. **Enroll the console's operator key.** Serve the console
+   (`cd apps/sovereign-admin && trunk serve`), open it, and expand the "key …"
+   disclosure in the top bar. Copy the enrollment record it shows, set an
+   `operator_id` + `role`, and drop it into an `operators.json`:
+   ```json
+   { "operators": [ { "operator_id": "alice", "ed25519_pubkey": "…",
+                      "ml_dsa_pubkey": "…", "role": "Admin" } ] }
+   ```
+2. **Run the daemon with auth on:**
+   ```sh
+   xenia-peer --require-operator-auth --operators-file operators.json \
+     --admin-port 8081 --consent-port 8082 \
+     --m1-consent-key-path ./m1-consent.key
+   ```
+3. **Point the console at it.** On the Sessions page set *Daemon Endpoint* to
+   `http://127.0.0.1:8081` and *Consent Port* to `8082`, Save. Click
+   **Operator sign-in** — the role chip should appear (challenge→verify ran).
+4. **Drive a session.** Connect a viewer so the daemon needs consent; the
+   modal shows the `scope`, and only the buttons your role permits render.
+   Click **Approve**, then **Revoke** — each is signed + attributed in the
+   daemon's ledger (grep the daemon log for `consent decision received` /
+   `consent revocation received`).
 
 ## The one-sentence problem
 
