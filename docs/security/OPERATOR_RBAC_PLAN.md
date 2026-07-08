@@ -124,9 +124,13 @@ not the coherent answer.
    confidentiality, mutual auth from **already-enrolled keys** (no cert, no CA),
    and **one** trust model. Proven feasible in-browser: `xenia-viewer-web`
    already runs the handshake + ML-KEM + sealing in WASM. Server-impersonation
-   is covered by the host-identity TOFU the console already does. This is a real
-   design pass (reuse the viewer-web crypto; define the sealed operator framing)
-   before code.
+   is covered by the host-identity TOFU the console already does. **Design pass
+   written: `SEALED_OPERATOR_CHANNEL_DESIGN.md`** — grounded in the existing
+   crypto, with the key finding that the handshake *is* the operator
+   authentication (the enrolled Ed25519 + ML-DSA-65 key is the viewer handshake
+   identity), so it collapses the `/auth` proof-of-possession into the
+   handshake while keeping the per-action Ed25519 signature for ledger
+   non-repudiation. Ready to build behind a flag when greenlit.
 
 ## Live walkthrough (manual browser E2E)
 
