@@ -91,9 +91,42 @@ Design for closing review finding #17 (no server-side operator auth/RBAC).
     app-layer signatures already prevent forgery); **confidentiality** still
     wants TLS in front (reverse proxy / `wss`) — the app crypto stops forgery,
     not eavesdropping.
-  - **Still remaining:** production transport security (in-daemon TLS or a
-    documented proxy pattern), NAT traversal / relay for operators off-LAN, and
+  - **Still remaining:** operator-surface confidentiality (see *Transport
+    security* below), NAT traversal / relay for operators off-LAN, and
     **session-recording integrity** (tamper-evident recording into the ledger).
+
+## Transport security for the operator surface (design decision)
+
+The operator surface (admin `/auth` + `/ws`, consent port) is the **only
+unsealed channel** in Xenia: the host↔viewer screen/input data is already
+end-to-end sealed by `xenia-wire` (ChaCha20-Poly1305 under a PQC-hybrid
+handshake — Ed25519 + ML-DSA-65 + ML-KEM-768). Phase 6a's guard gives the
+operator surface **integrity** (forgery-proof via the RBAC signatures); this is
+about **confidentiality** (a passive observer reading tokens / consent prompts /
+enrollment records once the surface is exposed beyond loopback).
+
+**Why not classical TLS as the destination.** It would work, but it imports a
+trust model Xenia rejects elsewhere: classical X.509 TLS is **not** post-quantum
+(the one non-PQC link in an otherwise PQC product), and it's **CA/PKI** trust,
+not the key-pinning + host-TOFU Xenia already uses. Adding in-daemon `rustls` is
+the worst option — a classical-crypto dep *and* a cert-management surface, still
+not the coherent answer.
+
+**Decision — two layers:**
+1. **Interim (ship now): reverse-proxy TLS / `wss`.** Front the daemon with
+   nginx/caddy/cloudflared terminating TLS → `ws`/`http` on loopback. Zero
+   daemon deps, native browser support, immediate confidentiality. Matches the
+   `xenia-transport-ws` threat-model note ("front with a reverse proxy … in a
+   later crate"). This is a deployment recipe, not daemon code.
+2. **Destination (the coherent answer): seal the operator channel with
+   `xenia-wire`.** Run the same PQC-hybrid handshake + sealed envelopes the
+   viewer path uses, carrying `/auth` + consent inside sealed frames. Gives PQC
+   confidentiality, mutual auth from **already-enrolled keys** (no cert, no CA),
+   and **one** trust model. Proven feasible in-browser: `xenia-viewer-web`
+   already runs the handshake + ML-KEM + sealing in WASM. Server-impersonation
+   is covered by the host-identity TOFU the console already does. This is a real
+   design pass (reuse the viewer-web crypto; define the sealed operator framing)
+   before code.
 
 ## Live walkthrough (manual browser E2E)
 
