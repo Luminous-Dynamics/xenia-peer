@@ -85,13 +85,184 @@ pub(crate) async fn establish_operator_channel<T: Transport>(
     }
 }
 
+/// Fixed `xenia-wire` source id for the operator channel, shared by the daemon
+/// (opener) and the console (sealer) so the sealed-envelope nonces line up.
+const OPERATOR_CHANNEL_SOURCE_ID: [u8; 8] = *b"xnaopch1";
+
+/// Everything the sealed consent serve loop needs once the channel is up —
+/// the same session-scoped state the plaintext consent server takes.
+pub(crate) struct SealedConsentDeps {
+    pub(crate) require_operator_auth: bool,
+    pub(crate) auth_state: std::sync::Arc<crate::operator_http::OperatorAuthState>,
+    pub(crate) session_id: [u8; 16],
+    pub(crate) session_uuid: uuid::Uuid,
+    pub(crate) ledger: std::sync::Arc<tokio::sync::Mutex<xenia_ledger::Chain>>,
+    pub(crate) grant_tx: tokio::sync::oneshot::Sender<bool>,
+    pub(crate) revoked: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Serve one sealed operator channel over `transport`: establish the
+/// authenticated channel (handshake + policy), then read sealed consent
+/// envelopes. Each envelope opens (with the channel key) to the **same** message
+/// the plaintext consent port accepts, decoded via `decode_consent_decision` —
+/// so this adds PQC confidentiality + handshake channel-auth while auth,
+/// per-action non-repudiation, and ledger attribution are preserved unchanged.
+/// Drives the grant/revoke via the shared `apply_consent_decision`.
+pub(crate) async fn serve_sealed_operator_channel<T: Transport>(
+    transport: &mut T,
+    host_mgr: &mut HandshakeManager,
+    policy: &OperatorPolicy,
+    deps: SealedConsentDeps,
+) -> Result<(), OperatorChannelError> {
+    let channel = establish_operator_channel(transport, host_mgr, policy).await?;
+    tracing::info!(
+        operator = %channel.operator_id,
+        role = ?channel.role,
+        "sealed operator channel established"
+    );
+
+    let mut session = xenia_wire::Session::with_source_id(OPERATOR_CHANNEL_SOURCE_ID, 1);
+    session.install_key(channel.key_schedule.aead);
+
+    let SealedConsentDeps {
+        require_operator_auth,
+        auth_state,
+        session_id,
+        session_uuid,
+        ledger,
+        grant_tx,
+        revoked,
+    } = deps;
+    let mut grant_tx = Some(grant_tx);
+
+    // Read sealed consent decisions for the life of the channel.
+    while let Ok(envelope) = transport.recv_envelope().await {
+        let Ok(plaintext) = session.open(&envelope) else {
+            tracing::warn!("failed to open sealed consent envelope");
+            continue;
+        };
+        let Ok(text) = std::str::from_utf8(&plaintext) else {
+            continue;
+        };
+        let Some(decoded) =
+            crate::decode_consent_decision(text, require_operator_auth, &auth_state, &session_id)
+        else {
+            continue;
+        };
+        match crate::consent_server::apply_consent_decision(
+            decoded,
+            &mut grant_tx,
+            &revoked,
+            &ledger,
+            session_uuid,
+        )
+        .await
+        {
+            crate::consent_server::ConsentFollowup::KeepServing => {}
+            crate::consent_server::ConsentFollowup::Stop => break,
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::operator::EnrolledOperator;
+    use crate::operator_auth::{AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS, ChallengeStore, RateLimiter};
+    use crate::operator_http::OperatorAuthState;
+    use ed25519_dalek::SigningKey;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::{Mutex as TokioMutex, oneshot};
+    use uuid::Uuid;
+    use xenia_ledger::Chain;
     use xenia_peer_core::handshake::perform_viewer_handshake_with_transcript;
+    // `Transport` (for `send_envelope`) comes in via `use super::*`.
     use xenia_peer_core::transport::TcpTransport;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sealed_channel_serves_a_consent_decision() {
+        // An enrolled operator drives the whole path: establish the sealed
+        // channel, then send a sealed consent decision over it.
+        let op_ed = [11u8; 32];
+        let op_ml = [12u8; 32];
+        let operator = HandshakeManager::from_identity_seeds(op_ed, op_ml);
+        let policy = OperatorPolicy::from_operators(vec![EnrolledOperator {
+            operator_id: "carol".to_string(),
+            ed25519_pubkey: operator.identity_public_key_bytes(),
+            ml_dsa_pubkey: operator.ml_dsa_public_key_bytes().to_vec(),
+            role: OperatorRole::Operator,
+        }])
+        .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (grant_tx, grant_rx) = oneshot::channel();
+        let revoked = Arc::new(AtomicBool::new(false));
+        let revoked_daemon = revoked.clone();
+
+        // Daemon: establish the channel, then serve sealed consent.
+        let host = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            stream.set_nodelay(true).ok();
+            let mut t = TcpTransport::new(stream);
+            let mut mgr = HandshakeManager::new();
+            let daemon = SigningKey::generate(&mut rand::thread_rng());
+            let auth_state = Arc::new(OperatorAuthState {
+                policy: OperatorPolicy::default(),
+                challenges: TokioMutex::new(ChallengeStore::new()),
+                daemon_key: daemon.clone(),
+                rate_limiter: TokioMutex::new(RateLimiter::new(
+                    AUTH_RATE_MAX,
+                    AUTH_RATE_WINDOW_SECS,
+                )),
+            });
+            let ledger = Arc::new(TokioMutex::new(Chain::new(daemon)));
+            let deps = SealedConsentDeps {
+                // Auth off: the sealed payload is a plaintext action, so this
+                // exercises the sealed transport + serve wiring (the token/auth
+                // path is covered by operator_http/operator_live_smoke).
+                require_operator_auth: false,
+                auth_state,
+                session_id: [0x5a; 16],
+                session_uuid: Uuid::from_u128(3),
+                ledger,
+                grant_tx,
+                revoked: revoked_daemon,
+            };
+            serve_sealed_operator_channel(&mut t, &mut mgr, &policy, deps).await
+        });
+
+        // Console (viewer): handshake with the enrolled identity, then seal an
+        // "Approve" over the channel key.
+        let viewer = tokio::spawn(async move {
+            let stream = TcpStream::connect(addr).await.unwrap();
+            stream.set_nodelay(true).ok();
+            let mut t = TcpTransport::new(stream);
+            let mut mgr = HandshakeManager::from_identity_seeds(op_ed, op_ml);
+            let outcome = perform_viewer_handshake_with_transcript(&mut t, &mut mgr, "daemon")
+                .await
+                .unwrap();
+            let mut sess = xenia_wire::Session::with_source_id(OPERATOR_CHANNEL_SOURCE_ID, 1);
+            sess.install_key(outcome.key_schedule.aead);
+            let envelope = sess
+                .seal(b"Approve", xenia_wire::PAYLOAD_TYPE_APPLICATION_MIN)
+                .unwrap();
+            t.send_envelope(&envelope).await.unwrap();
+            // Hold the connection open briefly so the daemon reads the decision.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        });
+
+        assert!(
+            grant_rx.await.unwrap(),
+            "a sealed Approve resolves the grant to true"
+        );
+        assert!(!revoked.load(Ordering::SeqCst));
+        let _ = viewer.await;
+        let _ = host.await;
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn enrolled_operator_establishes_a_usable_sealed_channel() {
