@@ -15,17 +15,71 @@
 //! decision is a signed, role-authorized action attributed in the ledger; with
 //! it off, legacy plaintext `Approve`/`Deny`/`Revoke`.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use futures::StreamExt;
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 use xenia_ledger::Chain;
 
 use crate::operator_auth::ConsentAction;
 use crate::operator_http::OperatorAuthState;
+
+/// Whether the accept/serve loop should keep going after a decision.
+pub(crate) enum ConsentFollowup {
+    /// Non-terminal (an Approve): keep the socket open for a later Revoke.
+    KeepServing,
+    /// Terminal (Deny or Revoke): stop.
+    Stop,
+}
+
+/// Apply one decoded consent decision, independent of the transport that
+/// delivered it: attribute an authenticated decision in the tamper-evident
+/// ledger, resolve the grant exactly once (Approve → true, Deny → false), or
+/// set the `revoked` flag. Shared by the plaintext [`ConsentServer`] and the
+/// sealed operator channel, so the decision semantics live in one tested place.
+pub(crate) async fn apply_consent_decision(
+    decoded: crate::DecodedConsent,
+    grant_tx: &mut Option<oneshot::Sender<bool>>,
+    revoked: &AtomicBool,
+    ledger: &Mutex<Chain>,
+    session_uuid: Uuid,
+) -> ConsentFollowup {
+    // Attribute an authenticated decision in the tamper-evident ledger.
+    if let Some(authorized) = &decoded.authorized {
+        let event = crate::operator_audit::operator_consent_audit_event(
+            authorized,
+            session_uuid,
+            Uuid::new_v4(),
+        );
+        if let Err(err) = ledger.lock().await.append(event) {
+            tracing::warn!(error = %err, "failed to append operator-action audit entry");
+        }
+    }
+    match decoded.action {
+        ConsentAction::Approve => {
+            tracing::info!(approved = true, "consent decision received");
+            if let Some(tx) = grant_tx.take() {
+                let _ = tx.send(true);
+            }
+            ConsentFollowup::KeepServing
+        }
+        ConsentAction::Deny => {
+            tracing::info!(approved = false, "consent decision received");
+            if let Some(tx) = grant_tx.take() {
+                let _ = tx.send(false);
+            }
+            ConsentFollowup::Stop
+        }
+        ConsentAction::Revoke => {
+            tracing::info!("consent revocation received");
+            revoked.store(true, Ordering::SeqCst);
+            ConsentFollowup::Stop
+        }
+    }
+}
 
 /// The consent server for a single session.
 pub(crate) struct ConsentServer {
@@ -94,39 +148,18 @@ impl ConsentServer {
                 ) else {
                     continue;
                 };
-                // Attribute an authenticated decision in the tamper-evident
-                // ledger.
-                if let Some(authorized) = &decoded.authorized {
-                    let event = crate::operator_audit::operator_consent_audit_event(
-                        authorized,
-                        session_uuid,
-                        Uuid::new_v4(),
-                    );
-                    if let Err(err) = ledger.lock().await.append(event) {
-                        tracing::warn!(error = %err, "failed to append operator-action audit entry");
-                    }
-                }
-                match decoded.action {
-                    ConsentAction::Approve => {
-                        tracing::info!(approved = true, "consent decision received");
-                        if let Some(tx) = grant_tx.take() {
-                            let _ = tx.send(true);
-                        }
-                        // Keep the socket open: the operator can still send
-                        // "Revoke" to end the live session.
-                    }
-                    ConsentAction::Deny => {
-                        tracing::info!(approved = false, "consent decision received");
-                        if let Some(tx) = grant_tx.take() {
-                            let _ = tx.send(false);
-                        }
-                        break 'accept;
-                    }
-                    ConsentAction::Revoke => {
-                        tracing::info!("consent revocation received");
-                        revoked.store(true, Ordering::SeqCst);
-                        break 'accept;
-                    }
+                match apply_consent_decision(
+                    decoded,
+                    &mut grant_tx,
+                    &revoked,
+                    &ledger,
+                    session_uuid,
+                )
+                .await
+                {
+                    // Approve keeps the socket open for a later Revoke.
+                    ConsentFollowup::KeepServing => {}
+                    ConsentFollowup::Stop => break 'accept,
                 }
             }
             // The connection ended without a terminal decision (Deny/Revoke):
@@ -177,6 +210,69 @@ mod tests {
             .await
             .unwrap();
         ws
+    }
+
+    // The decision semantics, tested directly (no transport) via the shared
+    // helper the sealed operator channel will also use.
+    #[tokio::test]
+    async fn apply_consent_decision_resolves_grant_and_terminates() {
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let ledger = TokioMutex::new(Chain::new(daemon));
+        let uuid = Uuid::from_u128(2);
+
+        // Approve -> grant true, keep serving, no revoke.
+        let (tx, rx) = oneshot::channel();
+        let mut tx = Some(tx);
+        let revoked = AtomicBool::new(false);
+        let f = apply_consent_decision(
+            crate::DecodedConsent {
+                action: ConsentAction::Approve,
+                authorized: None,
+            },
+            &mut tx,
+            &revoked,
+            &ledger,
+            uuid,
+        )
+        .await;
+        assert!(matches!(f, ConsentFollowup::KeepServing));
+        assert!(rx.await.unwrap());
+        assert!(!revoked.load(Ordering::SeqCst));
+
+        // Revoke -> revoked flag set, terminal.
+        let (tx2, _rx2) = oneshot::channel();
+        let mut tx2 = Some(tx2);
+        let f2 = apply_consent_decision(
+            crate::DecodedConsent {
+                action: ConsentAction::Revoke,
+                authorized: None,
+            },
+            &mut tx2,
+            &revoked,
+            &ledger,
+            uuid,
+        )
+        .await;
+        assert!(matches!(f2, ConsentFollowup::Stop));
+        assert!(revoked.load(Ordering::SeqCst));
+
+        // Deny -> grant false, terminal.
+        let (tx3, rx3) = oneshot::channel();
+        let mut tx3 = Some(tx3);
+        let revoked2 = AtomicBool::new(false);
+        let f3 = apply_consent_decision(
+            crate::DecodedConsent {
+                action: ConsentAction::Deny,
+                authorized: None,
+            },
+            &mut tx3,
+            &revoked2,
+            &ledger,
+            uuid,
+        )
+        .await;
+        assert!(matches!(f3, ConsentFollowup::Stop));
+        assert!(!rx3.await.unwrap());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
