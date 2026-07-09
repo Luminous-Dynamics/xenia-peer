@@ -164,9 +164,17 @@ so this is already solved on the console side.
   (stranger → fail-closed). The central claim — *the handshake IS the operator
   auth* — is now test-backed. The existing function delegates to the new one, so
   the video path is untouched.
-- ⬜ **Slice 1** — `WasmHandshake::from_identity(ed_seed, ml_seed)` in the
-  viewer-web crate (currently generates ephemeral keys), so the browser drives
-  the handshake with the console's persisted operator identity.
+- 🟢 **Slice 1 done** — `WasmHandshake::fromIdentity(ed25519_secret, ml_dsa_seed)`
+  in the viewer-web crate reconstructs the viewer identity from the console's
+  persisted seeds (mirroring the native `HandshakeManager::from_identity_seeds`
+  byte-for-byte) instead of generating ephemeral keys, so the browser drives the
+  handshake with the *enrolled* operator identity. On the xenia-wire branch
+  `sealed-operator-channel/wasm-from-identity` (compile-verified against
+  `wasm32-unknown-unknown`); merges to xenia-wire `main` via PR. The
+  WASM↔native key/identity parity is guaranteed by the identical derivation and
+  transitively by Slice 0; an explicit cross-compat assertion (extending
+  `xenia-viewer-web/tests/handshake_cross_compat.rs`, which already path-dev-deps
+  the native handshake) is Slice 4.
 - 🟢 **Slice 2 — establishment core done** (`operator_sealed_channel.rs`):
   `establish_operator_channel(transport, host_mgr, policy)` runs the host
   handshake and authorizes the authenticated peer against `OperatorPolicy`,
