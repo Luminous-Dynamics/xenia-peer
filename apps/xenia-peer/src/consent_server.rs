@@ -15,12 +15,12 @@
 //! decision is a signed, role-authorized action attributed in the ledger; with
 //! it off, legacy plaintext `Approve`/`Deny`/`Revoke`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt;
 use tokio::net::TcpListener;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 use uuid::Uuid;
 use xenia_ledger::Chain;
 
