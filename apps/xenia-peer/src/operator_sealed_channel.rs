@@ -20,9 +20,9 @@
 #![allow(dead_code)]
 
 use xenia_handshake::SessionKeySchedule;
+use xenia_peer_core::HandshakeManager;
 use xenia_peer_core::handshake::perform_host_handshake_authenticating_peer;
 use xenia_peer_core::transport::Transport;
-use xenia_peer_core::HandshakeManager;
 
 use crate::operator::{OperatorPolicy, OperatorRole};
 

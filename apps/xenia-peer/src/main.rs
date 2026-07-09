@@ -57,6 +57,7 @@ use xenia_capture::CpalAudioCapture;
 use xenia_capture::ScapCapture;
 
 mod admin_ui;
+mod consent_server;
 mod file_transfer;
 mod governance;
 mod m1_ledger;
@@ -66,11 +67,11 @@ mod operator_audit;
 mod operator_auth;
 mod operator_exposure;
 mod operator_http;
-mod operator_sealed_channel;
 #[cfg(test)]
 mod operator_live_smoke;
 #[cfg(test)]
 mod operator_rbac_smoke;
+mod operator_sealed_channel;
 #[cfg(test)]
 mod operator_sealed_smoke;
 use crate::governance::{GovernanceBridge, MitigationRule};
@@ -1650,8 +1651,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         response::IntoResponse,
         routing::get,
     };
-    use futures::StreamExt;
-
     async fn ws_handler(ws: WebSocketUpgrade, bridge: Arc<GovernanceBridge>) -> impl IntoResponse {
         ws.on_upgrade(move |socket| handle_socket(socket, bridge))
     }
@@ -1825,7 +1824,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Waiting for consent request...");
 
     let (consent_decision_tx, consent_decision_rx) = tokio::sync::oneshot::channel::<bool>();
-    let mut consent_decision_tx = Some(consent_decision_tx);
 
     // Set by the consent socket when the operator sends a later "Revoke" on
     // the still-open connection (after an initial "Approve"). The main send
@@ -1846,97 +1844,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let consent_session_uuid = session_id;
     let consent_ledger = shared_ledger.clone();
 
-    // Server task for processing consent responses.
+    // Consent server (extracted to consent_server::ConsentServer so its
+    // reconnect/revoke behavior is independently tested). Bind here so a bind
+    // failure just skips the server rather than dying silently inside the task.
     let consent_addr = format!("{}:{}", args.operator_bind, args.consent_port);
-    tokio::spawn(async move {
-        let listener = match TcpListener::bind(&consent_addr).await {
-            Ok(listener) => listener,
-            Err(err) => {
-                tracing::error!(addr = %consent_addr, error = %err, "consent websocket bind failed");
-                return;
-            }
-        };
-
-        // Accept consent connections for the life of the session. The first
-        // Approve/Deny resolves the grant; after an Approve we keep serving so
-        // the operator can later send "Revoke". Crucially we loop on accept():
-        // if the console's socket drops (tab closed, network blip) the operator
-        // can reconnect and still revoke -- otherwise the "revocation always
-        // nearby" property would silently lapse after the first disconnect.
-        'accept: loop {
-            let (stream, _) = match listener.accept().await {
-                Ok(conn) => conn,
-                Err(err) => {
-                    tracing::warn!(error = %err, "consent websocket accept failed");
-                    break 'accept;
-                }
+    match TcpListener::bind(&consent_addr).await {
+        Ok(listener) => {
+            let server = crate::consent_server::ConsentServer {
+                require_operator_auth,
+                auth_state: consent_auth_state,
+                session_id: consent_session_id,
+                session_uuid: consent_session_uuid,
+                ledger: consent_ledger,
+                grant_tx: consent_decision_tx,
+                revoked: revoked_for_consent,
             };
-            let mut ws_stream = match tokio_tungstenite::accept_async(stream).await {
-                Ok(ws) => ws,
-                Err(err) => {
-                    tracing::warn!(error = %err, "consent websocket handshake failed");
-                    continue 'accept;
-                }
-            };
-            while let Some(result) = ws_stream.next().await {
-                let msg = match result {
-                    Ok(msg) => msg,
-                    Err(err) => {
-                        tracing::warn!(error = %err, "consent websocket receive failed");
-                        break;
-                    }
-                };
-                let Ok(text) = msg.to_text() else {
-                    continue;
-                };
-                let Some(decoded) = decode_consent_decision(
-                    text,
-                    require_operator_auth,
-                    &consent_auth_state,
-                    &consent_session_id,
-                ) else {
-                    continue;
-                };
-                // Phase 4: attribute an authenticated decision in the
-                // tamper-evident ledger.
-                if let Some(authorized) = &decoded.authorized {
-                    let event = crate::operator_audit::operator_consent_audit_event(
-                        authorized,
-                        consent_session_uuid,
-                        Uuid::new_v4(),
-                    );
-                    if let Err(err) = consent_ledger.lock().await.append(event) {
-                        tracing::warn!(error = %err, "failed to append operator-action audit entry");
-                    }
-                }
-                match decoded.action {
-                    crate::operator_auth::ConsentAction::Approve => {
-                        info!(approved = true, "consent decision received");
-                        if let Some(tx) = consent_decision_tx.take() {
-                            let _ = tx.send(true);
-                        }
-                        // Keep the socket open: the operator can still send
-                        // "Revoke" to end the live session.
-                    }
-                    crate::operator_auth::ConsentAction::Deny => {
-                        info!(approved = false, "consent decision received");
-                        if let Some(tx) = consent_decision_tx.take() {
-                            let _ = tx.send(false);
-                        }
-                        break 'accept;
-                    }
-                    crate::operator_auth::ConsentAction::Revoke => {
-                        info!("consent revocation received");
-                        revoked_for_consent.store(true, Ordering::SeqCst);
-                        break 'accept;
-                    }
-                }
-            }
-            // The connection ended without a terminal decision (Deny/Revoke):
-            // loop back to accept the next socket so a reconnecting operator
-            // can still approve a pending grant or revoke a live session.
+            tokio::spawn(server.run(listener));
         }
-    });
+        Err(err) => {
+            tracing::error!(addr = %consent_addr, error = %err, "consent websocket bind failed");
+        }
+    }
 
     session.install_schedule(&handshake.key_schedule);
     let _negotiated_context_key =
