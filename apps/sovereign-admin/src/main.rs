@@ -18,6 +18,7 @@ mod config;
 mod context;
 mod operator_session;
 mod pages;
+mod sealed_consent;
 
 fn main() {
     console_error_panic_hook::set_once();

@@ -13,6 +13,7 @@ const ENDPOINT_KEY: &str = "xenia-admin.daemon-endpoint";
 const SECRET_KEY: &str = "xenia-admin.daemon-secret";
 const CONSENT_PORT_KEY: &str = "xenia-admin.daemon-consent-port";
 const SEALED_PORT_KEY: &str = "xenia-admin.daemon-sealed-port";
+const SEALED_ENABLED_KEY: &str = "xenia-admin.daemon-sealed-enabled";
 
 /// The daemon's default admin HTTP port (xenia-peer `--admin-port`); the
 /// `/auth/*` routes and the `/ws` consent broadcast both live here. (The old
@@ -39,6 +40,10 @@ pub struct DaemonConfig {
     /// the daemon runs with `--operator-sealed`, decisions go here inside PQC
     /// envelopes over the authenticated handshake channel.
     pub sealed_port: RwSignal<u16>,
+    /// Whether the operator's daemon is running `--operator-sealed`, so consent
+    /// decisions should go over the PQC-sealed channel instead of the plaintext
+    /// consent socket. Operator-set (there is no daemon-advertised signal yet).
+    pub use_sealed_channel: RwSignal<bool>,
 }
 
 impl DaemonConfig {
@@ -57,11 +62,17 @@ impl DaemonConfig {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(DEFAULT_SEALED_PORT),
         );
+        let use_sealed_channel = RwSignal::new(
+            load_from_storage(SEALED_ENABLED_KEY)
+                .map(|s| s == "true")
+                .unwrap_or(false),
+        );
         Self {
             endpoint,
             hmac_secret,
             consent_port,
             sealed_port,
+            use_sealed_channel,
         }
     }
 
@@ -70,6 +81,10 @@ impl DaemonConfig {
         persist_to_storage(SECRET_KEY, &self.hmac_secret.get());
         persist_to_storage(CONSENT_PORT_KEY, &self.consent_port.get().to_string());
         persist_to_storage(SEALED_PORT_KEY, &self.sealed_port.get().to_string());
+        persist_to_storage(
+            SEALED_ENABLED_KEY,
+            &self.use_sealed_channel.get().to_string(),
+        );
     }
 
     /// The `ws://host:adminport` authority derived from the HTTP `endpoint`
@@ -98,13 +113,8 @@ impl DaemonConfig {
 
     /// The WebSocket URL of the daemon's sealed operator channel
     /// (`--operator-sealed-port`). The console performs the PQC handshake here
-    /// and sends consent decisions inside sealed envelopes.
-    //
-    // Consumed by the pending sealed-consent WS driver, which lands once the
-    // wasm-safe handshake (xenia-wire `WasmHandshake::fromIdentity`, PR #7) is
-    // exposed as a consumable library. Kept here as the URL foundation so that
-    // wiring is a one-line call, not a config change.
-    #[allow(dead_code)]
+    /// and sends consent decisions inside sealed envelopes (see
+    /// [`crate::sealed_consent::send_sealed_consent`]).
     pub fn sealed_ws_url(&self) -> String {
         self.ws_url_for_port(self.sealed_port.get())
     }

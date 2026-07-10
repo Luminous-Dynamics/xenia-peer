@@ -48,6 +48,8 @@ pub struct OperatorIdentity {
     hm: HandshakeManager,
     ed_pubkey: [u8; 32],
     ml_pubkey: Vec<u8>,
+    ed_seed: [u8; 32],
+    ml_seed: [u8; 32],
 }
 
 impl OperatorIdentity {
@@ -71,7 +73,18 @@ impl OperatorIdentity {
             hm,
             ed_pubkey,
             ml_pubkey,
+            ed_seed,
+            ml_seed,
         }
+    }
+
+    /// The persisted identity seeds (Ed25519 secret, ML-DSA-65 seed). Used to
+    /// drive the sealed operator channel's PQC handshake with *this* enrolled
+    /// identity, so the handshake authenticates the operator (see
+    /// [`crate::sealed_consent`]). These never leave the browser except as the
+    /// public keys they derive.
+    pub fn seeds(&self) -> ([u8; 32], [u8; 32]) {
+        (self.ed_seed, self.ml_seed)
     }
 
     /// The Ed25519 public key, hex — what an admin enrolls in the daemon's

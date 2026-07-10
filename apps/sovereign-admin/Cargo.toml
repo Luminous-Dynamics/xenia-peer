@@ -50,6 +50,14 @@ serde_json = "1"
 # Real Holochain zome calls from the browser (resolve_did on login).
 mycelix-leptos-client = { version = "0.1", default-features = false, features = ["browser"] }
 
+# Sealed operator channel: the wasm-safe PQC viewer handshake
+# (xenia_wire::handshake::ViewerHandshake) + AEAD envelope sealing
+# (Session::seal), so the console can complete the handshake with its enrolled
+# operator identity and seal consent decisions over the daemon's
+# --operator-sealed endpoint. The `handshake` feature pulls ml-kem/ml-dsa
+# (getrandom backends already wired for wasm32 below).
+xenia-wire = { workspace = true, features = ["handshake"] }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # ml-kem/ml-dsa (via xenia-handshake + xenia-ledger) resolve getrandom 0.3 AND
 # 0.4, both semver-incompatible with the 0.2 chain (rand_core 0.6 / ed25519)

@@ -80,25 +80,45 @@ pub fn ConsentModal() -> impl IntoView {
 
     // Send a decision: signed + token-bearing when we have a session *and* the
     // prompt carried a session_id to bind to; otherwise the legacy plaintext
-    // action a non-`--require-operator-auth` daemon accepts.
+    // action a non-`--require-operator-auth` daemon accepts. When the operator's
+    // daemon runs `--operator-sealed`, the *same* payload is sealed over the PQC
+    // handshake channel instead of sent plaintext (the daemon decodes it
+    // identically after opening the envelope).
     let decide = move |action: ConsentAction| {
         let prompt = consent_req.get_untracked();
         let sess = session.and_then(|sig| sig.get_untracked());
         let session_id = prompt.as_deref().and_then(parse_session_id);
+        // Load the enrolled identity once — it builds the token-bound payload and
+        // (for the sealed path) drives the handshake that authenticates us.
+        let id = OperatorIdentity::load_or_generate();
         let payload = match (sess, session_id) {
-            (Some(s), Some(sid)) => {
-                let id = OperatorIdentity::load_or_generate();
-                build_consent_request(&id, &s, action, &sid)
-            }
+            (Some(s), Some(sid)) => build_consent_request(&id, &s, action, &sid),
             _ => action.as_str().to_string(),
         };
-        let consent_url = config.consent_ws_url();
-        spawn_local(async move {
-            if let Ok(ws) = WebSocket::open(&consent_url) {
-                let (mut writer, _) = ws.split();
-                let _ = writer.send(Message::Text(payload)).await;
-            }
-        });
+        if config.use_sealed_channel.get_untracked() {
+            let (ed_seed, ml_seed) = id.seeds();
+            let sealed_url = config.sealed_ws_url();
+            spawn_local(async move {
+                if let Err(err) = crate::sealed_consent::send_sealed_consent(
+                    &sealed_url,
+                    &ed_seed,
+                    &ml_seed,
+                    payload.as_bytes(),
+                )
+                .await
+                {
+                    leptos::logging::error!("sealed consent decision failed: {err}");
+                }
+            });
+        } else {
+            let consent_url = config.consent_ws_url();
+            spawn_local(async move {
+                if let Ok(ws) = WebSocket::open(&consent_url) {
+                    let (mut writer, _) = ws.split();
+                    let _ = writer.send(Message::Text(payload)).await;
+                }
+            });
+        }
         set_is_open.set(false);
     };
 

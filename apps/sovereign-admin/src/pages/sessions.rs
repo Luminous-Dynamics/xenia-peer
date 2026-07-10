@@ -72,6 +72,30 @@ pub fn SessionsPage() -> impl IntoView {
                                 }
                             />
                         </div>
+                        <div class="field">
+                            <label class="checkbox">
+                                <input
+                                    type="checkbox"
+                                    prop:checked=move || config.use_sealed_channel.get()
+                                    on:change=move |ev| {
+                                        config.use_sealed_channel.set(event_target_checked(&ev))
+                                    }
+                                />
+                                " Use sealed operator channel (PQC) — daemon must run --operator-sealed"
+                            </label>
+                        </div>
+                        <div class="field">
+                            <label>"Sealed Port"</label>
+                            <input
+                                type="number"
+                                prop:value=move || config.sealed_port.get().to_string()
+                                on:input=move |ev| {
+                                    if let Ok(p) = event_target_value(&ev).parse::<u16>() {
+                                        config.sealed_port.set(p);
+                                    }
+                                }
+                            />
+                        </div>
                         <button class="primary" on:click=move |_| config.save()>"Save & Reconnect"</button>
                     </div>
                 </section>
