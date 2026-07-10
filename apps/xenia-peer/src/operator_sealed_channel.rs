@@ -19,10 +19,12 @@
 
 #![allow(dead_code)]
 
+use tokio::net::TcpListener;
 use xenia_handshake::SessionKeySchedule;
 use xenia_peer_core::HandshakeManager;
 use xenia_peer_core::handshake::perform_host_handshake_authenticating_peer;
 use xenia_peer_core::transport::Transport;
+use xenia_transport_ws::WsTransport;
 
 use crate::operator::{OperatorPolicy, OperatorRole};
 
@@ -163,6 +165,42 @@ pub(crate) async fn serve_sealed_operator_channel<T: Transport>(
         }
     }
     Ok(())
+}
+
+/// The `--operator-sealed` daemon endpoint (v1): accept **one** WebSocket
+/// connection over `listener`, wrap it as a `WsTransport`, and serve the sealed
+/// operator channel over it. Fail-closed and simple — a failed handshake or an
+/// un-enrolled peer just ends the channel, and the session's consent then times
+/// out (deny). v1 is single-connection: no accept-loop reconnect (unlike the
+/// plaintext `ConsentServer`); that, and letting a rejected first connection
+/// yield to a later legitimate one, is the next increment.
+pub(crate) async fn run_sealed_operator_endpoint(
+    listener: TcpListener,
+    mut host_mgr: HandshakeManager,
+    policy: OperatorPolicy,
+    deps: SealedConsentDeps,
+) {
+    let (stream, peer) = match listener.accept().await {
+        Ok(conn) => conn,
+        Err(err) => {
+            tracing::error!(error = %err, "sealed operator endpoint accept failed");
+            return;
+        }
+    };
+    stream.set_nodelay(true).ok();
+    let mut transport = match WsTransport::accept_stream(stream).await {
+        Ok(t) => t,
+        Err(err) => {
+            tracing::warn!(error = %err, "sealed operator websocket upgrade failed");
+            return;
+        }
+    };
+    tracing::info!(peer = %peer, "sealed operator channel connection accepted");
+    if let Err(err) =
+        serve_sealed_operator_channel(&mut transport, &mut host_mgr, &policy, deps).await
+    {
+        tracing::warn!(error = %err, "sealed operator channel ended");
+    }
 }
 
 #[cfg(test)]

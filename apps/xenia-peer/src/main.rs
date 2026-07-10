@@ -126,6 +126,19 @@ struct Args {
     #[arg(long, default_value_t = 8082)]
     consent_port: u16,
 
+    /// Serve consent over a `xenia-wire`-sealed operator channel (PQC-hybrid
+    /// handshake + AEAD) instead of the plaintext consent port. The console
+    /// opens a WebSocket, runs the operator handshake (its enrolled Ed25519 +
+    /// ML-DSA-65 key IS the proof of possession), and sends sealed consent
+    /// decisions. See `docs/security/SEALED_OPERATOR_CHANNEL_DESIGN.md`. v1 is
+    /// single-connection (no reconnect); requires `--operators-file`.
+    #[arg(long)]
+    operator_sealed: bool,
+
+    /// Port for the sealed operator channel (`--operator-sealed`).
+    #[arg(long, default_value_t = 8083)]
+    operator_sealed_port: u16,
+
     /// Bind address for the operator surface (the admin `/auth` + `/ws` port
     /// and the consent port). Defaults to loopback. Binding to a non-loopback
     /// address (e.g. `0.0.0.0`) exposes the surface to the network and is
@@ -1844,25 +1857,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let consent_session_uuid = session_id;
     let consent_ledger = shared_ledger.clone();
 
-    // Consent server (extracted to consent_server::ConsentServer so its
-    // reconnect/revoke behavior is independently tested). Bind here so a bind
+    // Consent server. With --operator-sealed the console talks over a
+    // xenia-wire-sealed operator channel (PQC confidentiality + handshake
+    // channel-auth); otherwise the plaintext consent port. Both own the single
+    // per-session grant oneshot, so it's one or the other. Bind here so a bind
     // failure just skips the server rather than dying silently inside the task.
-    let consent_addr = format!("{}:{}", args.operator_bind, args.consent_port);
-    match TcpListener::bind(&consent_addr).await {
-        Ok(listener) => {
-            let server = crate::consent_server::ConsentServer {
-                require_operator_auth,
-                auth_state: consent_auth_state,
-                session_id: consent_session_id,
-                session_uuid: consent_session_uuid,
-                ledger: consent_ledger,
-                grant_tx: consent_decision_tx,
-                revoked: revoked_for_consent,
-            };
-            tokio::spawn(server.run(listener));
+    if args.operator_sealed {
+        let sealed_addr = format!("{}:{}", args.operator_bind, args.operator_sealed_port);
+        match TcpListener::bind(&sealed_addr).await {
+            Ok(listener) => {
+                // A second host HandshakeManager with the *same* persisted
+                // identity, so the console pins one daemon fingerprint.
+                let host_mgr = load_or_create_host_identity(&args.host_identity_key_path)?;
+                let deps = crate::operator_sealed_channel::SealedConsentDeps {
+                    require_operator_auth,
+                    auth_state: consent_auth_state,
+                    session_id: consent_session_id,
+                    session_uuid: consent_session_uuid,
+                    ledger: consent_ledger,
+                    grant_tx: consent_decision_tx,
+                    revoked: revoked_for_consent,
+                };
+                let policy = operator_auth_state.policy.clone();
+                info!(addr = %sealed_addr, "sealed operator endpoint listening");
+                tokio::spawn(
+                    crate::operator_sealed_channel::run_sealed_operator_endpoint(
+                        listener, host_mgr, policy, deps,
+                    ),
+                );
+            }
+            Err(err) => {
+                tracing::error!(addr = %sealed_addr, error = %err, "sealed operator endpoint bind failed");
+            }
         }
-        Err(err) => {
-            tracing::error!(addr = %consent_addr, error = %err, "consent websocket bind failed");
+    } else {
+        let consent_addr = format!("{}:{}", args.operator_bind, args.consent_port);
+        match TcpListener::bind(&consent_addr).await {
+            Ok(listener) => {
+                let server = crate::consent_server::ConsentServer {
+                    require_operator_auth,
+                    auth_state: consent_auth_state,
+                    session_id: consent_session_id,
+                    session_uuid: consent_session_uuid,
+                    ledger: consent_ledger,
+                    grant_tx: consent_decision_tx,
+                    revoked: revoked_for_consent,
+                };
+                tokio::spawn(server.run(listener));
+            }
+            Err(err) => {
+                tracing::error!(addr = %consent_addr, error = %err, "consent websocket bind failed");
+            }
         }
     }
 
