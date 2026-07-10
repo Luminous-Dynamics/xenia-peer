@@ -97,6 +97,9 @@ pub(crate) struct ConsentServer {
     pub(crate) grant_tx: oneshot::Sender<bool>,
     /// Set true on a Revoke so the main send loop tears the session down.
     pub(crate) revoked: Arc<AtomicBool>,
+    /// Live operator revocation list — a revoked operator's signed action is
+    /// refused here too (not just on the sealed channel).
+    pub(crate) revocations: crate::operator_revocations::OperatorRevocations,
 }
 
 impl ConsentServer {
@@ -111,6 +114,7 @@ impl ConsentServer {
             ledger,
             grant_tx,
             revoked,
+            revocations,
         } = self;
         let mut grant_tx = Some(grant_tx);
 
@@ -145,6 +149,7 @@ impl ConsentServer {
                     require_operator_auth,
                     &auth_state,
                     &session_id,
+                    &revocations,
                 ) else {
                     continue;
                 };
@@ -199,6 +204,7 @@ mod tests {
             ledger,
             grant_tx,
             revoked,
+            revocations: crate::operator_revocations::OperatorRevocations::empty(),
         }
     }
 

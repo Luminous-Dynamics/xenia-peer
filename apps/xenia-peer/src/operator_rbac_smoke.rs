@@ -126,8 +126,10 @@ async fn operator_rbac_full_chain_smoke() {
     .to_string();
 
     // --- 4. run it through the daemon's OWN consent-decision path ---
-    let decoded = crate::decode_consent_decision(&consent_json, true, &state, &session_id)
-        .expect("authenticated Approve must be authorized");
+    let no_revocations = crate::operator_revocations::OperatorRevocations::empty();
+    let decoded =
+        crate::decode_consent_decision(&consent_json, true, &state, &session_id, &no_revocations)
+            .expect("authenticated Approve must be authorized");
     assert_eq!(decoded.action, ConsentAction::Approve);
     let authorized = decoded
         .authorized
@@ -135,6 +137,16 @@ async fn operator_rbac_full_chain_smoke() {
     assert_eq!(authorized.operator_id, "alice");
     assert_eq!(authorized.role, OperatorRole::Admin);
     assert_eq!(authorized.ed25519_pubkey, op.identity_public_key_bytes());
+
+    // --- 4b. once alice is revoked, the SAME valid, unexpired signed action is
+    //         refused on the consent path (not just on the sealed channel) ---
+    let revocations = crate::operator_revocations::OperatorRevocations::empty();
+    revocations.revoke("alice");
+    assert!(
+        crate::decode_consent_decision(&consent_json, true, &state, &session_id, &revocations)
+            .is_none(),
+        "a revoked operator's signed action must be refused on the consent path"
+    );
 
     // --- 5. attribute it in the ledger and verify the hash chain ---
     let event = operator_consent_audit_event(&authorized, Uuid::from_u128(1), Uuid::from_u128(2));
@@ -146,7 +158,8 @@ async fn operator_rbac_full_chain_smoke() {
 
     // --- 6. a tampered/replayed decision is refused by the same path ---
     // Wrong session id: the per-action signature no longer binds.
-    let bad = crate::decode_consent_decision(&consent_json, true, &state, &[0u8; 16]);
+    let bad =
+        crate::decode_consent_decision(&consent_json, true, &state, &[0u8; 16], &no_revocations);
     assert!(
         bad.is_none(),
         "a decision signed for another session is refused"

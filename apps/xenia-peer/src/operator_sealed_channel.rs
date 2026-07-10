@@ -161,6 +161,7 @@ pub(crate) async fn serve_sealed_operator_channel<T: Transport>(
             deps.require_operator_auth,
             &deps.auth_state,
             &deps.session_id,
+            &deps.revocations,
         ) else {
             continue;
         };
