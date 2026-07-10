@@ -65,11 +65,12 @@ mod m1_runtime;
 mod operator;
 mod operator_audit;
 mod operator_auth;
+#[cfg(test)]
+mod operator_channel_metrics;
 mod operator_exposure;
 mod operator_http;
 #[cfg(test)]
 mod operator_live_smoke;
-#[cfg(test)]
 mod operator_rbac_smoke;
 mod operator_sealed_channel;
 #[cfg(test)]
@@ -1878,6 +1879,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     revoked: revoked_for_consent,
                 };
                 let policy = operator_auth_state.policy.clone();
+                let sealed_metrics = std::sync::Arc::new(
+                    crate::operator_channel_metrics::OperatorChannelMetrics::default(),
+                );
                 info!(addr = %sealed_addr, "sealed operator endpoint listening");
                 tokio::spawn(
                     crate::operator_sealed_channel::run_sealed_operator_endpoint(
@@ -1886,6 +1890,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         policy,
                         deps,
                         consent_decision_tx,
+                        sealed_metrics,
                     ),
                 );
             }
