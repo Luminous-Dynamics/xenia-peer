@@ -1728,6 +1728,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )),
     });
 
+    // Live operator revocation list — shared by the admin `/operator/revoke`
+    // endpoint (below) and the sealed operator endpoint. A failed load is fatal:
+    // we won't run the privileged surfaces without the list we were told to
+    // enforce (fail-closed).
+    let revocations = match &args.revoked_operators_file {
+        Some(path) => {
+            let r = crate::operator_revocations::OperatorRevocations::from_file(path).map_err(
+                |err| -> Box<dyn std::error::Error> {
+                    format!(
+                        "failed to load --revoked-operators-file {}: {err}",
+                        path.display()
+                    )
+                    .into()
+                },
+            )?;
+            info!(path = %path.display(), revoked = r.len(), "loaded operator revocation list");
+            r
+        }
+        None => crate::operator_revocations::OperatorRevocations::empty(),
+    };
+    // Reload the revocation file on SIGHUP (no restart), only when a file is
+    // configured so SIGHUP disposition is otherwise unchanged.
+    #[cfg(unix)]
+    if args.revoked_operators_file.is_some() {
+        let reload = revocations.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{SignalKind, signal};
+            let Ok(mut hup) = signal(SignalKind::hangup()) else {
+                return;
+            };
+            while hup.recv().await.is_some() {
+                match reload.reload() {
+                    Ok(n) => info!(revoked = n, "reloaded operator revocation list on SIGHUP"),
+                    Err(err) => {
+                        tracing::error!(error = %err, "failed to reload revocation list on SIGHUP")
+                    }
+                }
+            }
+        });
+    }
+
     let app = crate::admin_ui::mount(Router::new())
         .route(
             "/ws",
@@ -1736,7 +1777,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 move |ws| ws_handler(ws, bridge.clone())
             }),
         )
-        .merge(crate::operator_http::router(operator_auth_state.clone()));
+        .merge(crate::operator_http::router(
+            operator_auth_state.clone(),
+            revocations.clone(),
+        ));
 
     let listener = TcpListener::bind(format!("{}:{}", args.operator_bind, args.admin_port)).await?;
     tokio::spawn(async move {
@@ -1879,50 +1923,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // A second host HandshakeManager with the *same* persisted
                 // identity, so the console pins one daemon fingerprint.
                 let host_mgr = load_or_create_host_identity(&args.host_identity_key_path)?;
-                // Live operator revocation list (optional). A failed load is
-                // fatal — we won't run the privileged endpoint without the
-                // revocation list we were told to enforce (fail-closed).
-                let revocations = match &args.revoked_operators_file {
-                    Some(path) => {
-                        let r = crate::operator_revocations::OperatorRevocations::from_file(path)
-                            .map_err(|err| -> Box<dyn std::error::Error> {
-                            format!(
-                                "failed to load --revoked-operators-file {}: {err}",
-                                path.display()
-                            )
-                            .into()
-                        })?;
-                        info!(path = %path.display(), revoked = r.len(), "loaded operator revocation list");
-                        r
-                    }
-                    None => crate::operator_revocations::OperatorRevocations::empty(),
-                };
-                // Reload the revocation file on SIGHUP (no restart). Only wired
-                // when a file is configured, so SIGHUP disposition is otherwise
-                // unchanged.
-                #[cfg(unix)]
-                if args.revoked_operators_file.is_some() {
-                    let reload = revocations.clone();
-                    tokio::spawn(async move {
-                        use tokio::signal::unix::{SignalKind, signal};
-                        let Ok(mut hup) = signal(SignalKind::hangup()) else {
-                            return;
-                        };
-                        while hup.recv().await.is_some() {
-                            match reload.reload() {
-                                Ok(n) => {
-                                    info!(
-                                        revoked = n,
-                                        "reloaded operator revocation list on SIGHUP"
-                                    )
-                                }
-                                Err(err) => {
-                                    tracing::error!(error = %err, "failed to reload revocation list on SIGHUP")
-                                }
-                            }
-                        }
-                    });
-                }
+                // Uses the `revocations` handle created above (shared with the
+                // admin /operator/revoke endpoint), so a live revoke reaches the
+                // sealed channel immediately.
                 let deps = crate::operator_sealed_channel::SealedConsentDeps {
                     require_operator_auth,
                     auth_state: consent_auth_state,

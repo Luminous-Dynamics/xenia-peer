@@ -28,6 +28,10 @@ pub const CHALLENGE_DOMAIN: &[u8] = b"xenia-operator-auth-challenge-v1";
 /// Domain-separation tag for a per-consent-action signature.
 pub const CONSENT_ACTION_DOMAIN: &[u8] = b"xenia-operator-consent-action-v1";
 
+/// Domain-separation tag for an admin's signature authorizing the revocation of
+/// another operator (the `/operator/revoke` admin action).
+pub const REVOKE_OPERATOR_DOMAIN: &[u8] = b"xenia-operator-revoke-operator-v1";
+
 /// An operator's role. Strictly hierarchical: a higher role can do everything
 /// a lower one can, plus more (see [`OperatorRole::rank`]). Serializes to the
 /// variant name (`"Viewer"`, `"Admin"`, …) — the console gates its UI on the
@@ -200,6 +204,22 @@ pub fn consent_action_transcript(
     t.extend_from_slice(CONSENT_ACTION_DOMAIN);
     t.push(action.tag());
     t.extend_from_slice(session_id);
+    t.extend_from_slice(token_nonce);
+    t
+}
+
+/// The bytes an Admin signs to authorize revoking `target_operator_id`. Bound to
+/// the admin's current token (via `token_nonce`) so a captured signature can't
+/// be replayed against a different token; the target id is length-prefixed so it
+/// can't be ambiguously concatenated with the trailing nonce.
+///
+/// Layout: `REVOKE_OPERATOR_DOMAIN || len(target)(4, be) || target || token_nonce(16)`.
+pub fn revoke_operator_transcript(target_operator_id: &str, token_nonce: &[u8; 16]) -> Vec<u8> {
+    let target = target_operator_id.as_bytes();
+    let mut t = Vec::with_capacity(REVOKE_OPERATOR_DOMAIN.len() + 4 + target.len() + 16);
+    t.extend_from_slice(REVOKE_OPERATOR_DOMAIN);
+    t.extend_from_slice(&(target.len() as u32).to_be_bytes());
+    t.extend_from_slice(target);
     t.extend_from_slice(token_nonce);
     t
 }
