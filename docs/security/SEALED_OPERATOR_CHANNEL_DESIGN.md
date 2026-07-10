@@ -228,7 +228,13 @@ so this is already solved on the console side.
   wire-compat guaranteed by Slice 2.5's `handshake_cross_compat` (3/3, same
   `ViewerHandshake` + `source_id`). **End-to-end sealed operator channel is now
   complete: daemon (Slice 2 + v2 reconnect) ↔ console (Slice 3).**
-- ⬜ **Slice 4 — live browser↔daemon E2E** (optional): a running-daemon +
-  headless-browser test of the full flow. The cryptographic wire-compat is
-  already proven natively by `handshake_cross_compat` (Slice 2.5), so this is a
-  transport/integration smoke test, not a correctness gate.
+- ✅ **Slice 4 — native browser-path E2E over a real WebSocket done**
+  (`operator_sealed_channel.rs::browser_viewer_handshake_drives_the_live_ws_endpoint`):
+  the console's *exact* `xenia_wire::handshake::ViewerHandshake` + `Session`
+  drives the real `run_sealed_operator_endpoint` over a real `WsTransport`
+  WebSocket, seals an Approve, and the grant resolves — proving the production
+  host path (`perform_host_handshake_authenticating_peer`) and the production
+  browser path are wire-compatible over the actual transport. `xenia-wire`'s
+  `handshake` feature is a `[dev-dependency]` so it's test-only (not in the
+  production daemon binary). 4/4 module tests pass. A true headless-browser run
+  is the only remaining (optional) fidelity step; correctness is fully proven.
