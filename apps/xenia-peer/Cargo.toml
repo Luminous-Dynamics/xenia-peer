@@ -102,3 +102,5 @@ tower = { version = "0.5", features = ["util"] }
 # only for the test/dev profile, so the production daemon binary does NOT pull
 # the handshake/ml-kem tree (it uses its own native host handshake).
 xenia-wire = { workspace = true, features = ["handshake"] }
+# Test-only: temp files for the operator-revocations file-parsing/reload tests.
+tempfile = "3"

@@ -49,6 +49,9 @@ pub(crate) enum OperatorChannelError {
     /// The handshake was cryptographically valid, but the peer's key is not an
     /// enrolled operator — refused fail-closed.
     NotEnrolled,
+    /// The handshake authenticated an enrolled operator, but that operator id is
+    /// on the live revocation list — refused fail-closed without a restart.
+    Revoked(String),
 }
 
 impl std::fmt::Display for OperatorChannelError {
@@ -57,6 +60,9 @@ impl std::fmt::Display for OperatorChannelError {
             OperatorChannelError::Handshake(e) => write!(f, "operator handshake failed: {e}"),
             OperatorChannelError::NotEnrolled => {
                 write!(f, "authenticated peer is not an enrolled operator")
+            }
+            OperatorChannelError::Revoked(id) => {
+                write!(f, "operator '{id}' is revoked")
             }
         }
     }
@@ -101,6 +107,9 @@ pub(crate) struct SealedConsentDeps {
     pub(crate) session_uuid: uuid::Uuid,
     pub(crate) ledger: std::sync::Arc<tokio::sync::Mutex<xenia_ledger::Chain>>,
     pub(crate) revoked: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Live operator revocation list. Consulted after the handshake authenticates
+    /// the peer, so a compromised operator is refused without a daemon restart.
+    pub(crate) revocations: crate::operator_revocations::OperatorRevocations,
 }
 
 /// Serve one sealed operator channel over `transport`: establish the
@@ -124,6 +133,11 @@ pub(crate) async fn serve_sealed_operator_channel<T: Transport>(
     grant_tx: &mut Option<tokio::sync::oneshot::Sender<bool>>,
 ) -> Result<bool, OperatorChannelError> {
     let channel = establish_operator_channel(transport, host_mgr, policy).await?;
+    // The key is enrolled, but it may have been revoked at runtime — check the
+    // live list before trusting the channel. Fail-closed.
+    if deps.revocations.is_revoked(&channel.operator_id) {
+        return Err(OperatorChannelError::Revoked(channel.operator_id));
+    }
     tracing::info!(
         operator = %channel.operator_id,
         role = ?channel.role,
@@ -246,6 +260,14 @@ pub(crate) async fn run_sealed_operator_endpoint(
                 tracing::warn!(error = %err, peer = %peer, handshake_failures_total = total, "sealed operator handshake failed");
                 continue 'accept;
             }
+            // An enrolled operator that has been revoked at runtime — refused
+            // fail-closed. A distinct signal from a probe: a *known* operator's
+            // key is being used after revocation (possible key compromise).
+            Err(err @ OperatorChannelError::Revoked(_)) => {
+                let total = metrics.record_revoked();
+                tracing::warn!(error = %err, peer = %peer, revoked_total = total, "revoked operator attempted the sealed operator channel");
+                continue 'accept;
+            }
         }
     }
     // Session summary once the endpoint stops (terminal decision or accept
@@ -255,6 +277,7 @@ pub(crate) async fn run_sealed_operator_endpoint(
         connections_accepted = s.connections_accepted,
         handshake_failures = s.handshake_failures,
         not_enrolled_rejections = s.not_enrolled_rejections,
+        revoked_rejections = s.revoked_rejections,
         channels_established = s.channels_established,
         terminal_decisions = s.terminal_decisions,
         "sealed operator endpoint closed"
@@ -326,6 +349,7 @@ mod tests {
                 session_uuid: Uuid::from_u128(3),
                 ledger,
                 revoked: revoked_daemon,
+                revocations: crate::operator_revocations::OperatorRevocations::empty(),
             };
             let mut grant_tx = Some(grant_tx);
             serve_sealed_operator_channel(&mut t, &mut mgr, &policy, &deps, &mut grant_tx).await
@@ -404,6 +428,7 @@ mod tests {
             session_uuid: Uuid::from_u128(21),
             ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
             revoked: revoked.clone(),
+            revocations: crate::operator_revocations::OperatorRevocations::empty(),
         };
         let host_mgr = HandshakeManager::new();
         let metrics = Arc::new(crate::operator_channel_metrics::OperatorChannelMetrics::default());
@@ -447,6 +472,77 @@ mod tests {
         // the time the grant resolved it must be counted — proves the metrics are
         // wired live on the endpoint path.
         assert_eq!(metrics.snapshot().connections_accepted, 1);
+    }
+
+    /// Live revocation: an operator whose key is still enrolled but whose id is
+    /// on the revocation list completes a valid handshake and is then refused
+    /// post-authentication — the "revoke a compromised key without a restart"
+    /// guarantee.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn revoked_operator_is_refused_after_a_valid_handshake() {
+        let op_ed = [31u8; 32];
+        let op_ml = [32u8; 32];
+        let operator = HandshakeManager::from_identity_seeds(op_ed, op_ml);
+        let policy = OperatorPolicy::from_operators(vec![EnrolledOperator {
+            operator_id: "dave".to_string(),
+            ed25519_pubkey: operator.identity_public_key_bytes(),
+            ml_dsa_pubkey: operator.ml_dsa_public_key_bytes().to_vec(),
+            role: OperatorRole::Operator,
+        }])
+        .unwrap();
+
+        // Dave is enrolled but revoked at runtime.
+        let revocations = crate::operator_revocations::OperatorRevocations::empty();
+        revocations.revoke("dave");
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (grant_tx, _grant_rx) = oneshot::channel();
+
+        let host = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            stream.set_nodelay(true).ok();
+            let mut t = TcpTransport::new(stream);
+            let mut mgr = HandshakeManager::new();
+            let daemon = SigningKey::generate(&mut rand::thread_rng());
+            let auth_state = Arc::new(OperatorAuthState {
+                policy: OperatorPolicy::default(),
+                challenges: TokioMutex::new(ChallengeStore::new()),
+                daemon_key: daemon.clone(),
+                rate_limiter: TokioMutex::new(RateLimiter::new(
+                    AUTH_RATE_MAX,
+                    AUTH_RATE_WINDOW_SECS,
+                )),
+            });
+            let deps = SealedConsentDeps {
+                require_operator_auth: false,
+                auth_state,
+                session_id: [0x77; 16],
+                session_uuid: Uuid::from_u128(31),
+                ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
+                revoked: Arc::new(AtomicBool::new(false)),
+                revocations,
+            };
+            let mut grant_tx = Some(grant_tx);
+            serve_sealed_operator_channel(&mut t, &mut mgr, &policy, &deps, &mut grant_tx).await
+        });
+
+        // Viewer: complete a valid handshake as the (revoked) enrolled operator.
+        let viewer = tokio::spawn(async move {
+            let stream = TcpStream::connect(addr).await.unwrap();
+            stream.set_nodelay(true).ok();
+            let mut t = TcpTransport::new(stream);
+            let mut mgr = HandshakeManager::from_identity_seeds(op_ed, op_ml);
+            // The handshake itself succeeds; the daemon rejects post-auth.
+            let _ = perform_viewer_handshake_with_transcript(&mut t, &mut mgr, "operator").await;
+        });
+
+        let result = host.await.unwrap();
+        assert!(
+            matches!(&result, Err(OperatorChannelError::Revoked(id)) if id == "dave"),
+            "a revoked enrolled operator must be refused post-handshake, got {result:?}"
+        );
+        let _ = viewer.await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

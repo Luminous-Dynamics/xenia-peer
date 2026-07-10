@@ -23,6 +23,7 @@ pub(crate) struct OperatorChannelMetrics {
     connections_accepted: AtomicU64,
     handshake_failures: AtomicU64,
     not_enrolled_rejections: AtomicU64,
+    revoked_rejections: AtomicU64,
     channels_established: AtomicU64,
     terminal_decisions: AtomicU64,
 }
@@ -39,6 +40,10 @@ pub(crate) struct OperatorChannelMetricsSnapshot {
     /// Cryptographically valid handshakes from keys that are NOT enrolled
     /// operators. A rising count here is the strongest probe signal.
     pub not_enrolled_rejections: u64,
+    /// Enrolled operators refused because their id is on the live revocation
+    /// list — a *known* operator's key used after revocation (possible key
+    /// compromise), distinct from an unenrolled probe.
+    pub revoked_rejections: u64,
     /// Handshakes that authenticated an enrolled operator and opened a channel.
     pub channels_established: u64,
     /// Channels ended by a terminal (Deny/Revoke) decision.
@@ -62,6 +67,11 @@ impl OperatorChannelMetrics {
         self.not_enrolled_rejections.fetch_add(1, Ordering::Relaxed) + 1
     }
 
+    /// Record an enrolled-but-revoked operator rejection; returns the new total.
+    pub(crate) fn record_revoked(&self) -> u64 {
+        self.revoked_rejections.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
     /// Record an authenticated, enrolled operator channel being established.
     pub(crate) fn record_established(&self) {
         self.channels_established.fetch_add(1, Ordering::Relaxed);
@@ -80,6 +90,7 @@ impl OperatorChannelMetrics {
             connections_accepted: self.connections_accepted.load(Ordering::Relaxed),
             handshake_failures: self.handshake_failures.load(Ordering::Relaxed),
             not_enrolled_rejections: self.not_enrolled_rejections.load(Ordering::Relaxed),
+            revoked_rejections: self.revoked_rejections.load(Ordering::Relaxed),
             channels_established: self.channels_established.load(Ordering::Relaxed),
             terminal_decisions: self.terminal_decisions.load(Ordering::Relaxed),
         }
@@ -99,6 +110,7 @@ mod tests {
                 connections_accepted: 0,
                 handshake_failures: 0,
                 not_enrolled_rejections: 0,
+                revoked_rejections: 0,
                 channels_established: 0,
                 terminal_decisions: 0,
             }
@@ -109,6 +121,7 @@ mod tests {
         assert_eq!(m.record_not_enrolled(), 1);
         assert_eq!(m.record_not_enrolled(), 2);
         assert_eq!(m.record_handshake_failure(), 1);
+        assert_eq!(m.record_revoked(), 1);
         m.record_established();
         m.record_terminal();
 
@@ -116,6 +129,7 @@ mod tests {
         assert_eq!(s.connections_accepted, 2);
         assert_eq!(s.not_enrolled_rejections, 2);
         assert_eq!(s.handshake_failures, 1);
+        assert_eq!(s.revoked_rejections, 1);
         assert_eq!(s.channels_established, 1);
         assert_eq!(s.terminal_decisions, 1);
     }

@@ -72,6 +72,7 @@ mod operator_http;
 mod operator_live_smoke;
 #[cfg(test)]
 mod operator_rbac_smoke;
+mod operator_revocations;
 mod operator_sealed_channel;
 #[cfg(test)]
 mod operator_sealed_smoke;
@@ -362,6 +363,14 @@ struct Args {
     /// `docs/security/OPERATOR_RBAC_PLAN.md`.
     #[arg(long)]
     operators_file: Option<std::path::PathBuf>,
+
+    /// Optional file listing revoked `operator_id`s (one per line; `#` comments
+    /// and blank lines ignored). Consulted live by the `--operator-sealed`
+    /// endpoint after the handshake authenticates a peer, so a compromised
+    /// operator is refused fail-closed. Edit the file and send the daemon
+    /// `SIGHUP` to reload it without a restart (existing sessions untouched).
+    #[arg(long)]
+    revoked_operators_file: Option<std::path::PathBuf>,
 
     /// Require an authenticated, role-authorized operator token for consent
     /// decisions. When off (default), the consent port accepts the legacy
@@ -1870,6 +1879,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // A second host HandshakeManager with the *same* persisted
                 // identity, so the console pins one daemon fingerprint.
                 let host_mgr = load_or_create_host_identity(&args.host_identity_key_path)?;
+                // Live operator revocation list (optional). A failed load is
+                // fatal — we won't run the privileged endpoint without the
+                // revocation list we were told to enforce (fail-closed).
+                let revocations = match &args.revoked_operators_file {
+                    Some(path) => {
+                        let r = crate::operator_revocations::OperatorRevocations::from_file(path)
+                            .map_err(|err| -> Box<dyn std::error::Error> {
+                            format!(
+                                "failed to load --revoked-operators-file {}: {err}",
+                                path.display()
+                            )
+                            .into()
+                        })?;
+                        info!(path = %path.display(), revoked = r.len(), "loaded operator revocation list");
+                        r
+                    }
+                    None => crate::operator_revocations::OperatorRevocations::empty(),
+                };
+                // Reload the revocation file on SIGHUP (no restart). Only wired
+                // when a file is configured, so SIGHUP disposition is otherwise
+                // unchanged.
+                #[cfg(unix)]
+                if args.revoked_operators_file.is_some() {
+                    let reload = revocations.clone();
+                    tokio::spawn(async move {
+                        use tokio::signal::unix::{SignalKind, signal};
+                        let Ok(mut hup) = signal(SignalKind::hangup()) else {
+                            return;
+                        };
+                        while hup.recv().await.is_some() {
+                            match reload.reload() {
+                                Ok(n) => {
+                                    info!(
+                                        revoked = n,
+                                        "reloaded operator revocation list on SIGHUP"
+                                    )
+                                }
+                                Err(err) => {
+                                    tracing::error!(error = %err, "failed to reload revocation list on SIGHUP")
+                                }
+                            }
+                        }
+                    });
+                }
                 let deps = crate::operator_sealed_channel::SealedConsentDeps {
                     require_operator_auth,
                     auth_state: consent_auth_state,
@@ -1877,6 +1930,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     session_uuid: consent_session_uuid,
                     ledger: consent_ledger,
                     revoked: revoked_for_consent,
+                    revocations,
                 };
                 let policy = operator_auth_state.policy.clone();
                 let sealed_metrics = std::sync::Arc::new(
