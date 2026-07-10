@@ -35,7 +35,8 @@ use crate::operator::{OperatorPolicy, OperatorRole};
 // the daemon verifies. Re-exported at `crate::operator_auth::*` so existing
 // call sites (main.rs, operator_http, the smoke test) stay unchanged.
 pub(crate) use xenia_operator_proto::{
-    ConsentAction, challenge_transcript, consent_action_transcript,
+    ConsentAction, OperatorAction, challenge_transcript, consent_action_transcript,
+    revoke_operator_transcript,
 };
 
 // The session token is minted and verified only by the daemon, so its domain
@@ -365,6 +366,70 @@ pub(crate) fn authorize_consent_action(
     })
 }
 
+/// An admin's authenticated request to revoke another operator: their session
+/// token plus a signature over (revoke domain + target id + token nonce),
+/// proving the *admin* (not just a token bearer) authorized this exact
+/// revocation.
+pub(crate) struct AuthenticatedRevocation {
+    pub(crate) token: SignedOperatorToken,
+    pub(crate) target_operator_id: String,
+    pub(crate) action_signature: [u8; 64],
+}
+
+/// A revocation authorized to a specific admin operator, ready to apply + audit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuthorizedRevocation {
+    /// The operator being revoked.
+    pub(crate) target_operator_id: String,
+    /// The admin who authorized the revocation (for audit attribution).
+    pub(crate) operator_id: String,
+    /// The authorizing admin's enrolled Ed25519 key.
+    pub(crate) ed25519_pubkey: [u8; 32],
+}
+
+/// Authorize an operator-revocation request, fail-closed at every step — the
+/// same discipline as [`authorize_consent_action`]:
+/// 1. the token is daemon-signed and unexpired;
+/// 2. the token's role is `Admin` (via the `EnrollOperator` permission, which is
+///    "enroll or revoke an operator");
+/// 3. the authorizing admin is *still* enrolled;
+/// 4. the per-action signature verifies against that admin's enrolled Ed25519
+///    key over this exact target id + token nonce.
+///
+/// Note this authorizes *who may revoke*; it does not itself validate that
+/// `target_operator_id` is currently enrolled — revoking an unknown/already-gone
+/// id is a harmless no-op the caller may still want recorded.
+pub(crate) fn authorize_operator_revocation(
+    policy: &OperatorPolicy,
+    daemon_pubkey: &VerifyingKey,
+    now: u64,
+    request: &AuthenticatedRevocation,
+) -> Result<AuthorizedRevocation, AuthError> {
+    let token = verify_token(daemon_pubkey, now, &request.token)?;
+
+    // "Enroll or revoke an operator" is Admin-only.
+    if !crate::operator::role_permits(token.role, OperatorAction::EnrollOperator) {
+        return Err(AuthError::RoleNotPermitted);
+    }
+
+    let operator = policy
+        .lookup_by_id(&token.operator_id)
+        .ok_or(AuthError::NotEnrolled)?;
+
+    let transcript = revoke_operator_transcript(&request.target_operator_id, &token.token_nonce);
+    let ed_vk = HandshakeManager::parse_peer_public_key(&operator.ed25519_pubkey)
+        .map_err(|_| AuthError::MalformedKey)?;
+    let sig = Signature::from_bytes(&request.action_signature);
+    HandshakeManager::verify(&ed_vk, &transcript, &sig)
+        .map_err(|_| AuthError::Ed25519VerifyFailed)?;
+
+    Ok(AuthorizedRevocation {
+        target_operator_id: request.target_operator_id.clone(),
+        operator_id: token.operator_id,
+        ed25519_pubkey: operator.ed25519_pubkey,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,6 +613,88 @@ mod tests {
             action,
             action_signature,
         }
+    }
+
+    /// Build a signed operator-revocation request: `op` (role `role`) authorizes
+    /// revoking `target`.
+    fn authed_revocation(
+        op: &HandshakeManager,
+        daemon: &SigningKey,
+        role: OperatorRole,
+        target: &str,
+        now: u64,
+    ) -> AuthenticatedRevocation {
+        let authed = AuthenticatedOperator {
+            operator_id: "op".to_string(),
+            role,
+        };
+        let signed = issue_token(daemon, &authed, now, TOKEN_TTL_SECS, [9u8; 16]);
+        let transcript = revoke_operator_transcript(target, &signed.token.token_nonce);
+        let action_signature = op.sign(&transcript).to_bytes();
+        AuthenticatedRevocation {
+            token: signed,
+            target_operator_id: target.to_string(),
+            action_signature,
+        }
+    }
+
+    #[test]
+    fn revocation_authorized_for_admin() {
+        let op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let policy = policy_with(&op, OperatorRole::Admin);
+        let req = authed_revocation(&op, &daemon, OperatorRole::Admin, "mallory", 3000);
+        let authorized =
+            authorize_operator_revocation(&policy, &daemon.verifying_key(), 3010, &req).unwrap();
+        assert_eq!(authorized.target_operator_id, "mallory");
+        assert_eq!(authorized.operator_id, "op");
+    }
+
+    #[test]
+    fn revocation_denied_for_non_admin() {
+        let op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        // Approver is below Admin; even an honestly-issued Approver token can't
+        // revoke an operator.
+        let policy = policy_with(&op, OperatorRole::Approver);
+        let req = authed_revocation(&op, &daemon, OperatorRole::Approver, "mallory", 3000);
+        assert_eq!(
+            authorize_operator_revocation(&policy, &daemon.verifying_key(), 3010, &req),
+            Err(AuthError::RoleNotPermitted)
+        );
+    }
+
+    #[test]
+    fn revocation_signature_bound_to_target() {
+        let op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let policy = policy_with(&op, OperatorRole::Admin);
+        // Signature is over "mallory"; swap the target to "alice" → the per-action
+        // signature no longer verifies (can't be replayed for a different target).
+        let mut req = authed_revocation(&op, &daemon, OperatorRole::Admin, "mallory", 3000);
+        req.target_operator_id = "alice".to_string();
+        assert_eq!(
+            authorize_operator_revocation(&policy, &daemon.verifying_key(), 3010, &req),
+            Err(AuthError::Ed25519VerifyFailed)
+        );
+    }
+
+    #[test]
+    fn revocation_rejected_for_expired_token() {
+        let op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let policy = policy_with(&op, OperatorRole::Admin);
+        let req = authed_revocation(&op, &daemon, OperatorRole::Admin, "mallory", 3000);
+        // now is past the token's expiry.
+        assert_eq!(
+            authorize_operator_revocation(
+                &policy,
+                &daemon.verifying_key(),
+                3000 + TOKEN_TTL_SECS + 1,
+                &req
+            ),
+            Err(AuthError::InvalidToken)
+        );
     }
 
     #[test]

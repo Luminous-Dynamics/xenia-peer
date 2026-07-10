@@ -81,7 +81,10 @@ async fn operator_rbac_full_chain_smoke() {
         daemon_key: daemon.clone(),
         rate_limiter: Mutex::new(RateLimiter::new(AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS)),
     });
-    let http = router(state.clone());
+    let http = router(
+        state.clone(),
+        crate::operator_revocations::OperatorRevocations::empty(),
+    );
 
     // --- 1. GET a challenge from the real endpoint ---
     let (status, body) = post(&http, "/auth/challenge", "{}".to_string()).await;

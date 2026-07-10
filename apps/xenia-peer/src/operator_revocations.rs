@@ -58,11 +58,11 @@ impl OperatorRevocations {
             .unwrap_or(true) // poisoned lock -> fail closed (treat as revoked)
     }
 
-    /// Revoke `operator_id` in-process. Currently used only by tests to populate
-    /// the set; when an authenticated admin "revoke" endpoint lands (a planned
-    /// Track B slice) this becomes its entry point — ungate it then. The backing
-    /// file is not written, so a subsequent SIGHUP reload would overwrite this.
-    #[cfg(test)]
+    /// Revoke `operator_id` in-process — the entry point for the authenticated
+    /// admin `POST /operator/revoke` endpoint (and used by tests). The backing
+    /// file is not written, so a subsequent SIGHUP reload from the file would
+    /// overwrite an in-process-only revocation; persist it to the file for
+    /// durability across reloads.
     pub(crate) fn revoke(&self, operator_id: &str) {
         if let Ok(mut s) = self.revoked.write() {
             s.insert(operator_id.to_string());

@@ -27,10 +27,11 @@ use xenia_handshake::{ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN};
 
 use crate::operator::{OperatorPolicy, OperatorRole};
 use crate::operator_auth::{
-    AuthenticatedConsentAction, CHALLENGE_TTL_SECS, ChallengeResponse, ChallengeStore,
-    ConsentAction, OperatorToken, RateLimiter, SignedOperatorToken, TOKEN_TTL_SECS, issue_token,
-    verify_challenge_response,
+    AuthenticatedConsentAction, AuthenticatedRevocation, CHALLENGE_TTL_SECS, ChallengeResponse,
+    ChallengeStore, ConsentAction, OperatorToken, RateLimiter, SignedOperatorToken, TOKEN_TTL_SECS,
+    issue_token, verify_challenge_response,
 };
+use crate::operator_revocations::OperatorRevocations;
 
 /// Shared state for the operator-auth routes.
 pub(crate) struct OperatorAuthState {
@@ -210,13 +211,91 @@ pub(crate) fn parse_authenticated_consent_action(
     })
 }
 
-/// A `Router` carrying the two auth routes with the state already applied, so
-/// it can be `.merge()`d into the stateless admin router.
-pub(crate) fn router(state: Arc<OperatorAuthState>) -> Router {
+/// Wire form of an admin's operator-revocation request:
+/// `{ token, target_operator_id, action_signature }`.
+#[derive(Deserialize)]
+struct AuthenticatedRevocationDto {
+    token: TokenDto,
+    target_operator_id: String,
+    /// Hex Ed25519 signature over `revoke_operator_transcript(target, token_nonce)`.
+    action_signature: String,
+}
+
+/// Parse the JSON body of a `/operator/revoke` request into an
+/// [`AuthenticatedRevocation`], mirroring [`parse_authenticated_consent_action`].
+pub(crate) fn parse_authenticated_revocation(
+    json: &str,
+) -> Result<AuthenticatedRevocation, String> {
+    let dto: AuthenticatedRevocationDto = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    let action_signature = decode_fixed::<64>(&dto.action_signature).map_err(|(_, m)| m)?;
+    Ok(AuthenticatedRevocation {
+        token: dto.token.into_signed()?,
+        target_operator_id: dto.target_operator_id,
+        action_signature,
+    })
+}
+
+/// State for privileged admin mutation routes that need both the auth state and
+/// the live revocation list.
+#[derive(Clone)]
+struct AdminMutationState {
+    auth: Arc<OperatorAuthState>,
+    revocations: OperatorRevocations,
+}
+
+/// `POST /operator/revoke` — an authenticated `Admin` revokes another operator
+/// live (no restart). Fail-closed: only a valid, unexpired, `Admin`-role token
+/// whose per-action signature verifies over the exact target may revoke; every
+/// auth failure returns `403` without disclosing which check failed.
+async fn revoke_operator_handler(
+    State(state): State<AdminMutationState>,
+    body: String,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let request = parse_authenticated_revocation(&body).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("malformed revocation request: {e}"),
+        )
+    })?;
+    match crate::operator_auth::authorize_operator_revocation(
+        &state.auth.policy,
+        &state.auth.daemon_key.verifying_key(),
+        unix_now_secs(),
+        &request,
+    ) {
+        Ok(authorized) => {
+            state.revocations.revoke(&authorized.target_operator_id);
+            tracing::warn!(
+                target = %authorized.target_operator_id,
+                by = %authorized.operator_id,
+                "operator revoked via admin endpoint"
+            );
+            Ok(StatusCode::NO_CONTENT)
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "operator revocation refused");
+            Err((StatusCode::FORBIDDEN, "revocation refused".to_string()))
+        }
+    }
+}
+
+/// A `Router` carrying the auth routes plus the admin revoke route, each with its
+/// own state already applied, so it can be `.merge()`d into the stateless admin
+/// router. `revocations` is the *same* handle the sealed endpoint consults.
+pub(crate) fn router(state: Arc<OperatorAuthState>, revocations: OperatorRevocations) -> Router {
+    let mutation = AdminMutationState {
+        auth: state.clone(),
+        revocations,
+    };
     Router::new()
         .route("/auth/challenge", post(challenge_handler))
         .route("/auth/verify", post(verify_handler))
         .with_state(state)
+        .merge(
+            Router::new()
+                .route("/operator/revoke", post(revoke_operator_handler))
+                .with_state(mutation),
+        )
 }
 
 #[cfg(test)]
@@ -266,7 +345,7 @@ mod tests {
             daemon_key: daemon,
             rate_limiter: Mutex::new(RateLimiter::new(1, 3600)),
         });
-        let router = router(state);
+        let router = router(state, OperatorRevocations::empty());
         // A well-formed VerifyRequestDto (all fields present) so the handler
         // runs -- the crypto is garbage, but the rate limiter fires before
         // verification. (Malformed JSON is rejected by the extractor before
@@ -313,7 +392,7 @@ mod tests {
         let daemon = SigningKey::generate(&mut rand::thread_rng());
         let daemon_pk = daemon.verifying_key();
         let state = state_with(&op, daemon);
-        let router = router(state);
+        let router = router(state, OperatorRevocations::empty());
 
         // 1. get a challenge.
         let (status, body) = post_json(&router, "/auth/challenge", "{}".to_string()).await;
@@ -363,7 +442,7 @@ mod tests {
     async fn verify_without_a_challenge_is_unauthorized() {
         let op = HandshakeManager::new();
         let daemon = SigningKey::generate(&mut rand::thread_rng());
-        let router = router(state_with(&op, daemon));
+        let router = router(state_with(&op, daemon), OperatorRevocations::empty());
         // A well-formed but never-issued nonce.
         let ml_pk = op.ml_dsa_public_key_bytes().to_vec();
         let body = serde_json::json!({
