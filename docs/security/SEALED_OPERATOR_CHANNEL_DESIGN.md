@@ -175,19 +175,79 @@ so this is already solved on the console side.
   transitively by Slice 0; an explicit cross-compat assertion (extending
   `xenia-viewer-web/tests/handshake_cross_compat.rs`, which already path-dev-deps
   the native handshake) is Slice 4.
-- 🟢 **Slice 2 — establishment core done** (`operator_sealed_channel.rs`):
-  `establish_operator_channel(transport, host_mgr, policy)` runs the host
-  handshake and authorizes the authenticated peer against `OperatorPolicy`,
-  returning the operator id + role + key schedule (fail-closed: a valid
-  handshake from an un-enrolled key → `NotEnrolled`). Two tests prove it,
-  including a real consent payload sealed host-side and opened viewer-side over
-  the derived key (the channel carries data). **Remaining:** wire it into
-  `main.rs` behind an `--operator-sealed` flag — a new WS listener that accepts,
-  calls `establish_operator_channel`, then serves the consent path sealed. That
-  main.rs accept-loop plumbing pairs with the deferred `main.rs` extraction
-  (P3), so it's held for a quieter build window.
-- ⬜ **Slice 3** — move the consent decision path onto sealed `0x31` envelopes
-  (smallest, highest-value surface — Approve/Revoke), keeping the per-action
-  Ed25519 signature for ledger non-repudiation.
+- ✅ **Slice 2 — establishment core + daemon endpoint done**
+  (`operator_sealed_channel.rs`): `establish_operator_channel(transport,
+  host_mgr, policy)` runs the host handshake and authorizes the authenticated
+  peer against `OperatorPolicy`, returning the operator id + role + key schedule
+  (fail-closed: a valid handshake from an un-enrolled key → `NotEnrolled`). Then
+  `serve_sealed_operator_channel` reads sealed consent decisions over the
+  channel, and `run_sealed_operator_endpoint` (wired into `main.rs` behind
+  `--operator-sealed` / `--operator-sealed-port`, default 8083) accepts
+  connections in an **`'accept` loop with v2 reconnect**: a terminal
+  Deny/Revoke breaks; a dropped connection or a failed/un-enrolled handshake
+  loops back (so a reconnecting console can still revoke, and a rejected first
+  connection yields to a legitimate one); the single per-session grant oneshot
+  is threaded across reconnects and resolved at most once — `ConsentServer`
+  parity. 3 tests pass.
+- 🟢 **Console URL foundation done** — `DaemonConfig.sealed_port` (default 8083)
+  + `sealed_ws_url()` in `apps/sovereign-admin/src/config.rs`, so the console
+  knows where the sealed endpoint lives (unit-tested; wasm32 check passes).
+  `#[allow(dead_code)]` until the driver (Slice 3) consumes it.
+
+- ⬜ **Slice 2.5 — expose the wasm-safe handshake as a library** (the gate for
+  the browser driver; **do this once Slice 1 / PR #7 has merged and in a calm
+  build window**). The console (`sovereign-admin`, Leptos/WASM) cannot do the
+  wire handshake through its existing `xenia-handshake` dep — that crate's
+  `establish()` path uses `SystemTime` and is not wasm-safe (`operator_session.rs`
+  only calls it for signing). The wasm-safe, wire-compatible viewer handshake
+  today lives inside the **`xenia-viewer-web` *app* crate** (`WasmHandshake`,
+  `begin_inner`/`finish_inner`/`fromIdentity`, all pure Rust — only the
+  `#[wasm_bindgen]` `begin`/`finish`/`to_js`/`js_error` wrappers touch JS), which
+  is a cdylib+web-sys app crate excluded from the workspace — not cleanly
+  consumable.
+
+  **Chosen design (over a new crate or depending on viewer-web):** move the pure
+  handshake core into the **`xenia-wire` crate itself**, behind a new
+  off-by-default `handshake` feature. The console *already* depends on
+  `xenia-wire` (git, branch main) with `features = ["consent"]`, so it only adds
+  `"handshake"` — no new crate, no new git dep, no cross-repo app-crate pull.
+  `xenia-wire` core is already wasm-bindgen-free and already gates crypto deps
+  behind features (see `consent`). Concrete deltas:
+    - `xenia-wire/Cargo.toml`: add optional deps pinned to **exactly**
+      viewer-web's versions (or the ML-DSA/KEM wire format drifts) —
+      `ml-kem = "=0.3.0-rc.2"` (default-features=false, `["zeroize","getrandom"]`),
+      `ml-dsa = "=0.1.1"`, `blake3 = "1.5"`; reuse the already-present optional
+      `ed25519-dalek`/`serde-big-array`/`hkdf`/`sha2`. New feature
+      `handshake = ["dep:ed25519-dalek","dep:serde-big-array","dep:hkdf",
+      "dep:sha2","dep:ml-kem","dep:ml-dsa","dep:blake3"]`.
+    - Move `xenia-viewer-web/src/handshake.rs`'s pure core into
+      `xenia-wire/src/handshake.rs` (feature-gated `pub mod handshake`): rename
+      `WasmHandshake`→`ViewerHandshake` and `WasmSessionKeySchedule`→
+      `SessionKeySchedule` (drop `to_js`), keep `HandshakeError`,
+      `derive_labeled_session_key` (make it `pub`), `from_identity`,
+      `begin_inner`/`finish_inner`. `xenia-wire` uses `thiserror = "1"` (vs
+      viewer-web's `2`) — the `#[error]`/`#[from]` derives are compatible.
+    - `xenia-viewer-web`: add `"handshake"` to its `xenia-wire` feature list;
+      reduce `src/handshake.rs` to a `#[wasm_bindgen]` newtype wrapping
+      `xenia_wire::handshake::ViewerHandshake` (keep `new`/`fromIdentity`/`begin`/
+      `finish`/`to_js`); point `src/session.rs`'s
+      `use crate::handshake::derive_labeled_session_key` at
+      `xenia_wire::handshake::derive_labeled_session_key`.
+  **Verification is native (no wasm/browser needed):** after rewiring,
+  `cargo test -p xenia-viewer-web --test handshake_cross_compat` still drives the
+  **real native host** (`xenia-peer-core::handshake` + `xenia-handshake`, already
+  dev-deps) through the wrapper→moved-core and asserts byte-identical session
+  keys — the gold-standard wire-compat proof. This PR supersedes PR #7 (folds in
+  `fromIdentity`). See `memory/xenia_sealed_browser_client_blocker.md`.
+- ⬜ **Slice 3 — browser sealed-consent driver** (needs Slice 2.5): add
+  `sovereign-admin/src/sealed_consent.rs` — a gloo_net WebSocket driver that
+  recv HostHello → `ViewerHandshake::begin_inner` → send ViewerResponse → recv
+  HostFinalize → `finish_inner` → `aead` → `xenia_wire::Session::with_source_id(
+  *b"xnaopch1", 1)` + `install_key` + `seal(payload, PAYLOAD_TYPE_APPLICATION_MIN)`
+  → send envelope. Wire into `consent.rs`: `decide()` uses `config.sealed_ws_url()`
+  when the daemon runs `--operator-sealed`, keeping the per-action Ed25519
+  signature for ledger non-repudiation. `OPERATOR_CHANNEL_SOURCE_ID` MUST match
+  the daemon's `*b"xnaopch1"`.
 - ⬜ **Slice 4** — cross-compat test (mirror `handshake_cross_compat.rs`)
-  asserting the WASM console and daemon derive identical operator-channel keys.
+  asserting the WASM console and daemon derive identical operator-channel keys
+  (largely subsumed by Slice 2.5's cross-compat verification through the wrapper).
