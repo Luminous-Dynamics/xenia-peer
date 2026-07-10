@@ -96,3 +96,9 @@ pqc-signatures = ["xenia-ledger/pqc-signatures"]
 # `ServiceExt::oneshot` for driving the operator-auth axum routes in tests
 # without binding a real socket.
 tower = { version = "0.5", features = ["util"] }
+# Test-only: the sealed-channel E2E test drives the *browser console's* exact
+# wire handshake (xenia_wire::handshake::ViewerHandshake) against the live
+# --operator-sealed endpoint. Cargo unions this with the [dependencies] entry
+# only for the test/dev profile, so the production daemon binary does NOT pull
+# the handshake/ml-kem tree (it uses its own native host handshake).
+xenia-wire = { workspace = true, features = ["handshake"] }

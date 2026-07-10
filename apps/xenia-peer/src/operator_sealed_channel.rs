@@ -331,6 +331,85 @@ mod tests {
         let _ = host.await;
     }
 
+    /// End-to-end (Slice 4, native): the operator console's **exact** wire
+    /// handshake — `xenia_wire::handshake::ViewerHandshake`, the same code the
+    /// browser runs — drives the **real** `run_sealed_operator_endpoint` over a
+    /// **real WebSocket** (`WsTransport`), then seals an Approve that resolves the
+    /// grant. This proves the production host path
+    /// (`perform_host_handshake_authenticating_peer`) and the production browser
+    /// path (`ViewerHandshake`) are wire-compatible over the actual transport —
+    /// the highest-fidelity check short of a headless browser.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn browser_viewer_handshake_drives_the_live_ws_endpoint() {
+        // The enrolled identity IS the seeds the browser reconstructs:
+        // HandshakeManager::from_identity_seeds and ViewerHandshake::from_identity
+        // derive the same keys, so enrolling via HandshakeManager enrolls exactly
+        // the browser identity.
+        let op_ed = [21u8; 32];
+        let op_ml = [22u8; 32];
+        let operator = HandshakeManager::from_identity_seeds(op_ed, op_ml);
+        let policy = OperatorPolicy::from_operators(vec![EnrolledOperator {
+            operator_id: "browser-op".to_string(),
+            ed25519_pubkey: operator.identity_public_key_bytes(),
+            ml_dsa_pubkey: operator.ml_dsa_public_key_bytes().to_vec(),
+            role: OperatorRole::Operator,
+        }])
+        .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (grant_tx, grant_rx) = oneshot::channel();
+        let revoked = Arc::new(AtomicBool::new(false));
+
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let auth_state = Arc::new(OperatorAuthState {
+            policy: OperatorPolicy::default(),
+            challenges: TokioMutex::new(ChallengeStore::new()),
+            daemon_key: daemon.clone(),
+            rate_limiter: TokioMutex::new(RateLimiter::new(AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS)),
+        });
+        let deps = SealedConsentDeps {
+            require_operator_auth: false,
+            auth_state,
+            session_id: [0x33; 16],
+            session_uuid: Uuid::from_u128(21),
+            ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
+            revoked: revoked.clone(),
+        };
+        let host_mgr = HandshakeManager::new();
+
+        // Daemon: the real `--operator-sealed` endpoint (accept-loop + reconnect).
+        tokio::spawn(run_sealed_operator_endpoint(
+            listener, host_mgr, policy, deps, grant_tx,
+        ));
+
+        // "Browser": connect over a real WebSocket and drive the exact
+        // ViewerHandshake the sovereign-admin console uses.
+        let mut transport = WsTransport::connect(&format!("ws://{addr}")).await.unwrap();
+        let mut hs = xenia_wire::handshake::ViewerHandshake::from_identity(&op_ed, &op_ml).unwrap();
+
+        let hello = transport.recv_envelope().await.unwrap();
+        let response = hs.begin(&hello).unwrap();
+        transport.send_envelope(&response).await.unwrap();
+
+        let finalize = transport.recv_envelope().await.unwrap();
+        let schedule = hs.finish(&finalize).unwrap();
+
+        // Seal "Approve" exactly as the console does and send it.
+        let mut session = xenia_wire::Session::with_source_id(OPERATOR_CHANNEL_SOURCE_ID, 1);
+        session.install_key(schedule.aead);
+        let envelope = session
+            .seal(b"Approve", xenia_wire::PAYLOAD_TYPE_APPLICATION_MIN)
+            .unwrap();
+        transport.send_envelope(&envelope).await.unwrap();
+
+        assert!(
+            grant_rx.await.unwrap(),
+            "a sealed Approve from the browser's ViewerHandshake over the live WS endpoint resolves the grant"
+        );
+        assert!(!revoked.load(Ordering::SeqCst));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn enrolled_operator_establishes_a_usable_sealed_channel() {
         let op_ed_seed = [3u8; 32];
