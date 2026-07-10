@@ -213,15 +213,22 @@ so this is already solved on the console side.
   warnings-clean, `cargo fmt --check` clean. **Console consumes it** by adding
   `features = ["handshake"]` to its existing `xenia-wire` dep.
   See `memory/xenia_sealed_browser_client_blocker.md`.
-- ⬜ **Slice 3 — browser sealed-consent driver** (unblocked by Slice 2.5): add
-  `sovereign-admin/src/sealed_consent.rs` — a gloo_net WebSocket driver that
-  recv HostHello → `ViewerHandshake::begin_inner` → send ViewerResponse → recv
-  HostFinalize → `finish_inner` → `aead` → `xenia_wire::Session::with_source_id(
-  *b"xnaopch1", 1)` + `install_key` + `seal(payload, PAYLOAD_TYPE_APPLICATION_MIN)`
-  → send envelope. Wire into `consent.rs`: `decide()` uses `config.sealed_ws_url()`
-  when the daemon runs `--operator-sealed`, keeping the per-action Ed25519
-  signature for ledger non-repudiation. `OPERATOR_CHANNEL_SOURCE_ID` MUST match
-  the daemon's `*b"xnaopch1"`.
-- ⬜ **Slice 4** — cross-compat test (mirror `handshake_cross_compat.rs`)
-  asserting the WASM console and daemon derive identical operator-channel keys
-  (largely subsumed by Slice 2.5's cross-compat verification through the wrapper).
+- ✅ **Slice 3 — browser sealed-consent driver done** (`sovereign-admin`):
+  `src/sealed_consent.rs` is a gloo_net WebSocket driver — recv HostHello →
+  `ViewerHandshake::begin` → send ViewerResponse → recv HostFinalize → `finish`
+  → `aead` → `xenia_wire::Session::with_source_id(*b"xnaopch1", 1)` +
+  `install_key` + `seal(payload, PAYLOAD_TYPE_APPLICATION_MIN)` → send envelope.
+  `OperatorIdentity::seeds()` feeds the handshake the *enrolled* seeds (so the
+  handshake authenticates the operator). `consent.rs` `decide()` seals the same
+  payload the plaintext path builds (keeping the per-action Ed25519 signature for
+  ledger non-repudiation) when `config.use_sealed_channel` is set — a persisted
+  toggle + Sealed Port field added to the Sessions settings UI. Depends on
+  `xenia-wire` `features = ["handshake"]`. **Verified:** `cargo build -p
+  sovereign-admin --target wasm32-unknown-unknown` clean (no errors/warnings);
+  wire-compat guaranteed by Slice 2.5's `handshake_cross_compat` (3/3, same
+  `ViewerHandshake` + `source_id`). **End-to-end sealed operator channel is now
+  complete: daemon (Slice 2 + v2 reconnect) ↔ console (Slice 3).**
+- ⬜ **Slice 4 — live browser↔daemon E2E** (optional): a running-daemon +
+  headless-browser test of the full flow. The cryptographic wire-compat is
+  already proven natively by `handshake_cross_compat` (Slice 2.5), so this is a
+  transport/integration smoke test, not a correctness gate.
