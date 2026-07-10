@@ -1,21 +1,22 @@
 // Copyright (c) 2024-2026 Tristan Stoltz / Luminous Dynamics
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Daemon-side establishment of an authenticated, `xenia-wire`-sealed operator
-//! channel (Slice 2 of `docs/security/SEALED_OPERATOR_CHANNEL_DESIGN.md`).
+//! The daemon-side `xenia-wire`-sealed operator channel (Slices 2–3 +
+//! endpoint of `docs/security/SEALED_OPERATOR_CHANNEL_DESIGN.md`).
 //!
 //! [`establish_operator_channel`] runs the PQC-hybrid host handshake over a
-//! transport (typically a WebSocket the console opened), then authorizes the
+//! transport (the WebSocket the console opened), then authorizes the
 //! *authenticated* peer against the [`OperatorPolicy`]. Because the handshake
 //! already proved possession of the peer's Ed25519 + ML-DSA-65 keys, a
 //! successful policy lookup means "this live, confidential channel belongs to
 //! enrolled operator X with role R" — the handshake *is* the proof-of-possession
 //! the `/auth` ceremony used to provide, and the resulting key schedule seals
-//! every subsequent operator payload.
+//! every subsequent operator payload. [`serve_sealed_operator_channel`] then
+//! reads sealed consent decisions over it, and [`run_sealed_operator_endpoint`]
+//! is the `--operator-sealed` daemon endpoint that drives the whole thing.
 //!
 //! Fail-closed: a cryptographically valid handshake from a key that is not
-//! enrolled is still refused. Not yet wired into `main.rs` — the
-//! `--operator-sealed` endpoint that drives this is the next slice.
+//! enrolled is still refused.
 
 #![allow(dead_code)]
 
