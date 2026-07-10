@@ -194,52 +194,26 @@ so this is already solved on the console side.
   knows where the sealed endpoint lives (unit-tested; wasm32 check passes).
   `#[allow(dead_code)]` until the driver (Slice 3) consumes it.
 
-- ⬜ **Slice 2.5 — expose the wasm-safe handshake as a library** (the gate for
-  the browser driver; **do this once Slice 1 / PR #7 has merged and in a calm
-  build window**). The console (`sovereign-admin`, Leptos/WASM) cannot do the
-  wire handshake through its existing `xenia-handshake` dep — that crate's
-  `establish()` path uses `SystemTime` and is not wasm-safe (`operator_session.rs`
-  only calls it for signing). The wasm-safe, wire-compatible viewer handshake
-  today lives inside the **`xenia-viewer-web` *app* crate** (`WasmHandshake`,
-  `begin_inner`/`finish_inner`/`fromIdentity`, all pure Rust — only the
-  `#[wasm_bindgen]` `begin`/`finish`/`to_js`/`js_error` wrappers touch JS), which
-  is a cdylib+web-sys app crate excluded from the workspace — not cleanly
-  consumable.
-
-  **Chosen design (over a new crate or depending on viewer-web):** move the pure
-  handshake core into the **`xenia-wire` crate itself**, behind a new
-  off-by-default `handshake` feature. The console *already* depends on
-  `xenia-wire` (git, branch main) with `features = ["consent"]`, so it only adds
-  `"handshake"` — no new crate, no new git dep, no cross-repo app-crate pull.
-  `xenia-wire` core is already wasm-bindgen-free and already gates crypto deps
-  behind features (see `consent`). Concrete deltas:
-    - `xenia-wire/Cargo.toml`: add optional deps pinned to **exactly**
-      viewer-web's versions (or the ML-DSA/KEM wire format drifts) —
-      `ml-kem = "=0.3.0-rc.2"` (default-features=false, `["zeroize","getrandom"]`),
-      `ml-dsa = "=0.1.1"`, `blake3 = "1.5"`; reuse the already-present optional
-      `ed25519-dalek`/`serde-big-array`/`hkdf`/`sha2`. New feature
-      `handshake = ["dep:ed25519-dalek","dep:serde-big-array","dep:hkdf",
-      "dep:sha2","dep:ml-kem","dep:ml-dsa","dep:blake3"]`.
-    - Move `xenia-viewer-web/src/handshake.rs`'s pure core into
-      `xenia-wire/src/handshake.rs` (feature-gated `pub mod handshake`): rename
-      `WasmHandshake`→`ViewerHandshake` and `WasmSessionKeySchedule`→
-      `SessionKeySchedule` (drop `to_js`), keep `HandshakeError`,
-      `derive_labeled_session_key` (make it `pub`), `from_identity`,
-      `begin_inner`/`finish_inner`. `xenia-wire` uses `thiserror = "1"` (vs
-      viewer-web's `2`) — the `#[error]`/`#[from]` derives are compatible.
-    - `xenia-viewer-web`: add `"handshake"` to its `xenia-wire` feature list;
-      reduce `src/handshake.rs` to a `#[wasm_bindgen]` newtype wrapping
-      `xenia_wire::handshake::ViewerHandshake` (keep `new`/`fromIdentity`/`begin`/
-      `finish`/`to_js`); point `src/session.rs`'s
-      `use crate::handshake::derive_labeled_session_key` at
-      `xenia_wire::handshake::derive_labeled_session_key`.
-  **Verification is native (no wasm/browser needed):** after rewiring,
-  `cargo test -p xenia-viewer-web --test handshake_cross_compat` still drives the
-  **real native host** (`xenia-peer-core::handshake` + `xenia-handshake`, already
-  dev-deps) through the wrapper→moved-core and asserts byte-identical session
-  keys — the gold-standard wire-compat proof. This PR supersedes PR #7 (folds in
-  `fromIdentity`). See `memory/xenia_sealed_browser_client_blocker.md`.
-- ⬜ **Slice 3 — browser sealed-consent driver** (needs Slice 2.5): add
+- ✅ **Slice 2.5 — wasm-safe handshake exposed as a library** (xenia-wire
+  **PR #8**, supersedes #7). Moved the pure viewer handshake core out of the
+  `xenia-viewer-web` app crate into the **`xenia-wire` crate** behind an
+  off-by-default `handshake` feature: `xenia_wire::handshake::{ViewerHandshake
+  (new/from_identity/begin/finish/ed25519_public_key), SessionKeySchedule,
+  HandshakeError, derive_labeled_session_key}` — plain Rust, no wasm-bindgen.
+  `xenia-viewer-web`'s `WasmHandshake` is now a thin `#[wasm_bindgen]` wrapper
+  delegating to it (keeps `begin_inner`/`finish_inner`, the
+  `WasmSessionKeySchedule` alias, and the `derive_labeled_session_key`
+  re-export, so `session.rs` and the cross-compat test are untouched). Deps
+  `ml-kem =0.3.0-rc.2` / `ml-dsa =0.1.1` / `blake3` pinned to viewer-web's exact
+  versions (wire format can't drift); getrandom 0.3/0.4 `wasm_js` backends wired
+  for the wasm32 `--all-features` build. **Verified:** `handshake_cross_compat`
+  3/3 through the wrapper→moved-core asserts byte-identical session keys +
+  transcript hash + host-identity fingerprint vs the **real native host**; native
+  `--features handshake` and `wasm32 --all-features` both build clean,
+  warnings-clean, `cargo fmt --check` clean. **Console consumes it** by adding
+  `features = ["handshake"]` to its existing `xenia-wire` dep.
+  See `memory/xenia_sealed_browser_client_blocker.md`.
+- ⬜ **Slice 3 — browser sealed-consent driver** (unblocked by Slice 2.5): add
   `sovereign-admin/src/sealed_consent.rs` — a gloo_net WebSocket driver that
   recv HostHello → `ViewerHandshake::begin_inner` → send ViewerResponse → recv
   HostFinalize → `finish_inner` → `aead` → `xenia_wire::Session::with_source_id(
