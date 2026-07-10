@@ -18,8 +18,6 @@
 //! Fail-closed: a cryptographically valid handshake from a key that is not
 //! enrolled is still refused.
 
-#![allow(dead_code)]
-
 use tokio::net::TcpListener;
 use xenia_handshake::SessionKeySchedule;
 use xenia_peer_core::HandshakeManager;
