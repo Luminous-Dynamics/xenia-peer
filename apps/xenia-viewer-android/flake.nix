@@ -39,7 +39,11 @@
         ndkRoot = "${androidSdk}/libexec/android-sdk/ndk/27.0.12077973";
         ndkToolchain = "${ndkRoot}/toolchains/llvm/prebuilt/linux-x86_64";
 
-        rustToolchain = pkgs.rust-bin.stable.latest.default.override {
+        # Rust toolchain - read from rust-toolchain.toml (single source of truth), not
+        # stable.latest, which silently drifts ahead of any rustup-side pin over time.
+        rustToolchainToml = builtins.fromTOML (builtins.readFile ./rust-toolchain.toml);
+        rustChannel = rustToolchainToml.toolchain.channel;
+        rustToolchain = pkgs.rust-bin.stable.${rustChannel}.default.override {
           extensions = [ "rust-src" "clippy" "rustfmt" ];
           targets = [ "aarch64-linux-android" ];
         };

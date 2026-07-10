@@ -1293,6 +1293,7 @@ fn decode_consent_decision(
     require_operator_auth: bool,
     auth_state: &crate::operator_http::OperatorAuthState,
     session_id: &[u8; 16],
+    revocations: &crate::operator_revocations::OperatorRevocations,
 ) -> Option<DecodedConsent> {
     if !require_operator_auth {
         let action = match text {
@@ -1329,6 +1330,14 @@ fn decode_consent_decision(
         &request,
     ) {
         Ok(authorized) => {
+            // A token is dead the moment its operator is revoked, even if the
+            // token itself is still unexpired and correctly signed. This closes
+            // the plaintext-consent path (the sealed channel already refuses a
+            // revoked operator at the handshake).
+            if revocations.is_revoked(&authorized.operator_id) {
+                warn!(operator = %authorized.operator_id, "consent action refused: operator revoked");
+                return None;
+            }
             info!(
                 operator = %authorized.operator_id,
                 role = ?authorized.role,
@@ -1933,7 +1942,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     session_uuid: consent_session_uuid,
                     ledger: consent_ledger,
                     revoked: revoked_for_consent,
-                    revocations,
+                    revocations: revocations.clone(),
                 };
                 let policy = operator_auth_state.policy.clone();
                 let sealed_metrics = std::sync::Arc::new(
@@ -1967,6 +1976,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ledger: consent_ledger,
                     grant_tx: consent_decision_tx,
                     revoked: revoked_for_consent,
+                    revocations: revocations.clone(),
                 };
                 tokio::spawn(server.run(listener));
             }
