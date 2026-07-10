@@ -188,6 +188,7 @@ pub(crate) async fn run_sealed_operator_endpoint(
     policy: OperatorPolicy,
     deps: SealedConsentDeps,
     grant_tx: tokio::sync::oneshot::Sender<bool>,
+    metrics: std::sync::Arc<crate::operator_channel_metrics::OperatorChannelMetrics>,
 ) {
     let mut grant_tx = Some(grant_tx);
     'accept: loop {
@@ -202,10 +203,14 @@ pub(crate) async fn run_sealed_operator_endpoint(
         let mut transport = match WsTransport::accept_stream(stream).await {
             Ok(t) => t,
             Err(err) => {
-                tracing::warn!(error = %err, "sealed operator websocket upgrade failed");
+                // A failed WS upgrade on the operator port is a malformed/hostile
+                // probe as much as a benign misconnect — count it.
+                let total = metrics.record_handshake_failure();
+                tracing::warn!(error = %err, peer = %peer, handshake_failures_total = total, "sealed operator websocket upgrade failed");
                 continue 'accept;
             }
         };
+        metrics.record_connection();
         tracing::info!(peer = %peer, "sealed operator channel connection accepted");
         match serve_sealed_operator_channel(
             &mut transport,
@@ -217,17 +222,43 @@ pub(crate) async fn run_sealed_operator_endpoint(
         .await
         {
             // Terminal decision (Deny/Revoke): the session is decided.
-            Ok(true) => break 'accept,
+            Ok(true) => {
+                metrics.record_established();
+                metrics.record_terminal();
+                break 'accept;
+            }
             // Connection closed without a terminal decision: accept a reconnect
             // so the operator can still approve a pending grant or revoke.
-            Ok(false) => continue 'accept,
-            // Handshake / not-enrolled: yield to the next connection.
-            Err(err) => {
-                tracing::warn!(error = %err, "sealed operator channel rejected");
+            Ok(false) => {
+                metrics.record_established();
+                continue 'accept;
+            }
+            // A cryptographically valid handshake from a key that is not an
+            // enrolled operator — the strongest probe signal on this surface.
+            Err(err @ OperatorChannelError::NotEnrolled) => {
+                let total = metrics.record_not_enrolled();
+                tracing::warn!(error = %err, peer = %peer, not_enrolled_total = total, "unenrolled key attempted the sealed operator channel");
+                continue 'accept;
+            }
+            // The handshake itself failed (bad signature, transport error, probe).
+            Err(err @ OperatorChannelError::Handshake(_)) => {
+                let total = metrics.record_handshake_failure();
+                tracing::warn!(error = %err, peer = %peer, handshake_failures_total = total, "sealed operator handshake failed");
                 continue 'accept;
             }
         }
     }
+    // Session summary once the endpoint stops (terminal decision or accept
+    // error) — a single line carrying the whole probe picture for this run.
+    let s = metrics.snapshot();
+    tracing::info!(
+        connections_accepted = s.connections_accepted,
+        handshake_failures = s.handshake_failures,
+        not_enrolled_rejections = s.not_enrolled_rejections,
+        channels_established = s.channels_established,
+        terminal_decisions = s.terminal_decisions,
+        "sealed operator endpoint closed"
+    );
 }
 
 #[cfg(test)]
@@ -375,10 +406,16 @@ mod tests {
             revoked: revoked.clone(),
         };
         let host_mgr = HandshakeManager::new();
+        let metrics = Arc::new(crate::operator_channel_metrics::OperatorChannelMetrics::default());
 
         // Daemon: the real `--operator-sealed` endpoint (accept-loop + reconnect).
         tokio::spawn(run_sealed_operator_endpoint(
-            listener, host_mgr, policy, deps, grant_tx,
+            listener,
+            host_mgr,
+            policy,
+            deps,
+            grant_tx,
+            metrics.clone(),
         ));
 
         // "Browser": connect over a real WebSocket and drive the exact
@@ -406,6 +443,10 @@ mod tests {
             "a sealed Approve from the browser's ViewerHandshake over the live WS endpoint resolves the grant"
         );
         assert!(!revoked.load(Ordering::SeqCst));
+        // The endpoint records the connection before the handshake begins, so by
+        // the time the grant resolved it must be counted — proves the metrics are
+        // wired live on the endpoint path.
+        assert_eq!(metrics.snapshot().connections_accepted, 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
