@@ -33,7 +33,7 @@ pub(crate) struct OperatorRevocations {
 
 impl OperatorRevocations {
     /// An empty revocation list with no backing file (nothing is ever revoked
-    /// unless [`OperatorRevocations::revoke`] is called).
+    /// unless `revoke` is called).
     pub(crate) fn empty() -> Self {
         Self::default()
     }
