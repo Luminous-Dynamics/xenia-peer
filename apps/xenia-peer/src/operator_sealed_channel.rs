@@ -92,15 +92,16 @@ pub(crate) async fn establish_operator_channel<T: Transport>(
 /// (opener) and the console (sealer) so the sealed-envelope nonces line up.
 const OPERATOR_CHANNEL_SOURCE_ID: [u8; 8] = *b"xnaopch1";
 
-/// Everything the sealed consent serve loop needs once the channel is up —
-/// the same session-scoped state the plaintext consent server takes.
+/// Session-scoped state the sealed serve loop needs once the channel is up —
+/// the same state the plaintext consent server takes, minus the grant oneshot
+/// (which the endpoint owns and threads across reconnects). Passed by reference
+/// so it survives multiple connections.
 pub(crate) struct SealedConsentDeps {
     pub(crate) require_operator_auth: bool,
     pub(crate) auth_state: std::sync::Arc<crate::operator_http::OperatorAuthState>,
     pub(crate) session_id: [u8; 16],
     pub(crate) session_uuid: uuid::Uuid,
     pub(crate) ledger: std::sync::Arc<tokio::sync::Mutex<xenia_ledger::Chain>>,
-    pub(crate) grant_tx: tokio::sync::oneshot::Sender<bool>,
     pub(crate) revoked: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -111,12 +112,19 @@ pub(crate) struct SealedConsentDeps {
 /// so this adds PQC confidentiality + handshake channel-auth while auth,
 /// per-action non-repudiation, and ledger attribution are preserved unchanged.
 /// Drives the grant/revoke via the shared `apply_consent_decision`.
+///
+/// Returns `Ok(true)` if a **terminal** decision (Deny/Revoke) ended the
+/// channel, `Ok(false)` if the connection simply closed (so the endpoint can
+/// accept a reconnect and still take a later Revoke). `grant_tx` is threaded by
+/// `&mut Option` so a dropped-then-reconnected console keeps the same session
+/// grant.
 pub(crate) async fn serve_sealed_operator_channel<T: Transport>(
     transport: &mut T,
     host_mgr: &mut HandshakeManager,
     policy: &OperatorPolicy,
-    deps: SealedConsentDeps,
-) -> Result<(), OperatorChannelError> {
+    deps: &SealedConsentDeps,
+    grant_tx: &mut Option<tokio::sync::oneshot::Sender<bool>>,
+) -> Result<bool, OperatorChannelError> {
     let channel = establish_operator_channel(transport, host_mgr, policy).await?;
     tracing::info!(
         operator = %channel.operator_id,
@@ -127,18 +135,7 @@ pub(crate) async fn serve_sealed_operator_channel<T: Transport>(
     let mut session = xenia_wire::Session::with_source_id(OPERATOR_CHANNEL_SOURCE_ID, 1);
     session.install_key(channel.key_schedule.aead);
 
-    let SealedConsentDeps {
-        require_operator_auth,
-        auth_state,
-        session_id,
-        session_uuid,
-        ledger,
-        grant_tx,
-        revoked,
-    } = deps;
-    let mut grant_tx = Some(grant_tx);
-
-    // Read sealed consent decisions for the life of the channel.
+    // Read sealed consent decisions for the life of the connection.
     while let Ok(envelope) = transport.recv_envelope().await {
         let Ok(plaintext) = session.open(&envelope) else {
             tracing::warn!("failed to open sealed consent envelope");
@@ -147,60 +144,91 @@ pub(crate) async fn serve_sealed_operator_channel<T: Transport>(
         let Ok(text) = std::str::from_utf8(&plaintext) else {
             continue;
         };
-        let Some(decoded) =
-            crate::decode_consent_decision(text, require_operator_auth, &auth_state, &session_id)
-        else {
+        let Some(decoded) = crate::decode_consent_decision(
+            text,
+            deps.require_operator_auth,
+            &deps.auth_state,
+            &deps.session_id,
+        ) else {
             continue;
         };
         match crate::consent_server::apply_consent_decision(
             decoded,
-            &mut grant_tx,
-            &revoked,
-            &ledger,
-            session_uuid,
+            grant_tx,
+            &deps.revoked,
+            &deps.ledger,
+            deps.session_uuid,
         )
         .await
         {
             crate::consent_server::ConsentFollowup::KeepServing => {}
-            crate::consent_server::ConsentFollowup::Stop => break,
+            // Terminal (Deny/Revoke): the session is decided; stop for good.
+            crate::consent_server::ConsentFollowup::Stop => return Ok(true),
         }
     }
-    Ok(())
+    // Connection closed without a terminal decision.
+    Ok(false)
 }
 
-/// The `--operator-sealed` daemon endpoint (v1): accept **one** WebSocket
-/// connection over `listener`, wrap it as a `WsTransport`, and serve the sealed
-/// operator channel over it. Fail-closed and simple — a failed handshake or an
-/// un-enrolled peer just ends the channel, and the session's consent then times
-/// out (deny). v1 is single-connection: no accept-loop reconnect (unlike the
-/// plaintext `ConsentServer`); that, and letting a rejected first connection
-/// yield to a later legitimate one, is the next increment.
+/// The `--operator-sealed` daemon endpoint: accept sealed operator connections
+/// over `listener` for the life of the session, wrapping each as a `WsTransport`
+/// and serving the sealed operator channel. Loops on `accept()` with the same
+/// reconnect/revoke semantics as the plaintext [`ConsentServer`]:
+/// - a terminal decision (Deny/Revoke) ends the endpoint;
+/// - a connection that drops mid-Approve, or a failed/un-enrolled handshake,
+///   just loops back to accept the next — so a reconnecting console can still
+///   revoke, and a rejected first connection yields to a later legitimate one.
+///
+/// Fail-closed throughout: only a policy-authorized operator's handshake
+/// establishes a channel, and `grant_tx` is threaded across reconnects so the
+/// single per-session grant is resolved at most once.
+///
+/// [`ConsentServer`]: crate::consent_server::ConsentServer
 pub(crate) async fn run_sealed_operator_endpoint(
     listener: TcpListener,
     mut host_mgr: HandshakeManager,
     policy: OperatorPolicy,
     deps: SealedConsentDeps,
+    grant_tx: tokio::sync::oneshot::Sender<bool>,
 ) {
-    let (stream, peer) = match listener.accept().await {
-        Ok(conn) => conn,
-        Err(err) => {
-            tracing::error!(error = %err, "sealed operator endpoint accept failed");
-            return;
+    let mut grant_tx = Some(grant_tx);
+    'accept: loop {
+        let (stream, peer) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(err) => {
+                tracing::error!(error = %err, "sealed operator endpoint accept failed");
+                break 'accept;
+            }
+        };
+        stream.set_nodelay(true).ok();
+        let mut transport = match WsTransport::accept_stream(stream).await {
+            Ok(t) => t,
+            Err(err) => {
+                tracing::warn!(error = %err, "sealed operator websocket upgrade failed");
+                continue 'accept;
+            }
+        };
+        tracing::info!(peer = %peer, "sealed operator channel connection accepted");
+        match serve_sealed_operator_channel(
+            &mut transport,
+            &mut host_mgr,
+            &policy,
+            &deps,
+            &mut grant_tx,
+        )
+        .await
+        {
+            // Terminal decision (Deny/Revoke): the session is decided.
+            Ok(true) => break 'accept,
+            // Connection closed without a terminal decision: accept a reconnect
+            // so the operator can still approve a pending grant or revoke.
+            Ok(false) => continue 'accept,
+            // Handshake / not-enrolled: yield to the next connection.
+            Err(err) => {
+                tracing::warn!(error = %err, "sealed operator channel rejected");
+                continue 'accept;
+            }
         }
-    };
-    stream.set_nodelay(true).ok();
-    let mut transport = match WsTransport::accept_stream(stream).await {
-        Ok(t) => t,
-        Err(err) => {
-            tracing::warn!(error = %err, "sealed operator websocket upgrade failed");
-            return;
-        }
-    };
-    tracing::info!(peer = %peer, "sealed operator channel connection accepted");
-    if let Err(err) =
-        serve_sealed_operator_channel(&mut transport, &mut host_mgr, &policy, deps).await
-    {
-        tracing::warn!(error = %err, "sealed operator channel ended");
     }
 }
 
@@ -268,10 +296,10 @@ mod tests {
                 session_id: [0x5a; 16],
                 session_uuid: Uuid::from_u128(3),
                 ledger,
-                grant_tx,
                 revoked: revoked_daemon,
             };
-            serve_sealed_operator_channel(&mut t, &mut mgr, &policy, deps).await
+            let mut grant_tx = Some(grant_tx);
+            serve_sealed_operator_channel(&mut t, &mut mgr, &policy, &deps, &mut grant_tx).await
         });
 
         // Console (viewer): handshake with the enrolled identity, then seal an

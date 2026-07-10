@@ -1875,14 +1875,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     session_id: consent_session_id,
                     session_uuid: consent_session_uuid,
                     ledger: consent_ledger,
-                    grant_tx: consent_decision_tx,
                     revoked: revoked_for_consent,
                 };
                 let policy = operator_auth_state.policy.clone();
                 info!(addr = %sealed_addr, "sealed operator endpoint listening");
                 tokio::spawn(
                     crate::operator_sealed_channel::run_sealed_operator_endpoint(
-                        listener, host_mgr, policy, deps,
+                        listener,
+                        host_mgr,
+                        policy,
+                        deps,
+                        consent_decision_tx,
                     ),
                 );
             }
