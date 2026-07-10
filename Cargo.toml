@@ -44,7 +44,7 @@ repository = "https://github.com/Luminous-Dynamics/xenia-peer"
 homepage = "https://github.com/Luminous-Dynamics/xenia-peer"
 
 [workspace.dependencies]
-xenia-wire = "0.2.0-alpha.3"
+xenia-wire = "0.2.0-alpha.4"
 xenia-operator-proto = { path = "crates/xenia-operator-proto" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time"] }
 bincode = "1.3"
@@ -62,12 +62,3 @@ unsafe_code = "deny"
 opt-level = 3
 lto = true
 codegen-units = 1
-
-# Override: xenia-wire's published 0.2.0-alpha.3 doesn't have
-# envelope_payload_type (added 2026-07-04 for clipboard-sync, T2.3), which
-# this workspace uses. Point at the public git repo (its `main` has the
-# function) rather than a local sibling path, so CI and fresh clones -- which
-# have no `../xenia-wire` checkout -- build too. Remove once a xenia-wire
-# version bump + crates.io republish lands.
-[patch.crates-io]
-xenia-wire = { git = "https://github.com/Luminous-Dynamics/xenia-wire", branch = "main" }
