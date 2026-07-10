@@ -248,6 +248,17 @@ pub(crate) async fn run_sealed_operator_endpoint(
             }
         }
     }
+    // Session summary once the endpoint stops (terminal decision or accept
+    // error) — a single line carrying the whole probe picture for this run.
+    let s = metrics.snapshot();
+    tracing::info!(
+        connections_accepted = s.connections_accepted,
+        handshake_failures = s.handshake_failures,
+        not_enrolled_rejections = s.not_enrolled_rejections,
+        channels_established = s.channels_established,
+        terminal_decisions = s.terminal_decisions,
+        "sealed operator endpoint closed"
+    );
 }
 
 #[cfg(test)]

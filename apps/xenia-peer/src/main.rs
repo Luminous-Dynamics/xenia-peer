@@ -65,12 +65,12 @@ mod m1_runtime;
 mod operator;
 mod operator_audit;
 mod operator_auth;
-#[cfg(test)]
 mod operator_channel_metrics;
 mod operator_exposure;
 mod operator_http;
 #[cfg(test)]
 mod operator_live_smoke;
+#[cfg(test)]
 mod operator_rbac_smoke;
 mod operator_sealed_channel;
 #[cfg(test)]
