@@ -65,6 +65,18 @@
           binaryen
         ];
 
+        # Heap-profiling tools for chasing real memory growth (e.g. the
+        # scap/dbus-rs Linux capture leak documented in ROADMAP.md).
+        # heaptrack is the default choice -- much lower overhead than
+        # valgrind/massif, which matters here since the repro involves
+        # real-time D-Bus/PipeWire interaction that heavy instrumentation
+        # can visibly slow down or change the timing of. valgrind is kept
+        # too for cases heaptrack's sampling approach doesn't suit.
+        profilingTools = with pkgs; [
+          heaptrack
+          valgrind
+        ];
+
         mediaAndPlatformInputs = with pkgs; [
           # ffmpeg for the `h264` feature. Both the full package (for the
           # `ffmpeg` binary, useful for manual debugging) and the dev output
@@ -128,6 +140,7 @@
           , includeDevTools ? true
           , includeAuditTools ? true
           , includeWebTools ? true
+          , includeProfilingTools ? false
           }:
           pkgs.mkShell {
             inherit name;
@@ -139,7 +152,8 @@
               ++ mediaAndPlatformInputs
               ++ lib.optionals includeDevTools rustDevTools
               ++ lib.optionals includeAuditTools auditTools
-              ++ lib.optionals includeWebTools webTools;
+              ++ lib.optionals includeWebTools webTools
+              ++ lib.optionals includeProfilingTools profilingTools;
 
             shellHook = ''
               ${xeniaEnv}
@@ -170,6 +184,7 @@
           includeDevTools = true;
           includeAuditTools = true;
           includeWebTools = true;
+          includeProfilingTools = true;
         };
 
         # CI shell: same system libraries, but no rust-analyzer or browser build

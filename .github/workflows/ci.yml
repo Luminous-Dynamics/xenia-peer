@@ -26,29 +26,25 @@ jobs:
           components: rustfmt
       - run: cargo fmt --check
 
-  clippy:
-    name: Clippy
+  # Clippy, the full test suite, and docs all build the default-members
+  # workspace, which includes the ffmpeg-backed `xenia-capture-scrcpy` crate.
+  # The system libraries (ffmpeg/libav, ALSA, Opus, libclang, pkg-config) live
+  # in the flake's `ci` devShell -- the single source of truth for build deps
+  # -- so these jobs run inside `nix develop .#ci` rather than apt-get'ing
+  # libraries in each job.
+  flake-checks:
+    name: Clippy + Test + Docs (flake)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      - uses: DeterminateSystems/nix-installer-action@main
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets -- -D warnings
-
-  test:
-    name: Test
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test
+      - name: Clippy
+        run: nix develop .#ci --command cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: nix develop .#ci --command cargo test
+      - name: Docs
+        run: nix develop .#ci --command bash -c 'RUSTDOCFLAGS="-D warnings" cargo doc --no-deps'
 
   msrv:
     name: MSRV (Rust 1.94)
@@ -57,95 +53,35 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --all-targets
+      # `xenia-capture-scrcpy` depends on ffmpeg (only available via the flake)
+      # and `sovereign-admin` is a wasm32 target; both are excluded here so MSRV
+      # validates the minimum toolchain on the portable host crates without
+      # pulling ffmpeg. The scrcpy/wasm crates' toolchain is covered by
+      # flake-checks / the wasm job.
+      - run: cargo build --all-targets --workspace --exclude xenia-capture-scrcpy --exclude sovereign-admin
 
-  docs:
-    name: Docs
+  # Feature builds that need extra system libraries also take them from the
+  # flake (ffmpeg for h264, ALSA/Opus for audio) instead of apt-get.
+  features:
+    name: Feature builds (h264 + audio, flake)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: DeterminateSystems/nix-installer-action@main
       - uses: Swatinem/rust-cache@v2
-      - env:
-          RUSTDOCFLAGS: -D warnings
-        run: cargo doc --no-deps
-
-  h264:
-    name: Test (--features h264)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install libav + libclang for ffmpeg-next + bindgen
+      - name: h264 (xenia-video + daemon + viewer)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libavcodec-dev \
-            libavformat-dev \
-            libavutil-dev \
-            libswscale-dev \
-            libswresample-dev \
-            libavfilter-dev \
-            libavdevice-dev \
-            libclang-dev \
-            clang \
-            pkg-config
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Build xenia-video with h264 feature
-        run: cargo build -p xenia-video --features h264
-      - name: Test xenia-video h264 encode/decode roundtrip
-        run: cargo test -p xenia-video --features h264
-      - name: Build daemon + viewer binaries with h264 feature
+          nix develop .#ci --command bash -c '
+            set -euo pipefail
+            cargo test  -p xenia-video  --features h264
+            cargo build -p xenia-peer   --features h264
+            cargo build -p xenia-viewer --features h264'
+      - name: audio (capture + output + opus)
         run: |
-          cargo build -p xenia-peer --features h264
-          cargo build -p xenia-viewer --features h264
-
-  audio-output:
-    name: Check viewer audio output
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install ALSA headers for CPAL
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Check xenia-viewer audio-output feature
-        run: cargo check -p xenia-viewer --features audio-output
-      - name: Test xenia-viewer audio-output feature
-        run: cargo test -p xenia-viewer --features audio-output
-
-  audio-capture:
-    name: Check daemon audio capture
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install ALSA headers for CPAL
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Check xenia-peer audio-capture feature
-        run: cargo check -p xenia-peer --features audio-capture
-      - name: Test xenia-peer audio-capture feature
-        run: cargo test -p xenia-peer --features audio-capture
-
-  audio-opus:
-    name: Check Opus audio codec
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Opus headers
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libopus-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Test xenia-peer-core Opus feature
-        run: cargo test -p xenia-peer-core --features opus
-      - name: Check daemon Opus feature
-        run: cargo check -p xenia-peer --features audio-opus
-      - name: Check viewer Opus feature
-        run: cargo check -p xenia-viewer --features audio-opus
+          nix develop .#ci --command bash -c '
+            set -euo pipefail
+            cargo test  -p xenia-peer      --features audio-capture
+            cargo test  -p xenia-viewer    --features audio-output
+            cargo test  -p xenia-peer-core --features opus
+            cargo check -p xenia-peer      --features audio-opus
+            cargo check -p xenia-viewer    --features audio-opus'

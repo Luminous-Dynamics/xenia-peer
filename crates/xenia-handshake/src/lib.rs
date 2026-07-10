@@ -60,6 +60,12 @@ use std::time::SystemTime;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
+use ml_dsa::{
+    B32, EncodedSignature as MlDsaEncodedSignature,
+    EncodedVerifyingKey as MlDsaEncodedVerifyingKey, MlDsa65, Signature as MlDsaSignatureT,
+    SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey,
+    signature::{Keypair as MlDsaKeypair, Signer as MlDsaSigner, Verifier as MlDsaVerifier},
+};
 use ml_kem::{
     MlKem768, TryKeyInit,
     kem::{Decapsulate, Encapsulate, Kem, KeyExport},
@@ -82,6 +88,28 @@ pub const ML_KEM_768_PK_LEN: usize = 1184;
 /// ML-KEM-768 ciphertext size in bytes (FIPS 203).
 pub const ML_KEM_768_CT_LEN: usize = 1088;
 
+/// ML-DSA-65 verifying-key size in bytes (FIPS 204). Matches
+/// `xenia-ledger`'s `SignatureSuite::MlDsa65Fips204::fixed_public_key_len()`.
+pub const ML_DSA_65_PK_LEN: usize = 1952;
+
+/// BLAKE3-256 fingerprint binding a peer's full signing identity: its
+/// Ed25519 and ML-DSA-65 public keys together. This is the value a viewer
+/// pins for trust-on-first-use -- an active MITM that substitutes its own
+/// keypairs in `HostHello` produces a different fingerprint, so a mismatch
+/// against a previously-pinned host reveals the substitution. Domain-tagged
+/// so it can't collide with any other BLAKE3 use in the transcript.
+pub fn host_identity_fingerprint(ed25519_pk: &[u8; 32], ml_dsa_pk: &[u8]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"xenia-host-identity-fingerprint-v1");
+    hasher.update(ed25519_pk);
+    hasher.update(ml_dsa_pk);
+    *hasher.finalize().as_bytes()
+}
+
+/// ML-DSA-65 signature size in bytes (FIPS 204). Matches
+/// `xenia-ledger`'s `SignatureSuite::MlDsa65Fips204::fixed_signature_len()`.
+pub const ML_DSA_65_SIG_LEN: usize = 3309;
+
 /// HKDF-SHA-256 salt (domain separator, v1 of this protocol).
 const HKDF_SALT: &[u8] = b"xenia-handshake-v1";
 
@@ -91,14 +119,30 @@ const HKDF_INFO: &[u8] = b"xenia-session-key";
 /// Machine-readable KEM label for evidence manifests.
 pub const KEM_SUITE_LABEL: &str = "ml-kem-768-fips203";
 
-/// Machine-readable transcript-authentication label for the current implementation.
-pub const TRANSCRIPT_SIGNATURE_SUITE_LABEL: &str = "ed25519-rfc8032";
+/// Machine-readable label for the classical half of transcript authentication.
+pub const CLASSICAL_TRANSCRIPT_SIGNATURE_SUITE_LABEL: &str = "ed25519-rfc8032";
+
+/// Machine-readable label for the post-quantum half of transcript
+/// authentication.
+pub const PQ_TRANSCRIPT_SIGNATURE_SUITE_LABEL: &str = "ml-dsa-65-fips204";
+
+/// Machine-readable transcript-authentication label for the current
+/// implementation -- both signatures below must verify; there is no
+/// classical-only fallback. Kept as a combined label (rather than only
+/// [`CLASSICAL_TRANSCRIPT_SIGNATURE_SUITE_LABEL`]) so evidence exports
+/// don't imply Ed25519-only authentication now that ML-DSA is mandatory.
+pub const TRANSCRIPT_SIGNATURE_SUITE_LABEL: &str = "ed25519-rfc8032+ml-dsa-65-fips204";
 
 /// Machine-readable KDF label for the current implementation.
 pub const KDF_SUITE_LABEL: &str = "hkdf-sha256";
 
-/// Machine-readable evidence profile represented by this crate today.
-pub const HANDSHAKE_POLICY_PROFILE: &str = "hybrid-pre-pqc-v1";
+/// Machine-readable evidence profile represented by this crate today:
+/// hybrid PQ transcript authentication (Ed25519 AND ML-DSA-65 both
+/// required, matching the "Hybrid PQ/T" category in
+/// `docs/crypto/FULL_PQC_MIGRATION_PLAN.md` -- not yet "full-PQC",
+/// which additionally requires removing Ed25519 as an authority root
+/// entirely, per that plan's Stage 4/5).
+pub const HANDSHAKE_POLICY_PROFILE: &str = "hybrid-pq-transcript-v1";
 
 /// Stable schema label for canonical handshake transcripts.
 pub const HANDSHAKE_TRANSCRIPT_SCHEMA: &str = "xenia-handshake-transcript-v1";
@@ -154,15 +198,27 @@ pub const CURRENT_HANDSHAKE_EVIDENCE_PROFILE: HandshakeEvidenceProfile = Handsha
     transcript_signature: TRANSCRIPT_SIGNATURE_SUITE_LABEL,
     kdf: KDF_SUITE_LABEL,
     policy_profile: HANDSHAKE_POLICY_PROFILE,
-    transcript_signature_post_quantum: false,
+    // ML-DSA-65 verification is now mandatory alongside Ed25519 (both
+    // must pass, no silent classical-only fallback) -- the transcript
+    // as a whole is PQ-secure against forgery since breaking it
+    // requires breaking ML-DSA specifically, not just Ed25519.
+    transcript_signature_post_quantum: true,
 };
 
 /// Runtime crypto profile requested for a handshake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HandshakeCryptoProfile {
-    /// Current hybrid/pre-PQC authentication profile.
+    /// Historical profile: Ed25519-only transcript authentication.
+    /// No longer what this crate's runtime produces -- kept for
+    /// evidence/labeling of pre-migration sessions and tests.
     HybridPrePqcV1,
-    /// Future post-quantum transcript-authentication profile. Refused by this implementation.
+    /// Current profile: Ed25519 AND ML-DSA-65 both required over the
+    /// transcript. "Hybrid PQ/T" per
+    /// `docs/crypto/FULL_PQC_MIGRATION_PLAN.md`'s claim-boundary table.
+    HybridPqTranscriptV1,
+    /// Future post-quantum-only transcript-authentication profile
+    /// (Ed25519 removed as an authority root entirely). Refused by
+    /// this implementation -- that's migration-plan Stage 4/5.
     FullPqcV1,
 }
 
@@ -171,6 +227,7 @@ impl HandshakeCryptoProfile {
     pub const fn stable_label(self) -> &'static str {
         match self {
             Self::HybridPrePqcV1 => "hybrid-pre-pqc-v1",
+            Self::HybridPqTranscriptV1 => "hybrid-pq-transcript-v1",
             Self::FullPqcV1 => "full-pqc-v1",
         }
     }
@@ -182,21 +239,26 @@ pub struct HandshakeCryptoPolicy {
     /// Requested crypto profile.
     pub profile: HandshakeCryptoProfile,
     /// Whether the policy permits the current classical Ed25519 transcript
-    /// signature suite.
+    /// signature suite. Ed25519 is always present alongside ML-DSA in the
+    /// current runtime, so this only matters for historical
+    /// [`HandshakeCryptoProfile::HybridPrePqcV1`] evidence.
     pub allow_classical_transcript_signature: bool,
 }
 
 impl HandshakeCryptoPolicy {
-    /// Current stable runtime policy.
+    /// Current stable runtime policy: hybrid PQ transcript
+    /// authentication (Ed25519 AND ML-DSA-65 both required).
     pub const fn current() -> Self {
         Self {
-            profile: HandshakeCryptoProfile::HybridPrePqcV1,
+            profile: HandshakeCryptoProfile::HybridPqTranscriptV1,
             allow_classical_transcript_signature: true,
         }
     }
 
     /// Strict future policy. This intentionally refuses the current runtime
-    /// until ML-DSA/SLH-DSA transcript signatures land.
+    /// until Ed25519 is removed as an authority root entirely (migration
+    /// plan Stage 4/5) -- the current runtime still keeps Ed25519 alongside
+    /// ML-DSA-65, which is "hybrid", not "full-PQC" in the plan's terms.
     pub const fn full_pqc() -> Self {
         Self {
             profile: HandshakeCryptoProfile::FullPqcV1,
@@ -213,6 +275,7 @@ impl HandshakeCryptoPolicy {
                 }
                 Ok(())
             }
+            HandshakeCryptoProfile::HybridPqTranscriptV1 => Ok(()),
             HandshakeCryptoProfile::FullPqcV1 => {
                 Err(HandshakePolicyError::FullPqcRequiresPostQuantumTranscriptSignature)
             }
@@ -258,6 +321,10 @@ pub struct HandshakeTranscriptV1 {
     pub host_ed25519_pk: [u8; 32],
     /// Viewer Ed25519 verifying key.
     pub viewer_ed25519_pk: [u8; 32],
+    /// Host ML-DSA-65 verifying key.
+    pub host_ml_dsa_pk: Vec<u8>,
+    /// Viewer ML-DSA-65 verifying key.
+    pub viewer_ml_dsa_pk: Vec<u8>,
     /// Host ML-KEM-768 encapsulation key.
     pub host_kem_pk: Vec<u8>,
     /// Viewer ML-KEM-768 ciphertext sent to the host.
@@ -266,10 +333,17 @@ pub struct HandshakeTranscriptV1 {
     pub host_nonce: [u8; 32],
     /// Viewer nonce used in the KDF binding.
     pub viewer_nonce: [u8; 32],
-    /// Viewer signature over the pre-finalize transcript.
+    /// Viewer Ed25519 signature over the pre-finalize transcript.
     pub viewer_signature: Vec<u8>,
-    /// Host signature over the finalized transcript.
+    /// Host Ed25519 signature over the finalized transcript.
     pub host_signature: Vec<u8>,
+    /// Viewer ML-DSA-65 signature over the pre-finalize transcript.
+    /// Both this and `viewer_signature` must verify -- no classical-only
+    /// fallback.
+    pub viewer_ml_dsa_signature: Vec<u8>,
+    /// Host ML-DSA-65 signature over the finalized transcript. Both this
+    /// and `host_signature` must verify -- no classical-only fallback.
+    pub host_ml_dsa_signature: Vec<u8>,
 }
 
 impl HandshakeTranscriptV1 {
@@ -278,23 +352,47 @@ impl HandshakeTranscriptV1 {
     pub fn new(
         host_ed25519_pk: [u8; 32],
         viewer_ed25519_pk: [u8; 32],
+        host_ml_dsa_pk: impl Into<Vec<u8>>,
+        viewer_ml_dsa_pk: impl Into<Vec<u8>>,
         host_kem_pk: impl Into<Vec<u8>>,
         kem_ciphertext: impl Into<Vec<u8>>,
         host_nonce: [u8; 32],
         viewer_nonce: [u8; 32],
         viewer_signature: impl Into<Vec<u8>>,
         host_signature: impl Into<Vec<u8>>,
+        viewer_ml_dsa_signature: impl Into<Vec<u8>>,
+        host_ml_dsa_signature: impl Into<Vec<u8>>,
         negotiated_context_hash: Option<[u8; 32]>,
     ) -> Result<Self> {
+        let host_ml_dsa_pk = host_ml_dsa_pk.into();
+        let viewer_ml_dsa_pk = viewer_ml_dsa_pk.into();
         let host_kem_pk = host_kem_pk.into();
         let kem_ciphertext = kem_ciphertext.into();
         let viewer_signature = viewer_signature.into();
         let host_signature = host_signature.into();
+        let viewer_ml_dsa_signature = viewer_ml_dsa_signature.into();
+        let host_ml_dsa_signature = host_ml_dsa_signature.into();
 
+        validate_transcript_component("host_ml_dsa_pk", host_ml_dsa_pk.len(), ML_DSA_65_PK_LEN)?;
+        validate_transcript_component(
+            "viewer_ml_dsa_pk",
+            viewer_ml_dsa_pk.len(),
+            ML_DSA_65_PK_LEN,
+        )?;
         validate_transcript_component("host_kem_pk", host_kem_pk.len(), ML_KEM_768_PK_LEN)?;
         validate_transcript_component("kem_ciphertext", kem_ciphertext.len(), ML_KEM_768_CT_LEN)?;
         validate_transcript_component("viewer_signature", viewer_signature.len(), 64)?;
         validate_transcript_component("host_signature", host_signature.len(), 64)?;
+        validate_transcript_component(
+            "viewer_ml_dsa_signature",
+            viewer_ml_dsa_signature.len(),
+            ML_DSA_65_SIG_LEN,
+        )?;
+        validate_transcript_component(
+            "host_ml_dsa_signature",
+            host_ml_dsa_signature.len(),
+            ML_DSA_65_SIG_LEN,
+        )?;
 
         Ok(Self {
             schema: HANDSHAKE_TRANSCRIPT_SCHEMA.to_string(),
@@ -304,12 +402,16 @@ impl HandshakeTranscriptV1 {
             negotiated_context_hash,
             host_ed25519_pk,
             viewer_ed25519_pk,
+            host_ml_dsa_pk,
+            viewer_ml_dsa_pk,
             host_kem_pk,
             kem_ciphertext,
             host_nonce,
             viewer_nonce,
             viewer_signature,
             host_signature,
+            viewer_ml_dsa_signature,
+            host_ml_dsa_signature,
         })
     }
 
@@ -377,6 +479,15 @@ pub enum HandshakeError {
 
     #[error("invalid Ed25519 public key")]
     InvalidVerifyingKey,
+
+    #[error("ML-DSA-65 signature verification failed")]
+    MlDsaSignatureVerificationFailed,
+
+    #[error("invalid ML-DSA-65 verifying key")]
+    InvalidMlDsaVerifyingKey,
+
+    #[error("invalid ML-DSA-65 signature encoding")]
+    InvalidMlDsaSignatureEncoding,
 
     #[error("invalid handshake transcript component {name}: got {got}, expected {expected}")]
     InvalidTranscriptComponent {
@@ -547,6 +658,7 @@ pub struct KemExchange {
 /// 4. Use `session_key(peer)` to seal/open frames.
 pub struct HandshakeManager {
     signing_key: SigningKey,
+    ml_dsa_signing_key: MlDsaSigningKey<MlDsa65>,
     kem_dk: MlKemDk,
     kem_ek_bytes: [u8; ML_KEM_768_PK_LEN],
     sessions: HashMap<String, SessionKey>,
@@ -559,9 +671,23 @@ impl HandshakeManager {
         CURRENT_HANDSHAKE_EVIDENCE_PROFILE
     }
 
-    /// Generate a fresh identity + KEM keypair on this node.
+    /// Generate a fresh identity + ML-DSA-65 + KEM keypair set on this node.
     pub fn new() -> Self {
         let signing_key = SigningKey::generate(&mut OsRng);
+        let ml_dsa_seed: [u8; 32] = rand::random();
+        Self::from_identity_seeds(signing_key.to_bytes(), ml_dsa_seed)
+    }
+
+    /// Reconstruct a manager from a *persisted* identity: a 32-byte Ed25519
+    /// secret and a 32-byte ML-DSA-65 seed (FIPS-204 ξ). The KEM
+    /// encapsulation key stays freshly generated -- only the signing
+    /// identity is stable, which is what a peer pins for trust-on-first-use.
+    /// Given the same two seeds, this produces the same public identity
+    /// (hence the same [`Self::identity_fingerprint`]) across restarts.
+    pub fn from_identity_seeds(ed25519_secret: [u8; 32], ml_dsa_seed: [u8; 32]) -> Self {
+        let signing_key = SigningKey::from_bytes(&ed25519_secret);
+        let seed: B32 = ml_dsa_seed.into();
+        let ml_dsa_signing_key = MlDsaSigningKey::<MlDsa65>::from_seed(&seed);
         let (kem_dk, kem_ek) = MlKem768::generate_keypair();
 
         let ek_encoded = kem_ek.to_bytes();
@@ -570,11 +696,22 @@ impl HandshakeManager {
 
         Self {
             signing_key,
+            ml_dsa_signing_key,
             kem_dk,
             kem_ek_bytes,
             sessions: HashMap::new(),
             pending_kem: HashMap::new(),
         }
+    }
+
+    /// BLAKE3-256 fingerprint of this node's own signing identity
+    /// (Ed25519 || ML-DSA-65 public keys). Stable across restarts when
+    /// constructed from persisted seeds; a peer pins this value.
+    pub fn identity_fingerprint(&self) -> [u8; 32] {
+        host_identity_fingerprint(
+            &self.identity_public_key_bytes(),
+            &self.ml_dsa_public_key_bytes(),
+        )
     }
 
     // ─── Identity ────────────────────────────────────────────────────────
@@ -601,6 +738,52 @@ impl HandshakeManager {
     /// Parse a 32-byte Ed25519 public key.
     pub fn parse_peer_public_key(bytes: &[u8; 32]) -> Result<VerifyingKey> {
         VerifyingKey::from_bytes(bytes).map_err(|_| HandshakeError::InvalidVerifyingKey)
+    }
+
+    // ─── ML-DSA-65 identity (mandatory alongside Ed25519; see module docs) ─
+
+    /// Raw bytes of this node's ML-DSA-65 verifying key.
+    pub fn ml_dsa_public_key_bytes(&self) -> [u8; ML_DSA_65_PK_LEN] {
+        let encoded = self.ml_dsa_signing_key.verifying_key().encode();
+        let mut out = [0u8; ML_DSA_65_PK_LEN];
+        out.copy_from_slice(encoded.as_slice());
+        out
+    }
+
+    /// Sign a message with this node's ML-DSA-65 identity key. Callers must
+    /// also call [`Self::sign`] over the same message and send both --
+    /// there is no classical-only fallback.
+    pub fn sign_ml_dsa(&self, message: &[u8]) -> [u8; ML_DSA_65_SIG_LEN] {
+        let signature: MlDsaSignatureT<MlDsa65> = self.ml_dsa_signing_key.sign(message);
+        let encoded = signature.encode();
+        let mut out = [0u8; ML_DSA_65_SIG_LEN];
+        out.copy_from_slice(encoded.as_slice());
+        out
+    }
+
+    /// Verify an ML-DSA-65 signature from a peer's verifying-key bytes.
+    pub fn verify_ml_dsa(
+        peer_pk: &[u8; ML_DSA_65_PK_LEN],
+        message: &[u8],
+        signature: &[u8; ML_DSA_65_SIG_LEN],
+    ) -> Result<()> {
+        let verifying_key = Self::parse_peer_ml_dsa_public_key(peer_pk)?;
+        let encoded_sig = MlDsaEncodedSignature::<MlDsa65>::try_from(signature.as_slice())
+            .map_err(|_| HandshakeError::InvalidMlDsaSignatureEncoding)?;
+        let sig = MlDsaSignatureT::<MlDsa65>::decode(&encoded_sig)
+            .ok_or(HandshakeError::InvalidMlDsaSignatureEncoding)?;
+        verifying_key
+            .verify(message, &sig)
+            .map_err(|_| HandshakeError::MlDsaSignatureVerificationFailed)
+    }
+
+    /// Parse a raw ML-DSA-65 verifying-key byte array.
+    pub fn parse_peer_ml_dsa_public_key(
+        bytes: &[u8; ML_DSA_65_PK_LEN],
+    ) -> Result<MlDsaVerifyingKey<MlDsa65>> {
+        let encoded = MlDsaEncodedVerifyingKey::<MlDsa65>::try_from(bytes.as_slice())
+            .map_err(|_| HandshakeError::InvalidMlDsaVerifyingKey)?;
+        Ok(MlDsaVerifyingKey::<MlDsa65>::decode(&encoded))
     }
 
     // ─── KEM ─────────────────────────────────────────────────────────────
@@ -851,9 +1034,88 @@ mod tests {
     }
 
     #[test]
+    fn persisted_identity_is_stable_across_reconstruction() {
+        let ed = [7u8; 32];
+        let seed = [9u8; 32];
+        let a = HandshakeManager::from_identity_seeds(ed, seed);
+        let b = HandshakeManager::from_identity_seeds(ed, seed);
+
+        // Same seeds -> same public identity and fingerprint (the KEM key
+        // differs, but it isn't part of the identity fingerprint).
+        assert_eq!(a.identity_public_key_bytes(), b.identity_public_key_bytes());
+        assert_eq!(a.ml_dsa_public_key_bytes(), b.ml_dsa_public_key_bytes());
+        assert_eq!(a.identity_fingerprint(), b.identity_fingerprint());
+    }
+
+    #[test]
+    fn different_seeds_yield_different_fingerprints() {
+        let a = HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]);
+        let b = HandshakeManager::from_identity_seeds([1u8; 32], [3u8; 32]);
+        let c = HandshakeManager::from_identity_seeds([4u8; 32], [2u8; 32]);
+        assert_ne!(a.identity_fingerprint(), b.identity_fingerprint());
+        assert_ne!(a.identity_fingerprint(), c.identity_fingerprint());
+    }
+
+    #[test]
+    fn fingerprint_helper_binds_both_keys() {
+        let mgr = HandshakeManager::from_identity_seeds([5u8; 32], [6u8; 32]);
+        let ed = mgr.identity_public_key_bytes();
+        let ml = mgr.ml_dsa_public_key_bytes();
+        // The free helper agrees with the method...
+        assert_eq!(
+            mgr.identity_fingerprint(),
+            host_identity_fingerprint(&ed, &ml)
+        );
+        // ...and changing either input changes the fingerprint.
+        let mut ed2 = ed;
+        ed2[0] ^= 1;
+        assert_ne!(
+            host_identity_fingerprint(&ed, &ml),
+            host_identity_fingerprint(&ed2, &ml)
+        );
+    }
+
+    #[test]
     fn identity_public_key_is_32_bytes() {
         let mgr = HandshakeManager::new();
         assert_eq!(mgr.identity_public_key_bytes().len(), 32);
+    }
+
+    #[test]
+    fn ml_dsa_sign_and_verify_roundtrip() {
+        let mgr = HandshakeManager::new();
+        let pk = mgr.ml_dsa_public_key_bytes();
+        let message = b"xenia hybrid PQ transcript authentication";
+        let signature = mgr.sign_ml_dsa(message);
+        assert!(HandshakeManager::verify_ml_dsa(&pk, message, &signature).is_ok());
+    }
+
+    #[test]
+    fn ml_dsa_verify_rejects_tampered_message() {
+        let mgr = HandshakeManager::new();
+        let pk = mgr.ml_dsa_public_key_bytes();
+        let signature = mgr.sign_ml_dsa(b"original message");
+        assert!(HandshakeManager::verify_ml_dsa(&pk, b"tampered message", &signature).is_err());
+    }
+
+    #[test]
+    fn ml_dsa_verify_rejects_wrong_signer() {
+        let signer = HandshakeManager::new();
+        let impostor = HandshakeManager::new();
+        let message = b"who signed this?";
+        let signature = signer.sign_ml_dsa(message);
+        let impostor_pk = impostor.ml_dsa_public_key_bytes();
+        assert!(HandshakeManager::verify_ml_dsa(&impostor_pk, message, &signature).is_err());
+    }
+
+    #[test]
+    fn ml_dsa_verify_rejects_tampered_signature_bytes() {
+        let mgr = HandshakeManager::new();
+        let pk = mgr.ml_dsa_public_key_bytes();
+        let message = b"flip a bit in the signature";
+        let mut signature = mgr.sign_ml_dsa(message);
+        signature[0] ^= 0x01;
+        assert!(HandshakeManager::verify_ml_dsa(&pk, message, &signature).is_err());
     }
 
     #[test]
@@ -861,10 +1123,13 @@ mod tests {
         let profile = HandshakeManager::evidence_profile();
         assert_eq!(profile.schema, "xenia-handshake-evidence-profile-v1");
         assert_eq!(profile.kem, "ml-kem-768-fips203");
-        assert_eq!(profile.transcript_signature, "ed25519-rfc8032");
+        assert_eq!(
+            profile.transcript_signature,
+            "ed25519-rfc8032+ml-dsa-65-fips204"
+        );
         assert_eq!(profile.kdf, "hkdf-sha256");
-        assert_eq!(profile.policy_profile, "hybrid-pre-pqc-v1");
-        assert!(!profile.transcript_signature_post_quantum);
+        assert_eq!(profile.policy_profile, "hybrid-pq-transcript-v1");
+        assert!(profile.transcript_signature_post_quantum);
     }
 
     #[test]
@@ -900,12 +1165,16 @@ mod tests {
         let transcript = HandshakeTranscriptV1::new(
             [0xA1; 32],
             [0xB2; 32],
+            vec![0xA7; ML_DSA_65_PK_LEN],
+            vec![0xB8; ML_DSA_65_PK_LEN],
             vec![0xC3; ML_KEM_768_PK_LEN],
             vec![0xD4; ML_KEM_768_CT_LEN],
             [0xE5; 32],
             [0xF6; 32],
             vec![0x11; 64],
             vec![0x22; 64],
+            vec![0x33; ML_DSA_65_SIG_LEN],
+            vec![0x44; ML_DSA_65_SIG_LEN],
             None,
         )
         .unwrap();
@@ -925,12 +1194,16 @@ mod tests {
         let err = HandshakeTranscriptV1::new(
             [0xA1; 32],
             [0xB2; 32],
+            vec![0xA7; ML_DSA_65_PK_LEN],
+            vec![0xB8; ML_DSA_65_PK_LEN],
             vec![0xC3; ML_KEM_768_PK_LEN - 1],
             vec![0xD4; ML_KEM_768_CT_LEN],
             [0xE5; 32],
             [0xF6; 32],
             vec![0x11; 64],
             vec![0x22; 64],
+            vec![0x33; ML_DSA_65_SIG_LEN],
+            vec![0x44; ML_DSA_65_SIG_LEN],
             None,
         )
         .unwrap_err();

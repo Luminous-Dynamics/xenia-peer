@@ -5,6 +5,7 @@
 // renders the top navigation.
 
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 use leptos_router::{
     components::{A, Route, Router, Routes},
     path,
@@ -12,10 +13,18 @@ use leptos_router::{
 
 use crate::auth::AuthState;
 use crate::config::DaemonConfig;
-use crate::context::{auth_context, missing_context_view};
+use crate::context::{auth_context, daemon_config_context, missing_context_view};
+use crate::operator_session::{OperatorIdentity, OperatorSession, authenticate};
 use crate::pages::{
     ConsentModal, DevicesPage, GovernancePage, LoginPage, MonitorPage, PolicyPage, SessionsPage,
 };
+use xenia_operator_proto::OperatorRole;
+
+/// Shared operator-RBAC session: `Some` once the operator completes the
+/// challenge/verify ceremony against the daemon, carrying the role the daemon
+/// scoped the token to. Provided at the root so the consent modal (and any
+/// privileged control) can gate on the real role rather than a client claim.
+pub type OperatorSessionCtx = RwSignal<Option<OperatorSession>>;
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -24,6 +33,9 @@ pub fn App() -> impl IntoView {
 
     let config = DaemonConfig::new();
     provide_context(config);
+
+    let operator_session: OperatorSessionCtx = RwSignal::new(None);
+    provide_context(operator_session);
 
     view! {
         <Router>
@@ -34,6 +46,7 @@ pub fn App() -> impl IntoView {
                     <span class="brand-suite">"Operations Center"</span>
                 </a>
                 <Nav/>
+                <OperatorAuthPanel/>
                 <AuthStatus/>
             </header>
             <main class="content">
@@ -79,6 +92,94 @@ fn AuthStatus() -> impl IntoView {
                     {move || auth.did.with(|d| d.clone().unwrap_or_default())}
                 </span>
                 <button class="sign-out" on:click=move |_| auth.sign_out()>"Sign out"</button>
+            </Show>
+        </div>
+    }
+    .into_any()
+}
+
+/// Operator-RBAC status + the challenge/verify ceremony trigger. Distinct from
+/// [`AuthStatus`] (the DID login): this proves possession of an *enrolled
+/// operator key* to the daemon and obtains the role-scoped token that gates
+/// privileged actions. Shows the enrolled role when authenticated, and the
+/// operator's enrollment fingerprint (to paste into the daemon's operators
+/// file) before that.
+#[component]
+fn OperatorAuthPanel() -> impl IntoView {
+    let Ok(session) = use_context::<OperatorSessionCtx>().ok_or(()) else {
+        return missing_context_view("OperatorSession").into_any();
+    };
+    let Ok(config) = daemon_config_context() else {
+        return missing_context_view("DaemonConfig").into_any();
+    };
+    let (busy, set_busy) = signal(false);
+    let (error, set_error) = signal(None::<String>);
+
+    // Compute the operator's fingerprint + paste-ready enrollment record once at
+    // mount (constructing the identity does ML-KEM keygen, so not per render).
+    let identity = OperatorIdentity::load_or_generate();
+    let fingerprint = identity.fingerprint_hex();
+    let fp_short = fingerprint.chars().take(16).collect::<String>();
+    // Template record: the admin sets operator_id + role, then adds it to the
+    // daemon's --operators-file. The two public keys are what matter.
+    let enrollment = identity.enrollment_record_json("your-operator-id", OperatorRole::Viewer);
+
+    let sign_in = move |_| {
+        set_busy.set(true);
+        set_error.set(None);
+        let endpoint = config.endpoint.get();
+        spawn_local(async move {
+            // Constructed from the persisted seeds, so this is the same
+            // enrolled identity every time.
+            let identity = OperatorIdentity::load_or_generate();
+            match authenticate(&endpoint, &identity).await {
+                Ok(s) => session.set(Some(s)),
+                Err(e) => set_error.set(Some(e)),
+            }
+            set_busy.set(false);
+        });
+    };
+
+    view! {
+        <div class="operator-auth">
+            <Show
+                when=move || session.with(|s| s.is_some())
+                fallback=move || {
+                    let fp = fingerprint.clone();
+                    let short = fp_short.clone();
+                    let record = enrollment.clone();
+                    view! {
+                        <button
+                            class="operator-signin"
+                            prop:disabled=move || busy.get()
+                            on:click=sign_in
+                        >
+                            {move || if busy.get() { "Authenticating…" } else { "Operator sign-in" }}
+                        </button>
+                        <details class="operator-enroll">
+                            <summary class="operator-fingerprint" title=fp>
+                                "key " {short} "…"
+                            </summary>
+                            <p class="operator-enroll-hint">
+                                "Add to the daemon's --operators-file (set operator_id + role):"
+                            </p>
+                            <code class="operator-enroll-record">{record}</code>
+                        </details>
+                        {move || error.get().map(|e| view! {
+                            <span class="operator-error">{e}</span>
+                        })}
+                    }
+                }
+            >
+                <span class="operator-role-chip">
+                    {move || session.with(|s| {
+                        s.as_ref().map(|s| format!("{} · {}", s.operator_id, s.role.as_str()))
+                            .unwrap_or_default()
+                    })}
+                </span>
+                <button class="operator-signout" on:click=move |_| session.set(None)>
+                    "End operator session"
+                </button>
             </Show>
         </div>
     }

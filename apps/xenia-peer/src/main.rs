@@ -4,10 +4,14 @@
 /// `xenia-peer` — headless daemon that hosts a Xenia session.
 use clap::{Parser, ValueEnum};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex as AsyncMutex;
 use tracing::{info, warn};
 use uuid::Uuid;
+
+use xenia_inject::{InputInjector, LoggingInjector, NoopInjector};
 
 use ed25519_dalek::SigningKey;
 #[cfg(any(feature = "audio-capture", test))]
@@ -25,21 +29,24 @@ use xenia_peer_core::OpusAudioCodec;
 #[cfg(any(feature = "audio-capture", test))]
 use xenia_peer_core::frame::audio_flags;
 use xenia_peer_core::{
-    AudioCodec, LaneSession, RawPcmAudioCodec, RekeyPolicy, SessionEpochState,
+    AudioCodec, ClipboardContent, LaneSession, M1PermissionSet, PAYLOAD_TYPE_CLIPBOARD,
+    RawPcmAudioCodec, RekeyPolicy, SessionEpochState,
     advertisement::{AdvertisedAudioCodec, AudioAdvertisement, TransportAdvertisement},
     frame::{
-        PixelFormat as FramePixelFormat, RawAudio, RawFrame, RawRekey, RawTelemetry,
-        SyntheticAudioKind, SyntheticAudioSource, TelemetrySample as WireTelemetrySample,
-        TelemetryValue as WireTelemetryValue,
+        LANE_ENVELOPE_MAGIC, PixelFormat as FramePixelFormat, RawAudio, RawClipboard, RawFrame,
+        RawRekey, RawTelemetry, SyntheticAudioKind, SyntheticAudioSource,
+        TelemetrySample as WireTelemetrySample, TelemetryValue as WireTelemetryValue,
     },
     handshake::{
         NegotiatedTransport, negotiated_session_context_hash,
         perform_host_handshake_with_transcript_and_context,
     },
-    transport::{TcpTransport, Transport},
+    transport::{RecvEnvelope, SendEnvelope, TcpRecvHalf, TcpSendHalf, TcpTransport, Transport},
 };
-use xenia_transport_quic::{QuicTransport, bind_xenia_endpoint, encode_endpoint_addr};
-use xenia_transport_ws::WsTransport;
+use xenia_transport_quic::{
+    QuicRecvHalf, QuicSendHalf, QuicTransport, bind_xenia_endpoint, encode_endpoint_addr,
+};
+use xenia_transport_ws::{WsRecvHalf, WsSendHalf, WsTransport};
 use xenia_video::{
     EncodeParams, Encoder, PixelFormat as VideoPixelFormat, passthrough::PassthroughEncoder,
 };
@@ -49,9 +56,24 @@ use xenia_capture::CpalAudioCapture;
 #[cfg(feature = "scap")]
 use xenia_capture::ScapCapture;
 
+mod admin_ui;
+mod consent_server;
+mod file_transfer;
 mod governance;
 mod m1_ledger;
 mod m1_runtime;
+mod operator;
+mod operator_audit;
+mod operator_auth;
+mod operator_exposure;
+mod operator_http;
+#[cfg(test)]
+mod operator_live_smoke;
+#[cfg(test)]
+mod operator_rbac_smoke;
+mod operator_sealed_channel;
+#[cfg(test)]
+mod operator_sealed_smoke;
 use crate::governance::{GovernanceBridge, MitigationRule};
 
 #[derive(Parser, Debug)]
@@ -72,6 +94,20 @@ struct Args {
     #[arg(long, default_value_t = 30)]
     fps: u32,
 
+    /// Capture a real Android phone's screen via scrcpy instead of the
+    /// host display -- the ADB serial of the device to use (`adb devices`
+    /// lists connected serials). Requires building with `--features
+    /// scrcpy` and a device connected over USB with debugging authorized.
+    /// Takes priority over the scap/TestCapture desktop backends when set.
+    #[arg(long)]
+    phone_serial: Option<String>,
+
+    /// Host-side TCP port for the scrcpy reverse tunnel (`adb reverse`
+    /// bridges the device's local abstract socket here). Only used with
+    /// `--phone-serial`. 27183 matches upstream scrcpy's own default.
+    #[arg(long, default_value_t = 27183)]
+    phone_tcp_port: u16,
+
     #[arg(long, default_value_t = 0)]
     frames: u64,
 
@@ -89,6 +125,34 @@ struct Args {
 
     #[arg(long, default_value_t = 8082)]
     consent_port: u16,
+
+    /// Serve consent over a `xenia-wire`-sealed operator channel (PQC-hybrid
+    /// handshake + AEAD) instead of the plaintext consent port. The console
+    /// opens a WebSocket, runs the operator handshake (its enrolled Ed25519 +
+    /// ML-DSA-65 key IS the proof of possession), and sends sealed consent
+    /// decisions. See `docs/security/SEALED_OPERATOR_CHANNEL_DESIGN.md`. v1 is
+    /// single-connection (no reconnect); requires `--operators-file`.
+    #[arg(long)]
+    operator_sealed: bool,
+
+    /// Port for the sealed operator channel (`--operator-sealed`).
+    #[arg(long, default_value_t = 8083)]
+    operator_sealed_port: u16,
+
+    /// Bind address for the operator surface (the admin `/auth` + `/ws` port
+    /// and the consent port). Defaults to loopback. Binding to a non-loopback
+    /// address (e.g. `0.0.0.0`) exposes the surface to the network and is
+    /// **refused unless `--require-operator-auth` is set** — otherwise any host
+    /// could send `Approve` on the consent port. Even with auth, terminate TLS
+    /// in front for confidentiality (the app-layer signatures prevent forgery,
+    /// not eavesdropping). See `docs/security/OPERATOR_RBAC_PLAN.md`.
+    #[arg(long, default_value = "127.0.0.1")]
+    operator_bind: String,
+
+    /// Seconds to wait for an Approve/Deny decision on --consent-port before
+    /// giving up and exiting. Ignored when --m1-preprod-auto-consent is set.
+    #[arg(long, default_value_t = 120)]
+    consent_timeout_secs: u64,
 
     #[arg(long, default_value_t = 1_000)]
     telemetry_interval_ms: u64,
@@ -161,11 +225,106 @@ struct Args {
     #[arg(long, value_enum, requires = "verify_evidence_bundle")]
     require_evidence_profile: Option<EvidenceProfileRequirement>,
 
+    /// Verify a seven-file sealed full-PQC evidence bundle and exit.
+    /// Requires explicit trusted key fingerprints; public-key binding files are
+    /// not treated as self-authenticating identity claims.
+    #[arg(long, value_name = "DIR")]
+    verify_sealed_evidence_bundle: Option<std::path::PathBuf>,
+
+    /// Trusted BLAKE3 fingerprint for the transcript verifier key.
+    #[arg(long, requires = "verify_sealed_evidence_bundle")]
+    trusted_transcript_key_fingerprint_hex: Option<String>,
+
+    /// Trusted BLAKE3 fingerprint for the ledger verifier key.
+    #[arg(long, requires = "verify_sealed_evidence_bundle")]
+    trusted_ledger_key_fingerprint_hex: Option<String>,
+
+    /// Signature suite/backend to use when verifying a sealed full-PQC bundle.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = EvidenceVerifierSuite::MlDsa65Fips204,
+        requires = "verify_sealed_evidence_bundle"
+    )]
+    sealed_evidence_signature_suite: EvidenceVerifierSuite,
+
+    /// Read trusted sealed full-PQC key fingerprints from an enrolled policy file.
+    /// This is preferred for CI/operator workflows because it avoids copying
+    /// fingerprints by hand. Do not combine with the manual trusted fingerprint flags.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "verify_sealed_evidence_bundle",
+        conflicts_with_all = [
+            "trusted_transcript_key_fingerprint_hex",
+            "trusted_ledger_key_fingerprint_hex"
+        ]
+    )]
+    sealed_evidence_trust_policy: Option<std::path::PathBuf>,
+
+    /// Detached signature authenticating `--sealed-evidence-trust-policy` under
+    /// an enrolled local policy-root key.
+    #[arg(long, value_name = "FILE", requires = "sealed_evidence_trust_policy")]
+    sealed_evidence_trust_policy_signature: Option<std::path::PathBuf>,
+
+    /// Trusted BLAKE3 fingerprint for the policy-root key that signs the sealed
+    /// evidence trust policy. Use either this manual root fingerprint or
+    /// `--sealed-evidence-policy-roots`, not both.
+    #[arg(
+        long,
+        requires = "sealed_evidence_trust_policy_signature",
+        conflicts_with = "sealed_evidence_policy_roots"
+    )]
+    trusted_sealed_evidence_policy_root_fingerprint_hex: Option<String>,
+
+    /// Enrolled policy-root registry used to authorize the root that signed the
+    /// sealed evidence trust policy. This avoids manually pasting the trusted
+    /// root fingerprint during CI/operator verification.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "sealed_evidence_trust_policy_signature",
+        conflicts_with = "trusted_sealed_evidence_policy_root_fingerprint_hex"
+    )]
+    sealed_evidence_policy_roots: Option<std::path::PathBuf>,
+
+    /// Require the signed policy to be authorized by this enrolled policy-root id.
+    #[arg(long, value_name = "ID", requires = "sealed_evidence_policy_roots")]
+    required_sealed_evidence_policy_root_id: Option<String>,
+
+    /// Refuse an unsigned sealed evidence trust policy.
+    #[arg(long, requires = "sealed_evidence_trust_policy")]
+    require_signed_sealed_evidence_trust_policy: bool,
+
+    /// Refuse a sealed trust policy whose policy_epoch is missing or below this value (`--minimum-sealed-evidence-policy-epoch`).
+    #[arg(
+        long = "minimum-sealed-evidence-policy-epoch",
+        requires = "sealed_evidence_trust_policy"
+    )]
+    minimum_sealed_evidence_policy_epoch: Option<u64>,
+
+    /// Write a sealed full-PQC verification_report.json after successful verification.
+    /// Use `--write-sealed-evidence-report` only when the operator wants an
+    /// archival audit handle. This report is an audit aid only; trust is still recomputed from the seven
+    /// sealed artifacts and operator-supplied fingerprints.
+    #[arg(
+        long = "write-sealed-evidence-report",
+        requires = "verify_sealed_evidence_bundle"
+    )]
+    write_sealed_evidence_report: bool,
+
     /// Audit a stored verification_report.json against the current bundle artifact bytes.
     /// Use as `--audit-evidence-report DIR`. This recomputes artifact digests only;
     /// use --verify-evidence-bundle for signature verification.
     #[arg(long, value_name = "DIR")]
     audit_evidence_report: Option<std::path::PathBuf>,
+
+    /// Audit a stored sealed full-PQC verification_report.json against the current
+    /// seven-file sealed bundle artifact bytes with `--audit-sealed-evidence-report`.
+    /// This recomputes digests only; use
+    /// --verify-sealed-evidence-bundle for signature and trust-anchor verification.
+    #[arg(long = "audit-sealed-evidence-report", value_name = "DIR")]
+    audit_sealed_evidence_report: Option<std::path::PathBuf>,
 
     /// PRE-PRODUCTION ONLY: auto-grant the local M1 runtime gate after handshake.
     ///
@@ -179,6 +338,84 @@ struct Args {
     /// so runtime keys are not written into the repository root.
     #[arg(long, default_value = "operator.key")]
     operator_key_path: std::path::PathBuf,
+
+    /// M1 consent-ledger signing key path. Signs the consent grant/deny/revoke
+    /// boundary events; generated on first run with owner-only (0600)
+    /// permissions. Must be a real per-host secret -- a shared or well-known
+    /// key lets anyone forge a fully-verifying consent transcript.
+    #[arg(long, default_value = "consent-ledger.key")]
+    m1_consent_key_path: std::path::PathBuf,
+
+    /// Host signing-identity path (Ed25519 secret + ML-DSA-65 seed, 64 bytes).
+    /// Generated on first run with owner-only (0600) permissions and reused
+    /// thereafter, giving the host a stable identity a viewer can pin
+    /// (trust-on-first-use). Its BLAKE3 fingerprint is logged at startup so
+    /// an operator can share it out-of-band for verification.
+    #[arg(long, default_value = "host-identity.key")]
+    host_identity_key_path: std::path::PathBuf,
+
+    /// Operator enrollment file (JSON): the operators allowed to authenticate
+    /// to this daemon's admin surface, each an Ed25519 + ML-DSA-65 public key
+    /// bound to a role. When unset, the `/auth/*` endpoints still exist but no
+    /// operator can authenticate (empty policy = deny all). See
+    /// `docs/security/OPERATOR_RBAC_PLAN.md`.
+    #[arg(long)]
+    operators_file: Option<std::path::PathBuf>,
+
+    /// Require an authenticated, role-authorized operator token for consent
+    /// decisions. When off (default), the consent port accepts the legacy
+    /// plain-text `Approve`/`Deny`/`Revoke` (backward compatible). When on,
+    /// each decision must be a signed `AuthenticatedConsentAction` (token +
+    /// per-action signature) from an enrolled operator whose role permits it;
+    /// plain-text decisions are refused. Requires `--operators-file`.
+    #[arg(long)]
+    require_operator_auth: bool,
+
+    /// Inbound viewer-input backend. `noop` (default) discards every
+    /// input event -- a connected viewer is view-only and no OS-level
+    /// injector is ever constructed, so no consent dialog appears.
+    /// `log` records denormalized events for verification (no host
+    /// permissions needed). `xdg-portal` actually moves the mouse /
+    /// types keys via the RemoteDesktop portal (requires the
+    /// `xdg-portal` build feature and triggers its own interactive
+    /// consent dialog on first real input event). `uinput` injects via
+    /// a real kernel-level `/dev/uinput` virtual device (requires the
+    /// `uinput` build feature and `/dev/uinput` access -- root, `input`
+    /// group membership, or a udev rule); unlike `xdg-portal`, this
+    /// needs no compositor, portal, or active desktop session at all.
+    #[arg(long, value_enum, default_value_t = InputBackendChoice::Noop)]
+    input_backend: InputBackendChoice,
+
+    /// Clipboard sync mode. `off` (default, view-only) never touches
+    /// the real OS clipboard. `host-to-viewer` pushes host clipboard
+    /// changes to the viewer only. `bidirectional` also applies
+    /// viewer-originated clipboard updates to the real host clipboard
+    /// -- this lets a remote viewer write to the host's clipboard, so
+    /// it needs the same M1 consent gate as input injection.
+    #[arg(long, value_enum, default_value_t = ClipboardMode::Off)]
+    clipboard: ClipboardMode,
+
+    /// How often to poll the host clipboard for changes (host-to-viewer
+    /// direction). Ignored when `--clipboard off`.
+    #[arg(long, default_value_t = 500)]
+    clipboard_interval_ms: u64,
+
+    /// Directory to write files the viewer sends. Not set (default) means
+    /// the daemon rejects every inbound file-transfer offer -- the
+    /// feature is off unless a real destination is configured.
+    #[arg(long)]
+    recv_file_dir: Option<std::path::PathBuf>,
+
+    /// A local file to offer to the viewer once connected. One transfer
+    /// per daemon run in this first cut.
+    #[arg(long)]
+    send_file: Option<std::path::PathBuf>,
+
+    /// Reject/refuse to send any file larger than this many bytes. The
+    /// whole file is buffered in memory (both sending and receiving), so
+    /// this is also a memory-use cap, not just a policy knob.
+    #[arg(long, default_value_t = 200 * 1024 * 1024)]
+    file_transfer_max_bytes: u64,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -186,6 +423,23 @@ enum CodecChoice {
     Passthrough,
     H264,
     Hdc,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ClipboardMode {
+    Off,
+    HostToViewer,
+    Bidirectional,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum InputBackendChoice {
+    Noop,
+    Log,
+    #[cfg(feature = "xdg-portal")]
+    XdgPortal,
+    #[cfg(feature = "uinput")]
+    Uinput,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -318,18 +572,87 @@ impl AnyTransport {
         }
     }
 
+    /// Split into independently-owned send/recv halves so a dedicated
+    /// task can run an inbound `RawInput` receive loop concurrently
+    /// with the outbound video/audio/telemetry send loop. See
+    /// [`Transport`]'s doc comment for why splitting exists.
+    fn split(self) -> (AnySendHalf, AnyRecvHalf) {
+        match self {
+            AnyTransport::Tcp(t) => {
+                let (send, recv) = t.split();
+                (AnySendHalf::Tcp(send), AnyRecvHalf::Tcp(recv))
+            }
+            AnyTransport::Ws(t) => {
+                let (send, recv) = t.split();
+                (AnySendHalf::Ws(send), AnyRecvHalf::Ws(recv))
+            }
+            AnyTransport::Quic {
+                _endpoint,
+                transport,
+            } => {
+                let (send, recv) = transport.split();
+                (
+                    AnySendHalf::Quic { _endpoint, send },
+                    AnyRecvHalf::Quic(recv),
+                )
+            }
+        }
+    }
+}
+
+/// Send-only half of a split [`AnyTransport`].
+enum AnySendHalf {
+    Tcp(TcpSendHalf),
+    Ws(WsSendHalf),
+    Quic {
+        _endpoint: xenia_transport_quic::iroh::Endpoint,
+        send: QuicSendHalf,
+    },
+}
+
+impl SendEnvelope for AnySendHalf {
+    async fn send_envelope(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(), xenia_peer_core::transport::TransportError> {
+        match self {
+            AnySendHalf::Tcp(t) => t.send_envelope(bytes).await,
+            AnySendHalf::Ws(t) => t.send_envelope(bytes).await,
+            AnySendHalf::Quic { send, .. } => send.send_envelope(bytes).await,
+        }
+    }
+}
+
+impl AnySendHalf {
+    /// Mirrors `AnyTransport::close` for the post-split send half —
+    /// only the QUIC variant needs an explicit teardown sequence.
     async fn close(&mut self) -> Result<(), xenia_peer_core::transport::TransportError> {
-        if let AnyTransport::Quic {
-            _endpoint,
-            transport,
-        } = self
-        {
-            let finish_result = transport.finish();
-            let _ = tokio::time::timeout(Duration::from_secs(3), transport.closed()).await;
+        if let AnySendHalf::Quic { _endpoint, send } = self {
+            let finish_result = send.finish();
+            let _ = tokio::time::timeout(Duration::from_secs(3), send.closed()).await;
             _endpoint.close().await;
             finish_result?;
         }
         Ok(())
+    }
+}
+
+/// Receive-only half of a split [`AnyTransport`].
+enum AnyRecvHalf {
+    Tcp(TcpRecvHalf),
+    Ws(WsRecvHalf),
+    Quic(QuicRecvHalf),
+}
+
+impl RecvEnvelope for AnyRecvHalf {
+    async fn recv_envelope(
+        &mut self,
+    ) -> Result<Vec<u8>, xenia_peer_core::transport::TransportError> {
+        match self {
+            AnyRecvHalf::Tcp(t) => t.recv_envelope().await,
+            AnyRecvHalf::Ws(t) => t.recv_envelope().await,
+            AnyRecvHalf::Quic(t) => t.recv_envelope().await,
+        }
     }
 }
 
@@ -556,6 +879,8 @@ fn session_capabilities_frame(
     audio: AudioAdvertisement,
     video_format: FramePixelFormat,
     telemetry_level: TelemetryLevel,
+    input_backend: InputBackendChoice,
+    clipboard: ClipboardMode,
 ) -> Result<RawFrame, Box<dyn std::error::Error>> {
     xenia_peer_core::RawCapabilities {
         frame_id,
@@ -563,7 +888,8 @@ fn session_capabilities_frame(
         audio: Some(audio),
         video_format,
         telemetry_enabled: telemetry_level != TelemetryLevel::Off,
-        input_control_enabled: false,
+        input_control_enabled: input_backend != InputBackendChoice::Noop,
+        clipboard_enabled: clipboard != ClipboardMode::Off,
         lane_envelope_version: xenia_peer_core::frame::LANE_ENVELOPE_SCHEMA_VERSION,
         lane_envelope_magic: xenia_peer_core::frame::LANE_ENVELOPE_MAGIC,
     }
@@ -625,6 +951,185 @@ async fn perform_rekey(
     }
 }
 
+/// Mirrors [`perform_rekey`] for use after the transport has been
+/// split (`AnyTransport::split`): sends the proposal on the send half
+/// and waits for the ack on `rekey_ack_rx` instead of a direct
+/// `recv_envelope` -- once split, only the dedicated recv task may
+/// call `recv_envelope`, so the ack has to reach this function via the
+/// channel that task feeds. `session` is behind an async mutex because
+/// the recv task also opens control-lane envelopes (input events)
+/// concurrently with this function installing new rekey-epoch keys.
+async fn perform_rekey_split(
+    send_half: &mut AnySendHalf,
+    session: &AsyncMutex<LaneSession>,
+    rekey_ack_rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>,
+    epoch_state: &mut SessionEpochState,
+    schedule: &xenia_handshake::SessionKeySchedule,
+    context: xenia_handshake::RekeyEpochContextV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let epoch_hash = context.epoch_hash()?;
+    let proposal = RawRekey::Proposal {
+        key_epoch: context.key_epoch,
+        base_transcript_hash: context.base_transcript_hash,
+        previous_epoch_hash: context.previous_epoch_hash,
+        reason: context.reason,
+        epoch_hash,
+    }
+    .into_frame(session.lock().await.next_frame_id(), now_ms())?;
+    let envelope = session.lock().await.seal_control_frame(&proposal)?;
+    send_half.send_envelope(&envelope).await?;
+
+    let frames_before_rekey = epoch_state.frames_in_epoch();
+    let bytes_before_rekey = epoch_state.bytes_in_epoch();
+    let audio_frames_before_rekey = epoch_state.audio_frames_in_epoch();
+    let keys = epoch_state.derive_and_install(schedule, &context)?;
+    session.lock().await.install_rekey_keys(&keys);
+
+    let ack_envelope = rekey_ack_rx
+        .recv()
+        .await
+        .ok_or("rekey ack channel closed before an ack arrived (recv task ended)")?;
+    let ack_frame = session.lock().await.open_frame(&ack_envelope)?;
+    match RawRekey::from_frame(&ack_frame)? {
+        RawRekey::Ack {
+            key_epoch,
+            epoch_hash: ack_epoch_hash,
+        } if key_epoch == epoch_state.current_epoch() && ack_epoch_hash == epoch_hash => {
+            info!(
+                key_epoch,
+                reason = ?context.reason,
+                frames_before_rekey,
+                bytes_before_rekey,
+                audio_frames_before_rekey,
+                epoch_hash = ?epoch_hash,
+                "session rekey acknowledged"
+            );
+            Ok(())
+        }
+        other => Err(format!("unexpected rekey ack: {other:?}").into()),
+    }
+}
+
+/// Construct the input-injection backend selected by `--input-backend`.
+/// Called lazily on the first real inbound `InputEvent` (see the recv
+/// task in `main`), not eagerly at startup, so a view-only session
+/// never triggers `XdgPortalInjector`'s consent dialog.
+fn build_input_injector(
+    choice: InputBackendChoice,
+    screen_width: u32,
+    screen_height: u32,
+) -> Box<dyn InputInjector> {
+    match choice {
+        InputBackendChoice::Noop => Box::new(NoopInjector),
+        InputBackendChoice::Log => Box::new(LoggingInjector::new(screen_width, screen_height)),
+        #[cfg(feature = "xdg-portal")]
+        InputBackendChoice::XdgPortal => {
+            match xenia_inject::XdgPortalInjector::new(
+                screen_width,
+                screen_height,
+                Duration::from_secs(60),
+            ) {
+                Ok(injector) => Box::new(injector),
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        "XdgPortalInjector construction failed; input events will be discarded"
+                    );
+                    Box::new(NoopInjector)
+                }
+            }
+        }
+        #[cfg(feature = "uinput")]
+        InputBackendChoice::Uinput => {
+            match xenia_inject::UinputInjector::new(screen_width, screen_height) {
+                Ok(injector) => Box::new(injector),
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        "UinputInjector construction failed; input events will be discarded"
+                    );
+                    Box::new(NoopInjector)
+                }
+            }
+        }
+    }
+}
+
+/// Read the current host clipboard text, if any.
+///
+/// A fresh `arboard::Clipboard` is opened per call rather than cached across
+/// polls: `Clipboard` is not `Send` on Linux (both the X11 and
+/// wayland-data-control backends hold non-thread-safe connection state), so
+/// it cannot be held across an `.await` point shared between the poll loop
+/// and the recv task. Opening a connection per poll (default every 500ms)
+/// is cheap enough not to matter.
+fn read_host_clipboard_text() -> Option<String> {
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(clipboard) => clipboard,
+        Err(err) => {
+            warn!(error = %err, "failed to open host clipboard for reading");
+            return None;
+        }
+    };
+    match clipboard.get_text() {
+        Ok(text) => Some(text),
+        Err(arboard::Error::ContentNotAvailable) => None,
+        Err(err) => {
+            warn!(error = %err, "failed to read host clipboard text");
+            None
+        }
+    }
+}
+
+/// Apply a viewer-originated clipboard update to the real host clipboard.
+/// Only called in `--clipboard bidirectional` mode, after the M1 consent
+/// gate has already allowed the flow.
+/// Cap on a single viewer-originated clipboard update applied to the host
+/// clipboard. Without a dedicated cap this is bounded only by the 16 MiB
+/// envelope limit, letting a bidirectional viewer stuff megabytes into the
+/// host clipboard on every update. 1 MiB is well above any realistic text
+/// clipboard.
+const MAX_INBOUND_CLIPBOARD_BYTES: usize = 1024 * 1024;
+
+fn apply_clipboard_content(content: &ClipboardContent) {
+    if let ClipboardContent::Text(text) = content
+        && text.len() > MAX_INBOUND_CLIPBOARD_BYTES
+    {
+        warn!(
+            len = text.len(),
+            cap = MAX_INBOUND_CLIPBOARD_BYTES,
+            "viewer clipboard update exceeds cap; ignoring"
+        );
+        return;
+    }
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(clipboard) => clipboard,
+        Err(err) => {
+            warn!(error = %err, "failed to open host clipboard for writing");
+            return;
+        }
+    };
+    // `Cleared` deliberately uses `set_text("")` rather than `clipboard.clear()`.
+    // Verified live on a real KDE-Wayland session: `clear()` only unsets the
+    // calling connection's own (momentary) selection -- it does not preempt
+    // a selection still actively served by an *earlier* `set_text()` call's
+    // background wl-data-control server, so a stale value kept reading back
+    // after `clear()` returned `Ok`. `set_text("")` actively claims
+    // ownership with empty content, which does override it.
+    let result = match content {
+        ClipboardContent::Text(text) => clipboard.set_text(text.clone()),
+        ClipboardContent::Cleared => clipboard.set_text(String::new()),
+    };
+    if let Err(err) = result {
+        warn!(error = %err, "failed to apply viewer clipboard update to host clipboard");
+    } else {
+        info!(
+            ?content,
+            "applied viewer clipboard update to host clipboard"
+        );
+    }
+}
+
 fn telemetry_value_to_wire(value: xenia_capture::TelemetryValue) -> WireTelemetryValue {
     match value {
         xenia_capture::TelemetryValue::I64(value) => WireTelemetryValue::I64(value),
@@ -670,6 +1175,166 @@ fn m1_consent_scope(telemetry_level: TelemetryLevel, audio_mode: AudioMode) -> S
         AudioMode::Capture => "audio: host device capture",
     };
     format!("display: screen stream; {telemetry}; {audio}")
+}
+
+/// Load an Ed25519 signing key from `path`, or generate and persist a fresh
+/// one on first use. The persisted key file is created with owner-only (0600)
+/// permissions, and existing files are re-tightened to 0600 on load, so a
+/// signing secret is never left group/world-readable on disk.
+fn load_or_create_signing_key(
+    path: &std::path::Path,
+) -> Result<SigningKey, Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    fn restrict_permissions(path: &std::path::Path) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(not(unix))]
+    fn restrict_permissions(_path: &std::path::Path) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    if path.exists() {
+        let key_bytes = std::fs::read(path)?;
+        let key = SigningKey::from_bytes(&key_bytes.try_into().map_err(|_| "Invalid key length")?);
+        restrict_permissions(path)?;
+        Ok(key)
+    } else {
+        let key = SigningKey::generate(&mut rand::thread_rng());
+        std::fs::write(path, key.to_bytes())?;
+        restrict_permissions(path)?;
+        Ok(key)
+    }
+}
+
+/// Load the host's persistent signing identity from `path`, or generate and
+/// persist a fresh one (0600) on first use. The file is a 64-byte blob:
+/// 32-byte Ed25519 secret followed by a 32-byte ML-DSA-65 seed. Reconstructed
+/// deterministically so the host's public identity (and fingerprint) is stable
+/// across restarts -- the prerequisite for a viewer pinning it.
+fn load_or_create_host_identity(
+    path: &std::path::Path,
+) -> Result<HandshakeManager, Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    fn restrict_permissions(path: &std::path::Path) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(not(unix))]
+    fn restrict_permissions(_path: &std::path::Path) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    let blob: Vec<u8> = if path.exists() {
+        let bytes = std::fs::read(path)?;
+        restrict_permissions(path)?;
+        if bytes.len() != 64 {
+            return Err("host identity file must be exactly 64 bytes".into());
+        }
+        bytes
+    } else {
+        let mut blob = Vec::with_capacity(64);
+        blob.extend_from_slice(&rand::random::<[u8; 32]>());
+        blob.extend_from_slice(&rand::random::<[u8; 32]>());
+        std::fs::write(path, &blob)?;
+        restrict_permissions(path)?;
+        blob
+    };
+    let mut ed25519_secret = [0u8; 32];
+    let mut ml_dsa_seed = [0u8; 32];
+    ed25519_secret.copy_from_slice(&blob[..32]);
+    ml_dsa_seed.copy_from_slice(&blob[32..64]);
+    Ok(HandshakeManager::from_identity_seeds(
+        ed25519_secret,
+        ml_dsa_seed,
+    ))
+}
+
+/// Derive the consent tiers to grant from the operator's configured flags.
+///
+/// A single Approve should authorize only what the operator actually turned
+/// on: frame streaming is the daemon's core purpose and always granted, but
+/// input injection, clipboard apply, and file transfer are each unlocked only
+/// when their backing flag is enabled. This keeps an approval from silently
+/// authorizing capabilities the daemon isn't even wired to use.
+fn configured_permission_set(args: &Args) -> M1PermissionSet {
+    M1PermissionSet {
+        stream_frame: true,
+        inject_input: args.input_backend != InputBackendChoice::Noop,
+        clipboard_sync: args.clipboard == ClipboardMode::Bidirectional,
+        file_transfer: args.recv_file_dir.is_some() || args.send_file.is_some(),
+    }
+}
+
+/// A decoded consent-socket decision: the action to apply, plus the operator
+/// attribution when it came in authenticated (drives the Phase 4 audit entry).
+struct DecodedConsent {
+    action: crate::operator_auth::ConsentAction,
+    authorized: Option<crate::operator_auth::AuthorizedConsentAction>,
+}
+
+/// Decode a consent-socket message into a decision. With operator auth off,
+/// this is the legacy plain-text `Approve`/`Deny`/`Revoke`. With it on, the
+/// message must be a signed `AuthenticatedConsentAction` from an enrolled
+/// operator whose role permits the action -- anything else is refused (logged
+/// and dropped), so an unauthenticated socket can no longer decide consent.
+fn decode_consent_decision(
+    text: &str,
+    require_operator_auth: bool,
+    auth_state: &crate::operator_http::OperatorAuthState,
+    session_id: &[u8; 16],
+) -> Option<DecodedConsent> {
+    if !require_operator_auth {
+        let action = match text {
+            "Approve" => crate::operator_auth::ConsentAction::Approve,
+            "Deny" => crate::operator_auth::ConsentAction::Deny,
+            "Revoke" => crate::operator_auth::ConsentAction::Revoke,
+            other => {
+                info!(text = other, "ignoring unrecognized consent message");
+                return None;
+            }
+        };
+        return Some(DecodedConsent {
+            action,
+            authorized: None,
+        });
+    }
+
+    let request = match crate::operator_http::parse_authenticated_consent_action(text) {
+        Ok(request) => request,
+        Err(err) => {
+            warn!(error = %err, "malformed authenticated consent action; refused");
+            return None;
+        }
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    match crate::operator_auth::authorize_consent_action(
+        &auth_state.policy,
+        &auth_state.daemon_key.verifying_key(),
+        now,
+        session_id,
+        &request,
+    ) {
+        Ok(authorized) => {
+            info!(
+                operator = %authorized.operator_id,
+                role = ?authorized.role,
+                action = ?authorized.action,
+                "authenticated consent action authorized"
+            );
+            Some(DecodedConsent {
+                action: authorized.action,
+                authorized: Some(authorized),
+            })
+        }
+        Err(err) => {
+            warn!(error = %err, "consent action refused by operator auth");
+            None
+        }
+    }
 }
 
 fn synthetic_audio_kind(mode: AudioMode) -> Option<SyntheticAudioKind> {
@@ -813,6 +1478,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let source_id = parse_source_id(&args.source_id_hex)?;
 
+    // Fail closed before doing any work: never expose the operator surface to
+    // the network without operator auth (Phase 6 — remote operators).
+    crate::operator_exposure::validate_operator_exposure(
+        &args.operator_bind,
+        args.require_operator_auth,
+    )?;
+    if !crate::operator_exposure::is_loopback_bind(&args.operator_bind) {
+        tracing::warn!(
+            bind = %args.operator_bind,
+            "operator surface bound to a NON-loopback address — reachable from the network. \
+             Operator auth is enforced (forgery-safe), but terminate TLS in front for \
+             confidentiality."
+        );
+    }
+
     if args.m1_runtime_smoke {
         run_m1_runtime_smoke(
             source_id,
@@ -846,6 +1526,73 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if let Some(bundle_dir) = args.verify_sealed_evidence_bundle.as_deref() {
+        let trust = resolve_sealed_evidence_trust_anchors(SealedEvidenceTrustInputs {
+            trust_policy_path: args.sealed_evidence_trust_policy.as_deref(),
+            trust_policy_signature_path: args.sealed_evidence_trust_policy_signature.as_deref(),
+            trusted_policy_root_fingerprint_hex: args
+                .trusted_sealed_evidence_policy_root_fingerprint_hex
+                .as_deref(),
+            policy_roots_path: args.sealed_evidence_policy_roots.as_deref(),
+            required_policy_root_id: args.required_sealed_evidence_policy_root_id.as_deref(),
+            trusted_transcript_key_fingerprint_hex: args
+                .trusted_transcript_key_fingerprint_hex
+                .as_deref(),
+            trusted_ledger_key_fingerprint_hex: args.trusted_ledger_key_fingerprint_hex.as_deref(),
+            suite: args.sealed_evidence_signature_suite,
+            minimum_policy_epoch: args.minimum_sealed_evidence_policy_epoch,
+            require_signed_policy: args.require_signed_sealed_evidence_trust_policy,
+        })?;
+
+        let mut report = verify_sealed_evidence_bundle_with_selected_suite(
+            bundle_dir,
+            trust.trusted_transcript_key_fingerprint,
+            trust.trusted_ledger_key_fingerprint,
+            args.sealed_evidence_signature_suite,
+        )?;
+        report.trust_policy = trust.trust_policy;
+        println!("sealed evidence bundle verified");
+        println!("profile: {}", report.profile);
+        println!("transcript signature: {}", report.transcript_signature);
+        println!("ledger signature: {}", report.ledger_signature);
+        println!("entries: {}", report.ledger_entries);
+        println!("session: {}", report.session_id);
+        println!(
+            "transcript key fingerprint: {}",
+            report.transcript_public_key_fingerprint_hex
+        );
+        println!(
+            "ledger key fingerprint: {}",
+            report.ledger_public_key_fingerprint_hex
+        );
+        println!(
+            "sealed artifact set blake3: {}",
+            report.artifacts.artifact_set_blake3
+        );
+        if let Some(trust_policy) = &report.trust_policy {
+            println!("trust policy source: {}", trust_policy.source);
+            if let Some(policy_id) = trust_policy.policy_id.as_deref() {
+                println!("trust policy id: {policy_id}");
+            }
+            if let Some(policy_blake3) = trust_policy.policy_blake3.as_deref() {
+                println!("trust policy blake3: {policy_blake3}");
+            }
+            if let Some(policy_root_id) = trust_policy.policy_root_id.as_deref() {
+                println!("policy root id: {policy_root_id}");
+            }
+            if let Some(policy_roots_blake3) = trust_policy.policy_roots_blake3.as_deref() {
+                println!("policy roots blake3: {policy_roots_blake3}");
+            }
+        }
+        if args.write_sealed_evidence_report {
+            let report_path = crate::m1_runtime::write_sealed_evidence_verification_report_dir(
+                bundle_dir, &report,
+            )?;
+            println!("sealed verification report: {}", report_path.display());
+        }
+        return Ok(());
+    }
+
     if let Some(bundle_dir) = args.audit_evidence_report.as_deref() {
         let report =
             crate::m1_runtime::audit_evidence_verification_report_artifacts_dir(bundle_dir)?;
@@ -861,16 +1608,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if let Some(bundle_dir) = args.audit_sealed_evidence_report.as_deref() {
+        let report =
+            crate::m1_runtime::audit_sealed_evidence_verification_report_artifacts_dir(bundle_dir)?;
+        println!("sealed evidence verification report artifact audit passed");
+        println!("profile: {}", report.profile);
+        println!("transcript signature: {}", report.transcript_signature);
+        println!("ledger signature: {}", report.ledger_signature);
+        println!("entries: {}", report.ledger_entries);
+        println!("session: {}", report.session_id);
+        println!(
+            "sealed artifact set blake3: {}",
+            report.artifacts.artifact_set_blake3
+        );
+        return Ok(());
+    }
+
     info!(addr = %args.listen, "xenia-peer daemon listening");
 
-    let signing_key = if args.operator_key_path.exists() {
-        let key_bytes = std::fs::read(&args.operator_key_path)?;
-        SigningKey::from_bytes(&key_bytes.try_into().map_err(|_| "Invalid key length")?)
-    } else {
-        let key = SigningKey::generate(&mut rand::thread_rng());
-        std::fs::write(&args.operator_key_path, key.to_bytes())?;
-        key
-    };
+    let signing_key = load_or_create_signing_key(&args.operator_key_path)?;
 
     let mut telemetry = SysinfoTelemetryStream::new();
     let mut audio = build_audio_source(args.audio)?;
@@ -908,8 +1664,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         response::IntoResponse,
         routing::get,
     };
-    use futures::StreamExt;
-
     async fn ws_handler(ws: WebSocketUpgrade, bridge: Arc<GovernanceBridge>) -> impl IntoResponse {
         ws.on_upgrade(move |socket| handle_socket(socket, bridge))
     }
@@ -937,15 +1691,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     bridge.start_signal_listener();
     bridge.broadcast("daemon ready");
 
-    let app = Router::new().route(
-        "/ws",
-        get({
-            let bridge = bridge.clone();
-            move |ws| ws_handler(ws, bridge.clone())
-        }),
-    );
+    // Operator-auth state: the enrolled-operator policy (empty = deny all if
+    // no --operators-file), a challenge store, and the daemon's key for
+    // signing issued tokens.
+    let operator_policy = match &args.operators_file {
+        Some(path) => match crate::operator::OperatorPolicy::load(path) {
+            Ok(policy) => {
+                info!(operators = policy.len(), path = %path.display(), "operator policy loaded");
+                policy
+            }
+            Err(err) => {
+                return Err(
+                    format!("failed to load --operators-file {}: {err}", path.display()).into(),
+                );
+            }
+        },
+        None => crate::operator::OperatorPolicy::default(),
+    };
+    let operator_auth_state = Arc::new(crate::operator_http::OperatorAuthState {
+        policy: operator_policy,
+        challenges: AsyncMutex::new(crate::operator_auth::ChallengeStore::new()),
+        daemon_key: signing_key.clone(),
+        rate_limiter: AsyncMutex::new(crate::operator_auth::RateLimiter::new(
+            crate::operator_auth::AUTH_RATE_MAX,
+            crate::operator_auth::AUTH_RATE_WINDOW_SECS,
+        )),
+    });
 
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", args.admin_port)).await?;
+    let app = crate::admin_ui::mount(Router::new())
+        .route(
+            "/ws",
+            get({
+                let bridge = bridge.clone();
+                move |ws| ws_handler(ws, bridge.clone())
+            }),
+        )
+        .merge(crate::operator_http::router(operator_auth_state.clone()));
+
+    let listener = TcpListener::bind(format!("{}:{}", args.operator_bind, args.admin_port)).await?;
     tokio::spawn(async move {
         if let Err(err) = axum::serve(listener, app).await {
             tracing::error!(error = %err, "admin websocket server exited");
@@ -953,7 +1736,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Initialize Capture Backend
-    let mut capture: Box<dyn ScreenCapture> = {
+    // The `'backend` label is only broken to from the `scrcpy`-gated arm
+    // below, so it reads as unused in a default (non-scrcpy) build.
+    #[cfg_attr(not(feature = "scrcpy"), allow(unused_labels))]
+    let mut capture: Box<dyn ScreenCapture> = 'backend: {
+        if let Some(serial) = &args.phone_serial {
+            #[cfg(feature = "scrcpy")]
+            {
+                info!(
+                    serial,
+                    tcp_port = args.phone_tcp_port,
+                    "Initializing ScrcpyScreenCapture backend (phone-as-source)"
+                );
+                break 'backend Box::new(xenia_capture_scrcpy::ScrcpyScreenCapture::launch(
+                    serial,
+                    args.phone_tcp_port,
+                )?);
+            }
+            #[cfg(not(feature = "scrcpy"))]
+            {
+                let _ = serial;
+                return Err(
+                    "--phone-serial requires building with feature `xenia-peer/scrcpy`".into(),
+                );
+            }
+        }
         #[cfg(feature = "scap")]
         if ScapCapture::is_available() {
             info!("Initializing ScapCapture backend");
@@ -998,13 +1805,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         audio_advertisement.clone(),
         frame_format,
         args.telemetry_level,
+        args.input_backend,
+        args.clipboard,
     )?;
     let negotiated_context_hash = negotiated_session_context_hash(
         negotiated_transport,
         xenia_peer_core::RawCapabilities::from_frame(&capabilities)?,
     )?;
 
-    let mut mgr = HandshakeManager::new();
+    let mut mgr = load_or_create_host_identity(&args.host_identity_key_path)?;
+    info!(
+        fingerprint = %hex::encode(mgr.identity_fingerprint()),
+        path = %args.host_identity_key_path.display(),
+        "host signing identity loaded; share this fingerprint out-of-band for viewer pinning"
+    );
     let handshake = perform_host_handshake_with_transcript_and_context(
         &mut transport,
         &mut mgr,
@@ -1014,45 +1828,91 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     info!("Handshake successful, session key established and transcript hash computed");
 
-    // Consent Ceremony: Simple CLI prompt
-    // In a real implementation, this would be a GUI-based consent flow
-    // integrated with a desktop portal or the admin crate.
+    // Consent Ceremony: the real decision arrives over --consent-port as a
+    // plain "Approve" / "Deny" text message — the same convention already
+    // spoken by apps/sovereign-admin's ConsentModal (a browser-based
+    // operator console). The request itself is broadcast on --admin-port
+    // (below, once m1_runtime.offer() succeeds) so a connected ConsentModal
+    // has something real to show instead of an empty prompt.
     info!("Waiting for consent request...");
 
-    // Server task for processing consent responses.
-    let consent_addr = format!("127.0.0.1:{}", args.consent_port);
-    tokio::spawn(async move {
-        let listener = match TcpListener::bind(&consent_addr).await {
-            Ok(listener) => listener,
+    let (consent_decision_tx, consent_decision_rx) = tokio::sync::oneshot::channel::<bool>();
+
+    // Set by the consent socket when the operator sends a later "Revoke" on
+    // the still-open connection (after an initial "Approve"). The main send
+    // loop polls this each tick, calls `M1RuntimeSession::revoke()` to record
+    // the boundary in the consent ledger and flip every gate fail-closed,
+    // then stops streaming -- so an operator can end a live session without
+    // killing the process. See the send loop's revocation check below.
+    let revoked = Arc::new(AtomicBool::new(false));
+    let revoked_for_consent = Arc::clone(&revoked);
+
+    // When --require-operator-auth is set, consent decisions must be signed,
+    // role-authorized operator actions (see decode_consent_decision). The
+    // per-action signature binds to this session id, and each authenticated
+    // decision is attributed in the ledger (Phase 4).
+    let require_operator_auth = args.require_operator_auth;
+    let consent_auth_state = operator_auth_state.clone();
+    let consent_session_id = *session_id.as_bytes();
+    let consent_session_uuid = session_id;
+    let consent_ledger = shared_ledger.clone();
+
+    // Consent server. With --operator-sealed the console talks over a
+    // xenia-wire-sealed operator channel (PQC confidentiality + handshake
+    // channel-auth); otherwise the plaintext consent port. Both own the single
+    // per-session grant oneshot, so it's one or the other. Bind here so a bind
+    // failure just skips the server rather than dying silently inside the task.
+    if args.operator_sealed {
+        let sealed_addr = format!("{}:{}", args.operator_bind, args.operator_sealed_port);
+        match TcpListener::bind(&sealed_addr).await {
+            Ok(listener) => {
+                // A second host HandshakeManager with the *same* persisted
+                // identity, so the console pins one daemon fingerprint.
+                let host_mgr = load_or_create_host_identity(&args.host_identity_key_path)?;
+                let deps = crate::operator_sealed_channel::SealedConsentDeps {
+                    require_operator_auth,
+                    auth_state: consent_auth_state,
+                    session_id: consent_session_id,
+                    session_uuid: consent_session_uuid,
+                    ledger: consent_ledger,
+                    revoked: revoked_for_consent,
+                };
+                let policy = operator_auth_state.policy.clone();
+                info!(addr = %sealed_addr, "sealed operator endpoint listening");
+                tokio::spawn(
+                    crate::operator_sealed_channel::run_sealed_operator_endpoint(
+                        listener,
+                        host_mgr,
+                        policy,
+                        deps,
+                        consent_decision_tx,
+                    ),
+                );
+            }
+            Err(err) => {
+                tracing::error!(addr = %sealed_addr, error = %err, "sealed operator endpoint bind failed");
+            }
+        }
+    } else {
+        let consent_addr = format!("{}:{}", args.operator_bind, args.consent_port);
+        match TcpListener::bind(&consent_addr).await {
+            Ok(listener) => {
+                let server = crate::consent_server::ConsentServer {
+                    require_operator_auth,
+                    auth_state: consent_auth_state,
+                    session_id: consent_session_id,
+                    session_uuid: consent_session_uuid,
+                    ledger: consent_ledger,
+                    grant_tx: consent_decision_tx,
+                    revoked: revoked_for_consent,
+                };
+                tokio::spawn(server.run(listener));
+            }
             Err(err) => {
                 tracing::error!(addr = %consent_addr, error = %err, "consent websocket bind failed");
-                return;
             }
-        };
-
-        match listener.accept().await {
-            Ok((stream, _)) => match tokio_tungstenite::accept_async(stream).await {
-                Ok(mut ws_stream) => {
-                    while let Some(result) = ws_stream.next().await {
-                        match result {
-                            Ok(msg) => {
-                                if let Ok(text) = msg.to_text() {
-                                    info!("Received consent response: {}", text);
-                                    // Process Approve/Deny...
-                                }
-                            }
-                            Err(err) => {
-                                tracing::warn!(error = %err, "consent websocket receive failed");
-                                break;
-                            }
-                        }
-                    }
-                }
-                Err(err) => tracing::warn!(error = %err, "consent websocket handshake failed"),
-            },
-            Err(err) => tracing::warn!(error = %err, "consent websocket accept failed"),
         }
-    });
+    }
 
     session.install_schedule(&handshake.key_schedule);
     let _negotiated_context_key =
@@ -1082,7 +1942,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    let m1_signing_key = SigningKey::from_bytes(&[0x41u8; 32]);
+    let m1_signing_key = load_or_create_signing_key(&args.m1_consent_key_path)?;
     let m1_scope = m1_consent_scope(args.telemetry_level, args.audio);
     let m1_scope_for_log = m1_scope.clone();
     let mut m1_runtime = crate::m1_runtime::M1RuntimeSession::new(
@@ -1099,26 +1959,272 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.m1_preprod_auto_consent {
         grant_preprod_auto_consent(&mut m1_runtime)?;
     } else {
-        warn!("M1 runtime gate offered but not approved; live frame flow will fail closed");
+        // Broadcast the consent request as JSON carrying the session_id, so an
+        // authenticated operator console can bind its per-action signature to
+        // this exact session (see the console's
+        // operator_session::build_consent_request + consent_action_transcript).
+        // `scope` is the human-readable description for display. A legacy
+        // plaintext console just shows the text and still sends
+        // "Approve"/"Deny", which a daemon without --require-operator-auth
+        // accepts -- so this shape change is backward compatible.
+        let consent_prompt = serde_json::json!({
+            "session_id": hex::encode(session_id.as_bytes()),
+            "scope": m1_scope_for_log,
+        })
+        .to_string();
+        bridge.broadcast(&consent_prompt);
+        info!(
+            consent_port = args.consent_port,
+            timeout_secs = args.consent_timeout_secs,
+            "consent request broadcast; waiting for Approve/Deny on --consent-port"
+        );
+        let timeout = Duration::from_secs(args.consent_timeout_secs.max(1));
+        match tokio::time::timeout(timeout, consent_decision_rx).await {
+            Ok(Ok(true)) => {
+                let granted = configured_permission_set(&args);
+                m1_runtime.grant_consent_scoped(granted)?;
+                info!(
+                    inject_input = granted.inject_input,
+                    clipboard_sync = granted.clipboard_sync,
+                    file_transfer = granted.file_transfer,
+                    "M1 consent granted; only the operator-enabled tiers unlocked"
+                );
+            }
+            Ok(Ok(false)) => {
+                m1_runtime.deny_consent()?;
+                warn!("M1 consent denied; exiting");
+                return Ok(());
+            }
+            Ok(Err(_)) => {
+                warn!("consent channel closed before a decision arrived; exiting");
+                return Ok(());
+            }
+            Err(_) => {
+                warn!(
+                    timeout_secs = args.consent_timeout_secs,
+                    "M1 consent timed out waiting for a decision; exiting"
+                );
+                return Ok(());
+            }
+        }
     }
 
-    let params = EncodeParams {
-        width: args.width,
-        height: args.height,
-        pixel_format: VideoPixelFormat::Rgba,
-        target_fps: args.fps.max(1),
-        bitrate_kbps: 2_000,
-    };
-    let mut encoder = make_encoder(args.codec, params)?;
+    // Split the transport so a dedicated task can drain inbound
+    // envelopes (viewer input events + rekey acks) concurrently with
+    // the outbound video/audio/telemetry send loop below. `session`
+    // and `m1_runtime` move behind async mutexes because both this
+    // loop and the recv task need to seal/open lane traffic and gate
+    // input through the M1 consent state.
+    let (mut send_half, recv_half) = transport.split();
+    let session = Arc::new(AsyncMutex::new(session));
+    let m1_runtime = Arc::new(AsyncMutex::new(m1_runtime));
+    let (rekey_ack_tx, mut rekey_ack_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+    // File-transfer envelopes are forwarded here rather than opened in the
+    // recv task, because replying (Accept/Reject/Chunk/Verified) needs
+    // `send_half`, which the main send loop below owns exclusively (unlike
+    // xenia-viewer, which already wraps its send half in an Arc<Mutex>).
+    let (ft_tx, mut ft_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+
+    let mut ft_state = file_transfer::FileTransferState::new();
+    if let Some(path) = &args.send_file {
+        let data = std::fs::read(path)?;
+        if data.len() as u64 > args.file_transfer_max_bytes {
+            return Err(format!(
+                "--send-file {} is {} bytes, exceeds --file-transfer-max-bytes {}",
+                path.display(),
+                data.len(),
+                args.file_transfer_max_bytes
+            )
+            .into());
+        }
+        let blake3_hash = *blake3::hash(&data).as_bytes();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("transfer")
+            .to_string();
+        let transfer_id = 1;
+        m1_runtime.lock().await.allow_file_transfer_flow()?;
+        let offer = xenia_peer_core::FileTransferMessage::Offer {
+            transfer_id,
+            name: name.clone(),
+            size: data.len() as u64,
+            blake3_hash,
+        };
+        let envelope = session
+            .lock()
+            .await
+            .seal_file_transfer_message(offer, true)?;
+        send_half.send_envelope(&envelope).await?;
+        info!(
+            transfer_id,
+            name,
+            size = data.len(),
+            "file transfer offered"
+        );
+        ft_state.outgoing = Some(file_transfer::OutgoingTransfer {
+            transfer_id,
+            data,
+            started: false,
+        });
+    }
+
+    // Updated by the send loop below whenever the encoder is (re)built
+    // from a real captured frame, so a lazily-constructed input
+    // injector denormalizes coordinates against the actual screen
+    // size rather than the --width/--height CLI defaults.
+    let screen_dims = Arc::new((AtomicU32::new(args.width), AtomicU32::new(args.height)));
+
+    {
+        let session = Arc::clone(&session);
+        let m1_runtime = Arc::clone(&m1_runtime);
+        let screen_dims = Arc::clone(&screen_dims);
+        let input_backend = args.input_backend;
+        let clipboard_mode = args.clipboard;
+        let ft_tx = ft_tx.clone();
+        tokio::spawn(async move {
+            let mut recv_half = recv_half;
+            // Constructed lazily on the first real InputEvent, not at
+            // task start -- a view-only session (`--input-backend
+            // noop`, the default) never triggers `XdgPortalInjector`'s
+            // consent dialog because it's simply never built.
+            let mut injector: Option<Box<dyn InputInjector>> = None;
+            loop {
+                let envelope = match recv_half.recv_envelope().await {
+                    Ok(envelope) => envelope,
+                    Err(err) => {
+                        info!(error = %err, "input/rekey-ack receive loop ending");
+                        break;
+                    }
+                };
+
+                if envelope.len() >= LANE_ENVELOPE_MAGIC.len()
+                    && envelope[..LANE_ENVELOPE_MAGIC.len()] == LANE_ENVELOPE_MAGIC
+                {
+                    // Lane-enveloped control frame. The only thing a
+                    // viewer sends this direction on the control lane
+                    // today is a RawRekey::Ack -- forward the raw
+                    // envelope to perform_rekey_split, which owns
+                    // opening + validating it. Drop silently if nobody
+                    // is currently waiting on one.
+                    let _ = rekey_ack_tx.send(envelope).await;
+                    continue;
+                }
+
+                // Bare (non-lane-wrapped) envelope: either a viewer-captured
+                // input event or a viewer-originated clipboard update, both
+                // sealed directly under the control lane's key. The payload
+                // type byte is cleartext (nonce byte 6) so this is checked
+                // without attempting -- and potentially misfiring -- a
+                // decrypt against the wrong opener.
+                if matches!(
+                    xenia_wire::envelope_payload_type(&envelope),
+                    Some(xenia_peer_core::PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST)
+                        | Some(xenia_peer_core::PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER)
+                ) {
+                    let _ = ft_tx.send(envelope).await;
+                    continue;
+                }
+
+                if xenia_wire::envelope_payload_type(&envelope) == Some(PAYLOAD_TYPE_CLIPBOARD) {
+                    let clipboard = {
+                        let mut session = session.lock().await;
+                        match session.open_clipboard(&envelope) {
+                            Ok(clipboard) => clipboard,
+                            Err(err) => {
+                                warn!(error = %err, "failed to open inbound clipboard envelope");
+                                continue;
+                            }
+                        }
+                    };
+                    if clipboard_mode != ClipboardMode::Bidirectional {
+                        warn!("ignoring viewer clipboard update: --clipboard is not bidirectional");
+                        continue;
+                    }
+                    {
+                        let mut m1_runtime = m1_runtime.lock().await;
+                        if let Err(err) = m1_runtime.allow_clipboard_flow() {
+                            warn!(error = %err, "clipboard update rejected by M1 consent gate");
+                            continue;
+                        }
+                    }
+                    apply_clipboard_content(&clipboard.content);
+                    continue;
+                }
+
+                let input = {
+                    let mut session = session.lock().await;
+                    match session.open_input(&envelope) {
+                        Ok(input) => input,
+                        Err(err) => {
+                            warn!(error = %err, "failed to open inbound input envelope");
+                            continue;
+                        }
+                    }
+                };
+                let event: xenia_inject::InputEvent = match bincode::deserialize(&input.payload) {
+                    Ok(event) => event,
+                    Err(err) => {
+                        warn!(error = %err, "failed to decode InputEvent payload");
+                        continue;
+                    }
+                };
+                {
+                    let mut m1_runtime = m1_runtime.lock().await;
+                    if let Err(err) = m1_runtime.allow_input_flow() {
+                        warn!(error = %err, "input event rejected by M1 consent gate");
+                        continue;
+                    }
+                }
+
+                let width = screen_dims.0.load(Ordering::Relaxed);
+                let height = screen_dims.1.load(Ordering::Relaxed);
+                let injector = injector
+                    .get_or_insert_with(|| build_input_injector(input_backend, width, height));
+                match injector.process_events(std::slice::from_ref(&event)) {
+                    Ok(()) => {
+                        info!(
+                            ?event,
+                            backend = injector.backend_name(),
+                            "input event injected"
+                        );
+                    }
+                    Err(err) => {
+                        warn!(
+                            error = %err,
+                            backend = injector.backend_name(),
+                            "input injection failed"
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    // The encoder is built lazily from the first captured frame's real
+    // dimensions rather than --width/--height. TestCapture/BlankCapture
+    // frames already match those CLI defaults, so this is a no-op for the
+    // synthetic path; a real backend like ScapCapture doesn't know its
+    // output size until the first frame arrives (see
+    // xenia-capture::ScapCapture's width()/height() doc comments), and its
+    // native resolution essentially never matches the 320x200 CLI default.
+    let mut effective_width = args.width;
+    let mut effective_height = args.height;
+    let mut encoder: Option<Box<dyn Encoder>> = None;
     let frame_interval = Duration::from_millis(1_000 / u64::from(args.fps.max(1)));
     let mut ticker = tokio::time::interval(frame_interval);
     let telemetry_interval = Duration::from_millis(args.telemetry_interval_ms.max(1));
     let mut last_telemetry_sent = std::time::Instant::now() - telemetry_interval;
     let audio_interval = Duration::from_millis(args.audio_interval_ms.max(1));
     let mut last_audio_sent = std::time::Instant::now() - audio_interval;
+    let clipboard_interval = Duration::from_millis(args.clipboard_interval_ms.max(1));
+    let mut last_clipboard_check = std::time::Instant::now() - clipboard_interval;
+    let mut last_sent_clipboard_text: Option<String> = None;
+    let mut clipboard_seq = 0u64;
     let mut sent_frames = 0u64;
     let mut sent_telemetry = 0u64;
     let mut sent_audio = 0u64;
+    let mut sent_clipboard = 0u64;
 
     loop {
         if args.frames != 0 && sent_frames >= args.frames {
@@ -1127,10 +2233,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         ticker.tick().await;
+
+        // Mid-session revocation: if the operator sent "Revoke" on the
+        // consent socket, record it in the consent ledger (which flips the
+        // M1 state to Revoked so every frame/input/clipboard/file gate now
+        // fails closed) and stop streaming with a graceful close.
+        if revoked.load(Ordering::SeqCst) {
+            if let Err(err) = m1_runtime.lock().await.revoke() {
+                warn!(error = %err, "failed to record consent revocation");
+            }
+            info!("session revoked by operator; stopping frame flow");
+            break;
+        }
+
+        while let Ok(envelope) = ft_rx.try_recv() {
+            let ft_config = file_transfer::FileTransferConfig {
+                recv_file_dir: args.recv_file_dir.as_deref(),
+                max_bytes: args.file_transfer_max_bytes,
+            };
+            file_transfer::handle_envelope(
+                &envelope,
+                &mut send_half,
+                &session,
+                &m1_runtime,
+                &mut ft_state,
+                &ft_config,
+            )
+            .await?;
+        }
+
         if args.telemetry_level != TelemetryLevel::Off
             && last_telemetry_sent.elapsed() >= telemetry_interval
         {
-            m1_runtime.preflight_frame_flow()?;
+            m1_runtime.lock().await.preflight_frame_flow()?;
             match telemetry.poll_samples() {
                 Ok(samples) if !samples.is_empty() => {
                     let samples: Vec<_> = samples
@@ -1141,7 +2276,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         last_telemetry_sent = std::time::Instant::now();
                         continue;
                     }
-                    let frame_id = session.next_frame_id();
+                    let frame_id = session.lock().await.next_frame_id();
                     let telemetry_frame = RawTelemetry {
                         frame_id,
                         timestamp_ms: now_ms(),
@@ -1149,9 +2284,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         samples: samples.into_iter().map(telemetry_sample_to_wire).collect(),
                     }
                     .into_frame()?;
-                    let envelope = session.seal_frame(&telemetry_frame)?;
-                    m1_runtime.allow_frame_flow()?;
-                    transport.send_envelope(&envelope).await?;
+                    let envelope = session.lock().await.seal_frame(&telemetry_frame)?;
+                    m1_runtime.lock().await.allow_frame_flow()?;
+                    send_half.send_envelope(&envelope).await?;
                     sent_telemetry += 1;
                     last_telemetry_sent = std::time::Instant::now();
                     if sent_telemetry <= 3 || sent_telemetry.is_multiple_of(10) {
@@ -1169,14 +2304,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(audio) = &mut audio
             && last_audio_sent.elapsed() >= audio_interval
         {
-            m1_runtime.preflight_frame_flow()?;
+            m1_runtime.lock().await.preflight_frame_flow()?;
             if let Some(raw_audio) = audio.next_raw_audio(now_ms())? {
                 let raw_audio = audio_codec.encode(raw_audio)?;
-                let frame_id = session.next_frame_id();
+                let frame_id = session.lock().await.next_frame_id();
                 let audio_frame = raw_audio.into_frame(frame_id)?;
-                let envelope = session.seal_frame(&audio_frame)?;
-                m1_runtime.allow_frame_flow()?;
-                transport.send_envelope(&envelope).await?;
+                let envelope = session.lock().await.seal_frame(&audio_frame)?;
+                m1_runtime.lock().await.allow_frame_flow()?;
+                send_half.send_envelope(&envelope).await?;
                 epoch_state.record_audio_frame(envelope.len());
                 sent_audio += 1;
                 last_audio_sent = std::time::Instant::now();
@@ -1186,7 +2321,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        m1_runtime.preflight_frame_flow()?;
+        if args.clipboard != ClipboardMode::Off
+            && last_clipboard_check.elapsed() >= clipboard_interval
+        {
+            last_clipboard_check = std::time::Instant::now();
+            if let Some(text) = read_host_clipboard_text()
+                && Some(&text) != last_sent_clipboard_text.as_ref()
+            {
+                m1_runtime.lock().await.preflight_frame_flow()?;
+                let frame_id = session.lock().await.next_frame_id();
+                let seq = clipboard_seq;
+                clipboard_seq += 1;
+                let clipboard_frame = RawClipboard {
+                    sequence: seq,
+                    timestamp_ms: now_ms(),
+                    content: ClipboardContent::Text(text.clone()),
+                }
+                .into_frame(frame_id)?;
+                let envelope = session.lock().await.seal_frame(&clipboard_frame)?;
+                m1_runtime.lock().await.allow_frame_flow()?;
+                send_half.send_envelope(&envelope).await?;
+                last_sent_clipboard_text = Some(text);
+                sent_clipboard += 1;
+                if sent_clipboard <= 3 || sent_clipboard.is_multiple_of(10) {
+                    info!(
+                        sent = sent_clipboard,
+                        frame_id, "clipboard update sealed and sent"
+                    );
+                }
+            }
+        }
+
+        m1_runtime.lock().await.preflight_frame_flow()?;
         let Some(frame) = capture.capture()? else {
             continue;
         };
@@ -1197,32 +2363,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
         };
-        if frame.width != args.width || frame.height != args.height {
-            warn!(
-                width = frame.width,
-                height = frame.height,
-                expected_width = args.width,
-                expected_height = args.height,
-                "capture dimensions changed; dropping frame"
-            );
-            continue;
+        if encoder.is_none() || frame.width != effective_width || frame.height != effective_height {
+            if encoder.is_some() {
+                info!(
+                    old_width = effective_width,
+                    old_height = effective_height,
+                    new_width = frame.width,
+                    new_height = frame.height,
+                    "capture dimensions changed; rebuilding encoder"
+                );
+            }
+            effective_width = frame.width;
+            effective_height = frame.height;
+            screen_dims.0.store(effective_width, Ordering::Relaxed);
+            screen_dims.1.store(effective_height, Ordering::Relaxed);
+            let params = EncodeParams {
+                width: effective_width,
+                height: effective_height,
+                pixel_format: VideoPixelFormat::Rgba,
+                target_fps: args.fps.max(1),
+                bitrate_kbps: 2_000,
+            };
+            encoder = Some(make_encoder(args.codec, params)?);
         }
+        let encoder = encoder.as_mut().expect("encoder built above");
 
         let captured_at = now_ms();
         let packets = encoder.encode(&pixels, captured_at)?;
         for packet in packets {
-            let frame_id = session.next_frame_id();
+            let frame_id = session.lock().await.next_frame_id();
             let raw = RawFrame::encoded(
                 frame_id,
                 packet.pts_ms,
-                args.width,
-                args.height,
+                effective_width,
+                effective_height,
                 frame_format,
                 packet.bytes,
             );
-            let envelope = session.seal_frame(&raw)?;
-            m1_runtime.allow_frame_flow()?;
-            transport.send_envelope(&envelope).await?;
+            let envelope = session.lock().await.seal_frame(&raw)?;
+            m1_runtime.lock().await.allow_frame_flow()?;
+            send_half.send_envelope(&envelope).await?;
             epoch_state.record_video_frame(envelope.len());
             sent_frames += 1;
             if sent_frames <= 3 || sent_frames.is_multiple_of(10) {
@@ -1232,9 +2412,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
             if let Some(rekey_context) = epoch_state.next_rekey_due() {
-                perform_rekey(
-                    &mut transport,
-                    &mut session,
+                perform_rekey_split(
+                    &mut send_half,
+                    &session,
+                    &mut rekey_ack_rx,
                     &mut epoch_state,
                     &handshake.key_schedule,
                     rekey_context,
@@ -1247,7 +2428,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    transport.close().await?;
+    send_half.close().await?;
     Ok(())
 }
 
@@ -1274,6 +2455,166 @@ fn parse_evidence_public_key_hex(hex_text: &str) -> Result<Vec<u8>, Box<dyn std:
         return Err("evidence public key must not be empty".into());
     }
     Ok(bytes)
+}
+
+fn parse_evidence_key_fingerprint_hex(
+    hex_text: &str,
+) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    let bytes = hex::decode(hex_text)?;
+    let found = bytes.len();
+    let fingerprint: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| format!("evidence key fingerprint must be exactly 32 bytes, found {found}"))?;
+    Ok(fingerprint)
+}
+
+struct ResolvedSealedEvidenceTrust {
+    trusted_transcript_key_fingerprint: [u8; 32],
+    trusted_ledger_key_fingerprint: [u8; 32],
+    trust_policy: Option<crate::m1_runtime::SealedEvidenceTrustPolicyReceipt>,
+}
+
+/// The sealed-evidence trust-anchor inputs, all derived from CLI flags.
+/// Bundled into one struct so [`resolve_sealed_evidence_trust_anchors`] takes
+/// a single argument rather than ten positional ones.
+#[derive(Clone, Copy)]
+struct SealedEvidenceTrustInputs<'a> {
+    trust_policy_path: Option<&'a std::path::Path>,
+    trust_policy_signature_path: Option<&'a std::path::Path>,
+    trusted_policy_root_fingerprint_hex: Option<&'a str>,
+    policy_roots_path: Option<&'a std::path::Path>,
+    required_policy_root_id: Option<&'a str>,
+    trusted_transcript_key_fingerprint_hex: Option<&'a str>,
+    trusted_ledger_key_fingerprint_hex: Option<&'a str>,
+    suite: EvidenceVerifierSuite,
+    minimum_policy_epoch: Option<u64>,
+    require_signed_policy: bool,
+}
+
+fn resolve_sealed_evidence_trust_anchors(
+    inputs: SealedEvidenceTrustInputs,
+) -> Result<ResolvedSealedEvidenceTrust, Box<dyn std::error::Error>> {
+    let SealedEvidenceTrustInputs {
+        trust_policy_path,
+        trust_policy_signature_path,
+        trusted_policy_root_fingerprint_hex,
+        policy_roots_path,
+        required_policy_root_id,
+        trusted_transcript_key_fingerprint_hex,
+        trusted_ledger_key_fingerprint_hex,
+        suite,
+        minimum_policy_epoch,
+        require_signed_policy,
+    } = inputs;
+    if let Some(path) = trust_policy_path {
+        let policy = crate::m1_runtime::read_sealed_evidence_trust_policy_file(path)?;
+        if let Some(minimum_policy_epoch) = minimum_policy_epoch {
+            crate::m1_runtime::require_sealed_evidence_trust_policy_minimum_epoch(
+                &policy,
+                minimum_policy_epoch,
+            )?;
+        }
+        let trust_anchors =
+            crate::m1_runtime::sealed_evidence_trust_policy_anchors(&policy, suite.stable_label())?;
+        let mut trust_policy = crate::m1_runtime::sealed_evidence_trust_policy_receipt_file(
+            path,
+            &policy,
+            suite.stable_label(),
+        )?;
+        if let Some(signature_path) = trust_policy_signature_path {
+            let (trusted_policy_root_fingerprint, root_receipt) = if let Some(roots_path) =
+                policy_roots_path
+            {
+                if trusted_policy_root_fingerprint_hex.is_some() {
+                    return Err("use either --sealed-evidence-policy-roots or --trusted-sealed-evidence-policy-root-fingerprint-hex, not both".into());
+                }
+                let root_receipt =
+                    crate::m1_runtime::sealed_evidence_policy_root_receipt_file_for_signature(
+                        roots_path,
+                        signature_path,
+                        suite.stable_label(),
+                        required_policy_root_id,
+                    )?;
+                let trusted_policy_root_fingerprint = parse_evidence_key_fingerprint_hex(
+                    &root_receipt.policy_root_key_fingerprint_hex,
+                )?;
+                (trusted_policy_root_fingerprint, Some(root_receipt))
+            } else {
+                if required_policy_root_id.is_some() {
+                    return Err("--required-sealed-evidence-policy-root-id requires --sealed-evidence-policy-roots".into());
+                }
+                let root_fingerprint_hex = trusted_policy_root_fingerprint_hex.ok_or(
+                        "--sealed-evidence-trust-policy-signature requires either --sealed-evidence-policy-roots or --trusted-sealed-evidence-policy-root-fingerprint-hex",
+                    )?;
+                (
+                    parse_evidence_key_fingerprint_hex(root_fingerprint_hex)?,
+                    None,
+                )
+            };
+
+            let signature_receipt =
+                verify_sealed_evidence_trust_policy_signature_with_selected_suite(
+                    path,
+                    signature_path,
+                    suite,
+                    trusted_policy_root_fingerprint,
+                )?;
+            crate::m1_runtime::attach_sealed_evidence_trust_policy_signature_receipt(
+                &mut trust_policy,
+                signature_receipt,
+            );
+            if let Some(root_receipt) = root_receipt {
+                crate::m1_runtime::attach_sealed_evidence_policy_root_receipt(
+                    &mut trust_policy,
+                    root_receipt,
+                );
+            }
+        } else if require_signed_policy {
+            return Err("--require-signed-sealed-evidence-trust-policy requires --sealed-evidence-trust-policy-signature".into());
+        } else if trusted_policy_root_fingerprint_hex.is_some() {
+            return Err("--trusted-sealed-evidence-policy-root-fingerprint-hex requires --sealed-evidence-trust-policy-signature".into());
+        } else if policy_roots_path.is_some() {
+            return Err(
+                "--sealed-evidence-policy-roots requires --sealed-evidence-trust-policy-signature"
+                    .into(),
+            );
+        } else if required_policy_root_id.is_some() {
+            return Err(
+                "--required-sealed-evidence-policy-root-id requires --sealed-evidence-policy-roots"
+                    .into(),
+            );
+        }
+        return Ok(ResolvedSealedEvidenceTrust {
+            trusted_transcript_key_fingerprint: trust_anchors.trusted_transcript_key_fingerprint,
+            trusted_ledger_key_fingerprint: trust_anchors.trusted_ledger_key_fingerprint,
+            trust_policy: Some(trust_policy),
+        });
+    }
+
+    if trust_policy_signature_path.is_some()
+        || trusted_policy_root_fingerprint_hex.is_some()
+        || policy_roots_path.is_some()
+        || required_policy_root_id.is_some()
+        || require_signed_policy
+    {
+        return Err(
+            "signed sealed evidence trust policy flags require --sealed-evidence-trust-policy"
+                .into(),
+        );
+    }
+
+    let transcript_fingerprint_hex = trusted_transcript_key_fingerprint_hex
+        .ok_or("--verify-sealed-evidence-bundle requires either --sealed-evidence-trust-policy or --trusted-transcript-key-fingerprint-hex")?;
+    let ledger_fingerprint_hex = trusted_ledger_key_fingerprint_hex
+        .ok_or("--verify-sealed-evidence-bundle requires either --sealed-evidence-trust-policy or --trusted-ledger-key-fingerprint-hex")?;
+
+    Ok(ResolvedSealedEvidenceTrust {
+        trusted_transcript_key_fingerprint: parse_evidence_key_fingerprint_hex(
+            transcript_fingerprint_hex,
+        )?,
+        trusted_ledger_key_fingerprint: parse_evidence_key_fingerprint_hex(ledger_fingerprint_hex)?,
+        trust_policy: None,
+    })
 }
 
 fn parse_ed25519_public_key_bytes(
@@ -1311,6 +2652,71 @@ fn verify_evidence_bundle_with_selected_suite(
         EvidenceVerifierSuite::MlDsa87Fips204 => {
             verify_ml_dsa_87_evidence_bundle(bundle_dir, public_key)
         }
+    }
+}
+
+fn verify_sealed_evidence_bundle_with_selected_suite(
+    bundle_dir: &std::path::Path,
+    trusted_transcript_key_fingerprint: [u8; 32],
+    trusted_ledger_key_fingerprint: [u8; 32],
+    suite: EvidenceVerifierSuite,
+) -> Result<crate::m1_runtime::SealedEvidenceVerificationReport, Box<dyn std::error::Error>> {
+    validate_sealed_evidence_verifier_suite(suite)?;
+
+    match suite {
+        EvidenceVerifierSuite::Ed25519Rfc8032 => unreachable!(
+            "validate_sealed_evidence_verifier_suite rejects classical sealed full-PQC verification"
+        ),
+        EvidenceVerifierSuite::MlDsa65Fips204 => verify_sealed_ml_dsa_65_evidence_bundle(
+            bundle_dir,
+            trusted_transcript_key_fingerprint,
+            trusted_ledger_key_fingerprint,
+        ),
+        EvidenceVerifierSuite::MlDsa87Fips204 => verify_sealed_ml_dsa_87_evidence_bundle(
+            bundle_dir,
+            trusted_transcript_key_fingerprint,
+            trusted_ledger_key_fingerprint,
+        ),
+    }
+}
+
+fn verify_sealed_evidence_trust_policy_signature_with_selected_suite(
+    policy_path: &std::path::Path,
+    signature_path: &std::path::Path,
+    suite: EvidenceVerifierSuite,
+    trusted_policy_root_fingerprint: [u8; 32],
+) -> Result<crate::m1_runtime::SealedEvidenceTrustPolicySignatureReceipt, Box<dyn std::error::Error>>
+{
+    validate_sealed_evidence_verifier_suite(suite)?;
+
+    match suite {
+        EvidenceVerifierSuite::Ed25519Rfc8032 => unreachable!(
+            "validate_sealed_evidence_verifier_suite rejects classical sealed full-PQC verification"
+        ),
+        EvidenceVerifierSuite::MlDsa65Fips204 => {
+            verify_ml_dsa_65_sealed_evidence_trust_policy_signature(
+                policy_path,
+                signature_path,
+                trusted_policy_root_fingerprint,
+            )
+        }
+        EvidenceVerifierSuite::MlDsa87Fips204 => {
+            verify_ml_dsa_87_sealed_evidence_trust_policy_signature(
+                policy_path,
+                signature_path,
+                trusted_policy_root_fingerprint,
+            )
+        }
+    }
+}
+
+fn validate_sealed_evidence_verifier_suite(
+    suite: EvidenceVerifierSuite,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if suite.is_post_quantum() {
+        Ok(())
+    } else {
+        Err("sealed full-PQC evidence verification requires an ML-DSA verifier suite".into())
     }
 }
 
@@ -1430,6 +2836,116 @@ fn verify_ml_dsa_87_evidence_bundle(
     _public_key: &[u8],
 ) -> Result<crate::m1_runtime::EvidenceVerificationReport, Box<dyn std::error::Error>> {
     Err("--evidence-signature-suite ml-dsa-87-fips204 requires building xenia-peer with feature `pqc-signatures`".into())
+}
+
+#[cfg(feature = "pqc-signatures")]
+fn verify_sealed_ml_dsa_65_evidence_bundle(
+    bundle_dir: &std::path::Path,
+    trusted_transcript_key_fingerprint: [u8; 32],
+    trusted_ledger_key_fingerprint: [u8; 32],
+) -> Result<crate::m1_runtime::SealedEvidenceVerificationReport, Box<dyn std::error::Error>> {
+    let backend = MlDsa65EvidenceSignatureBackend;
+    Ok(
+        crate::m1_runtime::verify_sealed_transcript_bound_evidence_bundle_dir_with_backend(
+            bundle_dir,
+            trusted_transcript_key_fingerprint,
+            trusted_ledger_key_fingerprint,
+            &backend,
+        )?,
+    )
+}
+
+#[cfg(not(feature = "pqc-signatures"))]
+fn verify_sealed_ml_dsa_65_evidence_bundle(
+    _bundle_dir: &std::path::Path,
+    _trusted_transcript_key_fingerprint: [u8; 32],
+    _trusted_ledger_key_fingerprint: [u8; 32],
+) -> Result<crate::m1_runtime::SealedEvidenceVerificationReport, Box<dyn std::error::Error>> {
+    Err("--sealed-evidence-signature-suite ml-dsa-65-fips204 requires building xenia-peer with feature `pqc-signatures`".into())
+}
+
+#[cfg(feature = "pqc-signatures")]
+fn verify_ml_dsa_65_sealed_evidence_trust_policy_signature(
+    policy_path: &std::path::Path,
+    signature_path: &std::path::Path,
+    trusted_policy_root_fingerprint: [u8; 32],
+) -> Result<crate::m1_runtime::SealedEvidenceTrustPolicySignatureReceipt, Box<dyn std::error::Error>>
+{
+    let backend = MlDsa65EvidenceSignatureBackend;
+    Ok(
+        crate::m1_runtime::verify_sealed_evidence_trust_policy_signature_file_with_backend(
+            policy_path,
+            signature_path,
+            EvidenceVerifierSuite::MlDsa65Fips204.stable_label(),
+            trusted_policy_root_fingerprint,
+            &backend,
+        )?,
+    )
+}
+
+#[cfg(not(feature = "pqc-signatures"))]
+fn verify_ml_dsa_65_sealed_evidence_trust_policy_signature(
+    _policy_path: &std::path::Path,
+    _signature_path: &std::path::Path,
+    _trusted_policy_root_fingerprint: [u8; 32],
+) -> Result<crate::m1_runtime::SealedEvidenceTrustPolicySignatureReceipt, Box<dyn std::error::Error>>
+{
+    Err("--sealed-evidence-trust-policy-signature with ml-dsa-65-fips204 requires building xenia-peer with feature `pqc-signatures`".into())
+}
+
+#[cfg(feature = "pqc-signatures")]
+fn verify_sealed_ml_dsa_87_evidence_bundle(
+    bundle_dir: &std::path::Path,
+    trusted_transcript_key_fingerprint: [u8; 32],
+    trusted_ledger_key_fingerprint: [u8; 32],
+) -> Result<crate::m1_runtime::SealedEvidenceVerificationReport, Box<dyn std::error::Error>> {
+    let backend = MlDsa87EvidenceSignatureBackend;
+    Ok(
+        crate::m1_runtime::verify_sealed_transcript_bound_evidence_bundle_dir_with_backend(
+            bundle_dir,
+            trusted_transcript_key_fingerprint,
+            trusted_ledger_key_fingerprint,
+            &backend,
+        )?,
+    )
+}
+
+#[cfg(not(feature = "pqc-signatures"))]
+fn verify_sealed_ml_dsa_87_evidence_bundle(
+    _bundle_dir: &std::path::Path,
+    _trusted_transcript_key_fingerprint: [u8; 32],
+    _trusted_ledger_key_fingerprint: [u8; 32],
+) -> Result<crate::m1_runtime::SealedEvidenceVerificationReport, Box<dyn std::error::Error>> {
+    Err("--sealed-evidence-signature-suite ml-dsa-87-fips204 requires building xenia-peer with feature `pqc-signatures`".into())
+}
+
+#[cfg(feature = "pqc-signatures")]
+fn verify_ml_dsa_87_sealed_evidence_trust_policy_signature(
+    policy_path: &std::path::Path,
+    signature_path: &std::path::Path,
+    trusted_policy_root_fingerprint: [u8; 32],
+) -> Result<crate::m1_runtime::SealedEvidenceTrustPolicySignatureReceipt, Box<dyn std::error::Error>>
+{
+    let backend = MlDsa87EvidenceSignatureBackend;
+    Ok(
+        crate::m1_runtime::verify_sealed_evidence_trust_policy_signature_file_with_backend(
+            policy_path,
+            signature_path,
+            EvidenceVerifierSuite::MlDsa87Fips204.stable_label(),
+            trusted_policy_root_fingerprint,
+            &backend,
+        )?,
+    )
+}
+
+#[cfg(not(feature = "pqc-signatures"))]
+fn verify_ml_dsa_87_sealed_evidence_trust_policy_signature(
+    _policy_path: &std::path::Path,
+    _signature_path: &std::path::Path,
+    _trusted_policy_root_fingerprint: [u8; 32],
+) -> Result<crate::m1_runtime::SealedEvidenceTrustPolicySignatureReceipt, Box<dyn std::error::Error>>
+{
+    Err("--sealed-evidence-trust-policy-signature with ml-dsa-87-fips204 requires building xenia-peer with feature `pqc-signatures`".into())
 }
 
 fn expand_source_id_for_m1(source_id_short: [u8; 8]) -> [u8; 32] {
@@ -1628,6 +3144,27 @@ mod evidence_verifier_preflight_tests {
 
         fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn sealed_verifier_rejects_classical_suite() {
+        let err = validate_sealed_evidence_verifier_suite(EvidenceVerifierSuite::Ed25519Rfc8032)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("sealed full-PQC"));
+        assert!(err.contains("ML-DSA"));
+    }
+
+    #[test]
+    fn evidence_key_fingerprint_parser_requires_32_bytes() {
+        let ok = parse_evidence_key_fingerprint_hex(&"ab".repeat(32)).unwrap();
+        assert_eq!(ok, [0xAB; 32]);
+
+        let err = parse_evidence_key_fingerprint_hex(&"ab".repeat(31))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exactly 32 bytes"));
+    }
 }
 
 #[cfg(test)]
@@ -1732,5 +3269,67 @@ mod audio_tests {
         assert_eq!(first.flags & audio_flags::SYNTHETIC, 0);
         assert!(first.validate());
         assert!(second.validate());
+    }
+}
+
+#[cfg(test)]
+mod consent_scope_tests {
+    use super::*;
+
+    fn args_with(
+        input_backend: InputBackendChoice,
+        clipboard: ClipboardMode,
+        recv_file_dir: Option<std::path::PathBuf>,
+        send_file: Option<std::path::PathBuf>,
+    ) -> Args {
+        let mut args = Args::parse_from(["xenia-peer"]);
+        args.input_backend = input_backend;
+        args.clipboard = clipboard;
+        args.recv_file_dir = recv_file_dir;
+        args.send_file = send_file;
+        args
+    }
+
+    #[test]
+    fn view_only_daemon_grants_only_frame_streaming() {
+        let args = args_with(InputBackendChoice::Noop, ClipboardMode::Off, None, None);
+        let granted = configured_permission_set(&args);
+        assert!(granted.stream_frame);
+        assert!(!granted.inject_input);
+        assert!(!granted.clipboard_sync);
+        assert!(!granted.file_transfer);
+    }
+
+    #[test]
+    fn each_enabled_capability_unlocks_exactly_its_own_tier() {
+        let input = args_with(InputBackendChoice::Log, ClipboardMode::Off, None, None);
+        assert!(configured_permission_set(&input).inject_input);
+        assert!(!configured_permission_set(&input).clipboard_sync);
+
+        let clip = args_with(
+            InputBackendChoice::Noop,
+            ClipboardMode::Bidirectional,
+            None,
+            None,
+        );
+        assert!(configured_permission_set(&clip).clipboard_sync);
+        assert!(!configured_permission_set(&clip).inject_input);
+
+        // Host-to-viewer clipboard is not a host-write grant.
+        let clip_one_way = args_with(
+            InputBackendChoice::Noop,
+            ClipboardMode::HostToViewer,
+            None,
+            None,
+        );
+        assert!(!configured_permission_set(&clip_one_way).clipboard_sync);
+
+        let recv = args_with(
+            InputBackendChoice::Noop,
+            ClipboardMode::Off,
+            Some(std::path::PathBuf::from("/tmp/inbox")),
+            None,
+        );
+        assert!(configured_permission_set(&recv).file_transfer);
     }
 }

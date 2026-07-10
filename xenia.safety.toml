@@ -23,7 +23,10 @@ silent_session_start_allowed = false
 [network]
 allowed_default_binds = ["127.0.0.1", "localhost", "::1"]
 public_binds_requiring_review = ["0.0.0.0", "::", "[::]"]
-allowed_public_bind_files = []
+# operator_exposure.rs is THE guard that refuses non-loopback binds without
+# operator auth; its tests must reference "0.0.0.0" to prove the refusal. These
+# are security-verifying test literals, not an insecure default.
+allowed_public_bind_files = ["apps/xenia-peer/src/operator_exposure.rs"]
 
 [scanner]
 # Source/config files produce hard findings. Docs produce warnings.

@@ -6,10 +6,11 @@
 // author); see ADR-002 for the library-vs-binary licensing split.
 // Faithful port of the 64x64 grayscale-tile HDC-delta codec, minus
 // the Symthaea-specific types and the consciousness-coupled framing.
-// `ContinuousHV` is inlined below as a minimal ~40-line struct —
-// the only HDC surface the codec touches is `from_values`,
-// `.similarity(&Self)`, and `.values` element access, so there's no
-// need to drag in `symthaea-core` as a dependency.
+// The original port materialized Symthaea's full 16,384-dim
+// `ContinuousHV` per tile per frame; since 2026-07-05 this crate
+// instead uses an exact 8-dimensional reduction of the same math
+// (see the "Tile features + band weighting" module comment below) —
+// there's still no need to drag in `symthaea-core` as a dependency.
 
 //! HDC hybrid tile-delta codec.
 //!
@@ -25,26 +26,31 @@
 //!         ↓
 //!     64×64 tile grid
 //!         ↓  (per tile)
-//!     HDC encoding → cosine sim vs prev frame's tile HV
+//!     HDC encoding → weighted cosine sim vs prev frame's tile features
 //!         ↓
 //!     if sim > threshold (0.92 default) → skip
 //!         ↓ else
 //!     Classify (Text / Photo / Video / Static) via pixel stats
 //!         ↓
-//!     Grayscale-quantize tile (i8 values, TILE_SIZE² bytes)
+//!     Extract tile pixels as RGB (TILE_SIZE² × 3 bytes, no alpha)
 //!         ↓
 //!     Emit tile-delta packet: (keyframe flag, frame_id, changed
-//!     tiles [(index, grayscale_bytes)…])
+//!     tiles [(index, rgb_bytes)…])
 //! ```
 //!
 //! On the decoder side the previous full frame is held in a buffer;
 //! each new packet patches in the changed tiles. First packet of a
-//! stream is a **keyframe** covering every tile.
+//! stream is a **keyframe** covering every tile, and one is also
+//! forced periodically thereafter (`DEFAULT_KEYFRAME_INTERVAL_MS`) as
+//! an error-recovery safety net — the per-tile change detector is a
+//! coarse statistical comparison, not an exact pixel hash, and can
+//! occasionally miss a real change (alias it as "unchanged").
 //!
-//! Output is currently **grayscale only**. The underlying Symthaea
-//! codec made this trade-off deliberately for sovereign-RDP
-//! bandwidth; extending to RGB (or RGB-for-photo-tiles + grayscale-
-//! for-text-tiles) is a follow-up.
+//! Output is full RGB (decoded back out as RGBA with A=255). Change
+//! detection and content classification (used only for future
+//! adaptive encoding, not yet consumed) still run on HDC features
+//! computed from the original RGB pixels — only the *transmitted*
+//! tile payload changed from grayscale to RGB.
 //!
 //! ## Wire format
 //!
@@ -61,48 +67,105 @@ use crate::{
 use serde::{Deserialize, Serialize};
 
 // ═══════════════════════════════════════════════════════════════════
-// Minimal ContinuousHV
+// Tile features + band weighting
 // ═══════════════════════════════════════════════════════════════════
+//
+// The original (ported-from-Symthaea) design materialized a dense
+// `TILE_HDC_DIM`-length "position HV" per tile, multiplied 8 scalar
+// pixel-statistics features into 8 equal-width bands of it, and took
+// the cosine similarity of that 16,384-element vector against the
+// previous frame's. That's exact but needlessly expensive: this
+// codec only ever compares a tile against *itself* at a later frame
+// (`HdcEncoder::prev_tiles[idx]` is indexed by tile position and never
+// cross-compared against a different position), so the same position
+// vector `pos` is reused on both sides of every similarity call.
+//
+// For two vectors built as `hv_a[i] = pos[i] * w_a[band(i)]` and
+// `hv_b[i] = pos[i] * w_b[band(i)]` sharing the same `pos`:
+//
+//   dot(hv_a, hv_b) = Σ_i pos[i]² · w_a[band(i)] · w_b[band(i)]
+//                   = Σ_band w_a[band] · w_b[band] · S[band]
+//
+// where `S[band] = Σ_{i in band} pos[i]²` depends only on the tile's
+// position and is constant across every frame. So `S` can be computed
+// **once per tile at encoder construction** (`N_BANDS` = 8 numbers,
+// not `TILE_HDC_DIM` = 16,384), and the per-frame hot loop only ever
+// needs the 8 scalar features — an exact (not approximate)
+// ~2,048x reduction in the per-tile, per-frame comparison cost.
+// Verified live 2026-07-05: at 1008×2244 (576 tiles), the pre-fix
+// dense-vector path measured 276–2083ms/frame even in `--release`
+// (see `examples/hdc_throughput.rs`) — unusable above ~1-3fps.
 
-/// 16,384-dimensional continuous-valued hyperdimensional vector.
-///
-/// Vendored minimal surface from `symthaea_core::hdc::unified_hv::ContinuousHV`.
-/// Only the operations the tile codec needs are implemented here —
-/// enough for change detection + content classification. Not a
-/// substitute for Symthaea's full HDC library.
-#[derive(Clone, Debug)]
-pub struct ContinuousHV {
-    /// Dense continuous values, length == [`TILE_HDC_DIM`].
-    pub values: Vec<f32>,
+/// Number of pixel-statistics feature bands (see module comment).
+/// Matches the original design's 8 bands of `TILE_HDC_DIM`.
+const N_BANDS: usize = 8;
+
+/// The 8 pixel-statistics features computed per tile. Order must
+/// match [`generate_band_sumsq`]'s per-band weighting.
+#[derive(Clone, Copy, Debug)]
+struct TileFeatures {
+    mean_lum: f32,
+    contrast: f32,
+    mean_r: f32,
+    mean_g: f32,
+    mean_b: f32,
+    edge_density: f32,
+    lum_contrast: f32,
+    rb_diff: f32,
 }
 
-impl ContinuousHV {
-    /// Construct from a pre-computed value vector.
-    pub fn from_values(values: Vec<f32>) -> Self {
-        Self { values }
-    }
+impl TileFeatures {
+    const ZERO: Self = Self {
+        mean_lum: 0.0,
+        contrast: 0.0,
+        mean_r: 0.0,
+        mean_g: 0.0,
+        mean_b: 0.0,
+        edge_density: 0.0,
+        lum_contrast: 0.0,
+        rb_diff: 0.0,
+    };
 
-    /// Cosine similarity in `[-1.0, 1.0]`. Undefined for zero-norm
-    /// vectors; returns `0.0` in that degenerate case (matches the
-    /// Symthaea-core behavior the caller expects).
-    pub fn similarity(&self, other: &Self) -> f32 {
-        if self.values.len() != other.values.len() {
-            return 0.0;
-        }
-        let mut dot = 0.0f32;
-        let mut n_a = 0.0f32;
-        let mut n_b = 0.0f32;
-        for (a, b) in self.values.iter().zip(other.values.iter()) {
-            dot += a * b;
-            n_a += a * a;
-            n_b += b * b;
-        }
-        let denom = (n_a * n_b).sqrt();
-        if denom <= f32::EPSILON {
-            0.0
-        } else {
-            dot / denom
-        }
+    fn as_array(&self) -> [f32; N_BANDS] {
+        [
+            self.mean_lum,
+            self.contrast,
+            self.mean_r,
+            self.mean_g,
+            self.mean_b,
+            self.edge_density,
+            self.lum_contrast,
+            self.rb_diff,
+        ]
+    }
+}
+
+/// Cosine similarity between two tiles' feature vectors, weighted by
+/// the shared tile position's per-band sum-of-squares (`band_sumsq`).
+/// Exactly equivalent to comparing the two tiles' full
+/// `TILE_HDC_DIM`-length position-modulated HVs (see module comment).
+/// Returns `0.0` for the degenerate zero-norm case (both features
+/// zero, e.g. the encoder's initial `prev_tiles` state).
+fn weighted_cosine_similarity(
+    a: &TileFeatures,
+    b: &TileFeatures,
+    band_sumsq: &[f32; N_BANDS],
+) -> f32 {
+    let (av, bv) = (a.as_array(), b.as_array());
+    let mut dot = 0.0f32;
+    let mut n_a = 0.0f32;
+    let mut n_b = 0.0f32;
+    for band in 0..N_BANDS {
+        let s = band_sumsq[band];
+        dot += av[band] * bv[band] * s;
+        n_a += av[band] * av[band] * s;
+        n_b += bv[band] * bv[band] * s;
+    }
+    let denom = (n_a * n_b).sqrt();
+    if denom <= f32::EPSILON {
+        0.0
+    } else {
+        dot / denom
     }
 }
 
@@ -114,8 +177,12 @@ impl ContinuousHV {
 /// between granularity and per-tile overhead.
 pub const TILE_SIZE: usize = 64;
 
-/// HDC vector dimension. Symthaea's default; smaller means faster
-/// similarity compute but coarser change detection.
+/// Conceptual HDC vector dimension inherited from Symthaea's default
+/// (smaller would mean faster similarity compute but coarser change
+/// detection). Since 2026-07-05 this is a construction-time-only cost
+/// (see the "Tile features + band weighting" module comment above,
+/// `generate_band_sumsq`) — the per-frame hot loop no longer
+/// materializes a vector of this length at all.
 pub const TILE_HDC_DIM: usize = 16_384;
 
 /// Default cosine-similarity threshold above which a tile is
@@ -129,9 +196,22 @@ pub const DEFAULT_CHANGE_THRESHOLD: f32 = 0.92;
 /// envelope under the replay-window-friendly size limit.
 pub const MAX_DELTA_PATCHES: usize = 512;
 
+/// Default interval between forced keyframes, in presentation-time
+/// milliseconds. HDC's per-tile change detection is a coarse
+/// 8-feature statistical comparison (see `encode_tile_hdc`), not an
+/// exact pixel hash — genuinely different content can occasionally
+/// alias to a similar-enough feature vector and be misclassified as
+/// unchanged. Without periodic re-sync, a single missed tile-change
+/// stays wrong for the rest of the session (verified live 2026-07-04:
+/// a real window rearrangement left stale tiles on screen indefinitely).
+/// A time-based (not frame-count-based) interval is used because HDC's
+/// own frame rate is inherently irregular — it only encodes when the
+/// damage-driven capture backend actually delivers a changed frame.
+pub const DEFAULT_KEYFRAME_INTERVAL_MS: u64 = 10_000;
+
 /// Content type detected by HDC classification. Used for future
-/// adaptive encoding (grayscale for text, JPEG for photos, etc.);
-/// currently all non-skipped tiles emit as grayscale.
+/// adaptive encoding (e.g. lower-fidelity for text, JPEG for photos);
+/// currently all non-skipped tiles emit as full RGB regardless.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TileContentType {
     /// Static UI / icons / backgrounds — skippable.
@@ -152,9 +232,9 @@ pub struct TilePatch {
     /// Cosine-similarity surprise score `1.0 - similarity`. Higher
     /// means more changed. Receivers can prioritize by this value.
     pub surprise: f32,
-    /// Grayscale pixel bytes, `TILE_SIZE * TILE_SIZE` of them for
-    /// edge-aligned tiles (shorter at the right/bottom image edges
-    /// where the tile is clipped).
+    /// RGB pixel bytes (3 bytes/pixel, no alpha), `TILE_SIZE *
+    /// TILE_SIZE * 3` of them for edge-aligned tiles (shorter at the
+    /// right/bottom image edges where the tile is clipped).
     pub values: Vec<u8>,
     /// Detected content type for adaptive future encoding.
     pub content_type: TileContentType,
@@ -191,9 +271,9 @@ pub struct HdcPacket {
 // Per-tile state tracked across frames
 // ═══════════════════════════════════════════════════════════════════
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct TileState {
-    hv: ContinuousHV,
+    features: TileFeatures,
     content_type: TileContentType,
     static_count: u32,
 }
@@ -208,33 +288,34 @@ pub struct HdcEncoder {
     tile_cols: u16,
     tile_rows: u16,
     prev_tiles: Vec<TileState>,
-    position_hvs: Vec<ContinuousHV>,
+    band_sumsq: Vec<[f32; N_BANDS]>,
     frame_count: u64,
     change_threshold: f32,
     static_threshold: u32,
+    keyframe_interval_ms: u64,
+    last_keyframe_pts_ms: u64,
 }
 
 impl HdcEncoder {
     /// Construct a new HDC encoder sized to the given frame params.
-    /// Pixel format must be RGBA or BGRA (both produce the same
-    /// grayscale output since luminance is computed from all three
-    /// channels).
+    /// Pixel format must be RGBA or BGRA; both are handled correctly
+    /// (channel order is normalized to true RGB on the wire).
     pub fn new(params: EncodeParams) -> Self {
         // Tile grid dimensions (ceil-divide at image edges).
         let tile_cols = params.width.div_ceil(TILE_SIZE as u32) as u16;
         let tile_rows = params.height.div_ceil(TILE_SIZE as u32) as u16;
         let n_tiles = tile_cols as usize * tile_rows as usize;
 
-        // Deterministic position-basis HVs, seeded per-tile so each
-        // tile index gets a unique "where am I" vector.
+        // Deterministic per-band position weighting, seeded per-tile
+        // so each tile index gets a unique "where am I" weighting.
+        // One-time construction cost only (see module comment above).
         let seed = (params.width as u64) * 0x100000000 + (params.height as u64);
-        let position_hvs: Vec<ContinuousHV> = (0..n_tiles)
-            .map(|i| generate_position_hv(i, seed))
-            .collect();
+        let band_sumsq: Vec<[f32; N_BANDS]> =
+            (0..n_tiles).map(|i| generate_band_sumsq(i, seed)).collect();
 
         let prev_tiles = vec![
             TileState {
-                hv: ContinuousHV::from_values(vec![0.0; TILE_HDC_DIM]),
+                features: TileFeatures::ZERO,
                 content_type: TileContentType::Static,
                 static_count: 0,
             };
@@ -246,10 +327,12 @@ impl HdcEncoder {
             tile_cols,
             tile_rows,
             prev_tiles,
-            position_hvs,
+            band_sumsq,
             frame_count: 0,
             change_threshold: DEFAULT_CHANGE_THRESHOLD,
             static_threshold: params.target_fps.max(1), // ~1s of stillness = Static
+            keyframe_interval_ms: DEFAULT_KEYFRAME_INTERVAL_MS,
+            last_keyframe_pts_ms: 0,
         }
     }
 
@@ -257,6 +340,13 @@ impl HdcEncoder {
     /// range `[0.5, 0.999]`.
     pub fn set_change_threshold(&mut self, t: f32) {
         self.change_threshold = t.clamp(0.5, 0.999);
+    }
+
+    /// Adjust the forced-keyframe interval at runtime (presentation-time
+    /// milliseconds). `0` disables periodic re-sync entirely (not
+    /// recommended — see `DEFAULT_KEYFRAME_INTERVAL_MS`'s doc comment).
+    pub fn set_keyframe_interval_ms(&mut self, interval_ms: u64) {
+        self.keyframe_interval_ms = interval_ms;
     }
 }
 
@@ -274,7 +364,21 @@ impl Encoder for HdcEncoder {
             )));
         }
 
-        let is_keyframe = self.frame_count == 0;
+        // Periodic re-sync: force a keyframe on the first frame, or once
+        // `keyframe_interval_ms` has elapsed since the last one, to bound
+        // how long a missed/aliased tile-change detection can leave
+        // stale content on screen. `pts_ms` is presentation time, not
+        // wall-clock capture time, but the two track closely enough for
+        // this purpose (a coarse periodic safety net, not a precise
+        // timer). `saturating_sub` handles a `pts_ms` that resets/goes
+        // backward (e.g. after an encoder rebuild on a resolution
+        // change) by simply forcing a keyframe rather than underflowing.
+        let is_keyframe = self.frame_count == 0
+            || (self.keyframe_interval_ms > 0
+                && pts_ms.saturating_sub(self.last_keyframe_pts_ms) >= self.keyframe_interval_ms);
+        if is_keyframe {
+            self.last_keyframe_pts_ms = pts_ms;
+        }
         let width = self.params.width;
         let height = self.params.height;
         let mut patches: Vec<TilePatch> = Vec::new();
@@ -285,18 +389,21 @@ impl Encoder for HdcEncoder {
                 let tile_x = col * TILE_SIZE;
                 let tile_y = row * TILE_SIZE;
 
-                // HDC-encode the current tile.
-                let tile_hv = encode_tile_hdc(
+                // Compute the current tile's pixel-statistics features.
+                let tile_features = encode_tile_hdc(
                     raw,
                     width as usize,
                     height as usize,
                     tile_x,
                     tile_y,
                     TILE_SIZE,
-                    &self.position_hvs[idx],
                 );
 
-                let sim = self.prev_tiles[idx].hv.similarity(&tile_hv);
+                let sim = weighted_cosine_similarity(
+                    &self.prev_tiles[idx].features,
+                    &tile_features,
+                    &self.band_sumsq[idx],
+                );
                 let sim = if sim.is_finite() { sim } else { 0.0 };
                 let changed = sim <= self.change_threshold;
 
@@ -317,18 +424,19 @@ impl Encoder for HdcEncoder {
                         self.prev_tiles[idx].content_type = TileContentType::Static;
                     }
                 }
-                self.prev_tiles[idx].hv = tile_hv;
+                self.prev_tiles[idx].features = tile_features;
 
                 // Emit the patch if it's a keyframe OR the tile
                 // changed. Keyframes cover everything regardless.
                 if is_keyframe || changed {
-                    let (values, tile_w, tile_h) = extract_tile_grayscale(
+                    let (values, tile_w, tile_h) = extract_tile_rgb(
                         raw,
                         width as usize,
                         height as usize,
                         tile_x,
                         tile_y,
                         TILE_SIZE,
+                        self.params.pixel_format == XvPixelFormat::Bgra,
                     );
                     patches.push(TilePatch {
                         index: idx as u16,
@@ -477,9 +585,9 @@ impl Decoder for HdcDecoder {
             let tile_y = row * TILE_SIZE;
             let tw = patch.tile_w as usize;
             let th = patch.tile_h as usize;
-            if patch.values.len() != tw * th {
+            if patch.values.len() != tw * th * 3 {
                 return Err(CodecError::DecodeFailed(format!(
-                    "hdc: tile {} has {} bytes, declared {}×{}",
+                    "hdc: tile {} has {} bytes, declared {}×{}×3",
                     idx,
                     patch.values.len(),
                     tw,
@@ -488,13 +596,12 @@ impl Decoder for HdcDecoder {
             }
             for dy in 0..th {
                 for dx in 0..tw {
-                    let src = patch.values[dy * tw + dx];
+                    let src_off = (dy * tw + dx) * 3;
                     let dst_off = ((tile_y + dy) * self.width as usize + (tile_x + dx)) * 4;
                     if dst_off + 3 < self.canvas.len() {
-                        // Expand grayscale to RGBA (R=G=B=src, A=255).
-                        self.canvas[dst_off] = src;
-                        self.canvas[dst_off + 1] = src;
-                        self.canvas[dst_off + 2] = src;
+                        self.canvas[dst_off] = patch.values[src_off];
+                        self.canvas[dst_off + 1] = patch.values[src_off + 1];
+                        self.canvas[dst_off + 2] = patch.values[src_off + 2];
                         self.canvas[dst_off + 3] = 255;
                     }
                 }
@@ -523,30 +630,37 @@ impl Decoder for HdcDecoder {
 // Internal helpers — ported from Symthaea's rdp_codec.rs
 // ═══════════════════════════════════════════════════════════════════
 
-/// Deterministic position-basis HV. Same seed => same HV. Used to
-/// domain-separate tiles so two visually-identical tiles at different
-/// positions produce distinguishable HVs.
-fn generate_position_hv(index: usize, seed: u64) -> ContinuousHV {
+/// Deterministic per-band sum-of-squares weighting for one tile
+/// position. Same seed => same weighting. Used to domain-separate
+/// tiles so two visually-identical tiles at different positions
+/// compare with different band weights (exactly reproduces the
+/// original dense-position-HV design's behavior — see the "Tile
+/// features + band weighting" module comment above — at 1/2,048th
+/// the per-tile cost, and only at encoder-construction time, never
+/// per frame).
+fn generate_band_sumsq(index: usize, seed: u64) -> [f32; N_BANDS] {
     let combined = seed
         .wrapping_add(index as u64)
         .wrapping_mul(0x517cc1b727220a95);
-    let mut values = vec![0.0f32; TILE_HDC_DIM];
+    let band_size = TILE_HDC_DIM / N_BANDS;
+    let mut sumsq = [0.0f32; N_BANDS];
     let mut state = combined;
-    for v in values.iter_mut() {
+    for i in 0..TILE_HDC_DIM {
         let hash = blake3::hash(&state.to_le_bytes());
         let bytes = hash.as_bytes();
         let u =
             u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f32 / u32::MAX as f32;
-        *v = (u - 0.5) * 2.0; // centered in [-1, 1]
+        let v = (u - 0.5) * 2.0; // centered in [-1, 1]
+        sumsq[i / band_size] += v * v;
         state = state.wrapping_add(1);
     }
-    ContinuousHV::from_values(values)
+    sumsq
 }
 
-/// Feature-extract a tile's pixel content into an HDC vector. 8
-/// features (luminance mean, contrast, RGB means, edge density,
-/// and two interaction terms) modulate 8 equal-width bands of the
-/// position HV.
+/// Feature-extract a tile's pixel content into its 8 pixel-statistics
+/// features (luminance mean, contrast, RGB means, edge density, and
+/// two interaction terms). These correspond 1:1 with the original
+/// design's 8 equal-width position-HV bands (see module comment).
 fn encode_tile_hdc(
     pixels: &[u8],
     img_width: usize,
@@ -554,8 +668,7 @@ fn encode_tile_hdc(
     tile_x: usize,
     tile_y: usize,
     tile_size: usize,
-    position_hv: &ContinuousHV,
-) -> ContinuousHV {
+) -> TileFeatures {
     let mut lum_sum = 0.0f32;
     let mut lum_sq_sum = 0.0f32;
     let mut r_sum = 0.0f32;
@@ -611,23 +724,16 @@ fn encode_tile_hdc(
     let mean_b = b_sum / n;
     let edge_density = edge_energy / n;
 
-    let mut values = vec![0.0f32; TILE_HDC_DIM];
-    let band_size = TILE_HDC_DIM / 8;
-    for (i, (v_out, pos)) in values.iter_mut().zip(position_hv.values.iter()).enumerate() {
-        let band = i / band_size;
-        let feature_weight = match band {
-            0 => mean_lum,
-            1 => contrast,
-            2 => mean_r,
-            3 => mean_g,
-            4 => mean_b,
-            5 => edge_density,
-            6 => mean_lum * contrast,
-            _ => (mean_r - mean_b).abs(),
-        };
-        *v_out = pos * feature_weight;
+    TileFeatures {
+        mean_lum,
+        contrast,
+        mean_r,
+        mean_g,
+        mean_b,
+        edge_density,
+        lum_contrast: mean_lum * contrast,
+        rb_diff: (mean_r - mean_b).abs(),
     }
-    ContinuousHV::from_values(values)
 }
 
 /// Classify a tile's content type from its pixel statistics.
@@ -700,36 +806,49 @@ fn classify_tile_content(
     }
 }
 
-/// Extract a tile's pixels as 8-bit grayscale (row-major). Returns
-/// the bytes + the logical (width, height) of the tile, which may be
-/// less than `tile_size` at the image's right/bottom edge where the
-/// tile is clipped.
-fn extract_tile_grayscale(
+/// Extract a tile's pixels as 8-bit-per-channel RGB (row-major,
+/// 3 bytes/pixel — no alpha, since decoded output always sets
+/// A=255). Returns the bytes + the logical (width, height) of the
+/// tile, which may be less than `tile_size` at the image's
+/// right/bottom edge where the tile is clipped.
+///
+/// `bgra` must reflect the source frame's actual channel order —
+/// unlike the old grayscale extraction (luminance is symmetric in
+/// R/B), true RGB output needs the right order or red/blue channels
+/// come out swapped for BGRA-sourced frames.
+fn extract_tile_rgb(
     pixels: &[u8],
     img_width: usize,
     img_height: usize,
     tile_x: usize,
     tile_y: usize,
     tile_size: usize,
+    bgra: bool,
 ) -> (Vec<u8>, u16, u16) {
     let tw = tile_size.min(img_width.saturating_sub(tile_x));
     let th = tile_size.min(img_height.saturating_sub(tile_y));
-    let mut out = Vec::with_capacity(tw * th);
+    let mut out = Vec::with_capacity(tw * th * 3);
     for dy in 0..th {
         let y = tile_y + dy;
         for dx in 0..tw {
             let x = tile_x + dx;
             let offset = (y * img_width + x) * 4;
             if offset + 3 >= pixels.len() {
-                out.push(0);
+                out.extend_from_slice(&[0, 0, 0]);
                 continue;
             }
-            let r = pixels[offset] as u32;
-            let g = pixels[offset + 1] as u32;
-            let b = pixels[offset + 2] as u32;
-            // BT.601-ish integer luminance.
-            let lum = ((299 * r + 587 * g + 114 * b) / 1000).min(255) as u8;
-            out.push(lum);
+            let (c0, c1, c2) = (pixels[offset], pixels[offset + 1], pixels[offset + 2]);
+            if bgra {
+                // Source order is B,G,R -> emit R,G,B.
+                out.push(c2);
+                out.push(c1);
+                out.push(c0);
+            } else {
+                // Source order is already R,G,B.
+                out.push(c0);
+                out.push(c1);
+                out.push(c2);
+            }
         }
     }
     (out, tw as u16, th as u16)
@@ -779,14 +898,104 @@ mod tests {
     }
 
     #[test]
-    fn continuous_hv_similarity_is_sane() {
-        let a = ContinuousHV::from_values(vec![1.0; 4]);
-        let b = ContinuousHV::from_values(vec![1.0; 4]);
-        let c = ContinuousHV::from_values(vec![-1.0; 4]);
-        assert!((a.similarity(&b) - 1.0).abs() < 1e-6);
-        assert!((a.similarity(&c) + 1.0).abs() < 1e-6);
-        let z = ContinuousHV::from_values(vec![0.0; 4]);
-        assert_eq!(a.similarity(&z), 0.0);
+    fn weighted_cosine_similarity_is_sane() {
+        let uniform_weights = [1.0f32; N_BANDS];
+        let a = TileFeatures {
+            mean_lum: 1.0,
+            contrast: 1.0,
+            mean_r: 1.0,
+            mean_g: 1.0,
+            mean_b: 1.0,
+            edge_density: 1.0,
+            lum_contrast: 1.0,
+            rb_diff: 1.0,
+        };
+        let b = a;
+        let c = TileFeatures {
+            mean_lum: -1.0,
+            contrast: -1.0,
+            mean_r: -1.0,
+            mean_g: -1.0,
+            mean_b: -1.0,
+            edge_density: -1.0,
+            lum_contrast: -1.0,
+            rb_diff: -1.0,
+        };
+        assert!((weighted_cosine_similarity(&a, &b, &uniform_weights) - 1.0).abs() < 1e-6);
+        assert!((weighted_cosine_similarity(&a, &c, &uniform_weights) + 1.0).abs() < 1e-6);
+        assert_eq!(
+            weighted_cosine_similarity(&a, &TileFeatures::ZERO, &uniform_weights),
+            0.0
+        );
+    }
+
+    #[test]
+    fn weighted_cosine_similarity_matches_dense_hv_reduction() {
+        // Directly verifies the module's core claim: comparing two
+        // 8-feature TileFeatures with band_sumsq weights gives the
+        // exact same result as materializing the original dense
+        // TILE_HDC_DIM-length position-modulated vectors and taking
+        // their plain cosine similarity.
+        let band_sumsq = generate_band_sumsq(7, 0xABCD_1234);
+        // Reconstruct the dense position vector this band_sumsq was
+        // derived from, band-by-band, to build reference dense HVs.
+        let seed = 0xABCD_1234u64;
+        let index = 7usize;
+        let combined = seed
+            .wrapping_add(index as u64)
+            .wrapping_mul(0x517cc1b727220a95);
+        let band_size = TILE_HDC_DIM / N_BANDS;
+        let mut pos = vec![0.0f32; TILE_HDC_DIM];
+        let mut state = combined;
+        for v in pos.iter_mut() {
+            let hash = blake3::hash(&state.to_le_bytes());
+            let bytes = hash.as_bytes();
+            let u = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f32
+                / u32::MAX as f32;
+            *v = (u - 0.5) * 2.0;
+            state = state.wrapping_add(1);
+        }
+
+        let a = TileFeatures {
+            mean_lum: 0.3,
+            contrast: 0.1,
+            mean_r: 0.5,
+            mean_g: 0.2,
+            mean_b: 0.4,
+            edge_density: 0.05,
+            lum_contrast: 0.03,
+            rb_diff: 0.1,
+        };
+        let b = TileFeatures {
+            mean_lum: 0.35,
+            contrast: 0.12,
+            mean_r: 0.45,
+            mean_g: 0.25,
+            mean_b: 0.38,
+            edge_density: 0.06,
+            lum_contrast: 0.042,
+            rb_diff: 0.07,
+        };
+
+        let dense = |f: &TileFeatures| -> Vec<f32> {
+            let w = f.as_array();
+            pos.iter()
+                .enumerate()
+                .map(|(i, p)| p * w[i / band_size])
+                .collect()
+        };
+        let dense_a = dense(&a);
+        let dense_b = dense(&b);
+        let dot: f32 = dense_a.iter().zip(dense_b.iter()).map(|(x, y)| x * y).sum();
+        let na: f32 = dense_a.iter().map(|x| x * x).sum();
+        let nb: f32 = dense_b.iter().map(|y| y * y).sum();
+        let reference_sim = dot / (na * nb).sqrt();
+
+        let fast_sim = weighted_cosine_similarity(&a, &b, &band_sumsq);
+        assert!(
+            (reference_sim - fast_sim).abs() < 1e-3,
+            "reference={reference_sim} fast={fast_sim}"
+        );
     }
 
     #[test]
@@ -847,6 +1056,64 @@ mod tests {
     }
 
     #[test]
+    fn periodic_keyframe_forces_resync_even_with_no_visible_change() {
+        // Regression test for a real bug found live 2026-07-04: without
+        // periodic re-sync, a tile-change detector miss (or an
+        // intentionally-unchanged screen) means the decoder's canvas
+        // can never self-correct. A constant (never-changing) frame
+        // should still get a fresh keyframe once keyframe_interval_ms
+        // has elapsed, purely from the passage of presentation time.
+        let w = 128;
+        let h = 128;
+        let p = params(w, h);
+        let mut enc = HdcEncoder::new(p);
+        enc.set_keyframe_interval_ms(1_000);
+        let f = constant_frame(w, h, 64);
+
+        let pkt0 = enc.encode(&f, 0).unwrap();
+        assert!(pkt0[0].is_keyframe, "frame 0 is always a keyframe");
+
+        // Still well inside the interval: identical content, zero patches.
+        let pkt1 = enc.encode(&f, 500).unwrap();
+        assert!(!pkt1[0].is_keyframe);
+        let body1: HdcPacket = bincode::deserialize(&pkt1[0].bytes).unwrap();
+        assert_eq!(body1.patches.len(), 0);
+
+        // Past the interval: must force a fresh keyframe covering every
+        // tile, even though the frame content hasn't changed at all.
+        let pkt2 = enc.encode(&f, 1_500).unwrap();
+        assert!(
+            pkt2[0].is_keyframe,
+            "expected a forced keyframe once keyframe_interval_ms elapsed"
+        );
+        let body2: HdcPacket = bincode::deserialize(&pkt2[0].bytes).unwrap();
+        assert_eq!(
+            body2.patches.len() as u16,
+            body2.tile_cols * body2.tile_rows
+        );
+
+        // Interval resets from the forced keyframe, not the original one.
+        let pkt3 = enc.encode(&f, 1_600).unwrap();
+        assert!(!pkt3[0].is_keyframe);
+    }
+
+    #[test]
+    fn zero_keyframe_interval_disables_periodic_resync() {
+        let w = 64;
+        let h = 64;
+        let p = params(w, h);
+        let mut enc = HdcEncoder::new(p);
+        enc.set_keyframe_interval_ms(0);
+        let f = constant_frame(w, h, 200);
+
+        let _ = enc.encode(&f, 0).unwrap();
+        // Even a huge pts_ms gap must not force a keyframe when the
+        // interval is explicitly disabled.
+        let pkt = enc.encode(&f, 1_000_000).unwrap();
+        assert!(!pkt[0].is_keyframe);
+    }
+
+    #[test]
     fn encode_rejects_wrong_size() {
         let p = params(64, 64);
         let mut enc = HdcEncoder::new(p);
@@ -870,12 +1137,97 @@ mod tests {
     }
 
     #[test]
-    fn position_hv_is_deterministic_per_seed() {
-        let a = generate_position_hv(0, 42);
-        let b = generate_position_hv(0, 42);
-        assert!((a.similarity(&b) - 1.0).abs() < 1e-6);
-        let c = generate_position_hv(1, 42);
-        // Same seed different index => different HV.
-        assert!(a.similarity(&c) < 0.99);
+    fn band_sumsq_is_deterministic_per_seed() {
+        let a = generate_band_sumsq(0, 42);
+        let b = generate_band_sumsq(0, 42);
+        assert_eq!(a, b);
+        let c = generate_band_sumsq(1, 42);
+        // Same seed, different index => different weighting.
+        assert_ne!(a, c);
+    }
+
+    /// A frame with distinct, non-grayscale R/G/B channels (pure
+    /// red on one half, pure blue on the other) — verifies the codec
+    /// actually round-trips color, not just luminance. A pre-RGB-output
+    /// codec would flatten both halves to different-but-colorless
+    /// gray levels; this catches that regression directly.
+    fn two_tone_rgba_frame(w: u32, h: u32) -> Vec<u8> {
+        let mut p = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let i = (y * w as usize + x) * 4;
+                if x < w as usize / 2 {
+                    p[i] = 255; // R
+                    p[i + 1] = 0;
+                    p[i + 2] = 0;
+                } else {
+                    p[i] = 0;
+                    p[i + 1] = 0;
+                    p[i + 2] = 255; // B
+                }
+                p[i + 3] = 255;
+            }
+        }
+        p
+    }
+
+    #[test]
+    fn decoded_output_preserves_true_color_not_just_luminance() {
+        let w = 128;
+        let h = 128;
+        let p = params(w, h);
+        let mut enc = HdcEncoder::new(p);
+        let mut dec = HdcDecoder::new();
+
+        let frame = two_tone_rgba_frame(w, h);
+        let pkt = enc.encode(&frame, 0).unwrap();
+        let decoded = dec.decode(&pkt[0]).unwrap();
+        let pixels = &decoded[0].pixels;
+
+        // Sample a pixel well inside the red half.
+        let red_off = (10 * w as usize + 10) * 4;
+        assert_eq!(pixels[red_off], 255, "red channel");
+        assert_eq!(pixels[red_off + 1], 0, "green channel");
+        assert_eq!(pixels[red_off + 2], 0, "blue channel");
+
+        // Sample a pixel well inside the blue half.
+        let blue_off = (10 * w as usize + (w as usize - 10)) * 4;
+        assert_eq!(pixels[blue_off], 0, "red channel");
+        assert_eq!(pixels[blue_off + 1], 0, "green channel");
+        assert_eq!(pixels[blue_off + 2], 255, "blue channel");
+    }
+
+    #[test]
+    fn bgra_input_normalizes_to_true_rgb_on_the_wire() {
+        // Same two-tone image, but stored in BGRA byte order (as if
+        // sourced from a BGRA capture backend). Swap R<->B on top of
+        // the RGBA test fixture to build a real BGRA buffer.
+        let w = 128;
+        let h = 128;
+        let mut frame = two_tone_rgba_frame(w, h);
+        for chunk in frame.chunks_exact_mut(4) {
+            chunk.swap(0, 2);
+        }
+
+        let mut p = params(w, h);
+        p.pixel_format = XvPixelFormat::Bgra;
+        let mut enc = HdcEncoder::new(p);
+        let mut dec = HdcDecoder::new();
+
+        let pkt = enc.encode(&frame, 0).unwrap();
+        let decoded = dec.decode(&pkt[0]).unwrap();
+        let pixels = &decoded[0].pixels;
+
+        // Decoded output is always RGBA regardless of input order —
+        // must match the same true colors as the RGBA-input test.
+        let red_off = (10 * w as usize + 10) * 4;
+        assert_eq!(pixels[red_off], 255, "red channel");
+        assert_eq!(pixels[red_off + 1], 0, "green channel");
+        assert_eq!(pixels[red_off + 2], 0, "blue channel");
+
+        let blue_off = (10 * w as usize + (w as usize - 10)) * 4;
+        assert_eq!(pixels[blue_off], 0, "red channel");
+        assert_eq!(pixels[blue_off + 1], 0, "green channel");
+        assert_eq!(pixels[blue_off + 2], 255, "blue channel");
     }
 }

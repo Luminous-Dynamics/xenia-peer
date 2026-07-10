@@ -394,6 +394,15 @@ pub struct CpalAudioCapture {
 #[cfg(feature = "audio-cpal")]
 impl CpalAudioCapture {
     /// Create a capture stream from the default host input device.
+    ///
+    /// `device.default_input_config()` reports whatever rate the OS/sound
+    /// server currently has the device opened at (commonly 44100 Hz, e.g.
+    /// PipeWire's own default) -- that's a *current* setting, not a hard
+    /// hardware limit. Most real devices (and virtually all PipeWire nodes)
+    /// support a *range* of rates, so search `supported_input_configs()`
+    /// for one whose range actually covers 48000 Hz -- the rate RawAudio
+    /// v0.1 requires -- before giving up. Only fails if nothing on the
+    /// device can do 48000 Hz at all.
     pub fn new_default_input() -> Result<Self, IngestionError> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -402,27 +411,22 @@ impl CpalAudioCapture {
             .default_input_device()
             .ok_or_else(|| IngestionError::Unavailable("no default audio input device".into()))?;
         let device_name = device.name().unwrap_or_else(|_| "unknown".to_string());
+
+        let target_rate = cpal::SampleRate(48_000);
         let supported = device
-            .default_input_config()
-            .map_err(|err| IngestionError::Backend(err.to_string()))?;
+            .supported_input_configs()
+            .map_err(|err| IngestionError::Backend(err.to_string()))?
+            .filter(|range| range.channels() <= 2)
+            .filter_map(|range| range.try_with_sample_rate(target_rate))
+            // Prefer stereo over mono when both are 48kHz-capable.
+            .max_by_key(|config| config.channels())
+            .ok_or_else(|| {
+                IngestionError::Unavailable(format!(
+                    "no <=2-channel input config on {device_name} supports 48000 Hz; RawAudio v0.1 capture requires 48000 Hz"
+                ))
+            })?;
         let sample_rate_hz = supported.sample_rate().0;
         let channels = supported.channels();
-        if channels == 0 {
-            return Err(IngestionError::Unavailable(
-                "default audio input reports zero channels".into(),
-            ));
-        }
-
-        if sample_rate_hz != 48_000 {
-            return Err(IngestionError::Unavailable(format!(
-                "default audio input uses {sample_rate_hz} Hz; RawAudio v0.1 capture requires 48000 Hz"
-            )));
-        }
-        if channels > 2 {
-            return Err(IngestionError::Unavailable(format!(
-                "default audio input reports {channels} channels; RawAudio v0.1 capture supports at most 2"
-            )));
-        }
 
         let frame_samples_per_channel = usize::try_from(sample_rate_hz / 50)
             .map_err(|_| IngestionError::Backend("sample rate does not fit usize".into()))?;

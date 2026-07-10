@@ -54,8 +54,14 @@ run_required scripts/check-pqc-evidence-artifact-digests.sh .
 run_required scripts/check-pqc-evidence-artifact-digests-negative.sh .
 run_required scripts/check-pqc-evidence-report-audit.sh .
 run_required scripts/check-pqc-evidence-report-audit-negative.sh .
+run_required scripts/check-sealed-pqc-evidence-report-audit.sh .
+run_required scripts/check-sealed-pqc-evidence-report-audit-negative.sh .
+run_required scripts/check-sealed-pqc-trust-policy.sh .
+run_required scripts/check-sealed-pqc-trust-policy-signature.sh .
+run_required scripts/check-sealed-pqc-policy-roots.sh .
 run_required scripts/check-pqc-feature-gate-negative.sh .
 run_required scripts/check-real-pqc-signature-backend.sh .
+run_required scripts/check-full-pqc-sealed-evidence-artifacts.sh .
 run_required scripts/check-full-pqc-runtime-refusal.sh .
 run_required scripts/check-pq-signature-vector-harness.sh .
 

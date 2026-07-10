@@ -18,15 +18,140 @@
 //! queued stale one.
 //!
 //! Input capture (mouse / keyboard → `RawInput` back to the
-//! daemon) is NOT wired yet; that's M2.
+//! daemon): pointer motion/buttons and a common-subset keymap are
+//! wired below via `egui::Context::input`. Captured [`InputEvent`]s
+//! go out over an unbounded channel to the network task, which seals
+//! and sends them concurrently with the frame-receive loop (see
+//! `gui_receive_loop` in `main.rs`). Coordinates are normalized
+//! against the last-rendered image rect, not the whole window, so
+//! pointer activity over the status bar / side panels is ignored.
 
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use eframe::egui;
+use xenia_inject::InputEvent;
 use xenia_peer_core::RawAudio;
 
 use crate::AudioPlaybackSink;
+
+/// Map a subset of `egui::Key` to Linux evdev keycodes (matching the
+/// convention `xenia-inject`'s backends expect — see
+/// `xenia-inject/examples/inject_bench.rs`'s `KEY_A = 30` comment).
+/// Covers letters, digits, and the keys most useful for real usability
+/// testing; not an exhaustive mapping of every `egui::Key` variant.
+fn egui_key_to_evdev(key: egui::Key) -> Option<u32> {
+    use egui::Key;
+    Some(match key {
+        Key::A => 30,
+        Key::B => 48,
+        Key::C => 46,
+        Key::D => 32,
+        Key::E => 18,
+        Key::F => 33,
+        Key::G => 34,
+        Key::H => 35,
+        Key::I => 23,
+        Key::J => 36,
+        Key::K => 37,
+        Key::L => 38,
+        Key::M => 50,
+        Key::N => 49,
+        Key::O => 24,
+        Key::P => 25,
+        Key::Q => 16,
+        Key::R => 19,
+        Key::S => 31,
+        Key::T => 20,
+        Key::U => 22,
+        Key::V => 47,
+        Key::W => 17,
+        Key::X => 45,
+        Key::Y => 21,
+        Key::Z => 44,
+        Key::Num0 => 11,
+        Key::Num1 => 2,
+        Key::Num2 => 3,
+        Key::Num3 => 4,
+        Key::Num4 => 5,
+        Key::Num5 => 6,
+        Key::Num6 => 7,
+        Key::Num7 => 8,
+        Key::Num8 => 9,
+        Key::Num9 => 10,
+        Key::Space => 57,
+        Key::Enter => 28,
+        Key::Escape => 1,
+        Key::Backspace => 14,
+        Key::Tab => 15,
+        Key::ArrowUp => 103,
+        Key::ArrowDown => 108,
+        Key::ArrowLeft => 105,
+        Key::ArrowRight => 106,
+        Key::Home => 102,
+        Key::End => 107,
+        Key::PageUp => 104,
+        Key::PageDown => 109,
+        Key::Insert => 110,
+        Key::Delete => 111,
+        Key::Minus => 12,
+        Key::Equals => 13,
+        Key::Semicolon => 39,
+        Key::Quote => 40,
+        Key::Backtick => 41,
+        Key::Backslash => 43,
+        Key::Comma => 51,
+        Key::Period => 52,
+        Key::Slash => 53,
+        Key::OpenBracket => 26,
+        Key::CloseBracket => 27,
+        Key::F1 => 59,
+        Key::F2 => 60,
+        Key::F3 => 61,
+        Key::F4 => 62,
+        Key::F5 => 63,
+        Key::F6 => 64,
+        Key::F7 => 65,
+        Key::F8 => 66,
+        Key::F9 => 67,
+        Key::F10 => 68,
+        Key::F11 => 87,
+        Key::F12 => 88,
+        _ => return None,
+    })
+}
+
+/// Bit 0 = Shift, 1 = Ctrl, 2 = Alt, 3 = Meta/Super/Cmd. Matches the
+/// convention documented on `xenia_inject::InputEvent::Key.modifiers`.
+fn modifiers_bitmask(m: &egui::Modifiers) -> u8 {
+    let mut bits = 0u8;
+    if m.shift {
+        bits |= 1 << 0;
+    }
+    if m.ctrl {
+        bits |= 1 << 1;
+    }
+    if m.alt {
+        bits |= 1 << 2;
+    }
+    if m.mac_cmd || m.command {
+        bits |= 1 << 3;
+    }
+    bits
+}
+
+/// xenia-inject's pointer-button convention (0 = left, 1 = middle,
+/// 2 = right) does not match egui's `PointerButton` discriminants
+/// (Primary=0/left, Secondary=1/right, Middle=2) -- remap explicitly
+/// rather than casting.
+fn pointer_button_id(button: egui::PointerButton) -> u8 {
+    match button {
+        egui::PointerButton::Primary => 0,
+        egui::PointerButton::Middle => 1,
+        egui::PointerButton::Secondary => 2,
+        _ => 3,
+    }
+}
 
 /// A single decoded frame ready for display. `rgba` length MUST
 /// equal `width * height * 4`.
@@ -205,6 +330,14 @@ pub struct ViewerApp {
     last_audio: Option<AudioData>,
     // Simple rolling fps: timestamp of last ~30 frames.
     recent_frame_instants: std::collections::VecDeque<std::time::Instant>,
+    // Input capture (mouse / keyboard -> daemon). `None` means input
+    // is disabled client-side (no channel was wired up).
+    input_tx: Option<tokio::sync::mpsc::UnboundedSender<InputEvent>>,
+    // On-screen rect of the last-rendered frame image, used to
+    // normalize pointer coordinates and to ignore pointer activity
+    // over the status bar / side panels.
+    image_rect: Option<egui::Rect>,
+    last_pointer_pos: Option<egui::Pos2>,
 }
 
 impl ViewerApp {
@@ -216,6 +349,7 @@ impl ViewerApp {
         config: ViewerConfig,
         audio_rx: Option<mpsc::Receiver<RawAudio>>,
         audio_sink: Box<dyn AudioPlaybackSink>,
+        input_tx: Option<tokio::sync::mpsc::UnboundedSender<InputEvent>>,
     ) -> Self {
         Self {
             slot,
@@ -230,6 +364,117 @@ impl ViewerApp {
             last_telemetry: None,
             last_audio: None,
             recent_frame_instants: std::collections::VecDeque::with_capacity(64),
+            input_tx,
+            image_rect: None,
+            last_pointer_pos: None,
+        }
+    }
+
+    /// Normalize a screen-space position against the last-rendered
+    /// image rect. `None` if there's no image yet or the position
+    /// falls outside it (pointer over a side panel / status bar).
+    fn normalize_in_image(&self, pos: egui::Pos2) -> Option<(f32, f32)> {
+        let rect = self.image_rect?;
+        if !rect.contains(pos) {
+            return None;
+        }
+        let size = rect.size();
+        if size.x <= 0.0 || size.y <= 0.0 {
+            return None;
+        }
+        let x = ((pos.x - rect.min.x) / size.x).clamp(0.0, 1.0);
+        let y = ((pos.y - rect.min.y) / size.y).clamp(0.0, 1.0);
+        Some((x, y))
+    }
+
+    /// Send one captured input event to the network task, if input
+    /// capture is wired up. Silently drops on a closed channel (the
+    /// network side already ended; the GUI keeps rendering
+    /// independently until the window closes).
+    fn send_input(&self, event: InputEvent) {
+        if let Some(tx) = &self.input_tx {
+            let _ = tx.send(event);
+        }
+    }
+
+    /// Poll `ctx` for pointer motion/buttons and keyboard events this
+    /// frame, translate to `InputEvent`s, and forward them.
+    fn capture_input(&mut self, ctx: &egui::Context) {
+        if self.input_tx.is_none() {
+            return;
+        }
+
+        let (pointer_pos, button_events, key_events) = ctx.input(|i| {
+            let pos = i.pointer.interact_pos();
+            let buttons = [
+                egui::PointerButton::Primary,
+                egui::PointerButton::Secondary,
+                egui::PointerButton::Middle,
+            ]
+            .into_iter()
+            .filter_map(|button| {
+                if i.pointer.button_pressed(button) {
+                    Some((button, true))
+                } else if i.pointer.button_released(button) {
+                    Some((button, false))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+            let keys = i
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::Key {
+                        key,
+                        pressed,
+                        repeat: false,
+                        modifiers,
+                        ..
+                    } => Some((*key, *pressed, *modifiers)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            (pos, buttons, keys)
+        });
+
+        if let Some(pos) = pointer_pos
+            && self.last_pointer_pos != Some(pos)
+        {
+            self.last_pointer_pos = Some(pos);
+            if let Some((x, y)) = self.normalize_in_image(pos) {
+                self.send_input(InputEvent::Pointer {
+                    x,
+                    y,
+                    button: 0,
+                    pressed: false,
+                });
+            }
+        }
+
+        for (button, pressed) in button_events {
+            let Some(pos) = pointer_pos else { continue };
+            let Some((x, y)) = self.normalize_in_image(pos) else {
+                continue;
+            };
+            self.send_input(InputEvent::Pointer {
+                x,
+                y,
+                button: pointer_button_id(button),
+                pressed,
+            });
+        }
+
+        for (key, pressed, modifiers) in key_events {
+            let Some(code) = egui_key_to_evdev(key) else {
+                continue;
+            };
+            self.send_input(InputEvent::Key {
+                code,
+                pressed,
+                modifiers: modifiers_bitmask(&modifiers),
+            });
         }
     }
 
@@ -337,12 +582,14 @@ impl eframe::App for ViewerApp {
             ui.horizontal_top(|ui| {
                 ui.vertical(|ui| {
                     if let Some(tex) = &self.texture {
-                        ui.add(
+                        let response = ui.add(
                             egui::Image::new(tex)
                                 .fit_to_exact_size(tex.size_vec2())
                                 .maintain_aspect_ratio(true),
                         );
+                        self.image_rect = Some(response.rect);
                     } else {
+                        self.image_rect = None;
                         ui.centered_and_justified(|ui| {
                             ui.label(
                                 egui::RichText::new("Waiting for first frame...")
@@ -429,9 +676,93 @@ impl eframe::App for ViewerApp {
             });
         });
 
+        // Capture after rendering so `self.image_rect` reflects
+        // exactly what's on screen this frame.
+        self.capture_input(ctx);
+
         // Keep the UI live so newly arriving frames show up without
         // requiring user input to trigger a repaint. Throttling is
         // fine for a remote-viewer at ~60fps target.
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_map_has_no_duplicate_evdev_codes() {
+        // All egui::Key variants (not just the mapped subset) --
+        // catches copy-paste collisions like accidentally mapping two
+        // different keys to the same evdev code.
+        let mut seen = std::collections::HashSet::new();
+        for key in egui::Key::ALL {
+            if let Some(code) = egui_key_to_evdev(*key) {
+                assert!(
+                    seen.insert(code),
+                    "evdev code {code} mapped from more than one egui::Key (last: {key:?})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn key_map_matches_known_evdev_codes() {
+        assert_eq!(egui_key_to_evdev(egui::Key::A), Some(30));
+        assert_eq!(egui_key_to_evdev(egui::Key::Space), Some(57));
+        assert_eq!(egui_key_to_evdev(egui::Key::Enter), Some(28));
+        assert_eq!(egui_key_to_evdev(egui::Key::Escape), Some(1));
+        assert_eq!(egui_key_to_evdev(egui::Key::Period), Some(52));
+        assert_eq!(egui_key_to_evdev(egui::Key::Num0), Some(11));
+        assert_eq!(egui_key_to_evdev(egui::Key::F1), Some(59));
+    }
+
+    #[test]
+    fn pointer_button_mapping_matches_xenia_inject_convention() {
+        // xenia-inject: 0 = left, 1 = middle, 2 = right.
+        assert_eq!(pointer_button_id(egui::PointerButton::Primary), 0);
+        assert_eq!(pointer_button_id(egui::PointerButton::Middle), 1);
+        assert_eq!(pointer_button_id(egui::PointerButton::Secondary), 2);
+    }
+
+    #[test]
+    fn modifiers_bitmask_combines_flags() {
+        let mut m = egui::Modifiers::default();
+        assert_eq!(modifiers_bitmask(&m), 0);
+        m.shift = true;
+        assert_eq!(modifiers_bitmask(&m), 0b0001);
+        m.ctrl = true;
+        assert_eq!(modifiers_bitmask(&m), 0b0011);
+        m.alt = true;
+        assert_eq!(modifiers_bitmask(&m), 0b0111);
+        m.command = true;
+        assert_eq!(modifiers_bitmask(&m), 0b1111);
+    }
+
+    #[test]
+    fn normalize_in_image_clamps_and_rejects_outside_rect() {
+        let mut app = ViewerApp::new(
+            FrameSlot::new(),
+            ViewerConfig {
+                codec: "test".into(),
+                transport: "test".into(),
+                peer_addr: "test".into(),
+            },
+            None,
+            Box::new(crate::NullAudioSink::default()),
+            None,
+        );
+        assert_eq!(app.normalize_in_image(egui::pos2(5.0, 5.0)), None);
+
+        app.image_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(10.0, 10.0),
+            egui::vec2(100.0, 50.0),
+        ));
+        assert_eq!(
+            app.normalize_in_image(egui::pos2(60.0, 35.0)),
+            Some((0.5, 0.5))
+        );
+        assert_eq!(app.normalize_in_image(egui::pos2(5.0, 5.0)), None);
     }
 }

@@ -42,6 +42,10 @@ allow = [
   "AGPL-3.0-or-later",
   "CC0-1.0",
   "Unlicense",
+  # ffmpeg-next / ffmpeg-sys-next (the h264/audio codec bindings, already
+  # shipped) are WTFPL -- a maximally-permissive public-domain-equivalent
+  # license. Allowed so the RC1 cargo-deny licenses check passes.
+  "WTFPL",
   "BSL-1.0",
   "OFL-1.1",
   "CDLA-Permissive-2.0",

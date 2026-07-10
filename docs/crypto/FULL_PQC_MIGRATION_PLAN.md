@@ -57,6 +57,21 @@ Goal: prevent quantum-era active impersonation.
 - Bind both peers' ML-KEM public keys, nonces, consent request ID, wire session fingerprint, and chosen transport into the signed transcript.
 - Add downgrade resistance: if a peer advertises full-PQC support, a classical-only transcript must fail unless explicitly permitted by policy.
 
+**Status (2026-07-02): native handshake done, browser not started.** `xenia-handshake`'s
+`HandshakeManager` and the live `xenia-peer-core` driver
+(`perform_host_handshake_with_transcript_and_context`/
+`perform_viewer_handshake_with_transcript`) now dual-sign every handshake:
+`HostHello`/`ViewerResponse`/`HostFinalize` carry ML-DSA-65 public keys and
+signatures alongside Ed25519, both signature transcripts bind the new
+fields, and verification requires both algorithms (AND composition, no
+classical-only fallback) — see ROADMAP.md row B4. This covers native
+`xenia-peer`/`xenia-viewer` only. `xenia-viewer-web`'s `WasmHandshake`
+still speaks the Ed25519-only transcript and will not interoperate with a
+dual-signing native peer until it is updated to match — that work has not
+started. Downgrade-resistance policy (classical-only transcript rejection
+when a peer advertises full-PQC support) is also not yet implemented; today
+both algorithms are simply always required.
+
 ### Stage 3 — PQ ledger signatures
 
 Goal: make consent evidence quantum-resistant.

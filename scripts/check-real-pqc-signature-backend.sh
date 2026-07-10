@@ -20,6 +20,21 @@ required_source=(
   "verify_evidence_bundle_with_backend"
   "verify_transcript_bound_evidence_bundle_with_backend"
   "BadSignatureEncoding"
+  "MlDsaEvidenceChain"
+  "new_ml_dsa_65_evidence_chain"
+  "ml_dsa_65_evidence_chain_exports_real_pq_signed_entries"
+  "EvidencePublicKeyBinding"
+  "verify_evidence_bundle_with_key_binding"
+  "ml_dsa_65_evidence_bundle_can_verify_with_public_key_binding"
+  "SessionTranscriptSignature"
+  "session_transcript_signature_message"
+  "verify_signed_transcript_bound_evidence_bundle_with_key_bindings"
+  "full_pqc_signed_transcript_bound_bundle_can_verify_with_ml_dsa"
+  "MissingTranscriptSignatureInFullPqc"
+  "EvidenceBundleSeal"
+  "sign_evidence_bundle_seal_ml_dsa_65"
+  "verify_sealed_signed_transcript_bound_evidence_bundle_with_key_bindings"
+  "full_pqc_sealed_bundle_can_verify_with_ml_dsa"
 )
 
 for token in "${required_source[@]}"; do
@@ -28,6 +43,16 @@ for token in "${required_source[@]}"; do
     exit 1
   fi
 done
+
+if python3 - "$ledger" <<'PY'
+import pathlib
+import sys
+sys.exit(0 if b"\x00" in pathlib.Path(sys.argv[1]).read_bytes() else 1)
+PY
+then
+  echo "ledger source must not contain raw NUL bytes" >&2
+  exit 1
+fi
 
 if ! grep -q -- 'ml-dsa = {' "$cargo"; then
   echo "missing ml-dsa dependency declaration" >&2

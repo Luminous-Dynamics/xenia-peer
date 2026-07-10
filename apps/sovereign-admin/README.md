@@ -16,7 +16,7 @@ Real integrations pending (W1 follow-ups):
 ## Build + run
 
 ```sh
-cd crates/xenia-admin
+cd apps/sovereign-admin
 
 # Dev: reload on change, serves on localhost:8134
 ~/.cargo/bin/trunk serve
@@ -45,7 +45,7 @@ This is the canonical "show a CISO what the product does" sequence. Every step h
 
 1. **Start the dev server:**
    ```sh
-   cd <xenia-root>-peer/crates/xenia-admin
+   cd <xenia-root>-peer/apps/sovereign-admin
    ~/.cargo/bin/trunk serve
    ```
    Wait for `applying new distribution` / `✅ success` (first run ~40s release compile, subsequent runs <2s incremental).
@@ -79,7 +79,7 @@ This is the canonical "show a CISO what the product does" sequence. Every step h
 ## Architecture
 
 ```
-crates/xenia-admin/
+apps/sovereign-admin/
 ├── Cargo.toml          AGPL-3.0-or-later, Leptos 0.8 CSR, xenia-ledger path dep
 ├── Trunk.toml          dev server on localhost:8134
 ├── index.html          Trunk entry, links main.css + the rust bin

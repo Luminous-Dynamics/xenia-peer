@@ -61,13 +61,16 @@ pub mod transport;
 #[cfg(feature = "opus")]
 pub use frame::OpusAudioCodec;
 pub use frame::{
-    AudioCodec, AudioCodecError, AudioJitterBuffer, AudioSampleFormat, JitterInsert, JitterStats,
-    PixelFormat, RawAudio, RawCapabilities, RawFrame, RawInput, RawPcmAudioCodec, RawRekey,
-    RawTelemetry, SyntheticAudioKind, SyntheticAudioSource, TelemetrySample, TelemetryValue,
+    AudioCodec, AudioCodecError, AudioJitterBuffer, AudioSampleFormat, ClipboardContent,
+    FILE_TRANSFER_CHUNK_SIZE, FileTransferMessage, JitterInsert, JitterStats,
+    PAYLOAD_TYPE_CLIPBOARD, PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST,
+    PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER, PixelFormat, RawAudio, RawCapabilities, RawClipboard,
+    RawFrame, RawInput, RawPcmAudioCodec, RawRekey, RawTelemetry, SyntheticAudioKind,
+    SyntheticAudioSource, TelemetrySample, TelemetryValue,
 };
 pub use handshake::{RekeyPolicy, SessionEpochState};
 pub use m1_session::{
-    M1AuditEvent, M1Permission, M1SessionError, M1SessionMachine, M1SessionState,
+    M1AuditEvent, M1Permission, M1PermissionSet, M1SessionError, M1SessionMachine, M1SessionState,
 };
 pub use session::{FrameLane, LaneSession, Session, SessionError, SessionRole};
 pub use xenia_handshake::{

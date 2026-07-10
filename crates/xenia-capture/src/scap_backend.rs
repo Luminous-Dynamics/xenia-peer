@@ -11,9 +11,21 @@
 //
 // - scap's `Capturer::get_next_frame()` is BLOCKING (no `try_recv` exposed
 //   upstream as of 0.1.0-beta.1), so we run the Capturer on a dedicated
-//   worker thread and forward frames via a bounded mpsc channel. The
-//   trait's `capture() -> Ok(None)` when no frame is ready is implemented
-//   via `Receiver::try_recv`.
+//   worker thread and forward frames via a bounded (`sync_channel`, cap 1)
+//   mpsc channel. The trait's `capture() -> Ok(None)` when no frame is
+//   ready is implemented via `Receiver::try_recv`, which drains at most
+//   one frame per call -- the consumer (the daemon's `--fps`-paced main
+//   loop) calls `capture()` once per tick, so if the channel were
+//   unbounded and the real capture rate exceeded `--fps` (very possible:
+//   PipeWire's damage-driven ScreenCast pace has nothing to do with
+//   `--fps`, and real-resolution BGRA frames are large), frames would
+//   queue up faster than they drain and memory would grow without limit.
+//   Bounding at 1 makes `frame_tx.send()` in the worker thread block once
+//   a frame is waiting to be consumed, which throttles capture to the
+//   consumer's actual drain rate -- exactly the backpressure a live
+//   video feed needs (always the latest frame, never a growing backlog
+//   of stale ones). Confirmed live: real capture without this bound grew
+//   to 7.5GB+ RSS within ~15-20s against a normal desktop.
 //
 // - scap's `Capturer` is `!Send` on Windows (upstream issue #145). The
 //   worker thread CONSTRUCTS the Capturer locally (inside the thread
@@ -30,7 +42,7 @@
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
-use crate::{CaptureError, CapturedFrame, ScreenCapture};
+use crate::{CaptureError, CapturedFrame, FrameData, ScreenCapture};
 
 /// Output resolution for scap. Maps to [`scap::capturer::Resolution`] at
 /// construction time.
@@ -128,7 +140,7 @@ impl ScapCapture {
             return Err(CaptureError::ConsentDenied);
         }
 
-        let (frame_tx, frame_rx) = mpsc::channel::<Result<CapturedFrame, CaptureError>>();
+        let (frame_tx, frame_rx) = mpsc::sync_channel::<Result<CapturedFrame, CaptureError>>(1);
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
 
         // Capturer is `!Send` on Windows — build it INSIDE the worker thread.
@@ -155,39 +167,94 @@ impl ScapCapture {
     }
 }
 
+/// Attempts to build a scap `Capturer` before giving up.
+///
+/// Upstream `scap`'s Linux portal D-Bus code has a request/response race:
+/// `handle_req_response` (portal.rs) sends the D-Bus method call and only
+/// registers the signal match for its reply afterward. If the portal
+/// replies before the match is registered — plausible for steps that need
+/// no user interaction, like session creation — the reply is silently
+/// missed and `LinuxCapturer::new` panics with "Failed to get screencast
+/// stream: ... Did not get response" despite the portal having actually
+/// succeeded. Observed non-deterministically (roughly every other attempt
+/// in one session, every attempt in another) on real KDE-Wayland hardware;
+/// a full restart of both xdg-desktop-portal.service and
+/// plasma-xdg-desktop-portal-kde.service did not affect its frequency,
+/// which rules out stale portal state and points at the race above.
+/// Retrying the whole build from scratch reliably gets past it.
+const MAX_BUILD_ATTEMPTS: u32 = 5;
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
+}
+
 fn scap_worker(
     options: ScapOptions,
-    frame_tx: mpsc::Sender<Result<CapturedFrame, CaptureError>>,
+    frame_tx: mpsc::SyncSender<Result<CapturedFrame, CaptureError>>,
     stop_rx: mpsc::Receiver<()>,
 ) {
-    let scap_options = scap::capturer::Options {
-        fps: options.fps,
-        show_cursor: options.show_cursor,
-        show_highlight: false,
-        target: None, // primary display
-        crop_area: None,
-        output_type: scap::frame::FrameType::BGRAFrame,
-        output_resolution: options.resolution.to_scap(),
-        excluded_targets: None,
-        captures_audio: false,
-        exclude_current_process_audio: false,
-    };
+    let mut capturer = None;
+    for attempt in 1..=MAX_BUILD_ATTEMPTS {
+        let scap_options = scap::capturer::Options {
+            fps: options.fps,
+            show_cursor: options.show_cursor,
+            show_highlight: false,
+            target: None, // primary display
+            crop_area: None,
+            output_type: scap::frame::FrameType::BGRAFrame,
+            output_resolution: options.resolution.to_scap(),
+            excluded_targets: None,
+            captures_audio: false,
+            exclude_current_process_audio: false,
+        };
 
-    let mut capturer = match scap::capturer::Capturer::build(scap_options) {
-        Ok(c) => c,
-        Err(e) => {
-            let err = match e {
-                scap::capturer::CapturerBuildError::NotSupported => {
-                    CaptureError::Unavailable(format!("scap build: {e:?}"))
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            scap::capturer::Capturer::build(scap_options)
+        })) {
+            Ok(Ok(c)) => {
+                capturer = Some(c);
+                break;
+            }
+            Ok(Err(e)) => {
+                // A real (non-panic) build error — support/permission, not
+                // the D-Bus race. Retrying won't help.
+                let err = match e {
+                    scap::capturer::CapturerBuildError::NotSupported => {
+                        CaptureError::Unavailable(format!("scap build: {e:?}"))
+                    }
+                    scap::capturer::CapturerBuildError::PermissionNotGranted => {
+                        CaptureError::ConsentDenied
+                    }
+                };
+                let _ = frame_tx.send(Err(err));
+                return;
+            }
+            Err(panic_payload) => {
+                let msg = panic_message(&*panic_payload);
+                if attempt == MAX_BUILD_ATTEMPTS {
+                    let _ = frame_tx.send(Err(CaptureError::Backend(format!(
+                        "scap capturer build panicked after {MAX_BUILD_ATTEMPTS} attempts \
+                         (known upstream D-Bus request/response race): {msg}"
+                    ))));
+                    return;
                 }
-                scap::capturer::CapturerBuildError::PermissionNotGranted => {
-                    CaptureError::ConsentDenied
-                }
-            };
-            let _ = frame_tx.send(Err(err));
-            return;
+                tracing::warn!(
+                    attempt,
+                    max_attempts = MAX_BUILD_ATTEMPTS,
+                    %msg,
+                    "scap capturer build panicked (known upstream D-Bus race); retrying"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
         }
-    };
+    }
+    let mut capturer = capturer.expect("loop exits only via break or early return");
 
     capturer.start_capture();
 
@@ -198,11 +265,11 @@ fn scap_worker(
 
         match capturer.get_next_frame() {
             Ok(frame) => {
-                if let Some(captured) = frame_to_rgba(frame) {
-                    if frame_tx.send(Ok(captured)).is_err() {
-                        // Consumer dropped — main thread is gone; shut down.
-                        break;
-                    }
+                if let Some(captured) = frame_to_rgba(frame)
+                    && frame_tx.send(Ok(captured)).is_err()
+                {
+                    // Consumer dropped — main thread is gone; shut down.
+                    break;
                 }
                 // Non-BGRA frames are discarded; we requested BGRA so
                 // this is an upstream API surprise rather than normal flow.
@@ -241,7 +308,7 @@ fn frame_to_rgba(frame: scap::frame::Frame) -> Option<CapturedFrame> {
         Frame::Audio(_) => return None,
     };
 
-    match video {
+    let (mut pixels, width, height) = match video {
         VideoFrame::BGRA(f) => {
             // B-G-R-A → R-G-B-A: swap bytes 0 and 2.
             let mut pixels = f.data;
@@ -251,11 +318,7 @@ fn frame_to_rgba(frame: scap::frame::Frame) -> Option<CapturedFrame> {
             for chunk in pixels.chunks_exact_mut(4) {
                 chunk.swap(0, 2);
             }
-            Some(CapturedFrame {
-                data: FrameData::Pixels(pixels),
-                width: f.width as u32,
-                height: f.height as u32,
-            })
+            (pixels, f.width as u32, f.height as u32)
         }
         VideoFrame::BGRx(f) => {
             // B-G-R-X → R-G-B-A: swap 0 and 2, force alpha to 255.
@@ -267,11 +330,7 @@ fn frame_to_rgba(frame: scap::frame::Frame) -> Option<CapturedFrame> {
                 chunk.swap(0, 2);
                 chunk[3] = 255;
             }
-            Some(CapturedFrame {
-                data: FrameData::Pixels(pixels),
-                width: f.width as u32,
-                height: f.height as u32,
-            })
+            (pixels, f.width as u32, f.height as u32)
         }
         VideoFrame::RGBx(f) => {
             // R-G-B-X → R-G-B-A: force alpha to 255, no channel swap.
@@ -282,11 +341,7 @@ fn frame_to_rgba(frame: scap::frame::Frame) -> Option<CapturedFrame> {
             for chunk in pixels.chunks_exact_mut(4) {
                 chunk[3] = 255;
             }
-            Some(CapturedFrame {
-                data: FrameData::Pixels(pixels),
-                width: f.width as u32,
-                height: f.height as u32,
-            })
+            (pixels, f.width as u32, f.height as u32)
         }
         VideoFrame::XBGR(f) => {
             // X-B-G-R → R-G-B-A: rotate bytes, set alpha to 255.
@@ -301,11 +356,7 @@ fn frame_to_rgba(frame: scap::frame::Frame) -> Option<CapturedFrame> {
                 chunk[2] = b;
                 chunk[3] = 255;
             }
-            Some(CapturedFrame {
-                data: FrameData::Pixels(pixels),
-                width: f.width as u32,
-                height: f.height as u32,
-            })
+            (pixels, f.width as u32, f.height as u32)
         }
         VideoFrame::RGB(f) => {
             // R-G-B → R-G-B-A: expand to 4 bytes per pixel, alpha 255.
@@ -316,11 +367,7 @@ fn frame_to_rgba(frame: scap::frame::Frame) -> Option<CapturedFrame> {
             for chunk in f.data.chunks_exact(3) {
                 pixels.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
             }
-            Some(CapturedFrame {
-                data: FrameData::Pixels(pixels),
-                width: f.width as u32,
-                height: f.height as u32,
-            })
+            (pixels, f.width as u32, f.height as u32)
         }
         VideoFrame::BGR0(f) => {
             // B-G-R-0 → R-G-B-A: swap 0 and 2, force alpha to 255.
@@ -334,18 +381,46 @@ fn frame_to_rgba(frame: scap::frame::Frame) -> Option<CapturedFrame> {
                 chunk.swap(0, 2);
                 chunk[3] = 255;
             }
-            Some(CapturedFrame {
-                data: FrameData::Pixels(pixels),
-                width: f.width as u32,
-                height: f.height as u32,
-            })
+            (pixels, f.width as u32, f.height as u32)
         }
         VideoFrame::YUVFrame(_) => {
             // NV12 YUV → RGBA conversion is non-trivial (420 subsampling,
             // BT.601 vs BT.709 color-matrix choice). Out of scope for this
             // wrapper — request BGRAFrame upstream and let scap handle it.
-            None
+            return None;
         }
+    };
+
+    // scap's Linux/PipeWire engine delivers buffers bottom-up (verified
+    // live 2026-07-04: a raw capture dump rendered upside-down --
+    // readable text, correctly proportioned windows, just vertically
+    // reversed, with no shearing -- ruling out a stride/padding bug and
+    // confirming a clean row-order flip is the whole fix). Every branch
+    // above produces tightly-packed RGBA (no stride padding), so a
+    // plain per-row reversal is exact.
+    flip_rows_vertically(&mut pixels, width, height);
+
+    Some(CapturedFrame {
+        data: FrameData::Pixels(pixels),
+        width,
+        height,
+    })
+}
+
+/// Reverse row order in-place for a tightly-packed (no stride padding)
+/// RGBA buffer. See `frame_to_rgba`'s doc comment for why this exists.
+fn flip_rows_vertically(pixels: &mut [u8], width: u32, height: u32) {
+    let row_len = width as usize * 4;
+    if row_len == 0 || pixels.len() != row_len * height as usize {
+        return;
+    }
+    let (mut top, mut bottom) = (0usize, height as usize - 1);
+    while top < bottom {
+        let (top_off, bottom_off) = (top * row_len, bottom * row_len);
+        let (head, tail) = pixels.split_at_mut(bottom_off);
+        head[top_off..top_off + row_len].swap_with_slice(&mut tail[..row_len]);
+        top += 1;
+        bottom -= 1;
     }
 }
 
@@ -420,6 +495,51 @@ mod tests {
         // Only contract: the probe returns a bool. On headless CI the
         // answer is almost certainly `false` and that's fine.
         let _ = ScapCapture::is_available();
+    }
+
+    #[test]
+    fn flip_rows_vertically_reverses_row_order() {
+        // 2x3 RGBA image (width=2, height=3): rows tagged 0/1/2 by their
+        // red channel so we can assert exact row order after flipping.
+        let mut pixels = vec![
+            0, 0, 0, 255, 0, 0, 0, 255, // row 0
+            1, 0, 0, 255, 1, 0, 0, 255, // row 1
+            2, 0, 0, 255, 2, 0, 0, 255, // row 2
+        ];
+        flip_rows_vertically(&mut pixels, 2, 3);
+        let expected = vec![
+            2, 0, 0, 255, 2, 0, 0, 255, // former row 2 now first
+            1, 0, 0, 255, 1, 0, 0, 255, // row 1 unchanged (middle)
+            0, 0, 0, 255, 0, 0, 0, 255, // former row 0 now last
+        ];
+        assert_eq!(pixels, expected);
+    }
+
+    #[test]
+    fn flip_rows_vertically_handles_odd_row_count() {
+        // 1x1 and 1x3 (odd height, has an untouched middle row) should
+        // not panic or corrupt data.
+        let mut single_row = vec![9, 8, 7, 255];
+        flip_rows_vertically(&mut single_row, 1, 1);
+        assert_eq!(single_row, vec![9, 8, 7, 255]);
+
+        let mut odd = vec![
+            0, 0, 0, 255, // row 0
+            1, 0, 0, 255, // row 1 (middle, stays put)
+            2, 0, 0, 255, // row 2
+        ];
+        flip_rows_vertically(&mut odd, 1, 3);
+        assert_eq!(odd, vec![2, 0, 0, 255, 1, 0, 0, 255, 0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn flip_rows_vertically_rejects_mismatched_length() {
+        // Defensive: a length that doesn't match width*height*4 must be
+        // a no-op, not a panic (mirrors length_matches' own defensive
+        // posture against malformed frames).
+        let mut pixels = vec![1, 2, 3, 4, 5, 6];
+        flip_rows_vertically(&mut pixels, 2, 2);
+        assert_eq!(pixels, vec![1, 2, 3, 4, 5, 6]);
     }
 
     #[test]

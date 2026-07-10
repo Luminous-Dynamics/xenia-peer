@@ -71,7 +71,7 @@ for the full claim boundary.
 
 ## Status
 
-**Pre-alpha.** Scaffold with ~480 LOC, 8 tests covering:
+**Pre-alpha.** ~3,950 LOC, 58 tests covering:
 
 - Empty chain verification
 - Genesis entry invariants (seq=0, prev_hash=0)

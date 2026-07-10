@@ -45,10 +45,11 @@
 //! - **blake3 for the hash chain.** Modern, tree-based, much faster than
 //!   SHA-256 at large scales. The chain itself uses only the single-
 //!   shot [`blake3::hash`] API for simplicity.
-//! - **Ed25519 for signatures.** Pair with the rest of the Xenia PQC
-//!   hybrid story (`xenia-handshake` uses Ed25519 + ML-KEM-768). PQC-
-//!   signed variants (Dilithium / ML-DSA) are a future extension tracked
-//!   separately.
+//! - **Ed25519 by default, ML-DSA behind an explicit feature.** The stable
+//!   [`Chain`] remains Ed25519 for M1 compatibility. Builds with the
+//!   `pqc-signatures` feature also expose ML-DSA-65/87 exported-evidence
+//!   chain builders so full-PQC fixtures can be produced and verified without
+//!   weakening the default hybrid/pre-PQC runtime claim.
 //! - **bincode v1 for canonical serialization.** Deterministic across
 //!   runs at a given bincode version. Version-locked via the workspace.
 //!   If we migrate to bincode v2 or a different serializer, a schema-
@@ -73,7 +74,8 @@ use uuid::Uuid;
 #[cfg(feature = "pqc-signatures")]
 use ml_dsa::{
     EncodedSignature as MlDsaEncodedSignature, EncodedVerifyingKey as MlDsaEncodedVerifyingKey,
-    MlDsa65, MlDsa87, MlDsaParams, Signature as MlDsaSignature, Verifier as MlDsaVerifier,
+    Keypair as MlDsaKeypair, MlDsa65, MlDsa87, MlDsaParams, Signature as MlDsaSignature,
+    Signer as MlDsaSigner, SigningKey as MlDsaSigningKey, Verifier as MlDsaVerifier,
     VerifyingKey as MlDsaVerifyingKey,
 };
 
@@ -628,6 +630,172 @@ pub const CURRENT_EVIDENCE_CRYPTO_MANIFEST: EvidenceCryptoManifest = EvidenceCry
     downgrade_policy: DowngradePolicy::ExplicitClassicalSignatureAllowance,
 };
 
+/// Stable schema label for evidence public-key bindings.
+pub const EVIDENCE_PUBLIC_KEY_BINDING_SCHEMA: &str = "xenia-evidence-public-key-binding-v1";
+
+/// Fingerprint algorithm used to bind evidence exports to their verifier key.
+pub const EVIDENCE_PUBLIC_KEY_FINGERPRINT_ALGORITHM: &str = "blake3-256";
+
+/// Public-key material and fingerprint used to verify exported evidence.
+///
+/// Evidence verifiers already require a caller-provided public key, but raw bytes
+/// alone are easy to mix up when full-PQC fixtures carry much larger ML-DSA keys.
+/// This binding makes the key's signature suite and fingerprint explicit before
+/// any ledger signature is trusted. It is intentionally separate from
+/// [`EvidenceCryptoManifest`] because fingerprints are artifact-specific while
+/// manifests describe the policy/profile class.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidencePublicKeyBinding {
+    /// Schema label for this binding shape.
+    pub schema: String,
+    /// Signature suite this public key verifies.
+    pub signature_suite: SignatureSuite,
+    /// Raw public/verifying-key bytes for `signature_suite`.
+    pub public_key: Vec<u8>,
+    /// Hash algorithm used for `public_key_fingerprint`.
+    pub fingerprint_algorithm: String,
+    /// Fingerprint over `public_key`.
+    pub public_key_fingerprint: [u8; 32],
+}
+
+impl EvidencePublicKeyBinding {
+    /// Build a public-key binding and compute its fingerprint.
+    pub fn new(signature_suite: SignatureSuite, public_key: impl Into<Vec<u8>>) -> Self {
+        let public_key = public_key.into();
+        Self {
+            schema: EVIDENCE_PUBLIC_KEY_BINDING_SCHEMA.to_string(),
+            signature_suite,
+            public_key_fingerprint: compute_evidence_public_key_fingerprint(&public_key),
+            public_key,
+            fingerprint_algorithm: EVIDENCE_PUBLIC_KEY_FINGERPRINT_ALGORITHM.to_string(),
+        }
+    }
+
+    /// Validate this key binding against a manifest and selected ledger signature backend.
+    pub fn validate_against_manifest_and_backend(
+        &self,
+        manifest: EvidenceCryptoManifest,
+        backend: &impl EvidenceSignatureBackend,
+    ) -> Result<(), EvidencePublicKeyBindingError> {
+        self.validate_against_signature_suite_and_backend(manifest.ledger_signature, backend)
+    }
+
+    /// Validate this key binding against an expected signature suite and backend.
+    ///
+    /// Use this when an artifact carries distinct verifier keys for different
+    /// authority surfaces, such as transcript signatures and ledger signatures.
+    pub fn validate_against_signature_suite_and_backend(
+        &self,
+        expected_suite: SignatureSuite,
+        backend: &impl EvidenceSignatureBackend,
+    ) -> Result<(), EvidencePublicKeyBindingError> {
+        if self.schema != EVIDENCE_PUBLIC_KEY_BINDING_SCHEMA {
+            return Err(EvidencePublicKeyBindingError::UnsupportedSchema {
+                schema: self.schema.clone(),
+            });
+        }
+        if self.fingerprint_algorithm != EVIDENCE_PUBLIC_KEY_FINGERPRINT_ALGORITHM {
+            return Err(
+                EvidencePublicKeyBindingError::UnsupportedFingerprintAlgorithm {
+                    algorithm: self.fingerprint_algorithm.clone(),
+                },
+            );
+        }
+        if self.public_key.is_empty() {
+            return Err(EvidencePublicKeyBindingError::EmptyPublicKey);
+        }
+        if self.signature_suite != expected_suite {
+            return Err(
+                EvidencePublicKeyBindingError::SignatureSuiteManifestMismatch {
+                    manifest_suite: expected_suite,
+                    binding_suite: self.signature_suite,
+                },
+            );
+        }
+        if self.signature_suite != backend.suite() {
+            return Err(
+                EvidencePublicKeyBindingError::SignatureSuiteBackendMismatch {
+                    backend_suite: backend.suite(),
+                    binding_suite: self.signature_suite,
+                },
+            );
+        }
+        if let Some(expected) = self.signature_suite.fixed_public_key_len() {
+            let found = self.public_key.len();
+            if found != expected {
+                return Err(EvidencePublicKeyBindingError::BadPublicKeyLength {
+                    signature_suite: self.signature_suite,
+                    expected,
+                    found,
+                });
+            }
+        }
+        let computed = compute_evidence_public_key_fingerprint(&self.public_key);
+        if computed != self.public_key_fingerprint {
+            return Err(EvidencePublicKeyBindingError::PublicKeyFingerprintMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// Compute the stable fingerprint for an evidence verifier public key.
+pub fn compute_evidence_public_key_fingerprint(public_key: &[u8]) -> [u8; 32] {
+    *blake3::hash(public_key).as_bytes()
+}
+
+/// Errors surfaced while validating an evidence public-key binding.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum EvidencePublicKeyBindingError {
+    /// The binding schema label is unknown to this verifier.
+    #[error("unsupported evidence public-key binding schema: {schema}")]
+    UnsupportedSchema {
+        /// Schema label found in the binding.
+        schema: String,
+    },
+    /// The fingerprint algorithm is unknown to this verifier.
+    #[error("unsupported evidence public-key fingerprint algorithm: {algorithm}")]
+    UnsupportedFingerprintAlgorithm {
+        /// Fingerprint algorithm label found in the binding.
+        algorithm: String,
+    },
+    /// The public key was empty.
+    #[error("evidence public key must not be empty")]
+    EmptyPublicKey,
+    /// The key binding's suite did not match the manifest ledger signature suite.
+    #[error(
+        "manifest ledger signature {manifest_suite:?} does not match public-key binding {binding_suite:?}"
+    )]
+    SignatureSuiteManifestMismatch {
+        /// Signature suite declared by the evidence manifest.
+        manifest_suite: SignatureSuite,
+        /// Signature suite declared by the public-key binding.
+        binding_suite: SignatureSuite,
+    },
+    /// The key binding's suite did not match the selected verifier backend.
+    #[error(
+        "verifier backend {backend_suite:?} does not match public-key binding {binding_suite:?}"
+    )]
+    SignatureSuiteBackendMismatch {
+        /// Signature suite handled by the selected backend.
+        backend_suite: SignatureSuite,
+        /// Signature suite declared by the public-key binding.
+        binding_suite: SignatureSuite,
+    },
+    /// The public key length did not match the fixed-size suite expectation.
+    #[error("bad public-key length for {signature_suite:?}: expected {expected}, found {found}")]
+    BadPublicKeyLength {
+        /// Signature suite declared by the binding.
+        signature_suite: SignatureSuite,
+        /// Expected public-key length in bytes.
+        expected: usize,
+        /// Actual public-key length in bytes.
+        found: usize,
+    },
+    /// The stored fingerprint did not match the supplied public-key bytes.
+    #[error("evidence public-key fingerprint mismatch")]
+    PublicKeyFingerprintMismatch,
+}
+
 /// Stable schema label for session transcript bindings.
 pub const SESSION_TRANSCRIPT_BINDING_SCHEMA: &str = "xenia-session-transcript-binding-v1";
 
@@ -712,6 +880,556 @@ impl SessionTranscriptBinding {
     }
 }
 
+/// Stable schema label for session transcript signatures.
+pub const SESSION_TRANSCRIPT_SIGNATURE_SCHEMA: &str = "xenia-session-transcript-signature-v1";
+
+/// Algorithm-tagged signature over a session transcript binding.
+///
+/// This artifact makes the transcript authority explicit. A transcript hash can
+/// bind a ledger to a session, but a full-PQC evidence bundle also needs a
+/// signature over that transcript hash so the transcript authority cannot remain
+/// classical or unsigned while the ledger entries are ML-DSA signed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTranscriptSignature {
+    /// Schema label for this signature artifact.
+    pub schema: String,
+    /// UUID of the session whose transcript was signed.
+    pub session_id: Uuid,
+    /// Hash algorithm used for `transcript_hash`.
+    pub transcript_hash_algorithm: String,
+    /// Hash of the canonical handshake/session transcript bytes.
+    pub transcript_hash: [u8; 32],
+    /// Algorithm-tagged signature over `transcript_hash`.
+    pub signature: SignatureEnvelope,
+}
+
+impl SessionTranscriptSignature {
+    /// Build a transcript-signature artifact from an existing transcript binding.
+    pub fn from_binding(binding: &SessionTranscriptBinding, signature: SignatureEnvelope) -> Self {
+        Self {
+            schema: SESSION_TRANSCRIPT_SIGNATURE_SCHEMA.to_string(),
+            session_id: binding.session_id,
+            transcript_hash_algorithm: binding.transcript_hash_algorithm.clone(),
+            transcript_hash: binding.transcript_hash,
+            signature,
+        }
+    }
+
+    /// Validate this transcript signature artifact before cryptographic verification.
+    pub fn validate_against_binding_and_manifest(
+        &self,
+        binding: &SessionTranscriptBinding,
+        manifest: EvidenceCryptoManifest,
+    ) -> Result<SignatureSuite, TranscriptSignatureError> {
+        if self.schema != SESSION_TRANSCRIPT_SIGNATURE_SCHEMA {
+            return Err(TranscriptSignatureError::UnsupportedSchema {
+                schema: self.schema.clone(),
+            });
+        }
+        if self.transcript_hash_algorithm != SESSION_TRANSCRIPT_HASH_ALGORITHM {
+            return Err(
+                TranscriptSignatureError::UnsupportedTranscriptHashAlgorithm {
+                    algorithm: self.transcript_hash_algorithm.clone(),
+                },
+            );
+        }
+        if self.session_id != binding.session_id {
+            return Err(TranscriptSignatureError::BindingSessionMismatch {
+                binding_session_id: binding.session_id,
+                signature_session_id: self.session_id,
+            });
+        }
+        if self.transcript_hash_algorithm != binding.transcript_hash_algorithm {
+            return Err(TranscriptSignatureError::BindingHashAlgorithmMismatch {
+                binding_algorithm: binding.transcript_hash_algorithm.clone(),
+                signature_algorithm: self.transcript_hash_algorithm.clone(),
+            });
+        }
+        if self.transcript_hash != binding.transcript_hash {
+            return Err(TranscriptSignatureError::BindingHashMismatch);
+        }
+        if self.transcript_hash == [0u8; 32] {
+            return Err(TranscriptSignatureError::EmptyTranscriptHash);
+        }
+
+        let signature_suite = self.signature.validate_shape()?;
+        if signature_suite != manifest.transcript_signature {
+            return Err(TranscriptSignatureError::TranscriptSignatureSuiteMismatch {
+                manifest_suite: manifest.transcript_signature,
+                signature_suite,
+            });
+        }
+
+        Ok(signature_suite)
+    }
+}
+
+/// Return the domain-separated message signed by transcript signature artifacts.
+///
+/// The raw transcript hash is intentionally not signed directly. Including the
+/// schema, session UUID, hash algorithm, and hash under an Xenia-specific domain
+/// prevents a transcript signature from being replayed as some other 32-byte
+/// message signature.
+pub fn session_transcript_signature_message(binding: &SessionTranscriptBinding) -> Vec<u8> {
+    let mut message = Vec::with_capacity(
+        b"xenia:session-transcript-signature:v1".len()
+            + SESSION_TRANSCRIPT_SIGNATURE_SCHEMA.len()
+            + SESSION_TRANSCRIPT_HASH_ALGORITHM.len()
+            + 16
+            + 32
+            + 4,
+    );
+    message.extend_from_slice(b"xenia:session-transcript-signature:v1");
+    message.push(0);
+    message.extend_from_slice(SESSION_TRANSCRIPT_SIGNATURE_SCHEMA.as_bytes());
+    message.push(0);
+    message.extend_from_slice(binding.session_id.as_bytes());
+    message.extend_from_slice(binding.transcript_hash_algorithm.as_bytes());
+    message.push(0);
+    message.extend_from_slice(&binding.transcript_hash);
+    message
+}
+
+/// Compute an Ed25519 transcript signature over an existing transcript binding.
+pub fn sign_session_transcript_binding_ed25519(
+    binding: &SessionTranscriptBinding,
+    signing_key: &SigningKey,
+) -> SessionTranscriptSignature {
+    let message = session_transcript_signature_message(binding);
+    let signature = signing_key.sign(&message).to_bytes();
+    SessionTranscriptSignature::from_binding(binding, SignatureEnvelope::ed25519(signature))
+}
+
+/// Compute an ML-DSA-65 transcript signature over an existing transcript binding.
+#[cfg(feature = "pqc-signatures")]
+pub fn sign_session_transcript_binding_ml_dsa_65(
+    binding: &SessionTranscriptBinding,
+    signing_key: &MlDsaSigningKey<MlDsa65>,
+) -> SessionTranscriptSignature {
+    let message = session_transcript_signature_message(binding);
+    let signature = signing_key.sign(&message).encode();
+    let signature_bytes: &[u8] = signature.as_ref();
+    SessionTranscriptSignature::from_binding(
+        binding,
+        SignatureEnvelope::new(SignatureSuite::MlDsa65Fips204, signature_bytes.to_vec()),
+    )
+}
+
+/// Compute an ML-DSA-87 transcript signature over an existing transcript binding.
+#[cfg(feature = "pqc-signatures")]
+pub fn sign_session_transcript_binding_ml_dsa_87(
+    binding: &SessionTranscriptBinding,
+    signing_key: &MlDsaSigningKey<MlDsa87>,
+) -> SessionTranscriptSignature {
+    let message = session_transcript_signature_message(binding);
+    let signature = signing_key.sign(&message).encode();
+    let signature_bytes: &[u8] = signature.as_ref();
+    SessionTranscriptSignature::from_binding(
+        binding,
+        SignatureEnvelope::new(SignatureSuite::MlDsa87Fips204, signature_bytes.to_vec()),
+    )
+}
+
+/// Stable schema label for signed evidence-bundle seals.
+pub const EVIDENCE_BUNDLE_SEAL_SCHEMA: &str = "xenia-evidence-bundle-seal-v1";
+
+/// Algorithm-tagged signature over the full evidence-bundle context.
+///
+/// Transcript signatures prove the handshake transcript hash. Ledger signatures
+/// prove individual consent entries. This seal binds the remaining artifact
+/// context together: manifest profile, signature suites, transcript hash,
+/// verifier-key fingerprints, and the ledger-chain endpoints. It prevents
+/// otherwise-valid pieces from being recombined across sessions or bundles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceBundleSeal {
+    /// Schema label for this seal shape.
+    pub schema: String,
+    /// UUID of the session described by the sealed bundle.
+    pub session_id: Uuid,
+    /// Evidence crypto policy profile declared by the manifest.
+    pub profile: CryptoPolicyProfile,
+    /// Signature suite authenticating the transcript authority surface.
+    pub transcript_signature: SignatureSuite,
+    /// Signature suite authenticating ledger entries.
+    pub ledger_signature: SignatureSuite,
+    /// Hash algorithm used for `transcript_hash`.
+    pub transcript_hash_algorithm: String,
+    /// Hash of the canonical handshake/session transcript bytes.
+    pub transcript_hash: [u8; 32],
+    /// Fingerprint of the transcript verifier public key.
+    pub transcript_public_key_fingerprint: [u8; 32],
+    /// Fingerprint of the ledger verifier public key.
+    pub ledger_public_key_fingerprint: [u8; 32],
+    /// Number of ledger entries covered by this seal.
+    pub ledger_entry_count: u64,
+    /// Entry hash of the first ledger entry covered by this seal.
+    pub ledger_first_entry_hash: [u8; 32],
+    /// Entry hash of the final ledger entry covered by this seal.
+    pub ledger_last_entry_hash: [u8; 32],
+    /// Algorithm-tagged signature over this seal's canonical message.
+    pub signature: SignatureEnvelope,
+}
+
+impl EvidenceBundleSeal {
+    /// Build a bundle-seal artifact from the verified evidence-bundle parts.
+    pub fn from_parts(
+        manifest: EvidenceCryptoManifest,
+        transcript_binding: &SessionTranscriptBinding,
+        transcript_key_binding: &EvidencePublicKeyBinding,
+        entries: &[LedgerEntryExport],
+        ledger_key_binding: &EvidencePublicKeyBinding,
+        signature: SignatureEnvelope,
+    ) -> Result<Self, EvidenceBundleSealError> {
+        let (ledger_entry_count, ledger_first_entry_hash, ledger_last_entry_hash) =
+            ledger_chain_anchors(entries)?;
+        Ok(Self {
+            schema: EVIDENCE_BUNDLE_SEAL_SCHEMA.to_string(),
+            session_id: transcript_binding.session_id,
+            profile: manifest.profile,
+            transcript_signature: manifest.transcript_signature,
+            ledger_signature: manifest.ledger_signature,
+            transcript_hash_algorithm: transcript_binding.transcript_hash_algorithm.clone(),
+            transcript_hash: transcript_binding.transcript_hash,
+            transcript_public_key_fingerprint: transcript_key_binding.public_key_fingerprint,
+            ledger_public_key_fingerprint: ledger_key_binding.public_key_fingerprint,
+            ledger_entry_count,
+            ledger_first_entry_hash,
+            ledger_last_entry_hash,
+            signature,
+        })
+    }
+
+    /// Validate this seal against the bundle parts it claims to cover.
+    pub fn validate_against_bundle(
+        &self,
+        manifest: EvidenceCryptoManifest,
+        transcript_binding: &SessionTranscriptBinding,
+        transcript_key_binding: &EvidencePublicKeyBinding,
+        entries: &[LedgerEntryExport],
+        ledger_key_binding: &EvidencePublicKeyBinding,
+    ) -> Result<SignatureSuite, EvidenceBundleSealError> {
+        if self.schema != EVIDENCE_BUNDLE_SEAL_SCHEMA {
+            return Err(EvidenceBundleSealError::UnsupportedSchema {
+                schema: self.schema.clone(),
+            });
+        }
+        if self.session_id != transcript_binding.session_id {
+            return Err(EvidenceBundleSealError::SessionMismatch {
+                binding_session_id: transcript_binding.session_id,
+                seal_session_id: self.session_id,
+            });
+        }
+        if self.profile != manifest.profile {
+            return Err(EvidenceBundleSealError::ProfileMismatch {
+                manifest_profile: manifest.profile,
+                seal_profile: self.profile,
+            });
+        }
+        if self.transcript_signature != manifest.transcript_signature {
+            return Err(EvidenceBundleSealError::TranscriptSignatureSuiteMismatch {
+                manifest_suite: manifest.transcript_signature,
+                seal_suite: self.transcript_signature,
+            });
+        }
+        if self.ledger_signature != manifest.ledger_signature {
+            return Err(EvidenceBundleSealError::LedgerSignatureSuiteMismatch {
+                manifest_suite: manifest.ledger_signature,
+                seal_suite: self.ledger_signature,
+            });
+        }
+        if self.transcript_hash_algorithm != transcript_binding.transcript_hash_algorithm {
+            return Err(EvidenceBundleSealError::TranscriptHashAlgorithmMismatch {
+                binding_algorithm: transcript_binding.transcript_hash_algorithm.clone(),
+                seal_algorithm: self.transcript_hash_algorithm.clone(),
+            });
+        }
+        if self.transcript_hash != transcript_binding.transcript_hash {
+            return Err(EvidenceBundleSealError::TranscriptHashMismatch);
+        }
+        if self.transcript_public_key_fingerprint != transcript_key_binding.public_key_fingerprint {
+            return Err(EvidenceBundleSealError::TranscriptPublicKeyFingerprintMismatch);
+        }
+        if self.ledger_public_key_fingerprint != ledger_key_binding.public_key_fingerprint {
+            return Err(EvidenceBundleSealError::LedgerPublicKeyFingerprintMismatch);
+        }
+
+        let (ledger_entry_count, ledger_first_entry_hash, ledger_last_entry_hash) =
+            ledger_chain_anchors(entries)?;
+        if self.ledger_entry_count != ledger_entry_count {
+            return Err(EvidenceBundleSealError::LedgerEntryCountMismatch {
+                expected: ledger_entry_count,
+                found: self.ledger_entry_count,
+            });
+        }
+        if self.ledger_first_entry_hash != ledger_first_entry_hash {
+            return Err(EvidenceBundleSealError::LedgerFirstEntryHashMismatch);
+        }
+        if self.ledger_last_entry_hash != ledger_last_entry_hash {
+            return Err(EvidenceBundleSealError::LedgerLastEntryHashMismatch);
+        }
+
+        let signature_suite = self.signature.validate_shape()?;
+        if signature_suite != manifest.transcript_signature {
+            return Err(EvidenceBundleSealError::SealSignatureSuiteMismatch {
+                manifest_suite: manifest.transcript_signature,
+                seal_suite: signature_suite,
+            });
+        }
+        Ok(signature_suite)
+    }
+}
+
+/// Return the domain-separated message signed by evidence-bundle seals.
+pub fn evidence_bundle_seal_message(seal: &EvidenceBundleSeal) -> Vec<u8> {
+    let mut message = Vec::new();
+    evidence_message_push_bytes(&mut message, b"xenia:evidence-bundle-seal:v1");
+    evidence_message_push_bytes(&mut message, seal.schema.as_bytes());
+    evidence_message_push_bytes(&mut message, seal.session_id.as_bytes());
+    evidence_message_push_bytes(&mut message, seal.profile.stable_label().as_bytes());
+    evidence_message_push_bytes(
+        &mut message,
+        seal.transcript_signature.stable_label().as_bytes(),
+    );
+    evidence_message_push_bytes(
+        &mut message,
+        seal.ledger_signature.stable_label().as_bytes(),
+    );
+    evidence_message_push_bytes(&mut message, seal.transcript_hash_algorithm.as_bytes());
+    evidence_message_push_bytes(&mut message, &seal.transcript_hash);
+    evidence_message_push_bytes(&mut message, &seal.transcript_public_key_fingerprint);
+    evidence_message_push_bytes(&mut message, &seal.ledger_public_key_fingerprint);
+    evidence_message_push_u64(&mut message, seal.ledger_entry_count);
+    evidence_message_push_bytes(&mut message, &seal.ledger_first_entry_hash);
+    evidence_message_push_bytes(&mut message, &seal.ledger_last_entry_hash);
+    message
+}
+
+/// Return the domain-separated message for a seal over the provided bundle parts.
+pub fn evidence_bundle_seal_message_from_parts(
+    manifest: EvidenceCryptoManifest,
+    transcript_binding: &SessionTranscriptBinding,
+    transcript_key_binding: &EvidencePublicKeyBinding,
+    entries: &[LedgerEntryExport],
+    ledger_key_binding: &EvidencePublicKeyBinding,
+) -> Result<Vec<u8>, EvidenceBundleSealError> {
+    let seal = EvidenceBundleSeal::from_parts(
+        manifest,
+        transcript_binding,
+        transcript_key_binding,
+        entries,
+        ledger_key_binding,
+        SignatureEnvelope::new(manifest.transcript_signature, Vec::<u8>::new()),
+    )?;
+    Ok(evidence_bundle_seal_message(&seal))
+}
+
+/// Compute an Ed25519 evidence-bundle seal signature.
+pub fn sign_evidence_bundle_seal_ed25519(
+    manifest: EvidenceCryptoManifest,
+    transcript_binding: &SessionTranscriptBinding,
+    transcript_key_binding: &EvidencePublicKeyBinding,
+    entries: &[LedgerEntryExport],
+    ledger_key_binding: &EvidencePublicKeyBinding,
+    signing_key: &SigningKey,
+) -> Result<EvidenceBundleSeal, EvidenceBundleSealError> {
+    let message = evidence_bundle_seal_message_from_parts(
+        manifest,
+        transcript_binding,
+        transcript_key_binding,
+        entries,
+        ledger_key_binding,
+    )?;
+    let signature = signing_key.sign(&message).to_bytes();
+    EvidenceBundleSeal::from_parts(
+        manifest,
+        transcript_binding,
+        transcript_key_binding,
+        entries,
+        ledger_key_binding,
+        SignatureEnvelope::ed25519(signature),
+    )
+}
+
+/// Compute an ML-DSA-65 evidence-bundle seal signature.
+#[cfg(feature = "pqc-signatures")]
+pub fn sign_evidence_bundle_seal_ml_dsa_65(
+    manifest: EvidenceCryptoManifest,
+    transcript_binding: &SessionTranscriptBinding,
+    transcript_key_binding: &EvidencePublicKeyBinding,
+    entries: &[LedgerEntryExport],
+    ledger_key_binding: &EvidencePublicKeyBinding,
+    signing_key: &MlDsaSigningKey<MlDsa65>,
+) -> Result<EvidenceBundleSeal, EvidenceBundleSealError> {
+    let message = evidence_bundle_seal_message_from_parts(
+        manifest,
+        transcript_binding,
+        transcript_key_binding,
+        entries,
+        ledger_key_binding,
+    )?;
+    let signature = signing_key.sign(&message).encode();
+    let signature_bytes: &[u8] = signature.as_ref();
+    EvidenceBundleSeal::from_parts(
+        manifest,
+        transcript_binding,
+        transcript_key_binding,
+        entries,
+        ledger_key_binding,
+        SignatureEnvelope::new(SignatureSuite::MlDsa65Fips204, signature_bytes.to_vec()),
+    )
+}
+
+/// Compute an ML-DSA-87 evidence-bundle seal signature.
+#[cfg(feature = "pqc-signatures")]
+pub fn sign_evidence_bundle_seal_ml_dsa_87(
+    manifest: EvidenceCryptoManifest,
+    transcript_binding: &SessionTranscriptBinding,
+    transcript_key_binding: &EvidencePublicKeyBinding,
+    entries: &[LedgerEntryExport],
+    ledger_key_binding: &EvidencePublicKeyBinding,
+    signing_key: &MlDsaSigningKey<MlDsa87>,
+) -> Result<EvidenceBundleSeal, EvidenceBundleSealError> {
+    let message = evidence_bundle_seal_message_from_parts(
+        manifest,
+        transcript_binding,
+        transcript_key_binding,
+        entries,
+        ledger_key_binding,
+    )?;
+    let signature = signing_key.sign(&message).encode();
+    let signature_bytes: &[u8] = signature.as_ref();
+    EvidenceBundleSeal::from_parts(
+        manifest,
+        transcript_binding,
+        transcript_key_binding,
+        entries,
+        ledger_key_binding,
+        SignatureEnvelope::new(SignatureSuite::MlDsa87Fips204, signature_bytes.to_vec()),
+    )
+}
+
+fn evidence_message_push_bytes(message: &mut Vec<u8>, bytes: &[u8]) {
+    let len = bytes.len() as u64;
+    message.extend_from_slice(&len.to_be_bytes());
+    message.extend_from_slice(bytes);
+}
+
+fn evidence_message_push_u64(message: &mut Vec<u8>, value: u64) {
+    message.extend_from_slice(&value.to_be_bytes());
+}
+
+fn ledger_chain_anchors(
+    entries: &[LedgerEntryExport],
+) -> Result<(u64, [u8; 32], [u8; 32]), EvidenceBundleSealError> {
+    let first = entries
+        .first()
+        .ok_or(EvidenceBundleSealError::EmptyTranscriptBoundBundle)?;
+    let last = entries
+        .last()
+        .ok_or(EvidenceBundleSealError::EmptyTranscriptBoundBundle)?;
+    Ok((entries.len() as u64, first.entry_hash, last.entry_hash))
+}
+
+/// Errors surfaced while validating a signed evidence-bundle seal.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum EvidenceBundleSealError {
+    /// The bundle seal schema label is unknown to this verifier.
+    #[error("unsupported evidence-bundle seal schema: {schema}")]
+    UnsupportedSchema {
+        /// Schema label found in the seal.
+        schema: String,
+    },
+    /// The seal session UUID did not match the transcript binding.
+    #[error(
+        "transcript binding session {binding_session_id} does not match bundle seal session {seal_session_id}"
+    )]
+    SessionMismatch {
+        /// Session UUID declared by the transcript binding.
+        binding_session_id: Uuid,
+        /// Session UUID declared by the bundle seal.
+        seal_session_id: Uuid,
+    },
+    /// The seal profile did not match the manifest.
+    #[error(
+        "manifest profile {manifest_profile:?} does not match bundle seal profile {seal_profile:?}"
+    )]
+    ProfileMismatch {
+        /// Crypto policy profile declared by the manifest.
+        manifest_profile: CryptoPolicyProfile,
+        /// Crypto policy profile declared by the seal.
+        seal_profile: CryptoPolicyProfile,
+    },
+    /// The seal transcript signature suite did not match the manifest.
+    #[error(
+        "manifest transcript signature {manifest_suite:?} does not match bundle seal transcript signature {seal_suite:?}"
+    )]
+    TranscriptSignatureSuiteMismatch {
+        /// Signature suite declared by the manifest.
+        manifest_suite: SignatureSuite,
+        /// Signature suite declared by the seal.
+        seal_suite: SignatureSuite,
+    },
+    /// The seal ledger signature suite did not match the manifest.
+    #[error(
+        "manifest ledger signature {manifest_suite:?} does not match bundle seal ledger signature {seal_suite:?}"
+    )]
+    LedgerSignatureSuiteMismatch {
+        /// Signature suite declared by the manifest.
+        manifest_suite: SignatureSuite,
+        /// Signature suite declared by the seal.
+        seal_suite: SignatureSuite,
+    },
+    /// The seal transcript hash algorithm did not match the transcript binding.
+    #[error(
+        "transcript binding hash algorithm {binding_algorithm} does not match bundle seal hash algorithm {seal_algorithm}"
+    )]
+    TranscriptHashAlgorithmMismatch {
+        /// Hash algorithm declared by the transcript binding.
+        binding_algorithm: String,
+        /// Hash algorithm declared by the seal.
+        seal_algorithm: String,
+    },
+    /// The seal transcript hash did not match the transcript binding.
+    #[error("bundle seal transcript hash does not match transcript binding hash")]
+    TranscriptHashMismatch,
+    /// The seal transcript key fingerprint did not match the transcript key binding.
+    #[error("bundle seal transcript public-key fingerprint mismatch")]
+    TranscriptPublicKeyFingerprintMismatch,
+    /// The seal ledger key fingerprint did not match the ledger key binding.
+    #[error("bundle seal ledger public-key fingerprint mismatch")]
+    LedgerPublicKeyFingerprintMismatch,
+    /// The seal ledger entry count did not match the supplied entries.
+    #[error("bundle seal ledger entry count mismatch: expected {expected}, found {found}")]
+    LedgerEntryCountMismatch {
+        /// Ledger entry count computed from the supplied entries.
+        expected: u64,
+        /// Ledger entry count declared by the seal.
+        found: u64,
+    },
+    /// The seal first entry hash did not match the supplied entries.
+    #[error("bundle seal first ledger entry hash mismatch")]
+    LedgerFirstEntryHashMismatch,
+    /// The seal last entry hash did not match the supplied entries.
+    #[error("bundle seal last ledger entry hash mismatch")]
+    LedgerLastEntryHashMismatch,
+    /// The seal signature envelope was malformed.
+    #[error("bundle seal signature envelope rejected artifact: {0}")]
+    SignatureEnvelope(#[from] SignatureEnvelopeError),
+    /// The seal signature suite did not match the manifest transcript authority suite.
+    #[error(
+        "manifest transcript signature {manifest_suite:?} does not match bundle seal signature {seal_suite:?}"
+    )]
+    SealSignatureSuiteMismatch {
+        /// Signature suite declared by the manifest.
+        manifest_suite: SignatureSuite,
+        /// Signature suite declared by the seal signature envelope.
+        seal_suite: SignatureSuite,
+    },
+    /// A sealed transcript-bound evidence bundle had no ledger entries to seal.
+    #[error("sealed transcript-bound evidence bundle must contain at least one ledger entry")]
+    EmptyTranscriptBoundBundle,
+}
+
 /// Compute Xenia's stable session transcript binding hash.
 pub fn compute_session_transcript_hash(transcript_bytes: &[u8]) -> [u8; 32] {
     *blake3::hash(transcript_bytes).as_bytes()
@@ -744,6 +1462,62 @@ pub enum TranscriptBindingError {
         manifest_suite: SignatureSuite,
         /// Signature suite declared by the transcript binding.
         binding_suite: SignatureSuite,
+    },
+}
+
+/// Errors surfaced while validating a session transcript signature artifact.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum TranscriptSignatureError {
+    /// The transcript signature schema label is unknown to this verifier.
+    #[error("unsupported transcript signature schema: {schema}")]
+    UnsupportedSchema {
+        /// Schema label found in the signature artifact.
+        schema: String,
+    },
+    /// The transcript hash algorithm is unknown to this verifier.
+    #[error("unsupported transcript signature hash algorithm: {algorithm}")]
+    UnsupportedTranscriptHashAlgorithm {
+        /// Hash algorithm label found in the signature artifact.
+        algorithm: String,
+    },
+    /// The signature artifact used an all-zero transcript hash placeholder.
+    #[error("transcript signature hash must not be the all-zero placeholder")]
+    EmptyTranscriptHash,
+    /// The signature artifact's session UUID did not match the binding.
+    #[error(
+        "transcript binding session {binding_session_id} does not match transcript signature session {signature_session_id}"
+    )]
+    BindingSessionMismatch {
+        /// Session UUID declared by the transcript binding.
+        binding_session_id: Uuid,
+        /// Session UUID declared by the transcript signature artifact.
+        signature_session_id: Uuid,
+    },
+    /// The signature artifact's hash algorithm did not match the binding.
+    #[error(
+        "transcript binding hash algorithm {binding_algorithm} does not match transcript signature algorithm {signature_algorithm}"
+    )]
+    BindingHashAlgorithmMismatch {
+        /// Hash algorithm declared by the transcript binding.
+        binding_algorithm: String,
+        /// Hash algorithm declared by the transcript signature artifact.
+        signature_algorithm: String,
+    },
+    /// The signature artifact's transcript hash did not match the binding.
+    #[error("transcript signature hash does not match transcript binding hash")]
+    BindingHashMismatch,
+    /// The signature envelope was malformed.
+    #[error("transcript signature envelope rejected artifact: {0}")]
+    SignatureEnvelope(#[from] SignatureEnvelopeError),
+    /// The signature artifact's suite did not match the manifest.
+    #[error(
+        "manifest transcript signature {manifest_suite:?} does not match transcript signature artifact {signature_suite:?}"
+    )]
+    TranscriptSignatureSuiteMismatch {
+        /// Signature suite declared by the evidence manifest.
+        manifest_suite: SignatureSuite,
+        /// Signature suite declared by the transcript signature artifact.
+        signature_suite: SignatureSuite,
     },
 }
 
@@ -900,6 +1674,110 @@ impl LedgerEntry {
     }
 }
 
+/// Feature-gated exported-evidence chain signed with ML-DSA.
+///
+/// This type deliberately produces only [`LedgerEntryExport`] entries. It does
+/// not pretend to be the stable Ed25519 [`Chain`] runtime shape; it exists to
+/// make the full-PQC evidence path real enough for fixtures, verifier tests,
+/// and future runtime promotion behind explicit policy gates.
+#[cfg(feature = "pqc-signatures")]
+pub struct MlDsaEvidenceChain<P: MlDsaParams> {
+    entries: Vec<LedgerEntryExport>,
+    signing_key: MlDsaSigningKey<P>,
+    suite: SignatureSuite,
+}
+
+#[cfg(feature = "pqc-signatures")]
+impl<P: MlDsaParams> MlDsaEvidenceChain<P> {
+    /// Create an empty ML-DSA exported-evidence chain.
+    fn new(signing_key: MlDsaSigningKey<P>, suite: SignatureSuite) -> Self {
+        Self {
+            entries: Vec::new(),
+            signing_key,
+            suite,
+        }
+    }
+
+    /// Return the number of entries in the exported-evidence chain.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the exported-evidence chain has no entries yet.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The `entry_hash` of the most recent entry, or `[0; 32]` before genesis.
+    pub fn last_hash(&self) -> [u8; 32] {
+        self.entries
+            .last()
+            .map(|entry| entry.entry_hash)
+            .unwrap_or([0u8; 32])
+    }
+
+    /// Return the raw encoded ML-DSA verifying key bytes for this chain.
+    pub fn public_key_bytes(&self) -> Vec<u8> {
+        let encoded = self.signing_key.verifying_key().encode();
+        std::convert::AsRef::<[u8]>::as_ref(&encoded).to_vec()
+    }
+
+    /// Iterate over all exported entries in sequence order.
+    pub fn iter(&self) -> impl Iterator<Item = &LedgerEntryExport> {
+        self.entries.iter()
+    }
+
+    /// Return a cloned exported-entry vector for persistence or evidence bundles.
+    pub fn export_entries(&self) -> Vec<LedgerEntryExport> {
+        self.entries.clone()
+    }
+
+    /// Append a consent event, computing the same hash-chain preimage as the
+    /// default ledger but signing the resulting entry hash with ML-DSA.
+    pub fn append(&mut self, event: ConsentEventRecord) -> Result<&LedgerEntryExport, LedgerError> {
+        let entry_index = self.entries.len();
+        let seq = entry_index as u64;
+        let prev_hash = self.last_hash();
+        let timestamp = SystemTime::now();
+
+        let entry_hash = compute_entry_hash(seq, &prev_hash, &timestamp, &event)?;
+        let signature = self.signing_key.sign(&entry_hash).encode();
+        let signature_bytes: &[u8] = signature.as_ref();
+
+        self.entries.push(LedgerEntryExport {
+            seq,
+            prev_hash,
+            timestamp,
+            event,
+            entry_hash,
+            signature: SignatureEnvelope::new(self.suite, signature_bytes.to_vec()),
+        });
+        self.entries
+            .get(entry_index)
+            .ok_or(LedgerError::AppendInvariant)
+    }
+}
+
+/// ML-DSA-65 exported-evidence chain builder.
+#[cfg(feature = "pqc-signatures")]
+pub type MlDsa65EvidenceChain = MlDsaEvidenceChain<MlDsa65>;
+
+/// ML-DSA-87 exported-evidence chain builder.
+#[cfg(feature = "pqc-signatures")]
+pub type MlDsa87EvidenceChain = MlDsaEvidenceChain<MlDsa87>;
+
+/// Create an empty ML-DSA-65 exported-evidence chain.
+#[cfg(feature = "pqc-signatures")]
+pub fn new_ml_dsa_65_evidence_chain(signing_key: MlDsaSigningKey<MlDsa65>) -> MlDsa65EvidenceChain {
+    MlDsaEvidenceChain::new(signing_key, SignatureSuite::MlDsa65Fips204)
+}
+
+/// Create an empty ML-DSA-87 exported-evidence chain.
+#[cfg(feature = "pqc-signatures")]
+pub fn new_ml_dsa_87_evidence_chain(signing_key: MlDsaSigningKey<MlDsa87>) -> MlDsa87EvidenceChain {
+    MlDsaEvidenceChain::new(signing_key, SignatureSuite::MlDsa87Fips204)
+}
+
 /// Errors surfaced by [`Chain`] operations.
 #[derive(Debug, Error)]
 pub enum LedgerError {
@@ -1006,6 +1884,46 @@ pub enum EvidenceBundleVerifyError {
     /// The session transcript binding failed validation.
     #[error("session transcript binding rejected artifact: {0}")]
     TranscriptBinding(#[from] TranscriptBindingError),
+    /// A full-PQC transcript-bound verifier was called without a transcript signature artifact.
+    #[error(
+        "full-pqc-v1 transcript-bound evidence requires an explicit transcript signature artifact"
+    )]
+    MissingTranscriptSignatureInFullPqc,
+    /// The session transcript signature artifact failed validation.
+    #[error("session transcript signature rejected artifact: {0}")]
+    TranscriptSignature(#[from] TranscriptSignatureError),
+    /// The selected transcript signature backend does not satisfy the manifest.
+    #[error(
+        "manifest transcript signature {manifest_suite:?} does not match transcript verifier backend {backend_suite:?}"
+    )]
+    TranscriptBackendSuiteMismatch {
+        /// Signature suite declared by the evidence manifest.
+        manifest_suite: SignatureSuite,
+        /// Signature suite handled by the selected transcript verifier backend.
+        backend_suite: SignatureSuite,
+    },
+    /// The transcript signature failed backend verification.
+    #[error("transcript signature verification failed for {signature_suite:?}: {source}")]
+    TranscriptSignatureBackend {
+        /// Signature suite selected for transcript verification.
+        signature_suite: SignatureSuite,
+        /// Backend verification error.
+        source: EvidenceSignatureBackendError,
+    },
+    /// The evidence-bundle seal failed validation.
+    #[error("evidence-bundle seal rejected artifact: {0}")]
+    BundleSeal(#[from] EvidenceBundleSealError),
+    /// The bundle seal signature failed backend verification.
+    #[error("bundle seal signature verification failed for {signature_suite:?}: {source}")]
+    BundleSealSignatureBackend {
+        /// Signature suite selected for bundle-seal verification.
+        signature_suite: SignatureSuite,
+        /// Backend verification error.
+        source: EvidenceSignatureBackendError,
+    },
+    /// The public-key binding failed validation.
+    #[error("evidence public-key binding rejected artifact: {0}")]
+    PublicKeyBinding(#[from] EvidencePublicKeyBindingError),
     /// A transcript-bound evidence bundle had no ledger entries to bind.
     #[error("transcript-bound evidence bundle must contain at least one ledger entry")]
     EmptyTranscriptBoundBundle,
@@ -1263,6 +2181,27 @@ impl Verifier {
         Ok(())
     }
 
+    /// Verify an evidence bundle using a self-describing public-key binding.
+    ///
+    /// This is the preferred explicit-backend verifier for long-lived artifacts:
+    /// it validates the manifest policy, selected backend, key suite, public-key
+    /// length, and public-key fingerprint before any entry signature is checked.
+    pub fn verify_evidence_bundle_with_key_binding(
+        manifest: EvidenceCryptoManifest,
+        entries: &[LedgerEntryExport],
+        key_binding: &EvidencePublicKeyBinding,
+        backend: &impl EvidenceSignatureBackend,
+    ) -> Result<(), EvidenceBundleVerifyError> {
+        Self::verify_evidence_crypto_manifest(manifest)?;
+        key_binding.validate_against_manifest_and_backend(manifest, backend)?;
+        Self::verify_evidence_bundle_with_backend(
+            manifest,
+            entries,
+            &key_binding.public_key,
+            backend,
+        )
+    }
+
     /// Verify a manifest, session transcript binding, and exported ledger as one artifact.
     ///
     /// This is the preferred verifier for evidence bundles that include a canonical
@@ -1298,6 +2237,9 @@ impl Verifier {
         backend: &impl EvidenceSignatureBackend,
     ) -> Result<(), EvidenceBundleVerifyError> {
         transcript_binding.validate_against_manifest(manifest)?;
+        if manifest.profile.requires_post_quantum_signatures() {
+            return Err(EvidenceBundleVerifyError::MissingTranscriptSignatureInFullPqc);
+        }
 
         if entries.is_empty() {
             return Err(EvidenceBundleVerifyError::EmptyTranscriptBoundBundle);
@@ -1314,6 +2256,172 @@ impl Verifier {
         }
 
         Self::verify_evidence_bundle_with_backend(manifest, entries, public_key, backend)
+    }
+
+    /// Verify a transcript-bound evidence bundle using a self-describing public-key binding.
+    ///
+    /// This keeps the full verifier surface self-describing: manifest, transcript
+    /// binding, public-key provenance, signature backend, and exported ledger must
+    /// agree before the artifact is accepted.
+    pub fn verify_transcript_bound_evidence_bundle_with_key_binding(
+        manifest: EvidenceCryptoManifest,
+        transcript_binding: &SessionTranscriptBinding,
+        entries: &[LedgerEntryExport],
+        key_binding: &EvidencePublicKeyBinding,
+        backend: &impl EvidenceSignatureBackend,
+    ) -> Result<(), EvidenceBundleVerifyError> {
+        transcript_binding.validate_against_manifest(manifest)?;
+        if manifest.profile.requires_post_quantum_signatures() {
+            return Err(EvidenceBundleVerifyError::MissingTranscriptSignatureInFullPqc);
+        }
+        key_binding.validate_against_manifest_and_backend(manifest, backend)?;
+
+        if entries.is_empty() {
+            return Err(EvidenceBundleVerifyError::EmptyTranscriptBoundBundle);
+        }
+
+        for entry in entries {
+            if entry.event.session_id != transcript_binding.session_id {
+                return Err(EvidenceBundleVerifyError::TranscriptSessionMismatch {
+                    seq: entry.seq,
+                    binding_session_id: transcript_binding.session_id,
+                    entry_session_id: entry.event.session_id,
+                });
+            }
+        }
+
+        Self::verify_evidence_bundle_with_backend(
+            manifest,
+            entries,
+            &key_binding.public_key,
+            backend,
+        )
+    }
+
+    /// Verify a signed transcript-bound evidence bundle using explicit key bindings.
+    ///
+    /// This is the strict verifier for `full-pqc-v1` artifacts. It requires a
+    /// signature over the transcript hash, validates the transcript verifier key
+    /// against `manifest.transcript_signature`, validates the ledger verifier key
+    /// against `manifest.ledger_signature`, and only then verifies ledger entries.
+    #[allow(clippy::too_many_arguments)] // distinct verification inputs (manifest, bindings, signatures, key fingerprints); a bundle struct would just re-spread them
+    pub fn verify_signed_transcript_bound_evidence_bundle_with_key_bindings(
+        manifest: EvidenceCryptoManifest,
+        transcript_binding: &SessionTranscriptBinding,
+        transcript_signature: &SessionTranscriptSignature,
+        transcript_key_binding: &EvidencePublicKeyBinding,
+        entries: &[LedgerEntryExport],
+        ledger_key_binding: &EvidencePublicKeyBinding,
+        transcript_backend: &impl EvidenceSignatureBackend,
+        ledger_backend: &impl EvidenceSignatureBackend,
+    ) -> Result<(), EvidenceBundleVerifyError> {
+        Self::verify_evidence_crypto_manifest(manifest)?;
+        transcript_binding.validate_against_manifest(manifest)?;
+        let transcript_signature_suite = transcript_signature
+            .validate_against_binding_and_manifest(transcript_binding, manifest)?;
+
+        if transcript_backend.suite() != manifest.transcript_signature {
+            return Err(EvidenceBundleVerifyError::TranscriptBackendSuiteMismatch {
+                manifest_suite: manifest.transcript_signature,
+                backend_suite: transcript_backend.suite(),
+            });
+        }
+        if transcript_signature_suite != transcript_backend.suite() {
+            return Err(EvidenceBundleVerifyError::TranscriptBackendSuiteMismatch {
+                manifest_suite: transcript_signature_suite,
+                backend_suite: transcript_backend.suite(),
+            });
+        }
+        transcript_key_binding.validate_against_signature_suite_and_backend(
+            manifest.transcript_signature,
+            transcript_backend,
+        )?;
+        ledger_key_binding.validate_against_manifest_and_backend(manifest, ledger_backend)?;
+
+        transcript_backend
+            .verify_signature(
+                &transcript_key_binding.public_key,
+                &session_transcript_signature_message(transcript_binding),
+                &transcript_signature.signature.signature,
+            )
+            .map_err(
+                |source| EvidenceBundleVerifyError::TranscriptSignatureBackend {
+                    signature_suite: transcript_signature_suite,
+                    source,
+                },
+            )?;
+
+        if entries.is_empty() {
+            return Err(EvidenceBundleVerifyError::EmptyTranscriptBoundBundle);
+        }
+
+        for entry in entries {
+            if entry.event.session_id != transcript_binding.session_id {
+                return Err(EvidenceBundleVerifyError::TranscriptSessionMismatch {
+                    seq: entry.seq,
+                    binding_session_id: transcript_binding.session_id,
+                    entry_session_id: entry.event.session_id,
+                });
+            }
+        }
+
+        Self::verify_evidence_bundle_with_key_binding(
+            manifest,
+            entries,
+            ledger_key_binding,
+            ledger_backend,
+        )
+    }
+
+    /// Verify a signed transcript-bound bundle plus a signed bundle-level seal.
+    ///
+    /// This is the strongest verifier path for long-lived audit artifacts. In
+    /// addition to the signed transcript and signed ledger entries, it verifies a
+    /// bundle seal over the manifest profile, signature suites, transcript hash,
+    /// verifier-key fingerprints, and ledger-chain endpoints.
+    #[allow(clippy::too_many_arguments)] // distinct verification inputs; a bundle struct would just re-spread them
+    pub fn verify_sealed_signed_transcript_bound_evidence_bundle_with_key_bindings(
+        manifest: EvidenceCryptoManifest,
+        transcript_binding: &SessionTranscriptBinding,
+        transcript_signature: &SessionTranscriptSignature,
+        bundle_seal: &EvidenceBundleSeal,
+        transcript_key_binding: &EvidencePublicKeyBinding,
+        entries: &[LedgerEntryExport],
+        ledger_key_binding: &EvidencePublicKeyBinding,
+        transcript_backend: &impl EvidenceSignatureBackend,
+        ledger_backend: &impl EvidenceSignatureBackend,
+    ) -> Result<(), EvidenceBundleVerifyError> {
+        Self::verify_signed_transcript_bound_evidence_bundle_with_key_bindings(
+            manifest,
+            transcript_binding,
+            transcript_signature,
+            transcript_key_binding,
+            entries,
+            ledger_key_binding,
+            transcript_backend,
+            ledger_backend,
+        )?;
+
+        let seal_signature_suite = bundle_seal.validate_against_bundle(
+            manifest,
+            transcript_binding,
+            transcript_key_binding,
+            entries,
+            ledger_key_binding,
+        )?;
+
+        transcript_backend
+            .verify_signature(
+                &transcript_key_binding.public_key,
+                &evidence_bundle_seal_message(bundle_seal),
+                &bundle_seal.signature.signature,
+            )
+            .map_err(
+                |source| EvidenceBundleVerifyError::BundleSealSignatureBackend {
+                    signature_suite: seal_signature_suite,
+                    source,
+                },
+            )
     }
 
     /// Verify an export-safe chain whose signatures are algorithm-tagged.
@@ -1609,6 +2717,69 @@ mod tests {
     }
 
     #[test]
+    fn evidence_public_key_binding_computes_and_validates_fingerprint() {
+        let signing_key = new_signing_key();
+        let public_key = signing_key.verifying_key().to_bytes();
+        let binding = EvidencePublicKeyBinding::new(SignatureSuite::Ed25519Rfc8032, public_key);
+        let backend = Ed25519EvidenceSignatureBackend;
+
+        assert_eq!(binding.schema, EVIDENCE_PUBLIC_KEY_BINDING_SCHEMA);
+        assert_eq!(binding.signature_suite, SignatureSuite::Ed25519Rfc8032);
+        assert_eq!(binding.public_key.len(), 32);
+        assert_eq!(
+            binding.public_key_fingerprint,
+            compute_evidence_public_key_fingerprint(&binding.public_key)
+        );
+        binding
+            .validate_against_manifest_and_backend(CURRENT_EVIDENCE_CRYPTO_MANIFEST, &backend)
+            .unwrap();
+    }
+
+    #[test]
+    fn evidence_public_key_binding_rejects_tampered_fingerprint() {
+        let signing_key = new_signing_key();
+        let public_key = signing_key.verifying_key().to_bytes();
+        let mut binding = EvidencePublicKeyBinding::new(SignatureSuite::Ed25519Rfc8032, public_key);
+        binding.public_key_fingerprint[0] ^= 0x80;
+        let backend = Ed25519EvidenceSignatureBackend;
+
+        assert_eq!(
+            binding
+                .validate_against_manifest_and_backend(CURRENT_EVIDENCE_CRYPTO_MANIFEST, &backend,),
+            Err(EvidencePublicKeyBindingError::PublicKeyFingerprintMismatch)
+        );
+    }
+
+    #[test]
+    fn evidence_public_key_binding_rejects_bad_suite_and_length() {
+        let backend = Ed25519EvidenceSignatureBackend;
+        let bad_suite =
+            EvidencePublicKeyBinding::new(SignatureSuite::MlDsa65Fips204, vec![0u8; 1952]);
+        assert_eq!(
+            bad_suite
+                .validate_against_manifest_and_backend(CURRENT_EVIDENCE_CRYPTO_MANIFEST, &backend,),
+            Err(
+                EvidencePublicKeyBindingError::SignatureSuiteManifestMismatch {
+                    manifest_suite: SignatureSuite::Ed25519Rfc8032,
+                    binding_suite: SignatureSuite::MlDsa65Fips204,
+                }
+            )
+        );
+
+        let bad_length =
+            EvidencePublicKeyBinding::new(SignatureSuite::Ed25519Rfc8032, vec![0u8; 31]);
+        assert_eq!(
+            bad_length
+                .validate_against_manifest_and_backend(CURRENT_EVIDENCE_CRYPTO_MANIFEST, &backend,),
+            Err(EvidencePublicKeyBindingError::BadPublicKeyLength {
+                signature_suite: SignatureSuite::Ed25519Rfc8032,
+                expected: 32,
+                found: 31,
+            })
+        );
+    }
+
+    #[test]
     fn signature_envelope_uses_stable_algorithm_label() {
         let envelope = SignatureEnvelope::ed25519([0xA5; 64]);
         assert_eq!(envelope.algorithm, "ed25519-rfc8032");
@@ -1741,6 +2912,82 @@ mod tests {
             manifest,
             &[entry],
             public_key_bytes.as_ref(),
+            &backend,
+        )
+        .unwrap();
+    }
+
+    #[cfg(feature = "pqc-signatures")]
+    #[test]
+    fn ml_dsa_65_evidence_chain_exports_real_pq_signed_entries() {
+        use ml_dsa::{MlDsa65, SigningKey};
+
+        let seed = ml_dsa::B32::default();
+        let signing_key = SigningKey::<MlDsa65>::from_seed(&seed);
+        let mut chain = new_ml_dsa_65_evidence_chain(signing_key);
+        chain.append(sample_event(ConsentKind::Request)).unwrap();
+        chain.append(sample_event(ConsentKind::Approval)).unwrap();
+
+        let entries = chain.export_entries();
+        assert_eq!(chain.len(), 2);
+        assert_eq!(entries[0].seq, 0);
+        assert_eq!(entries[1].seq, 1);
+        assert_eq!(entries[1].prev_hash, entries[0].entry_hash);
+        assert_eq!(
+            entries[0].signature.suite().unwrap(),
+            SignatureSuite::MlDsa65Fips204
+        );
+        assert_eq!(entries[0].signature.signature.len(), 3309);
+
+        let manifest = EvidenceCryptoManifest {
+            profile: CryptoPolicyProfile::FullPqcV1,
+            transcript_signature: SignatureSuite::MlDsa65Fips204,
+            ledger_signature: SignatureSuite::MlDsa65Fips204,
+            downgrade_policy: DowngradePolicy::RejectClassicalSignatures,
+            ..CURRENT_EVIDENCE_CRYPTO_MANIFEST
+        };
+        let backend = MlDsa65EvidenceSignatureBackend;
+        Verifier::verify_evidence_bundle_with_backend(
+            manifest,
+            &entries,
+            &chain.public_key_bytes(),
+            &backend,
+        )
+        .unwrap();
+    }
+
+    #[cfg(feature = "pqc-signatures")]
+    #[test]
+    fn ml_dsa_65_evidence_bundle_can_verify_with_public_key_binding() {
+        use ml_dsa::{MlDsa65, SigningKey};
+
+        let seed = ml_dsa::B32::default();
+        let signing_key = SigningKey::<MlDsa65>::from_seed(&seed);
+        let mut chain = new_ml_dsa_65_evidence_chain(signing_key);
+        chain.append(sample_event(ConsentKind::Request)).unwrap();
+        chain.append(sample_event(ConsentKind::Approval)).unwrap();
+
+        let entries = chain.export_entries();
+        let manifest = EvidenceCryptoManifest {
+            profile: CryptoPolicyProfile::FullPqcV1,
+            transcript_signature: SignatureSuite::MlDsa65Fips204,
+            ledger_signature: SignatureSuite::MlDsa65Fips204,
+            downgrade_policy: DowngradePolicy::RejectClassicalSignatures,
+            ..CURRENT_EVIDENCE_CRYPTO_MANIFEST
+        };
+        let key_binding =
+            EvidencePublicKeyBinding::new(SignatureSuite::MlDsa65Fips204, chain.public_key_bytes());
+        let backend = MlDsa65EvidenceSignatureBackend;
+
+        assert_eq!(key_binding.public_key.len(), 1952);
+        assert_eq!(
+            key_binding.public_key_fingerprint,
+            compute_evidence_public_key_fingerprint(&key_binding.public_key)
+        );
+        Verifier::verify_evidence_bundle_with_key_binding(
+            manifest,
+            &entries,
+            &key_binding,
             &backend,
         )
         .unwrap();
@@ -2153,6 +3400,54 @@ mod tests {
     }
 
     #[test]
+    fn evidence_bundle_verification_accepts_public_key_binding() {
+        let sk = SigningKey::from_bytes(&[52u8; 32]);
+        let pk = sk.verifying_key();
+        let mut chain = Chain::new(sk);
+        chain.append(sample_event(ConsentKind::Request)).unwrap();
+        chain.append(sample_event(ConsentKind::Approval)).unwrap();
+
+        let exported = chain.export_entries();
+        let key_binding =
+            EvidencePublicKeyBinding::new(SignatureSuite::Ed25519Rfc8032, pk.to_bytes().to_vec());
+        let backend = Ed25519EvidenceSignatureBackend;
+
+        Verifier::verify_evidence_bundle_with_key_binding(
+            CURRENT_EVIDENCE_CRYPTO_MANIFEST,
+            &exported,
+            &key_binding,
+            &backend,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn evidence_bundle_verification_rejects_tampered_public_key_binding() {
+        let sk = SigningKey::from_bytes(&[53u8; 32]);
+        let pk = sk.verifying_key();
+        let mut chain = Chain::new(sk);
+        chain.append(sample_event(ConsentKind::Request)).unwrap();
+
+        let exported = chain.export_entries();
+        let mut key_binding =
+            EvidencePublicKeyBinding::new(SignatureSuite::Ed25519Rfc8032, pk.to_bytes().to_vec());
+        key_binding.public_key_fingerprint[0] ^= 0x40;
+        let backend = Ed25519EvidenceSignatureBackend;
+
+        assert_eq!(
+            Verifier::verify_evidence_bundle_with_key_binding(
+                CURRENT_EVIDENCE_CRYPTO_MANIFEST,
+                &exported,
+                &key_binding,
+                &backend,
+            ),
+            Err(EvidenceBundleVerifyError::PublicKeyBinding(
+                EvidencePublicKeyBindingError::PublicKeyFingerprintMismatch
+            ))
+        );
+    }
+
+    #[test]
     fn evidence_bundle_verification_rejects_manifest_backend_suite_mismatch() {
         let sk = SigningKey::from_bytes(&[43u8; 32]);
         let pk = sk.verifying_key();
@@ -2219,6 +3514,146 @@ mod tests {
         binding
             .validate_against_manifest(CURRENT_EVIDENCE_CRYPTO_MANIFEST)
             .unwrap();
+    }
+
+    #[test]
+    fn signed_transcript_bound_evidence_bundle_accepts_current_single_session_export() {
+        let sk = SigningKey::from_bytes(&[55u8; 32]);
+        let pk = sk.verifying_key();
+        let mut chain = Chain::new(sk.clone());
+        chain.append(sample_event(ConsentKind::Request)).unwrap();
+        chain.append(sample_event(ConsentKind::Approval)).unwrap();
+
+        let exported = chain.export_entries();
+        let binding = SessionTranscriptBinding::new(
+            exported[0].event.session_id,
+            b"canonical xenia signed handshake transcript v1",
+            CURRENT_EVIDENCE_CRYPTO_MANIFEST.transcript_signature,
+        );
+        let transcript_signature = sign_session_transcript_binding_ed25519(&binding, &sk);
+        let key_binding =
+            EvidencePublicKeyBinding::new(SignatureSuite::Ed25519Rfc8032, pk.to_bytes().to_vec());
+        let backend = Ed25519EvidenceSignatureBackend;
+
+        Verifier::verify_signed_transcript_bound_evidence_bundle_with_key_bindings(
+            CURRENT_EVIDENCE_CRYPTO_MANIFEST,
+            &binding,
+            &transcript_signature,
+            &key_binding,
+            &exported,
+            &key_binding,
+            &backend,
+            &backend,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn signed_transcript_bound_evidence_bundle_rejects_tampered_transcript_signature() {
+        let sk = SigningKey::from_bytes(&[56u8; 32]);
+        let pk = sk.verifying_key();
+        let mut chain = Chain::new(sk.clone());
+        chain.append(sample_event(ConsentKind::Request)).unwrap();
+
+        let exported = chain.export_entries();
+        let binding = SessionTranscriptBinding::new(
+            exported[0].event.session_id,
+            b"canonical xenia signed handshake transcript v1",
+            CURRENT_EVIDENCE_CRYPTO_MANIFEST.transcript_signature,
+        );
+        let mut transcript_signature = sign_session_transcript_binding_ed25519(&binding, &sk);
+        transcript_signature.signature.signature[0] ^= 0x80;
+        let key_binding =
+            EvidencePublicKeyBinding::new(SignatureSuite::Ed25519Rfc8032, pk.to_bytes().to_vec());
+        let backend = Ed25519EvidenceSignatureBackend;
+
+        assert!(matches!(
+            Verifier::verify_signed_transcript_bound_evidence_bundle_with_key_bindings(
+                CURRENT_EVIDENCE_CRYPTO_MANIFEST,
+                &binding,
+                &transcript_signature,
+                &key_binding,
+                &exported,
+                &key_binding,
+                &backend,
+                &backend,
+            ),
+            Err(EvidenceBundleVerifyError::TranscriptSignatureBackend {
+                signature_suite: SignatureSuite::Ed25519Rfc8032,
+                source: EvidenceSignatureBackendError::BadSignature,
+            })
+        ));
+    }
+
+    #[test]
+    fn unsigned_transcript_bound_full_pqc_bundle_is_rejected() {
+        let sk = SigningKey::from_bytes(&[57u8; 32]);
+        let pk = sk.verifying_key();
+        let mut chain = Chain::new(sk);
+        chain.append(sample_event(ConsentKind::Request)).unwrap();
+
+        let exported = chain.export_entries();
+        let manifest = EvidenceCryptoManifest {
+            profile: CryptoPolicyProfile::FullPqcV1,
+            transcript_signature: SignatureSuite::MlDsa65Fips204,
+            ledger_signature: SignatureSuite::MlDsa65Fips204,
+            downgrade_policy: DowngradePolicy::RejectClassicalSignatures,
+            ..CURRENT_EVIDENCE_CRYPTO_MANIFEST
+        };
+        let binding = SessionTranscriptBinding::new(
+            exported[0].event.session_id,
+            b"canonical xenia unsigned full-pqc transcript",
+            manifest.transcript_signature,
+        );
+
+        assert_eq!(
+            Verifier::verify_transcript_bound_evidence_bundle(manifest, &binding, &exported, &pk,),
+            Err(EvidenceBundleVerifyError::MissingTranscriptSignatureInFullPqc)
+        );
+    }
+
+    #[cfg(feature = "pqc-signatures")]
+    #[test]
+    fn full_pqc_signed_transcript_bound_bundle_can_verify_with_ml_dsa() {
+        use ml_dsa::{MlDsa65, SigningKey};
+
+        let seed = ml_dsa::B32::default();
+        let ledger_signing_key = SigningKey::<MlDsa65>::from_seed(&seed);
+        let transcript_signing_key = SigningKey::<MlDsa65>::from_seed(&seed);
+        let mut chain = new_ml_dsa_65_evidence_chain(ledger_signing_key);
+        chain.append(sample_event(ConsentKind::Request)).unwrap();
+        chain.append(sample_event(ConsentKind::Approval)).unwrap();
+
+        let entries = chain.export_entries();
+        let manifest = EvidenceCryptoManifest {
+            profile: CryptoPolicyProfile::FullPqcV1,
+            transcript_signature: SignatureSuite::MlDsa65Fips204,
+            ledger_signature: SignatureSuite::MlDsa65Fips204,
+            downgrade_policy: DowngradePolicy::RejectClassicalSignatures,
+            ..CURRENT_EVIDENCE_CRYPTO_MANIFEST
+        };
+        let binding = SessionTranscriptBinding::new(
+            entries[0].event.session_id,
+            b"canonical xenia full-pqc signed handshake transcript v1",
+            manifest.transcript_signature,
+        );
+        let transcript_signature =
+            sign_session_transcript_binding_ml_dsa_65(&binding, &transcript_signing_key);
+        let key_binding =
+            EvidencePublicKeyBinding::new(SignatureSuite::MlDsa65Fips204, chain.public_key_bytes());
+        let backend = MlDsa65EvidenceSignatureBackend;
+
+        Verifier::verify_signed_transcript_bound_evidence_bundle_with_key_bindings(
+            manifest,
+            &binding,
+            &transcript_signature,
+            &key_binding,
+            &entries,
+            &key_binding,
+            &backend,
+            &backend,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -2326,5 +3761,194 @@ mod tests {
             binding.validate_against_manifest(CURRENT_EVIDENCE_CRYPTO_MANIFEST),
             Err(TranscriptBindingError::EmptyTranscriptHash)
         );
+    }
+
+    #[test]
+    fn sealed_signed_transcript_bound_bundle_accepts_current_single_session_export() {
+        let sk = SigningKey::from_bytes(&[58u8; 32]);
+        let pk = sk.verifying_key();
+        let mut chain = Chain::new(sk.clone());
+        chain.append(sample_event(ConsentKind::Request)).unwrap();
+        chain.append(sample_event(ConsentKind::Approval)).unwrap();
+
+        let exported = chain.export_entries();
+        let binding = SessionTranscriptBinding::new(
+            exported[0].event.session_id,
+            b"canonical xenia sealed signed handshake transcript v1",
+            CURRENT_EVIDENCE_CRYPTO_MANIFEST.transcript_signature,
+        );
+        let transcript_signature = sign_session_transcript_binding_ed25519(&binding, &sk);
+        let key_binding =
+            EvidencePublicKeyBinding::new(SignatureSuite::Ed25519Rfc8032, pk.to_bytes().to_vec());
+        let bundle_seal = sign_evidence_bundle_seal_ed25519(
+            CURRENT_EVIDENCE_CRYPTO_MANIFEST,
+            &binding,
+            &key_binding,
+            &exported,
+            &key_binding,
+            &sk,
+        )
+        .unwrap();
+        let backend = Ed25519EvidenceSignatureBackend;
+
+        Verifier::verify_sealed_signed_transcript_bound_evidence_bundle_with_key_bindings(
+            CURRENT_EVIDENCE_CRYPTO_MANIFEST,
+            &binding,
+            &transcript_signature,
+            &bundle_seal,
+            &key_binding,
+            &exported,
+            &key_binding,
+            &backend,
+            &backend,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn sealed_signed_transcript_bound_bundle_rejects_tampered_seal_fingerprint() {
+        let sk = SigningKey::from_bytes(&[59u8; 32]);
+        let pk = sk.verifying_key();
+        let mut chain = Chain::new(sk.clone());
+        chain.append(sample_event(ConsentKind::Request)).unwrap();
+
+        let exported = chain.export_entries();
+        let binding = SessionTranscriptBinding::new(
+            exported[0].event.session_id,
+            b"canonical xenia sealed signed handshake transcript v1",
+            CURRENT_EVIDENCE_CRYPTO_MANIFEST.transcript_signature,
+        );
+        let transcript_signature = sign_session_transcript_binding_ed25519(&binding, &sk);
+        let key_binding =
+            EvidencePublicKeyBinding::new(SignatureSuite::Ed25519Rfc8032, pk.to_bytes().to_vec());
+        let mut bundle_seal = sign_evidence_bundle_seal_ed25519(
+            CURRENT_EVIDENCE_CRYPTO_MANIFEST,
+            &binding,
+            &key_binding,
+            &exported,
+            &key_binding,
+            &sk,
+        )
+        .unwrap();
+        bundle_seal.ledger_public_key_fingerprint[0] ^= 0x01;
+        let backend = Ed25519EvidenceSignatureBackend;
+
+        assert_eq!(
+            Verifier::verify_sealed_signed_transcript_bound_evidence_bundle_with_key_bindings(
+                CURRENT_EVIDENCE_CRYPTO_MANIFEST,
+                &binding,
+                &transcript_signature,
+                &bundle_seal,
+                &key_binding,
+                &exported,
+                &key_binding,
+                &backend,
+                &backend,
+            ),
+            Err(EvidenceBundleVerifyError::BundleSeal(
+                EvidenceBundleSealError::LedgerPublicKeyFingerprintMismatch
+            ))
+        );
+    }
+
+    #[test]
+    fn sealed_signed_transcript_bound_bundle_rejects_tampered_seal_signature() {
+        let sk = SigningKey::from_bytes(&[60u8; 32]);
+        let pk = sk.verifying_key();
+        let mut chain = Chain::new(sk.clone());
+        chain.append(sample_event(ConsentKind::Request)).unwrap();
+
+        let exported = chain.export_entries();
+        let binding = SessionTranscriptBinding::new(
+            exported[0].event.session_id,
+            b"canonical xenia sealed signed handshake transcript v1",
+            CURRENT_EVIDENCE_CRYPTO_MANIFEST.transcript_signature,
+        );
+        let transcript_signature = sign_session_transcript_binding_ed25519(&binding, &sk);
+        let key_binding =
+            EvidencePublicKeyBinding::new(SignatureSuite::Ed25519Rfc8032, pk.to_bytes().to_vec());
+        let mut bundle_seal = sign_evidence_bundle_seal_ed25519(
+            CURRENT_EVIDENCE_CRYPTO_MANIFEST,
+            &binding,
+            &key_binding,
+            &exported,
+            &key_binding,
+            &sk,
+        )
+        .unwrap();
+        bundle_seal.signature.signature[0] ^= 0x80;
+        let backend = Ed25519EvidenceSignatureBackend;
+
+        assert!(matches!(
+            Verifier::verify_sealed_signed_transcript_bound_evidence_bundle_with_key_bindings(
+                CURRENT_EVIDENCE_CRYPTO_MANIFEST,
+                &binding,
+                &transcript_signature,
+                &bundle_seal,
+                &key_binding,
+                &exported,
+                &key_binding,
+                &backend,
+                &backend,
+            ),
+            Err(EvidenceBundleVerifyError::BundleSealSignatureBackend {
+                signature_suite: SignatureSuite::Ed25519Rfc8032,
+                source: EvidenceSignatureBackendError::BadSignature,
+            })
+        ));
+    }
+
+    #[cfg(feature = "pqc-signatures")]
+    #[test]
+    fn full_pqc_sealed_bundle_can_verify_with_ml_dsa() {
+        use ml_dsa::{MlDsa65, SigningKey};
+
+        let seed = ml_dsa::B32::default();
+        let ledger_signing_key = SigningKey::<MlDsa65>::from_seed(&seed);
+        let transcript_signing_key = SigningKey::<MlDsa65>::from_seed(&seed);
+        let mut chain = new_ml_dsa_65_evidence_chain(ledger_signing_key);
+        chain.append(sample_event(ConsentKind::Request)).unwrap();
+        chain.append(sample_event(ConsentKind::Approval)).unwrap();
+
+        let entries = chain.export_entries();
+        let manifest = EvidenceCryptoManifest {
+            profile: CryptoPolicyProfile::FullPqcV1,
+            transcript_signature: SignatureSuite::MlDsa65Fips204,
+            ledger_signature: SignatureSuite::MlDsa65Fips204,
+            downgrade_policy: DowngradePolicy::RejectClassicalSignatures,
+            ..CURRENT_EVIDENCE_CRYPTO_MANIFEST
+        };
+        let binding = SessionTranscriptBinding::new(
+            entries[0].event.session_id,
+            b"canonical xenia full-pqc sealed signed handshake transcript v1",
+            manifest.transcript_signature,
+        );
+        let transcript_signature =
+            sign_session_transcript_binding_ml_dsa_65(&binding, &transcript_signing_key);
+        let key_binding =
+            EvidencePublicKeyBinding::new(SignatureSuite::MlDsa65Fips204, chain.public_key_bytes());
+        let bundle_seal = sign_evidence_bundle_seal_ml_dsa_65(
+            manifest,
+            &binding,
+            &key_binding,
+            &entries,
+            &key_binding,
+            &transcript_signing_key,
+        )
+        .unwrap();
+        let backend = MlDsa65EvidenceSignatureBackend;
+
+        Verifier::verify_sealed_signed_transcript_bound_evidence_bundle_with_key_bindings(
+            manifest,
+            &binding,
+            &transcript_signature,
+            &bundle_seal,
+            &key_binding,
+            &entries,
+            &key_binding,
+            &backend,
+            &backend,
+        )
+        .unwrap();
     }
 }

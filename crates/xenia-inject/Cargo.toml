@@ -15,6 +15,21 @@ thiserror.workspace = true
 tracing.workspace = true
 serde = { version = "1", features = ["derive"] }
 
+# xdg-desktop-portal RemoteDesktop backend (see src/xdg_portal.rs).
+# High-level async bindings -- deliberately not the low-level `dbus`
+# crate xenia-capture's scap dependency uses, whose hand-rolled
+# request/response signal matching has a real, confirmed race (see
+# xenia-capture's MAX_BUILD_ATTEMPTS retry and mycelix-sovereign's
+# capture-validation-runbook.md).
+ashpd = { version = "0.9", optional = true, default-features = false, features = ["tokio"] }
+tokio = { version = "1", optional = true, features = ["rt", "sync", "time"] }
+
+# uinput backend (see the "uinput" feature below). Actively maintained,
+# clean dependency tree -- deliberately not the older `uinput` crate
+# (0.1.3), which pulls in a ~2018-era `nix 0.10`/`gcc` chain.
+input-linux = { version = "0.7.1", optional = true }
+nix = { version = "0.29", optional = true }
+
 [features]
 default = []
 # wlr-virtual-pointer-v1 + zwp-virtual-keyboard-v1 backend for
@@ -24,7 +39,26 @@ default = []
 wayland-virtual = []
 # uinput kernel-level backend. Works on any Linux with
 # /dev/uinput accessible (root, `input` group, or udev rule).
-uinput = []
+uinput = ["dep:input-linux", "dep:nix"]
+# xdg-desktop-portal RemoteDesktop backend for GNOME/KDE (portal-based,
+# no host permissions beyond the interactive consent dialog). Primary
+# backend per the xenia-capture precedent for portal-based Linux paths.
+xdg-portal = ["dep:ashpd", "dep:tokio"]
 
 [dev-dependencies]
 bincode = "1.3"
+
+# RemoteDesktop portal real-hardware validation harness. Only builds
+# when xdg-portal is enabled -- no-op in default `cargo build`/`cargo
+# test` runs, matching xenia-capture's capture_bench pattern.
+[[example]]
+name = "inject_bench"
+path = "examples/inject_bench.rs"
+required-features = ["xdg-portal"]
+
+# uinput real-hardware validation harness. Only builds when uinput is
+# enabled.
+[[example]]
+name = "uinput_smoke"
+path = "examples/uinput_smoke.rs"
+required-features = ["uinput"]

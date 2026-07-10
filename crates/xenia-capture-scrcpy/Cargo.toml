@@ -1,0 +1,18 @@
+[package]
+name = "xenia-capture-scrcpy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-or-later"
+description = "Phone-as-source screen capture for the Xenia remote-session stack: drives a real Android device's scrcpy-server over ADB and decodes its HEVC/H.264 stream into xenia_capture::ScreenCapture frames. Ported from symthaea-phone-embodiment's hardware-verified scrcpy client (same license)."
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+xenia-capture = { path = "../xenia-capture" }
+ffmpeg-next = { version = "7", default-features = false, features = ["codec", "format", "software-scaling"] }
+sha2 = "0.10"
+thiserror.workspace = true
+tracing.workspace = true

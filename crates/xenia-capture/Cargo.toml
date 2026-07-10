@@ -56,6 +56,11 @@ wayland-wlroots = []
 wayland-portal = []
 
 [dev-dependencies]
+# capture_bench's synthetic on-screen activity generator (XWayland window
+# repaint) — PipeWire's damage-driven ScreenCast under-reports fps against
+# a static desktop, so the harness needs to generate real screen changes
+# itself rather than depend on a human moving the mouse during the run.
+x11rb = "0.13"
 
 # W0 scap validation harness (docs/capture-validation-runbook.md).
 # Only builds when scap-backend feature is enabled — no-op in default

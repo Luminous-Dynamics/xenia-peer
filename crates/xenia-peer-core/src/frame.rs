@@ -46,6 +46,10 @@ pub enum PixelFormat {
     /// Reserved sealed session metadata frame carrying bincode-
     /// serialized [`RawRekey`].
     Rekey = 243,
+    /// Sealed clipboard-sync frame carrying bincode-serialized
+    /// [`RawClipboard`]. Bidirectional on the control lane (like
+    /// [`Self::Rekey`]) — either side can push a clipboard update.
+    Clipboard = 244,
 }
 
 /// Scalar telemetry value carried inside a [`RawTelemetry`] payload.
@@ -104,6 +108,8 @@ pub struct RawCapabilities {
     pub telemetry_enabled: bool,
     /// Input-control lane is enabled for this session.
     pub input_control_enabled: bool,
+    /// Clipboard sync is enabled for this session.
+    pub clipboard_enabled: bool,
     /// Lane envelope schema version used by this session.
     pub lane_envelope_version: u16,
     /// Cleartext lane envelope magic used before sealed lane payloads.
@@ -141,6 +147,188 @@ pub enum RawRekey {
         /// Canonical rekey epoch hash.
         epoch_hash: [u8; 32],
     },
+}
+
+/// Clipboard content carried inside a [`RawClipboard`] update.
+///
+/// Text-only for the initial cut — images/rich formats (HTML, file
+/// lists) are a documented follow-up, not included here to keep the
+/// wire format and the sensitivity-scrubbing story simple to reason
+/// about for a first real implementation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClipboardContent {
+    /// Plain UTF-8 text, as most clipboard managers surface it.
+    Text(String),
+    /// The clipboard was cleared (or its content is no longer
+    /// syncable, e.g. a password manager's sensitivity hint fired).
+    Cleared,
+}
+
+/// Clipboard-sync update, sealed bidirectionally on the control lane
+/// (either the host or the viewer may originate one, mirroring
+/// [`RawRekey`]'s Proposal/Ack bidirectionality — there's no
+/// "always this side" restriction here since either end's real OS
+/// clipboard can change independently).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawClipboard {
+    /// Monotonic per-originating-side sequence number. Lets a receiver
+    /// detect and discard an update that arrives out of order relative
+    /// to a more recent one it already applied (clipboard changes can
+    /// race with rekeys/reconnects); NOT a replacement for the wire's
+    /// own AEAD replay window, which is keyed by envelope, not by this
+    /// field.
+    pub sequence: u64,
+    /// Host or viewer timestamp in milliseconds since Unix epoch, from
+    /// whichever side originated this update.
+    pub timestamp_ms: u64,
+    /// The synced content.
+    pub content: ClipboardContent,
+}
+
+impl RawClipboard {
+    /// Build a clipboard-sync metadata frame.
+    pub fn into_frame(self, frame_id: u64) -> Result<RawFrame, WireError> {
+        let timestamp_ms = self.timestamp_ms;
+        let payload = bincode::serialize(&self).map_err(WireError::encode)?;
+        Ok(RawFrame::encoded(
+            frame_id,
+            timestamp_ms,
+            0,
+            0,
+            PixelFormat::Clipboard,
+            payload,
+        ))
+    }
+
+    /// Decode a clipboard-sync metadata frame.
+    pub fn from_frame(frame: &RawFrame) -> Result<Self, WireError> {
+        if frame.pixel_format != PixelFormat::Clipboard {
+            return Err(WireError::decode("RawFrame is not a clipboard update"));
+        }
+        bincode::deserialize(&frame.pixels).map_err(WireError::decode)
+    }
+}
+
+/// Wire payload type for the reverse-path (viewer → host) clipboard
+/// stream, sealed directly under the control lane's key via the
+/// generic [`xenia_wire::seal`]/[`xenia_wire::open`] -- mirrors
+/// [`RawInput`]'s bare-envelope reverse path, but with its own type
+/// byte so a receiver can distinguish the two bare-envelope streams by
+/// peeking [`xenia_wire::envelope_payload_type`] before opening,
+/// without wasting a decrypt attempt (and without double-consuming
+/// replay-window state) on the wrong stream. `0x30` is the first byte
+/// of `xenia_wire::payload_types`' reserved application range.
+pub const PAYLOAD_TYPE_CLIPBOARD: u8 = 0x30;
+
+impl Sealable for RawClipboard {
+    fn to_bin(&self) -> Result<Vec<u8>, WireError> {
+        bincode::serialize(self).map_err(WireError::encode)
+    }
+    fn from_bin(bytes: &[u8]) -> Result<Self, WireError> {
+        bincode::deserialize(bytes).map_err(WireError::decode)
+    }
+}
+
+/// Chunk size for file transfer. 64 KiB balances envelope overhead against
+/// per-chunk memory/latency; not tuned against a real transport benchmark.
+pub const FILE_TRANSFER_CHUNK_SIZE: usize = 64 * 1024;
+
+/// File-transfer protocol message, symmetric in both directions -- unlike
+/// [`RawClipboard`], a transfer can be initiated by either the host or the
+/// viewer, so both sides use the same [`crate::LaneSession::seal_file_transfer_message`]/
+/// [`crate::LaneSession::open_file_transfer_message`] pair rather than a
+/// forward/reverse split.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileTransferMessage {
+    /// Sender offers a file. `blake3_hash` covers the *whole* file so the
+    /// receiver can verify integrity once every chunk has arrived.
+    Offer {
+        /// Sender-chosen identifier, unique for the life of the session.
+        transfer_id: u64,
+        /// Sanitized to a bare filename by the receiver before writing --
+        /// never trusted as a path.
+        name: String,
+        /// Total file size in bytes.
+        size: u64,
+        /// BLAKE3-256 digest of the whole file.
+        blake3_hash: [u8; 32],
+    },
+    /// Receiver accepts the offer and is ready for chunks.
+    Accept {
+        /// Matches the `Offer`'s `transfer_id`.
+        transfer_id: u64,
+    },
+    /// Receiver rejects the offer (size cap, feature disabled, etc).
+    Reject {
+        /// Matches the `Offer`'s `transfer_id`.
+        transfer_id: u64,
+        /// Human-readable reason, logged but not otherwise interpreted.
+        reason: String,
+    },
+    /// One chunk of file data, at the given byte offset.
+    Chunk {
+        /// Matches the `Offer`'s `transfer_id`.
+        transfer_id: u64,
+        /// Byte offset of `data` within the reassembled file.
+        offset: u64,
+        /// Chunk bytes, at most [`FILE_TRANSFER_CHUNK_SIZE`].
+        data: Vec<u8>,
+    },
+    /// Sender indicates every chunk has been sent.
+    Complete {
+        /// Matches the `Offer`'s `transfer_id`.
+        transfer_id: u64,
+    },
+    /// Receiver reports whether the reassembled file's BLAKE3 hash matched
+    /// the `Offer`'s.
+    Verified {
+        /// Matches the `Offer`'s `transfer_id`.
+        transfer_id: u64,
+        /// Whether the reassembled file's hash matched.
+        ok: bool,
+    },
+}
+
+/// Wire payload type for file-transfer messages *sealed by the host*,
+/// directly under the control lane's key via the generic
+/// [`xenia_wire::seal`]/[`xenia_wire::open`] -- same bare-envelope shape as
+/// [`RawInput`] and [`RawClipboard`]'s reverse path.
+///
+/// Unlike input/clipboard-reverse (strictly viewer-only-outbound, so only
+/// one side ever calls `seal()` under that payload type), a file transfer
+/// can be offered by *either* side, and [`FileTransferMessage::Offer`] /
+/// `Accept` / `Chunk` / etc. can each flow in either direction depending on
+/// who's sending vs receiving. If both sides sealed under the *same*
+/// payload type, their independent per-session nonce counters would
+/// collide: `xenia_wire::Session::seal`'s nonce is
+/// `source_id[0..6] | payload_type | epoch | sequence[0..4]`, and host and
+/// viewer are configured with the *same* `source_id` (see `--source-id-hex`),
+/// so identical `(payload_type, epoch, sequence)` tuples from each side
+/// would produce byte-identical nonces under the same control-lane key --
+/// an actual AEAD nonce reuse, not just a replay-window false positive.
+/// Caught live: a real daemon+viewer run hit `Wire(OpenFailed)` the moment
+/// both sides tried to seal their own `Offer` under one shared payload
+/// type. The fix is this pair of payload types, one per *sealing side*
+/// (not per message semantics) -- `seal_file_transfer_message` always
+/// seals under the caller's own side, so each payload type's nonce space
+/// is written by exactly one session object, matching the safe pattern
+/// input/clipboard-reverse already rely on.
+///
+/// `0x31`/`0x32` are the second and third bytes of `xenia_wire::payload_types`'
+/// reserved application range (`0x30` is [`PAYLOAD_TYPE_CLIPBOARD`]).
+pub const PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST: u8 = 0x31;
+/// Wire payload type for file-transfer messages *sealed by the viewer* --
+/// see [`PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST`]'s doc comment for why this
+/// needs to be a distinct value rather than one shared payload type.
+pub const PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER: u8 = 0x32;
+
+impl Sealable for FileTransferMessage {
+    fn to_bin(&self) -> Result<Vec<u8>, WireError> {
+        bincode::serialize(self).map_err(WireError::encode)
+    }
+    fn from_bin(bytes: &[u8]) -> Result<Self, WireError> {
+        bincode::deserialize(bytes).map_err(WireError::decode)
+    }
 }
 
 /// Audio sample payload format.
@@ -817,6 +1005,7 @@ impl RawFrame {
                     | PixelFormat::Audio
                     | PixelFormat::Capabilities
                     | PixelFormat::Rekey
+                    | PixelFormat::Clipboard
             ),
             "RawFrame::encoded requires an encoded PixelFormat variant",
         );
@@ -849,6 +1038,7 @@ impl RawFrame {
                 !self.pixels.is_empty()
             }
             PixelFormat::Rekey => RawRekey::from_frame(self).is_ok(),
+            PixelFormat::Clipboard => RawClipboard::from_frame(self).is_ok(),
             PixelFormat::Audio => RawAudio::from_frame(self).is_ok_and(|audio| audio.validate()),
         }
     }

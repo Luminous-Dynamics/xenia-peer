@@ -1,0 +1,21 @@
+# Copyright (c) 2024-2026 Tristan Stoltz / Luminous Dynamics
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[package]
+name = "xenia-operator-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-or-later"
+repository.workspace = true
+homepage.workspace = true
+description = "Shared operator-RBAC protocol: roles, actions, and the exact signed transcripts, used by both the xenia-peer daemon and the sovereign-admin console so a signature the console produces is byte-identical to what the daemon verifies."
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

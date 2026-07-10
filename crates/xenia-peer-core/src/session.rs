@@ -66,9 +66,9 @@ impl FrameLane {
 
     fn for_frame(frame: &RawFrame) -> Self {
         match frame.pixel_format {
-            crate::frame::PixelFormat::Capabilities | crate::frame::PixelFormat::Rekey => {
-                Self::Control
-            }
+            crate::frame::PixelFormat::Capabilities
+            | crate::frame::PixelFormat::Rekey
+            | crate::frame::PixelFormat::Clipboard => Self::Control,
             crate::frame::PixelFormat::Audio => Self::Audio,
             crate::frame::PixelFormat::Telemetry => Self::Telemetry,
             _ => Self::Video,
@@ -97,6 +97,8 @@ pub struct LaneSession {
     audio: WireSession,
     telemetry: WireSession,
     next_frame_id: u64,
+    next_input_seq: u64,
+    next_clipboard_seq: u64,
     last_frame_sent_ms: u64,
 }
 
@@ -109,6 +111,8 @@ impl LaneSession {
             audio: WireSession::with_source_id(source_id, epoch),
             telemetry: WireSession::with_source_id(source_id, epoch),
             next_frame_id: 0,
+            next_input_seq: 0,
+            next_clipboard_seq: 0,
             last_frame_sent_ms: 0,
         }
     }
@@ -144,9 +148,113 @@ impl LaneSession {
         id
     }
 
+    /// Allocate the next outbound input sequence.
+    fn next_input_seq(&mut self) -> u64 {
+        let seq = self.next_input_seq;
+        self.next_input_seq = self.next_input_seq.wrapping_add(1);
+        seq
+    }
+
     /// Return telemetry: time since last frame was sent (in ms).
     pub fn last_frame_latency_ms(&self) -> u64 {
         now_ms().saturating_sub(self.last_frame_sent_ms)
+    }
+
+    /// Seal a captured input event on the reverse path (viewer →
+    /// host). Input does not ride the lane-envelope system used by
+    /// [`LaneSession::seal_frame`] — it seals directly under the
+    /// control lane's key, since input is a control-plane-adjacent
+    /// concern and that lane's key is already installed immediately
+    /// post-handshake. Fills in `sequence` and `timestamp_ms`
+    /// automatically. See [`LaneSession::open_input`].
+    pub fn seal_input_event(&mut self, payload: Vec<u8>) -> Result<Vec<u8>, SessionError> {
+        let input = RawInput {
+            sequence: self.next_input_seq(),
+            timestamp_ms: now_ms(),
+            payload,
+        };
+        xenia_wire::seal_input(&input_as_wire(&input)?, &mut self.control).map_err(Into::into)
+    }
+
+    /// Open a sealed input envelope on the host side. See
+    /// [`LaneSession::seal_input_event`] for why this uses the control
+    /// lane's key directly rather than the `XLN1` lane-envelope format.
+    pub fn open_input(&mut self, envelope: &[u8]) -> Result<RawInput, SessionError> {
+        let wire_input = open_input(envelope, &mut self.control)?;
+        input_from_wire(&wire_input).map_err(Into::into)
+    }
+
+    /// Allocate the next outbound clipboard-update sequence.
+    fn next_clipboard_seq(&mut self) -> u64 {
+        let seq = self.next_clipboard_seq;
+        self.next_clipboard_seq = self.next_clipboard_seq.wrapping_add(1);
+        seq
+    }
+
+    /// Seal a clipboard update this side originated, for the *reverse*
+    /// direction only (viewer → host) -- bare envelope directly under
+    /// the control lane's key, like [`LaneSession::seal_input_event`],
+    /// but with its own wire payload type
+    /// ([`crate::frame::PAYLOAD_TYPE_CLIPBOARD`]) so a receiver can
+    /// distinguish the two bare-envelope streams by peeking
+    /// [`xenia_wire::envelope_payload_type`] rather than guessing.
+    ///
+    /// The *forward* direction (host → viewer) instead rides the
+    /// ordinary lane-envelope system as a `PixelFormat::Clipboard`
+    /// frame via [`LaneSession::seal_control_frame`] -- see
+    /// [`crate::frame::RawClipboard::into_frame`].
+    pub fn seal_clipboard_event(
+        &mut self,
+        content: crate::frame::ClipboardContent,
+    ) -> Result<Vec<u8>, SessionError> {
+        let clip = crate::frame::RawClipboard {
+            sequence: self.next_clipboard_seq(),
+            timestamp_ms: now_ms(),
+            content,
+        };
+        xenia_wire::seal(
+            &clip,
+            &mut self.control,
+            crate::frame::PAYLOAD_TYPE_CLIPBOARD,
+        )
+        .map_err(Into::into)
+    }
+
+    /// Open a reverse-path (viewer → host) clipboard envelope sealed by
+    /// [`LaneSession::seal_clipboard_event`].
+    pub fn open_clipboard(
+        &mut self,
+        envelope: &[u8],
+    ) -> Result<crate::frame::RawClipboard, SessionError> {
+        xenia_wire::open(envelope, &mut self.control).map_err(Into::into)
+    }
+
+    /// Seal a file-transfer protocol message under the control lane's key.
+    /// `is_host` selects which of the two payload types to seal under --
+    /// pass the caller's own fixed role (`true` for `xenia-peer`, `false`
+    /// for `xenia-viewer`), never the transfer's sender/receiver role;
+    /// see [`crate::frame::PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST`]'s doc
+    /// comment for why this can't be a single shared payload type.
+    pub fn seal_file_transfer_message(
+        &mut self,
+        message: crate::frame::FileTransferMessage,
+        is_host: bool,
+    ) -> Result<Vec<u8>, SessionError> {
+        let payload_type = if is_host {
+            crate::frame::PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST
+        } else {
+            crate::frame::PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER
+        };
+        xenia_wire::seal(&message, &mut self.control, payload_type).map_err(Into::into)
+    }
+
+    /// Open a bare file-transfer envelope sealed by
+    /// [`LaneSession::seal_file_transfer_message`].
+    pub fn open_file_transfer_message(
+        &mut self,
+        envelope: &[u8],
+    ) -> Result<crate::frame::FileTransferMessage, SessionError> {
+        xenia_wire::open(envelope, &mut self.control).map_err(Into::into)
     }
 
     /// Seal a captured raw-RGBA frame on the video lane.
@@ -654,6 +762,205 @@ mod tests {
     }
 
     #[test]
+    fn lane_session_input_seal_open_roundtrip_uses_control_key_unwrapped() {
+        let schedule = xenia_handshake::derive_session_key_schedule(&[0xA5; 32], &[0x5A; 32]);
+        let mut viewer = LaneSession::with_fixture([0x44; 8], 0xDE);
+        viewer.install_schedule(&schedule);
+        let mut host = LaneSession::with_fixture([0x44; 8], 0xDE);
+        host.install_schedule(&schedule);
+
+        let payload = br#"{"type":"mousemove","x":0.4,"y":0.6}"#.to_vec();
+        let sealed = viewer.seal_input_event(payload.clone()).unwrap();
+
+        // Input is NOT lane-enveloped -- no XLN1 magic prefix.
+        assert_ne!(
+            &sealed[..LANE_ENVELOPE_MAGIC.len().min(sealed.len())],
+            &LANE_ENVELOPE_MAGIC
+        );
+
+        let opened = host.open_input(&sealed).unwrap();
+        assert_eq!(opened.payload, payload);
+        assert_eq!(opened.sequence, 0);
+
+        // Wrong key (e.g. video lane's) must not open it.
+        let mut wrong_key_host = LaneSession::with_fixture([0x44; 8], 0xDE);
+        let mut tampered_schedule = schedule;
+        tampered_schedule.control[0] ^= 0x01;
+        wrong_key_host.install_schedule(&tampered_schedule);
+        assert!(wrong_key_host.open_input(&sealed).is_err());
+    }
+
+    #[test]
+    fn lane_session_clipboard_reverse_path_seal_open_roundtrip() {
+        let schedule = xenia_handshake::derive_session_key_schedule(&[0xB6; 32], &[0x6B; 32]);
+        let mut viewer = LaneSession::with_fixture([0x55; 8], 0xEF);
+        viewer.install_schedule(&schedule);
+        let mut host = LaneSession::with_fixture([0x55; 8], 0xEF);
+        host.install_schedule(&schedule);
+
+        let sealed = viewer
+            .seal_clipboard_event(crate::frame::ClipboardContent::Text("hello xenia".into()))
+            .unwrap();
+
+        // Clipboard is NOT lane-enveloped either -- same bare-envelope
+        // convention as input, just a different wire payload type.
+        assert_ne!(
+            &sealed[..LANE_ENVELOPE_MAGIC.len().min(sealed.len())],
+            &LANE_ENVELOPE_MAGIC
+        );
+
+        let opened = host.open_clipboard(&sealed).unwrap();
+        assert_eq!(
+            opened.content,
+            crate::frame::ClipboardContent::Text("hello xenia".into())
+        );
+        assert_eq!(opened.sequence, 0);
+    }
+
+    #[test]
+    fn lane_session_file_transfer_seal_open_roundtrip_is_symmetric() {
+        let schedule = xenia_handshake::derive_session_key_schedule(&[0xD8; 32], &[0x8D; 32]);
+        let mut host = LaneSession::with_fixture([0x77; 8], 0x22);
+        host.install_schedule(&schedule);
+        let mut viewer = LaneSession::with_fixture([0x77; 8], 0x22);
+        viewer.install_schedule(&schedule);
+
+        // Either side can originate a transfer -- host offers here, but
+        // the wire shape is identical if the viewer originates instead.
+        // `is_host` always reflects the *sealing* side, not who is
+        // logically sending/receiving this particular transfer.
+        let offer = crate::frame::FileTransferMessage::Offer {
+            transfer_id: 42,
+            name: "notes.txt".into(),
+            size: 11,
+            blake3_hash: [0x9A; 32],
+        };
+        let sealed = host
+            .seal_file_transfer_message(offer.clone(), true)
+            .unwrap();
+        assert_ne!(
+            &sealed[..LANE_ENVELOPE_MAGIC.len().min(sealed.len())],
+            &LANE_ENVELOPE_MAGIC
+        );
+        assert_eq!(
+            xenia_wire::envelope_payload_type(&sealed),
+            Some(crate::frame::PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST)
+        );
+        let opened = viewer.open_file_transfer_message(&sealed).unwrap();
+        assert_eq!(opened, offer);
+
+        // Viewer replies with an Accept -- same methods, opposite direction,
+        // sealed under the *other* payload type.
+        let accept = crate::frame::FileTransferMessage::Accept { transfer_id: 42 };
+        let sealed = viewer
+            .seal_file_transfer_message(accept.clone(), false)
+            .unwrap();
+        assert_eq!(
+            xenia_wire::envelope_payload_type(&sealed),
+            Some(crate::frame::PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER)
+        );
+        let opened = host.open_file_transfer_message(&sealed).unwrap();
+        assert_eq!(opened, accept);
+    }
+
+    #[test]
+    fn file_transfer_from_host_and_from_viewer_do_not_collide_on_first_nonce() {
+        // Regression test for a real bug caught via live testing: host and
+        // viewer share the same `source_id` (per --source-id-hex), and each
+        // side's session-object nonce counter starts at 0 independently.
+        // Sealing both sides' very first file-transfer message under one
+        // shared payload type produced byte-identical nonces (the same
+        // source_id, payload_type, epoch, and sequence=0) under the same
+        // control-lane key -- an actual AEAD nonce reuse, not just a
+        // replay-window false positive. Asserts the two sealed envelopes
+        // differ (in the payload_type nonce byte) even though both sides
+        // seal their very first message here.
+        let schedule = xenia_handshake::derive_session_key_schedule(&[0xE9; 32], &[0x9E; 32]);
+        let mut host = LaneSession::with_fixture([0x88; 8], 0x33);
+        host.install_schedule(&schedule);
+        let mut viewer = LaneSession::with_fixture([0x88; 8], 0x33);
+        viewer.install_schedule(&schedule);
+
+        let host_msg = crate::frame::FileTransferMessage::Offer {
+            transfer_id: 1,
+            name: "a.bin".into(),
+            size: 1,
+            blake3_hash: [0; 32],
+        };
+        let viewer_msg = crate::frame::FileTransferMessage::Offer {
+            transfer_id: 1,
+            name: "b.bin".into(),
+            size: 1,
+            blake3_hash: [0; 32],
+        };
+        let host_sealed = host.seal_file_transfer_message(host_msg, true).unwrap();
+        let viewer_sealed = viewer
+            .seal_file_transfer_message(viewer_msg, false)
+            .unwrap();
+
+        // Nonce is the first 12 bytes; must differ despite both being each
+        // side's first-ever seal under a shared source_id/epoch.
+        assert_ne!(host_sealed[..12], viewer_sealed[..12]);
+        // Each side must be able to open the OTHER's envelope but not its
+        // own confused-for-the-other's (opening still works generically
+        // here since open() doesn't care which of the two payload types it
+        // sees -- the real safety property is the nonce disjointness above).
+        assert!(viewer.open_file_transfer_message(&host_sealed).is_ok());
+        assert!(host.open_file_transfer_message(&viewer_sealed).is_ok());
+    }
+
+    #[test]
+    fn clipboard_and_input_bare_envelopes_are_distinguishable_by_payload_type_without_opening() {
+        let schedule = xenia_handshake::derive_session_key_schedule(&[0xC7; 32], &[0x7C; 32]);
+        let mut viewer = LaneSession::with_fixture([0x66; 8], 0x11);
+        viewer.install_schedule(&schedule);
+
+        let clipboard_envelope = viewer
+            .seal_clipboard_event(crate::frame::ClipboardContent::Cleared)
+            .unwrap();
+        let input_envelope = viewer.seal_input_event(b"tap".to_vec()).unwrap();
+
+        assert_eq!(
+            xenia_wire::envelope_payload_type(&clipboard_envelope),
+            Some(crate::frame::PAYLOAD_TYPE_CLIPBOARD)
+        );
+        assert_ne!(
+            xenia_wire::envelope_payload_type(&input_envelope),
+            Some(crate::frame::PAYLOAD_TYPE_CLIPBOARD)
+        );
+    }
+
+    #[test]
+    fn lane_session_clipboard_forward_path_rides_control_lane_envelope() {
+        // Forward direction (host -> viewer) uses the ordinary
+        // lane-envelope RawFrame system instead, like Capabilities/Rekey.
+        let schedule = xenia_handshake::derive_session_key_schedule(&[0xD8; 32], &[0x8D; 32]);
+        let mut host = LaneSession::with_fixture([0x77; 8], 0x22);
+        host.install_schedule(&schedule);
+        let mut viewer = LaneSession::with_fixture([0x77; 8], 0x22);
+        viewer.install_schedule(&schedule);
+
+        let clip = crate::frame::RawClipboard {
+            sequence: 0,
+            timestamp_ms: 1_700_000_000_900,
+            content: crate::frame::ClipboardContent::Text("from host".into()),
+        };
+        let frame_id = host.next_frame_id();
+        let frame = clip.clone().into_frame(frame_id).unwrap();
+        let sealed = host.seal_control_frame(&frame).unwrap();
+
+        // This direction IS lane-enveloped.
+        assert_eq!(&sealed[..LANE_ENVELOPE_MAGIC.len()], &LANE_ENVELOPE_MAGIC);
+
+        let opened = viewer.open_frame(&sealed).unwrap();
+        assert_eq!(opened.pixel_format, crate::frame::PixelFormat::Clipboard);
+        assert_eq!(
+            crate::frame::RawClipboard::from_frame(&opened).unwrap(),
+            clip
+        );
+    }
+
+    #[test]
     fn lane_session_separates_audio_and_video_keys() {
         let mut schedule = xenia_handshake::derive_session_key_schedule(&[0xA5; 32], &[0x5A; 32]);
         let mut host = LaneSession::with_fixture([0x22; 8], 0xBC);
@@ -752,6 +1059,7 @@ mod tests {
             video_format: crate::frame::PixelFormat::Passthrough,
             telemetry_enabled: true,
             input_control_enabled: false,
+            clipboard_enabled: false,
             lane_envelope_version: crate::frame::LANE_ENVELOPE_SCHEMA_VERSION,
             lane_envelope_magic: crate::frame::LANE_ENVELOPE_MAGIC,
         };

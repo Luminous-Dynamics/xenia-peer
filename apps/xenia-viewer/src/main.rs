@@ -22,6 +22,7 @@ use std::sync::Arc;
 #[cfg(feature = "audio-output")]
 use std::sync::Mutex;
 use std::sync::mpsc;
+use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
 use tracing::{info, warn};
@@ -32,18 +33,23 @@ use xenia_peer_core::advertisement::{
     AdvertisedAudioCodec, AdvertisedTransport, TransportAdvertisement,
 };
 use xenia_peer_core::frame::{
-    PixelFormat as FramePixelFormat, RawAudio, RawCapabilities, RawRekey, RawTelemetry, audio_flags,
+    PixelFormat as FramePixelFormat, RawAudio, RawCapabilities, RawClipboard, RawRekey,
+    RawTelemetry, audio_flags,
 };
 use xenia_peer_core::handshake::{
     NegotiatedTransport, negotiated_session_context_hash, perform_viewer_handshake_with_transcript,
 };
-use xenia_peer_core::transport::{TcpTransport, Transport, TransportError};
-use xenia_peer_core::{
-    AudioCodec, AudioJitterBuffer, HandshakeManager, LaneSession, RawPcmAudioCodec, RekeyPolicy,
-    SessionEpochState, derive_negotiated_context_key,
+use xenia_peer_core::transport::{
+    RecvEnvelope, SendEnvelope, TcpRecvHalf, TcpSendHalf, TcpTransport, Transport, TransportError,
 };
-use xenia_transport_quic::{QuicTransport, bind_xenia_endpoint, decode_endpoint_addr};
-use xenia_transport_ws::WsTransport;
+use xenia_peer_core::{
+    AudioCodec, AudioJitterBuffer, ClipboardContent, HandshakeManager, LaneSession,
+    RawPcmAudioCodec, RekeyPolicy, SessionEpochState, derive_negotiated_context_key,
+};
+use xenia_transport_quic::{
+    QuicRecvHalf, QuicSendHalf, QuicTransport, bind_xenia_endpoint, decode_endpoint_addr,
+};
+use xenia_transport_ws::{WsRecvHalf, WsSendHalf, WsTransport};
 use xenia_video::passthrough::PassthroughDecoder;
 use xenia_video::{Decoder, EncodedPacket};
 
@@ -123,6 +129,96 @@ impl AnyTransport {
             finish_result?;
         }
         Ok(())
+    }
+
+    /// Split into independently-owned send/recv halves so a dedicated
+    /// task can keep receiving frames while the main loop sends
+    /// captured input events. See [`Transport`]'s doc comment for why
+    /// splitting exists.
+    ///
+    /// Must only be called after any buffered `PreloadedTcp` first
+    /// envelope has already been consumed (true by construction — the
+    /// preload only exists to let transport auto-detection peek at
+    /// the first envelope during the handshake, long before a caller
+    /// would split).
+    fn split(self) -> (AnySendHalf, AnyRecvHalf) {
+        match self {
+            AnyTransport::Tcp(t) => {
+                let (send, recv) = t.split();
+                (AnySendHalf::Tcp(send), AnyRecvHalf::Tcp(recv))
+            }
+            AnyTransport::PreloadedTcp { first, transport } => {
+                debug_assert!(
+                    first.is_none(),
+                    "split() called before preloaded envelope was consumed"
+                );
+                let (send, recv) = transport.split();
+                (AnySendHalf::Tcp(send), AnyRecvHalf::Tcp(recv))
+            }
+            AnyTransport::Ws(t) => {
+                let (send, recv) = t.split();
+                (AnySendHalf::Ws(send), AnyRecvHalf::Ws(recv))
+            }
+            AnyTransport::Quic {
+                _endpoint,
+                transport,
+            } => {
+                let (send, recv) = transport.split();
+                (
+                    AnySendHalf::Quic { _endpoint, send },
+                    AnyRecvHalf::Quic(recv),
+                )
+            }
+        }
+    }
+}
+
+/// Send-only half of a split [`AnyTransport`].
+enum AnySendHalf {
+    Tcp(TcpSendHalf),
+    Ws(WsSendHalf),
+    Quic {
+        _endpoint: xenia_transport_quic::iroh::Endpoint,
+        send: QuicSendHalf,
+    },
+}
+
+impl SendEnvelope for AnySendHalf {
+    async fn send_envelope(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
+        match self {
+            AnySendHalf::Tcp(t) => t.send_envelope(bytes).await,
+            AnySendHalf::Ws(t) => t.send_envelope(bytes).await,
+            AnySendHalf::Quic { send, .. } => send.send_envelope(bytes).await,
+        }
+    }
+}
+
+impl AnySendHalf {
+    /// Mirrors `AnyTransport::close` for the post-split send half.
+    async fn close(&mut self) -> Result<(), TransportError> {
+        if let AnySendHalf::Quic { _endpoint, send } = self {
+            let finish_result = send.finish();
+            _endpoint.close().await;
+            finish_result?;
+        }
+        Ok(())
+    }
+}
+
+/// Receive-only half of a split [`AnyTransport`].
+enum AnyRecvHalf {
+    Tcp(TcpRecvHalf),
+    Ws(WsRecvHalf),
+    Quic(QuicRecvHalf),
+}
+
+impl RecvEnvelope for AnyRecvHalf {
+    async fn recv_envelope(&mut self) -> Result<Vec<u8>, TransportError> {
+        match self {
+            AnyRecvHalf::Tcp(t) => t.recv_envelope().await,
+            AnyRecvHalf::Ws(t) => t.recv_envelope().await,
+            AnyRecvHalf::Quic(t) => t.recv_envelope().await,
+        }
     }
 }
 
@@ -611,6 +707,261 @@ fn choose_audio_codec_from_capabilities(
     }
 }
 
+/// Read the viewer's own OS clipboard text, if any. A fresh
+/// `arboard::Clipboard` is opened per call rather than cached across polls
+/// -- see `xenia-peer`'s `read_host_clipboard_text` for why (not `Send` on
+/// Linux, cheap enough to reopen at typical poll intervals).
+fn read_viewer_clipboard_text() -> Option<String> {
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(clipboard) => clipboard,
+        Err(err) => {
+            warn!(error = %err, "failed to open viewer clipboard for reading");
+            return None;
+        }
+    };
+    match clipboard.get_text() {
+        Ok(text) => Some(text),
+        Err(arboard::Error::ContentNotAvailable) => None,
+        Err(err) => {
+            warn!(error = %err, "failed to read viewer clipboard text");
+            None
+        }
+    }
+}
+
+/// Apply a daemon-originated clipboard update to the viewer's own OS
+/// clipboard. Called whenever `--clipboard` is not `off`.
+fn apply_clipboard_content_to_viewer(content: &ClipboardContent) {
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(clipboard) => clipboard,
+        Err(err) => {
+            warn!(error = %err, "failed to open viewer clipboard for writing");
+            return;
+        }
+    };
+    // `Cleared` deliberately uses `set_text("")` rather than `clipboard.clear()`
+    // -- see the matching comment in xenia-peer's `apply_clipboard_content`
+    // for why (`clear()` doesn't reliably override a selection still served
+    // by an earlier `set_text()` call, verified live on KDE-Wayland).
+    let result = match content {
+        ClipboardContent::Text(text) => clipboard.set_text(text.clone()),
+        ClipboardContent::Cleared => clipboard.set_text(String::new()),
+    };
+    if let Err(err) = result {
+        warn!(error = %err, "failed to apply daemon clipboard update to viewer clipboard");
+    } else {
+        info!(
+            ?content,
+            "applied daemon clipboard update to viewer clipboard"
+        );
+    }
+}
+
+/// A transfer this side is sending. One at a time in this first cut --
+/// `--send-file` offers a single file per viewer run.
+struct OutgoingTransfer {
+    transfer_id: u64,
+    data: Vec<u8>,
+}
+
+/// A transfer this side is receiving.
+struct IncomingTransfer {
+    name: String,
+    expected_size: u64,
+    expected_hash: [u8; 32],
+    buffer: Vec<u8>,
+}
+
+/// Reduce a wire-provided filename to a bare basename with no path
+/// separators, mirroring `xenia-peer`'s identically-named helper -- see
+/// its doc comment for why.
+fn sanitize_transfer_filename(name: &str) -> Option<String> {
+    let candidate = std::path::Path::new(name)
+        .file_name()?
+        .to_str()?
+        .to_string();
+    if candidate.is_empty() || candidate == "." || candidate == ".." {
+        return None;
+    }
+    Some(candidate)
+}
+
+/// Decode and act on one file-transfer bare envelope, replying over
+/// `send_half` as needed. Only wired into the GUI receive loop -- the
+/// headless CLI probe mode doesn't support file transfer at all (checked
+/// in `main`). No M1 consent gate here: M1 is a host(daemon)-side concept
+/// protecting the daemon's local resources; the viewer has no equivalent.
+#[allow(clippy::too_many_arguments)]
+async fn handle_file_transfer_message(
+    message: xenia_peer_core::FileTransferMessage,
+    send_half: &Arc<tokio::sync::Mutex<AnySendHalf>>,
+    session: &Arc<tokio::sync::Mutex<LaneSession>>,
+    outgoing: &mut Option<OutgoingTransfer>,
+    incoming: &mut std::collections::HashMap<u64, IncomingTransfer>,
+    recv_file_dir: Option<&std::path::Path>,
+    max_bytes: u64,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match message {
+        xenia_peer_core::FileTransferMessage::Offer {
+            transfer_id,
+            name,
+            size,
+            blake3_hash,
+        } => {
+            let (accept, reason) = match (recv_file_dir, sanitize_transfer_filename(&name)) {
+                (None, _) => (
+                    false,
+                    "file transfer is disabled on this viewer".to_string(),
+                ),
+                (Some(_), None) => (false, "unusable filename".to_string()),
+                (Some(_), Some(_)) if size > max_bytes => {
+                    (false, format!("file exceeds {max_bytes}-byte cap"))
+                }
+                (Some(_), Some(_)) => (true, String::new()),
+            };
+            if accept {
+                let safe_name = sanitize_transfer_filename(&name).expect("checked above");
+                incoming.insert(
+                    transfer_id,
+                    IncomingTransfer {
+                        name: safe_name,
+                        expected_size: size,
+                        expected_hash: blake3_hash,
+                        buffer: Vec::with_capacity(size.min(max_bytes) as usize),
+                    },
+                );
+                info!(transfer_id, name, size, "file transfer offer accepted");
+            } else {
+                info!(
+                    transfer_id,
+                    name, size, reason, "file transfer offer rejected"
+                );
+            }
+            let reply = if accept {
+                xenia_peer_core::FileTransferMessage::Accept { transfer_id }
+            } else {
+                xenia_peer_core::FileTransferMessage::Reject {
+                    transfer_id,
+                    reason,
+                }
+            };
+            let envelope = session
+                .lock()
+                .await
+                .seal_file_transfer_message(reply, false)?;
+            send_half.lock().await.send_envelope(&envelope).await?;
+        }
+        xenia_peer_core::FileTransferMessage::Accept { transfer_id } => {
+            let Some(transfer) = outgoing.as_ref().filter(|t| t.transfer_id == transfer_id) else {
+                warn!(transfer_id, "Accept for unknown/stale outgoing transfer");
+                return Ok(());
+            };
+            info!(
+                transfer_id,
+                bytes = transfer.data.len(),
+                "transfer accepted, sending chunks"
+            );
+            let chunk_size = xenia_peer_core::FILE_TRANSFER_CHUNK_SIZE;
+            for (i, chunk) in transfer.data.chunks(chunk_size).enumerate() {
+                let msg = xenia_peer_core::FileTransferMessage::Chunk {
+                    transfer_id,
+                    offset: (i * chunk_size) as u64,
+                    data: chunk.to_vec(),
+                };
+                let envelope = session
+                    .lock()
+                    .await
+                    .seal_file_transfer_message(msg, false)?;
+                send_half.lock().await.send_envelope(&envelope).await?;
+            }
+            let complete = xenia_peer_core::FileTransferMessage::Complete { transfer_id };
+            let envelope = session
+                .lock()
+                .await
+                .seal_file_transfer_message(complete, false)?;
+            send_half.lock().await.send_envelope(&envelope).await?;
+            info!(transfer_id, "all chunks sent, awaiting verification");
+        }
+        xenia_peer_core::FileTransferMessage::Reject {
+            transfer_id,
+            reason,
+        } => {
+            if outgoing
+                .as_ref()
+                .is_some_and(|t| t.transfer_id == transfer_id)
+            {
+                warn!(transfer_id, reason, "outgoing transfer rejected by peer");
+                *outgoing = None;
+            }
+        }
+        xenia_peer_core::FileTransferMessage::Chunk {
+            transfer_id,
+            offset,
+            data,
+        } => {
+            let Some(transfer) = incoming.get_mut(&transfer_id) else {
+                warn!(transfer_id, "chunk for unknown/stale incoming transfer");
+                return Ok(());
+            };
+            let off = offset as usize;
+            if off.saturating_add(data.len()) > transfer.expected_size as usize {
+                warn!(
+                    transfer_id,
+                    "chunk exceeds offered file size; dropping transfer"
+                );
+                incoming.remove(&transfer_id);
+                return Ok(());
+            }
+            if transfer.buffer.len() < off + data.len() {
+                transfer.buffer.resize(off + data.len(), 0);
+            }
+            transfer.buffer[off..off + data.len()].copy_from_slice(&data);
+        }
+        xenia_peer_core::FileTransferMessage::Complete { transfer_id } => {
+            let Some(transfer) = incoming.remove(&transfer_id) else {
+                warn!(transfer_id, "Complete for unknown/stale incoming transfer");
+                return Ok(());
+            };
+            let actual_hash = *blake3::hash(&transfer.buffer).as_bytes();
+            let ok = actual_hash == transfer.expected_hash;
+            if ok {
+                let dest = recv_file_dir
+                    .expect("incoming transfer only exists when recv_file_dir is set")
+                    .join(&transfer.name);
+                match std::fs::write(&dest, &transfer.buffer) {
+                    Ok(()) => {
+                        info!(transfer_id, path = %dest.display(), bytes = transfer.buffer.len(), "file transfer verified and written")
+                    }
+                    Err(err) => {
+                        warn!(transfer_id, error = %err, "verified file failed to write to disk")
+                    }
+                }
+            } else {
+                warn!(
+                    transfer_id,
+                    "file transfer failed BLAKE3 verification, not written"
+                );
+            }
+            let verified = xenia_peer_core::FileTransferMessage::Verified { transfer_id, ok };
+            let envelope = session
+                .lock()
+                .await
+                .seal_file_transfer_message(verified, false)?;
+            send_half.lock().await.send_envelope(&envelope).await?;
+        }
+        xenia_peer_core::FileTransferMessage::Verified { transfer_id, ok } => {
+            if outgoing
+                .as_ref()
+                .is_some_and(|t| t.transfer_id == transfer_id)
+            {
+                info!(transfer_id, ok, "outgoing transfer verification result");
+                *outgoing = None;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn decode_telemetry_frame(raw_frame: &xenia_peer_core::RawFrame) -> Option<TelemetryData> {
     match RawTelemetry::from_frame(raw_frame) {
         Ok(telemetry) => {
@@ -726,6 +1077,21 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:4747")]
     connect: String,
 
+    /// Known-hosts file for trust-on-first-use host verification. On the
+    /// first connection to a given `--connect` address the host's identity
+    /// fingerprint is recorded here; on later connections it must match, or
+    /// the viewer refuses (an active MITM presenting substitute keys yields a
+    /// different fingerprint). Off by default -- when unset, the host
+    /// fingerprint is logged but not pinned.
+    #[arg(long)]
+    known_hosts: Option<std::path::PathBuf>,
+
+    /// Require the host's identity fingerprint to equal this exact hex value
+    /// (64 hex chars). Verified out-of-band; a mismatch aborts the
+    /// connection. Takes precedence over `--known-hosts`.
+    #[arg(long)]
+    host_fingerprint: Option<String>,
+
     /// Fixed source_id (hex, 16 chars). MUST match daemon.
     #[arg(long, default_value = "7878656e69617068")]
     source_id_hex: String,
@@ -783,6 +1149,134 @@ struct Args {
     /// statistics to stdout.
     #[arg(long)]
     gui: bool,
+
+    /// Clipboard sync mode (GUI mode only). `off` (default) never
+    /// touches the viewer's real OS clipboard. `host-to-viewer` applies
+    /// daemon clipboard updates to the viewer's OS clipboard only.
+    /// `bidirectional` also polls the viewer's own OS clipboard and
+    /// sends its changes to the daemon (which needs a matching
+    /// `--clipboard bidirectional` to actually apply them).
+    #[arg(long, value_enum, default_value_t = ClipboardMode::Off)]
+    clipboard: ClipboardMode,
+
+    /// How often to poll the viewer's own clipboard for changes
+    /// (bidirectional mode only).
+    #[arg(long, default_value_t = 500)]
+    clipboard_interval_ms: u64,
+
+    /// Directory to write files the daemon sends. Not set (default) means
+    /// the viewer rejects every inbound file-transfer offer.
+    #[arg(long)]
+    recv_file_dir: Option<std::path::PathBuf>,
+
+    /// A local file to offer to the daemon once connected. One transfer
+    /// per viewer run in this first cut.
+    #[arg(long)]
+    send_file: Option<std::path::PathBuf>,
+
+    /// Reject/refuse to send any file larger than this many bytes. The
+    /// whole file is buffered in memory (both sending and receiving), so
+    /// this is also a memory-use cap, not just a policy knob.
+    #[arg(long, default_value_t = 200 * 1024 * 1024)]
+    file_transfer_max_bytes: u64,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ClipboardMode {
+    Off,
+    HostToViewer,
+    Bidirectional,
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+}
+
+/// Verify the host's identity fingerprint against the viewer's trust policy
+/// before treating the session as authenticated. `--host-fingerprint` (an
+/// out-of-band pinned value) takes precedence; otherwise `--known-hosts`
+/// provides trust-on-first-use. With neither set the fingerprint is logged
+/// but the host is trusted blindly (documented, opt-in pinning).
+fn verify_host_identity(
+    fingerprint: &[u8; 32],
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fp_hex = to_hex(fingerprint);
+
+    if let Some(expected) = &args.host_fingerprint {
+        let expected = expected.trim();
+        if expected.eq_ignore_ascii_case(&fp_hex) {
+            info!(fingerprint = %fp_hex, "host identity matches --host-fingerprint");
+            return Ok(());
+        }
+        return Err(format!(
+            "host identity fingerprint mismatch: expected {expected}, got {fp_hex} -- \
+             refusing to connect (possible man-in-the-middle)"
+        )
+        .into());
+    }
+
+    if let Some(path) = &args.known_hosts {
+        return pin_or_verify_known_hosts(path, &args.connect, &fp_hex);
+    }
+
+    warn!(
+        fingerprint = %fp_hex,
+        "host identity is NOT pinned (pass --known-hosts or --host-fingerprint to verify it); \
+         trusting this host blindly"
+    );
+    Ok(())
+}
+
+/// Trust-on-first-use against a known-hosts file. Each line is
+/// `<connect-address> <fingerprint-hex>`. First contact for an address pins
+/// its fingerprint; a later mismatch is refused; a match passes silently.
+fn pin_or_verify_known_hosts(
+    path: &std::path::Path,
+    host_addr: &str,
+    fp_hex: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    for line in existing.lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(addr), Some(fp)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        if addr == host_addr {
+            if fp.eq_ignore_ascii_case(fp_hex) {
+                info!(host = host_addr, fingerprint = %fp_hex, "host identity matches known_hosts");
+                return Ok(());
+            }
+            return Err(format!(
+                "host {host_addr} identity fingerprint changed: known_hosts has {fp}, host \
+                 presented {fp_hex} -- refusing to connect (possible man-in-the-middle). \
+                 Remove the stale line from {} if this change is expected.",
+                path.display()
+            )
+            .into());
+        }
+    }
+
+    // First contact: pin it.
+    let mut updated = existing;
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(&format!("{host_addr} {fp_hex}\n"));
+    std::fs::write(path, updated)?;
+    info!(
+        host = host_addr,
+        fingerprint = %fp_hex,
+        path = %path.display(),
+        "pinned host identity on first use (trust-on-first-use)"
+    );
+    Ok(())
 }
 
 fn parse_source_id(hex: &str) -> Result<[u8; 8], String> {
@@ -808,6 +1302,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let args = Args::parse();
+
+    if !args.gui && (args.recv_file_dir.is_some() || args.send_file.is_some()) {
+        return Err(
+            "--recv-file-dir/--send-file are only supported with --gui; the headless CLI \
+             probe mode doesn't wire file transfer"
+                .into(),
+        );
+    }
 
     if args.gui {
         run_gui(args)
@@ -842,6 +1344,7 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let handshake =
         perform_viewer_handshake_with_transcript(&mut transport, &mut handshake_mgr, "daemon")
             .await?;
+    verify_host_identity(&handshake.host_identity_fingerprint, &args)?;
     info!(
         transcript_hash = ?handshake.transcript_hash,
         "viewer handshake transcript bound"
@@ -980,6 +1483,15 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             }
             continue;
         }
+        if raw_frame.pixel_format == FramePixelFormat::Clipboard {
+            if args.clipboard != ClipboardMode::Off {
+                match RawClipboard::from_frame(&raw_frame) {
+                    Ok(clipboard) => apply_clipboard_content_to_viewer(&clipboard.content),
+                    Err(err) => warn!(error = %err, "failed to decode clipboard frame"),
+                }
+            }
+            continue;
+        }
         if raw_frame.pixel_format != expected_frame_fmt {
             warn!(
                 fmt = ?raw_frame.pixel_format,
@@ -1084,6 +1596,11 @@ fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let audio_sink = ViewerAudioSink::new(args.play_audio, args.audio_output_device.as_deref())
         .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
     let (audio_tx, audio_rx) = mpsc::sync_channel(64);
+    // Captured pointer/keyboard events flow GUI thread -> network
+    // task. `UnboundedSender::send` is a sync method, so the egui
+    // thread can call it directly without needing to be inside an
+    // async context.
+    let (input_tx, input_rx) = tokio::sync::mpsc::unbounded_channel::<xenia_inject::InputEvent>();
 
     // Spawn the receive/decode pipeline on a dedicated tokio thread.
     // eframe wants to own the main thread; tokio runs beside it.
@@ -1094,7 +1611,7 @@ fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let slot_for_task = Arc::clone(&slot);
     let args_for_task = args.clone();
     rt.spawn(async move {
-        if let Err(err) = gui_receive_loop(args_for_task, slot_for_task, audio_tx).await {
+        if let Err(err) = gui_receive_loop(args_for_task, slot_for_task, audio_tx, input_rx).await {
             tracing::error!(error = %err, "gui receive loop exited with error");
         }
     });
@@ -1117,6 +1634,7 @@ fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 config,
                 Some(audio_rx),
                 Box::new(audio_sink),
+                Some(input_tx),
             )))
         }),
     )
@@ -1131,6 +1649,7 @@ async fn gui_receive_loop(
     args: Args,
     slot: Arc<FrameSlot>,
     audio_tx: mpsc::SyncSender<RawAudio>,
+    mut input_rx: tokio::sync::mpsc::UnboundedReceiver<xenia_inject::InputEvent>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let source_id = parse_source_id(&args.source_id_hex)
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
@@ -1149,12 +1668,124 @@ async fn gui_receive_loop(
         perform_viewer_handshake_with_transcript(&mut transport, &mut handshake_mgr, "daemon")
             .await
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
+    verify_host_identity(&handshake.host_identity_fingerprint, &args)
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
     info!(
         transcript_hash = ?handshake.transcript_hash,
         "viewer handshake transcript bound"
     );
     let mut session = LaneSession::with_fixture(source_id, args.epoch);
     session.install_schedule(&handshake.key_schedule);
+    let negotiated_transport = transport.negotiated_transport();
+
+    // Split the transport so captured input can be sent concurrently
+    // with the frame-receive loop below. `session` and the send half
+    // move behind async mutexes shared with the spawned input-sender
+    // task: `session` because sealing an outbound input event and
+    // opening/installing an inbound rekey share the same control-lane
+    // key state, and the send half because both this loop's rekey
+    // acks and the input task's sealed events go out over it.
+    let (send_half, mut recv_half) = transport.split();
+    let session = Arc::new(tokio::sync::Mutex::new(session));
+    let send_half = Arc::new(tokio::sync::Mutex::new(send_half));
+
+    {
+        let session = Arc::clone(&session);
+        let send_half = Arc::clone(&send_half);
+        tokio::spawn(async move {
+            while let Some(event) = input_rx.recv().await {
+                let payload = match bincode::serialize(&event) {
+                    Ok(bytes) => bytes,
+                    Err(err) => {
+                        warn!(error = %err, "failed to encode captured InputEvent");
+                        continue;
+                    }
+                };
+                let envelope = {
+                    let mut session = session.lock().await;
+                    match session.seal_input_event(payload) {
+                        Ok(envelope) => envelope,
+                        Err(err) => {
+                            warn!(error = %err, "failed to seal captured input event");
+                            continue;
+                        }
+                    }
+                };
+                if let Err(err) = send_half.lock().await.send_envelope(&envelope).await {
+                    info!(error = %err, "input send loop ending (daemon disconnected)");
+                    break;
+                }
+            }
+        });
+    }
+
+    if args.clipboard == ClipboardMode::Bidirectional {
+        let session = Arc::clone(&session);
+        let send_half = Arc::clone(&send_half);
+        let poll_interval = Duration::from_millis(args.clipboard_interval_ms.max(1));
+        tokio::spawn(async move {
+            let mut last_sent: Option<String> = None;
+            loop {
+                tokio::time::sleep(poll_interval).await;
+                let Some(text) = read_viewer_clipboard_text() else {
+                    continue;
+                };
+                if Some(&text) == last_sent.as_ref() {
+                    continue;
+                }
+                let envelope = {
+                    let mut session = session.lock().await;
+                    match session.seal_clipboard_event(ClipboardContent::Text(text.clone())) {
+                        Ok(envelope) => envelope,
+                        Err(err) => {
+                            warn!(error = %err, "failed to seal captured clipboard update");
+                            continue;
+                        }
+                    }
+                };
+                if let Err(err) = send_half.lock().await.send_envelope(&envelope).await {
+                    info!(error = %err, "clipboard send loop ending (daemon disconnected)");
+                    break;
+                }
+                last_sent = Some(text);
+            }
+        });
+    }
+
+    let mut outgoing_transfer: Option<OutgoingTransfer> = None;
+    let mut incoming_transfers: std::collections::HashMap<u64, IncomingTransfer> =
+        std::collections::HashMap::new();
+    // Prepared here (read the file, hash it) but NOT sent yet -- the actual
+    // Offer send is deferred until after the initial rekey exchange
+    // completes (see the Rekey-handling branch below). Sending it here,
+    // immediately after the handshake, raced ahead of the daemon's own
+    // blocking `perform_rekey` (which does `send Proposal; recv Ack`
+    // synchronously before ever reaching its split recv task): a live test
+    // showed the daemon's `recv_envelope()` call meant for the Rekey Ack
+    // picking up this bare file-transfer envelope instead, since this
+    // pre-loop code ran (and sent) before the loop below ever received or
+    // acted on the daemon's Rekey Proposal.
+    let mut pending_initial_offer: Option<(u64, String, Vec<u8>, [u8; 32])> = None;
+    if let Some(path) = &args.send_file {
+        let data = std::fs::read(path)
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
+        if data.len() as u64 > args.file_transfer_max_bytes {
+            return Err(format!(
+                "--send-file {} is {} bytes, exceeds --file-transfer-max-bytes {}",
+                path.display(),
+                data.len(),
+                args.file_transfer_max_bytes
+            )
+            .into());
+        }
+        let blake3_hash = *blake3::hash(&data).as_bytes();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("transfer")
+            .to_string();
+        pending_initial_offer = Some((1, name, data, blake3_hash));
+    }
 
     let mut decoder = make_decoder(args.codec)
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
@@ -1172,7 +1803,6 @@ async fn gui_receive_loop(
     );
     let mut audio_sink: Box<dyn AudioPlaybackSink + Send> =
         Box::new(ChannelAudioSink::new(audio_tx));
-    let negotiated_transport = transport.negotiated_transport();
     let mut capabilities_received = false;
     let mut epoch_state = SessionEpochState::new(handshake.transcript_hash, RekeyPolicy::smoke());
     loop {
@@ -1180,7 +1810,7 @@ async fn gui_receive_loop(
             info!(received, "reached --frames, closing receive loop");
             break;
         }
-        let envelope = match transport.recv_envelope().await {
+        let envelope = match recv_half.recv_envelope().await {
             Ok(e) => e,
             Err(err) => {
                 info!(error = %err, received, "daemon disconnected");
@@ -1188,7 +1818,36 @@ async fn gui_receive_loop(
             }
         };
         let wire_bytes = envelope.len();
-        let raw_frame = match session.open_frame(&envelope) {
+
+        // File-transfer messages are bare envelopes (like input/clipboard
+        // reverse-path), not lane-enveloped -- check before `open_frame`,
+        // which only understands the lane-envelope shape.
+        if matches!(
+            xenia_wire::envelope_payload_type(&envelope),
+            Some(xenia_peer_core::PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST)
+                | Some(xenia_peer_core::PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER)
+        ) {
+            let message = match session.lock().await.open_file_transfer_message(&envelope) {
+                Ok(message) => message,
+                Err(err) => {
+                    warn!(error = %err, "failed to open file-transfer envelope");
+                    continue;
+                }
+            };
+            handle_file_transfer_message(
+                message,
+                &send_half,
+                &session,
+                &mut outgoing_transfer,
+                &mut incoming_transfers,
+                args.recv_file_dir.as_deref(),
+                args.file_transfer_max_bytes,
+            )
+            .await?;
+            continue;
+        }
+
+        let raw_frame = match session.lock().await.open_frame(&envelope) {
             Ok(f) => f,
             Err(err) => {
                 warn!(error = %err, "failed to open frame");
@@ -1272,20 +1931,62 @@ async fn gui_receive_loop(
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
                     e.to_string().into()
                 })?;
-            session.install_rekey_keys(&keys);
+            session.lock().await.install_rekey_keys(&keys);
             let ack = RawRekey::Ack {
                 key_epoch: epoch_state.current_epoch(),
                 epoch_hash,
             }
             .into_frame(0, 0)
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
-            let envelope = session.seal_control_frame(&ack).map_err(
+            let envelope = session.lock().await.seal_control_frame(&ack).map_err(
                 |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
             )?;
-            transport.send_envelope(&envelope).await.map_err(
-                |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
-            )?;
+            send_half
+                .lock()
+                .await
+                .send_envelope(&envelope)
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                    e.to_string().into()
+                })?;
             info!(key_epoch = epoch_state.current_epoch(), epoch_hash = ?epoch_hash, "session rekey installed");
+
+            // Now safe to send: the initial rekey handshake (the daemon's
+            // blocking send-Proposal/recv-Ack pair) is fully resolved from
+            // the daemon's perspective once this Ack lands, so any
+            // subsequent bare envelope from us will be read by the
+            // daemon's split recv task rather than mistaken for the Ack it
+            // was waiting on.
+            if let Some((transfer_id, name, data, blake3_hash)) = pending_initial_offer.take() {
+                let offer = xenia_peer_core::FileTransferMessage::Offer {
+                    transfer_id,
+                    name: name.clone(),
+                    size: data.len() as u64,
+                    blake3_hash,
+                };
+                let envelope = session
+                    .lock()
+                    .await
+                    .seal_file_transfer_message(offer, false)
+                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                        e.to_string().into()
+                    })?;
+                send_half
+                    .lock()
+                    .await
+                    .send_envelope(&envelope)
+                    .await
+                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                        e.to_string().into()
+                    })?;
+                info!(
+                    transfer_id,
+                    name,
+                    size = data.len(),
+                    "file transfer offered"
+                );
+                outgoing_transfer = Some(OutgoingTransfer { transfer_id, data });
+            }
             continue;
         }
         if raw_frame.pixel_format == FramePixelFormat::Audio {
@@ -1297,6 +1998,15 @@ async fn gui_receive_loop(
                 &mut audio_decoded,
             ) {
                 slot.put_audio(audio);
+            }
+            continue;
+        }
+        if raw_frame.pixel_format == FramePixelFormat::Clipboard {
+            if args.clipboard != ClipboardMode::Off {
+                match RawClipboard::from_frame(&raw_frame) {
+                    Ok(clipboard) => apply_clipboard_content_to_viewer(&clipboard.content),
+                    Err(err) => warn!(error = %err, "failed to decode clipboard frame"),
+                }
             }
             continue;
         }
@@ -1332,6 +2042,12 @@ async fn gui_receive_loop(
             });
         }
     }
+    send_half
+        .lock()
+        .await
+        .close()
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
     Ok(())
 }
 
@@ -1360,6 +2076,42 @@ async fn connect_transport(args: &Args) -> Result<ConnectedTransport, TransportE
 mod tests {
     use super::*;
     use xenia_peer_core::{SyntheticAudioKind, SyntheticAudioSource};
+
+    #[test]
+    fn to_hex_encodes_lowercase_fixed_width() {
+        assert_eq!(to_hex(&[0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
+    }
+
+    #[test]
+    fn known_hosts_pins_on_first_use_then_verifies() {
+        let dir = std::env::temp_dir().join(format!("xenia-known-hosts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("known_hosts");
+        let _ = std::fs::remove_file(&path);
+
+        // First contact: pins, succeeds, and writes the entry.
+        pin_or_verify_known_hosts(&path, "10.0.0.1:4747", "aabbcc").unwrap();
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("10.0.0.1:4747 aabbcc")
+        );
+
+        // Same fingerprint: passes (case-insensitive).
+        pin_or_verify_known_hosts(&path, "10.0.0.1:4747", "AABBCC").unwrap();
+
+        // Changed fingerprint for the same host: refused.
+        let err = pin_or_verify_known_hosts(&path, "10.0.0.1:4747", "deadbeef").unwrap_err();
+        assert!(err.to_string().contains("fingerprint changed"));
+
+        // A different host pins independently.
+        pin_or_verify_known_hosts(&path, "10.0.0.2:4747", "1234").unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("10.0.0.1:4747 aabbcc"));
+        assert!(contents.contains("10.0.0.2:4747 1234"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn synthetic_audio_sink_accepts_only_synthetic_frames() {

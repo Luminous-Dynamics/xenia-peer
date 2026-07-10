@@ -19,6 +19,9 @@ blake3 = "1.5"
 
 ml-kem = { version = "0.3.0-rc.2", default-features = false, features = ["zeroize", "getrandom"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
+# Same version xenia-ledger pins for its ML-DSA evidence-signature
+# backends -- kept in lockstep so both crates resolve one ml-dsa tree.
+ml-dsa = { version = "0.1.1", default-features = true }
 hkdf = "0.12"
 sha2 = "0.10"
 rand = "0.8"

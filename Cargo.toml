@@ -1,30 +1,36 @@
 [workspace]
 members = [
     "crates/xenia-peer-core",
+    "crates/xenia-operator-proto",
     "apps/xenia-peer",
     "apps/xenia-viewer",
     "crates/xenia-capture",
+    "crates/xenia-capture-scrcpy",
     "crates/xenia-video",
     "crates/xenia-transport-ws",
     "crates/xenia-transport-quic",
     "crates/xenia-inject",
     "crates/xenia-handshake",
     "crates/xenia-ledger",
+    "crates/xenia-mobile-ffi",
     "apps/sovereign-admin",
 ]
 # sovereign-admin is a wasm32-unknown-unknown CSR bin; keep it out of
 # host-only cargo check/build invocations.
 default-members = [
     "crates/xenia-peer-core",
+    "crates/xenia-operator-proto",
     "apps/xenia-peer",
     "apps/xenia-viewer",
     "crates/xenia-capture",
+    "crates/xenia-capture-scrcpy",
     "crates/xenia-video",
     "crates/xenia-transport-ws",
     "crates/xenia-transport-quic",
     "crates/xenia-inject",
     "crates/xenia-handshake",
     "crates/xenia-ledger",
+    "crates/xenia-mobile-ffi",
 ]
 resolver = "2"
 
@@ -39,41 +45,29 @@ homepage = "https://github.com/Luminous-Dynamics/xenia-peer"
 
 [workspace.dependencies]
 xenia-wire = "0.2.0-alpha.3"
+xenia-operator-proto = { path = "crates/xenia-operator-proto" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time"] }
-serde = { version = "1", features = ["derive"] }
 bincode = "1.3"
 thiserror = "1"
 tracing = "0.1"
 bs58 = "0.5"
-anyhow = "1.0"
 serde_json = "1.0"
-tracing-subscriber = "0.3"
-uuid = "1.0"
-regex = "1.11"
-rmp-serde = "1.3"
-ndarray = "0.16"
-nalgebra = "0.33"
-petgraph = "0.6"
-rustfft = "6.2"
 chrono = { version = "0.4", features = ["serde"] }
-parking_lot = "0.12"
-once_cell = "1.19"
-dashmap = "6.1"
-lru = "0.12"
-strsim = "0.11"
-tree-sitter = "0.24"
-rubato = "0.16"
-tree-sitter-nix = "0.0.2"
-rusqlite = { version = "0.32", features = ["bundled"] }
-tracing-chrome = "0.7"
-rayon = "1.10"
-blake3 = "1.6"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
 
 # Workspace profiles moved from apps/sovereign-admin.
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = true
 codegen-units = 1
+
+# Override: xenia-wire's published 0.2.0-alpha.3 doesn't have
+# envelope_payload_type (added 2026-07-04 for clipboard-sync, T2.3), which
+# this workspace uses. Point at the public git repo (its `main` has the
+# function) rather than a local sibling path, so CI and fresh clones -- which
+# have no `../xenia-wire` checkout -- build too. Remove once a xenia-wire
+# version bump + crates.io republish lands.
+[patch.crates-io]
+xenia-wire = { git = "https://github.com/Luminous-Dynamics/xenia-wire", branch = "main" }

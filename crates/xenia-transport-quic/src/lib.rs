@@ -26,7 +26,9 @@ use iroh::{
 };
 use thiserror::Error;
 use tracing::debug;
-use xenia_peer_core::transport::{MAX_ENVELOPE_BYTES, Transport, TransportError};
+use xenia_peer_core::transport::{
+    MAX_ENVELOPE_BYTES, RecvEnvelope, SendEnvelope, Transport, TransportError,
+};
 
 /// Re-export of the Iroh crate for endpoint ownership in callers.
 pub use iroh;
@@ -175,6 +177,22 @@ impl QuicTransport {
         let _ = self.conn.closed().await;
     }
 
+    /// Split into independently-owned send/recv halves — Iroh's
+    /// `SendStream`/`RecvStream` are already separate fields
+    /// internally, so this just repackages them. See
+    /// [`xenia_peer_core::transport::Transport`]'s doc comment for why
+    /// this exists. The connection handle (needed for `finish`/`closed`
+    /// during teardown) stays with the send half.
+    pub fn split(self) -> (QuicSendHalf, QuicRecvHalf) {
+        (
+            QuicSendHalf {
+                conn: self.conn,
+                send: self.send,
+            },
+            QuicRecvHalf { recv: self.recv },
+        )
+    }
+
     async fn accept_stream_pair(
         conn: Connection,
         send: SendStream,
@@ -204,50 +222,159 @@ fn is_stream_eof(msg: &str) -> bool {
     msg.contains("end of stream") || msg.contains("closed") || msg.contains("reset")
 }
 
+/// Write one length-prefixed envelope to a QUIC send stream. Shared by
+/// [`QuicTransport`] and [`QuicSendHalf`].
+async fn write_envelope(send: &mut SendStream, bytes: &[u8]) -> Result<(), TransportError> {
+    let len = u32::try_from(bytes.len()).map_err(|_| TransportError::EnvelopeTooLarge(u32::MAX))?;
+    if len > MAX_ENVELOPE_BYTES {
+        return Err(TransportError::EnvelopeTooLarge(len));
+    }
+
+    send.write_all(&len.to_be_bytes())
+        .await
+        .map_err(|e| TransportError::from(QuicError::Io(e.to_string())))?;
+    send.write_all(bytes)
+        .await
+        .map_err(|e| TransportError::from(QuicError::Io(e.to_string())))?;
+    Ok(())
+}
+
+/// Read one length-prefixed envelope from a QUIC recv stream. Shared
+/// by [`QuicTransport`] and [`QuicRecvHalf`].
+async fn read_envelope(recv: &mut RecvStream) -> Result<Vec<u8>, TransportError> {
+    let mut len_buf = [0u8; 4];
+    recv.read_exact(&mut len_buf).await.map_err(|e| {
+        let msg = e.to_string();
+        if is_stream_eof(&msg) {
+            TransportError::UnexpectedEof
+        } else {
+            TransportError::from(QuicError::Io(msg))
+        }
+    })?;
+
+    let len = u32::from_be_bytes(len_buf);
+    if len > MAX_ENVELOPE_BYTES {
+        return Err(TransportError::EnvelopeTooLarge(len));
+    }
+
+    let mut buf = vec![0u8; len as usize];
+    recv.read_exact(&mut buf).await.map_err(|e| {
+        let msg = e.to_string();
+        if is_stream_eof(&msg) {
+            TransportError::UnexpectedEof
+        } else {
+            TransportError::from(QuicError::Io(msg))
+        }
+    })?;
+    Ok(buf)
+}
+
 impl Transport for QuicTransport {
     async fn send_envelope(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
-        let len =
-            u32::try_from(bytes.len()).map_err(|_| TransportError::EnvelopeTooLarge(u32::MAX))?;
-        if len > MAX_ENVELOPE_BYTES {
-            return Err(TransportError::EnvelopeTooLarge(len));
-        }
-
-        self.send
-            .write_all(&len.to_be_bytes())
-            .await
-            .map_err(|e| TransportError::from(QuicError::Io(e.to_string())))?;
-        self.send
-            .write_all(bytes)
-            .await
-            .map_err(|e| TransportError::from(QuicError::Io(e.to_string())))?;
-        Ok(())
+        write_envelope(&mut self.send, bytes).await
     }
 
     async fn recv_envelope(&mut self) -> Result<Vec<u8>, TransportError> {
-        let mut len_buf = [0u8; 4];
-        self.recv.read_exact(&mut len_buf).await.map_err(|e| {
-            let msg = e.to_string();
-            if is_stream_eof(&msg) {
-                TransportError::UnexpectedEof
-            } else {
-                TransportError::from(QuicError::Io(msg))
-            }
-        })?;
+        read_envelope(&mut self.recv).await
+    }
+}
 
-        let len = u32::from_be_bytes(len_buf);
-        if len > MAX_ENVELOPE_BYTES {
-            return Err(TransportError::EnvelopeTooLarge(len));
-        }
+/// Send-only half of a split [`QuicTransport`]. Also carries the
+/// `Connection` handle so callers can still `finish`/`closed` during
+/// teardown after splitting.
+pub struct QuicSendHalf {
+    conn: Connection,
+    send: SendStream,
+}
 
-        let mut buf = vec![0u8; len as usize];
-        self.recv.read_exact(&mut buf).await.map_err(|e| {
-            let msg = e.to_string();
-            if is_stream_eof(&msg) {
-                TransportError::UnexpectedEof
-            } else {
-                TransportError::from(QuicError::Io(msg))
-            }
-        })?;
-        Ok(buf)
+impl QuicSendHalf {
+    /// Gracefully finish the sending side of the stream.
+    pub fn finish(&mut self) -> Result<(), TransportError> {
+        self.send
+            .finish()
+            .map_err(|e| TransportError::from(QuicError::Io(e.to_string())))
+    }
+
+    /// Wait until the peer closes the underlying QUIC connection.
+    pub async fn closed(&self) {
+        let _ = self.conn.closed().await;
+    }
+}
+
+impl SendEnvelope for QuicSendHalf {
+    async fn send_envelope(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
+        write_envelope(&mut self.send, bytes).await
+    }
+}
+
+/// Receive-only half of a split [`QuicTransport`].
+pub struct QuicRecvHalf {
+    recv: RecvStream,
+}
+
+impl RecvEnvelope for QuicRecvHalf {
+    async fn recv_envelope(&mut self) -> Result<Vec<u8>, TransportError> {
+        read_envelope(&mut self.recv).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wire_constants_are_stable() {
+        // These are on the wire; a change silently breaks interop with peers
+        // running an older build.
+        assert_eq!(XENIA_QUIC_ALPN, b"xenia/transport/quic/0");
+        assert_eq!(STREAM_PREFACE, b"XENIAQ0\0");
+        assert_eq!(STREAM_PREFACE.len(), 8);
+    }
+
+    #[test]
+    fn decode_endpoint_addr_rejects_garbage() {
+        // Non-base58 characters (0, O, I, l are not in the alphabet).
+        assert!(decode_endpoint_addr("iroh:0OIl").is_err());
+        // Empty.
+        assert!(decode_endpoint_addr("").is_err());
+        // Valid base58 whose decoded bytes are not an EndpointAddr JSON.
+        let token = format!("iroh:{}", bs58::encode(b"not endpoint json").into_string());
+        assert!(decode_endpoint_addr(&token).is_err());
+    }
+
+    #[test]
+    fn decode_endpoint_addr_tolerates_a_missing_prefix() {
+        // The prefix is stripped when present and ignored when absent; either
+        // way an un-decodable body errors rather than panicking.
+        let body = bs58::encode(b"still not json").into_string();
+        assert!(decode_endpoint_addr(&body).is_err());
+        assert!(decode_endpoint_addr(&format!("iroh:{body}")).is_err());
+    }
+
+    #[test]
+    fn is_stream_eof_classifies_teardown_messages() {
+        assert!(is_stream_eof("the connection was closed"));
+        assert!(is_stream_eof("stream reset by peer"));
+        assert!(is_stream_eof("reached end of stream"));
+        assert!(!is_stream_eof("permission denied"));
+        assert!(!is_stream_eof("timed out"));
+    }
+
+    #[test]
+    fn quic_error_maps_to_the_uniform_transport_error() {
+        // EndpointClosed is the graceful-shutdown signal -> UnexpectedEof.
+        assert!(matches!(
+            TransportError::from(QuicError::EndpointClosed),
+            TransportError::UnexpectedEof
+        ));
+        // Everything else collapses to Io so the trait contract stays uniform.
+        assert!(matches!(
+            TransportError::from(QuicError::Connect("x".into())),
+            TransportError::Io(_)
+        ));
+        assert!(matches!(
+            TransportError::from(QuicError::Stream("y".into())),
+            TransportError::Io(_)
+        ));
     }
 }

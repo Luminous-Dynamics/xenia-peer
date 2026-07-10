@@ -12,21 +12,36 @@ use serde_big_array::BigArray;
 use tracing::info;
 use xenia_handshake::{
     HANDSHAKE_POLICY_PROFILE, HANDSHAKE_TRANSCRIPT_SCHEMA, HandshakeManager, HandshakeTranscriptV1,
-    KDF_SUITE_LABEL, KEM_SUITE_LABEL, ML_KEM_768_CT_LEN, ML_KEM_768_PK_LEN, RekeyEpochContextV1,
-    RekeyReason, SessionKeySchedule, TRANSCRIPT_SIGNATURE_SUITE_LABEL, derive_rekey_epoch_keys,
-    derive_session_key_schedule,
+    KDF_SUITE_LABEL, KEM_SUITE_LABEL, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN, ML_KEM_768_CT_LEN,
+    ML_KEM_768_PK_LEN, RekeyEpochContextV1, RekeyReason, SessionKeySchedule,
+    TRANSCRIPT_SIGNATURE_SUITE_LABEL, derive_rekey_epoch_keys, derive_session_key_schedule,
 };
 
 const HANDSHAKE_SIGNATURE_CONTEXT_V1: &str = "xenia-handshake-signature-v1";
 const NEGOTIATED_SESSION_CONTEXT_SCHEMA: &str = "xenia-negotiated-session-context-v1";
 
 /// Handshake messages exchanged between host and viewer.
+///
+/// Every signature-bearing message carries both an Ed25519 and an
+/// ML-DSA-65 signature over the identical transcript bytes -- both
+/// must verify (see `viewer_signature_transcript`/
+/// `host_signature_transcript`); there is no classical-only fallback.
+/// See `docs/crypto/FULL_PQC_MIGRATION_PLAN.md` Stage 2.
+// The variants differ a lot in size (HostHello/ViewerResponse carry ML-DSA-65
+// keys/signatures; HostFinalize is small), but handshake messages are built
+// and sent one at a time and never stored in bulk, so the per-instance size
+// spread doesn't matter -- boxing would only add an indirection to a
+// short-lived value.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HandshakeMessage {
     /// Host starts by sending its identity and KEM public keys + a fresh nonce.
     HostHello {
         /// Ed25519 verifying key.
         ed25519_pk: [u8; 32],
+        /// ML-DSA-65 verifying key.
+        #[serde(with = "BigArray")]
+        ml_dsa_pk: [u8; ML_DSA_65_PK_LEN],
         /// ML-KEM-768 encapsulation key.
         #[serde(with = "BigArray")]
         kem_pk: [u8; ML_KEM_768_PK_LEN],
@@ -40,6 +55,9 @@ pub enum HandshakeMessage {
     ViewerResponse {
         /// Ed25519 verifying key.
         ed25519_pk: [u8; 32],
+        /// ML-DSA-65 verifying key.
+        #[serde(with = "BigArray")]
+        ml_dsa_pk: [u8; ML_DSA_65_PK_LEN],
         /// ML-KEM-768 ciphertext.
         #[serde(with = "BigArray")]
         kem_ct: [u8; ML_KEM_768_CT_LEN],
@@ -48,6 +66,9 @@ pub enum HandshakeMessage {
         /// Ed25519 signature from viewer over the transcript.
         #[serde(with = "BigArray")]
         signature: [u8; 64],
+        /// ML-DSA-65 signature from viewer over the identical transcript.
+        #[serde(with = "BigArray")]
+        ml_dsa_signature: [u8; ML_DSA_65_SIG_LEN],
     },
     /// Host finalizes the handshake by verifying viewer's response and
     /// signing the final transcript.
@@ -55,6 +76,9 @@ pub enum HandshakeMessage {
         /// Ed25519 signature from host over the full transcript.
         #[serde(with = "BigArray")]
         signature: [u8; 64],
+        /// ML-DSA-65 signature from host over the identical transcript.
+        #[serde(with = "BigArray")]
+        ml_dsa_signature: [u8; ML_DSA_65_SIG_LEN],
     },
 }
 
@@ -69,6 +93,26 @@ pub struct HandshakeOutcome {
     pub key_schedule: SessionKeySchedule,
     /// Optional negotiated session context hash included in HostHello.
     pub negotiated_context_hash: Option<[u8; 32]>,
+    /// BLAKE3 fingerprint of the host's signing identity (Ed25519 ||
+    /// ML-DSA-65). On the viewer path this is the peer being pinned for
+    /// trust-on-first-use; on the host path it is the host's own identity.
+    /// A viewer compares this against a previously-pinned value to detect an
+    /// active MITM that substituted its own keys in HostHello.
+    pub host_identity_fingerprint: [u8; 32],
+}
+
+/// The peer identity a host authenticated during the handshake (both the
+/// Ed25519 and ML-DSA-65 signatures were verified). Lets the host authorize the
+/// peer against its own policy — e.g. look the keys up in an operator policy so
+/// the handshake itself proves *which* enrolled operator connected. Kept out of
+/// [`HandshakeOutcome`] because that type is `Copy` and small; the ML-DSA key is
+/// ~2 KB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedPeerIdentity {
+    /// The peer's Ed25519 verifying key (32 bytes).
+    pub ed25519_pk: [u8; 32],
+    /// The peer's ML-DSA-65 verifying key.
+    pub ml_dsa_pk: Vec<u8>,
 }
 
 /// Transport selected for the authenticated session.
@@ -341,9 +385,19 @@ fn signature_context_prefix() -> Vec<u8> {
     out
 }
 
+/// Build the transcript both sides sign at the viewer-response phase.
+///
+/// Both Ed25519 and ML-DSA-65 sign this identical byte sequence -- the
+/// viewer's ML-DSA-65 verifying key is bound in here (alongside the
+/// Ed25519 key) so an attacker can't strip or substitute the PQ
+/// identity without invalidating the classical signature too. The
+/// host's ML-DSA-65 key is already bound transitively via
+/// `hello_bytes` (the full serialized `HostHello`, which now carries
+/// `ml_dsa_pk`).
 fn viewer_signature_transcript(
     hello_bytes: &[u8],
     viewer_ed25519_pk: &[u8; 32],
+    viewer_ml_dsa_pk: &[u8; ML_DSA_65_PK_LEN],
     kem_ct: &[u8],
     viewer_nonce: &[u8; 32],
 ) -> Vec<u8> {
@@ -351,22 +405,35 @@ fn viewer_signature_transcript(
     append_len_prefixed(&mut transcript, b"viewer-response");
     append_len_prefixed(&mut transcript, hello_bytes);
     append_len_prefixed(&mut transcript, viewer_ed25519_pk);
+    append_len_prefixed(&mut transcript, viewer_ml_dsa_pk);
     append_len_prefixed(&mut transcript, kem_ct);
     append_len_prefixed(&mut transcript, viewer_nonce);
     transcript
 }
 
+/// Build the transcript both sides sign at the host-finalize phase --
+/// the viewer-response transcript plus both of the viewer's signatures
+/// (Ed25519 and ML-DSA-65), so the host's finalize signatures also
+/// bind the viewer's complete signed response.
 fn host_signature_transcript(
     hello_bytes: &[u8],
     viewer_ed25519_pk: &[u8; 32],
+    viewer_ml_dsa_pk: &[u8; ML_DSA_65_PK_LEN],
     kem_ct: &[u8],
     viewer_nonce: &[u8; 32],
     viewer_signature: &[u8; 64],
+    viewer_ml_dsa_signature: &[u8; ML_DSA_65_SIG_LEN],
 ) -> Vec<u8> {
-    let mut transcript =
-        viewer_signature_transcript(hello_bytes, viewer_ed25519_pk, kem_ct, viewer_nonce);
+    let mut transcript = viewer_signature_transcript(
+        hello_bytes,
+        viewer_ed25519_pk,
+        viewer_ml_dsa_pk,
+        kem_ct,
+        viewer_nonce,
+    );
     append_len_prefixed(&mut transcript, b"host-finalize");
     append_len_prefixed(&mut transcript, viewer_signature);
+    append_len_prefixed(&mut transcript, viewer_ml_dsa_signature);
     transcript
 }
 
@@ -393,19 +460,45 @@ pub async fn perform_host_handshake_with_transcript<T: Transport>(
 }
 
 /// Perform a host-side handshake and bind an optional negotiated context hash.
+/// Returns only the [`HandshakeOutcome`]; use
+/// [`perform_host_handshake_authenticating_peer`] when the host needs the
+/// authenticated peer identity (e.g. to authorize an operator).
 pub async fn perform_host_handshake_with_transcript_and_context<T: Transport>(
     transport: &mut T,
     mgr: &mut HandshakeManager,
     peer_id: &str,
     negotiated_context_hash: Option<[u8; 32]>,
 ) -> Result<HandshakeOutcome, Box<dyn std::error::Error>> {
+    let (outcome, _peer) = perform_host_handshake_authenticating_peer(
+        transport,
+        mgr,
+        peer_id,
+        negotiated_context_hash,
+    )
+    .await?;
+    Ok(outcome)
+}
+
+/// Perform a host-side handshake and return both the [`HandshakeOutcome`] and
+/// the [`VerifiedPeerIdentity`] whose Ed25519 + ML-DSA-65 signatures the host
+/// verified. The identity lets the host authorize the peer (e.g. the daemon can
+/// look the keys up in its operator policy — the handshake then *is* the
+/// operator proof-of-possession).
+pub async fn perform_host_handshake_authenticating_peer<T: Transport>(
+    transport: &mut T,
+    mgr: &mut HandshakeManager,
+    peer_id: &str,
+    negotiated_context_hash: Option<[u8; 32]>,
+) -> Result<(HandshakeOutcome, VerifiedPeerIdentity), Box<dyn std::error::Error>> {
     info!("Starting host-side handshake");
     let host_nonce = rand::random::<[u8; 32]>();
     let host_ed25519_pk = mgr.identity_public_key_bytes();
+    let host_ml_dsa_pk = mgr.ml_dsa_public_key_bytes();
     let host_kem_pk = *mgr.kem_public_key_bytes();
 
     let hello = HandshakeMessage::HostHello {
         ed25519_pk: host_ed25519_pk,
+        ml_dsa_pk: host_ml_dsa_pk,
         kem_pk: host_kem_pk,
         nonce: host_nonce,
         negotiated_context_hash,
@@ -417,22 +510,32 @@ pub async fn perform_host_handshake_with_transcript_and_context<T: Transport>(
     let response_bytes = transport.recv_envelope().await?;
     let HandshakeMessage::ViewerResponse {
         ed25519_pk,
+        ml_dsa_pk,
         kem_ct,
         nonce: viewer_nonce,
         signature,
+        ml_dsa_signature,
     } = bincode::deserialize(&response_bytes)?
     else {
         return Err("Expected ViewerResponse".into());
     };
 
-    // Verify viewer identity.
+    // Verify viewer identity -- both Ed25519 and ML-DSA-65 must verify,
+    // no classical-only fallback.
     let viewer_verifying_key = HandshakeManager::parse_peer_public_key(&ed25519_pk)?;
 
-    // Domain-separated transcript for viewer's signature.
-    let transcript = viewer_signature_transcript(&hello_bytes, &ed25519_pk, &kem_ct, &viewer_nonce);
+    // Domain-separated transcript for viewer's signatures.
+    let transcript = viewer_signature_transcript(
+        &hello_bytes,
+        &ed25519_pk,
+        &ml_dsa_pk,
+        &kem_ct,
+        &viewer_nonce,
+    );
 
     let sig = ed25519_dalek::Signature::from_bytes(&signature);
     HandshakeManager::verify(&viewer_verifying_key, &transcript, &sig)?;
+    HandshakeManager::verify_ml_dsa(&ml_dsa_pk, &transcript, &ml_dsa_signature)?;
 
     // Combined nonce for KDF.
     let mut combined_nonce = [0u8; 64];
@@ -441,18 +544,23 @@ pub async fn perform_host_handshake_with_transcript_and_context<T: Transport>(
 
     let root_key = mgr.decapsulate_and_derive(peer_id, &kem_ct, &combined_nonce)?;
 
-    // Finalize: sign the transcript (including viewer's signature).
+    // Finalize: sign the transcript (including viewer's signatures) with
+    // both algorithms.
     let final_transcript = host_signature_transcript(
         &hello_bytes,
         &ed25519_pk,
+        &ml_dsa_pk,
         &kem_ct,
         &viewer_nonce,
         &signature,
+        &ml_dsa_signature,
     );
     let host_sig = mgr.sign(&final_transcript).to_bytes();
+    let host_ml_dsa_sig = mgr.sign_ml_dsa(&final_transcript);
 
     let finalize = HandshakeMessage::HostFinalize {
         signature: host_sig,
+        ml_dsa_signature: host_ml_dsa_sig,
     };
     transport
         .send_envelope(&bincode::serialize(&finalize)?)
@@ -461,25 +569,39 @@ pub async fn perform_host_handshake_with_transcript_and_context<T: Transport>(
     let canonical_transcript = HandshakeTranscriptV1::new(
         host_ed25519_pk,
         ed25519_pk,
+        host_ml_dsa_pk.to_vec(),
+        ml_dsa_pk.to_vec(),
         host_kem_pk.to_vec(),
         kem_ct.to_vec(),
         host_nonce,
         viewer_nonce,
         signature.to_vec(),
         host_sig.to_vec(),
+        ml_dsa_signature.to_vec(),
+        host_ml_dsa_sig.to_vec(),
         negotiated_context_hash,
     )?;
     let transcript_hash = canonical_transcript.transcript_hash()?;
     let key_schedule = derive_session_key_schedule(&root_key, &transcript_hash);
     let session_key = key_schedule.aead;
 
+    let host_identity_fingerprint =
+        xenia_handshake::host_identity_fingerprint(&host_ed25519_pk, &host_ml_dsa_pk);
+
     info!("Host-side handshake complete");
-    Ok(HandshakeOutcome {
-        session_key,
-        transcript_hash,
-        key_schedule,
-        negotiated_context_hash,
-    })
+    Ok((
+        HandshakeOutcome {
+            session_key,
+            transcript_hash,
+            key_schedule,
+            negotiated_context_hash,
+            host_identity_fingerprint,
+        },
+        VerifiedPeerIdentity {
+            ed25519_pk,
+            ml_dsa_pk: ml_dsa_pk.to_vec(),
+        },
+    ))
 }
 
 /// Perform a viewer-side handshake and return only the session key.
@@ -507,6 +629,7 @@ pub async fn perform_viewer_handshake_with_transcript<T: Transport>(
     let hello = bincode::deserialize::<HandshakeMessage>(&hello_bytes)?;
     let HandshakeMessage::HostHello {
         ed25519_pk,
+        ml_dsa_pk,
         kem_pk,
         nonce: host_nonce,
         negotiated_context_hash,
@@ -528,21 +651,30 @@ pub async fn perform_viewer_handshake_with_transcript<T: Transport>(
     let kem_ct = mgr.encapsulate_for_peer(peer_id, &combined_nonce)?;
 
     let viewer_ed25519_pk = mgr.identity_public_key_bytes();
+    let viewer_ml_dsa_pk = mgr.ml_dsa_public_key_bytes();
 
-    // Sign the domain-separated transcript.
-    let transcript =
-        viewer_signature_transcript(&hello_bytes, &viewer_ed25519_pk, &kem_ct, &viewer_nonce);
+    // Sign the domain-separated transcript with both algorithms.
+    let transcript = viewer_signature_transcript(
+        &hello_bytes,
+        &viewer_ed25519_pk,
+        &viewer_ml_dsa_pk,
+        &kem_ct,
+        &viewer_nonce,
+    );
 
     let viewer_sig = mgr.sign(&transcript).to_bytes();
+    let viewer_ml_dsa_sig = mgr.sign_ml_dsa(&transcript);
 
     let response = HandshakeMessage::ViewerResponse {
         ed25519_pk: viewer_ed25519_pk,
+        ml_dsa_pk: viewer_ml_dsa_pk,
         kem_ct: kem_ct
             .clone()
             .try_into()
             .map_err(|_| "Invalid KEM CT length")?,
         nonce: viewer_nonce,
         signature: viewer_sig,
+        ml_dsa_signature: viewer_ml_dsa_sig,
     };
 
     let response_bytes = bincode::serialize(&response)?;
@@ -552,21 +684,27 @@ pub async fn perform_viewer_handshake_with_transcript<T: Transport>(
     let finalize_bytes = transport.recv_envelope().await?;
     let HandshakeMessage::HostFinalize {
         signature: host_sig_bytes,
+        ml_dsa_signature: host_ml_dsa_sig_bytes,
     } = bincode::deserialize(&finalize_bytes)?
     else {
         return Err("Expected HostFinalize".into());
     };
 
-    // Verify host signature over the finalized domain-separated transcript.
+    // Verify host signatures over the finalized domain-separated
+    // transcript -- both Ed25519 and ML-DSA-65 must verify, no
+    // classical-only fallback.
     let final_transcript = host_signature_transcript(
         &hello_bytes,
         &viewer_ed25519_pk,
+        &viewer_ml_dsa_pk,
         &kem_ct,
         &viewer_nonce,
         &viewer_sig,
+        &viewer_ml_dsa_sig,
     );
     let host_sig = ed25519_dalek::Signature::from_bytes(&host_sig_bytes);
     HandshakeManager::verify(&host_verifying_key, &final_transcript, &host_sig)?;
+    HandshakeManager::verify_ml_dsa(&ml_dsa_pk, &final_transcript, &host_ml_dsa_sig_bytes)?;
 
     let root_key = *mgr
         .session_key(peer_id)
@@ -576,17 +714,24 @@ pub async fn perform_viewer_handshake_with_transcript<T: Transport>(
     let canonical_transcript = HandshakeTranscriptV1::new(
         ed25519_pk,
         viewer_ed25519_pk,
+        ml_dsa_pk.to_vec(),
+        viewer_ml_dsa_pk.to_vec(),
         kem_pk.to_vec(),
         kem_ct.to_vec(),
         host_nonce,
         viewer_nonce,
         viewer_sig.to_vec(),
         host_sig_bytes.to_vec(),
+        viewer_ml_dsa_sig.to_vec(),
+        host_ml_dsa_sig_bytes.to_vec(),
         negotiated_context_hash,
     )?;
     let transcript_hash = canonical_transcript.transcript_hash()?;
     let key_schedule = derive_session_key_schedule(&root_key, &transcript_hash);
     let session_key = key_schedule.aead;
+
+    let host_identity_fingerprint =
+        xenia_handshake::host_identity_fingerprint(&ed25519_pk, &ml_dsa_pk);
 
     info!("Viewer-side handshake complete");
     Ok(HandshakeOutcome {
@@ -594,6 +739,7 @@ pub async fn perform_viewer_handshake_with_transcript<T: Transport>(
         transcript_hash,
         key_schedule,
         negotiated_context_hash,
+        host_identity_fingerprint,
     })
 }
 
@@ -605,6 +751,7 @@ mod tests {
     fn viewer_signature_transcript_binds_suite_context() {
         let hello_bytes = bincode::serialize(&HandshakeMessage::HostHello {
             ed25519_pk: [0x11; 32],
+            ml_dsa_pk: [0x99; ML_DSA_65_PK_LEN],
             kem_pk: [0x22; ML_KEM_768_PK_LEN],
             nonce: [0x33; 32],
             negotiated_context_hash: Some([0x99; 32]),
@@ -614,6 +761,7 @@ mod tests {
         let transcript = viewer_signature_transcript(
             &hello_bytes,
             &[0x44; 32],
+            &[0xAA; ML_DSA_65_PK_LEN],
             &[0x55; ML_KEM_768_CT_LEN],
             &[0x66; 32],
         );
@@ -641,22 +789,34 @@ mod tests {
         let verifier = signer.identity_public_key();
         let hello_bytes = bincode::serialize(&HandshakeMessage::HostHello {
             ed25519_pk: [0x11; 32],
+            ml_dsa_pk: [0x99; ML_DSA_65_PK_LEN],
             kem_pk: [0x22; ML_KEM_768_PK_LEN],
             nonce: [0x33; 32],
             negotiated_context_hash: None,
         })
         .unwrap();
         let viewer_pk = [0x44; 32];
+        let viewer_ml_dsa_pk = [0xAA; ML_DSA_65_PK_LEN];
         let mut kem_ct = [0x55; ML_KEM_768_CT_LEN];
         let viewer_nonce = [0x66; 32];
 
-        let transcript =
-            viewer_signature_transcript(&hello_bytes, &viewer_pk, &kem_ct, &viewer_nonce);
+        let transcript = viewer_signature_transcript(
+            &hello_bytes,
+            &viewer_pk,
+            &viewer_ml_dsa_pk,
+            &kem_ct,
+            &viewer_nonce,
+        );
         let signature = signer.sign(&transcript);
 
         kem_ct[0] ^= 0x01;
-        let tampered =
-            viewer_signature_transcript(&hello_bytes, &viewer_pk, &kem_ct, &viewer_nonce);
+        let tampered = viewer_signature_transcript(
+            &hello_bytes,
+            &viewer_pk,
+            &viewer_ml_dsa_pk,
+            &kem_ct,
+            &viewer_nonce,
+        );
 
         assert!(HandshakeManager::verify(&verifier, &transcript, &signature).is_ok());
         assert!(HandshakeManager::verify(&verifier, &tampered, &signature).is_err());
@@ -668,23 +828,35 @@ mod tests {
         let verifier = signer.identity_public_key();
         let hello = HandshakeMessage::HostHello {
             ed25519_pk: [0x11; 32],
+            ml_dsa_pk: [0x99; ML_DSA_65_PK_LEN],
             kem_pk: [0x22; ML_KEM_768_PK_LEN],
             nonce: [0x33; 32],
             negotiated_context_hash: None,
         };
         let hello_bytes = bincode::serialize(&hello).unwrap();
         let viewer_pk = [0x44; 32];
+        let viewer_ml_dsa_pk = [0xAA; ML_DSA_65_PK_LEN];
         let kem_ct = [0x55; ML_KEM_768_CT_LEN];
         let viewer_nonce = [0x66; 32];
 
-        let transcript =
-            viewer_signature_transcript(&hello_bytes, &viewer_pk, &kem_ct, &viewer_nonce);
+        let transcript = viewer_signature_transcript(
+            &hello_bytes,
+            &viewer_pk,
+            &viewer_ml_dsa_pk,
+            &kem_ct,
+            &viewer_nonce,
+        );
         let signature = signer.sign(&transcript);
 
         let mut tampered_hello = hello_bytes.clone();
         tampered_hello[8] ^= 0x01;
-        let tampered =
-            viewer_signature_transcript(&tampered_hello, &viewer_pk, &kem_ct, &viewer_nonce);
+        let tampered = viewer_signature_transcript(
+            &tampered_hello,
+            &viewer_pk,
+            &viewer_ml_dsa_pk,
+            &kem_ct,
+            &viewer_nonce,
+        );
 
         assert!(HandshakeManager::verify(&verifier, &tampered, &signature).is_err());
     }
@@ -692,11 +864,13 @@ mod tests {
     #[test]
     fn viewer_signature_transcript_binds_negotiated_context_hash() {
         let viewer_pk = [0x44; 32];
+        let viewer_ml_dsa_pk = [0xAA; ML_DSA_65_PK_LEN];
         let kem_ct = [0x55; ML_KEM_768_CT_LEN];
         let viewer_nonce = [0x66; 32];
 
         let first_hello = bincode::serialize(&HandshakeMessage::HostHello {
             ed25519_pk: [0x11; 32],
+            ml_dsa_pk: [0x99; ML_DSA_65_PK_LEN],
             kem_pk: [0x22; ML_KEM_768_PK_LEN],
             nonce: [0x33; 32],
             negotiated_context_hash: Some([0x01; 32]),
@@ -704,14 +878,27 @@ mod tests {
         .unwrap();
         let second_hello = bincode::serialize(&HandshakeMessage::HostHello {
             ed25519_pk: [0x11; 32],
+            ml_dsa_pk: [0x99; ML_DSA_65_PK_LEN],
             kem_pk: [0x22; ML_KEM_768_PK_LEN],
             nonce: [0x33; 32],
             negotiated_context_hash: Some([0x02; 32]),
         })
         .unwrap();
 
-        let first = viewer_signature_transcript(&first_hello, &viewer_pk, &kem_ct, &viewer_nonce);
-        let second = viewer_signature_transcript(&second_hello, &viewer_pk, &kem_ct, &viewer_nonce);
+        let first = viewer_signature_transcript(
+            &first_hello,
+            &viewer_pk,
+            &viewer_ml_dsa_pk,
+            &kem_ct,
+            &viewer_nonce,
+        );
+        let second = viewer_signature_transcript(
+            &second_hello,
+            &viewer_pk,
+            &viewer_ml_dsa_pk,
+            &kem_ct,
+            &viewer_nonce,
+        );
 
         assert_ne!(first, second);
     }
@@ -722,22 +909,27 @@ mod tests {
         let verifier = signer.identity_public_key();
         let hello_bytes = bincode::serialize(&HandshakeMessage::HostHello {
             ed25519_pk: [0x11; 32],
+            ml_dsa_pk: [0x99; ML_DSA_65_PK_LEN],
             kem_pk: [0x22; ML_KEM_768_PK_LEN],
             nonce: [0x33; 32],
             negotiated_context_hash: None,
         })
         .unwrap();
         let viewer_pk = [0x44; 32];
+        let viewer_ml_dsa_pk = [0xAA; ML_DSA_65_PK_LEN];
         let kem_ct = [0x55; ML_KEM_768_CT_LEN];
         let viewer_nonce = [0x66; 32];
         let mut viewer_signature = [0x77; 64];
+        let viewer_ml_dsa_signature = [0xBB; ML_DSA_65_SIG_LEN];
 
         let transcript = host_signature_transcript(
             &hello_bytes,
             &viewer_pk,
+            &viewer_ml_dsa_pk,
             &kem_ct,
             &viewer_nonce,
             &viewer_signature,
+            &viewer_ml_dsa_signature,
         );
         let signature = signer.sign(&transcript);
 
@@ -745,9 +937,11 @@ mod tests {
         let tampered = host_signature_transcript(
             &hello_bytes,
             &viewer_pk,
+            &viewer_ml_dsa_pk,
             &kem_ct,
             &viewer_nonce,
             &viewer_signature,
+            &viewer_ml_dsa_signature,
         );
 
         assert!(HandshakeManager::verify(&verifier, &transcript, &signature).is_ok());
@@ -763,6 +957,7 @@ mod tests {
             video_format: crate::frame::PixelFormat::Passthrough,
             telemetry_enabled: false,
             input_control_enabled: false,
+            clipboard_enabled: false,
             lane_envelope_version: crate::frame::LANE_ENVELOPE_SCHEMA_VERSION,
             lane_envelope_magic: crate::frame::LANE_ENVELOPE_MAGIC,
         };
@@ -785,6 +980,7 @@ mod tests {
             video_format: crate::frame::PixelFormat::Passthrough,
             telemetry_enabled: false,
             input_control_enabled: false,
+            clipboard_enabled: false,
             lane_envelope_version: crate::frame::LANE_ENVELOPE_SCHEMA_VERSION,
             lane_envelope_magic: crate::frame::LANE_ENVELOPE_MAGIC,
         };
@@ -807,6 +1003,7 @@ mod tests {
             video_format: crate::frame::PixelFormat::Passthrough,
             telemetry_enabled: false,
             input_control_enabled: false,
+            clipboard_enabled: false,
             lane_envelope_version: crate::frame::LANE_ENVELOPE_SCHEMA_VERSION,
             lane_envelope_magic: crate::frame::LANE_ENVELOPE_MAGIC,
         };

@@ -17,6 +17,8 @@ xenia-video = { path = "../../crates/xenia-video" }
 xenia-transport-ws = { path = "../../crates/xenia-transport-ws" }
 xenia-transport-quic = { path = "../../crates/xenia-transport-quic" }
 xenia-ledger = { path = "../../crates/xenia-ledger" }
+xenia-inject = { path = "../../crates/xenia-inject" }
+xenia-operator-proto = { workspace = true }
 tokio-tungstenite = "0.24"
 
 xenia-wire = { workspace = true, features = ["consent", "reference-frame"] }
@@ -35,12 +37,31 @@ serde_json = "1"
 hex = "0.4"
 bincode = "1"
 serde = { version = "1", features = ["derive"] }
+chrono.workspace = true
 blake3 = "1.5"
 reqwest = { version = "0.13", features = ["json"] }
 xenia-handshake = { path = "../../crates/xenia-handshake" }
+# Only used to embed the operator console (`embedded-console` feature); the
+# embed requires apps/sovereign-admin/dist/ to be trunk-built at compile time,
+# so it is opt-in rather than a default compile-time coupling.
+rust-embed = { version = "8.11.0", features = ["axum", "mime-guess"], optional = true }
+mime_guess = { version = "2.0.5", optional = true }
+arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
+xenia-capture-scrcpy = { path = "../../crates/xenia-capture-scrcpy", optional = true }
 
 [features]
 scap = ["xenia-capture/scap-backend"]
+# xdg-desktop-portal RemoteDesktop input-injection backend
+# (--input-backend xdg-portal). Requires a live Wayland session with
+# a RemoteDesktop-capable portal backend (GNOME/KDE); triggers an
+# interactive consent dialog on first use. Off by default -- the
+# `noop`/`log` backends need no extra system deps.
+xdg-portal = ["xenia-inject/xdg-portal"]
+# Kernel-level /dev/uinput input-injection backend (--input-backend
+# uinput). Works without any compositor/portal/desktop session --
+# needs root, `input` group membership, or a udev rule granting
+# /dev/uinput access. Off by default.
+uinput = ["xenia-inject/uinput"]
 # Viewer/daemon protocol path for real host audio capture. Requires
 # system audio headers on Linux; off by default.
 audio-capture = ["xenia-capture/audio-cpal"]
@@ -52,9 +73,32 @@ h264 = ["xenia-video/h264"]
 # HDC hybrid tile-delta codec (ported from Symthaea). Pure Rust,
 # no external libs. Grayscale output.
 hdc = ["xenia-video/hdc"]
+# Phone-as-source capture (--phone-serial): streams a real Android
+# device's screen via scrcpy-server over ADB instead of the host
+# display. Requires libav dev headers (enable inside nix develop, same
+# as h264) plus a device connected over USB with debugging authorized.
+scrcpy = ["dep:xenia-capture-scrcpy"]
+# Embed the built sovereign-admin operator console into the daemon binary and
+# serve it from the admin port. Off by default because it requires
+# apps/sovereign-admin/dist/ to be trunk-built at compile time (see
+# admin_ui.rs); without it the daemon still serves /ws and /auth, and the
+# console can run via `trunk serve`.
+embedded-console = ["dep:rust-embed", "dep:mime_guess"]
+
 # Local smoke/demo-only fixtures. Required for flags that bypass a real
 # operator consent source; never enable for production or design-partner builds.
 preprod-fixtures = []
 # Propagate the ledger's explicit ML-DSA evidence verifier feature to the daemon
 # verifier CLI. Off by default; this does not enable PQ runtime export.
 pqc-signatures = ["xenia-ledger/pqc-signatures"]
+
+[dev-dependencies]
+# `ServiceExt::oneshot` for driving the operator-auth axum routes in tests
+# without binding a real socket.
+tower = { version = "0.5", features = ["util"] }
+# Test-only: the sealed-channel E2E test drives the *browser console's* exact
+# wire handshake (xenia_wire::handshake::ViewerHandshake) against the live
+# --operator-sealed endpoint. Cargo unions this with the [dependencies] entry
+# only for the test/dev profile, so the production daemon binary does NOT pull
+# the handshake/ml-kem tree (it uses its own native host handshake).
+xenia-wire = { workspace = true, features = ["handshake"] }

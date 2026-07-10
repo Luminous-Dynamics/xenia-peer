@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <application
+        android:allowBackup="false"
+        android:label="Xenia Viewer"
+        android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
+        android:theme="@style/Theme.XeniaViewer">
+        <!-- usesCleartextTraffic: v1 connects over plain TCP (see the
+             project plan's phasing: WS/TLS is a possible fast-follow,
+             not v1 scope). Sealed-envelope confidentiality/integrity
+             comes from the xenia-wire AEAD layer regardless of
+             transport, but Android 9+ blocks all cleartext sockets by
+             default without this. -->
+
+        <activity
+            android:name=".XeniaViewerActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:screenOrientation="portrait">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
