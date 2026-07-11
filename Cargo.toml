@@ -44,7 +44,7 @@ repository = "https://github.com/Luminous-Dynamics/xenia-peer"
 homepage = "https://github.com/Luminous-Dynamics/xenia-peer"
 
 [workspace.dependencies]
-xenia-wire = "0.2.0-alpha.4"
+xenia-wire = "0.2.0-alpha.5"
 xenia-operator-proto = { path = "crates/xenia-operator-proto" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time", "signal"] }
 bincode = "1.3"
@@ -56,16 +56,6 @@ chrono = { version = "0.4", features = ["serde"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
-
-# TEMPORARY dev-time override: xenia-wire's operator_rekey + handshake_highsec
-# modules (forward secrecy + high-security suite for the operator sealed
-# channel) are unreleased -- see xenia-wire PR #10
-# (https://github.com/Luminous-Dynamics/xenia-wire/pull/10). Remove this patch
-# and bump the pinned version above once that PR merges and a release
-# containing it is published (mirrors the workflow PR #47 established:
-# develop against a git xenia-wire, then publish + pin + drop the patch).
-[patch.crates-io]
-xenia-wire = { git = "https://github.com/Luminous-Dynamics/xenia-wire", branch = "xenia/operator-forward-secrecy-and-highsec" }
 
 # Workspace profiles moved from apps/sovereign-admin.
 [profile.release]
