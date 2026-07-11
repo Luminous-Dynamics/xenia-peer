@@ -141,6 +141,25 @@ struct Args {
     #[arg(long, default_value_t = 8083)]
     operator_sealed_port: u16,
 
+    /// Forward-secrecy key rotation interval (seconds) for a long-lived
+    /// sealed operator channel connection. `0` (default) disables rekeying --
+    /// the connection keeps the handshake-derived key for its whole lifetime,
+    /// same as before this flag existed (every connection is short-lived in
+    /// today's console usage, so this matters mainly for a future
+    /// persistent-console mode, or a deliberately conservative deployment).
+    /// See `docs/security/SEALED_OPERATOR_CHANNEL_DESIGN.md`.
+    #[arg(long, default_value_t = 0)]
+    operator_rekey_interval_secs: u64,
+
+    /// Use the high-security operator-channel handshake suite (ML-KEM-1024 +
+    /// Ed25519 + ML-DSA-87, NIST security category 5) instead of the default
+    /// (ML-KEM-768 + ML-DSA-65, category 3). The console must be configured
+    /// to match -- the two suites speak non-interoperable wire messages by
+    /// design (see `xenia_wire::handshake_highsec`'s module doc comment), so
+    /// a mismatched pairing fails the handshake rather than downgrading.
+    #[arg(long)]
+    operator_high_security: bool,
+
     /// Bind address for the operator surface (the admin `/auth` + `/ws` port
     /// and the consent port). Defaults to loopback. Binding to a non-loopback
     /// address (e.g. `0.0.0.0`) exposes the surface to the network and is
@@ -1260,6 +1279,53 @@ fn load_or_create_host_identity(
     ))
 }
 
+/// Like [`load_or_create_host_identity`], but for the `--operator-high-security`
+/// suite: reads/creates the *same* identity file (so both suites share one
+/// persisted Ed25519 secret -- the identity a peer actually pins), then
+/// derives the ML-DSA-87 seed from that secret via
+/// `derive_ml_dsa_87_seed_from_ed25519_secret` rather than using the file's
+/// own `[32..64]` bytes (that half is the *standard*-suite ML-DSA-65 seed --
+/// a different parameter set, not reusable here).
+fn load_or_create_host_identity_highsec(
+    path: &std::path::Path,
+) -> Result<xenia_wire::handshake_highsec::HostHandshakeHighSec, Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    fn restrict_permissions(path: &std::path::Path) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(not(unix))]
+    fn restrict_permissions(_path: &std::path::Path) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    let blob: Vec<u8> = if path.exists() {
+        let bytes = std::fs::read(path)?;
+        restrict_permissions(path)?;
+        if bytes.len() != 64 {
+            return Err("host identity file must be exactly 64 bytes".into());
+        }
+        bytes
+    } else {
+        let mut blob = Vec::with_capacity(64);
+        blob.extend_from_slice(&rand::random::<[u8; 32]>());
+        blob.extend_from_slice(&rand::random::<[u8; 32]>());
+        std::fs::write(path, &blob)?;
+        restrict_permissions(path)?;
+        blob
+    };
+    let mut ed25519_secret = [0u8; 32];
+    ed25519_secret.copy_from_slice(&blob[..32]);
+    let ml_dsa_seed =
+        xenia_wire::handshake_highsec::derive_ml_dsa_87_seed_from_ed25519_secret(&ed25519_secret);
+    Ok(
+        xenia_wire::handshake_highsec::HostHandshakeHighSec::from_identity(
+            &ed25519_secret,
+            &ml_dsa_seed,
+        ),
+    )
+}
+
 /// Derive the consent tiers to grant from the operator's configured flags.
 ///
 /// A single Approve should authorize only what the operator actually turned
@@ -1929,9 +1995,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sealed_addr = format!("{}:{}", args.operator_bind, args.operator_sealed_port);
         match TcpListener::bind(&sealed_addr).await {
             Ok(listener) => {
-                // A second host HandshakeManager with the *same* persisted
-                // identity, so the console pins one daemon fingerprint.
-                let host_mgr = load_or_create_host_identity(&args.host_identity_key_path)?;
+                // A second host identity with the *same* persisted secret, so
+                // the console pins one daemon fingerprint. Suite selected by
+                // --operator-high-security; see that flag's doc comment.
+                let identity = if args.operator_high_security {
+                    crate::operator_sealed_channel::OperatorHostIdentity::HighSecurity(Box::new(
+                        load_or_create_host_identity_highsec(&args.host_identity_key_path)?,
+                    ))
+                } else {
+                    crate::operator_sealed_channel::OperatorHostIdentity::Standard(Box::new(
+                        load_or_create_host_identity(&args.host_identity_key_path)?,
+                    ))
+                };
                 // Uses the `revocations` handle created above (shared with the
                 // admin /operator/revoke endpoint), so a live revoke reaches the
                 // sealed channel immediately.
@@ -1943,6 +2018,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ledger: consent_ledger,
                     revoked: revoked_for_consent,
                     revocations: revocations.clone(),
+                    rekey_interval: (args.operator_rekey_interval_secs > 0)
+                        .then(|| Duration::from_secs(args.operator_rekey_interval_secs)),
                 };
                 let policy = operator_auth_state.policy.clone();
                 let sealed_metrics = std::sync::Arc::new(
@@ -1952,7 +2029,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tokio::spawn(
                     crate::operator_sealed_channel::run_sealed_operator_endpoint(
                         listener,
-                        host_mgr,
+                        identity,
                         policy,
                         deps,
                         consent_decision_tx,

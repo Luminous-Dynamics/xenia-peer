@@ -55,8 +55,11 @@ mycelix-leptos-client = { version = "0.1", default-features = false, features = 
 # (Session::seal), so the console can complete the handshake with its enrolled
 # operator identity and seal consent decisions over the daemon's
 # --operator-sealed endpoint. The `handshake` feature pulls ml-kem/ml-dsa
-# (getrandom backends already wired for wasm32 below).
-xenia-wire = { workspace = true, features = ["handshake"] }
+# (getrandom backends already wired for wasm32 below). `operator-rekey` adds
+# forward secrecy: the console installs a new AEAD key when the daemon
+# proposes a rekey epoch on a long-lived connection instead of keeping the
+# handshake's key for the connection's whole lifetime.
+xenia-wire = { workspace = true, features = ["handshake", "operator-rekey"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # ml-kem/ml-dsa (via xenia-handshake + xenia-ledger) resolve getrandom 0.3 AND

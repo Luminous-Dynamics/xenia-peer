@@ -21,7 +21,7 @@ xenia-inject = { path = "../../crates/xenia-inject" }
 xenia-operator-proto = { workspace = true }
 tokio-tungstenite = "0.24"
 
-xenia-wire = { workspace = true, features = ["consent", "reference-frame"] }
+xenia-wire = { workspace = true, features = ["consent", "reference-frame", "operator-rekey", "handshake"] }
 tokio = { workspace = true }
 tokio-util = "0.7"
 tracing.workspace = true
@@ -96,11 +96,14 @@ pqc-signatures = ["xenia-ledger/pqc-signatures"]
 # `ServiceExt::oneshot` for driving the operator-auth axum routes in tests
 # without binding a real socket.
 tower = { version = "0.5", features = ["util"] }
-# Test-only: the sealed-channel E2E test drives the *browser console's* exact
-# wire handshake (xenia_wire::handshake::ViewerHandshake) against the live
-# --operator-sealed endpoint. Cargo unions this with the [dependencies] entry
-# only for the test/dev profile, so the production daemon binary does NOT pull
-# the handshake/ml-kem tree (it uses its own native host handshake).
-xenia-wire = { workspace = true, features = ["handshake"] }
+# Redundant with [dependencies] above (both `handshake` and `operator-rekey`
+# are now production features -- `handshake` is needed there too for the
+# `--operator-high-security` suite, `HostHandshakeHighSec`). Kept explicit
+# here as a reminder for what the sealed-channel E2E tests actually exercise:
+# they drive the *browser console's* exact wire code
+# (xenia_wire::handshake::ViewerHandshake / handshake_highsec::ViewerHandshakeHighSec)
+# against the live --operator-sealed endpoint, proving cross-compat with the
+# daemon's own handshake drivers rather than asserting it separately.
+xenia-wire = { workspace = true, features = ["handshake", "operator-rekey"] }
 # Test-only: temp files for the operator-revocations file-parsing/reload tests.
 tempfile = "3"

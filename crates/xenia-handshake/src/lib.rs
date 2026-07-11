@@ -998,6 +998,87 @@ pub fn derive_rekey_epoch_keys(
     })
 }
 
+/// Reason an operator-channel rekey epoch was created. Bound into the hashed
+/// epoch context ([`OperatorRekeyEpochContext`]), so variant order matters for
+/// cross-implementation hash agreement even though the reason itself isn't
+/// security-relevant — it MUST match `xenia_wire::operator_rekey::OperatorRekeyReason`'s
+/// variant order exactly (bincode encodes enums by variant index, not name).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OperatorRekeyReason {
+    /// Periodic time-based rotation.
+    Interval,
+    /// Operator/admin explicitly requested it (reserved for future use).
+    Manual,
+}
+
+/// Canonical, independently-hashable context for one operator-channel rekey
+/// epoch (Xenia's operator sealed channel -- a single-key `xenia_wire::Session`
+/// channel, distinct from the multi-lane [`RekeyEpochContextV1`] above).
+/// Mirrors `xenia_wire::operator_rekey`'s (private) context type
+/// field-for-field and schema-string-for-schema-string; proven byte-identical
+/// by a cross-compat test in `apps/xenia-peer`'s operator sealed channel test
+/// suite, since this crate does not depend on `xenia-wire`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorRekeyEpochContext {
+    schema: String,
+    /// New epoch number. Epoch 0 is the key installed at handshake.
+    pub key_epoch: u64,
+    /// Original canonical handshake transcript hash (audit chain root).
+    pub base_transcript_hash: [u8; 32],
+    /// Previous rekey epoch's hash, or `base_transcript_hash` for epoch 1.
+    pub previous_epoch_hash: [u8; 32],
+    /// Trigger reason.
+    pub reason: OperatorRekeyReason,
+}
+
+impl OperatorRekeyEpochContext {
+    /// Build a canonical operator-channel rekey context.
+    pub fn new(
+        key_epoch: u64,
+        base_transcript_hash: [u8; 32],
+        previous_epoch_hash: [u8; 32],
+        reason: OperatorRekeyReason,
+    ) -> Self {
+        Self {
+            schema: "xenia-operator-rekey-epoch-context-v1".to_string(),
+            key_epoch,
+            base_transcript_hash,
+            previous_epoch_hash,
+            reason,
+        }
+    }
+
+    /// Return canonical bincode-v1 bytes.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
+        Ok(bincode::serialize(self)?)
+    }
+
+    /// Return BLAKE3-256 hash over canonical context bytes.
+    pub fn epoch_hash(&self) -> Result<[u8; 32]> {
+        Ok(*blake3::hash(&self.canonical_bytes()?).as_bytes())
+    }
+}
+
+/// Derive an operator-channel rekey epoch's single AEAD key from a schedule's
+/// `rekey` root and an already-computed canonical epoch hash (see
+/// [`OperatorRekeyEpochContext::epoch_hash`]). Mirrors [`derive_rekey_epoch_keys`]
+/// but for a single-key channel (Xenia's operator sealed channel) rather than
+/// a multi-lane session -- uses a distinct label so operator-channel epochs
+/// can never derive a key colliding with a lane-session rekey epoch even if a
+/// `rekey` root were ever reused across channel types. The label MUST match
+/// `xenia_wire::operator_rekey`'s internal `OPERATOR_REKEY_AEAD_LABEL`
+/// byte-for-byte; this crate does not depend on `xenia-wire`, so the match is
+/// proven by a cross-compat test in `apps/xenia-peer`'s operator sealed
+/// channel test suite rather than by a shared constant.
+///
+/// Takes the raw `rekey` root rather than a whole `SessionKeySchedule` so the
+/// caller can be suite-agnostic (the operator channel's standard-suite and
+/// high-security handshakes both produce a `rekey` root the same way, via
+/// different handshake types -- see xenia-wire's `handshake_highsec`).
+pub fn derive_operator_rekey_key(rekey_root: &[u8; 32], epoch_hash: &[u8; 32]) -> [u8; 32] {
+    derive_labeled_session_key(rekey_root, epoch_hash, b"xenia/operator/rekey/aead")
+}
+
 fn derive_labeled_session_key(
     root_key: &[u8; 32],
     transcript_hash: &[u8; 32],
@@ -1464,5 +1545,76 @@ mod tests {
         assert_eq!(decoded.kem_public_key, exchange.kem_public_key);
         assert_eq!(decoded.kem_ciphertext, exchange.kem_ciphertext);
         assert_eq!(decoded.peer_node_id, exchange.peer_node_id);
+    }
+
+    #[test]
+    fn operator_rekey_epoch_hash_is_deterministic_and_epoch_bound() {
+        let ctx1 = OperatorRekeyEpochContext::new(
+            1,
+            [0x11; 32],
+            [0x11; 32],
+            OperatorRekeyReason::Interval,
+        );
+        let ctx1_again = OperatorRekeyEpochContext::new(
+            1,
+            [0x11; 32],
+            [0x11; 32],
+            OperatorRekeyReason::Interval,
+        );
+        let ctx2 = OperatorRekeyEpochContext::new(
+            2,
+            [0x11; 32],
+            [0x22; 32],
+            OperatorRekeyReason::Interval,
+        );
+        assert_eq!(ctx1.epoch_hash().unwrap(), ctx1_again.epoch_hash().unwrap());
+        assert_ne!(ctx1.epoch_hash().unwrap(), ctx2.epoch_hash().unwrap());
+    }
+
+    #[test]
+    fn operator_rekey_epoch_hash_differs_from_lane_rekey_schema() {
+        // Same field values, but the two context types use distinct schema
+        // tags -- their hashes must never collide.
+        let operator_ctx = OperatorRekeyEpochContext::new(
+            1,
+            [0x11; 32],
+            [0x11; 32],
+            OperatorRekeyReason::Interval,
+        );
+        let lane_ctx = RekeyEpochContextV1::new(1, [0x11; 32], [0x11; 32], RekeyReason::Time);
+        assert_ne!(
+            operator_ctx.epoch_hash().unwrap(),
+            lane_ctx.epoch_hash().unwrap()
+        );
+    }
+
+    #[test]
+    fn operator_rekey_key_derivation_is_deterministic_and_epoch_bound() {
+        let schedule = derive_session_key_schedule(&[0xA5u8; 32], &[0x5Au8; 32]);
+        let epoch_hash_1 = OperatorRekeyEpochContext::new(
+            1,
+            [0x11; 32],
+            [0x11; 32],
+            OperatorRekeyReason::Interval,
+        )
+        .epoch_hash()
+        .unwrap();
+        let epoch_hash_2 = OperatorRekeyEpochContext::new(
+            2,
+            [0x11; 32],
+            epoch_hash_1,
+            OperatorRekeyReason::Interval,
+        )
+        .epoch_hash()
+        .unwrap();
+
+        let key1 = derive_operator_rekey_key(&schedule.rekey, &epoch_hash_1);
+        let key1_again = derive_operator_rekey_key(&schedule.rekey, &epoch_hash_1);
+        let key2 = derive_operator_rekey_key(&schedule.rekey, &epoch_hash_2);
+
+        assert_eq!(key1, key1_again);
+        assert_ne!(key1, key2);
+        assert_ne!(key1, schedule.aead);
+        assert_ne!(key1, schedule.rekey);
     }
 }

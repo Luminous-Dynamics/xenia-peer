@@ -19,11 +19,24 @@
 //! The handshake and session sealing come from the `xenia-wire` crate's
 //! `handshake` feature — the exact wire-compatible implementation the daemon's
 //! native host handshake speaks (proven by `handshake_cross_compat`).
+//!
+//! [`handle_operator_rekey_envelope`] handles the daemon's forward-secrecy
+//! rekey proposals (see xenia-peer's `operator_sealed_channel.rs` module doc
+//! comment, "Forward secrecy"). [`send_sealed_consent`] doesn't call it today
+//! — it's a one-shot "connect, decide, close" driver that never keeps a
+//! connection open long enough for a proposal to arrive — but the function is
+//! here, real, and proven wire-compatible against the live daemon endpoint
+//! (see xenia-peer's `operator_rekey_proposal_installs_new_key_and_channel_keeps_serving`
+//! test, which drives this exact `xenia_wire::operator_rekey` logic natively),
+//! ready for a future persistent-console mode (a live-updating admin view
+//! that holds one connection across many decisions) to call from its own read
+//! loop.
 
 use futures_util::{SinkExt, StreamExt};
 use gloo_net::websocket::{Message, WebSocketError, futures::WebSocket};
 
-use xenia_wire::handshake::ViewerHandshake;
+use xenia_wire::handshake::{SessionKeySchedule, ViewerHandshake};
+use xenia_wire::operator_rekey::{self, OperatorRekeyMessage};
 use xenia_wire::{PAYLOAD_TYPE_APPLICATION_MIN, Session};
 
 /// Shared `source_id` for the sealed operator channel — MUST match the daemon's
@@ -73,6 +86,65 @@ pub async fn send_sealed_consent(
     send_binary(&mut writer, envelope).await?;
 
     Ok(())
+}
+
+/// Handle one sealed operator-channel envelope already identified (via
+/// `xenia_wire::envelope_payload_type`) as
+/// [`operator_rekey::PAYLOAD_TYPE_OPERATOR_REKEY`]: open it under the
+/// *current* key, verify the proposed epoch's self-consistency
+/// ([`operator_rekey::verify_proposal_epoch_hash`]), derive and install the
+/// new key, and return the Ack envelope (already sealed under the *new* key)
+/// ready to send. See the module doc comment for why nothing calls this yet.
+///
+/// Errors (a malformed/tampered envelope, or a message that isn't a Proposal
+/// — the console never proposes, only the daemon does) are returned rather
+/// than panicking, matching every other function in this module.
+// Not yet called from this crate -- see the module doc comment. Real,
+// tested (via xenia-peer's native E2E test), and public so a future
+// persistent-console read loop can call it directly.
+#[allow(dead_code)]
+pub fn handle_operator_rekey_envelope(
+    session: &mut Session,
+    schedule: &SessionKeySchedule,
+    envelope: &[u8],
+) -> Result<Vec<u8>, String> {
+    let plaintext = session
+        .open(envelope)
+        .map_err(|e| format!("failed to open sealed operator rekey envelope: {e}"))?;
+    let OperatorRekeyMessage::Proposal {
+        key_epoch,
+        base_transcript_hash,
+        previous_epoch_hash,
+        reason,
+        epoch_hash,
+    } = OperatorRekeyMessage::decode(&plaintext)
+        .map_err(|e| format!("failed to decode operator rekey message: {e}"))?
+    else {
+        return Err("expected an operator rekey Proposal (only the daemon proposes)".to_string());
+    };
+    let verified = operator_rekey::verify_proposal_epoch_hash(
+        key_epoch,
+        base_transcript_hash,
+        previous_epoch_hash,
+        reason,
+        epoch_hash,
+    )
+    .map_err(|e| format!("operator rekey proposal failed its self-consistency check: {e}"))?;
+
+    let new_key = operator_rekey::derive_operator_rekey_key(&schedule.rekey, &verified);
+    session.install_key(new_key);
+
+    let ack = OperatorRekeyMessage::Ack {
+        key_epoch,
+        epoch_hash: verified,
+    };
+    session
+        .seal(
+            &ack.encode()
+                .map_err(|e| format!("failed to encode operator rekey ack: {e}"))?,
+            operator_rekey::PAYLOAD_TYPE_OPERATOR_REKEY,
+        )
+        .map_err(|e| format!("failed to seal operator rekey ack: {e}"))
 }
 
 /// Receive the next WebSocket frame, requiring it to be binary (the handshake
