@@ -29,6 +29,7 @@ use web_sys::Storage;
 use xenia_handshake::HandshakeManager;
 use xenia_operator_proto::{
     ConsentAction, OperatorAction, OperatorRole, challenge_transcript, consent_action_transcript,
+    revoke_operator_transcript,
 };
 
 /// localStorage keys for the operator's persisted identity seeds (hex). Two
@@ -249,6 +250,27 @@ pub fn build_consent_request(
     serde_json::json!({
         "token": session.token_json,
         "action": action.as_str(),
+        "action_signature": hex::encode(sig),
+    })
+    .to_string()
+}
+
+/// Build the authenticated `POST /operator/revoke` body the daemon parses:
+/// `{ token, target_operator_id, action_signature }`. The per-action Ed25519
+/// signature is over the shared `revoke_operator_transcript(target,
+/// token_nonce)`, so it binds this revocation to the exact target and the
+/// admin's current token — byte-identical to what the daemon verifies. Only an
+/// Admin session's token will be authorized daemon-side.
+pub fn build_revoke_request(
+    id: &OperatorIdentity,
+    session: &OperatorSession,
+    target_operator_id: &str,
+) -> String {
+    let transcript = revoke_operator_transcript(target_operator_id, &session.token_nonce);
+    let sig = id.hm.sign(&transcript).to_bytes();
+    serde_json::json!({
+        "token": session.token_json,
+        "target_operator_id": target_operator_id,
         "action_signature": hex::encode(sig),
     })
     .to_string()

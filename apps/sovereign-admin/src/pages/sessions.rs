@@ -11,9 +11,12 @@ use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use xenia_ledger::{Chain, ConsentEventRecord, ConsentKind, LedgerEntry, Verifier, VerifyError};
+use xenia_operator_proto::OperatorAction;
 
+use crate::app::OperatorSessionCtx;
 use crate::config::DaemonConfig;
 use crate::context::{auth_context, daemon_config_context, missing_context_view};
+use crate::operator_session::{OperatorIdentity, build_revoke_request};
 
 /// Portable JSON shape used by the export/import pair.
 #[derive(Serialize, Deserialize)]
@@ -29,6 +32,61 @@ pub fn SessionsPage() -> impl IntoView {
     };
     let Ok(config) = daemon_config_context() else {
         return missing_context_view("DaemonConfig").into_any();
+    };
+
+    // Operator-revocation control — shown only to an authenticated operator whose
+    // role permits it (EnrollOperator = Admin, the same gate the daemon enforces).
+    let operator_session = use_context::<OperatorSessionCtx>();
+    let (revoke_target, set_revoke_target) = signal(String::new());
+    let (revoke_status, set_revoke_status) = signal(String::new());
+    let can_revoke = move || {
+        operator_session
+            .map(|sig| {
+                sig.with(|s| {
+                    s.as_ref()
+                        .map(|s| s.is_valid() && s.permits(OperatorAction::EnrollOperator))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    };
+    let do_revoke = move |_| {
+        let target = revoke_target.get_untracked().trim().to_string();
+        if target.is_empty() {
+            set_revoke_status.set("Enter an operator id to revoke.".to_string());
+            return;
+        }
+        let Some(sess) = operator_session.and_then(|sig| sig.get_untracked()) else {
+            set_revoke_status
+                .set("No operator session — sign in as an operator first.".to_string());
+            return;
+        };
+        let id = OperatorIdentity::load_or_generate();
+        let body = build_revoke_request(&id, &sess, &target);
+        let url = format!(
+            "{}/operator/revoke",
+            config.endpoint.get_untracked().trim_end_matches('/')
+        );
+        set_revoke_status.set(format!("Revoking '{target}'…"));
+        spawn_local(async move {
+            let sent = match Request::post(&url)
+                .header("content-type", "application/json")
+                .body(body)
+            {
+                Ok(req) => req.send().await,
+                Err(err) => {
+                    set_revoke_status.set(format!("Request build failed: {err}"));
+                    return;
+                }
+            };
+            match sent {
+                Ok(resp) if resp.ok() => set_revoke_status.set(format!("Revoked '{target}'.")),
+                Ok(resp) => {
+                    set_revoke_status.set(format!("Refused by daemon ({}).", resp.status()))
+                }
+                Err(err) => set_revoke_status.set(format!("Request failed: {err}")),
+            }
+        });
     };
 
     view! {
@@ -99,6 +157,27 @@ pub fn SessionsPage() -> impl IntoView {
                         <button class="primary" on:click=move |_| config.save()>"Save & Reconnect"</button>
                     </div>
                 </section>
+
+                <Show when=can_revoke>
+                    <section class="config-section">
+                        <h2>"Revoke Operator"</h2>
+                        <p class="prose">
+                            "Immediately revoke a compromised operator by id. Signed with your "
+                            "Admin session and applied live on the daemon (sealed channel + consent "
+                            "path) with no restart."
+                        </p>
+                        <div class="field">
+                            <label>"Operator ID to revoke"</label>
+                            <input
+                                type="text"
+                                prop:value=move || revoke_target.get()
+                                on:input=move |ev| set_revoke_target.set(event_target_value(&ev))
+                            />
+                        </div>
+                        <button class="danger" on:click=do_revoke>"Revoke Operator"</button>
+                        <p class="prose">{move || revoke_status.get()}</p>
+                    </section>
+                </Show>
 
                 <RealLedger config/>
 
