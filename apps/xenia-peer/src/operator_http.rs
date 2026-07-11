@@ -456,4 +456,79 @@ mod tests {
         let (status, _) = post_json(&router, "/auth/verify", body).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
+
+    fn now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    /// Mint a daemon-signed token JSON for operator "alice" at `role`, plus its
+    /// token nonce (needed to sign the revoke transcript).
+    fn token_json_for(
+        daemon: &SigningKey,
+        role: OperatorRole,
+        now: u64,
+    ) -> (serde_json::Value, [u8; 16]) {
+        let authed = crate::operator_auth::AuthenticatedOperator {
+            operator_id: "alice".to_string(),
+            role,
+        };
+        let nonce = [0x2b; 16];
+        let signed = issue_token(daemon, &authed, now, TOKEN_TTL_SECS, nonce);
+        (
+            serde_json::to_value(TokenDto::from_signed(&signed)).unwrap(),
+            nonce,
+        )
+    }
+
+    /// Build a signed `POST /operator/revoke` body for `target`, signed by `op`.
+    fn revoke_body(
+        op: &HandshakeManager,
+        token_json: serde_json::Value,
+        target: &str,
+        nonce: &[u8; 16],
+    ) -> String {
+        let transcript = crate::operator_auth::revoke_operator_transcript(target, nonce);
+        serde_json::json!({
+            "token": token_json,
+            "target_operator_id": target,
+            "action_signature": hex::encode(op.sign(&transcript).to_bytes()),
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn admin_revoke_endpoint_revokes_target_and_gates_by_role() {
+        let op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let state = state_with(&op, daemon.clone()); // "alice" enrolled as Admin
+        let revocations = OperatorRevocations::empty();
+        let router = router(state, revocations.clone());
+        let now = now_secs();
+
+        // An Admin token authorizes the revocation: 204 + target revoked.
+        let (admin_token, nonce) = token_json_for(&daemon, OperatorRole::Admin, now);
+        let body = revoke_body(&op, admin_token, "mallory", &nonce);
+        let (status, _) = post_json(&router, "/operator/revoke", body).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(revocations.is_revoked("mallory"));
+
+        // An honestly-issued NON-Admin token is refused (403) and revokes nothing
+        // -- the daemon gates on the token's own role, not on any client UI.
+        let (approver_token, nonce2) = token_json_for(&daemon, OperatorRole::Approver, now);
+        let body2 = revoke_body(&op, approver_token, "victim", &nonce2);
+        let (status2, _) = post_json(&router, "/operator/revoke", body2).await;
+        assert_eq!(status2, StatusCode::FORBIDDEN);
+        assert!(!revocations.is_revoked("victim"));
+
+        // Signature is over "mallory" but the body claims "eve": the per-action
+        // signature no longer verifies -> refused, nothing revoked.
+        let (admin_token2, nonce3) = token_json_for(&daemon, OperatorRole::Admin, now);
+        let tampered = revoke_body(&op, admin_token2, "mallory", &nonce3).replace("mallory", "eve");
+        let (status3, _) = post_json(&router, "/operator/revoke", tampered).await;
+        assert_eq!(status3, StatusCode::FORBIDDEN);
+        assert!(!revocations.is_revoked("eve"));
+    }
 }
