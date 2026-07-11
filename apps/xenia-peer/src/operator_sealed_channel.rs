@@ -17,27 +17,64 @@
 //!
 //! Fail-closed: a cryptographically valid handshake from a key that is not
 //! enrolled is still refused.
+//!
+//! ## Forward secrecy
+//!
+//! A connection that stays open across multiple decisions (the serve loop
+//! below doesn't close after one — see its doc comment) would otherwise keep
+//! the single key derived at handshake time for its entire lifetime. When
+//! `SealedConsentDeps::rekey_interval` is set, the daemon periodically
+//! proposes a new key epoch (`xenia_wire::operator_rekey::OperatorRekeyMessage`)
+//! and installs it right after sending — mirroring `xenia-peer-core`'s
+//! lane-session `perform_rekey` ordering. Off by default (today's console
+//! usage opens a fresh connection, and therefore a fresh handshake key, per
+//! action — see `apps/sovereign-admin/src/sealed_consent.rs`'s doc comment).
 
 use tokio::net::TcpListener;
-use xenia_handshake::SessionKeySchedule;
+use xenia_handshake::{OperatorRekeyEpochContext, OperatorRekeyReason};
 use xenia_peer_core::HandshakeManager;
 use xenia_peer_core::handshake::perform_host_handshake_authenticating_peer;
 use xenia_peer_core::transport::Transport;
 use xenia_transport_ws::WsTransport;
+use xenia_wire::handshake_highsec::HostHandshakeHighSec;
+use xenia_wire::operator_rekey::{self, OperatorRekeyMessage};
 
 use crate::operator::{OperatorPolicy, OperatorRole};
 
+/// Which handshake suite establishes an operator channel. See
+/// `xenia_wire::handshake_highsec`'s module doc comment for why the two
+/// suites are non-interoperable, non-negotiated alternatives rather than a
+/// negotiated wire option.
+pub(crate) enum OperatorHostIdentity {
+    /// ML-KEM-768 + Ed25519 + ML-DSA-65 (the original, still-default suite).
+    /// Boxed, matching `HighSecurity` -- both variants hold multi-KB signing
+    /// state, and an unboxed enum would size every `OperatorHostIdentity` to
+    /// its largest variant regardless of which one is actually held.
+    Standard(Box<HandshakeManager>),
+    /// ML-KEM-1024 + Ed25519 + ML-DSA-87 (NIST security category 5).
+    HighSecurity(Box<HostHandshakeHighSec>),
+}
+
 /// An authenticated, sealed operator channel. The handshake proved the peer's
 /// key possession and the peer was found in the operator policy, so we know the
-/// operator id + role and hold the transcript-bound key schedule used to
-/// seal/open operator payloads on this channel.
+/// operator id + role and hold the key material used to seal/open operator
+/// payloads on this channel. Deliberately suite-agnostic (raw key bytes, not
+/// a suite-specific `SessionKeySchedule` type) so the rest of this module
+/// doesn't need to know or care which handshake suite established the
+/// channel.
 pub(crate) struct AuthenticatedOperatorChannel {
     /// The enrolled operator this channel is authenticated as.
     pub(crate) operator_id: String,
     /// The role the operator is enrolled with (gates privileged actions).
     pub(crate) role: OperatorRole,
-    /// The transcript-bound key schedule for sealing this channel's payloads.
-    pub(crate) key_schedule: SessionKeySchedule,
+    /// The transcript-bound AEAD key installed into this channel's `Session`.
+    pub(crate) aead_key: [u8; 32],
+    /// Root key for deriving forward-secrecy rekey epochs (see the module
+    /// doc comment's "Forward secrecy" section).
+    pub(crate) rekey_root: [u8; 32],
+    /// Canonical handshake transcript hash. Root of the rekey-epoch chain
+    /// (`base_transcript_hash` on the first proposed epoch).
+    pub(crate) transcript_hash: [u8; 32],
 }
 
 /// Why establishing an operator channel failed. Both are denials, kept distinct
@@ -71,22 +108,59 @@ impl std::fmt::Display for OperatorChannelError {
 impl std::error::Error for OperatorChannelError {}
 
 /// Establish an authenticated sealed operator channel over `transport`: run the
-/// host handshake, then authorize the authenticated peer against `policy`.
+/// host handshake (whichever suite `identity` holds), then authorize the
+/// authenticated peer against `policy`.
 pub(crate) async fn establish_operator_channel<T: Transport>(
     transport: &mut T,
-    host_mgr: &mut HandshakeManager,
+    identity: &mut OperatorHostIdentity,
     policy: &OperatorPolicy,
 ) -> Result<AuthenticatedOperatorChannel, OperatorChannelError> {
-    let (outcome, peer) =
-        perform_host_handshake_authenticating_peer(transport, host_mgr, "operator", None)
-            .await
-            .map_err(|e| OperatorChannelError::Handshake(e.to_string()))?;
+    let (aead_key, rekey_root, transcript_hash, peer_ed25519_pk) = match identity {
+        OperatorHostIdentity::Standard(host_mgr) => {
+            let (outcome, peer) =
+                perform_host_handshake_authenticating_peer(transport, host_mgr, "operator", None)
+                    .await
+                    .map_err(|e| OperatorChannelError::Handshake(e.to_string()))?;
+            (
+                outcome.key_schedule.aead,
+                outcome.key_schedule.rekey,
+                outcome.transcript_hash,
+                peer.ed25519_pk,
+            )
+        }
+        OperatorHostIdentity::HighSecurity(host_hs) => {
+            let hello = host_hs.hello(None);
+            transport
+                .send_envelope(&hello)
+                .await
+                .map_err(|e| OperatorChannelError::Handshake(e.to_string()))?;
+            let response_bytes = transport
+                .recv_envelope()
+                .await
+                .map_err(|e| OperatorChannelError::Handshake(e.to_string()))?;
+            let (finalize_bytes, schedule, peer) = host_hs
+                .finish(&response_bytes)
+                .map_err(|e| OperatorChannelError::Handshake(e.to_string()))?;
+            transport
+                .send_envelope(&finalize_bytes)
+                .await
+                .map_err(|e| OperatorChannelError::Handshake(e.to_string()))?;
+            (
+                schedule.aead,
+                schedule.rekey,
+                schedule.transcript_hash,
+                peer.ed25519_pk,
+            )
+        }
+    };
 
-    match policy.lookup(&peer.ed25519_pk) {
+    match policy.lookup(&peer_ed25519_pk) {
         Some(op) => Ok(AuthenticatedOperatorChannel {
             operator_id: op.operator_id.clone(),
             role: op.role,
-            key_schedule: outcome.key_schedule,
+            aead_key,
+            rekey_root,
+            transcript_hash,
         }),
         None => Err(OperatorChannelError::NotEnrolled),
     }
@@ -110,6 +184,10 @@ pub(crate) struct SealedConsentDeps {
     /// Live operator revocation list. Consulted after the handshake authenticates
     /// the peer, so a compromised operator is refused without a daemon restart.
     pub(crate) revocations: crate::operator_revocations::OperatorRevocations,
+    /// Forward-secrecy key rotation interval for a connection that stays open
+    /// across multiple decisions. `None` (the default) never rekeys -- see
+    /// the module doc comment's "Forward secrecy" section.
+    pub(crate) rekey_interval: Option<std::time::Duration>,
 }
 
 /// Serve one sealed operator channel over `transport`: establish the
@@ -127,12 +205,12 @@ pub(crate) struct SealedConsentDeps {
 /// grant.
 pub(crate) async fn serve_sealed_operator_channel<T: Transport>(
     transport: &mut T,
-    host_mgr: &mut HandshakeManager,
+    identity: &mut OperatorHostIdentity,
     policy: &OperatorPolicy,
     deps: &SealedConsentDeps,
     grant_tx: &mut Option<tokio::sync::oneshot::Sender<bool>>,
 ) -> Result<bool, OperatorChannelError> {
-    let channel = establish_operator_channel(transport, host_mgr, policy).await?;
+    let channel = establish_operator_channel(transport, identity, policy).await?;
     // The key is enrolled, but it may have been revoked at runtime — check the
     // live list before trusting the channel. Fail-closed.
     if deps.revocations.is_revoked(&channel.operator_id) {
@@ -145,42 +223,145 @@ pub(crate) async fn serve_sealed_operator_channel<T: Transport>(
     );
 
     let mut session = xenia_wire::Session::with_source_id(OPERATOR_CHANNEL_SOURCE_ID, 1);
-    session.install_key(channel.key_schedule.aead);
+    session.install_key(channel.aead_key);
 
-    // Read sealed consent decisions for the life of the connection.
-    while let Ok(envelope) = transport.recv_envelope().await {
-        let Ok(plaintext) = session.open(&envelope) else {
-            tracing::warn!("failed to open sealed consent envelope");
-            continue;
-        };
-        let Ok(text) = std::str::from_utf8(&plaintext) else {
-            continue;
-        };
-        let Some(decoded) = crate::decode_consent_decision(
-            text,
-            deps.require_operator_auth,
-            &deps.auth_state,
-            &deps.session_id,
-            &deps.revocations,
-        ) else {
-            continue;
-        };
-        match crate::consent_server::apply_consent_decision(
-            decoded,
-            grant_tx,
-            &deps.revoked,
-            &deps.ledger,
-            deps.session_uuid,
-        )
-        .await
-        {
-            crate::consent_server::ConsentFollowup::KeepServing => {}
-            // Terminal (Deny/Revoke): the session is decided; stop for good.
-            crate::consent_server::ConsentFollowup::Stop => return Ok(true),
+    // Forward-secrecy rekey state (see the module doc comment). `interval`
+    // fires only when `deps.rekey_interval` is configured; `awaiting_ack`
+    // gates against proposing a second epoch before the first is confirmed.
+    let mut interval = deps.rekey_interval.map(tokio::time::interval);
+    if let Some(interval) = interval.as_mut() {
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        interval.tick().await; // consume the immediate first tick
+    }
+    let mut current_epoch: u64 = 0;
+    let base_transcript_hash = channel.transcript_hash;
+    let mut previous_epoch_hash = channel.transcript_hash;
+    let mut awaiting_ack: Option<(u64, [u8; 32])> = None;
+
+    // Read sealed consent decisions (and, if enabled, rekey Acks) for the
+    // life of the connection.
+    loop {
+        tokio::select! {
+            _ = async { interval.as_mut().unwrap().tick().await },
+                if interval.is_some() && awaiting_ack.is_none() =>
+            {
+                let next_epoch = current_epoch + 1;
+                let epoch_hash = match OperatorRekeyEpochContext::new(
+                    next_epoch,
+                    base_transcript_hash,
+                    previous_epoch_hash,
+                    OperatorRekeyReason::Interval,
+                )
+                .epoch_hash()
+                {
+                    Ok(h) => h,
+                    Err(err) => {
+                        tracing::error!(error = %err, "failed to hash operator rekey epoch context");
+                        continue;
+                    }
+                };
+                let proposal = OperatorRekeyMessage::Proposal {
+                    key_epoch: next_epoch,
+                    base_transcript_hash,
+                    previous_epoch_hash,
+                    reason: operator_rekey::OperatorRekeyReason::Interval,
+                    epoch_hash,
+                };
+                let Ok(bytes) = proposal.encode() else {
+                    tracing::error!("failed to encode operator rekey proposal");
+                    continue;
+                };
+                let Ok(envelope) = session.seal(&bytes, operator_rekey::PAYLOAD_TYPE_OPERATOR_REKEY)
+                else {
+                    tracing::error!("failed to seal operator rekey proposal");
+                    continue;
+                };
+                if transport.send_envelope(&envelope).await.is_err() {
+                    // Connection is going away; let the next recv_envelope()
+                    // observe the close and return Ok(false).
+                    continue;
+                }
+                let new_key =
+                    xenia_handshake::derive_operator_rekey_key(&channel.rekey_root, &epoch_hash);
+                session.install_key(new_key);
+                awaiting_ack = Some((next_epoch, epoch_hash));
+                tracing::info!(key_epoch = next_epoch, "operator rekey proposed");
+            }
+            recv = transport.recv_envelope() => {
+                let Ok(envelope) = recv else {
+                    // Connection closed without a terminal decision.
+                    return Ok(false);
+                };
+                if xenia_wire::envelope_payload_type(&envelope)
+                    == Some(operator_rekey::PAYLOAD_TYPE_OPERATOR_REKEY)
+                {
+                    let Ok(plaintext) = session.open(&envelope) else {
+                        tracing::warn!("failed to open sealed operator rekey envelope");
+                        continue;
+                    };
+                    match OperatorRekeyMessage::decode(&plaintext) {
+                        Ok(OperatorRekeyMessage::Ack { key_epoch, epoch_hash }) => {
+                            match awaiting_ack {
+                                Some((expected_epoch, expected_hash))
+                                    if expected_epoch == key_epoch && expected_hash == epoch_hash =>
+                                {
+                                    current_epoch = key_epoch;
+                                    previous_epoch_hash = epoch_hash;
+                                    awaiting_ack = None;
+                                    tracing::info!(key_epoch, "operator rekey acknowledged");
+                                }
+                                _ => {
+                                    tracing::warn!(
+                                        key_epoch,
+                                        "operator rekey ack did not match the outstanding proposal"
+                                    );
+                                }
+                            }
+                        }
+                        Ok(OperatorRekeyMessage::Proposal { .. }) => {
+                            tracing::warn!(
+                                "console sent an operator rekey proposal; only the daemon proposes"
+                            );
+                        }
+                        Err(err) => {
+                            tracing::warn!(error = %err, "failed to decode operator rekey message");
+                        }
+                    }
+                    continue;
+                }
+
+                let Ok(plaintext) = session.open(&envelope) else {
+                    tracing::warn!("failed to open sealed consent envelope");
+                    continue;
+                };
+                let Ok(text) = std::str::from_utf8(&plaintext) else {
+                    continue;
+                };
+                let Some(decoded) = crate::decode_consent_decision(
+                    text,
+                    deps.require_operator_auth,
+                    &deps.auth_state,
+                    &deps.session_id,
+                    &deps.revocations,
+                ) else {
+                    continue;
+                };
+                match crate::consent_server::apply_consent_decision(
+                    decoded,
+                    grant_tx,
+                    &deps.revoked,
+                    &deps.ledger,
+                    deps.session_uuid,
+                )
+                .await
+                {
+                    crate::consent_server::ConsentFollowup::KeepServing => {}
+                    // Terminal (Deny/Revoke): the session is decided; stop for good.
+                    crate::consent_server::ConsentFollowup::Stop => return Ok(true),
+                }
+            }
         }
     }
-    // Connection closed without a terminal decision.
-    Ok(false)
 }
 
 /// The `--operator-sealed` daemon endpoint: accept sealed operator connections
@@ -199,7 +380,7 @@ pub(crate) async fn serve_sealed_operator_channel<T: Transport>(
 /// [`ConsentServer`]: crate::consent_server::ConsentServer
 pub(crate) async fn run_sealed_operator_endpoint(
     listener: TcpListener,
-    mut host_mgr: HandshakeManager,
+    mut identity: OperatorHostIdentity,
     policy: OperatorPolicy,
     deps: SealedConsentDeps,
     grant_tx: tokio::sync::oneshot::Sender<bool>,
@@ -229,7 +410,7 @@ pub(crate) async fn run_sealed_operator_endpoint(
         tracing::info!(peer = %peer, "sealed operator channel connection accepted");
         match serve_sealed_operator_channel(
             &mut transport,
-            &mut host_mgr,
+            &mut identity,
             &policy,
             &deps,
             &mut grant_tx,
@@ -328,7 +509,7 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             stream.set_nodelay(true).ok();
             let mut t = TcpTransport::new(stream);
-            let mut mgr = HandshakeManager::new();
+            let mut identity = OperatorHostIdentity::Standard(Box::new(HandshakeManager::new()));
             let daemon = SigningKey::generate(&mut rand::thread_rng());
             let auth_state = Arc::new(OperatorAuthState {
                 policy: OperatorPolicy::default(),
@@ -351,9 +532,11 @@ mod tests {
                 ledger,
                 revoked: revoked_daemon,
                 revocations: crate::operator_revocations::OperatorRevocations::empty(),
+                rekey_interval: None,
             };
             let mut grant_tx = Some(grant_tx);
-            serve_sealed_operator_channel(&mut t, &mut mgr, &policy, &deps, &mut grant_tx).await
+            serve_sealed_operator_channel(&mut t, &mut identity, &policy, &deps, &mut grant_tx)
+                .await
         });
 
         // Console (viewer): handshake with the enrolled identity, then seal an
@@ -430,14 +613,15 @@ mod tests {
             ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
             revoked: revoked.clone(),
             revocations: crate::operator_revocations::OperatorRevocations::empty(),
+            rekey_interval: None,
         };
-        let host_mgr = HandshakeManager::new();
+        let identity = OperatorHostIdentity::Standard(Box::new(HandshakeManager::new()));
         let metrics = Arc::new(crate::operator_channel_metrics::OperatorChannelMetrics::default());
 
         // Daemon: the real `--operator-sealed` endpoint (accept-loop + reconnect).
         tokio::spawn(run_sealed_operator_endpoint(
             listener,
-            host_mgr,
+            identity,
             policy,
             deps,
             grant_tx,
@@ -475,6 +659,228 @@ mod tests {
         assert_eq!(metrics.snapshot().connections_accepted, 1);
     }
 
+    /// Forward secrecy (native E2E, mirrors Slice 4's fidelity): a long-lived
+    /// connection with `rekey_interval` configured gets a real rekey Proposal
+    /// from the live `run_sealed_operator_endpoint`, the browser's exact
+    /// `xenia_wire::operator_rekey` functions verify + derive + install the
+    /// new key and Ack it, and a subsequent consent decision sealed under the
+    /// *new* key is still accepted — proving the full
+    /// propose-then-install/verify-then-install-then-ack cycle is wire- and
+    /// key-compatible end to end, not just unit-tested in isolation on either
+    /// side.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn operator_rekey_proposal_installs_new_key_and_channel_keeps_serving() {
+        let op_ed = [41u8; 32];
+        let op_ml = [42u8; 32];
+        let operator = HandshakeManager::from_identity_seeds(op_ed, op_ml);
+        let policy = OperatorPolicy::from_operators(vec![EnrolledOperator {
+            operator_id: "rekey-op".to_string(),
+            ed25519_pubkey: operator.identity_public_key_bytes(),
+            ml_dsa_pubkey: operator.ml_dsa_public_key_bytes().to_vec(),
+            role: OperatorRole::Operator,
+        }])
+        .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (grant_tx, grant_rx) = oneshot::channel();
+        let revoked = Arc::new(AtomicBool::new(false));
+
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let auth_state = Arc::new(OperatorAuthState {
+            policy: OperatorPolicy::default(),
+            challenges: TokioMutex::new(ChallengeStore::new()),
+            daemon_key: daemon.clone(),
+            rate_limiter: TokioMutex::new(RateLimiter::new(AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS)),
+        });
+        let deps = SealedConsentDeps {
+            require_operator_auth: false,
+            auth_state,
+            session_id: [0x44; 16],
+            session_uuid: Uuid::from_u128(41),
+            ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
+            revoked: revoked.clone(),
+            revocations: crate::operator_revocations::OperatorRevocations::empty(),
+            // Short enough that the test doesn't need to wait long, long
+            // enough that the immediate first tick (consumed at connection
+            // start) doesn't race the handshake itself.
+            rekey_interval: Some(std::time::Duration::from_millis(20)),
+        };
+        let identity = OperatorHostIdentity::Standard(Box::new(HandshakeManager::new()));
+        let metrics = Arc::new(crate::operator_channel_metrics::OperatorChannelMetrics::default());
+
+        tokio::spawn(run_sealed_operator_endpoint(
+            listener,
+            identity,
+            policy,
+            deps,
+            grant_tx,
+            metrics.clone(),
+        ));
+
+        // "Browser": the exact ViewerHandshake the sovereign-admin console uses.
+        let mut transport = WsTransport::connect(&format!("ws://{addr}")).await.unwrap();
+        let mut hs = xenia_wire::handshake::ViewerHandshake::from_identity(&op_ed, &op_ml).unwrap();
+
+        let hello = transport.recv_envelope().await.unwrap();
+        let response = hs.begin(&hello).unwrap();
+        transport.send_envelope(&response).await.unwrap();
+
+        let finalize = transport.recv_envelope().await.unwrap();
+        let schedule = hs.finish(&finalize).unwrap();
+
+        let mut session = xenia_wire::Session::with_source_id(OPERATOR_CHANNEL_SOURCE_ID, 1);
+        session.install_key(schedule.aead);
+
+        // The daemon proposes a rekey shortly after the channel is up (20ms
+        // interval). Receive it, exactly as a persistent console would.
+        let proposal_envelope = transport.recv_envelope().await.unwrap();
+        assert_eq!(
+            xenia_wire::envelope_payload_type(&proposal_envelope),
+            Some(operator_rekey::PAYLOAD_TYPE_OPERATOR_REKEY),
+        );
+        let proposal_plaintext = session.open(&proposal_envelope).unwrap();
+        let OperatorRekeyMessage::Proposal {
+            key_epoch,
+            base_transcript_hash,
+            previous_epoch_hash,
+            reason,
+            epoch_hash,
+        } = OperatorRekeyMessage::decode(&proposal_plaintext).unwrap()
+        else {
+            panic!("expected a rekey Proposal");
+        };
+        assert_eq!(key_epoch, 1);
+        assert_eq!(base_transcript_hash, schedule.transcript_hash);
+
+        let verified = operator_rekey::verify_proposal_epoch_hash(
+            key_epoch,
+            base_transcript_hash,
+            previous_epoch_hash,
+            reason,
+            epoch_hash,
+        )
+        .expect("the browser's own epoch-hash verification must agree with the daemon's");
+        let new_key = operator_rekey::derive_operator_rekey_key(&schedule.rekey, &verified);
+        session.install_key(new_key);
+
+        let ack = OperatorRekeyMessage::Ack {
+            key_epoch,
+            epoch_hash,
+        };
+        let ack_envelope = session
+            .seal(
+                &ack.encode().unwrap(),
+                operator_rekey::PAYLOAD_TYPE_OPERATOR_REKEY,
+            )
+            .unwrap();
+        transport.send_envelope(&ack_envelope).await.unwrap();
+
+        // A consent decision sealed under the *new* (post-rekey) key must
+        // still be accepted by the still-open channel.
+        let envelope = session
+            .seal(b"Approve", xenia_wire::PAYLOAD_TYPE_APPLICATION_MIN)
+            .unwrap();
+        transport.send_envelope(&envelope).await.unwrap();
+
+        assert!(
+            grant_rx.await.unwrap(),
+            "an Approve sealed under the post-rekey key resolves the grant"
+        );
+        assert!(!revoked.load(Ordering::SeqCst));
+    }
+
+    /// High-security suite (native E2E, mirrors
+    /// `browser_viewer_handshake_drives_the_live_ws_endpoint`): a real
+    /// `OperatorHostIdentity::HighSecurity` daemon endpoint completes the
+    /// ML-KEM-1024 + Ed25519 + ML-DSA-87 handshake with the browser's exact
+    /// `xenia_wire::handshake_highsec::ViewerHandshakeHighSec`, and a sealed
+    /// Approve over the resulting channel resolves the grant -- proving the
+    /// high-security suite is wire-compatible end to end over the real
+    /// endpoint, not just correct in the isolated round-trip unit test in
+    /// `xenia-wire`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn high_security_handshake_drives_the_live_ws_endpoint() {
+        let op_ed = [51u8; 32];
+        let op_ml = [52u8; 32];
+        let operator_viewer =
+            xenia_wire::handshake_highsec::ViewerHandshakeHighSec::from_identity(&op_ed, &op_ml)
+                .unwrap();
+        let policy = OperatorPolicy::from_operators(vec![EnrolledOperator {
+            operator_id: "highsec-op".to_string(),
+            ed25519_pubkey: operator_viewer.ed25519_public_key(),
+            // Policy lookup is keyed by Ed25519 only (see `OperatorPolicy::lookup`) --
+            // the ML-DSA-87 bytes aren't checked against enrollment, only bound
+            // into the handshake transcript itself. An arbitrary placeholder is
+            // fine here.
+            ml_dsa_pubkey: vec![0u8; 1],
+            role: OperatorRole::Operator,
+        }])
+        .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (grant_tx, grant_rx) = oneshot::channel();
+        let revoked = Arc::new(AtomicBool::new(false));
+
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let auth_state = Arc::new(OperatorAuthState {
+            policy: OperatorPolicy::default(),
+            challenges: TokioMutex::new(ChallengeStore::new()),
+            daemon_key: daemon.clone(),
+            rate_limiter: TokioMutex::new(RateLimiter::new(AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS)),
+        });
+        let deps = SealedConsentDeps {
+            require_operator_auth: false,
+            auth_state,
+            session_id: [0x55; 16],
+            session_uuid: Uuid::from_u128(51),
+            ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
+            revoked: revoked.clone(),
+            revocations: crate::operator_revocations::OperatorRevocations::empty(),
+            rekey_interval: None,
+        };
+        let identity = OperatorHostIdentity::HighSecurity(Box::new(
+            xenia_wire::handshake_highsec::HostHandshakeHighSec::new(),
+        ));
+        let metrics = Arc::new(crate::operator_channel_metrics::OperatorChannelMetrics::default());
+
+        tokio::spawn(run_sealed_operator_endpoint(
+            listener,
+            identity,
+            policy,
+            deps,
+            grant_tx,
+            metrics.clone(),
+        ));
+
+        // "Browser": the exact ViewerHandshakeHighSec the console would use in
+        // high-security mode.
+        let mut transport = WsTransport::connect(&format!("ws://{addr}")).await.unwrap();
+        let mut viewer = operator_viewer;
+
+        let hello = transport.recv_envelope().await.unwrap();
+        let response = viewer.begin(&hello).unwrap();
+        transport.send_envelope(&response).await.unwrap();
+
+        let finalize = transport.recv_envelope().await.unwrap();
+        let schedule = viewer.finish(&finalize).unwrap();
+
+        let mut session = xenia_wire::Session::with_source_id(OPERATOR_CHANNEL_SOURCE_ID, 1);
+        session.install_key(schedule.aead);
+        let envelope = session
+            .seal(b"Approve", xenia_wire::PAYLOAD_TYPE_APPLICATION_MIN)
+            .unwrap();
+        transport.send_envelope(&envelope).await.unwrap();
+
+        assert!(
+            grant_rx.await.unwrap(),
+            "a sealed Approve from the browser's ViewerHandshakeHighSec over the live WS endpoint resolves the grant"
+        );
+        assert!(!revoked.load(Ordering::SeqCst));
+        assert_eq!(metrics.snapshot().connections_accepted, 1);
+    }
+
     /// Live revocation: an operator whose key is still enrolled but whose id is
     /// on the revocation list completes a valid handshake and is then refused
     /// post-authentication — the "revoke a compromised key without a restart"
@@ -504,7 +910,7 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             stream.set_nodelay(true).ok();
             let mut t = TcpTransport::new(stream);
-            let mut mgr = HandshakeManager::new();
+            let mut identity = OperatorHostIdentity::Standard(Box::new(HandshakeManager::new()));
             let daemon = SigningKey::generate(&mut rand::thread_rng());
             let auth_state = Arc::new(OperatorAuthState {
                 policy: OperatorPolicy::default(),
@@ -523,9 +929,11 @@ mod tests {
                 ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
                 revoked: Arc::new(AtomicBool::new(false)),
                 revocations,
+                rekey_interval: None,
             };
             let mut grant_tx = Some(grant_tx);
-            serve_sealed_operator_channel(&mut t, &mut mgr, &policy, &deps, &mut grant_tx).await
+            serve_sealed_operator_channel(&mut t, &mut identity, &policy, &deps, &mut grant_tx)
+                .await
         });
 
         // Viewer: complete a valid handshake as the (revoked) enrolled operator.
@@ -566,8 +974,8 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             stream.set_nodelay(true).ok();
             let mut t = TcpTransport::new(stream);
-            let mut mgr = HandshakeManager::new();
-            establish_operator_channel(&mut t, &mut mgr, &policy).await
+            let mut identity = OperatorHostIdentity::Standard(Box::new(HandshakeManager::new()));
+            establish_operator_channel(&mut t, &mut identity, &policy).await
         });
         let viewer = tokio::spawn(async move {
             let stream = TcpStream::connect(addr).await.unwrap();
@@ -589,12 +997,12 @@ mod tests {
         assert_eq!(channel.operator_id, "bob");
         assert_eq!(channel.role, OperatorRole::Operator);
         // Both sides hold the same sealed-channel key.
-        assert_eq!(channel.key_schedule.aead, viewer_outcome.key_schedule.aead);
+        assert_eq!(channel.aead_key, viewer_outcome.key_schedule.aead);
 
         // The channel actually carries sealed operator payloads: seal a consent
         // decision host-side, open it viewer-side.
         let mut host_sess = xenia_wire::Session::with_source_id([0x5a; 8], 1);
-        host_sess.install_key(channel.key_schedule.aead);
+        host_sess.install_key(channel.aead_key);
         let mut viewer_sess = xenia_wire::Session::with_source_id([0x5a; 8], 1);
         viewer_sess.install_key(viewer_outcome.key_schedule.aead);
 
@@ -621,8 +1029,8 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             stream.set_nodelay(true).ok();
             let mut t = TcpTransport::new(stream);
-            let mut mgr = HandshakeManager::new();
-            establish_operator_channel(&mut t, &mut mgr, &policy).await
+            let mut identity = OperatorHostIdentity::Standard(Box::new(HandshakeManager::new()));
+            establish_operator_channel(&mut t, &mut identity, &policy).await
         });
         let viewer = tokio::spawn(async move {
             let stream = TcpStream::connect(addr).await.unwrap();
