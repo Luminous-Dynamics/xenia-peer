@@ -3,11 +3,16 @@ set -euo pipefail
 
 root="${1:-.}"
 main="$root/apps/xenia-peer/src/main.rs"
+# The evidence-verification surface was extracted out of main.rs into its own
+# module on 2026-07-12 -- see evidence_verifier.rs's module doc comment. Both
+# files are checked so this guard still catches the logic silently
+# disappearing, wherever it currently lives.
+verifier="$root/apps/xenia-peer/src/evidence_verifier.rs"
 cargo="$root/apps/xenia-peer/Cargo.toml"
 ci="$root/.github/workflows/xenia-validate.yml"
 doc="$root/docs/crypto/PQC_PEER_VERIFIER_SURFACE.md"
 
-for file in "$main" "$cargo" "$ci" "$doc"; do
+for file in "$main" "$verifier" "$cargo" "$ci" "$doc"; do
   if [[ ! -f "$file" ]]; then
     echo "missing PQC peer verifier surface file: $file" >&2
     exit 1
@@ -26,15 +31,15 @@ for token in \
   "verify_transcript_bound_evidence_bundle_dir_with_backend" \
   "MlDsa65EvidenceSignatureBackend" \
   "MlDsa87EvidenceSignatureBackend"; do
-  if ! grep -Fq "$token" "$main"; then
+  if ! grep -Fq "$token" "$main" "$verifier"; then
     echo "missing xenia-peer PQC verifier surface token: $token" >&2
     exit 1
   fi
 done
 
-if ! python3 - "$main" <<'PY'
+if ! python3 - "$main" "$verifier" <<'PY'
 import pathlib, re, sys
-text = pathlib.Path(sys.argv[1]).read_text()
+text = "\n".join(pathlib.Path(p).read_text() for p in sys.argv[1:])
 pattern = re.compile(r'#\[cfg\(feature = "pqc-signatures"\)\]\s*use xenia_ledger::\{MlDsa65EvidenceSignatureBackend, MlDsa87EvidenceSignatureBackend\};')
 if not pattern.search(text):
     raise SystemExit(1)

@@ -3,10 +3,16 @@ set -euo pipefail
 
 root="${1:-.}"
 main="$root/apps/xenia-peer/src/main.rs"
+# The evidence-verification surface (suite selection, profile/downgrade
+# preflight, etc.) was extracted out of main.rs into its own module on
+# 2026-07-12 -- see evidence_verifier.rs's module doc comment. Both files are
+# checked so this guard still catches the logic silently disappearing,
+# wherever it currently lives.
+verifier="$root/apps/xenia-peer/src/evidence_verifier.rs"
 runtime="$root/apps/xenia-peer/src/m1_runtime.rs"
 doc="$root/docs/crypto/PQC_PEER_VERIFIER_SURFACE.md"
 
-for file in "$main" "$runtime" "$doc"; do
+for file in "$main" "$verifier" "$runtime" "$doc"; do
   if [[ ! -f "$file" ]]; then
     echo "missing PQC verifier downgrade-resistance file: $file" >&2
     exit 1
@@ -26,8 +32,8 @@ for token in \
   "evidence transcript signature" \
   "evidence ledger signature" \
   "does not match requested verifier suite"; do
-  if ! grep -Fq "$token" "$main"; then
-    echo "missing verifier downgrade-resistance token in xenia-peer main: $token" >&2
+  if ! grep -Fq "$token" "$main" "$verifier"; then
+    echo "missing verifier downgrade-resistance token in xenia-peer main/evidence_verifier: $token" >&2
     exit 1
   fi
 done
