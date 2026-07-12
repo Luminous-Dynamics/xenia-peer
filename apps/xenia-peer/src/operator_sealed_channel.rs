@@ -32,9 +32,9 @@
 
 use tokio::net::TcpListener;
 use xenia_handshake::{OperatorRekeyEpochContext, OperatorRekeyReason};
+use xenia_peer_core::HandshakeManager;
 use xenia_peer_core::handshake::perform_host_handshake_authenticating_peer;
 use xenia_peer_core::transport::Transport;
-use xenia_peer_core::HandshakeManager;
 use xenia_transport_ws::WsTransport;
 use xenia_wire::handshake_highsec::HostHandshakeHighSec;
 use xenia_wire::operator_rekey::{self, OperatorRekeyMessage};
@@ -477,13 +477,13 @@ pub(crate) async fn run_sealed_operator_endpoint(
 mod tests {
     use super::*;
     use crate::operator::EnrolledOperator;
-    use crate::operator_auth::{ChallengeStore, RateLimiter, AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS};
+    use crate::operator_auth::{AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS, ChallengeStore, RateLimiter};
     use crate::operator_http::OperatorAuthState;
     use ed25519_dalek::SigningKey;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::net::{TcpListener, TcpStream};
-    use tokio::sync::{oneshot, Mutex as TokioMutex};
+    use tokio::sync::{Mutex as TokioMutex, oneshot};
     use uuid::Uuid;
     use xenia_ledger::Chain;
     use xenia_peer_core::handshake::perform_viewer_handshake_with_transcript;

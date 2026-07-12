@@ -475,7 +475,6 @@ enum InputBackendChoice {
     Uinput,
 }
 
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum TransportChoice {
     Auto,
@@ -2636,7 +2635,6 @@ fn run_m1_runtime_smoke(
 
     Ok(())
 }
-
 
 #[cfg(test)]
 mod audio_tests {
