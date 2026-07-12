@@ -44,7 +44,7 @@ repository = "https://github.com/Luminous-Dynamics/xenia-peer"
 homepage = "https://github.com/Luminous-Dynamics/xenia-peer"
 
 [workspace.dependencies]
-xenia-wire = "0.2.0-alpha.7"
+xenia-wire = "0.2.0-alpha.8"
 xenia-operator-proto = { path = "crates/xenia-operator-proto" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time", "signal"] }
 bincode = "1.3"
