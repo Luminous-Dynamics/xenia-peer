@@ -39,12 +39,38 @@ An operator identity is an **Ed25519 + ML-DSA-65 (FIPS 204) keypair**, derived
 from two persisted 32-byte seeds so it is stable across reloads
 (`HandshakeManager::from_identity_seeds`; browser side in
 `sovereign-admin/src/operator_session.rs`, native in `crates/xenia-handshake`).
+This standard-suite pair is required for every operator, since the `/auth/*`
+ceremony below always uses it regardless of which sealed-channel suite (§5)
+the operator later selects.
+
+An operator may **additionally** enroll an **ML-DSA-87** public key,
+deterministically derived from the same Ed25519 secret
+(`derive_ml_dsa_87_seed_from_ed25519_secret`), to use the high-security
+sealed channel. This is opt-in and separately checked: an operator enrolled
+only for the standard pair cannot use the high-security channel merely
+because they share an Ed25519 key (`OperatorPolicy::lookup_verified_highsec`).
 
 Enrollment is **allow-listed and out-of-band**: an admin adds a record
-(`operator_id`, `ed25519_pubkey`, `ml_dsa_pubkey`, `role`) to the daemon's
-`--operators-file` (`OperatorPolicy`, `apps/xenia-peer/src/operator.rs`). An
-unenrolled key authenticates nothing — the policy is the root of trust, and an
-empty/unset policy denies all (`OperatorPolicy::default()`).
+(`operator_id`, `ed25519_pubkey`, `ml_dsa_pubkey`, optionally
+`ml_dsa_87_pubkey`, `role`) to the daemon's `--operators-file`
+(`OperatorPolicy`, `apps/xenia-peer/src/operator.rs`) -- the console's
+`OperatorIdentity::enrollment_record_json` (built from the shared
+`xenia_operator_proto::OperatorEnrollmentRecord` type) emits all three
+fields by default so a single record enrolls an operator for both suites at
+once. An unenrolled key authenticates nothing — the policy is the root of
+trust, and an empty/unset policy denies all (`OperatorPolicy::default()`).
+
+**A verified signature alone does not authorize.** Both `/auth/verify` and
+the sealed-channel handshake verify the presented Ed25519 *and* ML-DSA
+signatures, but authorization additionally requires the *presented ML-DSA
+key* to match the *enrolled* one for that Ed25519 key
+(`OperatorPolicy::lookup_verified`/`lookup_verified_highsec`, not the
+Ed25519-only `lookup`). Without this, an attacker who controlled only the
+enrolled Ed25519 secret (a leaked classical key, or a future quantum break)
+could pair it with a self-generated ML-DSA keypair and still authenticate —
+the ML-DSA signature would verify but buy no security at the authorization
+boundary. This was found and fixed after initial hybrid-auth rollout; see
+the negative tests named `*foreign_ml_dsa_key_is_rejected`.
 
 The keys are bound together by a BLAKE3 **identity fingerprint** over
 `ed25519_pk || ml_dsa_pk`, byte-identical on the browser and native sides, so an
@@ -115,11 +141,30 @@ The daemon runs **exactly one** consent surface (mutually exclusive):
   role-authorized, token-bearing action.
 - **Sealed operator channel** (`operator_sealed_channel.rs`, `--operator-sealed`):
   the consent path wrapped in `xenia-wire` ChaCha20-Poly1305 envelopes over a
-  **PQC-hybrid handshake** (ML-KEM-768 + Ed25519 + ML-DSA-65 + HKDF-SHA-256).
-  The handshake **is** the operator proof-of-possession: a successful handshake
-  from an enrolled key means "this confidential channel belongs to operator X,
-  role R". Adds confidentiality + channel authentication on top of the existing
-  per-action signatures and ledger attribution.
+  **PQC-hybrid handshake**. Two non-interoperable suites, selected out-of-band
+  (a daemon flag matched by a console setting, never wire-negotiated, so a
+  mismatched pairing fails to deserialize rather than silently downgrading):
+  the standard ML-KEM-768 + Ed25519 + ML-DSA-65 + HKDF-SHA-256 suite, and
+  `--operator-high-security` (ML-KEM-1024 + Ed25519 + ML-DSA-87, NIST category
+  5). The handshake **is** the operator proof-of-possession: a successful
+  handshake from an enrolled key-pair (§2) means "this confidential channel
+  belongs to operator X, role R". Adds confidentiality + channel authentication
+  on top of the existing per-action signatures and ledger attribution.
+  - **Forward secrecy**: both suites generate a *fresh* KEM keypair for every
+    handshake (not once per daemon process) and discard the decapsulation key
+    once the handshake completes, so a later compromise of the daemon's
+    long-term state cannot decrypt a captured past session.
+  - **Host-fingerprint pinning**: the console trusts a daemon's signing
+    identity fingerprint on first connection (TOFU,
+    `sovereign-admin/src/host_pin.rs`) and refuses any later connection whose
+    fingerprint changed, *before* sealing or sending anything — a changed
+    fingerprint means either a legitimate daemon key rotation (the operator
+    must explicitly "forget" the old pin) or an active MITM. Storage failures
+    (unavailable/corrupt/write-failed) fail closed rather than silently
+    re-trusting.
+  - **In-place rekey**: a long-lived connection can periodically rotate its
+    AEAD key without dropping the connection (`operator_rekey` module,
+    `SealedConsentDeps::rekey_interval`, off by default today).
 
 Enabling `--operator-sealed` **closes the plaintext port** (`main.rs`: sealed
 XOR plaintext) — there is no downgrade path where an attacker routes around the
@@ -184,9 +229,12 @@ re-checks revocation). Refusing token issuance up front is a hardening follow-up
 | Replay of a captured action signature | Per-action transcript bound to action/target + token_nonce |
 | Replay of a challenge | Single-use, short-TTL, consumed before signature check |
 | Lower role attempts higher action | `role.permits(min_role)` on the token's own role |
-| Classical-crypto break | Hybrid PQC: **both** Ed25519 and ML-DSA-65 must verify |
-| Passive eavesdropping of consent | Sealed channel: ChaCha20-Poly1305 over an ML-KEM handshake |
+| Classical-crypto break | Hybrid PQC: **both** Ed25519 and ML-DSA must verify, **and** the presented ML-DSA key must match the one enrolled for that Ed25519 key (§2) |
+| Passive eavesdropping of consent | Sealed channel: ChaCha20-Poly1305 over an ML-KEM handshake, either suite |
+| Long-term-key compromise decrypts past sessions | Fresh KEM keypair generated per handshake, discarded after use — not one keypair reused for the daemon's lifetime |
+| Active MITM substitutes a different daemon identity | Host-fingerprint TOFU pinning, checked before any consent payload is sealed and sent |
 | Downgrade to plaintext | `--operator-sealed` closes the plaintext port (XOR) |
+| Downgrade to the weaker PQC suite | Suites are non-interoperable and out-of-band-selected, not wire-negotiated; a mismatched pairing fails to deserialize |
 | Compromised operator key | Live revocation (SIGHUP / endpoint / console), enforced on every path, no restart |
 | Brute-force / flood on auth | Rate-limited `/auth/verify` |
 | Recon / probing | Not-enrolled + handshake-failure counters + alertable warn logs |
@@ -194,13 +242,19 @@ re-checks revocation). Refusing token issuance up front is a hardening follow-up
 
 ## 9. Known limits / follow-ups
 
-- No forward secrecy on the operator channel yet (one AEAD key per session;
-  `SessionKeySchedule.rekey` machinery exists but is unwired).
-- Operator channel PQC is fixed at ML-DSA-65 / ML-KEM-768; a higher-security
-  ML-DSA-87 / ML-KEM-1024 mode is scoped but not built.
+- **Operator signing seeds (Ed25519 secret, ML-DSA seeds) persist as plaintext
+  hex in browser `localStorage` today** (`sovereign-admin/src/operator_session.rs`).
+  Readable by an XSS bug, a malicious browser extension, or a compromised
+  same-origin dependency. The intended direction is a native signing agent or
+  OS-keychain-backed companion the browser receives signatures from, rather
+  than holding raw seeds; not yet built. Treat this as a hard blocker before
+  exposing the admin console to any untrusted network.
 - `/auth/verify` still mints tokens for revoked operators (harmless — see §6).
 - `bincode` 1.3.3 is used for wire (handshake + envelopes) with a tracked RUSTSEC
-  exception; a postcard/wincode migration is pre-RC1 debt.
+  exception (an "unmaintained crate" advisory, not a CVE); a postcard/wincode
+  migration is pre-RC1 debt, deliberately deferred.
 - End-to-end verification is native (`handshake_cross_compat`, the sealed-channel
-  and revoke integration tests); a true headless-browser smoke test is blocked on
-  webdriver tooling.
+  and revoke integration tests, plus a console-generated-enrollment-record
+  integration test covering the real `--operators-file` parse path); a true
+  headless-browser smoke test is blocked on webdriver tooling not being
+  available in this environment.

@@ -7,14 +7,22 @@ remote-session stack built on top of
 
 ```text
   ╔═══════════════════════════════════════════════════════════════╗
-  ║  PRE-ALPHA, M0 — NOT USABLE AS A PRODUCT YET                  ║
+  ║  PRE-ALPHA — NOT USABLE AS A PRODUCT YET                      ║
   ║                                                               ║
-  ║  This milestone is the workspace scaffold: a headless daemon  ║
-  ║  binary, a CLI viewer binary, and the shared library they     ║
-  ║  sit on. End-to-end loopback works (sealed RawInput round-    ║
-  ║  trips over real tokio TCP). What does NOT work yet: screen   ║
-  ║  capture, video encode/decode, consent UI, input injection,   ║
-  ║  and anything resembling a graphical interface.               ║
+  ║  Well past the original M0 scaffold this box used to          ║
+  ║  describe. Real, tested, and merged: screen capture            ║
+  ║  (scap-backed + synthetic fallback), H.264/passthrough video, ║
+  ║  input injection, an operator RBAC + consent ceremony (a      ║
+  ║  browser console, apps/sovereign-admin, drives challenge/      ║
+  ║  response auth, role-scoped tokens, a signed+verifiable        ║
+  ║  consent ledger, and live operator revocation), and a PQC-     ║
+  ║  sealed operator channel with two non-interoperable suites    ║
+  ║  (ML-KEM-768+Ed25519+ML-DSA-65 and, for higher assurance,      ║
+  ║  ML-KEM-1024+Ed25519+ML-DSA-87 -- both forward-secret via a    ║
+  ║  fresh per-handshake KEM keypair, plus host-fingerprint        ║
+  ║  trust-on-first-use pinning and rekey). None of that adds up   ║
+  ║  to a finished product yet -- see Status below and ROADMAP.md ║
+  ║  for what's still missing.                                    ║
   ║                                                               ║
   ║  For a working remote-desktop tool today: RustDesk,           ║
   ║  MeshCentral, or Apache Guacamole.                            ║
@@ -235,6 +243,52 @@ test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured
 Plus replay protection (duplicate envelope rejected) and oversize-
 envelope safety (forged 100 MiB length prefix doesn't OOM the receiver).
 
+## Operator RBAC & sealed operator channel
+
+Landed after M0, not yet reflected above: a role-based operator
+authorization system and a PQC-sealed channel for delivering consent
+decisions, both with their own consent ledger.
+
+- **`apps/sovereign-admin`** — a Leptos 0.8 CSR browser console. Runs the
+  challenge/response auth ceremony against the daemon's `/auth/*` routes
+  (both Ed25519 and ML-DSA-65 signatures required, no classical-only
+  fallback), holds a role-scoped session token, and signs each consent
+  decision / revocation with a per-action signature the daemon
+  independently re-verifies rather than trusting the socket.
+- **Roles**: `Viewer < Approver < Operator < Admin`, strictly hierarchical
+  (`docs/security/OPERATOR_RBAC_PLAN.md`). Enforced identically on daemon
+  and console via the shared, crypto-free `xenia-operator-proto` crate, so
+  a role the console greys out is exactly a role the daemon also refuses.
+- **Sealed operator channel** (`--operator-sealed`) — consent decisions
+  travel inside PQC-sealed envelopes over a handshake-authenticated
+  channel instead of a plaintext socket. Two non-interoperable suites,
+  selected out-of-band (a daemon flag matched by a console setting, not
+  wire-negotiated): the standard ML-KEM-768 + Ed25519 + ML-DSA-65 suite,
+  and `--operator-high-security` (ML-KEM-1024 + Ed25519 + ML-DSA-87, NIST
+  category 5). Both generate a fresh KEM keypair per handshake (forward-
+  secret against a later compromise of the daemon's long-term state) and
+  support in-place forward-secrecy rekey on long-lived connections.
+  Authorization requires the *enrolled pair* of keys to match (not
+  Ed25519 alone), and enrollment is suite-aware -- an operator enrolled
+  only for the standard suite cannot use the high-security channel merely
+  by sharing an Ed25519 key.
+- **Host-fingerprint pinning** — the console trusts a daemon's signing
+  identity on first connection (TOFU) and refuses any later connection
+  whose fingerprint changed, before sealing or sending anything, with an
+  explicit "forget this pin" action for legitimate daemon key rotation.
+- **Consent ledger** — every decision is a hash-chained, Ed25519-signed
+  `xenia-ledger` entry; the console verifies the chain and each entry's
+  signature client-side and can export a self-contained, independently
+  verifiable JSON attestation.
+- **Live revocation** — an Admin can revoke a compromised operator by id;
+  the revocation list is consulted on every channel, live, no daemon
+  restart required.
+
+None of this is a finished security story yet. See
+`docs/security/OPERATOR_SECURITY_MODEL.md` for the current threat model
+and open gaps (notably: operator signing seeds persist in browser
+`localStorage` today, not a native agent or OS keychain).
+
 ## Licensing
 
 | Layer | License |
@@ -265,7 +319,8 @@ For the audit claim boundary, see
 ## Relationship to Track A
 
 [`xenia-wire`](https://github.com/Luminous-Dynamics/xenia-wire) is
-the completed Track A: the wire protocol + SPEC draft-03 + paper +
-demo pages, stable at `0.2.0-alpha.3`. This repo is Track B: the
-actual application layer. Track A is feature-complete-pending-
-external-review; Track B is signal-gated past M0.
+Track A: the wire protocol + SPEC draft-03 + paper + demo pages +
+(as of `0.2.0-alpha.5`+) its own optional handshake implementations,
+currently at `0.2.0-alpha.8`. This repo is Track B: the actual
+application layer. Track A is feature-complete-pending-external-review;
+Track B is well past its original M0 signal gate -- see Status above.
