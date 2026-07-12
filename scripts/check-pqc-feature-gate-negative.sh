@@ -27,6 +27,9 @@ make_fixture() {
   cp "$root/crates/xenia-ledger/src/lib.rs" "$fixture/crates/xenia-ledger/src/lib.rs"
   cp "$root/apps/xenia-peer/Cargo.toml" "$fixture/apps/xenia-peer/Cargo.toml"
   cp "$root/apps/xenia-peer/src/main.rs" "$fixture/apps/xenia-peer/src/main.rs"
+  # The evidence-verification surface now lives here (extracted 2026-07-12);
+  # the checker reads both files concatenated, so both must be present.
+  cp "$root/apps/xenia-peer/src/evidence_verifier.rs" "$fixture/apps/xenia-peer/src/evidence_verifier.rs"
   cp "$root/.github/workflows/xenia-validate.yml" "$fixture/.github/workflows/xenia-validate.yml"
   cp "$checker" "$fixture/scripts/check-pqc-feature-gate.py"
   chmod +x "$fixture/scripts/check-pqc-feature-gate.py"
@@ -125,29 +128,31 @@ expect_fail "$case6" "xenia-peer feature does not propagate to ledger"
 
 case7="$tmp/peer-missing-suite-selector"
 make_fixture "$case7"
-python3 - "$case7/apps/xenia-peer/src/main.rs" <<'PY'
+python3 - "$case7/apps/xenia-peer/src/main.rs" "$case7/apps/xenia-peer/src/evidence_verifier.rs" <<'PY'
 import pathlib, sys
-path = pathlib.Path(sys.argv[1])
-text = path.read_text()
-text = text.replace('EvidenceVerifierSuite', 'EvidenceVerifierSuiteRemoved')
-text = text.replace('evidence_signature_suite', 'evidence_signature_suite_removed')
-text = text.replace('verify_evidence_bundle_with_selected_suite', 'verify_evidence_bundle_without_suite_selector')
-path.write_text(text)
+for p in sys.argv[1:]:
+    path = pathlib.Path(p)
+    text = path.read_text()
+    text = text.replace('EvidenceVerifierSuite', 'EvidenceVerifierSuiteRemoved')
+    text = text.replace('evidence_signature_suite', 'evidence_signature_suite_removed')
+    text = text.replace('verify_evidence_bundle_with_selected_suite', 'verify_evidence_bundle_without_suite_selector')
+    path.write_text(text)
 PY
 expect_fail "$case7" "xenia-peer verifier suite selector removed"
 
 case8="$tmp/peer-ml-dsa-import-not-cfg-gated"
 make_fixture "$case8"
-python3 - "$case8/apps/xenia-peer/src/main.rs" <<'PY'
+python3 - "$case8/apps/xenia-peer/src/main.rs" "$case8/apps/xenia-peer/src/evidence_verifier.rs" <<'PY'
 import pathlib, sys
-path = pathlib.Path(sys.argv[1])
-text = path.read_text()
-text = text.replace(
-    '#[cfg(feature = "pqc-signatures")]\n'
-    'use xenia_ledger::{MlDsa65EvidenceSignatureBackend, MlDsa87EvidenceSignatureBackend};',
-    'use xenia_ledger::{MlDsa65EvidenceSignatureBackend, MlDsa87EvidenceSignatureBackend};',
-)
-path.write_text(text)
+for p in sys.argv[1:]:
+    path = pathlib.Path(p)
+    text = path.read_text()
+    text = text.replace(
+        '#[cfg(feature = "pqc-signatures")]\n'
+        'use xenia_ledger::{MlDsa65EvidenceSignatureBackend, MlDsa87EvidenceSignatureBackend};',
+        'use xenia_ledger::{MlDsa65EvidenceSignatureBackend, MlDsa87EvidenceSignatureBackend};',
+    )
+    path.write_text(text)
 PY
 expect_fail "$case8" "xenia-peer ML-DSA backend import not cfg-gated"
 
@@ -164,14 +169,15 @@ expect_fail "$case9" "CI does not test peer pqc-signatures feature"
 
 case10="$tmp/peer-missing-profile-requirement"
 make_fixture "$case10"
-python3 - "$case10/apps/xenia-peer/src/main.rs" <<'PY'
+python3 - "$case10/apps/xenia-peer/src/main.rs" "$case10/apps/xenia-peer/src/evidence_verifier.rs" <<'PY'
 import pathlib, sys
-path = pathlib.Path(sys.argv[1])
-text = path.read_text()
-text = text.replace('EvidenceProfileRequirement', 'EvidenceProfileRequirementRemoved')
-text = text.replace('require_evidence_profile', 'require_evidence_profile_removed')
-text = text.replace('preflight_evidence_verifier_selection', 'preflight_evidence_verifier_selection_removed')
-path.write_text(text)
+for p in sys.argv[1:]:
+    path = pathlib.Path(p)
+    text = path.read_text()
+    text = text.replace('EvidenceProfileRequirement', 'EvidenceProfileRequirementRemoved')
+    text = text.replace('require_evidence_profile', 'require_evidence_profile_removed')
+    text = text.replace('preflight_evidence_verifier_selection', 'preflight_evidence_verifier_selection_removed')
+    path.write_text(text)
 PY
 expect_fail "$case10" "xenia-peer verifier profile requirement removed"
 

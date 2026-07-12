@@ -65,7 +65,13 @@ def main(argv: list[str]) -> int:
     cargo_toml = read(root / "crates/xenia-ledger/Cargo.toml")
     ledger_src = read(root / "crates/xenia-ledger/src/lib.rs")
     peer_cargo_toml = read(root / "apps/xenia-peer/Cargo.toml")
-    peer_main_src = read(root / "apps/xenia-peer/src/main.rs")
+    # The evidence-verification surface was extracted out of main.rs into its
+    # own module on 2026-07-12 -- see evidence_verifier.rs's module doc
+    # comment. Both files are concatenated so this guard still catches the
+    # logic silently disappearing, wherever it currently lives.
+    peer_main_src = read(root / "apps/xenia-peer/src/main.rs") + "\n" + read(
+        root / "apps/xenia-peer/src/evidence_verifier.rs"
+    )
     ci_yml = read(root / ".github/workflows/xenia-validate.yml")
 
     require_regex(
