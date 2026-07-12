@@ -35,8 +35,8 @@ use crate::operator::{OperatorPolicy, OperatorRole};
 // the daemon verifies. Re-exported at `crate::operator_auth::*` so existing
 // call sites (main.rs, operator_http, the smoke test) stay unchanged.
 pub(crate) use xenia_operator_proto::{
-    ConsentAction, OperatorAction, challenge_transcript, consent_action_transcript,
-    revoke_operator_transcript,
+    challenge_transcript, consent_action_transcript, revoke_operator_transcript, ConsentAction,
+    OperatorAction,
 };
 
 // The session token is minted and verified only by the daemon, so its domain
@@ -212,8 +212,12 @@ pub(crate) fn verify_challenge_response(
     HandshakeManager::verify_ml_dsa(&ml_pk, &transcript, &response.ml_dsa_signature)
         .map_err(|_| AuthError::MlDsaVerifyFailed)?;
 
-    // Both signatures verified: the caller controls this key. Is it enrolled?
-    match policy.lookup(&response.ed_pubkey) {
+    // Both signatures verified: the caller controls this key *pair*. Is that
+    // exact pair enrolled? `lookup_verified` (not plain `lookup`) is required
+    // here -- otherwise an attacker holding only the enrolled Ed25519 secret
+    // could pair it with a self-generated ML-DSA keypair and still pass,
+    // silently downgrading hybrid auth to classical-only.
+    match policy.lookup_verified(&response.ed_pubkey, &response.ml_dsa_pubkey) {
         Some(op) => Ok(AuthenticatedOperator {
             operator_id: op.operator_id.clone(),
             role: op.role,
@@ -524,6 +528,40 @@ mod tests {
         let nonce = [5u8; 32];
         challenges.issue(nonce, 1000, CHALLENGE_TTL_SECS);
         let response = signed_response(&op, nonce);
+        assert_eq!(
+            verify_challenge_response(&policy, &mut challenges, 1010, &response),
+            Err(AuthError::NotEnrolled)
+        );
+    }
+
+    #[test]
+    fn enrolled_ed25519_key_with_a_foreign_ml_dsa_key_is_rejected() {
+        // The scenario the hybrid suite exists to defend against: an attacker
+        // who somehow controls the *enrolled* Ed25519 secret (e.g. Ed25519 is
+        // broken by a quantum adversary, or the classical key leaked) but
+        // does not control the enrolled ML-DSA key. They sign the transcript
+        // with the real Ed25519 key and their own freshly-generated ML-DSA
+        // keypair; both signatures verify individually, but the presented
+        // ML-DSA key does not match the enrollment record and must be
+        // refused -- otherwise the ML-DSA signature buys no security at all.
+        let op = HandshakeManager::new();
+        let policy = policy_with(&op, OperatorRole::Admin);
+        let mut challenges = ChallengeStore::new();
+        let nonce = [11u8; 32];
+        challenges.issue(nonce, 1000, CHALLENGE_TTL_SECS);
+
+        let attacker_ml_dsa = HandshakeManager::new();
+        let ed_pubkey = op.identity_public_key_bytes();
+        let ml_dsa_pubkey = attacker_ml_dsa.ml_dsa_public_key_bytes().to_vec();
+        let transcript = challenge_transcript(&nonce, &ed_pubkey, &ml_dsa_pubkey);
+        let response = ChallengeResponse {
+            nonce,
+            ed_pubkey,
+            ml_dsa_pubkey,
+            ed_signature: op.sign(&transcript).to_bytes(),
+            ml_dsa_signature: attacker_ml_dsa.sign_ml_dsa(&transcript),
+        };
+
         assert_eq!(
             verify_challenge_response(&policy, &mut challenges, 1010, &response),
             Err(AuthError::NotEnrolled)
