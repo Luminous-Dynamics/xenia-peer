@@ -34,7 +34,7 @@ use xenia_handshake::ML_DSA_65_PK_LEN;
 // console authorize against *identical* rules: a role the console greys out is
 // exactly a role the daemon also refuses. Only the enrollment/policy-file
 // machinery below is daemon-specific.
-pub(crate) use xenia_operator_proto::{OperatorAction, OperatorRole, role_permits};
+pub(crate) use xenia_operator_proto::{role_permits, OperatorAction, OperatorRole};
 
 /// The outcome of an authorization check, kept distinct so the caller can
 /// audit and message "not enrolled" separately from "enrolled but role too
@@ -131,8 +131,34 @@ impl OperatorPolicy {
     }
 
     /// Look up an enrolled operator by Ed25519 public key.
+    ///
+    /// This alone is **not sufficient for hybrid authentication** -- it only
+    /// confirms an Ed25519 key is enrolled, not that a presented ML-DSA key
+    /// belongs to the same enrollment record. A handshake/challenge that
+    /// verified both a classical and a post-quantum signature must call
+    /// [`Self::lookup_verified`] instead, or the ML-DSA signature buys
+    /// nothing: an attacker holding only the enrolled Ed25519 secret could
+    /// pair it with a self-generated ML-DSA keypair and still authenticate.
     pub(crate) fn lookup(&self, ed25519_pubkey: &[u8; 32]) -> Option<&EnrolledOperator> {
         self.by_ed25519.get(ed25519_pubkey)
+    }
+
+    /// Look up an enrolled operator, requiring **both** the Ed25519 and
+    /// ML-DSA public keys presented in a verified hybrid handshake/challenge
+    /// to match the same enrollment record. This is the correct lookup for
+    /// any caller that verified both signatures and wants the hybrid
+    /// authentication to mean something: enrollment binds a *pair* of keys,
+    /// not either key independently.
+    pub(crate) fn lookup_verified(
+        &self,
+        ed25519_pubkey: &[u8; 32],
+        ml_dsa_pubkey: &[u8],
+    ) -> Option<&EnrolledOperator> {
+        self.by_ed25519.get(ed25519_pubkey).filter(|op| {
+            // Constant-time-ish is not required here (both are public keys),
+            // but a plain slice comparison is exact and simple.
+            op.ml_dsa_pubkey.as_slice() == ml_dsa_pubkey
+        })
     }
 
     /// Look up an enrolled operator by operator id. Used to re-check
@@ -312,6 +338,33 @@ mod tests {
         ])
         .unwrap_err();
         assert!(matches!(err, OperatorPolicyError::DuplicateKey(_)));
+    }
+
+    #[test]
+    fn lookup_verified_requires_both_keys_to_match_the_same_enrollment() {
+        let alice_ed = [1u8; 32];
+        let alice_ml = vec![0xAAu8; ML_DSA_65_PK_LEN];
+        let policy = OperatorPolicy::from_operators(vec![EnrolledOperator {
+            operator_id: "alice".to_string(),
+            ed25519_pubkey: alice_ed,
+            ml_dsa_pubkey: alice_ml.clone(),
+            role: OperatorRole::Admin,
+        }])
+        .unwrap();
+
+        // The genuine pair matches.
+        assert!(policy.lookup_verified(&alice_ed, &alice_ml).is_some());
+
+        // An enrolled Ed25519 key paired with a *different* ML-DSA key (e.g.
+        // an attacker who only holds the classical secret and supplies their
+        // own post-quantum keypair) must be refused, even though plain
+        // `lookup` (Ed25519-only) would still find the record.
+        let foreign_ml = vec![0xBBu8; ML_DSA_65_PK_LEN];
+        assert!(policy.lookup_verified(&alice_ed, &foreign_ml).is_none());
+        assert!(policy.lookup(&alice_ed).is_some());
+
+        // An unenrolled Ed25519 key is refused regardless of the ML-DSA key.
+        assert!(policy.lookup_verified(&[9u8; 32], &alice_ml).is_none());
     }
 
     #[test]

@@ -32,9 +32,9 @@
 
 use tokio::net::TcpListener;
 use xenia_handshake::{OperatorRekeyEpochContext, OperatorRekeyReason};
-use xenia_peer_core::HandshakeManager;
 use xenia_peer_core::handshake::perform_host_handshake_authenticating_peer;
 use xenia_peer_core::transport::Transport;
+use xenia_peer_core::HandshakeManager;
 use xenia_transport_ws::WsTransport;
 use xenia_wire::handshake_highsec::HostHandshakeHighSec;
 use xenia_wire::operator_rekey::{self, OperatorRekeyMessage};
@@ -115,7 +115,7 @@ pub(crate) async fn establish_operator_channel<T: Transport>(
     identity: &mut OperatorHostIdentity,
     policy: &OperatorPolicy,
 ) -> Result<AuthenticatedOperatorChannel, OperatorChannelError> {
-    let (aead_key, rekey_root, transcript_hash, peer_ed25519_pk) = match identity {
+    let (aead_key, rekey_root, transcript_hash, peer_ed25519_pk, peer_ml_dsa_pk) = match identity {
         OperatorHostIdentity::Standard(host_mgr) => {
             let (outcome, peer) =
                 perform_host_handshake_authenticating_peer(transport, host_mgr, "operator", None)
@@ -126,6 +126,7 @@ pub(crate) async fn establish_operator_channel<T: Transport>(
                 outcome.key_schedule.rekey,
                 outcome.transcript_hash,
                 peer.ed25519_pk,
+                peer.ml_dsa_pk,
             )
         }
         OperatorHostIdentity::HighSecurity(host_hs) => {
@@ -150,11 +151,17 @@ pub(crate) async fn establish_operator_channel<T: Transport>(
                 schedule.rekey,
                 schedule.transcript_hash,
                 peer.ed25519_pk,
+                peer.ml_dsa_pk,
             )
         }
     };
 
-    match policy.lookup(&peer_ed25519_pk) {
+    // `lookup_verified` (not plain `lookup`) is required: the handshake
+    // verified both signatures, but only checking the enrolled record
+    // against the Ed25519 key would let an attacker who controls the
+    // enrolled Ed25519 secret pair it with a self-generated ML-DSA keypair
+    // and still be authorized as this operator.
+    match policy.lookup_verified(&peer_ed25519_pk, &peer_ml_dsa_pk) {
         Some(op) => Ok(AuthenticatedOperatorChannel {
             operator_id: op.operator_id.clone(),
             role: op.role,
@@ -470,13 +477,13 @@ pub(crate) async fn run_sealed_operator_endpoint(
 mod tests {
     use super::*;
     use crate::operator::EnrolledOperator;
-    use crate::operator_auth::{AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS, ChallengeStore, RateLimiter};
+    use crate::operator_auth::{ChallengeStore, RateLimiter, AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS};
     use crate::operator_http::OperatorAuthState;
     use ed25519_dalek::SigningKey;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use tokio::net::{TcpListener, TcpStream};
-    use tokio::sync::{Mutex as TokioMutex, oneshot};
+    use tokio::sync::{oneshot, Mutex as TokioMutex};
     use uuid::Uuid;
     use xenia_ledger::Chain;
     use xenia_peer_core::handshake::perform_viewer_handshake_with_transcript;
@@ -809,11 +816,12 @@ mod tests {
         let policy = OperatorPolicy::from_operators(vec![EnrolledOperator {
             operator_id: "highsec-op".to_string(),
             ed25519_pubkey: operator_viewer.ed25519_public_key(),
-            // Policy lookup is keyed by Ed25519 only (see `OperatorPolicy::lookup`) --
-            // the ML-DSA-87 bytes aren't checked against enrollment, only bound
-            // into the handshake transcript itself. An arbitrary placeholder is
-            // fine here.
-            ml_dsa_pubkey: vec![0u8; 1],
+            // Enrollment now binds the *pair* (`OperatorPolicy::lookup_verified`) --
+            // the real ML-DSA-87 public key must be enrolled, or the handshake's
+            // ML-DSA signature buys no security (see
+            // `enrolled_ed25519_key_with_a_foreign_ml_dsa_key_is_rejected` below
+            // for the negative case this closes).
+            ml_dsa_pubkey: operator_viewer.ml_dsa_public_key_bytes().to_vec(),
             role: OperatorRole::Operator,
         }])
         .unwrap();
@@ -879,6 +887,100 @@ mod tests {
         );
         assert!(!revoked.load(Ordering::SeqCst));
         assert_eq!(metrics.snapshot().connections_accepted, 1);
+    }
+
+    /// The bug class `lookup_verified` closes, end to end over the live
+    /// high-security WS endpoint: a peer who reuses the *enrolled* Ed25519
+    /// identity (e.g. because the classical secret leaked, or a future
+    /// quantum attacker broke it) but presents a *different*, self-generated
+    /// ML-DSA-87 keypair completes a fully valid cryptographic handshake --
+    /// both signatures verify, self-consistently -- yet must still be
+    /// refused, because the ML-DSA-87 key was never enrolled for this
+    /// operator. Before `OperatorPolicy::lookup_verified` existed, this
+    /// connection would have been silently granted (see the deleted
+    /// `ml_dsa_pubkey: vec![0u8; 1]` placeholder that used to sit in the
+    /// happy-path test above).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn enrolled_ed25519_key_with_a_foreign_ml_dsa_key_is_rejected() {
+        let op_ed = [61u8; 32];
+        let op_ml = [62u8; 32];
+        let genuine_viewer =
+            xenia_wire::handshake_highsec::ViewerHandshakeHighSec::from_identity(&op_ed, &op_ml)
+                .unwrap();
+        // The policy enrolls the *real* pair.
+        let policy = OperatorPolicy::from_operators(vec![EnrolledOperator {
+            operator_id: "highsec-op".to_string(),
+            ed25519_pubkey: genuine_viewer.ed25519_public_key(),
+            ml_dsa_pubkey: genuine_viewer.ml_dsa_public_key_bytes().to_vec(),
+            role: OperatorRole::Operator,
+        }])
+        .unwrap();
+
+        // The attacker: same Ed25519 seed (the "leaked classical secret"),
+        // but a different ML-DSA-87 seed than the enrolled operator's --
+        // e.g. their own freshly-generated post-quantum identity.
+        let attacker_ml = [63u8; 32];
+        let mut attacker = xenia_wire::handshake_highsec::ViewerHandshakeHighSec::from_identity(
+            &op_ed,
+            &attacker_ml,
+        )
+        .unwrap();
+        assert_ne!(
+            attacker.ml_dsa_public_key_bytes(),
+            genuine_viewer.ml_dsa_public_key_bytes(),
+            "the attacker's ML-DSA-87 key must differ from the enrolled one for this test to be meaningful"
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (grant_tx, mut grant_rx) = oneshot::channel();
+
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let auth_state = Arc::new(OperatorAuthState {
+            policy: OperatorPolicy::default(),
+            challenges: TokioMutex::new(ChallengeStore::new()),
+            daemon_key: daemon.clone(),
+            rate_limiter: TokioMutex::new(RateLimiter::new(AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS)),
+        });
+        let deps = SealedConsentDeps {
+            require_operator_auth: false,
+            auth_state,
+            session_id: [0x56; 16],
+            session_uuid: Uuid::from_u128(61),
+            ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
+            revoked: Arc::new(AtomicBool::new(false)),
+            revocations: crate::operator_revocations::OperatorRevocations::empty(),
+            rekey_interval: None,
+        };
+        let identity = OperatorHostIdentity::HighSecurity(Box::new(
+            xenia_wire::handshake_highsec::HostHandshakeHighSec::new(),
+        ));
+        let metrics = Arc::new(crate::operator_channel_metrics::OperatorChannelMetrics::default());
+
+        tokio::spawn(run_sealed_operator_endpoint(
+            listener,
+            identity,
+            policy,
+            deps,
+            grant_tx,
+            metrics.clone(),
+        ));
+
+        let mut transport = WsTransport::connect(&format!("ws://{addr}")).await.unwrap();
+        let hello = transport.recv_envelope().await.unwrap();
+        let response = attacker.begin(&hello).unwrap();
+        transport.send_envelope(&response).await.unwrap();
+        // The host completes the handshake -- both signatures verify -- but
+        // then refuses at the policy lookup, so it never sends Finalize.
+        // Confirm no grant appears within a short window rather than hanging
+        // forever on a Finalize that will never arrive.
+        let closed_without_grant =
+            tokio::time::timeout(std::time::Duration::from_millis(500), &mut grant_rx).await;
+        assert!(
+            closed_without_grant.is_err() || matches!(closed_without_grant, Ok(Err(_))),
+            "an unenrolled ML-DSA-87 key must never resolve a grant"
+        );
+        assert_eq!(metrics.snapshot().not_enrolled_rejections, 1);
     }
 
     /// Live revocation: an operator whose key is still enrolled but whose id is
