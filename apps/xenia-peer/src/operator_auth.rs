@@ -35,8 +35,8 @@ use crate::operator::{OperatorPolicy, OperatorRole};
 // the daemon verifies. Re-exported at `crate::operator_auth::*` so existing
 // call sites (main.rs, operator_http, the smoke test) stay unchanged.
 pub(crate) use xenia_operator_proto::{
-    ConsentAction, OperatorAction, challenge_transcript, consent_action_transcript,
-    revoke_operator_transcript,
+    challenge_transcript, consent_action_transcript, revoke_operator_transcript, ConsentAction,
+    OperatorAction,
 };
 
 // The session token is minted and verified only by the daemon, so its domain
@@ -445,6 +445,7 @@ mod tests {
             operator_id: "op".to_string(),
             ed25519_pubkey: mgr.identity_public_key_bytes(),
             ml_dsa_pubkey: mgr.ml_dsa_public_key_bytes().to_vec(),
+            ml_dsa_87_pubkey: None,
             role,
         }])
         .unwrap()

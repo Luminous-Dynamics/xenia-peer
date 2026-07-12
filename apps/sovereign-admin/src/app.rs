@@ -7,14 +7,14 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::{
-    components::{A, Route, Router, Routes},
+    components::{Route, Router, Routes, A},
     path,
 };
 
 use crate::auth::AuthState;
 use crate::config::DaemonConfig;
 use crate::context::{auth_context, daemon_config_context, missing_context_view};
-use crate::operator_session::{OperatorIdentity, OperatorSession, authenticate};
+use crate::operator_session::{authenticate, OperatorIdentity, OperatorSession};
 use crate::pages::{
     ConsentModal, DevicesPage, GovernancePage, LoginPage, MonitorPage, PolicyPage, SessionsPage,
 };
@@ -121,7 +121,9 @@ fn OperatorAuthPanel() -> impl IntoView {
     let fingerprint = identity.fingerprint_hex();
     let fp_short = fingerprint.chars().take(16).collect::<String>();
     // Template record: the admin sets operator_id + role, then adds it to the
-    // daemon's --operators-file. The two public keys are what matter.
+    // daemon's --operators-file. All three public keys matter -- omitting
+    // ml_dsa_87_pubkey means this operator can never use the high-security
+    // sealed channel, even if they select it in the console.
     let enrollment = identity.enrollment_record_json("your-operator-id", OperatorRole::Viewer);
 
     let sign_in = move |_| {

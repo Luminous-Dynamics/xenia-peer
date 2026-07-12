@@ -23,8 +23,8 @@ use xenia_handshake::HandshakeManager;
 use xenia_operator_proto::challenge_transcript;
 
 use crate::operator::{EnrolledOperator, OperatorPolicy, OperatorRole};
-use crate::operator_auth::{AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS, ChallengeStore, RateLimiter};
-use crate::operator_http::{OperatorAuthState, router};
+use crate::operator_auth::{ChallengeStore, RateLimiter, AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS};
+use crate::operator_http::{router, OperatorAuthState};
 
 #[tokio::test]
 async fn operator_auth_ceremony_works_over_real_http() {
@@ -35,6 +35,7 @@ async fn operator_auth_ceremony_works_over_real_http() {
         operator_id: "alice".to_string(),
         ed25519_pubkey: op.identity_public_key_bytes(),
         ml_dsa_pubkey: op.ml_dsa_public_key_bytes().to_vec(),
+        ml_dsa_87_pubkey: None,
         role: OperatorRole::Admin,
     }])
     .unwrap();

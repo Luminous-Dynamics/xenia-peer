@@ -35,10 +35,10 @@ use xenia_ledger::{Chain, Verifier};
 use crate::operator::{EnrolledOperator, OperatorPolicy, OperatorRole};
 use crate::operator_audit::operator_consent_audit_event;
 use crate::operator_auth::{
-    AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS, ChallengeStore, ConsentAction, RateLimiter,
-    challenge_transcript, consent_action_transcript,
+    challenge_transcript, consent_action_transcript, ChallengeStore, ConsentAction, RateLimiter,
+    AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS,
 };
-use crate::operator_http::{OperatorAuthState, router};
+use crate::operator_http::{router, OperatorAuthState};
 
 async fn post(router: &axum::Router, path: &str, body: String) -> (u16, String) {
     let resp = router
@@ -71,6 +71,7 @@ async fn operator_rbac_full_chain_smoke() {
         operator_id: "alice".to_string(),
         ed25519_pubkey: op.identity_public_key_bytes(),
         ml_dsa_pubkey: op.ml_dsa_public_key_bytes().to_vec(),
+        ml_dsa_87_pubkey: None,
         role: OperatorRole::Admin,
     }])
     .unwrap();
