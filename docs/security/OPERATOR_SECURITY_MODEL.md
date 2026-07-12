@@ -242,13 +242,25 @@ re-checks revocation). Refusing token issuance up front is a hardening follow-up
 
 ## 9. Known limits / follow-ups
 
-- **Operator signing seeds (Ed25519 secret, ML-DSA seeds) persist as plaintext
-  hex in browser `localStorage` today** (`sovereign-admin/src/operator_session.rs`).
-  Readable by an XSS bug, a malicious browser extension, or a compromised
-  same-origin dependency. The intended direction is a native signing agent or
-  OS-keychain-backed companion the browser receives signatures from, rather
-  than holding raw seeds; not yet built. Treat this as a hard blocker before
-  exposing the admin console to any untrusted network.
+- **Operator seeds no longer persist in browser `localStorage`, but the
+  browser still signs with them locally.** `apps/xenia-operator-agent` is a
+  small native process that holds the operator's Ed25519 + ML-DSA seeds in a
+  `0600` file and serves them to the console over a token-authenticated,
+  origin-restricted `127.0.0.1`-only API (`GET /seeds`); the console fetches
+  them into memory once per page session and never persists the result. This
+  closes the *persistent-storage* exposure (XSS, a malicious extension, or a
+  compromised same-origin dependency reading `localStorage` at any time) but
+  **not** the signing operation itself: the console still holds the fetched
+  seeds in memory for the session and signs both the `/auth/*` ceremony and
+  the sealed-channel handshake locally with them. Having the agent perform
+  the signing itself -- so raw key material never reaches the browser
+  process at all, not even transiently -- needs an async signing-callback
+  abstraction in `xenia-wire`'s `ViewerHandshake`/`ViewerHandshakeHighSec`
+  (which currently own raw keys internally); scoped, not built, deliberately
+  deferred rather than rushed through a published crate's API. Until then,
+  a compromised browser process *during an active session* can still exfiltrate
+  the seeds from memory (a materially smaller window than permanent
+  `localStorage` exposure, but not zero).
 - `/auth/verify` still mints tokens for revoked operators (harmless — see §6).
 - `bincode` 1.3.3 is used for wire (handshake + envelopes) with a tracked RUSTSEC
   exception (an "unmaintained crate" advisory, not a CVE); a postcard/wincode

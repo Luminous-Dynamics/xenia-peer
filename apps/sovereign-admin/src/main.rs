@@ -12,6 +12,7 @@
 
 use leptos::prelude::*;
 
+mod agent_client;
 mod app;
 mod auth;
 mod config;

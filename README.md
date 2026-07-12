@@ -283,11 +283,18 @@ decisions, both with their own consent ledger.
 - **Live revocation** — an Admin can revoke a compromised operator by id;
   the revocation list is consulted on every channel, live, no daemon
   restart required.
+- **`apps/xenia-operator-agent`** — a small native process that holds the
+  operator's Ed25519 + ML-DSA seeds in a `0600` file instead of browser
+  `localStorage`, serving them to the console over a token-authenticated,
+  `127.0.0.1`-only API. Run it once (`cargo run -p xenia-operator-agent`),
+  paste the printed pairing token into the console's Sessions page. The
+  console still signs locally with the fetched seeds for now (in-memory
+  only, never persisted) -- see `docs/security/OPERATOR_SECURITY_MODEL.md`
+  §9 for the scope and what's still deferred.
 
 None of this is a finished security story yet. See
 `docs/security/OPERATOR_SECURITY_MODEL.md` for the current threat model
-and open gaps (notably: operator signing seeds persist in browser
-`localStorage` today, not a native agent or OS keychain).
+and open gaps.
 
 ## Licensing
 

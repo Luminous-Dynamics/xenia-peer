@@ -11,6 +11,7 @@ use leptos_router::{
     path,
 };
 
+use crate::agent_client::AgentConfig;
 use crate::auth::AuthState;
 use crate::config::DaemonConfig;
 use crate::context::{auth_context, daemon_config_context, missing_context_view};
@@ -26,6 +27,40 @@ use xenia_operator_proto::OperatorRole;
 /// privileged control) can gate on the real role rather than a client claim.
 pub type OperatorSessionCtx = RwSignal<Option<OperatorSession>>;
 
+/// The operator's seeds, fetched from the local agent (see
+/// `crate::agent_client`) rather than generated/persisted in the browser.
+/// Holds the raw seeds (not an `OperatorIdentity`/`Rc` wrapper) so this type
+/// stays `Send + Sync` and fits a plain `RwSignal` -- `OperatorIdentity`
+/// wraps non-`Send` wasm-bindgen-adjacent crypto state, and constructing one
+/// from seeds is cheap (no keygen, just derivation), so callers just build
+/// one on demand from whichever variant they get.
+#[derive(Clone)]
+pub enum OperatorIdentityState {
+    /// Fetch in flight (or not yet started).
+    Loading,
+    Ready {
+        ed_seed: [u8; 32],
+        ml_seed: [u8; 32],
+    },
+    /// No token configured, or the agent fetch failed -- carries a
+    /// user-facing reason.
+    Unavailable(String),
+}
+
+impl OperatorIdentityState {
+    /// Build an [`OperatorIdentity`] if the seeds are ready.
+    pub fn identity(&self) -> Option<OperatorIdentity> {
+        match self {
+            OperatorIdentityState::Ready { ed_seed, ml_seed } => {
+                Some(OperatorIdentity::from_seeds(*ed_seed, *ml_seed))
+            }
+            _ => None,
+        }
+    }
+}
+
+pub type OperatorIdentityCtx = RwSignal<OperatorIdentityState>;
+
 #[component]
 pub fn App() -> impl IntoView {
     let auth = AuthState::new();
@@ -34,8 +69,39 @@ pub fn App() -> impl IntoView {
     let config = DaemonConfig::new();
     provide_context(config);
 
+    let agent_config = AgentConfig::new();
+    provide_context(agent_config);
+
     let operator_session: OperatorSessionCtx = RwSignal::new(None);
     provide_context(operator_session);
+
+    let identity_state: OperatorIdentityCtx = RwSignal::new(OperatorIdentityState::Loading);
+    provide_context(identity_state);
+
+    // Fetch the operator identity from the agent whenever its connection
+    // settings change (including once, on mount, with whatever was
+    // persisted from a prior session).
+    Effect::new(move |_| {
+        let url = agent_config.agent_url.get();
+        let token = agent_config.agent_token.get();
+        identity_state.set(OperatorIdentityState::Loading);
+        spawn_local(async move {
+            if token.trim().is_empty() {
+                identity_state.set(OperatorIdentityState::Unavailable(
+                    "Operator agent not configured -- set its URL and pairing token on the \
+                     Sessions page to enable operator sign-in."
+                        .to_string(),
+                ));
+                return;
+            }
+            match crate::agent_client::fetch_seeds(&url, &token).await {
+                Ok((ed_seed, ml_seed)) => {
+                    identity_state.set(OperatorIdentityState::Ready { ed_seed, ml_seed })
+                }
+                Err(e) => identity_state.set(OperatorIdentityState::Unavailable(e)),
+            }
+        });
+    });
 
     view! {
         <Router>
@@ -112,28 +178,25 @@ fn OperatorAuthPanel() -> impl IntoView {
     let Ok(config) = daemon_config_context() else {
         return missing_context_view("DaemonConfig").into_any();
     };
+    let Some(identity_state) = use_context::<OperatorIdentityCtx>() else {
+        return missing_context_view("OperatorIdentity").into_any();
+    };
     let (busy, set_busy) = signal(false);
     let (error, set_error) = signal(None::<String>);
 
-    // Compute the operator's fingerprint + paste-ready enrollment record once at
-    // mount (constructing the identity does ML-KEM keygen, so not per render).
-    let identity = OperatorIdentity::load_or_generate();
-    let fingerprint = identity.fingerprint_hex();
-    let fp_short = fingerprint.chars().take(16).collect::<String>();
-    // Template record: the admin sets operator_id + role, then adds it to the
-    // daemon's --operators-file. All three public keys matter -- omitting
-    // ml_dsa_87_pubkey means this operator can never use the high-security
-    // sealed channel, even if they select it in the console.
-    let enrollment = identity.enrollment_record_json("your-operator-id", OperatorRole::Viewer);
-
     let sign_in = move |_| {
+        let Some(identity) = identity_state.get_untracked().identity() else {
+            set_error.set(Some(
+                "Operator agent identity isn't ready -- check the agent settings on the \
+                 Sessions page."
+                    .to_string(),
+            ));
+            return;
+        };
         set_busy.set(true);
         set_error.set(None);
         let endpoint = config.endpoint.get();
         spawn_local(async move {
-            // Constructed from the persisted seeds, so this is the same
-            // enrolled identity every time.
-            let identity = OperatorIdentity::load_or_generate();
             match authenticate(&endpoint, &identity).await {
                 Ok(s) => session.set(Some(s)),
                 Err(e) => set_error.set(Some(e)),
@@ -146,31 +209,50 @@ fn OperatorAuthPanel() -> impl IntoView {
         <div class="operator-auth">
             <Show
                 when=move || session.with(|s| s.is_some())
-                fallback=move || {
-                    let fp = fingerprint.clone();
-                    let short = fp_short.clone();
-                    let record = enrollment.clone();
-                    view! {
-                        <button
-                            class="operator-signin"
-                            prop:disabled=move || busy.get()
-                            on:click=sign_in
-                        >
-                            {move || if busy.get() { "Authenticating…" } else { "Operator sign-in" }}
-                        </button>
-                        <details class="operator-enroll">
-                            <summary class="operator-fingerprint" title=fp>
-                                "key " {short} "…"
-                            </summary>
-                            <p class="operator-enroll-hint">
-                                "Add to the daemon's --operators-file (set operator_id + role):"
-                            </p>
-                            <code class="operator-enroll-record">{record}</code>
-                        </details>
-                        {move || error.get().map(|e| view! {
-                            <span class="operator-error">{e}</span>
-                        })}
-                    }
+                fallback=move || view! {
+                    {move || match identity_state.get() {
+                        OperatorIdentityState::Loading => view! {
+                            <span class="operator-agent-status">"Connecting to operator agent…"</span>
+                        }.into_any(),
+                        OperatorIdentityState::Unavailable(reason) => view! {
+                            <span class="operator-agent-status operator-error">{reason}</span>
+                        }.into_any(),
+                        state @ OperatorIdentityState::Ready { .. } => {
+                            let identity = state.identity().expect("just matched Ready");
+                            // Template record: the admin sets operator_id + role, then adds
+                            // it to the daemon's --operators-file. All three public keys
+                            // matter -- omitting ml_dsa_87_pubkey means this operator can
+                            // never use the high-security sealed channel, even if they
+                            // select it in the console.
+                            let fingerprint = identity.fingerprint_hex();
+                            let fp_short = fingerprint.chars().take(16).collect::<String>();
+                            let record = identity.enrollment_record_json(
+                                "your-operator-id",
+                                OperatorRole::Viewer,
+                            );
+                            view! {
+                                <button
+                                    class="operator-signin"
+                                    prop:disabled=move || busy.get()
+                                    on:click=sign_in
+                                >
+                                    {move || if busy.get() { "Authenticating…" } else { "Operator sign-in" }}
+                                </button>
+                                <details class="operator-enroll">
+                                    <summary class="operator-fingerprint" title=fingerprint.clone()>
+                                        "key " {fp_short} "…"
+                                    </summary>
+                                    <p class="operator-enroll-hint">
+                                        "Add to the daemon's --operators-file (set operator_id + role):"
+                                    </p>
+                                    <code class="operator-enroll-record">{record}</code>
+                                </details>
+                                {move || error.get().map(|e| view! {
+                                    <span class="operator-error">{e}</span>
+                                })}
+                            }.into_any()
+                        }
+                    }}
                 }
             >
                 <span class="operator-role-chip">

@@ -22,9 +22,16 @@
 //!   browser-produced signature is byte-identical to what the daemon expects.
 //!   We only ever call its keygen/sign methods (never the `SystemTime`-using
 //!   `establish()` paths), so it is wasm-safe at runtime.
+//!
+//! The identity's seeds are **not** persisted by this module (they used to
+//! be, in `localStorage` -- plaintext hex, readable by an XSS bug, a
+//! malicious browser extension, or a compromised same-origin dependency).
+//! They now come from [`crate::agent_client`], which fetches them from a
+//! local native agent process into memory once per page session. See that
+//! module's doc comment and `docs/security/OPERATOR_SECURITY_MODEL.md` §9
+//! for the current scope and what's still deferred.
 
 use serde::Deserialize;
-use web_sys::Storage;
 
 use xenia_handshake::HandshakeManager;
 use xenia_operator_proto::{
@@ -35,19 +42,8 @@ use xenia_wire::handshake_highsec::{
     derive_ml_dsa_87_seed_from_ed25519_secret, ViewerHandshakeHighSec,
 };
 
-/// localStorage keys for the operator's persisted identity seeds (hex). Two
-/// 32-byte seeds fully determine the Ed25519 + ML-DSA-65 identity, so the same
-/// enrolled key survives reloads (see [`HandshakeManager::from_identity_seeds`]).
-const ED_SEED_KEY: &str = "xenia-admin.operator.ed-seed";
-const ML_SEED_KEY: &str = "xenia-admin.operator.ml-seed";
-
-fn local_storage() -> Option<Storage> {
-    web_sys::window()?.local_storage().ok()?
-}
-
 /// A stable operator identity: Ed25519 + ML-DSA-65 (standard suite) plus a
-/// *derived* ML-DSA-87 identity (high-security suite), persisted as two
-/// seeds so the enrolled key is the same across page loads. Wraps a
+/// *derived* ML-DSA-87 identity (high-security suite). Wraps a
 /// [`HandshakeManager`] purely as the signing engine.
 ///
 /// The ML-DSA-87 public key is derived deterministically from the same
@@ -67,19 +63,12 @@ pub struct OperatorIdentity {
 }
 
 impl OperatorIdentity {
-    /// Load the persisted identity, or generate + persist a fresh one on first
-    /// use. Deterministic in the seeds, so the returned public keys (and hence
-    /// the enrollment fingerprint) are stable across reloads.
-    pub fn load_or_generate() -> Self {
-        let (ed_seed, ml_seed) = load_seeds().unwrap_or_else(|| {
-            let seeds = generate_seeds();
-            save_seeds(&seeds.0, &seeds.1);
-            seeds
-        });
-        Self::from_seeds(ed_seed, ml_seed)
-    }
-
-    fn from_seeds(ed_seed: [u8; 32], ml_seed: [u8; 32]) -> Self {
+    /// Build the identity from seeds already fetched from the operator
+    /// agent (see [`crate::agent_client::fetch_seeds`]). Deterministic in
+    /// the seeds, so the returned public keys (and hence the enrollment
+    /// fingerprint) are stable across page reloads as long as the agent's
+    /// identity file doesn't change.
+    pub fn from_seeds(ed_seed: [u8; 32], ml_seed: [u8; 32]) -> Self {
         let hm = HandshakeManager::from_identity_seeds(ed_seed, ml_seed);
         let ed_pubkey = hm.identity_public_key_bytes();
         let ml_pubkey = hm.ml_dsa_public_key_bytes().to_vec();
@@ -161,31 +150,6 @@ impl OperatorIdentity {
             role,
         }
         .to_json_string()
-    }
-}
-
-fn generate_seeds() -> ([u8; 32], [u8; 32]) {
-    use rand_core::{OsRng, RngCore};
-    let mut ed = [0u8; 32];
-    let mut ml = [0u8; 32];
-    OsRng.fill_bytes(&mut ed);
-    OsRng.fill_bytes(&mut ml);
-    (ed, ml)
-}
-
-fn load_seeds() -> Option<([u8; 32], [u8; 32])> {
-    let storage = local_storage()?;
-    let ed_hex = storage.get_item(ED_SEED_KEY).ok().flatten()?;
-    let ml_hex = storage.get_item(ML_SEED_KEY).ok().flatten()?;
-    let ed = decode32(&ed_hex).ok()?;
-    let ml = decode32(&ml_hex).ok()?;
-    Some((ed, ml))
-}
-
-fn save_seeds(ed: &[u8; 32], ml: &[u8; 32]) {
-    if let Some(storage) = local_storage() {
-        let _ = storage.set_item(ED_SEED_KEY, &hex::encode(ed));
-        let _ = storage.set_item(ML_SEED_KEY, &hex::encode(ml));
     }
 }
 
