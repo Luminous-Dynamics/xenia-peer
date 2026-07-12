@@ -16,7 +16,7 @@ use xenia_operator_proto::OperatorAction;
 use crate::app::OperatorSessionCtx;
 use crate::config::DaemonConfig;
 use crate::context::{auth_context, daemon_config_context, missing_context_view};
-use crate::operator_session::{OperatorIdentity, build_revoke_request};
+use crate::operator_session::{build_revoke_request, OperatorIdentity};
 
 /// Portable JSON shape used by the export/import pair.
 #[derive(Serialize, Deserialize)]
@@ -153,6 +153,19 @@ pub fn SessionsPage() -> impl IntoView {
                                     }
                                 }
                             />
+                        </div>
+                        <div class="field">
+                            <label class="checkbox">
+                                <input
+                                    type="checkbox"
+                                    prop:checked=move || config.high_security.get()
+                                    on:change=move |ev| {
+                                        config.high_security.set(event_target_checked(&ev))
+                                    }
+                                />
+                                " High-security suite (ML-KEM-1024 + ML-DSA-87) — daemon must run "
+                                "--operator-high-security too; the two suites don't interoperate"
+                            </label>
                         </div>
                         <button class="primary" on:click=move |_| config.save()>"Save & Reconnect"</button>
                     </div>

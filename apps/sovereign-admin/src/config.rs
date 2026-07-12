@@ -14,6 +14,7 @@ const SECRET_KEY: &str = "xenia-admin.daemon-secret";
 const CONSENT_PORT_KEY: &str = "xenia-admin.daemon-consent-port";
 const SEALED_PORT_KEY: &str = "xenia-admin.daemon-sealed-port";
 const SEALED_ENABLED_KEY: &str = "xenia-admin.daemon-sealed-enabled";
+const SEALED_HIGH_SECURITY_KEY: &str = "xenia-admin.daemon-sealed-high-security";
 
 /// The daemon's default admin HTTP port (xenia-peer `--admin-port`); the
 /// `/auth/*` routes and the `/ws` consent broadcast both live here. (The old
@@ -44,6 +45,13 @@ pub struct DaemonConfig {
     /// decisions should go over the PQC-sealed channel instead of the plaintext
     /// consent socket. Operator-set (there is no daemon-advertised signal yet).
     pub use_sealed_channel: RwSignal<bool>,
+    /// Whether the operator's daemon is running `--operator-sealed
+    /// --operator-high-security` (ML-KEM-1024 + Ed25519 + ML-DSA-87) rather
+    /// than the default suite. Only consulted when `use_sealed_channel` is
+    /// set; mismatched pairing fails the handshake rather than downgrading
+    /// (see `xenia_wire::handshake_highsec`'s module doc comment).
+    /// Operator-set, same as `use_sealed_channel`.
+    pub high_security: RwSignal<bool>,
 }
 
 impl DaemonConfig {
@@ -67,12 +75,18 @@ impl DaemonConfig {
                 .map(|s| s == "true")
                 .unwrap_or(false),
         );
+        let high_security = RwSignal::new(
+            load_from_storage(SEALED_HIGH_SECURITY_KEY)
+                .map(|s| s == "true")
+                .unwrap_or(false),
+        );
         Self {
             endpoint,
             hmac_secret,
             consent_port,
             sealed_port,
             use_sealed_channel,
+            high_security,
         }
     }
 
@@ -84,6 +98,10 @@ impl DaemonConfig {
         persist_to_storage(
             SEALED_ENABLED_KEY,
             &self.use_sealed_channel.get().to_string(),
+        );
+        persist_to_storage(
+            SEALED_HIGH_SECURITY_KEY,
+            &self.high_security.get().to_string(),
         );
     }
 

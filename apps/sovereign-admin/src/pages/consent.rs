@@ -13,7 +13,7 @@
 //! permitted operator.
 
 use futures_util::{SinkExt, StreamExt};
-use gloo_net::websocket::{Message, futures::WebSocket};
+use gloo_net::websocket::{futures::WebSocket, Message};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
@@ -21,7 +21,7 @@ use xenia_operator_proto::ConsentAction;
 
 use crate::app::OperatorSessionCtx;
 use crate::context::{daemon_config_context, missing_context_view};
-use crate::operator_session::{OperatorIdentity, build_consent_request};
+use crate::operator_session::{build_consent_request, OperatorIdentity};
 
 /// Extract the `session_id` (hex, 16 bytes) a daemon may include in the consent
 /// prompt. Required to bind an *authenticated* decision to the exact session;
@@ -98,15 +98,25 @@ pub fn ConsentModal() -> impl IntoView {
         if config.use_sealed_channel.get_untracked() {
             let (ed_seed, ml_seed) = id.seeds();
             let sealed_url = config.sealed_ws_url();
+            let high_security = config.high_security.get_untracked();
             spawn_local(async move {
-                if let Err(err) = crate::sealed_consent::send_sealed_consent(
-                    &sealed_url,
-                    &ed_seed,
-                    &ml_seed,
-                    payload.as_bytes(),
-                )
-                .await
-                {
+                let result = if high_security {
+                    crate::sealed_consent::send_sealed_consent_highsec(
+                        &sealed_url,
+                        &ed_seed,
+                        payload.as_bytes(),
+                    )
+                    .await
+                } else {
+                    crate::sealed_consent::send_sealed_consent(
+                        &sealed_url,
+                        &ed_seed,
+                        &ml_seed,
+                        payload.as_bytes(),
+                    )
+                    .await
+                };
+                if let Err(err) = result {
                     leptos::logging::error!("sealed consent decision failed: {err}");
                 }
             });
