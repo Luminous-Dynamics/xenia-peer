@@ -16,7 +16,7 @@ use xenia_operator_proto::OperatorAction;
 use crate::app::OperatorSessionCtx;
 use crate::config::DaemonConfig;
 use crate::context::{auth_context, daemon_config_context, missing_context_view};
-use crate::operator_session::{build_revoke_request, OperatorIdentity};
+use crate::operator_session::{OperatorIdentity, build_revoke_request};
 
 /// Portable JSON shape used by the export/import pair.
 #[derive(Serialize, Deserialize)]
@@ -50,6 +50,27 @@ pub fn SessionsPage() -> impl IntoView {
             })
             .unwrap_or(false)
     };
+    // "Forget" the pinned sealed-channel host identity fingerprint (see
+    // `crate::host_pin`'s module doc comment) — the operator's explicit path
+    // for a legitimate daemon key rotation, since otherwise a rotated key
+    // would permanently refuse the channel as a suspected MITM.
+    let (forget_status, set_forget_status) = signal(String::new());
+    let do_forget_pin = move |_| {
+        let suite = if config.high_security.get_untracked() {
+            "highsec"
+        } else {
+            "standard"
+        };
+        let key = crate::host_pin::storage_key(&config.sealed_ws_url(), suite);
+        crate::host_pin::forget(&key);
+        set_forget_status.set(format!(
+            "Forgot the pinned {suite} host fingerprint for {}. The next connection will \
+             trust-on-first-use whatever identity it sees — only do this if you intentionally \
+             rotated the daemon's key.",
+            config.sealed_ws_url()
+        ));
+    };
+
     let do_revoke = move |_| {
         let target = revoke_target.get_untracked().trim().to_string();
         if target.is_empty() {
@@ -170,6 +191,23 @@ pub fn SessionsPage() -> impl IntoView {
                         <button class="primary" on:click=move |_| config.save()>"Save & Reconnect"</button>
                     </div>
                 </section>
+
+                <Show when=move || config.use_sealed_channel.get()>
+                    <section class="config-section">
+                        <h2>"Pinned Host Identity"</h2>
+                        <p class="prose">
+                            "The sealed channel pins the daemon's host identity fingerprint on "
+                            "first connection (trust-on-first-use) and refuses any later "
+                            "connection whose fingerprint changed. Only forget the pin if you "
+                            "intentionally rotated the daemon's key — otherwise a changed "
+                            "fingerprint means a possible impersonation attempt."
+                        </p>
+                        <button class="danger" on:click=do_forget_pin>
+                            "Forget Pinned Host Fingerprint"
+                        </button>
+                        <p class="prose">{move || forget_status.get()}</p>
+                    </section>
+                </Show>
 
                 <Show when=can_revoke>
                     <section class="config-section">

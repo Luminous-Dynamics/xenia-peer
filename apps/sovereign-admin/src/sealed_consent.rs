@@ -33,14 +33,14 @@
 //! loop.
 
 use futures_util::{SinkExt, StreamExt};
-use gloo_net::websocket::{futures::WebSocket, Message, WebSocketError};
+use gloo_net::websocket::{Message, WebSocketError, futures::WebSocket};
 
 use xenia_wire::handshake::{SessionKeySchedule, ViewerHandshake};
 use xenia_wire::handshake_highsec::{
-    derive_ml_dsa_87_seed_from_ed25519_secret, ViewerHandshakeHighSec,
+    ViewerHandshakeHighSec, derive_ml_dsa_87_seed_from_ed25519_secret,
 };
 use xenia_wire::operator_rekey::{self, OperatorRekeyMessage};
-use xenia_wire::{Session, PAYLOAD_TYPE_APPLICATION_MIN};
+use xenia_wire::{PAYLOAD_TYPE_APPLICATION_MIN, Session};
 
 /// Shared `source_id` for the sealed operator channel — MUST match the daemon's
 /// `OPERATOR_CHANNEL_SOURCE_ID` (`operator_sealed_channel.rs`) so the console's
@@ -79,6 +79,17 @@ pub async fn send_sealed_consent(
     let schedule = handshake
         .finish(&finalize)
         .map_err(|e| format!("handshake finish failed (host rejected or MITM): {e}"))?;
+
+    // 2.5. TOFU-pin the host identity fingerprint *before* sending anything
+    // sealed under this channel's key -- a mismatch here means either a
+    // legitimate daemon key rotation (operator must explicitly
+    // `host_pin::forget`) or an active MITM, and either way the console must
+    // not proceed silently.
+    check_host_pin(
+        sealed_ws_url,
+        "standard",
+        schedule.host_identity_fingerprint,
+    )?;
 
     // 3. Seal the consent payload over the channel key and send it.
     let mut session = Session::with_source_id(OPERATOR_CHANNEL_SOURCE_ID, 1);
@@ -131,6 +142,14 @@ pub async fn send_sealed_consent_highsec(
         .finish(&finalize)
         .map_err(|e| format!("handshake finish failed (host rejected or MITM): {e}"))?;
 
+    // 2.5. TOFU-pin the host identity fingerprint before sending anything
+    // sealed under this channel's key -- see `send_sealed_consent`'s
+    // matching step for why. Pinned separately from the standard suite: the
+    // two suites' host identities are cryptographically distinct (Ed25519 ||
+    // ML-DSA-65 vs Ed25519 || ML-DSA-87), even though a real daemon shares
+    // the underlying Ed25519 secret across both.
+    check_host_pin(sealed_ws_url, "highsec", schedule.host_identity_fingerprint)?;
+
     // 3. Seal the consent payload over the channel key and send it.
     let mut session = Session::with_source_id(OPERATOR_CHANNEL_SOURCE_ID, 1);
     session.install_key(schedule.aead);
@@ -140,6 +159,26 @@ pub async fn send_sealed_consent_highsec(
     send_binary(&mut writer, envelope).await?;
 
     Ok(())
+}
+
+/// TOFU-check `fingerprint` against the pin stored for `(sealed_ws_url,
+/// suite)`. Returns `Ok(())` to proceed (logging on first trust, since that's
+/// the one point where an already-present MITM would go undetected); returns
+/// `Err` -- which the caller propagates, refusing the channel -- on a
+/// mismatch.
+fn check_host_pin(sealed_ws_url: &str, suite: &str, fingerprint: [u8; 32]) -> Result<(), String> {
+    let key = crate::host_pin::storage_key(sealed_ws_url, suite);
+    match crate::host_pin::verify_or_pin(&key, fingerprint) {
+        Ok(crate::host_pin::PinOutcome::FirstConnection) => {
+            leptos::logging::warn!(
+                "trusting {suite} host identity fingerprint {} for {sealed_ws_url} on first connection (TOFU)",
+                hex::encode(fingerprint)
+            );
+            Ok(())
+        }
+        Ok(crate::host_pin::PinOutcome::Matched) => Ok(()),
+        Err(mismatch) => Err(mismatch.to_string()),
+    }
 }
 
 /// Handle one sealed operator-channel envelope already identified (via
