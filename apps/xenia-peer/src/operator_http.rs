@@ -18,7 +18,7 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -27,9 +27,9 @@ use xenia_handshake::{ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN};
 
 use crate::operator::{OperatorPolicy, OperatorRole};
 use crate::operator_auth::{
-    AuthenticatedConsentAction, AuthenticatedRevocation, CHALLENGE_TTL_SECS, ChallengeResponse,
-    ChallengeStore, ConsentAction, OperatorToken, RateLimiter, SignedOperatorToken, TOKEN_TTL_SECS,
-    issue_token, verify_challenge_response,
+    issue_token, verify_challenge_response, AuthenticatedConsentAction, AuthenticatedRevocation,
+    ChallengeResponse, ChallengeStore, ConsentAction, OperatorToken, RateLimiter,
+    SignedOperatorToken, CHALLENGE_TTL_SECS, TOKEN_TTL_SECS,
 };
 use crate::operator_revocations::OperatorRevocations;
 
@@ -313,6 +313,7 @@ mod tests {
             operator_id: "alice".to_string(),
             ed25519_pubkey: op.identity_public_key_bytes(),
             ml_dsa_pubkey: op.ml_dsa_public_key_bytes().to_vec(),
+            ml_dsa_87_pubkey: None,
             role: OperatorRole::Admin,
         }])
         .unwrap();
@@ -336,6 +337,7 @@ mod tests {
             operator_id: "alice".to_string(),
             ed25519_pubkey: op.identity_public_key_bytes(),
             ml_dsa_pubkey: op.ml_dsa_public_key_bytes().to_vec(),
+            ml_dsa_87_pubkey: None,
             role: OperatorRole::Admin,
         }])
         .unwrap();

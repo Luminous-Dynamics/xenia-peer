@@ -28,8 +28,11 @@ use web_sys::Storage;
 
 use xenia_handshake::HandshakeManager;
 use xenia_operator_proto::{
-    ConsentAction, OperatorAction, OperatorRole, challenge_transcript, consent_action_transcript,
-    revoke_operator_transcript,
+    challenge_transcript, consent_action_transcript, revoke_operator_transcript, ConsentAction,
+    OperatorAction, OperatorEnrollmentRecord, OperatorRole,
+};
+use xenia_wire::handshake_highsec::{
+    derive_ml_dsa_87_seed_from_ed25519_secret, ViewerHandshakeHighSec,
 };
 
 /// localStorage keys for the operator's persisted identity seeds (hex). Two
@@ -42,13 +45,23 @@ fn local_storage() -> Option<Storage> {
     web_sys::window()?.local_storage().ok()?
 }
 
-/// A stable operator identity: Ed25519 + ML-DSA-65, persisted as two seeds so
-/// the enrolled key is the same across page loads. Wraps a
+/// A stable operator identity: Ed25519 + ML-DSA-65 (standard suite) plus a
+/// *derived* ML-DSA-87 identity (high-security suite), persisted as two
+/// seeds so the enrolled key is the same across page loads. Wraps a
 /// [`HandshakeManager`] purely as the signing engine.
+///
+/// The ML-DSA-87 public key is derived deterministically from the same
+/// Ed25519 secret via [`derive_ml_dsa_87_seed_from_ed25519_secret`] -- the
+/// same derivation [`crate::sealed_consent::send_sealed_consent_highsec`]
+/// uses to drive the actual handshake -- so this type is the single source
+/// of truth for "what would this operator's high-security identity be,"
+/// and [`Self::enrollment_record_json`] can enroll it without a second key
+/// file or a second enrollment ceremony.
 pub struct OperatorIdentity {
     hm: HandshakeManager,
     ed_pubkey: [u8; 32],
     ml_pubkey: Vec<u8>,
+    ml87_pubkey: Vec<u8>,
     ed_seed: [u8; 32],
     ml_seed: [u8; 32],
 }
@@ -70,10 +83,21 @@ impl OperatorIdentity {
         let hm = HandshakeManager::from_identity_seeds(ed_seed, ml_seed);
         let ed_pubkey = hm.identity_public_key_bytes();
         let ml_pubkey = hm.ml_dsa_public_key_bytes().to_vec();
+        // The ML-DSA-87 seed is *derived*, not separately persisted -- a
+        // 32-byte Ed25519 secret plus this deterministic derivation is all
+        // that's needed to reproduce the same high-security identity every
+        // time. The `ed_seed`/`ml87_seed` pair are both always exactly 32
+        // bytes here, so `from_identity` cannot actually fail.
+        let ml87_seed = derive_ml_dsa_87_seed_from_ed25519_secret(&ed_seed);
+        let ml87_pubkey = ViewerHandshakeHighSec::from_identity(&ed_seed, &ml87_seed)
+            .expect("32-byte seeds always produce a valid high-security identity")
+            .ml_dsa_public_key_bytes()
+            .to_vec();
         Self {
             hm,
             ed_pubkey,
             ml_pubkey,
+            ml87_pubkey,
             ed_seed,
             ml_seed,
         }
@@ -94,9 +118,17 @@ impl OperatorIdentity {
         hex::encode(self.ed_pubkey)
     }
 
-    /// The ML-DSA-65 public key, hex — the other half of the enrollment record.
+    /// The ML-DSA-65 public key, hex — the standard-suite half of the
+    /// enrollment record.
     pub fn ml_pubkey_hex(&self) -> String {
         hex::encode(&self.ml_pubkey)
+    }
+
+    /// The *derived* ML-DSA-87 public key, hex — the high-security-suite
+    /// half of the enrollment record. See the struct doc comment for how
+    /// this is derived.
+    pub fn ml87_pubkey_hex(&self) -> String {
+        hex::encode(&self.ml87_pubkey)
     }
 
     /// The host-identity fingerprint (BLAKE3 over both public keys) an admin
@@ -106,17 +138,29 @@ impl OperatorIdentity {
     }
 
     /// A paste-ready enrollment record for the daemon's `--operators-file`,
-    /// carrying both public keys. The admin adds this to the `operators` array
-    /// (with a chosen `operator_id` + `role`) so this browser identity becomes
-    /// an enrolled operator. Without this the fingerprint alone can't enroll.
+    /// carrying all three public keys (Ed25519, ML-DSA-65, and the derived
+    /// ML-DSA-87). The admin adds this to the `operators` array (with a
+    /// chosen `operator_id` + `role`) so this browser identity becomes an
+    /// enrolled operator for *both* sealed-channel suites at once -- without
+    /// this the fingerprint alone can't enroll, and omitting the ML-DSA-87
+    /// key here is exactly what left the high-security suite unusable via
+    /// any real enrollment (a policy file generated from this record could
+    /// never satisfy `OperatorPolicy::lookup_verified_highsec`).
+    ///
+    /// Built from [`xenia_operator_proto::OperatorEnrollmentRecord`] --
+    /// the same type an integration test can deserialize a daemon-side
+    /// `OperatorPolicy` from -- so this can't silently drift from what the
+    /// daemon actually parses the way the old hand-built `serde_json::json!`
+    /// call here once did.
     pub fn enrollment_record_json(&self, operator_id: &str, role: OperatorRole) -> String {
-        serde_json::json!({
-            "operator_id": operator_id,
-            "ed25519_pubkey": self.ed_pubkey_hex(),
-            "ml_dsa_pubkey": self.ml_pubkey_hex(),
-            "role": role.as_str(),
-        })
-        .to_string()
+        OperatorEnrollmentRecord {
+            operator_id: operator_id.to_string(),
+            ed25519_pubkey: self.ed_pubkey_hex(),
+            ml_dsa_pubkey: self.ml_pubkey_hex(),
+            ml_dsa_87_pubkey: Some(self.ml87_pubkey_hex()),
+            role,
+        }
+        .to_json_string()
     }
 }
 

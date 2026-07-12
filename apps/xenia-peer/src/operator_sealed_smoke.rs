@@ -19,11 +19,11 @@
 
 use tokio::net::{TcpListener, TcpStream};
 
-use xenia_peer_core::HandshakeManager;
 use xenia_peer_core::handshake::{
     perform_host_handshake_authenticating_peer, perform_viewer_handshake_with_transcript,
 };
 use xenia_peer_core::transport::TcpTransport;
+use xenia_peer_core::HandshakeManager;
 
 use crate::operator::{EnrolledOperator, OperatorPolicy, OperatorRole};
 
@@ -43,6 +43,7 @@ async fn operator_identity_drives_the_sealed_channel_handshake() {
         operator_id: "alice".to_string(),
         ed25519_pubkey: operator_ed_pk,
         ml_dsa_pubkey: operator_ml_pk.clone(),
+        ml_dsa_87_pubkey: None,
         role: OperatorRole::Admin,
     }])
     .unwrap();

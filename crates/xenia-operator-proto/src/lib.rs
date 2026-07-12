@@ -224,6 +224,50 @@ pub fn revoke_operator_transcript(target_operator_id: &str, token_nonce: &[u8; 1
     t
 }
 
+/// The daemon's `--operators-file` enrollment record shape, shared so the
+/// console (which generates one per identity) and the daemon (which parses
+/// it) can never drift on field names or casing -- the exact drift that let
+/// the console's high-security identity go unenrollable: the console had no
+/// shared type to generate the record from, so it never emitted an
+/// `ml_dsa_87_pubkey` field, and the daemon's ad hoc parser only ever
+/// recognized the ML-DSA-65 key length.
+///
+/// `ml_dsa_pubkey` (ML-DSA-65) is required -- every operator has a standard
+/// identity, since the HTTP challenge/response auth ceremony
+/// (`/auth/challenge` + `/auth/verify`) always uses it regardless of which
+/// suite the sealed channel later negotiates. `ml_dsa_87_pubkey` is optional:
+/// only an operator who will use the high-security sealed channel needs one
+/// enrolled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorEnrollmentRecord {
+    /// The operator id an admin assigns when enrolling this identity.
+    pub operator_id: String,
+    /// Ed25519 public key, hex-encoded.
+    pub ed25519_pubkey: String,
+    /// ML-DSA-65 public key, hex-encoded (the standard-suite identity).
+    pub ml_dsa_pubkey: String,
+    /// ML-DSA-87 public key, hex-encoded (the high-security-suite identity).
+    /// Present only if this operator has enrolled for the high-security
+    /// sealed channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ml_dsa_87_pubkey: Option<String>,
+    /// The role this enrollment grants.
+    pub role: OperatorRole,
+}
+
+impl OperatorEnrollmentRecord {
+    /// Serialize to the exact JSON object shape the daemon's
+    /// `--operators-file` `operators` array element expects.
+    pub fn to_json_string(&self) -> String {
+        // `OperatorEnrollmentRecord` derives `Serialize` with no custom
+        // field renaming, so this can't drift from the struct's own field
+        // names -- unlike hand-built `serde_json::json!` call sites, which
+        // is exactly how the console's `ml_dsa_87_pubkey` field went missing
+        // in the first place.
+        serde_json::to_string(self).unwrap_or_default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,6 +312,33 @@ mod tests {
         let r: OperatorRole = serde_json::from_str("\"Approver\"").unwrap();
         assert_eq!(r, OperatorRole::Approver);
         assert_eq!(OperatorRole::Operator.as_str(), "Operator");
+    }
+
+    #[test]
+    fn enrollment_record_round_trips_with_and_without_the_highsec_key() {
+        let with_highsec = OperatorEnrollmentRecord {
+            operator_id: "alice".to_string(),
+            ed25519_pubkey: "aa".repeat(32),
+            ml_dsa_pubkey: "bb".repeat(1952),
+            ml_dsa_87_pubkey: Some("cc".repeat(2592)),
+            role: OperatorRole::Admin,
+        };
+        let json = with_highsec.to_json_string();
+        assert!(json.contains("ml_dsa_87_pubkey"));
+        let parsed: OperatorEnrollmentRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, with_highsec);
+
+        let without_highsec = OperatorEnrollmentRecord {
+            ml_dsa_87_pubkey: None,
+            ..with_highsec
+        };
+        let json = without_highsec.to_json_string();
+        // Omitted, not null -- so a daemon parser that only checks
+        // `.contains_key(...)` (rather than treating an explicit null as
+        // "absent") can't be tricked either way.
+        assert!(!json.contains("ml_dsa_87_pubkey"));
+        let parsed: OperatorEnrollmentRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, without_highsec);
     }
 
     #[test]

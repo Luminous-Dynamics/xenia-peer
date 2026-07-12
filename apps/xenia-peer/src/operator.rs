@@ -28,13 +28,14 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use xenia_handshake::ML_DSA_65_PK_LEN;
+use xenia_wire::handshake_highsec::ML_DSA_87_PK_LEN;
 
 // The role/action model + fail-closed authorization logic now live in the
 // shared `xenia-operator-proto` crate, so the daemon and the sovereign-admin
 // console authorize against *identical* rules: a role the console greys out is
 // exactly a role the daemon also refuses. Only the enrollment/policy-file
 // machinery below is daemon-specific.
-pub(crate) use xenia_operator_proto::{OperatorAction, OperatorRole, role_permits};
+pub(crate) use xenia_operator_proto::{role_permits, OperatorAction, OperatorRole};
 
 /// The outcome of an authorization check, kept distinct so the caller can
 /// audit and message "not enrolled" separately from "enrolled but role too
@@ -56,12 +57,28 @@ pub(crate) enum AuthzDecision {
 }
 
 /// On-disk enrollment record (the policy-file shape). Public keys are hex for
-/// human readability; decoded and validated at load.
+/// human readability; decoded and validated at load. Mirrors
+/// [`xenia_operator_proto::OperatorEnrollmentRecord`] field-for-field (kept
+/// as a separate type here since this one needs `#[serde(default)]` on the
+/// optional field for backward compatibility with pre-existing policy files
+/// that predate it -- `xenia_operator_proto`'s version is what a *generator*,
+/// like the console, should build from, so it always emits the field
+/// explicitly when present).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OperatorRecord {
     operator_id: String,
     ed25519_pubkey: String,
+    /// ML-DSA-65 public key, hex -- required. Every operator has a
+    /// standard-suite identity, since the HTTP challenge/response auth
+    /// ceremony (`/auth/challenge` + `/auth/verify`) always uses it
+    /// regardless of which suite the sealed channel later negotiates.
     ml_dsa_pubkey: String,
+    /// ML-DSA-87 public key, hex -- optional. Only an operator who will use
+    /// the high-security sealed channel needs one enrolled; omitted (not
+    /// merely absent-but-present-as-null) in existing policy files parses as
+    /// `None` via `#[serde(default)]`.
+    #[serde(default)]
+    ml_dsa_87_pubkey: Option<String>,
     role: OperatorRole,
 }
 
@@ -75,7 +92,12 @@ struct OperatorPolicyFile {
 pub(crate) struct EnrolledOperator {
     pub(crate) operator_id: String,
     pub(crate) ed25519_pubkey: [u8; 32],
+    /// ML-DSA-65 public key -- required (see [`OperatorRecord::ml_dsa_pubkey`]).
     pub(crate) ml_dsa_pubkey: Vec<u8>,
+    /// ML-DSA-87 public key -- present only if this operator enrolled for
+    /// the high-security sealed channel (see
+    /// [`OperatorRecord::ml_dsa_87_pubkey`]).
+    pub(crate) ml_dsa_87_pubkey: Option<Vec<u8>>,
     pub(crate) role: OperatorRole,
 }
 
@@ -111,10 +133,20 @@ impl OperatorPolicy {
                 .ok()
                 .filter(|b| b.len() == ML_DSA_65_PK_LEN)
                 .ok_or_else(|| OperatorPolicyError::BadKey(rec.operator_id.clone()))?;
+            let ml_87 = match rec.ml_dsa_87_pubkey {
+                None => None,
+                Some(hex_str) => Some(
+                    hex::decode(hex_str.trim())
+                        .ok()
+                        .filter(|b| b.len() == ML_DSA_87_PK_LEN)
+                        .ok_or_else(|| OperatorPolicyError::BadKey(rec.operator_id.clone()))?,
+                ),
+            };
             operators.push(EnrolledOperator {
                 operator_id: rec.operator_id,
                 ed25519_pubkey: ed,
                 ml_dsa_pubkey: ml,
+                ml_dsa_87_pubkey: ml_87,
                 role: rec.role,
             });
         }
@@ -158,6 +190,25 @@ impl OperatorPolicy {
             // Constant-time-ish is not required here (both are public keys),
             // but a plain slice comparison is exact and simple.
             op.ml_dsa_pubkey.as_slice() == ml_dsa_pubkey
+        })
+    }
+
+    /// [`Self::lookup_verified`]'s counterpart for the high-security sealed
+    /// channel: requires the presented Ed25519 key and ML-DSA-**87** key to
+    /// match the same enrollment record's `ml_dsa_87_pubkey`. An operator who
+    /// never enrolled a high-security identity (`ml_dsa_87_pubkey: None`) is
+    /// refused here even if their Ed25519 + standard ML-DSA-65 pair is
+    /// enrolled -- enrollment for the high-security suite is opt-in per
+    /// operator, not implied by the standard enrollment.
+    pub(crate) fn lookup_verified_highsec(
+        &self,
+        ed25519_pubkey: &[u8; 32],
+        ml_dsa_87_pubkey: &[u8],
+    ) -> Option<&EnrolledOperator> {
+        self.by_ed25519.get(ed25519_pubkey).filter(|op| {
+            op.ml_dsa_87_pubkey
+                .as_deref()
+                .is_some_and(|enrolled| enrolled == ml_dsa_87_pubkey)
         })
     }
 
@@ -291,6 +342,7 @@ mod tests {
             operator_id: id.to_string(),
             ed25519_pubkey: ed,
             ml_dsa_pubkey: vec![0u8; ML_DSA_65_PK_LEN],
+            ml_dsa_87_pubkey: None,
             role,
         }
     }
@@ -348,6 +400,7 @@ mod tests {
             operator_id: "alice".to_string(),
             ed25519_pubkey: alice_ed,
             ml_dsa_pubkey: alice_ml.clone(),
+            ml_dsa_87_pubkey: None,
             role: OperatorRole::Admin,
         }])
         .unwrap();
@@ -389,5 +442,70 @@ mod tests {
             OperatorPolicy::from_json(json.as_bytes()),
             Err(OperatorPolicyError::BadKey(_))
         ));
+    }
+
+    #[test]
+    fn json_accepts_and_validates_the_optional_ml_dsa_87_key() {
+        let ed_hex = "02".repeat(32);
+        let ml65_hex = "ab".repeat(ML_DSA_65_PK_LEN);
+        let ml87_hex = "cd".repeat(ML_DSA_87_PK_LEN);
+        let json = format!(
+            r#"{{"operators":[{{"operator_id":"highsec-alice","ed25519_pubkey":"{ed_hex}","ml_dsa_pubkey":"{ml65_hex}","ml_dsa_87_pubkey":"{ml87_hex}","role":"Operator"}}]}}"#
+        );
+        let policy = OperatorPolicy::from_json(json.as_bytes()).unwrap();
+        let op = policy.lookup(&[2u8; 32]).unwrap();
+        assert_eq!(
+            op.ml_dsa_87_pubkey.as_ref().map(Vec::len),
+            Some(ML_DSA_87_PK_LEN)
+        );
+
+        // A wrong-length ml_dsa_87_pubkey is rejected the same way a
+        // wrong-length ml_dsa_pubkey is -- the optional field is validated,
+        // not merely accepted-if-present.
+        let short_json = format!(
+            r#"{{"operators":[{{"operator_id":"x","ed25519_pubkey":"{ed_hex}","ml_dsa_pubkey":"{ml65_hex}","ml_dsa_87_pubkey":"00","role":"Viewer"}}]}}"#
+        );
+        assert!(matches!(
+            OperatorPolicy::from_json(short_json.as_bytes()),
+            Err(OperatorPolicyError::BadKey(_))
+        ));
+    }
+
+    #[test]
+    fn lookup_verified_highsec_requires_the_enrolled_ml_dsa_87_key_and_refuses_standard_only_operators(
+    ) {
+        let ed = [3u8; 32];
+        let ml65 = vec![0xAAu8; ML_DSA_65_PK_LEN];
+        let ml87 = vec![0xBBu8; ML_DSA_87_PK_LEN];
+        let policy_with_highsec = OperatorPolicy::from_operators(vec![EnrolledOperator {
+            operator_id: "highsec-op".to_string(),
+            ed25519_pubkey: ed,
+            ml_dsa_pubkey: ml65.clone(),
+            ml_dsa_87_pubkey: Some(ml87.clone()),
+            role: OperatorRole::Admin,
+        }])
+        .unwrap();
+        assert!(policy_with_highsec
+            .lookup_verified_highsec(&ed, &ml87)
+            .is_some());
+        // A foreign ML-DSA-87 key is refused even though the Ed25519 key is enrolled.
+        let foreign_ml87 = vec![0xCCu8; ML_DSA_87_PK_LEN];
+        assert!(policy_with_highsec
+            .lookup_verified_highsec(&ed, &foreign_ml87)
+            .is_none());
+
+        // An operator enrolled only for the standard suite (no
+        // ml_dsa_87_pubkey at all) must be refused for the high-security
+        // suite even by their own real ML-DSA-87 identity -- enrollment for
+        // that suite is opt-in, not implied.
+        let standard_only = OperatorPolicy::from_operators(vec![EnrolledOperator {
+            operator_id: "standard-op".to_string(),
+            ed25519_pubkey: ed,
+            ml_dsa_pubkey: ml65,
+            ml_dsa_87_pubkey: None,
+            role: OperatorRole::Admin,
+        }])
+        .unwrap();
+        assert!(standard_only.lookup_verified_highsec(&ed, &ml87).is_none());
     }
 }
