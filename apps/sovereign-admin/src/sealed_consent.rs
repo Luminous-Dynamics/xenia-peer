@@ -33,14 +33,14 @@
 //! loop.
 
 use futures_util::{SinkExt, StreamExt};
-use gloo_net::websocket::{Message, WebSocketError, futures::WebSocket};
+use gloo_net::websocket::{futures::WebSocket, Message, WebSocketError};
 
 use xenia_wire::handshake::{SessionKeySchedule, ViewerHandshake};
 use xenia_wire::handshake_highsec::{
-    ViewerHandshakeHighSec, derive_ml_dsa_87_seed_from_ed25519_secret,
+    derive_ml_dsa_87_seed_from_ed25519_secret, ViewerHandshakeHighSec,
 };
 use xenia_wire::operator_rekey::{self, OperatorRekeyMessage};
-use xenia_wire::{PAYLOAD_TYPE_APPLICATION_MIN, Session};
+use xenia_wire::{Session, PAYLOAD_TYPE_APPLICATION_MIN};
 
 /// Shared `source_id` for the sealed operator channel — MUST match the daemon's
 /// `OPERATOR_CHANNEL_SOURCE_ID` (`operator_sealed_channel.rs`) so the console's
@@ -107,15 +107,19 @@ pub async fn send_sealed_consent(
 /// [`ViewerHandshakeHighSec`] — for a daemon running `--operator-sealed
 /// --operator-high-security`.
 ///
-/// Takes only `ed25519_secret`, not a separate ML-DSA-87 seed: the operator
-/// enrolls one Ed25519 key regardless of suite (policy lookup is keyed by
-/// Ed25519 only — see xenia-peer's `OperatorPolicy::lookup`), and the
-/// ML-DSA-87 identity is derived from that same secret via
+/// Takes only `ed25519_secret`, not a separate ML-DSA-87 seed: the ML-DSA-87
+/// identity is *derived* from that same secret via
 /// [`derive_ml_dsa_87_seed_from_ed25519_secret`] — the same derivation the
 /// daemon's `load_or_create_host_identity_highsec` uses from its own
-/// persisted secret, so both sides land on a suite-specific identity tied to
-/// the one enrolled key without a second key file or a second enrollment
-/// step.
+/// persisted secret, and [`crate::operator_session::OperatorIdentity`] uses
+/// to derive the operator's own ML-DSA-87 identity for enrollment — so both
+/// sides land on a suite-specific identity tied to the one enrolled Ed25519
+/// secret without a second key *file*. The daemon's `OperatorPolicy` still
+/// separately enrolls this derived ML-DSA-87 public key
+/// (`ml_dsa_87_pubkey`) alongside the standard ML-DSA-65 one
+/// (`OperatorPolicy::lookup_verified_highsec`) — an operator enrolled only
+/// for the standard suite cannot use the high-security channel merely
+/// because they share an Ed25519 key.
 pub async fn send_sealed_consent_highsec(
     sealed_ws_url: &str,
     ed25519_secret: &[u8; 32],
@@ -177,7 +181,11 @@ fn check_host_pin(sealed_ws_url: &str, suite: &str, fingerprint: [u8; 32]) -> Re
             Ok(())
         }
         Ok(crate::host_pin::PinOutcome::Matched) => Ok(()),
-        Err(mismatch) => Err(mismatch.to_string()),
+        // Covers both a real fingerprint mismatch and any storage-layer
+        // failure (unavailable/corrupt/write-failed) -- `PinCheckError`
+        // fails closed either way, so this refuses the channel either way
+        // rather than treating "couldn't check the pin" as "pin matched."
+        Err(err) => Err(err.to_string()),
     }
 }
 
