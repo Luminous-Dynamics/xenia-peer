@@ -39,10 +39,10 @@ pub fn MonitorPage() -> impl IntoView {
 
         let onmessage_callback =
             wasm_bindgen::closure::Closure::wrap(Box::new(move |e: web_sys::MessageEvent| {
-                if let Some(txt) = e.data().as_string() {
-                    if let Ok(thought) = serde_json::from_str::<Thought>(&txt) {
-                        thoughts_signal.update(|t| t.insert(0, thought));
-                    }
+                if let Some(txt) = e.data().as_string()
+                    && let Ok(thought) = serde_json::from_str::<Thought>(&txt)
+                {
+                    thoughts_signal.update(|t| t.insert(0, thought));
                 }
             })
                 as Box<dyn FnMut(web_sys::MessageEvent)>);
