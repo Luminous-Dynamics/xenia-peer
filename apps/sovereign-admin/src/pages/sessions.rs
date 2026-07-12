@@ -13,10 +13,11 @@ use uuid::Uuid;
 use xenia_ledger::{Chain, ConsentEventRecord, ConsentKind, LedgerEntry, Verifier, VerifyError};
 use xenia_operator_proto::OperatorAction;
 
-use crate::app::OperatorSessionCtx;
+use crate::agent_client::AgentConfig;
+use crate::app::{OperatorIdentityCtx, OperatorIdentityState, OperatorSessionCtx};
 use crate::config::DaemonConfig;
 use crate::context::{auth_context, daemon_config_context, missing_context_view};
-use crate::operator_session::{build_revoke_request, OperatorIdentity};
+use crate::operator_session::build_revoke_request;
 
 /// Portable JSON shape used by the export/import pair.
 #[derive(Serialize, Deserialize)]
@@ -32,6 +33,12 @@ pub fn SessionsPage() -> impl IntoView {
     };
     let Ok(config) = daemon_config_context() else {
         return missing_context_view("DaemonConfig").into_any();
+    };
+    let Some(agent_config) = use_context::<AgentConfig>() else {
+        return missing_context_view("AgentConfig").into_any();
+    };
+    let Some(identity_state) = use_context::<OperatorIdentityCtx>() else {
+        return missing_context_view("OperatorIdentity").into_any();
     };
 
     // Operator-revocation control — shown only to an authenticated operator whose
@@ -86,7 +93,13 @@ pub fn SessionsPage() -> impl IntoView {
                 .set("No operator session — sign in as an operator first.".to_string());
             return;
         };
-        let id = OperatorIdentity::load_or_generate();
+        let Some(id) = identity_state.get_untracked().identity() else {
+            set_revoke_status.set(
+                "Operator agent identity isn't ready -- check the agent settings below."
+                    .to_string(),
+            );
+            return;
+        };
         let body = build_revoke_request(&id, &sess, &target);
         let url = format!(
             "{}/operator/revoke",
@@ -194,6 +207,48 @@ pub fn SessionsPage() -> impl IntoView {
                         </div>
                         <button class="primary" on:click=move |_| config.save()>"Save & Reconnect"</button>
                     </div>
+                </section>
+
+                <section class="config-section">
+                    <h2>"Operator Agent"</h2>
+                    <p class="prose">
+                        "The operator's Ed25519 + ML-DSA signing seeds live in a local "
+                        <code>"xenia-operator-agent"</code>
+                        " process, not this browser's storage. Run it once "
+                        "(" <code>"cargo run -p xenia-operator-agent"</code> "), copy the pairing "
+                        "token it prints, and paste it below."
+                    </p>
+                    <div class="config-grid">
+                        <div class="field">
+                            <label>"Agent URL"</label>
+                            <input
+                                type="text"
+                                prop:value=move || agent_config.agent_url.get()
+                                on:input=move |ev| agent_config.agent_url.set(event_target_value(&ev))
+                            />
+                        </div>
+                        <div class="field">
+                            <label>"Pairing Token"</label>
+                            <input
+                                type="password"
+                                prop:value=move || agent_config.agent_token.get()
+                                on:input=move |ev| agent_config.agent_token.set(event_target_value(&ev))
+                            />
+                        </div>
+                        <button class="primary" on:click=move |_| agent_config.save()>
+                            "Save & Connect"
+                        </button>
+                    </div>
+                    <p class="prose">
+                        {move || match identity_state.get() {
+                            OperatorIdentityState::Loading => "Connecting…".to_string(),
+                            state @ OperatorIdentityState::Ready { .. } => {
+                                let id = state.identity().expect("just matched Ready");
+                                format!("Connected. Fingerprint: {}…", &id.fingerprint_hex()[..16])
+                            }
+                            OperatorIdentityState::Unavailable(reason) => reason,
+                        }}
+                    </p>
                 </section>
 
                 <Show when=move || config.use_sealed_channel.get()>

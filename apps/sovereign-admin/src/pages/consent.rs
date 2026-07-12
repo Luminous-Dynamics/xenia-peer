@@ -13,15 +13,15 @@
 //! permitted operator.
 
 use futures_util::{SinkExt, StreamExt};
-use gloo_net::websocket::{Message, futures::WebSocket};
+use gloo_net::websocket::{futures::WebSocket, Message};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use xenia_operator_proto::ConsentAction;
 
-use crate::app::OperatorSessionCtx;
+use crate::app::{OperatorIdentityCtx, OperatorSessionCtx};
 use crate::context::{daemon_config_context, missing_context_view};
-use crate::operator_session::{OperatorIdentity, build_consent_request};
+use crate::operator_session::build_consent_request;
 
 /// Extract the `session_id` (hex, 16 bytes) a daemon may include in the consent
 /// prompt. Required to bind an *authenticated* decision to the exact session;
@@ -45,6 +45,7 @@ fn display_scope(prompt: &str) -> String {
 #[component]
 pub fn ConsentModal() -> impl IntoView {
     let session = use_context::<OperatorSessionCtx>();
+    let identity_state = use_context::<OperatorIdentityCtx>();
     let Ok(config) = daemon_config_context() else {
         return missing_context_view("DaemonConfig").into_any();
     };
@@ -88,15 +89,35 @@ pub fn ConsentModal() -> impl IntoView {
         let prompt = consent_req.get_untracked();
         let sess = session.and_then(|sig| sig.get_untracked());
         let session_id = prompt.as_deref().and_then(parse_session_id);
-        // Load the enrolled identity once — it builds the token-bound payload and
-        // (for the sealed path) drives the handshake that authenticates us.
-        let id = OperatorIdentity::load_or_generate();
-        let payload = match (sess, session_id) {
-            (Some(s), Some(sid)) => build_consent_request(&id, &s, action, &sid),
+        let sealed = config.use_sealed_channel.get_untracked();
+
+        // The identity is only needed to build a token-bound payload (when
+        // we have a session + session_id) or to drive the sealed-channel
+        // handshake (which authenticates via the handshake itself,
+        // regardless of whether an operator session exists) -- so only
+        // require it when one of those actually applies.
+        let needs_identity = (sess.is_some() && session_id.is_some()) || sealed;
+        let id = if needs_identity {
+            match identity_state.and_then(|sig| sig.get_untracked().identity()) {
+                Some(id) => Some(id),
+                None => {
+                    leptos::logging::error!(
+                        "consent decision needs the operator identity but the agent isn't \
+                         connected -- check the agent settings on the Sessions page"
+                    );
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
+        let payload = match (&sess, session_id, &id) {
+            (Some(s), Some(sid), Some(id)) => build_consent_request(id, s, action, &sid),
             _ => action.as_str().to_string(),
         };
-        if config.use_sealed_channel.get_untracked() {
-            let (ed_seed, ml_seed) = id.seeds();
+        if sealed {
+            let (ed_seed, ml_seed) = id.expect("sealed => needs_identity => Some").seeds();
             let sealed_url = config.sealed_ws_url();
             let high_security = config.high_security.get_untracked();
             spawn_local(async move {
