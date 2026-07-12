@@ -260,7 +260,16 @@ re-checks revocation). Refusing token issuance up front is a hardening follow-up
   deferred rather than rushed through a published crate's API. Until then,
   a compromised browser process *during an active session* can still exfiltrate
   the seeds from memory (a materially smaller window than permanent
-  `localStorage` exposure, but not zero).
+  `localStorage` exposure, but not zero) -- the console clears its fetched
+  copy from the reactive graph on sign-out (operator or DID) as best-effort
+  hygiene, and `OperatorIdentity`'s seed fields are zeroized on drop, but
+  neither reaches copies already held elsewhere (the `HandshakeManager`'s
+  own internal signing-key state, or transient stack copies from before
+  construction). The agent's `Origin` check requires a match (a missing or
+  unrecognized header is refused, not treated as trusted) and its identity/
+  token files are created atomically with owner-only permissions set at
+  creation time, refusing to trust an existing path that isn't a regular
+  file owned by the agent's own user.
 - `/auth/verify` still mints tokens for revoked operators (harmless — see §6).
 - `bincode` 1.3.3 is used for wire (handshake + envelopes) with a tracked RUSTSEC
   exception (an "unmaintained crate" advisory, not a CVE); a postcard/wincode

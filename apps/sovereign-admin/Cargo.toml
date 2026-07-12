@@ -26,6 +26,7 @@ js-sys = "0.3"
 web-sys = { version = "0.3", features = ["console", "Storage", "Window", "Location"] }
 serde = { version = "1.0", features = ["derive"] }
 gloo-net = "0.6"
+zeroize = { version = "1", features = ["derive"] }
 
 # Live xenia-ledger demo on the Sessions page.
 xenia-ledger = { path = "../../crates/xenia-ledger" }

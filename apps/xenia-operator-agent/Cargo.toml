@@ -21,8 +21,20 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"
 rand = "0.8"
+zeroize = { version = "1", features = ["derive"] }
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(unix)'.dependencies]
+# Only for a safe getuid() (no unsafe code, per workspace lints) --
+# verifying an existing identity/token file is owned by this process's
+# user before trusting it.
+rustix = { version = "0.38", default-features = false, features = ["process", "std"] }
+
+[dev-dependencies]
+# `ServiceExt::oneshot` for driving the axum routes in tests without
+# binding a real socket.
+tower = { version = "0.5", features = ["util"] }
 
 [lints]
 workspace = true

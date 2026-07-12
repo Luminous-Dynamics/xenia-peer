@@ -148,6 +148,17 @@ fn AuthStatus() -> impl IntoView {
     let Ok(auth) = auth_context() else {
         return missing_context_view("AuthState").into_any();
     };
+    let identity_state = use_context::<OperatorIdentityCtx>();
+    let sign_out = move |_| {
+        auth.sign_out();
+        // Best-effort hygiene: drop this page's fetched copy of the
+        // operator seeds out of the reactive graph on sign-out, rather
+        // than leaving them reachable for the rest of the page's
+        // lifetime. Re-fetched from the agent on demand afterward.
+        if let Some(sig) = identity_state {
+            sig.set(OperatorIdentityState::Loading);
+        }
+    };
     view! {
         <div class="auth-status">
             <Show
@@ -157,7 +168,7 @@ fn AuthStatus() -> impl IntoView {
                 <span class="did-chip">
                     {move || auth.did.with(|d| d.clone().unwrap_or_default())}
                 </span>
-                <button class="sign-out" on:click=move |_| auth.sign_out()>"Sign out"</button>
+                <button class="sign-out" on:click=sign_out>"Sign out"</button>
             </Show>
         </div>
     }
@@ -261,7 +272,15 @@ fn OperatorAuthPanel() -> impl IntoView {
                             .unwrap_or_default()
                     })}
                 </span>
-                <button class="operator-signout" on:click=move |_| session.set(None)>
+                <button
+                    class="operator-signout"
+                    on:click=move |_| {
+                        session.set(None);
+                        // Best-effort hygiene, matching AuthStatus's sign-out --
+                        // see that handler's comment.
+                        identity_state.set(OperatorIdentityState::Loading);
+                    }
+                >
                     "End operator session"
                 </button>
             </Show>
