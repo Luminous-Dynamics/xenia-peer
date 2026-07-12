@@ -16,7 +16,7 @@ use xenia_operator_proto::OperatorAction;
 use crate::app::OperatorSessionCtx;
 use crate::config::DaemonConfig;
 use crate::context::{auth_context, daemon_config_context, missing_context_view};
-use crate::operator_session::{OperatorIdentity, build_revoke_request};
+use crate::operator_session::{build_revoke_request, OperatorIdentity};
 
 /// Portable JSON shape used by the export/import pair.
 #[derive(Serialize, Deserialize)]
@@ -62,13 +62,17 @@ pub fn SessionsPage() -> impl IntoView {
             "standard"
         };
         let key = crate::host_pin::storage_key(&config.sealed_ws_url(), suite);
-        crate::host_pin::forget(&key);
-        set_forget_status.set(format!(
-            "Forgot the pinned {suite} host fingerprint for {}. The next connection will \
-             trust-on-first-use whatever identity it sees — only do this if you intentionally \
-             rotated the daemon's key.",
-            config.sealed_ws_url()
-        ));
+        match crate::host_pin::forget(&key) {
+            Ok(()) => set_forget_status.set(format!(
+                "Forgot the pinned {suite} host fingerprint for {}. The next connection will \
+                 trust-on-first-use whatever identity it sees — only do this if you intentionally \
+                 rotated the daemon's key.",
+                config.sealed_ws_url()
+            )),
+            Err(err) => set_forget_status.set(format!(
+                "Failed to forget the pinned fingerprint: {err}. The old pin is still in effect."
+            )),
+        }
     };
 
     let do_revoke = move |_| {
