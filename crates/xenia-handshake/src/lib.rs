@@ -61,17 +61,17 @@ use std::time::SystemTime;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use ml_dsa::{
-    B32, EncodedSignature as MlDsaEncodedSignature,
-    EncodedVerifyingKey as MlDsaEncodedVerifyingKey, MlDsa65, Signature as MlDsaSignatureT,
-    SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey,
     signature::{Keypair as MlDsaKeypair, Signer as MlDsaSigner, Verifier as MlDsaVerifier},
+    EncodedSignature as MlDsaEncodedSignature, EncodedVerifyingKey as MlDsaEncodedVerifyingKey,
+    MlDsa65, Signature as MlDsaSignatureT, SigningKey as MlDsaSigningKey,
+    VerifyingKey as MlDsaVerifyingKey, B32,
 };
 use ml_kem::{
-    MlKem768, TryKeyInit,
     kem::{Decapsulate, Encapsulate, Kem, KeyExport},
     ml_kem_768::{
         Ciphertext as MlKemCiphertext, DecapsulationKey as MlKemDk, EncapsulationKey as MlKemEk,
     },
+    MlKem768, TryKeyInit,
 };
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -644,12 +644,15 @@ pub struct KemExchange {
 // HandshakeManager
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Owns this node's long-term Ed25519 identity key and a per-instance
-/// ML-KEM-768 keypair. Holds per-peer session state.
+/// Owns this node's long-term Ed25519 identity key. Holds per-peer session
+/// state, including a fresh per-handshake ML-KEM-768 keypair for each
+/// responder-role handshake in flight (never a single per-instance keypair
+/// reused across handshakes -- see [`Self::generate_kem_public_key`]).
 ///
 /// Typical lifecycle on a node:
-/// 1. `new()` — generate Ed25519 + ML-KEM keys on startup.
-/// 2. Publish `identity_public_key()` and `kem_public_key_bytes()` to peers.
+/// 1. `new()` — generate the Ed25519 + ML-DSA-65 identity on startup.
+/// 2. Publish `identity_public_key()` to peers; as the responder to a given
+///    peer, publish that peer's fresh `generate_kem_public_key(peer)`.
 /// 3. For each peer:
 ///    - Initiator: `receive_kem_public_key(peer, pk)` →
 ///      `encapsulate_for_peer(peer, nonce)` → send ciphertext.
@@ -659,10 +662,19 @@ pub struct KemExchange {
 pub struct HandshakeManager {
     signing_key: SigningKey,
     ml_dsa_signing_key: MlDsaSigningKey<MlDsa65>,
-    kem_dk: MlKemDk,
-    kem_ek_bytes: [u8; ML_KEM_768_PK_LEN],
     sessions: HashMap<String, SessionKey>,
     pending_kem: HashMap<String, Vec<u8>>,
+    /// Ephemeral decapsulation keys awaiting their peer's ciphertext, keyed
+    /// by `peer_id` exactly like `pending_kem` -- one fresh ML-KEM-768
+    /// keypair per [`Self::generate_kem_public_key`] call (i.e. per
+    /// handshake this manager drives as the responder), not one shared
+    /// keypair for the manager's whole lifetime. This is what makes each
+    /// handshake's AEAD key genuinely forward-secret against a *later*
+    /// compromise of this manager's long-term state: a captured ciphertext
+    /// from an earlier handshake can't be decapsulated using anything that
+    /// still exists once that handshake's entry here is removed (by
+    /// [`Self::decapsulate_and_derive`] or [`Self::remove_session`]).
+    pending_decap: HashMap<String, MlKemDk>,
 }
 
 impl HandshakeManager {
@@ -671,7 +683,9 @@ impl HandshakeManager {
         CURRENT_HANDSHAKE_EVIDENCE_PROFILE
     }
 
-    /// Generate a fresh identity + ML-DSA-65 + KEM keypair set on this node.
+    /// Generate a fresh Ed25519 + ML-DSA-65 signing identity for this node.
+    /// (No KEM keypair here -- it's generated per handshake, not per
+    /// identity; see [`Self::generate_kem_public_key`].)
     pub fn new() -> Self {
         let signing_key = SigningKey::generate(&mut OsRng);
         let ml_dsa_seed: [u8; 32] = rand::random();
@@ -679,28 +693,22 @@ impl HandshakeManager {
     }
 
     /// Reconstruct a manager from a *persisted* identity: a 32-byte Ed25519
-    /// secret and a 32-byte ML-DSA-65 seed (FIPS-204 ξ). The KEM
-    /// encapsulation key stays freshly generated -- only the signing
-    /// identity is stable, which is what a peer pins for trust-on-first-use.
+    /// secret and a 32-byte ML-DSA-65 seed (FIPS-204 ξ). Only the signing
+    /// identity is persisted/pinned by a peer; the KEM keypair is never part
+    /// of this identity at all -- see [`Self::generate_kem_public_key`].
     /// Given the same two seeds, this produces the same public identity
     /// (hence the same [`Self::identity_fingerprint`]) across restarts.
     pub fn from_identity_seeds(ed25519_secret: [u8; 32], ml_dsa_seed: [u8; 32]) -> Self {
         let signing_key = SigningKey::from_bytes(&ed25519_secret);
         let seed: B32 = ml_dsa_seed.into();
         let ml_dsa_signing_key = MlDsaSigningKey::<MlDsa65>::from_seed(&seed);
-        let (kem_dk, kem_ek) = MlKem768::generate_keypair();
-
-        let ek_encoded = kem_ek.to_bytes();
-        let mut kem_ek_bytes = [0u8; ML_KEM_768_PK_LEN];
-        kem_ek_bytes.copy_from_slice(ek_encoded.as_slice());
 
         Self {
             signing_key,
             ml_dsa_signing_key,
-            kem_dk,
-            kem_ek_bytes,
             sessions: HashMap::new(),
             pending_kem: HashMap::new(),
+            pending_decap: HashMap::new(),
         }
     }
 
@@ -788,9 +796,20 @@ impl HandshakeManager {
 
     // ─── KEM ─────────────────────────────────────────────────────────────
 
-    /// Raw bytes of this node's ML-KEM-768 public key (1184 bytes).
-    pub fn kem_public_key_bytes(&self) -> &[u8; ML_KEM_768_PK_LEN] {
-        &self.kem_ek_bytes
+    /// Generate a fresh ML-KEM-768 keypair for a handshake this manager is
+    /// about to drive as the responder to `peer_id`, and return the
+    /// encapsulation-key bytes to publish (1184 bytes). The decapsulation
+    /// key is held internally, keyed by `peer_id`, until
+    /// [`Self::decapsulate_and_derive`] consumes it (or
+    /// [`Self::remove_session`] discards it) -- never reused across two
+    /// handshakes, even two handshakes with the same `peer_id` label.
+    pub fn generate_kem_public_key(&mut self, peer_id: &str) -> [u8; ML_KEM_768_PK_LEN] {
+        let (kem_dk, kem_ek) = MlKem768::generate_keypair();
+        let ek_encoded = kem_ek.to_bytes();
+        let mut kem_ek_bytes = [0u8; ML_KEM_768_PK_LEN];
+        kem_ek_bytes.copy_from_slice(ek_encoded.as_slice());
+        self.pending_decap.insert(peer_id.to_string(), kem_dk);
+        kem_ek_bytes
     }
 
     // ─── Initiator side ──────────────────────────────────────────────────
@@ -861,6 +880,14 @@ impl HandshakeManager {
             });
         }
 
+        // The keypair `generate_kem_public_key(peer_id)` made for this
+        // handshake -- removed here so it cannot be reused for a second
+        // decapsulation even if this were somehow called twice.
+        let kem_dk = self
+            .pending_decap
+            .remove(peer_id)
+            .ok_or_else(|| HandshakeError::UnknownPeer(peer_id.to_string()))?;
+
         let ct = MlKemCiphertext::try_from(kem_ciphertext).map_err(|_| {
             HandshakeError::InvalidKemCiphertext {
                 got: kem_ciphertext.len(),
@@ -870,7 +897,7 @@ impl HandshakeManager {
         // ML-KEM decapsulate is infallible per FIPS 203 (implicit rejection:
         // invalid ciphertexts yield a pseudorandom shared secret rather than
         // an error). Authentication happens at the Ed25519/HKDF layer.
-        let shared = self.kem_dk.decapsulate(&ct);
+        let shared = kem_dk.decapsulate(&ct);
 
         let session_key = hkdf_derive(classical_nonce, shared.as_slice());
 
@@ -900,6 +927,11 @@ impl HandshakeManager {
             key.key.zeroize();
         }
         self.pending_kem.remove(peer_id);
+        // Drops (and, via ml-kem's `zeroize` feature, zeroizes) an
+        // in-flight ephemeral decapsulation key if the handshake never
+        // completed -- e.g. the connection dropped between
+        // `generate_kem_public_key` and `decapsulate_and_derive`.
+        self.pending_decap.remove(peer_id);
     }
 }
 
@@ -1110,8 +1142,56 @@ mod tests {
 
     #[test]
     fn kem_public_key_is_1184_bytes() {
-        let mgr = HandshakeManager::new();
-        assert_eq!(mgr.kem_public_key_bytes().len(), ML_KEM_768_PK_LEN);
+        let mut mgr = HandshakeManager::new();
+        assert_eq!(mgr.generate_kem_public_key("peer").len(), ML_KEM_768_PK_LEN);
+    }
+
+    #[test]
+    fn generate_kem_public_key_is_fresh_every_call_even_for_the_same_peer_id() {
+        // The property this whole redesign exists for: two handshakes with
+        // the same manager (even reusing the same peer_id label) never share
+        // a KEM keypair.
+        let mut mgr = HandshakeManager::new();
+        let first = mgr.generate_kem_public_key("peer");
+        let second = mgr.generate_kem_public_key("peer");
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn decapsulate_without_a_matching_generate_call_is_refused() {
+        // No `generate_kem_public_key("peer")` was ever called, so there is
+        // no ephemeral decapsulation key to consume.
+        let mut mgr = HandshakeManager::new();
+        let ct = vec![0u8; ML_KEM_768_CT_LEN];
+        let err = mgr
+            .decapsulate_and_derive("peer", &ct, &[0u8; 32])
+            .unwrap_err();
+        assert!(matches!(err, HandshakeError::UnknownPeer(id) if id == "peer"));
+    }
+
+    #[test]
+    fn decapsulate_consumes_the_ephemeral_key_so_it_cannot_be_reused() {
+        let mut initiator = HandshakeManager::new();
+        let mut responder = HandshakeManager::new();
+        let nonce = [0x11u8; 32];
+
+        let responder_kem_pk = responder.generate_kem_public_key("initiator");
+        initiator
+            .receive_kem_public_key("responder", &responder_kem_pk)
+            .unwrap();
+        let ct = initiator.encapsulate_for_peer("responder", &nonce).unwrap();
+
+        responder
+            .decapsulate_and_derive("initiator", &ct, &nonce)
+            .unwrap();
+
+        // The ephemeral key was consumed by the call above; a second
+        // decapsulation attempt for the same peer_id (e.g. a retried or
+        // replayed ciphertext) has nothing left to decapsulate with.
+        let err = responder
+            .decapsulate_and_derive("initiator", &ct, &nonce)
+            .unwrap_err();
+        assert!(matches!(err, HandshakeError::UnknownPeer(id) if id == "initiator"));
     }
 
     #[test]
@@ -1305,8 +1385,11 @@ mod tests {
 
         let nonce = [0x42u8; 32];
 
+        // The responder's generated keypair is keyed by "initiator" -- the
+        // same peer_id used below in `decapsulate_and_derive`.
+        let responder_kem_pk = responder.generate_kem_public_key("initiator");
         initiator
-            .receive_kem_public_key("responder", responder.kem_public_key_bytes())
+            .receive_kem_public_key("responder", &responder_kem_pk)
             .unwrap();
 
         let ct = initiator.encapsulate_for_peer("responder", &nonce).unwrap();
@@ -1323,15 +1406,15 @@ mod tests {
     #[test]
     fn different_peers_yield_different_session_keys() {
         let mut me = HandshakeManager::new();
-        let peer_a = HandshakeManager::new();
-        let peer_b = HandshakeManager::new();
+        let mut peer_a = HandshakeManager::new();
+        let mut peer_b = HandshakeManager::new();
         let nonce = [0x42u8; 32];
 
-        me.receive_kem_public_key("A", peer_a.kem_public_key_bytes())
+        me.receive_kem_public_key("A", &peer_a.generate_kem_public_key("me"))
             .unwrap();
         me.encapsulate_for_peer("A", &nonce).unwrap();
 
-        me.receive_kem_public_key("B", peer_b.kem_public_key_bytes())
+        me.receive_kem_public_key("B", &peer_b.generate_kem_public_key("me"))
             .unwrap();
         me.encapsulate_for_peer("B", &nonce).unwrap();
 
@@ -1344,9 +1427,9 @@ mod tests {
     fn different_nonces_yield_different_session_keys() {
         let mut init1 = HandshakeManager::new();
         let mut init2 = HandshakeManager::new();
-        let responder = HandshakeManager::new();
+        let mut responder = HandshakeManager::new();
 
-        let rpk = *responder.kem_public_key_bytes();
+        let rpk = responder.generate_kem_public_key("either-initiator");
 
         init1.receive_kem_public_key("R", &rpk).unwrap();
         init1.encapsulate_for_peer("R", &[0x01u8; 32]).unwrap();
@@ -1395,6 +1478,7 @@ mod tests {
         // (implicit rejection). The derived session key will simply not
         // match whatever the initiator thinks it is.
         let mut responder = HandshakeManager::new();
+        responder.generate_kem_public_key("peer");
         let bad_ct = vec![0xFFu8; ML_KEM_768_CT_LEN];
         let result = responder.decapsulate_and_derive("peer", &bad_ct, &[0u8; 32]);
         assert!(
@@ -1420,8 +1504,8 @@ mod tests {
     #[test]
     fn remove_session_clears_state() {
         let mut me = HandshakeManager::new();
-        let peer = HandshakeManager::new();
-        me.receive_kem_public_key("P", peer.kem_public_key_bytes())
+        let mut peer = HandshakeManager::new();
+        me.receive_kem_public_key("P", &peer.generate_kem_public_key("me"))
             .unwrap();
         me.encapsulate_for_peer("P", &[0u8; 32]).unwrap();
         assert_eq!(me.session_count(), 1);
@@ -1434,8 +1518,8 @@ mod tests {
     #[test]
     fn session_key_is_exactly_32_bytes() {
         let mut init = HandshakeManager::new();
-        let resp = HandshakeManager::new();
-        init.receive_kem_public_key("R", resp.kem_public_key_bytes())
+        let mut resp = HandshakeManager::new();
+        init.receive_kem_public_key("R", &resp.generate_kem_public_key("init"))
             .unwrap();
         init.encapsulate_for_peer("R", &[0u8; 32]).unwrap();
         assert_eq!(init.session_key("R").unwrap().bytes().len(), 32);
