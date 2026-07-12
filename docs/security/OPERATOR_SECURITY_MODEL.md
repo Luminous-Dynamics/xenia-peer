@@ -11,7 +11,8 @@ explicitly out of scope.
 > Companion docs: `OPERATOR_RBAC_PLAN.md` (phased plan + rationale),
 > `SEALED_OPERATOR_CHANNEL_DESIGN.md` (the sealed channel slices),
 > `PRIVILEGE_BOUNDARIES.md`, `CONSENT_STATE_MACHINE.md`,
-> `LEDGER_VERIFICATION_BOUNDARY.md`.
+> `LEDGER_VERIFICATION_BOUNDARY.md`, `SIGNER_DELEGATION_DESIGN.md` (the
+> plan to close §9's remaining seed-in-browser-memory gap).
 
 ---
 
@@ -254,10 +255,13 @@ re-checks revocation). Refusing token issuance up front is a hardening follow-up
   seeds in memory for the session and signs both the `/auth/*` ceremony and
   the sealed-channel handshake locally with them. Having the agent perform
   the signing itself -- so raw key material never reaches the browser
-  process at all, not even transiently -- needs an async signing-callback
-  abstraction in `xenia-wire`'s `ViewerHandshake`/`ViewerHandshakeHighSec`
-  (which currently own raw keys internally); scoped, not built, deliberately
-  deferred rather than rushed through a published crate's API. Until then,
+  process at all, not even transiently -- is planned in
+  `SIGNER_DELEGATION_DESIGN.md`. (An earlier version of this note assumed
+  that needed an async signing-callback redesign of `xenia-wire`'s published
+  `ViewerHandshake`/`ViewerHandshakeHighSec` API; that assumption turned out
+  to be avoidable -- the agent can run those types natively, unmodified,
+  the same way the browser's wasm build already does, and hand back only a
+  derived session key. No published-crate API change needed.) Until built,
   a compromised browser process *during an active session* can still exfiltrate
   the seeds from memory (a materially smaller window than permanent
   `localStorage` exposure, but not zero) -- the console clears its fetched
