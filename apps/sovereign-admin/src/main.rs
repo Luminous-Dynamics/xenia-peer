@@ -16,6 +16,7 @@ mod app;
 mod auth;
 mod config;
 mod context;
+mod host_pin;
 mod operator_session;
 mod pages;
 mod sealed_consent;
