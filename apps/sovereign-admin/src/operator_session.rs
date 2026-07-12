@@ -32,6 +32,7 @@
 //! for the current scope and what's still deferred.
 
 use serde::Deserialize;
+use zeroize::Zeroize;
 
 use xenia_handshake::HandshakeManager;
 use xenia_operator_proto::{
@@ -53,6 +54,14 @@ use xenia_wire::handshake_highsec::{
 /// of truth for "what would this operator's high-security identity be,"
 /// and [`Self::enrollment_record_json`] can enroll it without a second key
 /// file or a second enrollment ceremony.
+///
+/// `ed_seed`/`ml_seed` are zeroized on drop -- best-effort hygiene, not a
+/// guarantee: `hm` (the [`HandshakeManager`]) holds its own internal copy
+/// of the derived signing keys, which this does not reach, and Rust may
+/// have left other transient stack copies behind before this value was
+/// even constructed (e.g. in the seed tuple `Self::from_seeds` was called
+/// with). See `docs/security/OPERATOR_SECURITY_MODEL.md` §9 for the honest
+/// scope of what's protected today.
 pub struct OperatorIdentity {
     hm: HandshakeManager,
     ed_pubkey: [u8; 32],
@@ -60,6 +69,13 @@ pub struct OperatorIdentity {
     ml87_pubkey: Vec<u8>,
     ed_seed: [u8; 32],
     ml_seed: [u8; 32],
+}
+
+impl Drop for OperatorIdentity {
+    fn drop(&mut self) {
+        self.ed_seed.zeroize();
+        self.ml_seed.zeroize();
+    }
 }
 
 impl OperatorIdentity {

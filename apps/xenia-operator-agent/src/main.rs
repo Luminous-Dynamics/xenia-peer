@@ -32,15 +32,24 @@
 //! - Every request must present the pairing token (`X-Agent-Token` header),
 //!   generated on first run and persisted alongside the identity. The
 //!   operator copies it into the console's agent settings once.
-//! - Every request whose `Origin` header is present must match an allowed
-//!   origin (`--allowed-origin`, repeatable; defaults to the console's dev
-//!   origins). A request with no `Origin` header (e.g. a same-machine CLI
-//!   tool, or some browsers' same-origin requests) is not rejected on that
-//!   basis alone -- the token is the primary defense; origin-checking is
-//!   defense in depth against a malicious *cross-origin* web page.
-//! - The identity file and token file are created with `0600` permissions
-//!   on first run (mirrors `xenia-peer`'s own `load_or_create_host_identity`
-//!   pattern).
+//! - Every request must carry an `Origin` header matching an allowed origin
+//!   (`--allowed-origin`, repeatable; defaults to the console's dev
+//!   origins) -- a missing, malformed, or unrecognized `Origin` is refused,
+//!   not treated as trusted. The agent and console are different origins
+//!   by construction (different ports), so any genuine browser request is
+//!   cross-origin and always carries this header; a request without one is
+//!   not the console. (An earlier revision let a missing `Origin` through
+//!   on the theory that the token was the primary defense -- tightened
+//!   after review, since "trust absence" is exactly the failure mode this
+//!   check exists to close.)
+//! - The identity file and token file are created **atomically** with
+//!   owner-only (`0600`) permissions set *at creation*, not chmod'd
+//!   afterward (closing the window where a racing process could read them
+//!   between write and chmod), and refuse to open an existing path that
+//!   isn't a regular file they own (defends against a symlink swapped in
+//!   for the real file, or a file created by a different local user).
+//! - The seeds are held zeroize-on-drop (`zeroize::Zeroizing`) for as long
+//!   as this process holds them in memory.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -55,6 +64,7 @@ use clap::Parser;
 use serde::Serialize;
 use xenia_handshake::HandshakeManager;
 use xenia_operator_proto::{OperatorEnrollmentRecord, OperatorRole};
+use zeroize::Zeroizing;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -91,8 +101,8 @@ struct Args {
 
 struct AgentState {
     manager: HandshakeManager,
-    ed25519_secret: [u8; 32],
-    ml_dsa_seed: [u8; 32],
+    ed25519_secret: Zeroizing<[u8; 32]>,
+    ml_dsa_seed: Zeroizing<[u8; 32]>,
     token: String,
     allowed_origins: Vec<String>,
 }
@@ -124,20 +134,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = Arc::new(AgentState {
         manager,
-        ed25519_secret,
-        ml_dsa_seed,
+        ed25519_secret: Zeroizing::new(ed25519_secret),
+        ml_dsa_seed: Zeroizing::new(ml_dsa_seed),
         token,
         allowed_origins: args.allowed_origin,
     });
 
-    let app = Router::new()
-        .route("/identity", get(get_identity))
-        .route("/seeds", get(get_seeds))
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            auth_and_cors_middleware,
-        ))
-        .with_state(state);
+    let app = build_router(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], args.port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -151,11 +154,30 @@ async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
-/// Enforces both defenses on every route: the `Origin` allowlist (if the
-/// header is present at all) and the pairing token. Also answers CORS
-/// preflight (`OPTIONS`) requests and stamps `Access-Control-Allow-Origin`
-/// on real responses so the browser will actually let the console's JS
-/// read them.
+/// Build the axum app: routes + the auth/CORS middleware. Split out from
+/// `main` so tests can drive it with `tower::ServiceExt::oneshot` instead of
+/// binding a real socket.
+fn build_router(state: Arc<AgentState>) -> Router {
+    Router::new()
+        .route("/identity", get(get_identity))
+        .route("/seeds", get(get_seeds))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth_and_cors_middleware,
+        ))
+        .with_state(state)
+}
+
+/// Enforces both defenses on every route: the `Origin` allowlist and the
+/// pairing token. Also answers CORS preflight (`OPTIONS`) requests and
+/// stamps `Access-Control-Allow-Origin` on real responses so the browser
+/// will actually let the console's JS read them.
+///
+/// A missing, malformed (non-UTF-8), or unrecognized `Origin` is refused --
+/// not treated as trusted. The agent and console are different origins by
+/// construction, so a genuine console request is always cross-origin and
+/// always carries this header; a request without one is not the console
+/// (see the module doc comment).
 async fn auth_and_cors_middleware(
     State(state): State<Arc<AgentState>>,
     method: Method,
@@ -166,10 +188,10 @@ async fn auth_and_cors_middleware(
     let origin = headers
         .get(axum::http::header::ORIGIN)
         .and_then(|v| v.to_str().ok());
-    let origin_allowed = origin.is_none_or(|o| state.allowed_origins.iter().any(|a| a == o));
+    let origin_allowed = origin.is_some_and(|o| state.allowed_origins.iter().any(|a| a == o));
 
     if !origin_allowed {
-        return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
+        return (StatusCode::FORBIDDEN, "missing or disallowed Origin header").into_response();
     }
 
     if method == Method::OPTIONS {
@@ -241,7 +263,7 @@ async fn get_identity(State(state): State<Arc<AgentState>>) -> Json<IdentityResp
         &state.ed25519_secret,
     );
     let highsec = xenia_wire::handshake_highsec::ViewerHandshakeHighSec::from_identity(
-        &state.ed25519_secret,
+        &state.ed25519_secret[..],
         &ml_dsa_87_seed,
     )
     .expect("32-byte seeds always produce a valid high-security identity");
@@ -275,33 +297,28 @@ struct SeedsResponse {
 /// protect against today.
 async fn get_seeds(State(state): State<Arc<AgentState>>) -> Json<SeedsResponse> {
     Json(SeedsResponse {
-        ed25519_secret_hex: hex::encode(state.ed25519_secret),
-        ml_dsa_seed_hex: hex::encode(state.ml_dsa_seed),
+        ed25519_secret_hex: hex::encode(*state.ed25519_secret),
+        ml_dsa_seed_hex: hex::encode(*state.ml_dsa_seed),
     })
 }
 
 /// Load the operator identity from `path`, or generate and persist a fresh
 /// one (0600) on first use. 64-byte blob: 32-byte Ed25519 secret followed
 /// by a 32-byte ML-DSA-65 seed. Mirrors `xenia-peer`'s
-/// `load_or_create_host_identity` byte-for-byte.
+/// `load_or_create_host_identity` byte layout (not its permission-handling
+/// -- see [`load_or_create_secure_file`]).
 fn load_or_create_identity_seeds(
     path: &Path,
 ) -> Result<([u8; 32], [u8; 32]), Box<dyn std::error::Error>> {
-    let blob: Vec<u8> = if path.exists() {
-        let bytes = std::fs::read(path)?;
-        restrict_permissions(path)?;
-        if bytes.len() != 64 {
-            return Err("operator agent identity file must be exactly 64 bytes".into());
-        }
-        bytes
-    } else {
+    let blob = load_or_create_secure_file(path, || {
         let mut blob = Vec::with_capacity(64);
         blob.extend_from_slice(&rand::random::<[u8; 32]>());
         blob.extend_from_slice(&rand::random::<[u8; 32]>());
-        std::fs::write(path, &blob)?;
-        restrict_permissions(path)?;
         blob
-    };
+    })?;
+    if blob.len() != 64 {
+        return Err("operator agent identity file must be exactly 64 bytes".into());
+    }
     let mut ed25519_secret = [0u8; 32];
     let mut ml_dsa_seed = [0u8; 32];
     ed25519_secret.copy_from_slice(&blob[..32]);
@@ -312,25 +329,86 @@ fn load_or_create_identity_seeds(
 /// Load the pairing token from `path`, or generate and persist a fresh one
 /// (0600, 32 random bytes hex-encoded) on first use.
 fn load_or_create_token(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    if path.exists() {
-        let token = std::fs::read_to_string(path)?.trim().to_string();
-        restrict_permissions(path)?;
-        Ok(token)
-    } else {
-        let token = hex::encode(rand::random::<[u8; 32]>());
-        std::fs::write(path, &token)?;
-        restrict_permissions(path)?;
-        Ok(token)
+    let bytes = load_or_create_secure_file(path, || {
+        hex::encode(rand::random::<[u8; 32]>()).into_bytes()
+    })?;
+    Ok(String::from_utf8(bytes)?.trim().to_string())
+}
+
+/// Atomically create `path` with owner-only (`0600`) permissions set *at
+/// creation* (not chmod'd afterward -- there is no window where a racing
+/// process could open it before permissions are tightened) if it doesn't
+/// exist yet, writing `generate()`'s output and returning it. If `path`
+/// already exists, refuse to use it unless it's a regular file (not a
+/// symlink) owned by this process's user, then return its contents --
+/// closing off a symlink-swap or different-local-user substitution attack
+/// on a file this process is about to trust as key material.
+fn load_or_create_secure_file(
+    path: &Path,
+    generate: impl FnOnce() -> Vec<u8>,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    match secure_create_new(path) {
+        Ok(mut file) => {
+            use std::io::Write;
+            let contents = generate();
+            file.write_all(&contents)?;
+            Ok(contents)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            check_existing_file_is_safe(path)?;
+            Ok(std::fs::read(path)?)
+        }
+        Err(e) => Err(e.into()),
     }
 }
 
 #[cfg(unix)]
-fn restrict_permissions(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+fn secure_create_new(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
 }
 #[cfg(not(unix))]
-fn restrict_permissions(_path: &Path) -> std::io::Result<()> {
+fn secure_create_new(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+#[cfg(unix)]
+fn check_existing_file_is_safe(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        return Err(format!(
+            "{} is a symlink -- refusing to use it for sensitive material",
+            path.display()
+        )
+        .into());
+    }
+    if !meta.is_file() {
+        return Err(format!("{} is not a regular file", path.display()).into());
+    }
+    let owner_uid = meta.uid();
+    let current_uid = rustix::process::getuid().as_raw();
+    if owner_uid != current_uid {
+        return Err(format!(
+            "{} is owned by uid {owner_uid}, not this process's uid {current_uid} -- refusing to use it",
+            path.display()
+        )
+        .into());
+    }
+    // Re-tighten permissions in case they drifted since creation (defense
+    // in depth).
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+#[cfg(not(unix))]
+fn check_existing_file_is_safe(_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
@@ -386,5 +464,110 @@ mod tests {
         assert_eq!(t1.len(), 64, "32 random bytes, hex-encoded");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn refuses_a_symlink_swapped_in_for_the_identity_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "xenia-operator-agent-test-symlink-{}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real_secret = dir.join("some-other-secret");
+        std::fs::write(&real_secret, b"not an operator identity").unwrap();
+        let path = dir.join("identity.key");
+        std::os::unix::fs::symlink(&real_secret, &path).unwrap();
+
+        let err = load_or_create_identity_seeds(&path).unwrap_err();
+        assert!(err.to_string().contains("symlink"), "got: {err}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn refuses_a_directory_where_the_identity_file_should_be() {
+        let dir = std::env::temp_dir().join(format!(
+            "xenia-operator-agent-test-dir-{}",
+            rand::random::<u64>()
+        ));
+        let path = dir.join("identity.key");
+        std::fs::create_dir_all(&path).unwrap();
+
+        let err = load_or_create_identity_seeds(&path).unwrap_err();
+        assert!(err.to_string().contains("not a regular file"), "got: {err}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn test_state(token: &str, allowed_origins: &[&str]) -> Arc<AgentState> {
+        Arc::new(AgentState {
+            manager: HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]),
+            ed25519_secret: Zeroizing::new([1u8; 32]),
+            ml_dsa_seed: Zeroizing::new([2u8; 32]),
+            token: token.to_string(),
+            allowed_origins: allowed_origins.iter().map(|s| s.to_string()).collect(),
+        })
+    }
+
+    #[tokio::test]
+    async fn missing_origin_is_refused_even_with_a_valid_token() {
+        use tower::ServiceExt;
+        let app = build_router(test_state("secret", &["http://localhost:8134"]));
+        let req = axum::http::Request::builder()
+            .uri("/identity")
+            .header("x-agent-token", "secret")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn wrong_origin_is_refused() {
+        use tower::ServiceExt;
+        let app = build_router(test_state("secret", &["http://localhost:8134"]));
+        let req = axum::http::Request::builder()
+            .uri("/identity")
+            .header("origin", "http://evil.example")
+            .header("x-agent-token", "secret")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn right_origin_but_wrong_token_is_refused() {
+        use tower::ServiceExt;
+        let app = build_router(test_state("secret", &["http://localhost:8134"]));
+        let req = axum::http::Request::builder()
+            .uri("/identity")
+            .header("origin", "http://localhost:8134")
+            .header("x-agent-token", "not-the-secret")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn right_origin_and_token_succeeds() {
+        use tower::ServiceExt;
+        let app = build_router(test_state("secret", &["http://localhost:8134"]));
+        let req = axum::http::Request::builder()
+            .uri("/identity")
+            .header("origin", "http://localhost:8134")
+            .header("x-agent-token", "secret")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            "http://localhost:8134"
+        );
     }
 }
