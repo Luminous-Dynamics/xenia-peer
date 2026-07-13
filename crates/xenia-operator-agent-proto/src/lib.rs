@@ -49,7 +49,7 @@ pub use xenia_operator_proto::{ConsentAction, DaemonIdentityCertificate, Operato
 /// Bump when a breaking change to any request/response shape ships; the
 /// agent should refuse a request whose `schema_version` it doesn't
 /// recognize rather than guessing at compatibility.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Fields common to every `/v1/sign/*` request: who the caller believes
 /// they are, which daemon they're targeting, and enough to correlate a
@@ -81,6 +81,20 @@ pub struct SignRequestCommon {
     /// doc's "typed transcripts are not enough" section for why a bare
     /// caller-supplied fingerprint isn't sufficient.
     pub daemon_certificate: DaemonIdentityCertificate,
+    /// The daemon endpoint the caller believes it's talking to (e.g. the
+    /// console's configured `http://host:port`), used **only** as a stable
+    /// scope key for the native host-trust pin store -- never as identity
+    /// evidence. Schema version 2 and earlier pinned by the *fingerprint
+    /// itself*, which meant a rotated or spoofed identity always looked
+    /// like a brand-new host to the pin store rather than "the daemon at
+    /// this known endpoint changed identity" -- the
+    /// `FingerprintChanged`/rotation-confirmation path was effectively
+    /// unreachable in practice. The agent normalizes this string (not the
+    /// caller) before using it as a pin-store key; a compromised or
+    /// careless caller can at worst cause a spurious first-use/rotation
+    /// prompt under the wrong scope, never bypass the fingerprint
+    /// verification itself, which is unaffected by this field.
+    pub daemon_endpoint: String,
     /// Which sealed-channel suite this request is scoped to
     /// (`"standard"` or `"highsec"`) -- the two suites pin daemon
     /// identity under separate host-trust entries, mirroring
@@ -271,6 +285,15 @@ pub enum AgentErrorCode {
 pub struct HandshakeRequestCommon {
     /// Must equal [`SCHEMA_VERSION`], same as every `/v1/sign/*` request.
     pub schema_version: u32,
+    /// The daemon endpoint (the sealed-channel WebSocket URL) the caller
+    /// believes it's connecting to -- used **only** as a stable host-trust
+    /// pin-store scope key, never as identity evidence. See
+    /// [`SignRequestCommon::daemon_endpoint`] for why this replaced pinning
+    /// by the bare fingerprint. The agent stores this alongside the
+    /// pending handshake state (`/v1/handshake/begin`) so
+    /// `/v1/handshake/finish` can check the *completed* handshake's
+    /// authenticated fingerprint against the same scope.
+    pub daemon_endpoint: String,
     /// Which sealed-channel suite this handshake negotiates
     /// (`"standard"` or `"highsec"`) -- selects
     /// `ViewerHandshake`/`ViewerHandshakeHighSec` and scopes the resulting
@@ -385,6 +408,7 @@ mod tests {
             common: SignRequestCommon {
                 schema_version: SCHEMA_VERSION,
                 daemon_certificate: test_certificate(),
+                daemon_endpoint: "https://daemon.test.example".to_string(),
                 suite: "standard".to_string(),
                 request_id: "req-1".to_string(),
             },
@@ -410,6 +434,7 @@ mod tests {
             common: SignRequestCommon {
                 schema_version: SCHEMA_VERSION,
                 daemon_certificate: test_certificate(),
+                daemon_endpoint: "https://daemon.test.example".to_string(),
                 suite: "highsec".to_string(),
                 request_id: "req-2".to_string(),
             },
@@ -442,6 +467,7 @@ mod tests {
         let req = HandshakeBeginRequest {
             common: HandshakeRequestCommon {
                 schema_version: SCHEMA_VERSION,
+                daemon_endpoint: "wss://daemon.test.example/operator".to_string(),
                 suite: "standard".to_string(),
                 request_id: "req-3".to_string(),
             },

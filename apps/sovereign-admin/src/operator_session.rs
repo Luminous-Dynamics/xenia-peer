@@ -162,6 +162,7 @@ pub async fn authenticate(
             common: SignRequestCommon {
                 schema_version: xenia_operator_agent_proto::SCHEMA_VERSION,
                 daemon_certificate: cert,
+                daemon_endpoint: endpoint.to_string(),
                 suite: TRACK_A_SUITE.to_string(),
                 request_id: request_id(),
             },
@@ -222,6 +223,7 @@ pub async fn build_consent_request(
             common: SignRequestCommon {
                 schema_version: xenia_operator_agent_proto::SCHEMA_VERSION,
                 daemon_certificate: cert,
+                daemon_endpoint: endpoint.to_string(),
                 suite: TRACK_A_SUITE.to_string(),
                 request_id: request_id(),
             },
@@ -265,6 +267,7 @@ pub async fn build_revoke_request(
             common: SignRequestCommon {
                 schema_version: xenia_operator_agent_proto::SCHEMA_VERSION,
                 daemon_certificate: cert,
+                daemon_endpoint: endpoint.to_string(),
                 suite: TRACK_A_SUITE.to_string(),
                 request_id: request_id(),
             },

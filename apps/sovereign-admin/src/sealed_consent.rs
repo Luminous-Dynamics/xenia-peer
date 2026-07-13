@@ -91,6 +91,7 @@ async fn drive_agent_handshake(
         &HandshakeBeginRequest {
             common: HandshakeRequestCommon {
                 schema_version: SCHEMA_VERSION,
+                daemon_endpoint: sealed_ws_url.to_string(),
                 suite: suite.to_string(),
                 request_id: request_id(),
             },

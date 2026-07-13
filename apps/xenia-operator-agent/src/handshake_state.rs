@@ -87,7 +87,21 @@ pub enum PendingSuite {
 struct PendingHandshake {
     suite: PendingSuite,
     origin: String,
+    /// The caller's normalized `daemon_endpoint` from `/v1/handshake/begin`
+    /// -- carried through to `/v1/handshake/finish` so the host-trust check
+    /// there can scope its pin-store lookup by the same stable label the
+    /// caller supplied at `begin` time (see
+    /// `xenia_operator_agent_proto::HandshakeRequestCommon::daemon_endpoint`).
+    /// Not identity evidence -- purely a pin-store scope key.
+    daemon_endpoint: String,
     created_at: Instant,
+}
+
+/// What [`HandshakeState::take`] returns: the pending handshake state and
+/// the `daemon_endpoint` scope it was opened under.
+pub struct TakenHandshake {
+    pub suite: PendingSuite,
+    pub daemon_endpoint: String,
 }
 
 /// Why looking up a pending handshake failed. Both variants are
@@ -153,10 +167,19 @@ impl HandshakeState {
     }
 
     /// Insert a newly-begun handshake bound to `origin`, enforcing the
-    /// concurrency caps. Generates and returns a fresh random handshake
-    /// id. Callers should call [`Self::purge_expired`] first so an
-    /// about-to-expire entry doesn't spuriously count against the caps.
-    pub fn begin(&mut self, origin: &str, suite: PendingSuite) -> Result<[u8; 16], BeginError> {
+    /// concurrency caps. `daemon_endpoint` is the caller's (already
+    /// normalized) host-trust scope key, carried through to the matching
+    /// [`Self::take`] so `/v1/handshake/finish` can check the completed
+    /// handshake's fingerprint against the same scope `begin` was opened
+    /// under. Generates and returns a fresh random handshake id. Callers
+    /// should call [`Self::purge_expired`] first so an about-to-expire
+    /// entry doesn't spuriously count against the caps.
+    pub fn begin(
+        &mut self,
+        origin: &str,
+        suite: PendingSuite,
+        daemon_endpoint: String,
+    ) -> Result<[u8; 16], BeginError> {
         if self.pending.len() >= MAX_PENDING_PROCESS_WIDE {
             return Err(BeginError::TooManyPendingProcessWide);
         }
@@ -171,6 +194,7 @@ impl HandshakeState {
             PendingHandshake {
                 suite,
                 origin: origin.to_string(),
+                daemon_endpoint,
                 created_at: Instant::now(),
             },
         );
@@ -184,7 +208,7 @@ impl HandshakeState {
     /// different Origin still burns the attempt rather than being able to
     /// retry it. An expired entry is treated as absent (and is removed
     /// too, as routine cleanup).
-    pub fn take(&mut self, id: &[u8; 16], origin: &str) -> Result<PendingSuite, TakeError> {
+    pub fn take(&mut self, id: &[u8; 16], origin: &str) -> Result<TakenHandshake, TakeError> {
         let Some(entry) = self.pending.remove(id) else {
             return Err(TakeError::NotFoundOrExpired);
         };
@@ -194,7 +218,10 @@ impl HandshakeState {
         if entry.origin != origin {
             return Err(TakeError::OriginMismatch);
         }
-        Ok(entry.suite)
+        Ok(TakenHandshake {
+            suite: entry.suite,
+            daemon_endpoint: entry.daemon_endpoint,
+        })
     }
 
     #[cfg(test)]
@@ -222,18 +249,23 @@ mod tests {
         ))
     }
 
+    const TEST_ENDPOINT: &str = "wss://daemon.test.example/operator";
+
+    fn begin_standard(state: &mut HandshakeState, origin: &str) -> [u8; 16] {
+        state
+            .begin(origin, standard_pending(), TEST_ENDPOINT.to_string())
+            .unwrap()
+    }
+
     #[test]
     fn begin_then_take_round_trips_and_is_single_use() {
         let mut state = HandshakeState::new(DEFAULT_TTL);
-        let id = state
-            .begin("http://localhost:8134", standard_pending())
-            .unwrap();
+        let id = begin_standard(&mut state, "http://localhost:8134");
         assert_eq!(state.suite_label_for_test(&id), Some("standard"));
 
-        assert!(matches!(
-            state.take(&id, "http://localhost:8134").unwrap(),
-            PendingSuite::Standard(_)
-        ));
+        let taken = state.take(&id, "http://localhost:8134").unwrap();
+        assert!(matches!(taken.suite, PendingSuite::Standard(_)));
+        assert_eq!(taken.daemon_endpoint, TEST_ENDPOINT);
         // Gone: a second take fails even with the right Origin.
         assert!(matches!(
             state.take(&id, "http://localhost:8134"),
@@ -244,9 +276,7 @@ mod tests {
     #[test]
     fn take_with_the_wrong_origin_is_refused_and_still_consumes_the_entry() {
         let mut state = HandshakeState::new(DEFAULT_TTL);
-        let id = state
-            .begin("http://localhost:8134", standard_pending())
-            .unwrap();
+        let id = begin_standard(&mut state, "http://localhost:8134");
 
         assert!(matches!(
             state.take(&id, "http://evil.example"),
@@ -262,9 +292,7 @@ mod tests {
     #[test]
     fn expired_entries_are_treated_as_absent_by_take() {
         let mut state = HandshakeState::new(Duration::from_millis(1));
-        let id = state
-            .begin("http://localhost:8134", standard_pending())
-            .unwrap();
+        let id = begin_standard(&mut state, "http://localhost:8134");
         std::thread::sleep(Duration::from_millis(10));
         assert!(matches!(
             state.take(&id, "http://localhost:8134"),
@@ -275,13 +303,9 @@ mod tests {
     #[test]
     fn purge_expired_removes_stale_entries_but_keeps_fresh_ones() {
         let mut state = HandshakeState::new(Duration::from_millis(20));
-        let stale = state
-            .begin("http://localhost:8134", standard_pending())
-            .unwrap();
+        let stale = begin_standard(&mut state, "http://localhost:8134");
         std::thread::sleep(Duration::from_millis(30));
-        let fresh = state
-            .begin("http://localhost:8134", standard_pending())
-            .unwrap();
+        let fresh = begin_standard(&mut state, "http://localhost:8134");
 
         state.purge_expired();
         assert_eq!(state.len(), 1);
@@ -293,14 +317,26 @@ mod tests {
     fn per_origin_cap_is_enforced_independently_of_other_origins() {
         let mut state = HandshakeState::new(DEFAULT_TTL);
         for _ in 0..MAX_PENDING_PER_ORIGIN {
-            state.begin("http://a.example", standard_pending()).unwrap();
+            begin_standard(&mut state, "http://a.example");
         }
         assert!(matches!(
-            state.begin("http://a.example", standard_pending()),
+            state.begin(
+                "http://a.example",
+                standard_pending(),
+                TEST_ENDPOINT.to_string()
+            ),
             Err(BeginError::TooManyPendingForOrigin)
         ));
         // A different Origin is unaffected by "a.example" being at cap.
-        assert!(state.begin("http://b.example", standard_pending()).is_ok());
+        assert!(
+            state
+                .begin(
+                    "http://b.example",
+                    standard_pending(),
+                    TEST_ENDPOINT.to_string()
+                )
+                .is_ok()
+        );
     }
 
     #[test]
@@ -310,10 +346,14 @@ mod tests {
         // per-origin cap (8) never fires first.
         for i in 0..MAX_PENDING_PROCESS_WIDE {
             let origin = format!("http://origin-{i}.example");
-            state.begin(&origin, standard_pending()).unwrap();
+            begin_standard(&mut state, &origin);
         }
         assert!(matches!(
-            state.begin("http://one-more.example", standard_pending()),
+            state.begin(
+                "http://one-more.example",
+                standard_pending(),
+                TEST_ENDPOINT.to_string()
+            ),
             Err(BeginError::TooManyPendingProcessWide)
         ));
     }

@@ -488,6 +488,7 @@ async fn sign_revoke(
 
     let confirm_state = state.clone();
     let target = req.target_operator_id.clone();
+    let daemon_endpoint = normalize_daemon_endpoint(&req.common.daemon_endpoint);
     let daemon_fingerprint_hex = hex::encode(identity.fingerprint);
     let suite = req.common.suite.clone();
     let confirmed = tokio::task::spawn_blocking(move || {
@@ -499,6 +500,7 @@ async fn sign_revoke(
                 "Revoke operator enrollment?",
                 &[
                     ("target operator id", target),
+                    ("daemon endpoint", daemon_endpoint),
                     ("daemon fingerprint", daemon_fingerprint_hex),
                     ("suite", suite),
                 ],
@@ -554,6 +556,9 @@ async fn handshake_begin(
             xenia_operator_agent_proto::SCHEMA_VERSION
         )));
     }
+    if req.common.daemon_endpoint.trim().is_empty() {
+        return Err(bad_request("daemon_endpoint must not be empty"));
+    }
     let origin = origin_header(&headers)?;
     let hello = decode_hex_vec(&req.host_hello_hex)
         .ok_or_else(|| bad_request("host_hello_hex must be valid hex"))?;
@@ -590,18 +595,20 @@ async fn handshake_begin(
         }
     };
 
+    let daemon_endpoint = normalize_daemon_endpoint(&req.common.daemon_endpoint);
     let handshake_id = {
         let mut hs = state
             .handshake_state
             .lock()
             .expect("handshake-state mutex poisoned");
         hs.purge_expired();
-        hs.begin(&origin, pending)
+        hs.begin(&origin, pending, daemon_endpoint.clone())
             .map_err(|e| bad_request(e.message()))?
     };
 
     tracing::info!(
         request_id = %req.common.request_id,
+        daemon_endpoint = %daemon_endpoint,
         suite = %req.common.suite,
         handshake_id = %hex::encode(handshake_id),
         "handshake begin succeeded, pending finish"
@@ -641,7 +648,7 @@ async fn handshake_finish(
     let finalize = decode_hex_vec(&req.host_finalize_hex)
         .ok_or_else(|| bad_request("host_finalize_hex must be valid hex"))?;
 
-    let pending = {
+    let taken = {
         let mut hs = state
             .handshake_state
             .lock()
@@ -649,8 +656,9 @@ async fn handshake_finish(
         hs.take(&handshake_id, &origin)
             .map_err(|e| bad_request(e.not_found_message()))?
     };
+    let daemon_endpoint = taken.daemon_endpoint;
 
-    let (schedule, suite_label) = match pending {
+    let (schedule, suite_label) = match taken.suite {
         PendingSuite::Standard(mut vh) => {
             let schedule = vh.finish(&finalize).map_err(|e| {
                 bad_request(format!(
@@ -669,11 +677,16 @@ async fn handshake_finish(
         }
     };
 
-    let outcome =
-        check_host_trust_fingerprint(&state, schedule.host_identity_fingerprint, suite_label)
-            .await?;
+    let outcome = check_host_trust_fingerprint(
+        &state,
+        schedule.host_identity_fingerprint,
+        &daemon_endpoint,
+        suite_label,
+    )
+    .await?;
     tracing::info!(
         handshake_id = %req.handshake_id_hex,
+        daemon_endpoint = %daemon_endpoint,
         suite = suite_label,
         outcome = ?outcome,
         "host trust check passed for /v1/handshake/finish"
@@ -704,8 +717,8 @@ fn origin_header(headers: &HeaderMap) -> Result<String, (StatusCode, Json<AgentE
 }
 
 /// Steps 1-2 shared by every `/v1/sign/*` handler: reject an unrecognized
-/// `schema_version` or malformed `suite` rather than guessing at
-/// compatibility.
+/// `schema_version`, malformed `suite`, or empty `daemon_endpoint` rather
+/// than guessing at compatibility.
 fn validate_common(
     common: &xenia_operator_agent_proto::SignRequestCommon,
 ) -> Result<(), (StatusCode, Json<AgentErrorResponse>)> {
@@ -722,21 +735,32 @@ fn validate_common(
             common.suite
         )));
     }
+    if common.daemon_endpoint.trim().is_empty() {
+        return Err(bad_request("daemon_endpoint must not be empty"));
+    }
     Ok(())
+}
+
+/// Normalize a caller-supplied `daemon_endpoint` before using it as a
+/// host-trust pin-store scope key: trim surrounding whitespace and
+/// lowercase it, so trivial variance (a trailing space, a differently-cased
+/// scheme) doesn't fragment one daemon into two pin-store slots. This is
+/// *not* a security check -- `daemon_endpoint` is a label, not identity
+/// evidence (see [`xenia_operator_agent_proto::SignRequestCommon::daemon_endpoint`]'s
+/// doc comment); the agent never trusts it for anything beyond picking
+/// which pin-store entry to compare the *verified* fingerprint against.
+fn normalize_daemon_endpoint(raw: &str) -> String {
+    raw.trim().to_ascii_lowercase()
 }
 
 /// Step 3, shared by every `/v1/sign/*` handler: verify
 /// `common.daemon_certificate`'s own signatures
 /// ([`daemon_evidence::verify_daemon_certificate`]), then check the
 /// fingerprint it computes against native host-trust policy via
-/// [`check_host_trust_fingerprint`]. Returns the verified identity so
-/// callers can check further evidence (a challenge attestation or a
-/// session token) against its now-trusted keys.
-///
-/// Track A has no separate `host_alias` field -- the fingerprint itself is
-/// the pin key (see [`check_host_trust_fingerprint`]'s doc comment for why
-/// Track B, which *could* have introduced a separate alias concept, uses
-/// the exact same fingerprint-as-alias scheme instead, for consistency).
+/// [`check_host_trust_fingerprint`], scoped by `common.daemon_endpoint`
+/// (normalized). Returns the verified identity so callers can check
+/// further evidence (a challenge attestation or a session token) against
+/// its now-trusted keys.
 async fn enforce_host_trust(
     state: &Arc<AgentState>,
     common: &xenia_operator_agent_proto::SignRequestCommon,
@@ -748,9 +772,13 @@ async fn enforce_host_trust(
             (status_for(agent_err.code), Json(agent_err))
         })?;
 
-    let outcome = check_host_trust_fingerprint(state, identity.fingerprint, &common.suite).await?;
+    let host_alias = normalize_daemon_endpoint(&common.daemon_endpoint);
+    let outcome =
+        check_host_trust_fingerprint(state, identity.fingerprint, &host_alias, &common.suite)
+            .await?;
     tracing::info!(
         request_id = %common.request_id,
+        daemon_endpoint = %host_alias,
         suite = %common.suite,
         outcome = ?outcome,
         endpoint = endpoint_label,
@@ -763,28 +791,25 @@ async fn enforce_host_trust(
 /// [`daemon_evidence::VerifiedDaemonIdentity`] for Track A, or from
 /// completing a handshake for Track B; never one a caller simply asserts)
 /// against native host-trust policy (`host_trust::HostTrustStore::check`),
-/// blocking on a native terminal confirmation for an unpinned or changed
-/// fingerprint. `check()` blocks on terminal I/O, so this runs via
-/// `spawn_blocking` rather than on an async worker thread.
+/// scoped by `host_alias` (the caller's normalized `daemon_endpoint` --
+/// see [`xenia_operator_agent_proto::SignRequestCommon::daemon_endpoint`]'s
+/// doc comment for why this is a stable label, not the fingerprint itself).
+/// Blocks on a native terminal confirmation for an unpinned or changed
+/// fingerprint under that scope. `check()` blocks on terminal I/O, so this
+/// runs via `spawn_blocking` rather than on an async worker thread.
 ///
 /// Shared by [`enforce_host_trust`] (Track A) and [`handshake_finish`]
-/// (Track B) -- both pin against the bare fingerprint itself rather than a
-/// separate human-meaningful alias. Track B's `/v1/handshake/begin` could
-/// have introduced an "intended host alias" the way an earlier design
-/// sketch considered, but doing so would only matter if `begin` needed to
-/// express *which* host it expects to authenticate -- it doesn't: the
-/// browser relays whatever `HostHello` its own WebSocket connection
-/// received, and the *result* of completing the handshake is the only
-/// place a host identity exists to check at all. Keeping both tracks on
-/// the same fingerprint-as-alias scheme avoids two different pinning
-/// models for what is, from the trust-policy's point of view, the same
-/// question: "have I seen and confirmed this exact fingerprint before?"
+/// (Track B, which reads its own copy of `daemon_endpoint` back out of the
+/// pending-handshake state `/v1/handshake/begin` stored, since `begin` is
+/// where the caller supplied it and `finish` is where the fingerprint
+/// becomes known).
 async fn check_host_trust_fingerprint(
     state: &Arc<AgentState>,
     fingerprint: [u8; 32],
+    host_alias: &str,
     suite: &str,
 ) -> Result<host_trust::PinOutcome, (StatusCode, Json<AgentErrorResponse>)> {
-    let host_alias = hex::encode(fingerprint);
+    let host_alias = host_alias.to_string();
     let suite = suite.to_string();
     let check_state = state.clone();
     tokio::task::spawn_blocking(move || {
@@ -885,6 +910,12 @@ use secure_file::load_or_create_secure_file;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Shared `daemon_endpoint` for tests that don't specifically exercise
+    /// scoping -- keeps `test_state_with_pinned_host`'s pre-seeded pin and
+    /// the request bodies built by the `*_request_body`/`handshake_begin_body`
+    /// helpers pointed at the same pin-store slot.
+    const TEST_DAEMON_ENDPOINT: &str = "https://daemon.test.example";
 
     #[test]
     fn constant_time_eq_matches_equal_and_rejects_different_or_wrong_length() {
@@ -1027,7 +1058,10 @@ mod tests {
             &host.identity_public_key_bytes(),
             &host.ml_dsa_public_key_bytes(),
         );
-        let host_alias = hex::encode(fingerprint);
+        // Scoped by the same `daemon_endpoint` the `*_request_body` helpers
+        // put in their requests (normalized the same way the real handlers
+        // do), not the fingerprint itself -- see `normalize_daemon_endpoint`.
+        let host_alias = normalize_daemon_endpoint(TEST_DAEMON_ENDPOINT);
         {
             // Seed with a permissive store so seeding itself never needs
             // the confirmation surface a test using this helper is trying
@@ -1218,6 +1252,7 @@ mod tests {
         let mut body = serde_json::json!({
             "schema_version": xenia_operator_agent_proto::SCHEMA_VERSION,
             "daemon_certificate": cert,
+            "daemon_endpoint": TEST_DAEMON_ENDPOINT,
             "suite": "standard",
             "request_id": "test-req-1",
             "nonce_hex": hex::encode(nonce),
@@ -1264,6 +1299,63 @@ mod tests {
             &ed_sig,
         )
         .expect("agent's Ed25519 signature must verify over the challenge transcript");
+    }
+
+    /// The behavioral proof this whole PR is about: pinning by
+    /// `daemon_endpoint` (not the bare fingerprint) means a *different*
+    /// daemon identity presenting itself at the *same* `daemon_endpoint`
+    /// is recognized as "this known daemon changed identity"
+    /// (`FingerprintChanged`), not silently treated as a brand-new,
+    /// unrelated host the way fingerprint-as-alias pinning did (two
+    /// different fingerprints always produced two different pin-store
+    /// keys, so `FingerprintChanged` was effectively unreachable through
+    /// the real endpoints).
+    #[tokio::test]
+    async fn sign_challenge_detects_a_rotated_fingerprint_at_the_same_daemon_endpoint() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state.clone());
+
+        let (host_a, http_auth_a) = test_daemon_identity();
+        let cert_a = test_certificate(&host_a, &http_auth_a);
+        let body_a = challenge_request_body(&cert_a, &host_a, [0x01u8; 32], serde_json::json!({}));
+        let (status_a, json_a) = post_sign_challenge(app.clone(), "secret", body_a).await;
+        assert_eq!(status_a, StatusCode::OK, "body: {json_a}");
+
+        // A second, unrelated daemon identity -- different Ed25519/ML-DSA
+        // keys entirely -- claiming the exact same `daemon_endpoint`.
+        let (host_b, http_auth_b) = test_daemon_identity();
+        let cert_b = test_certificate(&host_b, &http_auth_b);
+        let body_b = challenge_request_body(&cert_b, &host_b, [0x02u8; 32], serde_json::json!({}));
+        let (status_b, json_b) = post_sign_challenge(app, "secret", body_b).await;
+        assert_eq!(status_b, StatusCode::OK, "body: {json_b}");
+
+        // Both requests used `test_state`'s permissive
+        // (`allow_noninteractive_privileged: true`) store, so both a
+        // first-use *and* a rotation auto-confirm and return 200 -- the
+        // HTTP status alone can't distinguish the two. What proves the fix
+        // is inspecting the agent's *own* pin store afterward: it must now
+        // hold host B's fingerprint (the later one) under the shared
+        // `daemon_endpoint` scope. Under the old fingerprint-as-alias
+        // scheme, host A and host B would have pinned under two entirely
+        // separate keys (`hex::encode(fp_a)` vs `hex::encode(fp_b)`), and
+        // the store would hold *both*, with no rotation ever having
+        // happened -- exactly the bug this PR closes.
+        let fp_b = xenia_handshake::host_identity_fingerprint(
+            &host_b.identity_public_key_bytes(),
+            &host_b.ml_dsa_public_key_bytes(),
+        );
+        let fp_a = xenia_handshake::host_identity_fingerprint(
+            &host_a.identity_public_key_bytes(),
+            &host_a.ml_dsa_public_key_bytes(),
+        );
+        assert_ne!(fp_a, fp_b, "test fixture bug: hosts must differ");
+        let host_alias = normalize_daemon_endpoint(TEST_DAEMON_ENDPOINT);
+        let trust = state.host_trust.lock().expect("host-trust mutex poisoned");
+        assert_eq!(
+            trust.lookup(&host_alias, "standard"),
+            Some(fp_b),
+            "the shared daemon_endpoint scope must hold the rotated (latest) fingerprint"
+        );
     }
 
     #[tokio::test]
@@ -1395,6 +1487,7 @@ mod tests {
         let mut body = serde_json::json!({
             "schema_version": xenia_operator_agent_proto::SCHEMA_VERSION,
             "daemon_certificate": cert,
+            "daemon_endpoint": TEST_DAEMON_ENDPOINT,
             "suite": "highsec",
             "request_id": "test-req-2",
             "action": "Approve",
@@ -1568,6 +1661,7 @@ mod tests {
         let mut body = serde_json::json!({
             "schema_version": xenia_operator_agent_proto::SCHEMA_VERSION,
             "daemon_certificate": cert,
+            "daemon_endpoint": TEST_DAEMON_ENDPOINT,
             "suite": "standard",
             "request_id": "test-req-3",
             "target_operator_id": "op-42",
@@ -1667,6 +1761,7 @@ mod tests {
         let body = serde_json::json!({
             "schema_version": xenia_operator_agent_proto::SCHEMA_VERSION,
             "daemon_certificate": cert,
+            "daemon_endpoint": TEST_DAEMON_ENDPOINT,
             "suite": "standard",
             "request_id": "test-req-3",
             "target_operator_id": "op-42",
@@ -1729,6 +1824,7 @@ mod tests {
         serde_json::to_value(HandshakeBeginRequest {
             common: xenia_operator_agent_proto::HandshakeRequestCommon {
                 schema_version: xenia_operator_agent_proto::SCHEMA_VERSION,
+                daemon_endpoint: TEST_DAEMON_ENDPOINT.to_string(),
                 suite: suite.to_string(),
                 request_id: "test-hs".to_string(),
             },
