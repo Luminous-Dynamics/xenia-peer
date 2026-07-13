@@ -7,24 +7,25 @@
 //! Ed25519 + ML-DSA seeds as plaintext hex in `localStorage` -- readable by
 //! an XSS bug, a malicious browser extension, or a compromised same-origin
 //! dependency (see `docs/security/OPERATOR_SECURITY_MODEL.md` §9, and the
-//! external review that flagged it). This binary is the interim fix: it
-//! holds the seeds in a permission-restricted file on disk instead, and
-//! serves them to the console over a token-authenticated, origin-restricted
-//! `127.0.0.1`-only HTTP API. The console fetches them into memory once per
-//! page session and never writes them to `localStorage`.
+//! external review that flagged it). This binary is the fix: it holds the
+//! seeds in a permission-restricted file on disk and never releases them --
+//! not to `localStorage`, and not even into the console's memory
+//! transiently. Instead it signs and handshakes on the console's behalf:
+//! `POST /v1/sign/challenge`/`/v1/sign/consent-action`/`/v1/sign/revoke` for
+//! the `/auth/*` HTTP ceremony (see `docs/security/SIGNER_DELEGATION_DESIGN.md`
+//! "Track A"), and `POST /v1/handshake/begin`/`/v1/handshake/finish` for the
+//! sealed-channel handshake ("Track B"). `GET /identity` exposes the
+//! operator's *public* keys/fingerprint/enrollment-record for display --
+//! the one HTTP surface here that returns identity data, and it never
+//! includes the seeds.
 //!
-//! **Scope note** (see `docs/security/OPERATOR_SECURITY_MODEL.md` for the
-//! full explanation): this moves the *persistent storage* of the seeds out
-//! of the browser. It does not (yet) move the *signing operations*
-//! themselves out of the browser -- the console still holds the seeds in
-//! memory and signs locally with them, for both the `/auth/*` HTTP
-//! ceremony and the sealed-channel handshake. A follow-up that has the
-//! agent perform the signing itself (so raw key material never reaches the
-//! browser process at all, not even transiently) is scoped but not built;
-//! it needs an async signing-callback abstraction in `xenia-wire`'s
-//! `ViewerHandshake`/`ViewerHandshakeHighSec` (which currently own raw
-//! keys internally), a larger change to a published crate that was
-//! deliberately deferred rather than rushed.
+//! **History**: an earlier revision of this binary only moved the
+//! *persistent storage* of the seeds out of the browser -- the console
+//! still fetched them into memory each page session and signed locally
+//! with them (via a since-removed `GET /seeds`). That window (seeds live in
+//! browser memory for the session, though never on disk) is now fully
+//! closed: every signing and handshaking operation happens in this
+//! process, and the seeds never leave it.
 //!
 //! ## Security model
 //!
@@ -218,7 +219,6 @@ async fn shutdown_signal() {
 fn build_router(state: Arc<AgentState>) -> Router {
     Router::new()
         .route("/identity", get(get_identity))
-        .route("/seeds", get(get_seeds))
         .route("/v1/sign/challenge", post(sign_challenge))
         .route("/v1/sign/consent-action", post(sign_consent_action))
         .route("/v1/sign/revoke", post(sign_revoke))
@@ -357,23 +357,6 @@ async fn get_identity(State(state): State<Arc<AgentState>>) -> Json<IdentityResp
         ml_dsa_87_pubkey_hex: hex::encode(highsec.ml_dsa_public_key_bytes()),
         fingerprint_hex: hex::encode(state.manager.identity_fingerprint()),
         enrollment_record_json: record.to_json_string(),
-    })
-}
-
-#[derive(Serialize)]
-struct SeedsResponse {
-    ed25519_secret_hex: String,
-    ml_dsa_seed_hex: String,
-}
-
-/// The sensitive endpoint: returns the raw seeds. The console fetches this
-/// once per page session into memory and never persists the result --
-/// see the module doc comment's scope note for what this does and doesn't
-/// protect against today.
-async fn get_seeds(State(state): State<Arc<AgentState>>) -> Json<SeedsResponse> {
-    Json(SeedsResponse {
-        ed25519_secret_hex: hex::encode(*state.ed25519_secret),
-        ml_dsa_seed_hex: hex::encode(*state.ml_dsa_seed),
     })
 }
 

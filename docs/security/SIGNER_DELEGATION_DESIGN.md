@@ -1,21 +1,23 @@
 # Design: agent-side signing delegation (retiring `GET /seeds`)
 
-**Status:** steps 1-6 of the PR sequence below have landed (PRs #69-72,
-#73/#74 for the 4.5a/4.5b confused-deputy fix, #75 for step 5, #76 + a
-following PR for step 6's agent-side and browser-side halves). Only step 7
-(deleting `GET /seeds`) remains, and it's now unblocked: neither the
-`/auth/*` ceremony nor the sealed-channel handshake signs or handshakes
-locally in the browser anymore. `fetch_seeds`/`GET /seeds` are still called
-once, but only to derive *display* data (`OperatorIdentity`'s enrollment
-record/fingerprint on the Sessions page) — see step 7's note below for what
-retiring them fully still needs. Follow-up to `apps/xenia-operator-agent`
-(PR #65) and its hardening pass (PR #66) — see
-`OPERATOR_SECURITY_MODEL.md` §9 for the gap this closes: the agent moved the
+**Status: all seven steps of the PR sequence below have landed.** (PRs
+#69-72 for steps 2-4, #73/#74 for the 4.5a/4.5b confused-deputy fix, #75 for
+step 5, #76 + a following PR for step 6's agent-side and browser-side
+halves, and a final PR for step 7.) `GET /seeds` is deleted, along with the
+browser's `fetch_seeds` and `OperatorIdentity` types. The raw operator seeds
+never reach the browser process at all anymore, not even transiently: the
+`/auth/*` ceremony and the sealed-channel handshake both ask the agent to
+sign/handshake, and the one remaining identity-shaped need in the
+browser -- the Sessions-page enrollment display -- is served by the agent's
+pre-existing `GET /identity`, which returns only public keys, a fingerprint,
+and a paste-ready enrollment record. Follow-up to `apps/xenia-operator-agent`
+(PR #65) and its hardening pass (PR #66) -- see
+`OPERATOR_SECURITY_MODEL.md` §9 for the gap this closed: the agent moved the
 operator's Ed25519/ML-DSA seeds out of browser `localStorage`, but the
 console used to fetch them into memory and sign locally with them, for both
-the `/auth/*` ceremony and the sealed-channel handshake. This doc plans
+the `/auth/*` ceremony and the sealed-channel handshake. This doc planned
 having the agent sign directly, so raw key material never reaches the
-browser process at all, not even transiently.
+browser process at all, not even transiently -- now built.
 
 ## The one structural fact that reshapes this plan
 
@@ -329,26 +331,28 @@ and WebSocket framing all stay in the browser. This keeps the agent a
 narrow, auditable cryptographic component rather than a second network
 client with its own reachability requirements.
 
-## Once both tracks land
+## Once both tracks land (done)
 
-- `GET /seeds` is deleted. It was always meant as the interim step (see
-  its own doc comment) — retire it once nothing calls it, and only once
-  both tracks have fully migrated (see PR sequence below).
-- `OperatorIdentity` stops holding `ed_seed`/`ml_seed` at all; it becomes a
-  thin handle around "call the agent for X," carrying only public
-  information (pubkeys, fingerprint) fetched from the unchanged
-  `GET /identity`. **Partially true already, as of step 6 landing**:
-  `OperatorIdentity` no longer *stores* the seeds past construction
-  (`from_seeds` zeroizes its local copies once it's derived the pubkeys),
-  but it's still *constructed from* raw seeds fetched via `fetch_seeds`/
-  `GET /seeds`, one call at a time, for the display path only. Fully
-  closing this bullet means switching that one remaining call site to a
-  new agent endpoint that returns public info directly (e.g. `GET
-  /identity`) instead of raw seeds — the actual work of step 7.
-- The zeroize-on-drop work from the hardening pass becomes moot for the
-  browser side (nothing left to zeroize) but stays exactly as valuable on
-  the agent side, where the seeds permanently live.
-- `OPERATOR_SECURITY_MODEL.md` §9's "not yet closed" bullet becomes closed;
+- **`GET /seeds` is deleted**, along with the agent's `SeedsResponse`/
+  `get_seeds` and the browser's `fetch_seeds`. It was always meant as the
+  interim step (see its own former doc comment) -- retired once nothing
+  called it, and only once both tracks had fully migrated.
+- **`OperatorIdentity` is deleted entirely**, not just emptied of seed
+  fields. It turned out there was no need for a thin "call the agent for X"
+  handle type in `operator_session.rs` at all: the Sessions-page enrollment
+  display now just stores the two `String`s it actually shows
+  (`fingerprint_hex`, `enrollment_record_json`) directly in
+  `app::OperatorIdentityState::Ready`, fetched in one call via
+  `agent_client::fetch_identity_info` from the agent's **pre-existing**
+  `GET /identity` route -- that route (public keys + fingerprint + a
+  paste-ready enrollment record, built server-side from
+  `xenia_operator_proto::OperatorEnrollmentRecord`) had already been added
+  during an earlier hardening pass and just wasn't being called from the
+  browser yet.
+- The zeroize-on-drop work from the hardening pass is moot for the browser
+  side now (there's nothing left there to zeroize) but stays exactly as
+  valuable on the agent side, where the seeds permanently live.
+- `OPERATOR_SECURITY_MODEL.md` §9's "not yet closed" bullet is now closed;
   the residual risk collapses to Track A's stated no-confirmation-action
   window, which is the honest floor for a browser-hosted operator console
   regardless of where keys live (the browser is still where decisions are
@@ -375,9 +379,11 @@ client with its own reachability requirements.
    landing first, since it would otherwise have wired the browser up to
    the same unverifiable-fingerprint gap.
 5. Remove those three signing uses from browser-held `OperatorIdentity`.
-6. Track B, as its own separately reviewed PR.
-7. Delete `GET /seeds` only once both tracks are fully migrated and
-   nothing calls it.
+6. Track B, as its own separately reviewed PR (landed as two: agent-side
+   `/v1/handshake/*`, then the browser wiring).
+7. **Done.** Delete `GET /seeds` and `OperatorIdentity` now that both tracks
+   are fully migrated and nothing calls them; the Sessions-page display
+   moves to the agent's already-existing `GET /identity`.
 
 ## What does *not* change
 

@@ -20,16 +20,14 @@
 //! ```
 //!
 //! **Scope note**: this is Track A only (the plain-HTTP `/auth/*`
-//! ceremony). Since Step 6 of `docs/security/SIGNER_DELEGATION_DESIGN.md`
-//! landed, the sealed-channel handshake ("Track B",
-//! `crate::sealed_consent`) no longer needs the operator's raw seeds
-//! either -- it relays the handshake's own wire bytes through the local
-//! agent instead. [`OperatorIdentity`] therefore no longer retains seeds at
-//! all past the moment [`OperatorIdentity::from_seeds`] derives its public
-//! keys from them; it's kept purely for *display* (the enrollment
-//! record/fingerprint shown on the Sessions page), fed by
-//! [`crate::agent_client::fetch_seeds`], and is no longer used for
-//! *signing* or *handshaking* anything in this crate.
+//! ceremony). Since Steps 6 and 7 of
+//! `docs/security/SIGNER_DELEGATION_DESIGN.md` landed, nothing in this
+//! crate holds the operator's raw seeds at all, for any purpose -- the
+//! sealed-channel handshake ("Track B", `crate::sealed_consent`) relays the
+//! handshake's own wire bytes through the local agent, and the Sessions-page
+//! enrollment display (`crate::app::OperatorIdentityState`) fetches only
+//! *public* info via `crate::agent_client::fetch_identity_info`. This module
+//! no longer needs a local operator-identity type at all.
 //!
 //! Correctness rests on shared crates, so nothing can drift from the
 //! daemon or the agent:
@@ -40,26 +38,15 @@
 //!   request/response shapes the agent parses -- see
 //!   `apps/xenia-operator-agent`'s `daemon_evidence` module for what it
 //!   verifies before signing anything.
-//! - [`xenia_handshake::HandshakeManager`] provides the *same* Ed25519 +
-//!   ML-DSA-65 keygen the daemon's enrolled operators use, still needed
-//!   here for [`OperatorIdentity`]'s non-signing uses (display). We only
-//!   ever call its keygen methods (never the `SystemTime`-using
-//!   `establish()` paths), so it is wasm-safe at runtime.
 
 use serde::Deserialize;
-use zeroize::Zeroize;
 
-use xenia_handshake::HandshakeManager;
 use xenia_operator_agent_proto::{
     SignChallengeRequest, SignConsentActionRequest, SignRequestCommon, SignRevokeRequest,
     SignedTokenDto,
 };
 use xenia_operator_proto::{
-    ConsentAction, DaemonIdentityCertificate, OperatorAction, OperatorEnrollmentRecord,
-    OperatorRole,
-};
-use xenia_wire::handshake_highsec::{
-    ViewerHandshakeHighSec, derive_ml_dsa_87_seed_from_ed25519_secret,
+    ConsentAction, DaemonIdentityCertificate, OperatorAction, OperatorRole,
 };
 
 /// Track A (the plain-HTTP `/auth/*` ceremony -- challenge/consent-action/
@@ -70,125 +57,6 @@ use xenia_wire::handshake_highsec::{
 /// `DaemonConfig::high_security`, which selects an actual different suite
 /// for Track B's sealed channel.
 const TRACK_A_SUITE: &str = "standard";
-
-/// A stable operator identity: Ed25519 + ML-DSA-65 (standard suite) plus a
-/// *derived* ML-DSA-87 identity (high-security suite). Wraps a
-/// [`HandshakeManager`] purely as the signing engine.
-///
-/// The ML-DSA-87 public key is derived deterministically from the same
-/// Ed25519 secret via [`derive_ml_dsa_87_seed_from_ed25519_secret`] -- the
-/// same derivation [`crate::sealed_consent::send_sealed_consent_highsec`]
-/// uses to drive the actual handshake -- so this type is the single source
-/// of truth for "what would this operator's high-security identity be,"
-/// and [`Self::enrollment_record_json`] can enroll it without a second key
-/// file or a second enrollment ceremony.
-///
-/// Unlike an earlier revision of this type, `OperatorIdentity` does not
-/// retain the raw seeds past construction: [`Self::from_seeds`] zeroizes its
-/// local copies as soon as every derivation that needs them is done (see its
-/// doc comment). Since Step 6 of `docs/security/SIGNER_DELEGATION_DESIGN.md`
-/// landed, nothing in this crate needs the raw seeds again after that point
-/// -- the sealed-channel handshake now relays wire bytes through the local
-/// agent instead of driving `ViewerHandshake`/`ViewerHandshakeHighSec` here.
-/// This is best-effort hygiene, not a guarantee: `hm` (the
-/// [`HandshakeManager`]) holds its own internal copy of the derived signing
-/// keys, which this does not reach, and Rust may have left other transient
-/// stack copies behind before `from_seeds` was even called (e.g. in
-/// [`crate::agent_client::fetch_seeds`]'s decode step). See
-/// `docs/security/OPERATOR_SECURITY_MODEL.md` §9 for the honest scope of
-/// what's protected today.
-pub struct OperatorIdentity {
-    hm: HandshakeManager,
-    ed_pubkey: [u8; 32],
-    ml_pubkey: Vec<u8>,
-    ml87_pubkey: Vec<u8>,
-}
-
-impl OperatorIdentity {
-    /// Build the identity from seeds already fetched from the operator
-    /// agent (see [`crate::agent_client::fetch_seeds`]). Deterministic in
-    /// the seeds, so the returned public keys (and hence the enrollment
-    /// fingerprint) are stable across page reloads as long as the agent's
-    /// identity file doesn't change.
-    ///
-    /// Zeroizes its local seed copies before returning -- nothing this type
-    /// exposes needs them again; see the struct doc comment.
-    pub fn from_seeds(mut ed_seed: [u8; 32], mut ml_seed: [u8; 32]) -> Self {
-        let hm = HandshakeManager::from_identity_seeds(ed_seed, ml_seed);
-        let ed_pubkey = hm.identity_public_key_bytes();
-        let ml_pubkey = hm.ml_dsa_public_key_bytes().to_vec();
-        // The ML-DSA-87 seed is *derived*, not separately persisted -- a
-        // 32-byte Ed25519 secret plus this deterministic derivation is all
-        // that's needed to reproduce the same high-security identity every
-        // time. The `ed_seed`/`ml87_seed` pair are both always exactly 32
-        // bytes here, so `from_identity` cannot actually fail.
-        let mut ml87_seed = derive_ml_dsa_87_seed_from_ed25519_secret(&ed_seed);
-        let ml87_pubkey = ViewerHandshakeHighSec::from_identity(&ed_seed, &ml87_seed)
-            .expect("32-byte seeds always produce a valid high-security identity")
-            .ml_dsa_public_key_bytes()
-            .to_vec();
-        ed_seed.zeroize();
-        ml_seed.zeroize();
-        ml87_seed.zeroize();
-        Self {
-            hm,
-            ed_pubkey,
-            ml_pubkey,
-            ml87_pubkey,
-        }
-    }
-
-    /// The Ed25519 public key, hex — what an admin enrolls in the daemon's
-    /// `--operators-file`.
-    pub fn ed_pubkey_hex(&self) -> String {
-        hex::encode(self.ed_pubkey)
-    }
-
-    /// The ML-DSA-65 public key, hex — the standard-suite half of the
-    /// enrollment record.
-    pub fn ml_pubkey_hex(&self) -> String {
-        hex::encode(&self.ml_pubkey)
-    }
-
-    /// The *derived* ML-DSA-87 public key, hex — the high-security-suite
-    /// half of the enrollment record. See the struct doc comment for how
-    /// this is derived.
-    pub fn ml87_pubkey_hex(&self) -> String {
-        hex::encode(&self.ml87_pubkey)
-    }
-
-    /// The host-identity fingerprint (BLAKE3 over both public keys) an admin
-    /// can eyeball when enrolling this operator.
-    pub fn fingerprint_hex(&self) -> String {
-        hex::encode(self.hm.identity_fingerprint())
-    }
-
-    /// A paste-ready enrollment record for the daemon's `--operators-file`,
-    /// carrying all three public keys (Ed25519, ML-DSA-65, and the derived
-    /// ML-DSA-87). The admin adds this to the `operators` array (with a
-    /// chosen `operator_id` + `role`) so this browser identity becomes an
-    /// enrolled operator for *both* sealed-channel suites at once -- without
-    /// this the fingerprint alone can't enroll, and omitting the ML-DSA-87
-    /// key here is exactly what left the high-security suite unusable via
-    /// any real enrollment (a policy file generated from this record could
-    /// never satisfy `OperatorPolicy::lookup_verified_highsec`).
-    ///
-    /// Built from [`xenia_operator_proto::OperatorEnrollmentRecord`] --
-    /// the same type an integration test can deserialize a daemon-side
-    /// `OperatorPolicy` from -- so this can't silently drift from what the
-    /// daemon actually parses the way the old hand-built `serde_json::json!`
-    /// call here once did.
-    pub fn enrollment_record_json(&self, operator_id: &str, role: OperatorRole) -> String {
-        OperatorEnrollmentRecord {
-            operator_id: operator_id.to_string(),
-            ed25519_pubkey: self.ed_pubkey_hex(),
-            ml_dsa_pubkey: self.ml_pubkey_hex(),
-            ml_dsa_87_pubkey: Some(self.ml87_pubkey_hex()),
-            role,
-        }
-        .to_json_string()
-    }
-}
 
 /// A daemon-issued, role-scoped session token. The raw `token_json` is
 /// re-embedded verbatim into every consent request (the daemon re-verifies its

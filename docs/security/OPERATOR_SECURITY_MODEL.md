@@ -54,8 +54,8 @@ because they share an Ed25519 key (`OperatorPolicy::lookup_verified_highsec`).
 Enrollment is **allow-listed and out-of-band**: an admin adds a record
 (`operator_id`, `ed25519_pubkey`, `ml_dsa_pubkey`, optionally
 `ml_dsa_87_pubkey`, `role`) to the daemon's `--operators-file`
-(`OperatorPolicy`, `apps/xenia-peer/src/operator.rs`) -- the console's
-`OperatorIdentity::enrollment_record_json` (built from the shared
+(`OperatorPolicy`, `apps/xenia-peer/src/operator.rs`) -- the local operator
+agent's `GET /identity` (built from the shared
 `xenia_operator_proto::OperatorEnrollmentRecord` type) emits all three
 fields by default so a single record enrolls an operator for both suites at
 once. An unenrolled key authenticates nothing — the policy is the root of
@@ -243,36 +243,39 @@ re-checks revocation). Refusing token issuance up front is a hardening follow-up
 
 ## 9. Known limits / follow-ups
 
-- **Operator seeds no longer persist in browser `localStorage`, but the
-  browser still signs with them locally.** `apps/xenia-operator-agent` is a
-  small native process that holds the operator's Ed25519 + ML-DSA seeds in a
-  `0600` file and serves them to the console over a token-authenticated,
-  origin-restricted `127.0.0.1`-only API (`GET /seeds`); the console fetches
-  them into memory once per page session and never persists the result. This
-  closes the *persistent-storage* exposure (XSS, a malicious extension, or a
-  compromised same-origin dependency reading `localStorage` at any time) but
-  **not** the signing operation itself: the console still holds the fetched
-  seeds in memory for the session and signs both the `/auth/*` ceremony and
-  the sealed-channel handshake locally with them. Having the agent perform
-  the signing itself -- so raw key material never reaches the browser
-  process at all, not even transiently -- is planned in
-  `SIGNER_DELEGATION_DESIGN.md`. (An earlier version of this note assumed
-  that needed an async signing-callback redesign of `xenia-wire`'s published
-  `ViewerHandshake`/`ViewerHandshakeHighSec` API; that assumption turned out
-  to be avoidable -- the agent can run those types natively, unmodified,
-  the same way the browser's wasm build already does, and hand back only a
-  derived session key. No published-crate API change needed.) Until built,
-  a compromised browser process *during an active session* can still exfiltrate
-  the seeds from memory (a materially smaller window than permanent
-  `localStorage` exposure, but not zero) -- the console clears its fetched
-  copy from the reactive graph on sign-out (operator or DID) as best-effort
-  hygiene, and `OperatorIdentity`'s seed fields are zeroized on drop, but
-  neither reaches copies already held elsewhere (the `HandshakeManager`'s
-  own internal signing-key state, or transient stack copies from before
-  construction). The agent's `Origin` check requires a match (a missing or
-  unrecognized header is refused, not treated as trusted) and its identity/
-  token files are created atomically with owner-only permissions set at
-  creation time, refusing to trust an existing path that isn't a regular
+- ~~Operator seeds no longer persist in browser `localStorage`, but the
+  browser still signs with them locally.~~ **Closed** (see
+  `SIGNER_DELEGATION_DESIGN.md`, all seven steps landed). `apps/xenia-operator-agent`
+  is a small native process that holds the operator's Ed25519 + ML-DSA seeds
+  in a `0600` file and now performs every signing and handshaking operation
+  itself: `POST /v1/sign/challenge`/`/v1/sign/consent-action`/
+  `/v1/sign/revoke` for the `/auth/*` HTTP ceremony, and
+  `POST /v1/handshake/begin`/`/v1/handshake/finish` for the sealed-channel
+  handshake. The console never receives the raw seeds at all, not even
+  transiently -- `GET /seeds` (which used to serve them once per page
+  session for the browser to sign locally with) and the browser's
+  `OperatorIdentity` type (which held them in memory for that purpose) are
+  both deleted. The one remaining identity-shaped need in the browser -- the
+  Sessions-page enrollment display -- is served by the agent's
+  `GET /identity`, which returns only public keys, a fingerprint, and a
+  paste-ready enrollment record; there is no HTTP surface anywhere in this
+  system, on either side, that transmits the seeds. (An earlier version of
+  this plan assumed closing this gap needed an async signing-callback
+  redesign of `xenia-wire`'s published `ViewerHandshake`/
+  `ViewerHandshakeHighSec` API; that assumption turned out to be avoidable
+  -- the agent runs those types natively, unmodified, the same way the
+  browser's wasm build used to, and hands back only a derived session key.
+  No published-crate API change was needed.) The residual risk now collapses
+  to Track A's stated no-confirmation-action window (see
+  `SIGNER_DELEGATION_DESIGN.md`: an XSS bug active *during an authenticated
+  operator session*, against an *already-trusted, already-confirmed* host,
+  can still trigger a no-confirmation-required action) -- the honest floor
+  for a browser-hosted operator console regardless of where keys live, since
+  the browser is still where decisions are displayed and clicked. The
+  agent's `Origin` check requires a match (a
+  missing or unrecognized header is refused, not treated as trusted) and its
+  identity/token files are created atomically with owner-only permissions set
+  at creation time, refusing to trust an existing path that isn't a regular
   file owned by the agent's own user.
 - `/auth/verify` still mints tokens for revoked operators (harmless — see §6).
 - `bincode` 1.3.3 is used for wire (handshake + envelopes) with a tracked RUSTSEC
