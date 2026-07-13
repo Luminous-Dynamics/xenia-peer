@@ -30,10 +30,13 @@
 //! concern (`apps/xenia-operator-agent`'s `host_trust` module) deliberately
 //! kept out of this shared, wasm-compiled crate.
 //!
-//! Handshake-delegation (Track B: `/v1/handshake/begin` /
-//! `/v1/handshake/finish`) types land in a later addition to this crate,
-//! once that track is actually built -- see the design doc's recommended
-//! PR sequence.
+//! Handshake-delegation (Track B: [`HandshakeBeginRequest`]/
+//! [`HandshakeFinishRequest`], for `/v1/handshake/begin` /
+//! `/v1/handshake/finish`) needs no equivalent "typed transcripts are not
+//! enough" caveat: the handshake's own cryptography *is* the
+//! host-authentication evidence, verified inside
+//! `ViewerHandshake::finish`/`ViewerHandshakeHighSec::finish` -- there's no
+//! separate daemon-signed certificate to relay the way Track A needs.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -255,6 +258,102 @@ pub enum AgentErrorCode {
     Internal,
 }
 
+/// Fields common to every `/v1/handshake/*` request (Track B: the
+/// agent-driven sealed-channel handshake). Unlike [`SignRequestCommon`],
+/// there is no `daemon_certificate` field here -- Track B doesn't need one.
+/// The handshake itself *is* the host-authentication evidence: the daemon's
+/// identity is proven by the signature the agent verifies inside
+/// `ViewerHandshake::finish`/`ViewerHandshakeHighSec::finish`, and the
+/// resulting fingerprint is checked against native trust policy the same
+/// way Track A's agent-computed fingerprint is -- see
+/// `apps/xenia-operator-agent`'s `handshake_state` module.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandshakeRequestCommon {
+    /// Must equal [`SCHEMA_VERSION`], same as every `/v1/sign/*` request.
+    pub schema_version: u32,
+    /// Which sealed-channel suite this handshake negotiates
+    /// (`"standard"` or `"highsec"`) -- selects
+    /// `ViewerHandshake`/`ViewerHandshakeHighSec` and scopes the resulting
+    /// fingerprint's host-trust pin, matching `suite`'s role in
+    /// [`SignRequestCommon`].
+    pub suite: String,
+    /// A caller-generated id for this request. Correlation/logging only --
+    /// not itself a security boundary.
+    pub request_id: String,
+}
+
+/// `POST /v1/handshake/begin` request: the browser relays the daemon's
+/// `HostHello` bytes (received over its own WebSocket connection to the
+/// daemon -- the agent never originates that connection) and asks the
+/// agent to run the viewer half of the handshake.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandshakeBeginRequest {
+    /// Fields shared by every `/v1/handshake/*` request.
+    #[serde(flatten)]
+    pub common: HandshakeRequestCommon,
+    /// The daemon's `HostHello` message, exactly as received, hex-encoded.
+    pub host_hello_hex: String,
+}
+
+/// Response to [`HandshakeBeginRequest`]: the bytes to relay back to the
+/// daemon, and an opaque id identifying the now-pending handshake state the
+/// agent is holding (consumed by [`HandshakeFinishRequest`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandshakeBeginResponse {
+    /// Identifies this pending handshake for the matching
+    /// `/v1/handshake/finish` call, hex-encoded (at least 128 random
+    /// bits). Single-use and short-lived -- see `handshake_state`'s module
+    /// doc comment for the exact lifetime/concurrency limits.
+    pub handshake_id_hex: String,
+    /// The viewer's response message, to relay to the daemon over the
+    /// browser's own connection, hex-encoded.
+    pub viewer_response_hex: String,
+    /// How many seconds from now this pending handshake expires --
+    /// informational only (the agent enforces this server-side
+    /// regardless); a caller doesn't need to track it precisely.
+    pub expires_in_secs: u64,
+}
+
+/// `POST /v1/handshake/finish` request: the browser relays the daemon's
+/// `HostFinalize` bytes. No daemon evidence or typed action fields are
+/// needed here beyond `handshake_id_hex` -- unlike Track A, there's nothing
+/// else to bind a transcript to; the handshake's own cryptography is the
+/// entire authorization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandshakeFinishRequest {
+    /// Must equal [`SCHEMA_VERSION`].
+    pub schema_version: u32,
+    /// The id returned by the matching `/v1/handshake/begin` call.
+    pub handshake_id_hex: String,
+    /// The daemon's `HostFinalize` message, exactly as received,
+    /// hex-encoded.
+    pub host_finalize_hex: String,
+}
+
+/// Response to [`HandshakeFinishRequest`]: the session material the
+/// browser needs to seal/open envelopes on its own -- no long-term
+/// identity material. Returned only once the authenticated host identity
+/// (derived from completing the handshake, not asserted by the caller)
+/// satisfies native trust policy; see `handshake_state`'s module doc
+/// comment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandshakeFinishResponse {
+    /// The derived AEAD key for sealing/opening application-layer
+    /// envelopes on this channel, hex-encoded.
+    pub aead_key_hex: String,
+    /// The root key for deriving a later forward-secrecy rekey, hex-encoded
+    /// (see `xenia_wire::operator_rekey`).
+    pub rekey_root_hex: String,
+    /// The handshake transcript hash, hex-encoded -- carried through for
+    /// completeness/future evidence export; not currently consumed by any
+    /// browser-side code.
+    pub transcript_hash_hex: String,
+    /// The daemon's authenticated host-identity fingerprint, hex-encoded --
+    /// the same value the agent already checked against native trust
+    /// policy before returning this response.
+    pub authenticated_host_fingerprint_hex: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,5 +435,44 @@ mod tests {
         assert!(json.contains("\"host_not_trusted\""));
         let parsed: AgentErrorResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.code, AgentErrorCode::HostNotTrusted);
+    }
+
+    #[test]
+    fn handshake_begin_request_round_trips_and_flattens_common_fields() {
+        let req = HandshakeBeginRequest {
+            common: HandshakeRequestCommon {
+                schema_version: SCHEMA_VERSION,
+                suite: "standard".to_string(),
+                request_id: "req-3".to_string(),
+            },
+            host_hello_hex: "aa".repeat(40),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"host_hello_hex\""));
+        assert!(!json.contains("\"common\""));
+        let parsed: HandshakeBeginRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+    }
+
+    #[test]
+    fn handshake_finish_request_and_response_round_trip() {
+        let req = HandshakeFinishRequest {
+            schema_version: SCHEMA_VERSION,
+            handshake_id_hex: "bb".repeat(16),
+            host_finalize_hex: "cc".repeat(40),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: HandshakeFinishRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+
+        let resp = HandshakeFinishResponse {
+            aead_key_hex: "dd".repeat(32),
+            rekey_root_hex: "ee".repeat(32),
+            transcript_hash_hex: "ff".repeat(32),
+            authenticated_host_fingerprint_hex: "11".repeat(32),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: HandshakeFinishResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, resp);
     }
 }

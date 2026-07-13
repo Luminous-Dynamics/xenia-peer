@@ -29,7 +29,7 @@
 
 use ed25519_dalek::Signature;
 use xenia_handshake::{
-    HandshakeManager, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN, host_identity_fingerprint,
+    host_identity_fingerprint, HandshakeManager, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN,
 };
 use xenia_operator_agent_proto::{DaemonIdentityCertificate, SignedTokenDto};
 use xenia_operator_proto::{
@@ -258,6 +258,14 @@ pub fn verify_token(
 /// `main.rs` can reuse it instead of keeping a second copy.
 pub(crate) fn decode_fixed_hex<const N: usize>(s: &str) -> Option<[u8; N]> {
     hex::decode(s.trim()).ok()?.try_into().ok()
+}
+
+/// Decode a variable-length hex string, for fields with no fixed size
+/// (handshake message bytes -- `bincode`-encoded, so their length varies
+/// by suite/content). `pub(crate)` for the same reason as
+/// [`decode_fixed_hex`].
+pub(crate) fn decode_hex_vec(s: &str) -> Option<Vec<u8>> {
+    hex::decode(s.trim()).ok()
 }
 
 #[cfg(test)]

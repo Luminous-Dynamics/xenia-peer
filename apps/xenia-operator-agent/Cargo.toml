@@ -40,6 +40,14 @@ rustix = { version = "0.38", default-features = false, features = ["process", "s
 # `ServiceExt::oneshot` for driving the axum routes in tests without
 # binding a real socket.
 tower = { version = "0.5", features = ["util"] }
+# Real host-side handshake round-trip tests for `/v1/handshake/*` (Track
+# B): `perform_host_handshake_authenticating_peer` + `TcpTransport` drive
+# the exact host role a real daemon plays over a real loopback socket, so
+# the standard-suite test proves this agent's viewer handling is genuinely
+# wire-compatible rather than just internally self-consistent -- the same
+# reasoning `sovereign-admin`'s `sealed_consent.rs` doc comment gives for
+# why this crate's own `handshake_cross_compat` test exists.
+xenia-peer-core = { path = "../../crates/xenia-peer-core" }
 
 [lints]
 workspace = true
