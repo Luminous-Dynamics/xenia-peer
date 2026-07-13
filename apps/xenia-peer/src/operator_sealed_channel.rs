@@ -32,9 +32,9 @@
 
 use tokio::net::TcpListener;
 use xenia_handshake::{OperatorRekeyEpochContext, OperatorRekeyReason};
+use xenia_peer_core::HandshakeManager;
 use xenia_peer_core::handshake::perform_host_handshake_authenticating_peer;
 use xenia_peer_core::transport::Transport;
-use xenia_peer_core::HandshakeManager;
 use xenia_transport_ws::WsTransport;
 use xenia_wire::handshake_highsec::HostHandshakeHighSec;
 use xenia_wire::operator_rekey::{self, OperatorRekeyMessage};
@@ -487,13 +487,13 @@ pub(crate) async fn run_sealed_operator_endpoint(
 mod tests {
     use super::*;
     use crate::operator::EnrolledOperator;
-    use crate::operator_auth::{ChallengeStore, RateLimiter, AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS};
+    use crate::operator_auth::{AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS};
     use crate::operator_http::OperatorAuthState;
     use ed25519_dalek::SigningKey;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::net::{TcpListener, TcpStream};
-    use tokio::sync::{oneshot, Mutex as TokioMutex};
+    use tokio::sync::{Mutex as TokioMutex, oneshot};
     use uuid::Uuid;
     use xenia_handshake::ML_DSA_65_PK_LEN;
     use xenia_ledger::Chain;
@@ -530,15 +530,13 @@ mod tests {
             let mut t = TcpTransport::new(stream);
             let mut identity = OperatorHostIdentity::Standard(Box::new(HandshakeManager::new()));
             let daemon = SigningKey::generate(&mut rand::thread_rng());
-            let auth_state = Arc::new(OperatorAuthState {
-                policy: OperatorPolicy::default(),
-                challenges: TokioMutex::new(ChallengeStore::new()),
-                daemon_key: daemon.clone(),
-                rate_limiter: TokioMutex::new(RateLimiter::new(
-                    AUTH_RATE_MAX,
-                    AUTH_RATE_WINDOW_SECS,
-                )),
-            });
+            let auth_state = Arc::new(OperatorAuthState::new(
+                OperatorPolicy::default(),
+                daemon.clone(),
+                HandshakeManager::new(),
+                AUTH_RATE_MAX,
+                AUTH_RATE_WINDOW_SECS,
+            ));
             let ledger = Arc::new(TokioMutex::new(Chain::new(daemon)));
             let deps = SealedConsentDeps {
                 // Auth off: the sealed payload is a plaintext action, so this
@@ -619,12 +617,13 @@ mod tests {
         let revoked = Arc::new(AtomicBool::new(false));
 
         let daemon = SigningKey::generate(&mut rand::thread_rng());
-        let auth_state = Arc::new(OperatorAuthState {
-            policy: OperatorPolicy::default(),
-            challenges: TokioMutex::new(ChallengeStore::new()),
-            daemon_key: daemon.clone(),
-            rate_limiter: TokioMutex::new(RateLimiter::new(AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS)),
-        });
+        let auth_state = Arc::new(OperatorAuthState::new(
+            OperatorPolicy::default(),
+            daemon.clone(),
+            HandshakeManager::new(),
+            AUTH_RATE_MAX,
+            AUTH_RATE_WINDOW_SECS,
+        ));
         let deps = SealedConsentDeps {
             require_operator_auth: false,
             auth_state,
@@ -708,12 +707,13 @@ mod tests {
         let revoked = Arc::new(AtomicBool::new(false));
 
         let daemon = SigningKey::generate(&mut rand::thread_rng());
-        let auth_state = Arc::new(OperatorAuthState {
-            policy: OperatorPolicy::default(),
-            challenges: TokioMutex::new(ChallengeStore::new()),
-            daemon_key: daemon.clone(),
-            rate_limiter: TokioMutex::new(RateLimiter::new(AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS)),
-        });
+        let auth_state = Arc::new(OperatorAuthState::new(
+            OperatorPolicy::default(),
+            daemon.clone(),
+            HandshakeManager::new(),
+            AUTH_RATE_MAX,
+            AUTH_RATE_WINDOW_SECS,
+        ));
         let deps = SealedConsentDeps {
             require_operator_auth: false,
             auth_state,
@@ -849,12 +849,13 @@ mod tests {
         let revoked = Arc::new(AtomicBool::new(false));
 
         let daemon = SigningKey::generate(&mut rand::thread_rng());
-        let auth_state = Arc::new(OperatorAuthState {
-            policy: OperatorPolicy::default(),
-            challenges: TokioMutex::new(ChallengeStore::new()),
-            daemon_key: daemon.clone(),
-            rate_limiter: TokioMutex::new(RateLimiter::new(AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS)),
-        });
+        let auth_state = Arc::new(OperatorAuthState::new(
+            OperatorPolicy::default(),
+            daemon.clone(),
+            HandshakeManager::new(),
+            AUTH_RATE_MAX,
+            AUTH_RATE_WINDOW_SECS,
+        ));
         let deps = SealedConsentDeps {
             require_operator_auth: false,
             auth_state,
@@ -955,12 +956,13 @@ mod tests {
         let (grant_tx, mut grant_rx) = oneshot::channel();
 
         let daemon = SigningKey::generate(&mut rand::thread_rng());
-        let auth_state = Arc::new(OperatorAuthState {
-            policy: OperatorPolicy::default(),
-            challenges: TokioMutex::new(ChallengeStore::new()),
-            daemon_key: daemon.clone(),
-            rate_limiter: TokioMutex::new(RateLimiter::new(AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS)),
-        });
+        let auth_state = Arc::new(OperatorAuthState::new(
+            OperatorPolicy::default(),
+            daemon.clone(),
+            HandshakeManager::new(),
+            AUTH_RATE_MAX,
+            AUTH_RATE_WINDOW_SECS,
+        ));
         let deps = SealedConsentDeps {
             require_operator_auth: false,
             auth_state,
@@ -1056,12 +1058,13 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let (grant_tx, grant_rx) = oneshot::channel();
         let daemon = SigningKey::generate(&mut rand::thread_rng());
-        let auth_state = Arc::new(OperatorAuthState {
-            policy: OperatorPolicy::default(),
-            challenges: TokioMutex::new(ChallengeStore::new()),
-            daemon_key: daemon.clone(),
-            rate_limiter: TokioMutex::new(RateLimiter::new(AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS)),
-        });
+        let auth_state = Arc::new(OperatorAuthState::new(
+            OperatorPolicy::default(),
+            daemon.clone(),
+            HandshakeManager::new(),
+            AUTH_RATE_MAX,
+            AUTH_RATE_WINDOW_SECS,
+        ));
         let deps = SealedConsentDeps {
             require_operator_auth: false,
             auth_state,
@@ -1139,15 +1142,13 @@ mod tests {
             let mut t = TcpTransport::new(stream);
             let mut identity = OperatorHostIdentity::Standard(Box::new(HandshakeManager::new()));
             let daemon = SigningKey::generate(&mut rand::thread_rng());
-            let auth_state = Arc::new(OperatorAuthState {
-                policy: OperatorPolicy::default(),
-                challenges: TokioMutex::new(ChallengeStore::new()),
-                daemon_key: daemon.clone(),
-                rate_limiter: TokioMutex::new(RateLimiter::new(
-                    AUTH_RATE_MAX,
-                    AUTH_RATE_WINDOW_SECS,
-                )),
-            });
+            let auth_state = Arc::new(OperatorAuthState::new(
+                OperatorPolicy::default(),
+                daemon.clone(),
+                HandshakeManager::new(),
+                AUTH_RATE_MAX,
+                AUTH_RATE_WINDOW_SECS,
+            ));
             let deps = SealedConsentDeps {
                 require_operator_auth: false,
                 auth_state,

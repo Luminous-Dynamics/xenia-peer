@@ -18,18 +18,19 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use xenia_handshake::{ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN};
+use xenia_handshake::{HandshakeManager, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN};
+use xenia_operator_proto::{DaemonIdentityCertificate, challenge_host_attestation_transcript};
 
 use crate::operator::{OperatorPolicy, OperatorRole};
 use crate::operator_auth::{
-    issue_token, verify_challenge_response, AuthenticatedConsentAction, AuthenticatedRevocation,
-    ChallengeResponse, ChallengeStore, ConsentAction, OperatorToken, RateLimiter,
-    SignedOperatorToken, CHALLENGE_TTL_SECS, TOKEN_TTL_SECS,
+    AuthenticatedConsentAction, AuthenticatedRevocation, CHALLENGE_TTL_SECS, ChallengeResponse,
+    ChallengeStore, ConsentAction, OperatorToken, RateLimiter, SignedOperatorToken, TOKEN_TTL_SECS,
+    issue_token, verify_challenge_response,
 };
 use crate::operator_revocations::OperatorRevocations;
 
@@ -41,6 +42,51 @@ pub(crate) struct OperatorAuthState {
     pub(crate) daemon_key: SigningKey,
     /// Bounds auth attempts against brute-force / flooding.
     pub(crate) rate_limiter: Mutex<RateLimiter>,
+    /// The daemon's *host* identity (the same one the sealed-channel
+    /// handshake uses and `host_pin.rs`/`host_trust.rs` pin) -- used to
+    /// sign each challenge's host attestation at issuance time. Kept
+    /// separate from `daemon_key`; see [`DaemonIdentityCertificate`]'s doc
+    /// comment for why the two aren't unified.
+    pub(crate) host_identity: HandshakeManager,
+    /// Host identity's delegation of trust to `daemon_key`, computed once
+    /// at startup and served verbatim over `GET /auth/daemon-identity`.
+    pub(crate) daemon_certificate: DaemonIdentityCertificate,
+}
+
+impl OperatorAuthState {
+    /// Build a state, computing `daemon_certificate` from `host_identity`
+    /// and `daemon_key` once here (both keys are static for the state's
+    /// lifetime, so there's no reason to recompute it per-request). The
+    /// single constructor keeps every call site (`main.rs`'s real daemon
+    /// bootstrap, and the several test harnesses across this crate) from
+    /// having to know how the certificate is built, and means adding a
+    /// future field to this struct doesn't require touching every one of
+    /// them.
+    pub(crate) fn new(
+        policy: OperatorPolicy,
+        daemon_key: SigningKey,
+        host_identity: HandshakeManager,
+        rate_limit_max: u32,
+        rate_limit_window_secs: u64,
+    ) -> Self {
+        let http_auth_pubkey = daemon_key.verifying_key().to_bytes();
+        let transcript = xenia_operator_proto::daemon_delegation_transcript(&http_auth_pubkey);
+        let daemon_certificate = DaemonIdentityCertificate {
+            host_ed25519_pubkey: hex::encode(host_identity.identity_public_key_bytes()),
+            host_ml_dsa_pubkey: hex::encode(host_identity.ml_dsa_public_key_bytes()),
+            http_auth_ed25519_pubkey: hex::encode(http_auth_pubkey),
+            host_ed_signature: hex::encode(host_identity.sign(&transcript).to_bytes()),
+            host_ml_dsa_signature: hex::encode(host_identity.sign_ml_dsa(&transcript)),
+        };
+        Self {
+            policy,
+            challenges: Mutex::new(ChallengeStore::new()),
+            daemon_key,
+            rate_limiter: Mutex::new(RateLimiter::new(rate_limit_max, rate_limit_window_secs)),
+            host_identity,
+            daemon_certificate,
+        }
+    }
 }
 
 fn unix_now_secs() -> u64 {
@@ -54,6 +100,16 @@ fn unix_now_secs() -> u64 {
 struct ChallengeResponseDto {
     nonce: String,
     expires_at: u64,
+    /// Host identity's Ed25519 signature over
+    /// `challenge_host_attestation_transcript(nonce)`, hex -- proof this
+    /// *specific* nonce was really issued by this daemon's attested host
+    /// identity, so a caller with no live connection to the daemon (the
+    /// operator agent) can verify it rather than trust a bare label. New
+    /// field, additive -- existing callers that only read `nonce`/
+    /// `expires_at` are unaffected.
+    host_ed_attestation_hex: String,
+    /// Host identity's ML-DSA-65 signature over the same transcript, hex.
+    host_ml_dsa_attestation_hex: String,
 }
 
 #[derive(Deserialize)]
@@ -88,7 +144,9 @@ impl TokenDto {
     }
 }
 
-/// `POST /auth/challenge` -- issue a fresh single-use challenge.
+/// `POST /auth/challenge` -- issue a fresh single-use challenge, host-
+/// attested so a caller with no live connection to the daemon can verify
+/// this exact nonce was really issued by an attested host identity.
 async fn challenge_handler(
     State(state): State<Arc<OperatorAuthState>>,
 ) -> Json<ChallengeResponseDto> {
@@ -99,10 +157,28 @@ async fn challenge_handler(
         challenges.gc(now);
         challenges.issue(nonce, now, CHALLENGE_TTL_SECS);
     }
+    let attestation_transcript = challenge_host_attestation_transcript(&nonce);
     Json(ChallengeResponseDto {
         nonce: hex::encode(nonce),
         expires_at: now + CHALLENGE_TTL_SECS,
+        host_ed_attestation_hex: hex::encode(
+            state.host_identity.sign(&attestation_transcript).to_bytes(),
+        ),
+        host_ml_dsa_attestation_hex: hex::encode(
+            state.host_identity.sign_ml_dsa(&attestation_transcript),
+        ),
     })
+}
+
+/// `GET /auth/daemon-identity` -- the daemon's host-identity delegation of
+/// trust to its separate HTTP-auth signing key. No authentication required:
+/// this *is* the daemon's own public, independently-verifiable identity
+/// evidence -- the same trust model as the sealed-channel handshake's host
+/// identity, which any peer can already learn by connecting.
+async fn daemon_identity_handler(
+    State(state): State<Arc<OperatorAuthState>>,
+) -> Json<DaemonIdentityCertificate> {
+    Json(state.daemon_certificate.clone())
 }
 
 fn decode_fixed<const N: usize>(s: &str) -> Result<[u8; N], (StatusCode, String)> {
@@ -290,6 +366,10 @@ pub(crate) fn router(state: Arc<OperatorAuthState>, revocations: OperatorRevocat
     Router::new()
         .route("/auth/challenge", post(challenge_handler))
         .route("/auth/verify", post(verify_handler))
+        .route(
+            "/auth/daemon-identity",
+            axum::routing::get(daemon_identity_handler),
+        )
         .with_state(state)
         .merge(
             Router::new()
@@ -317,15 +397,13 @@ mod tests {
             role: OperatorRole::Admin,
         }])
         .unwrap();
-        Arc::new(OperatorAuthState {
+        Arc::new(OperatorAuthState::new(
             policy,
-            challenges: Mutex::new(ChallengeStore::new()),
-            daemon_key: daemon,
-            rate_limiter: Mutex::new(RateLimiter::new(
-                crate::operator_auth::AUTH_RATE_MAX,
-                crate::operator_auth::AUTH_RATE_WINDOW_SECS,
-            )),
-        })
+            daemon,
+            HandshakeManager::new(),
+            crate::operator_auth::AUTH_RATE_MAX,
+            crate::operator_auth::AUTH_RATE_WINDOW_SECS,
+        ))
     }
 
     #[tokio::test]
@@ -341,12 +419,13 @@ mod tests {
             role: OperatorRole::Admin,
         }])
         .unwrap();
-        let state = Arc::new(OperatorAuthState {
+        let state = Arc::new(OperatorAuthState::new(
             policy,
-            challenges: Mutex::new(ChallengeStore::new()),
-            daemon_key: daemon,
-            rate_limiter: Mutex::new(RateLimiter::new(1, 3600)),
-        });
+            daemon,
+            HandshakeManager::new(),
+            1,
+            3600,
+        ));
         let router = router(state, OperatorRevocations::empty());
         // A well-formed VerifyRequestDto (all fields present) so the handler
         // runs -- the crypto is garbage, but the rate limiter fires before
@@ -386,6 +465,111 @@ mod tests {
             .await
             .unwrap();
         (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    async fn get_json(router: &Router, path: &str) -> (StatusCode, String) {
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn daemon_identity_certificate_is_self_consistent_and_matches_the_daemon_key() {
+        let op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let daemon_pk = daemon.verifying_key();
+        let router = router(state_with(&op, daemon), OperatorRevocations::empty());
+
+        let (status, body) = get_json(&router, "/auth/daemon-identity").await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let cert: DaemonIdentityCertificate = serde_json::from_str(&body).unwrap();
+
+        // The certificate's delegated key really is this daemon's HTTP-auth
+        // (token-signing) key.
+        let http_auth_pk: [u8; 32] = decode_fixed(&cert.http_auth_ed25519_pubkey).unwrap();
+        assert_eq!(http_auth_pk, daemon_pk.to_bytes());
+
+        // Both of the host identity's signatures over the delegation
+        // transcript verify against the certificate's own presented host
+        // public keys -- this is exactly what a caller with no live
+        // connection to the daemon (the operator agent) checks before
+        // trusting anything else in the certificate.
+        let host_ed_pk_bytes: [u8; 32] = decode_fixed(&cert.host_ed25519_pubkey).unwrap();
+        let host_ed_pk = HandshakeManager::parse_peer_public_key(&host_ed_pk_bytes).unwrap();
+        let host_ml_pk: [u8; ML_DSA_65_PK_LEN] = hex::decode(&cert.host_ml_dsa_pubkey)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let transcript = xenia_operator_proto::daemon_delegation_transcript(&http_auth_pk);
+
+        let ed_sig_bytes: [u8; 64] = decode_fixed(&cert.host_ed_signature).unwrap();
+        let ed_sig = ed25519_dalek::Signature::from_bytes(&ed_sig_bytes);
+        assert!(HandshakeManager::verify(&host_ed_pk, &transcript, &ed_sig).is_ok());
+
+        let ml_sig: [u8; ML_DSA_65_SIG_LEN] = hex::decode(&cert.host_ml_dsa_signature)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert!(HandshakeManager::verify_ml_dsa(&host_ml_pk, &transcript, &ml_sig).is_ok());
+    }
+
+    #[tokio::test]
+    async fn challenge_host_attestation_verifies_against_the_daemon_identity_certificate() {
+        let op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let router = router(state_with(&op, daemon), OperatorRevocations::empty());
+
+        let (status, cert_body) = get_json(&router, "/auth/daemon-identity").await;
+        assert_eq!(status, StatusCode::OK);
+        let cert: DaemonIdentityCertificate = serde_json::from_str(&cert_body).unwrap();
+        let host_ed_pk_bytes: [u8; 32] = decode_fixed(&cert.host_ed25519_pubkey).unwrap();
+        let host_ed_pk = HandshakeManager::parse_peer_public_key(&host_ed_pk_bytes).unwrap();
+        let host_ml_pk: [u8; ML_DSA_65_PK_LEN] = hex::decode(&cert.host_ml_dsa_pubkey)
+            .unwrap()
+            .try_into()
+            .unwrap();
+
+        let (status, chal_body) = post_json(&router, "/auth/challenge", "{}".to_string()).await;
+        assert_eq!(status, StatusCode::OK);
+        let chal: serde_json::Value = serde_json::from_str(&chal_body).unwrap();
+        let nonce: [u8; 32] = decode_fixed(chal["nonce"].as_str().unwrap()).unwrap();
+
+        let attestation_transcript =
+            xenia_operator_proto::challenge_host_attestation_transcript(&nonce);
+        let ed_sig_bytes: [u8; 64] =
+            decode_fixed(chal["host_ed_attestation_hex"].as_str().unwrap()).unwrap();
+        let ed_sig = ed25519_dalek::Signature::from_bytes(&ed_sig_bytes);
+        assert!(HandshakeManager::verify(&host_ed_pk, &attestation_transcript, &ed_sig).is_ok());
+
+        let ml_sig: [u8; ML_DSA_65_SIG_LEN] =
+            hex::decode(chal["host_ml_dsa_attestation_hex"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap();
+        assert!(
+            HandshakeManager::verify_ml_dsa(&host_ml_pk, &attestation_transcript, &ml_sig).is_ok()
+        );
+
+        // An attestation for a *different* nonce must not verify -- proves
+        // the attestation is really bound to this specific nonce, not just
+        // "some nonce this daemon once issued."
+        let other_nonce = [0xEEu8; 32];
+        let other_transcript =
+            xenia_operator_proto::challenge_host_attestation_transcript(&other_nonce);
+        assert!(HandshakeManager::verify(&host_ed_pk, &other_transcript, &ed_sig).is_err());
     }
 
     #[tokio::test]

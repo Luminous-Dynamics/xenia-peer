@@ -35,13 +35,9 @@ use crate::operator::{OperatorPolicy, OperatorRole};
 // the daemon verifies. Re-exported at `crate::operator_auth::*` so existing
 // call sites (main.rs, operator_http, the smoke test) stay unchanged.
 pub(crate) use xenia_operator_proto::{
-    challenge_transcript, consent_action_transcript, revoke_operator_transcript, ConsentAction,
-    OperatorAction,
+    ConsentAction, OperatorAction, challenge_transcript, consent_action_transcript,
+    operator_token_canonical_bytes, revoke_operator_transcript,
 };
-
-// The session token is minted and verified only by the daemon, so its domain
-// tag stays here rather than in the shared crate.
-const TOKEN_DOMAIN: &[u8] = b"xenia-operator-token-v1";
 
 /// Default lifetime of an issued challenge (seconds). Short: a challenge is
 /// consumed within one round trip.
@@ -246,17 +242,20 @@ pub(crate) struct OperatorToken {
 }
 
 impl OperatorToken {
+    /// Delegates to the shared [`operator_token_canonical_bytes`] so this
+    /// exact byte layout has exactly one implementation -- the operator
+    /// agent (which never talks to the daemon directly) needs to
+    /// reconstruct these same bytes to verify a relayed token's signature,
+    /// and a second, independent implementation here would risk drifting
+    /// from it.
     fn canonical_bytes(&self) -> Vec<u8> {
-        let id = self.operator_id.as_bytes();
-        let mut b = Vec::with_capacity(TOKEN_DOMAIN.len() + 8 + id.len() + 1 + 8 + 8 + 16);
-        b.extend_from_slice(TOKEN_DOMAIN);
-        b.extend_from_slice(&(id.len() as u64).to_le_bytes());
-        b.extend_from_slice(id);
-        b.push(role_tag(self.role));
-        b.extend_from_slice(&self.issued_at.to_le_bytes());
-        b.extend_from_slice(&self.expires_at.to_le_bytes());
-        b.extend_from_slice(&self.token_nonce);
-        b
+        operator_token_canonical_bytes(
+            &self.operator_id,
+            self.role,
+            self.issued_at,
+            self.expires_at,
+            &self.token_nonce,
+        )
     }
 }
 
@@ -300,15 +299,6 @@ pub(crate) fn verify_token(
         return Err(AuthError::InvalidToken);
     }
     Ok(signed.token.clone())
-}
-
-fn role_tag(role: OperatorRole) -> u8 {
-    match role {
-        OperatorRole::Viewer => 0,
-        OperatorRole::Approver => 1,
-        OperatorRole::Operator => 2,
-        OperatorRole::Admin => 3,
-    }
 }
 
 /// An operator's authenticated request to perform a consent action: their

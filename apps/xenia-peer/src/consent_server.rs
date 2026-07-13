@@ -186,15 +186,13 @@ mod tests {
         // Operator auth OFF: the legacy plaintext path, so the test drives it
         // with bare "Approve"/"Deny"/"Revoke" text frames.
         let daemon = SigningKey::generate(&mut rand::thread_rng());
-        let auth_state = Arc::new(OperatorAuthState {
-            policy: crate::operator::OperatorPolicy::default(),
-            challenges: TokioMutex::new(crate::operator_auth::ChallengeStore::new()),
-            daemon_key: daemon.clone(),
-            rate_limiter: TokioMutex::new(crate::operator_auth::RateLimiter::new(
-                crate::operator_auth::AUTH_RATE_MAX,
-                crate::operator_auth::AUTH_RATE_WINDOW_SECS,
-            )),
-        });
+        let auth_state = Arc::new(OperatorAuthState::new(
+            crate::operator::OperatorPolicy::default(),
+            daemon.clone(),
+            xenia_handshake::HandshakeManager::new(),
+            crate::operator_auth::AUTH_RATE_MAX,
+            crate::operator_auth::AUTH_RATE_WINDOW_SECS,
+        ));
         let ledger = Arc::new(TokioMutex::new(Chain::new(daemon)));
         ConsentServer {
             require_operator_auth: false,
