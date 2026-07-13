@@ -17,10 +17,9 @@
 //! is no longer the authoritative check once the agent performs the
 //! signing/handshake itself.
 //!
-//! **Not wired into any HTTP endpoint yet.** This is step 1 of the
-//! recommended PR sequence (shared types + native host-trust interface,
-//! the foundation both signing tracks build on) -- `/v1/sign/*` and
-//! `/v1/handshake/*` land in later PRs and call into this module.
+//! Wired into `POST /v1/sign/challenge` (step 2 of the recommended PR
+//! sequence); `/v1/sign/consent-action`, `/v1/sign/revoke`, and
+//! `/v1/handshake/*` land in later PRs and call into this module too.
 //!
 //! ## Confirmation UI (v1 scope)
 //!
@@ -36,12 +35,6 @@
 //! [`confirm`] is a *blocking* call. A future caller wiring this into an
 //! async axum handler should run it via `tokio::task::spawn_blocking`
 //! rather than await it directly on the runtime's worker threads.
-
-// Foundation module (step 1 of the design doc's PR sequence): fully
-// exercised by its own unit tests, not yet called from `main`/`AgentState`.
-// The `/v1/sign/*` and `/v1/handshake/*` endpoints (later steps) wire it
-// in; the allow is removed then.
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::io::IsTerminal;
@@ -193,6 +186,12 @@ impl HostTrustStore {
     /// confirmation path (e.g. to skip prompting for an action that's
     /// low-risk *and* already-pinned, per the confirmation policy's
     /// no-confirmation-required list).
+    ///
+    /// Not called from any endpoint yet -- `/v1/sign/challenge` always
+    /// goes through [`Self::check`], which subsumes this. A later step may
+    /// use it to short-circuit an already-trusted, no-confirmation-needed
+    /// action before touching the blocking `check` path at all.
+    #[allow(dead_code)]
     pub fn lookup(&self, host_alias: &str, suite: &str) -> Option<[u8; 32]> {
         self.pins.get(&Self::key(host_alias, suite)).copied()
     }
@@ -262,7 +261,9 @@ impl HostTrustStore {
 
     /// Explicitly forget a pin (the operator's path for a legitimate
     /// rotation without going through the interactive confirmation flow --
-    /// e.g. from a future admin CLI subcommand).
+    /// e.g. from a future admin CLI subcommand). Not called from any
+    /// endpoint yet.
+    #[allow(dead_code)]
     pub fn forget(&mut self, host_alias: &str, suite: &str) -> Result<(), HostTrustError> {
         let key = Self::key(host_alias, suite);
         self.pins.remove(&key);

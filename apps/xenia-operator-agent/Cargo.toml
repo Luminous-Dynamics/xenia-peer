@@ -36,6 +36,11 @@ rustix = { version = "0.38", default-features = false, features = ["process", "s
 # `ServiceExt::oneshot` for driving the axum routes in tests without
 # binding a real socket.
 tower = { version = "0.5", features = ["util"] }
+# Only to independently re-verify a returned Ed25519 signature in
+# `/v1/sign/challenge` tests (`xenia-handshake` doesn't re-export the
+# `Signature` type). Matches the version pinned by `xenia-handshake`/
+# `xenia-peer`.
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
 
 [lints]
 workspace = true
