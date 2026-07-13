@@ -53,8 +53,8 @@
 
 // `host_trust` (native host-fingerprint trust policy), step 1 of
 // SIGNER_DELEGATION_DESIGN.md's recommended PR sequence, is now wired in
-// (step 2: `POST /v1/sign/challenge`; step 3: `POST /v1/sign/consent-action`,
-// below).
+// (step 2: `POST /v1/sign/challenge`; step 3: `POST /v1/sign/consent-action`;
+// step 4: `POST /v1/sign/revoke`, below).
 mod host_trust;
 mod secure_file;
 
@@ -72,7 +72,7 @@ use serde::Serialize;
 use xenia_handshake::HandshakeManager;
 use xenia_operator_agent_proto::{
     AgentErrorCode, AgentErrorResponse, SignChallengeRequest, SignChallengeResponse,
-    SignConsentActionRequest, SignConsentActionResponse,
+    SignConsentActionRequest, SignConsentActionResponse, SignRevokeRequest, SignRevokeResponse,
 };
 use xenia_operator_proto::{OperatorEnrollmentRecord, OperatorRole};
 use zeroize::Zeroizing;
@@ -203,6 +203,7 @@ fn build_router(state: Arc<AgentState>) -> Router {
         .route("/seeds", get(get_seeds))
         .route("/v1/sign/challenge", post(sign_challenge))
         .route("/v1/sign/consent-action", post(sign_consent_action))
+        .route("/v1/sign/revoke", post(sign_revoke))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_and_cors_middleware,
@@ -428,6 +429,72 @@ async fn sign_consent_action(
     let ed_signature = state.manager.sign(&transcript);
 
     Ok(Json(SignConsentActionResponse {
+        ed_signature_hex: hex::encode(ed_signature.to_bytes()),
+    }))
+}
+
+/// `POST /v1/sign/revoke` -- sign an admin's authorization to revoke
+/// *another operator's enrollment*. Step 4 of the design doc's PR
+/// sequence, and the first endpoint that actually exercises the
+/// mandatory-*action*-confirmation path: "operator revocation" is on the
+/// design doc's mandatory-confirmation list regardless of how
+/// well-trusted the target daemon already is, so this handler runs a
+/// *second*, independent confirmation
+/// (`host_trust::HostTrustStore::confirm_action`) on top of
+/// [`enforce_host_trust`]'s host-identity gate -- an already-pinned host
+/// does not exempt a revocation from being confirmed.
+async fn sign_revoke(
+    State(state): State<Arc<AgentState>>,
+    Json(req): Json<SignRevokeRequest>,
+) -> Result<Json<SignRevokeResponse>, (StatusCode, Json<AgentErrorResponse>)> {
+    validate_common(&req.common)?;
+    if req.target_operator_id.trim().is_empty() {
+        return Err(bad_request("target_operator_id must not be empty"));
+    }
+    let token_nonce = decode_fixed_hex::<16>(&req.token_nonce_hex)
+        .ok_or_else(|| bad_request("token_nonce_hex must be 32 hex characters"))?;
+    enforce_host_trust(&state, &req.common, "/v1/sign/revoke").await?;
+
+    let confirm_state = state.clone();
+    let target = req.target_operator_id.clone();
+    let daemon_fingerprint_hex = req.common.daemon_fingerprint_hex.clone();
+    let suite = req.common.suite.clone();
+    let confirmed = tokio::task::spawn_blocking(move || {
+        confirm_state
+            .host_trust
+            .lock()
+            .expect("host-trust mutex poisoned")
+            .confirm_action(
+                "Revoke operator enrollment?",
+                &[
+                    ("target operator id", target),
+                    ("daemon fingerprint", daemon_fingerprint_hex),
+                    ("suite", suite),
+                ],
+            )
+    })
+    .await
+    .map_err(|_| internal_error("revoke confirmation task panicked"))?
+    .map_err(|e| {
+        let agent_err = e.to_agent_error();
+        (status_for(agent_err.code), Json(agent_err))
+    })?;
+    if !confirmed {
+        let agent_err = AgentErrorResponse {
+            code: AgentErrorCode::ConfirmationDeclined,
+            message: format!(
+                "operator declined to confirm revocation of '{}'",
+                req.target_operator_id
+            ),
+        };
+        return Err((status_for(agent_err.code), Json(agent_err)));
+    }
+
+    let transcript =
+        xenia_operator_proto::revoke_operator_transcript(&req.target_operator_id, &token_nonce);
+    let ed_signature = state.manager.sign(&transcript);
+
+    Ok(Json(SignRevokeResponse {
         ed_signature_hex: hex::encode(ed_signature.to_bytes()),
     }))
 }
@@ -702,6 +769,39 @@ mod tests {
         allow_noninteractive_privileged: bool,
     ) -> Arc<AgentState> {
         let pin_store_path = temp_pin_store_path("state");
+        Arc::new(AgentState {
+            manager: HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]),
+            ed25519_secret: Zeroizing::new([1u8; 32]),
+            ml_dsa_seed: Zeroizing::new([2u8; 32]),
+            token: token.to_string(),
+            allowed_origins: allowed_origins.iter().map(|s| s.to_string()).collect(),
+            host_trust: StdMutex::new(
+                HostTrustStore::load(pin_store_path, allow_noninteractive_privileged).unwrap(),
+            ),
+        })
+    }
+
+    /// Like [`test_state_with_host_trust`], but with `(daemon_fingerprint_hex,
+    /// suite)` already pinned before the router is even built -- so a test
+    /// can exercise a *second*, action-level confirmation gate
+    /// (`sign_revoke`'s) in isolation, without the host-trust step's own
+    /// first-use confirmation getting in the way first.
+    fn test_state_with_pinned_host(
+        token: &str,
+        allowed_origins: &[&str],
+        daemon_fingerprint_hex: &str,
+        suite: &str,
+        allow_noninteractive_privileged: bool,
+    ) -> Arc<AgentState> {
+        let pin_store_path = temp_pin_store_path("pinned");
+        {
+            // Seed with a permissive store so seeding itself never needs
+            // the confirmation surface a test using this helper is trying
+            // to isolate.
+            let mut seed = HostTrustStore::load(pin_store_path.clone(), true).unwrap();
+            let fp: [u8; 32] = decode_fixed_hex(daemon_fingerprint_hex).unwrap();
+            seed.check(daemon_fingerprint_hex, suite, fp).unwrap();
+        }
         Arc::new(AgentState {
             manager: HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]),
             ed25519_secret: Zeroizing::new([1u8; 32]),
@@ -1052,5 +1152,136 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "body: {json}");
         assert_eq!(json["code"], "confirmation_required");
+    }
+
+    fn revoke_request_body(overrides: serde_json::Value) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "schema_version": xenia_operator_agent_proto::SCHEMA_VERSION,
+            "daemon_fingerprint_hex": "aa".repeat(32),
+            "suite": "standard",
+            "request_id": "test-req-3",
+            "target_operator_id": "op-42",
+            "token_nonce_hex": "11".repeat(16),
+        });
+        if let (Some(body_map), Some(override_map)) = (body.as_object_mut(), overrides.as_object())
+        {
+            for (k, v) in override_map {
+                body_map.insert(k.clone(), v.clone());
+            }
+        }
+        body
+    }
+
+    #[tokio::test]
+    async fn sign_revoke_signs_with_confirmation_when_allowed() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let (status, json) = post_signed_json(
+            app,
+            "/v1/sign/revoke",
+            "secret",
+            revoke_request_body(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {json}");
+
+        let resp: SignRevokeResponse = serde_json::from_value(json).unwrap();
+        let expected_manager = HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]);
+        let token_nonce: [u8; 16] = decode_fixed_hex(&"11".repeat(16)).unwrap();
+        let transcript = xenia_operator_proto::revoke_operator_transcript("op-42", &token_nonce);
+        let ed_sig_bytes: [u8; 64] = decode_fixed_hex(&resp.ed_signature_hex).unwrap();
+        let ed_sig = ed25519_dalek::Signature::from_bytes(&ed_sig_bytes);
+        HandshakeManager::verify(
+            &expected_manager.identity_public_key(),
+            &transcript,
+            &ed_sig,
+        )
+        .expect("agent's Ed25519 signature must verify over the revoke transcript");
+    }
+
+    #[tokio::test]
+    async fn sign_revoke_requires_its_own_confirmation_even_when_the_host_is_already_pinned() {
+        // The host-trust step alone would pass here (the fingerprint is
+        // already pinned) -- this proves sign_revoke's mandatory
+        // *action*-level confirmation is a genuinely separate gate, not
+        // just a side effect of host-trust's own first-use check.
+        let daemon_fingerprint_hex = "ff".repeat(32);
+        let state = test_state_with_pinned_host(
+            "secret",
+            &["http://localhost:8134"],
+            &daemon_fingerprint_hex,
+            "standard",
+            false,
+        );
+        let app = build_router(state);
+        let body = revoke_request_body(
+            serde_json::json!({ "daemon_fingerprint_hex": daemon_fingerprint_hex }),
+        );
+        let (status, json) = post_signed_json(app, "/v1/sign/revoke", "secret", body).await;
+        assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "body: {json}");
+        assert_eq!(json["code"], "confirmation_required");
+    }
+
+    #[tokio::test]
+    async fn sign_revoke_fails_closed_when_the_host_itself_needs_confirmation_and_none_is_available(
+    ) {
+        let state = test_state_with_host_trust("secret", &["http://localhost:8134"], false);
+        let app = build_router(state);
+        let (status, json) = post_signed_json(
+            app,
+            "/v1/sign/revoke",
+            "secret",
+            revoke_request_body(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "body: {json}");
+        assert_eq!(json["code"], "confirmation_required");
+    }
+
+    #[tokio::test]
+    async fn sign_revoke_rejects_an_empty_target_operator_id() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let body = revoke_request_body(serde_json::json!({ "target_operator_id": "" }));
+        let (status, json) = post_signed_json(app, "/v1/sign/revoke", "secret", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
+        assert_eq!(json["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn sign_revoke_rejects_malformed_hex_fields() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let body = revoke_request_body(serde_json::json!({ "token_nonce_hex": "nope" }));
+        let (status, json) = post_signed_json(app, "/v1/sign/revoke", "secret", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
+        assert_eq!(json["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn sign_revoke_rejects_an_unsupported_schema_version() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let body = revoke_request_body(serde_json::json!({ "schema_version": 999 }));
+        let (status, json) = post_signed_json(app, "/v1/sign/revoke", "secret", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
+        assert_eq!(json["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn sign_revoke_requires_origin_and_token_like_every_other_route() {
+        use tower::ServiceExt;
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/sign/revoke")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                revoke_request_body(serde_json::json!({})).to_string(),
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }
