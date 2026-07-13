@@ -17,10 +17,12 @@
 //! is no longer the authoritative check once the agent performs the
 //! signing/handshake itself.
 //!
-//! Wired into `POST /v1/sign/challenge` (step 2) and
-//! `POST /v1/sign/consent-action` (step 3) of the recommended PR sequence;
-//! `/v1/sign/revoke` and `/v1/handshake/*` land in later PRs and call into
-//! this module too.
+//! Wired into `POST /v1/sign/challenge` (step 2), `POST
+//! /v1/sign/consent-action` (step 3), and `POST /v1/sign/revoke` (step 4,
+//! via [`HostTrustStore::confirm_action`] -- the first endpoint that
+//! actually exercises the mandatory-confirmation path for an *action*,
+//! not just a host identity) of the recommended PR sequence;
+//! `/v1/handshake/*` lands in a later PR and calls into this module too.
 //!
 //! ## Confirmation UI (v1 scope)
 //!
@@ -271,6 +273,20 @@ impl HostTrustStore {
         self.persist()
     }
 
+    /// Block on a native confirmation for an *action*-specific
+    /// mandatory-confirmation case (e.g. operator revocation), as opposed
+    /// to [`Self::check`]'s *host-identity* confirmation. Reuses the same
+    /// `allow_noninteractive_privileged` policy and prompt mechanism, so
+    /// there's exactly one confirmation UI/policy in the whole agent
+    /// rather than a second one growing alongside it.
+    pub fn confirm_action(
+        &self,
+        title: &str,
+        fields: &[(&str, String)],
+    ) -> Result<bool, HostTrustError> {
+        confirm(self.allow_noninteractive_privileged, title, fields)
+    }
+
     fn set_pin(&mut self, key: &str, fingerprint: [u8; 32]) -> Result<(), HostTrustError> {
         self.pins.insert(key.to_string(), fingerprint);
         self.persist()
@@ -470,5 +486,26 @@ mod tests {
             unavailable.to_agent_error().code,
             AgentErrorCode::ConfirmationRequired
         );
+    }
+
+    #[test]
+    fn confirm_action_respects_the_store_s_noninteractive_policy() {
+        let allowed_path = temp_path("confirm-action-allowed");
+        let allowed = HostTrustStore::load(allowed_path.clone(), true).unwrap();
+        assert!(allowed
+            .confirm_action("Revoke?", &[("target", "op-1".to_string())])
+            .unwrap());
+        std::fs::remove_dir_all(allowed_path.parent().unwrap()).ok();
+
+        let blocked_path = temp_path("confirm-action-blocked");
+        let blocked = HostTrustStore::load(blocked_path.clone(), false).unwrap();
+        let err = blocked
+            .confirm_action("Revoke?", &[("target", "op-1".to_string())])
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            HostTrustError::ConfirmationUnavailable { .. }
+        ));
+        std::fs::remove_dir_all(blocked_path.parent().unwrap()).ok();
     }
 }
