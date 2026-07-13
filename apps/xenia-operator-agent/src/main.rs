@@ -51,31 +51,31 @@
 //! - The seeds are held zeroize-on-drop (`zeroize::Zeroizing`) for as long
 //!   as this process holds them in memory.
 
-// `host_trust` (native host-fingerprint trust policy) is step 1 of
-// SIGNER_DELEGATION_DESIGN.md's recommended PR sequence: the foundation
-// the `/v1/sign/*` and `/v1/handshake/*` endpoints from later steps build
-// on. Not called from `main`/`AgentState` yet -- that lands with those
-// endpoints -- so it's fully exercised by its own unit tests but
-// otherwise dead code today. Mirrors `apps/xenia-peer`'s `operator.rs`
-// (Phase 1 of `OPERATOR_RBAC_PLAN.md`), which carries the identical
-// "foundation module, not yet wired, allow removed when it is" shape.
+// `host_trust` (native host-fingerprint trust policy), step 1 of
+// SIGNER_DELEGATION_DESIGN.md's recommended PR sequence, is now wired in
+// (step 2: `POST /v1/sign/challenge`, below).
 mod host_trust;
 mod secure_file;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::Parser;
 use serde::Serialize;
 use xenia_handshake::HandshakeManager;
+use xenia_operator_agent_proto::{
+    AgentErrorCode, AgentErrorResponse, SignChallengeRequest, SignChallengeResponse,
+};
 use xenia_operator_proto::{OperatorEnrollmentRecord, OperatorRole};
 use zeroize::Zeroizing;
+
+use host_trust::HostTrustStore;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -108,6 +108,22 @@ struct Args {
         default_values = ["http://localhost:8134", "http://127.0.0.1:8134"]
     )]
     allowed_origin: Vec<String>,
+
+    /// Native host-trust pin-store path (`host_trust::HostTrustStore`).
+    /// Grows over time as `/v1/sign/*` and (later) `/v1/handshake/*`
+    /// requests name daemon fingerprints to trust; unlike the identity/
+    /// token files this has no fixed first-run content, so it's simply
+    /// created empty on first use.
+    #[arg(long, default_value = "operator-agent-host-trust.json")]
+    pin_store_path: PathBuf,
+
+    /// Allow a privileged confirmation (first trust of a daemon
+    /// fingerprint, a fingerprint change, or -- in later steps --
+    /// revocation/enrollment) to proceed automatically when no interactive
+    /// terminal is attached, instead of failing closed. Off by default;
+    /// see `host_trust`'s module docs for why there's no silent fallback.
+    #[arg(long, default_value_t = false)]
+    allow_noninteractive_privileged_confirmation: bool,
 }
 
 struct AgentState {
@@ -116,6 +132,11 @@ struct AgentState {
     ml_dsa_seed: Zeroizing<[u8; 32]>,
     token: String,
     allowed_origins: Vec<String>,
+    /// Native host-trust policy for `/v1/sign/*` and (later)
+    /// `/v1/handshake/*`. `HostTrustStore::check` blocks on terminal I/O,
+    /// so callers must reach it through `tokio::task::spawn_blocking`
+    /// rather than locking it directly on an async worker thread.
+    host_trust: StdMutex<HostTrustStore>,
 }
 
 #[tokio::main]
@@ -128,11 +149,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (ed25519_secret, ml_dsa_seed) = load_or_create_identity_seeds(&args.identity_path)?;
     let manager = HandshakeManager::from_identity_seeds(ed25519_secret, ml_dsa_seed);
     let token = load_or_create_token(&args.token_path)?;
+    let host_trust = HostTrustStore::load(
+        args.pin_store_path.clone(),
+        args.allow_noninteractive_privileged_confirmation,
+    )?;
 
     tracing::info!(
         fingerprint = %hex::encode(manager.identity_fingerprint()),
         identity_path = %args.identity_path.display(),
         allowed_origins = ?args.allowed_origin,
+        pin_store_path = %args.pin_store_path.display(),
         "operator agent identity loaded"
     );
     println!(
@@ -149,6 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ml_dsa_seed: Zeroizing::new(ml_dsa_seed),
         token,
         allowed_origins: args.allowed_origin,
+        host_trust: StdMutex::new(host_trust),
     });
 
     let app = build_router(state);
@@ -172,10 +199,17 @@ fn build_router(state: Arc<AgentState>) -> Router {
     Router::new()
         .route("/identity", get(get_identity))
         .route("/seeds", get(get_seeds))
+        .route("/v1/sign/challenge", post(sign_challenge))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_and_cors_middleware,
         ))
+        // The `/v1/sign/*` bodies are tiny, fixed-shape JSON (a handful of
+        // hex strings) -- refuse anything wildly larger up front rather
+        // than let a misbehaving or malicious caller buffer an oversized
+        // body before typed parsing even starts. GET routes have no body,
+        // so this only bounds the new POST routes in practice.
+        .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))
         .with_state(state)
 }
 
@@ -236,7 +270,7 @@ fn cors_headers(origin: Option<&str>, mut response: Response) -> Response {
         );
         response.headers_mut().insert(
             axum::http::header::ACCESS_CONTROL_ALLOW_METHODS,
-            HeaderValue::from_static("GET, OPTIONS"),
+            HeaderValue::from_static("GET, POST, OPTIONS"),
         );
     }
     response
@@ -311,6 +345,141 @@ async fn get_seeds(State(state): State<Arc<AgentState>>) -> Json<SeedsResponse> 
         ed25519_secret_hex: hex::encode(*state.ed25519_secret),
         ml_dsa_seed_hex: hex::encode(*state.ml_dsa_seed),
     })
+}
+
+/// `POST /v1/sign/challenge` -- sign the daemon's `/auth/challenge` nonce
+/// with both algorithms, proving possession of the enrolled operator key,
+/// without the raw seeds ever leaving this process. Step 2 of
+/// `docs/security/SIGNER_DELEGATION_DESIGN.md`'s PR sequence (Track A).
+///
+/// Local-caller authentication (Origin + `X-Agent-Token`) already happened
+/// in `auth_and_cors_middleware` before this handler runs -- the design
+/// doc's Track A steps 1-2. What follows is steps 3-9:
+/// 1. Reject an unrecognized `schema_version` or malformed `suite` rather
+///    than guessing at compatibility.
+/// 2. Decode the typed hex fields; reject anything that isn't exactly the
+///    expected length.
+/// 3. Check the target daemon fingerprint against native host-trust policy
+///    (`host_trust::HostTrustStore::check`) -- the destination-host
+///    authorization the design doc's "typed transcripts are not enough"
+///    section requires; this is a routine `/auth` challenge, so per the
+///    confirmation policy no *additional* per-request confirmation is
+///    added here beyond what `check()` itself already enforces for an
+///    unpinned or changed fingerprint. `check()` blocks on terminal I/O,
+///    so it runs via `spawn_blocking` rather than on an async worker
+///    thread.
+/// 4. Build the canonical transcript via `xenia_operator_proto`'s own
+///    `challenge_transcript` -- never a caller-supplied byte string, so a
+///    compromised browser can't use this endpoint as a blind signing
+///    oracle.
+/// 5. Sign with both required algorithms and return the envelope.
+async fn sign_challenge(
+    State(state): State<Arc<AgentState>>,
+    Json(req): Json<SignChallengeRequest>,
+) -> Result<Json<SignChallengeResponse>, (StatusCode, Json<AgentErrorResponse>)> {
+    if req.common.schema_version != xenia_operator_agent_proto::SCHEMA_VERSION {
+        return Err(bad_request(format!(
+            "unsupported schema_version {} (expected {})",
+            req.common.schema_version,
+            xenia_operator_agent_proto::SCHEMA_VERSION
+        )));
+    }
+    if req.common.suite != "standard" && req.common.suite != "highsec" {
+        return Err(bad_request(format!(
+            "suite must be \"standard\" or \"highsec\", got {:?}",
+            req.common.suite
+        )));
+    }
+    let daemon_fingerprint = decode_fixed_hex::<32>(&req.common.daemon_fingerprint_hex)
+        .ok_or_else(|| bad_request("daemon_fingerprint_hex must be 64 hex characters"))?;
+    let nonce = decode_fixed_hex::<32>(&req.nonce_hex)
+        .ok_or_else(|| bad_request("nonce_hex must be 64 hex characters"))?;
+
+    // Track A has no separate `host_alias` field (unlike Track B's
+    // `/v1/handshake/begin`, which names an intended host *before*
+    // authentication completes) -- the fingerprint itself is the pin key.
+    // This still gives the core TOFU property: a fingerprint the operator
+    // has never confirmed before requires confirmation; a rotated
+    // fingerprint for what the daemon claims is the same host looks like
+    // "first use of a new fingerprint" rather than a flagged rotation,
+    // since there's no stable name to rotate *against*. That distinction
+    // is exactly what Track B's alias-based pinning adds later.
+    let host_alias = req.common.daemon_fingerprint_hex.clone();
+    let suite = req.common.suite.clone();
+    let check_state = state.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        check_state
+            .host_trust
+            .lock()
+            .expect("host-trust mutex poisoned")
+            .check(&host_alias, &suite, daemon_fingerprint)
+    })
+    .await
+    .map_err(|_| internal_error("host-trust check task panicked"))?
+    .map_err(|e| {
+        let agent_err = e.to_agent_error();
+        (status_for(agent_err.code), Json(agent_err))
+    })?;
+    tracing::info!(
+        request_id = %req.common.request_id,
+        suite = %req.common.suite,
+        outcome = ?outcome,
+        "host trust check passed for /v1/sign/challenge"
+    );
+
+    let ed_pubkey = state.manager.identity_public_key_bytes();
+    let ml_dsa_pubkey = state.manager.ml_dsa_public_key_bytes();
+    let transcript = xenia_operator_proto::challenge_transcript(&nonce, &ed_pubkey, &ml_dsa_pubkey);
+    let ed_signature = state.manager.sign(&transcript);
+    let ml_dsa_signature = state.manager.sign_ml_dsa(&transcript);
+
+    Ok(Json(SignChallengeResponse {
+        ed25519_pubkey_hex: hex::encode(ed_pubkey),
+        ml_dsa_pubkey_hex: hex::encode(ml_dsa_pubkey),
+        ed_signature_hex: hex::encode(ed_signature.to_bytes()),
+        ml_dsa_signature_hex: hex::encode(ml_dsa_signature),
+    }))
+}
+
+fn bad_request(message: impl Into<String>) -> (StatusCode, Json<AgentErrorResponse>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(AgentErrorResponse {
+            code: AgentErrorCode::BadRequest,
+            message: message.into(),
+        }),
+    )
+}
+
+fn internal_error(message: impl Into<String>) -> (StatusCode, Json<AgentErrorResponse>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(AgentErrorResponse {
+            code: AgentErrorCode::Internal,
+            message: message.into(),
+        }),
+    )
+}
+
+/// Maps a typed [`AgentErrorCode`] to the HTTP status the console sees.
+/// The console should match on `code`, not this status, for behavior --
+/// this exists only to give tooling (logs, curl, browser devtools) a
+/// sane-looking status alongside the typed body.
+fn status_for(code: AgentErrorCode) -> StatusCode {
+    match code {
+        AgentErrorCode::HostNotTrusted => StatusCode::FORBIDDEN,
+        AgentErrorCode::ConfirmationRequired => StatusCode::PRECONDITION_REQUIRED,
+        AgentErrorCode::ConfirmationDeclined => StatusCode::FORBIDDEN,
+        AgentErrorCode::BadRequest => StatusCode::BAD_REQUEST,
+        AgentErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
+        AgentErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// Decode exactly `N` bytes of hex, rejecting anything shorter, longer, or
+/// malformed rather than silently truncating/padding.
+fn decode_fixed_hex<const N: usize>(s: &str) -> Option<[u8; N]> {
+    hex::decode(s.trim()).ok()?.try_into().ok()
 }
 
 /// Load the operator identity from `path`, or generate and persist a fresh
@@ -446,13 +615,39 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    fn temp_pin_store_path(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "xenia-operator-agent-main-test-{label}-{}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("pins.json")
+    }
+
     fn test_state(token: &str, allowed_origins: &[&str]) -> Arc<AgentState> {
+        test_state_with_host_trust(token, allowed_origins, true)
+    }
+
+    /// Like [`test_state`], but with control over
+    /// `allow_noninteractive_privileged_confirmation` -- tests exercising
+    /// `/v1/sign/challenge`'s host-trust gate need `true` (so `confirm()`
+    /// resolves deterministically without a real terminal) or `false`
+    /// (to exercise the fail-closed path) depending on what they check.
+    fn test_state_with_host_trust(
+        token: &str,
+        allowed_origins: &[&str],
+        allow_noninteractive_privileged: bool,
+    ) -> Arc<AgentState> {
+        let pin_store_path = temp_pin_store_path("state");
         Arc::new(AgentState {
             manager: HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]),
             ed25519_secret: Zeroizing::new([1u8; 32]),
             ml_dsa_seed: Zeroizing::new([2u8; 32]),
             token: token.to_string(),
             allowed_origins: allowed_origins.iter().map(|s| s.to_string()).collect(),
+            host_trust: StdMutex::new(
+                HostTrustStore::load(pin_store_path, allow_noninteractive_privileged).unwrap(),
+            ),
         })
     }
 
@@ -515,5 +710,139 @@ mod tests {
                 .unwrap(),
             "http://localhost:8134"
         );
+    }
+
+    async fn post_sign_challenge(
+        app: Router,
+        token: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        use tower::ServiceExt;
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/sign/challenge")
+            .header("origin", "http://localhost:8134")
+            .header("x-agent-token", token)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, json)
+    }
+
+    fn challenge_request_body(overrides: serde_json::Value) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "schema_version": xenia_operator_agent_proto::SCHEMA_VERSION,
+            "daemon_fingerprint_hex": "aa".repeat(32),
+            "suite": "standard",
+            "request_id": "test-req-1",
+            "nonce_hex": "bb".repeat(32),
+        });
+        if let (Some(body_map), Some(override_map)) = (body.as_object_mut(), overrides.as_object())
+        {
+            for (k, v) in override_map {
+                body_map.insert(k.clone(), v.clone());
+            }
+        }
+        body
+    }
+
+    #[tokio::test]
+    async fn sign_challenge_trusts_a_new_daemon_on_first_use_and_returns_valid_signatures() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let (status, json) =
+            post_sign_challenge(app, "secret", challenge_request_body(serde_json::json!({}))).await;
+        assert_eq!(status, StatusCode::OK, "body: {json}");
+
+        let resp: SignChallengeResponse = serde_json::from_value(json).unwrap();
+        let expected_manager = HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]);
+        assert_eq!(
+            resp.ed25519_pubkey_hex,
+            hex::encode(expected_manager.identity_public_key_bytes())
+        );
+        assert_eq!(
+            resp.ml_dsa_pubkey_hex,
+            hex::encode(expected_manager.ml_dsa_public_key_bytes())
+        );
+
+        // The signature must actually verify over the canonical transcript
+        // the agent is supposed to have built itself -- not just be present.
+        let nonce: [u8; 32] = decode_fixed_hex(&"bb".repeat(32)).unwrap();
+        let ed_pubkey = expected_manager.identity_public_key_bytes();
+        let ml_dsa_pubkey = expected_manager.ml_dsa_public_key_bytes();
+        let transcript =
+            xenia_operator_proto::challenge_transcript(&nonce, &ed_pubkey, &ml_dsa_pubkey);
+        let ed_sig_bytes: [u8; 64] = decode_fixed_hex(&resp.ed_signature_hex).unwrap();
+        let ed_sig = ed25519_dalek::Signature::from_bytes(&ed_sig_bytes);
+        HandshakeManager::verify(
+            &expected_manager.identity_public_key(),
+            &transcript,
+            &ed_sig,
+        )
+        .expect("agent's Ed25519 signature must verify over the challenge transcript");
+    }
+
+    #[tokio::test]
+    async fn sign_challenge_rejects_an_unsupported_schema_version() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let body = challenge_request_body(serde_json::json!({ "schema_version": 999 }));
+        let (status, json) = post_sign_challenge(app, "secret", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
+        assert_eq!(json["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn sign_challenge_rejects_an_unrecognized_suite() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let body = challenge_request_body(serde_json::json!({ "suite": "quantum" }));
+        let (status, json) = post_sign_challenge(app, "secret", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
+        assert_eq!(json["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn sign_challenge_rejects_malformed_hex_fields() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let body = challenge_request_body(serde_json::json!({ "nonce_hex": "not-hex" }));
+        let (status, json) = post_sign_challenge(app, "secret", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
+        assert_eq!(json["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn sign_challenge_fails_closed_when_a_new_host_needs_confirmation_and_none_is_available()
+    {
+        let state = test_state_with_host_trust("secret", &["http://localhost:8134"], false);
+        let app = build_router(state);
+        let (status, json) =
+            post_sign_challenge(app, "secret", challenge_request_body(serde_json::json!({}))).await;
+        assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "body: {json}");
+        assert_eq!(json["code"], "confirmation_required");
+    }
+
+    #[tokio::test]
+    async fn sign_challenge_requires_origin_and_token_like_every_other_route() {
+        use tower::ServiceExt;
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/sign/challenge")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                challenge_request_body(serde_json::json!({})).to_string(),
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }
