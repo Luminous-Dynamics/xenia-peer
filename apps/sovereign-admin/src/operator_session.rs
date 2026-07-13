@@ -2,46 +2,73 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! Operator-RBAC ceremony — the **browser side** of `OPERATOR_RBAC_PLAN.md`
-//! Phase 5. This is the console's half of the exact flow the daemon already
-//! enforces:
+//! Phase 5, revised by Step 5 of
+//! `docs/security/SIGNER_DELEGATION_DESIGN.md`. This is the console's half
+//! of the exact flow the daemon already enforces:
 //!
 //! ```text
-//!   POST /auth/challenge  -> nonce
-//!   sign  challenge_transcript(nonce, ed_pk, ml_pk)  with BOTH keys
-//!   POST /auth/verify     -> daemon-signed, role-scoped token
-//!   sign  consent_action_transcript(action, session_id, token_nonce)  per action
+//!   GET  /auth/daemon-identity -> DaemonIdentityCertificate
+//!   POST /auth/challenge       -> host-attested nonce
+//!   ask the local agent to sign the challenge (both keys) -- it verifies
+//!     the certificate + attestation itself; the raw seeds never reach
+//!     this process
+//!   POST /auth/verify          -> daemon-signed, role-scoped token
+//!   ask the local agent to sign consent_action_transcript(action,
+//!     session_id, token_nonce) per action, relaying the full session
+//!     token so the agent can verify it
 //!   send  { token, action, action_signature }  on the consent socket
 //! ```
 //!
-//! Correctness rests on two shared crates, so nothing can drift from the
-//! daemon:
-//! - [`xenia_operator_proto`] provides the *exact* signed transcripts + role
-//!   model the daemon verifies against.
-//! - [`xenia_handshake::HandshakeManager`] provides the *same* Ed25519 +
-//!   ML-DSA-65 keygen/signing the daemon's enrolled operators use — so a
-//!   browser-produced signature is byte-identical to what the daemon expects.
-//!   We only ever call its keygen/sign methods (never the `SystemTime`-using
-//!   `establish()` paths), so it is wasm-safe at runtime.
+//! **Scope note**: this is Track A only (the plain-HTTP `/auth/*`
+//! ceremony). The sealed-channel handshake ("Track B",
+//! `crate::sealed_consent`/`crate::pages::consent`'s sealed path) still
+//! drives its own PQC handshake locally using [`OperatorIdentity::seeds`]
+//! -- that migration is a separate, later step. [`OperatorIdentity`] is
+//! therefore still needed (and still fetches seeds via
+//! [`crate::agent_client::fetch_seeds`]) for that path, and for displaying
+//! the operator's enrollment record/fingerprint; it's simply no longer
+//! used for *signing* anything in this module.
 //!
-//! The identity's seeds are **not** persisted by this module (they used to
-//! be, in `localStorage` -- plaintext hex, readable by an XSS bug, a
-//! malicious browser extension, or a compromised same-origin dependency).
-//! They now come from [`crate::agent_client`], which fetches them from a
-//! local native agent process into memory once per page session. See that
-//! module's doc comment and `docs/security/OPERATOR_SECURITY_MODEL.md` §9
-//! for the current scope and what's still deferred.
+//! Correctness rests on shared crates, so nothing can drift from the
+//! daemon or the agent:
+//! - [`xenia_operator_proto`] provides the *exact* signed transcripts,
+//!   role model, and [`xenia_operator_proto::DaemonIdentityCertificate`]
+//!   shape the daemon and agent both use.
+//! - [`xenia_operator_agent_proto`] provides the *exact* `/v1/sign/*`
+//!   request/response shapes the agent parses -- see
+//!   `apps/xenia-operator-agent`'s `daemon_evidence` module for what it
+//!   verifies before signing anything.
+//! - [`xenia_handshake::HandshakeManager`] provides the *same* Ed25519 +
+//!   ML-DSA-65 keygen the daemon's enrolled operators use, still needed
+//!   here for [`OperatorIdentity`]'s non-signing uses (display,
+//!   `.seeds()` for Track B). We only ever call its keygen methods (never
+//!   the `SystemTime`-using `establish()` paths), so it is wasm-safe at
+//!   runtime.
 
 use serde::Deserialize;
 use zeroize::Zeroize;
 
 use xenia_handshake::HandshakeManager;
+use xenia_operator_agent_proto::{
+    SignChallengeRequest, SignConsentActionRequest, SignRequestCommon, SignRevokeRequest,
+    SignedTokenDto,
+};
 use xenia_operator_proto::{
-    challenge_transcript, consent_action_transcript, revoke_operator_transcript, ConsentAction,
-    OperatorAction, OperatorEnrollmentRecord, OperatorRole,
+    ConsentAction, DaemonIdentityCertificate, OperatorAction, OperatorEnrollmentRecord,
+    OperatorRole,
 };
 use xenia_wire::handshake_highsec::{
-    derive_ml_dsa_87_seed_from_ed25519_secret, ViewerHandshakeHighSec,
+    ViewerHandshakeHighSec, derive_ml_dsa_87_seed_from_ed25519_secret,
 };
+
+/// Track A (the plain-HTTP `/auth/*` ceremony -- challenge/consent-action/
+/// revoke) is suite-independent: the daemon's host-identity certificate
+/// vouches for the HTTP-auth key regardless of which sealed-channel suite
+/// (if any) is later negotiated -- there's only one host identity. This is
+/// just a stable pin-store key for Track A; it is *not* the same knob as
+/// `DaemonConfig::high_security`, which selects an actual different suite
+/// for Track B's sealed channel.
+const TRACK_A_SUITE: &str = "standard";
 
 /// A stable operator identity: Ed25519 + ML-DSA-65 (standard suite) plus a
 /// *derived* ML-DSA-87 identity (high-security suite). Wraps a
@@ -171,8 +198,9 @@ impl OperatorIdentity {
 
 /// A daemon-issued, role-scoped session token. The raw `token_json` is
 /// re-embedded verbatim into every consent request (the daemon re-verifies its
-/// own signature); `role` and `token_nonce` are parsed out so the console can
-/// gate the UI and bind per-action signatures.
+/// own signature); the other fields are parsed out so the console can gate
+/// the UI and (via [`Self::to_signed_token_dto`]) ask the agent to verify
+/// and sign against this exact token.
 #[derive(Clone)]
 pub struct OperatorSession {
     /// The enrolled operator id the daemon attributed this session to.
@@ -181,7 +209,9 @@ pub struct OperatorSession {
     pub role: OperatorRole,
     /// Token expiry (unix secs) — the console stops using it past this.
     pub expires_at: u64,
+    issued_at: u64,
     token_nonce: [u8; 16],
+    signature_hex: String,
     token_json: serde_json::Value,
 }
 
@@ -200,49 +230,95 @@ impl OperatorSession {
         let now_secs = (js_sys::Date::now() / 1000.0) as u64;
         now_secs < self.expires_at
     }
+
+    /// This session's token in the shape the agent's `/v1/sign/*` endpoints
+    /// expect, so it can verify the daemon's own signature over it before
+    /// trusting the `token_nonce` bound into a consent-action/revoke
+    /// transcript. Built from fields already parsed at `authenticate()`
+    /// time -- infallible, no re-parsing of `token_json`.
+    fn to_signed_token_dto(&self) -> SignedTokenDto {
+        SignedTokenDto {
+            operator_id: self.operator_id.clone(),
+            role: self.role,
+            issued_at: self.issued_at,
+            expires_at: self.expires_at,
+            token_nonce_hex: hex::encode(self.token_nonce),
+            signature_hex: self.signature_hex.clone(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
 struct ChallengeDto {
     nonce: String,
+    host_ed_attestation_hex: String,
+    host_ml_dsa_attestation_hex: String,
 }
 
-// Only the fields the console needs; serde ignores the rest of the token JSON,
-// which is preserved intact in `token_json` and re-sent verbatim.
+// Every field the console needs, including the ones (`issued_at`,
+// `signature`) only [`OperatorSession::to_signed_token_dto`] uses -- the
+// rest of the token JSON (there is none beyond these) is preserved intact
+// in `token_json` and re-sent verbatim.
 #[derive(Deserialize)]
 struct TokenFields {
     operator_id: String,
     role: OperatorRole,
+    issued_at: u64,
     expires_at: u64,
     token_nonce: String,
+    signature: String,
 }
 
-/// Run the full challenge → sign(both keys) → verify ceremony against the
-/// daemon's `/auth/*` routes at `endpoint`, returning a role-scoped session.
+/// Run the full challenge → agent-sign → verify ceremony against the
+/// daemon's `/auth/*` routes at `endpoint`, returning a role-scoped
+/// session. The operator's seeds never reach this process: the agent (at
+/// `agent_url`, authenticated with `agent_token`) verifies the daemon's
+/// identity evidence and signs on the console's behalf.
 pub async fn authenticate(
     endpoint: &str,
-    id: &OperatorIdentity,
+    agent_url: &str,
+    agent_token: &str,
 ) -> Result<OperatorSession, String> {
     let base = endpoint.trim_end_matches('/');
 
-    // 1. Ask for a fresh single-use challenge.
-    let chal: ChallengeDto = post_json(&format!("{base}/auth/challenge"), "{}".to_string()).await?;
-    let nonce = decode32(&chal.nonce).map_err(|_| "daemon sent a malformed nonce".to_string())?;
+    // 1. Fetch the daemon's host-identity delegation certificate -- the
+    //    evidence the agent verifies (and computes the fingerprint from)
+    //    before it will sign anything. See
+    //    docs/security/SIGNER_DELEGATION_DESIGN.md's "typed transcripts
+    //    are not enough" section for why a bare fingerprint isn't enough.
+    let cert = fetch_daemon_certificate(base).await?;
 
-    // 2. Sign the exact transcript the daemon will reconstruct, with BOTH keys.
-    let transcript = challenge_transcript(&nonce, &id.ed_pubkey, &id.ml_pubkey);
-    let ed_sig = id.hm.sign(&transcript).to_bytes();
-    let ml_sig = id.hm.sign_ml_dsa(&transcript);
+    // 2. Ask for a fresh, host-attested single-use challenge.
+    let chal: ChallengeDto = post_json(&format!("{base}/auth/challenge"), "{}".to_string()).await?;
+
+    // 3. Ask the local agent to sign it. The agent verifies `cert` and the
+    //    attestation itself, then signs with both algorithms.
+    let signed = crate::agent_client::sign_challenge(
+        agent_url,
+        agent_token,
+        &SignChallengeRequest {
+            common: SignRequestCommon {
+                schema_version: xenia_operator_agent_proto::SCHEMA_VERSION,
+                daemon_certificate: cert,
+                suite: TRACK_A_SUITE.to_string(),
+                request_id: request_id(),
+            },
+            nonce_hex: chal.nonce.clone(),
+            host_ed_attestation_hex: chal.host_ed_attestation_hex.clone(),
+            host_ml_dsa_attestation_hex: chal.host_ml_dsa_attestation_hex.clone(),
+        },
+    )
+    .await?;
+
+    // 4. Exchange the signed response for a daemon-signed, role-scoped token.
     let verify_body = serde_json::json!({
         "nonce": chal.nonce,
-        "ed_pubkey": id.ed_pubkey_hex(),
-        "ml_dsa_pubkey": id.ml_pubkey_hex(),
-        "ed_signature": hex::encode(ed_sig),
-        "ml_dsa_signature": hex::encode(ml_sig),
+        "ed_pubkey": signed.ed25519_pubkey_hex,
+        "ml_dsa_pubkey": signed.ml_dsa_pubkey_hex,
+        "ed_signature": signed.ed_signature_hex,
+        "ml_dsa_signature": signed.ml_dsa_signature_hex,
     })
     .to_string();
-
-    // 3. Exchange the signed response for a daemon-signed, role-scoped token.
     let token_json: serde_json::Value =
         post_json(&format!("{base}/auth/verify"), verify_body).await?;
     let fields: TokenFields =
@@ -254,7 +330,9 @@ pub async fn authenticate(
         operator_id: fields.operator_id,
         role: fields.role,
         expires_at: fields.expires_at,
+        issued_at: fields.issued_at,
         token_nonce,
+        signature_hex: fields.signature,
         token_json,
     })
 }
@@ -262,52 +340,102 @@ pub async fn authenticate(
 /// Build the authenticated consent-action JSON the daemon parses on the consent
 /// socket: `{ token, action, action_signature }`. The per-action Ed25519
 /// signature binds the action to the exact session and token, so a captured
-/// signature can't be replayed for a different action/session/token.
-pub fn build_consent_request(
-    id: &OperatorIdentity,
+/// signature can't be replayed for a different action/session/token. The
+/// agent verifies `session`'s token before signing -- see
+/// [`OperatorSession::to_signed_token_dto`].
+pub async fn build_consent_request(
+    endpoint: &str,
+    agent_url: &str,
+    agent_token: &str,
     session: &OperatorSession,
     action: ConsentAction,
     session_id: &[u8; 16],
-) -> String {
-    let transcript = consent_action_transcript(action, session_id, &session.token_nonce);
-    let sig = id.hm.sign(&transcript).to_bytes();
-    serde_json::json!({
+) -> Result<String, String> {
+    let base = endpoint.trim_end_matches('/');
+    let cert = fetch_daemon_certificate(base).await?;
+    let signed = crate::agent_client::sign_consent_action(
+        agent_url,
+        agent_token,
+        &SignConsentActionRequest {
+            common: SignRequestCommon {
+                schema_version: xenia_operator_agent_proto::SCHEMA_VERSION,
+                daemon_certificate: cert,
+                suite: TRACK_A_SUITE.to_string(),
+                request_id: request_id(),
+            },
+            action,
+            session_id_hex: hex::encode(session_id),
+            token: session.to_signed_token_dto(),
+        },
+    )
+    .await?;
+    Ok(serde_json::json!({
         "token": session.token_json,
         "action": action.as_str(),
-        "action_signature": hex::encode(sig),
+        "action_signature": signed.ed_signature_hex,
     })
-    .to_string()
+    .to_string())
 }
 
 /// Build the authenticated `POST /operator/revoke` body the daemon parses:
 /// `{ token, target_operator_id, action_signature }`. The per-action Ed25519
 /// signature is over the shared `revoke_operator_transcript(target,
-/// token_nonce)`, so it binds this revocation to the exact target and the
-/// admin's current token — byte-identical to what the daemon verifies. Only an
-/// Admin session's token will be authorized daemon-side.
-pub fn build_revoke_request(
-    id: &OperatorIdentity,
+/// token_nonce)` -- built by the agent, which also verifies `session`'s
+/// token first (see [`OperatorSession::to_signed_token_dto`]) -- so it binds
+/// this revocation to the exact target and the admin's current token,
+/// byte-identical to what the daemon verifies. Only an Admin session's
+/// token will be authorized daemon-side. Privileged: the agent runs its own
+/// mandatory native confirmation for this action regardless of how
+/// well-trusted the daemon already is.
+pub async fn build_revoke_request(
+    endpoint: &str,
+    agent_url: &str,
+    agent_token: &str,
     session: &OperatorSession,
     target_operator_id: &str,
-) -> String {
-    let transcript = revoke_operator_transcript(target_operator_id, &session.token_nonce);
-    let sig = id.hm.sign(&transcript).to_bytes();
-    serde_json::json!({
+) -> Result<String, String> {
+    let base = endpoint.trim_end_matches('/');
+    let cert = fetch_daemon_certificate(base).await?;
+    let signed = crate::agent_client::sign_revoke(
+        agent_url,
+        agent_token,
+        &SignRevokeRequest {
+            common: SignRequestCommon {
+                schema_version: xenia_operator_agent_proto::SCHEMA_VERSION,
+                daemon_certificate: cert,
+                suite: TRACK_A_SUITE.to_string(),
+                request_id: request_id(),
+            },
+            target_operator_id: target_operator_id.to_string(),
+            token: session.to_signed_token_dto(),
+        },
+    )
+    .await?;
+    Ok(serde_json::json!({
         "token": session.token_json,
         "target_operator_id": target_operator_id,
-        "action_signature": hex::encode(sig),
+        "action_signature": signed.ed_signature_hex,
     })
-    .to_string()
+    .to_string())
+}
+
+/// Fetch the daemon's host-identity delegation certificate. No local
+/// caching (deliberately -- see the Step 5 design note): each of the three
+/// operations above is human-paced (sign-in, an approve/deny/revoke
+/// click), so one extra small `GET` per call is cheap and avoids any
+/// cache-invalidation-on-endpoint-change bug.
+async fn fetch_daemon_certificate(base: &str) -> Result<DaemonIdentityCertificate, String> {
+    get_json(&format!("{base}/auth/daemon-identity")).await
+}
+
+/// A caller-generated id for correlating a `/v1/sign/*` request through
+/// logs -- not itself a security boundary, so a UUID is sufficient (no
+/// need for a CSPRNG-sourced value here specifically).
+fn request_id() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 // ─── small helpers ───────────────────────────────────────────────────────────
-
-fn decode32(s: &str) -> Result<[u8; 32], ()> {
-    hex::decode(s.trim())
-        .ok()
-        .and_then(|b| b.try_into().ok())
-        .ok_or(())
-}
 
 fn decode16(s: &str) -> Result<[u8; 16], ()> {
     hex::decode(s.trim())
@@ -324,6 +452,22 @@ async fn post_json<T: for<'de> Deserialize<'de>>(url: &str, body: String) -> Res
         .header("content-type", "application/json")
         .body(body)
         .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| format!("request to {url} failed: {e}"))?;
+    if !resp.ok() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("{status}: {text}"));
+    }
+    resp.json::<T>().await.map_err(|e| e.to_string())
+}
+
+/// GET `url` and deserialize the JSON response. Mirrors [`post_json`]'s
+/// error handling.
+async fn get_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<T, String> {
+    use gloo_net::http::Request;
+    let resp = Request::get(url)
         .send()
         .await
         .map_err(|e| format!("request to {url} failed: {e}"))?;

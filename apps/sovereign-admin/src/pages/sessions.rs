@@ -93,20 +93,28 @@ pub fn SessionsPage() -> impl IntoView {
                 .set("No operator session — sign in as an operator first.".to_string());
             return;
         };
-        let Some(id) = identity_state.get_untracked().identity() else {
-            set_revoke_status.set(
-                "Operator agent identity isn't ready -- check the agent settings below."
-                    .to_string(),
-            );
-            return;
-        };
-        let body = build_revoke_request(&id, &sess, &target);
-        let url = format!(
-            "{}/operator/revoke",
-            config.endpoint.get_untracked().trim_end_matches('/')
-        );
+        let endpoint = config.endpoint.get_untracked();
+        let agent_url = agent_config.agent_url.get_untracked();
+        let agent_token = agent_config.agent_token.get_untracked();
+        let url = format!("{}/operator/revoke", endpoint.trim_end_matches('/'));
         set_revoke_status.set(format!("Revoking '{target}'…"));
         spawn_local(async move {
+            // `build_revoke_request` no longer needs `OperatorIdentity` --
+            // the local agent holds the operator's identity, verifies
+            // `sess`'s token, and signs on the console's behalf, running
+            // its own mandatory native confirmation for this privileged
+            // action (see `crate::operator_session::build_revoke_request`).
+            let body =
+                match build_revoke_request(&endpoint, &agent_url, &agent_token, &sess, &target)
+                    .await
+                {
+                    Ok(body) => body,
+                    Err(e) => {
+                        set_revoke_status
+                            .set(format!("Failed to build signed revoke request: {e}"));
+                        return;
+                    }
+                };
             let sent = match Request::post(&url)
                 .header("content-type", "application/json")
                 .body(body)
