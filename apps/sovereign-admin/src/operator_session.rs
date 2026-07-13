@@ -20,14 +20,16 @@
 //! ```
 //!
 //! **Scope note**: this is Track A only (the plain-HTTP `/auth/*`
-//! ceremony). The sealed-channel handshake ("Track B",
-//! `crate::sealed_consent`/`crate::pages::consent`'s sealed path) still
-//! drives its own PQC handshake locally using [`OperatorIdentity::seeds`]
-//! -- that migration is a separate, later step. [`OperatorIdentity`] is
-//! therefore still needed (and still fetches seeds via
-//! [`crate::agent_client::fetch_seeds`]) for that path, and for displaying
-//! the operator's enrollment record/fingerprint; it's simply no longer
-//! used for *signing* anything in this module.
+//! ceremony). Since Step 6 of `docs/security/SIGNER_DELEGATION_DESIGN.md`
+//! landed, the sealed-channel handshake ("Track B",
+//! `crate::sealed_consent`) no longer needs the operator's raw seeds
+//! either -- it relays the handshake's own wire bytes through the local
+//! agent instead. [`OperatorIdentity`] therefore no longer retains seeds at
+//! all past the moment [`OperatorIdentity::from_seeds`] derives its public
+//! keys from them; it's kept purely for *display* (the enrollment
+//! record/fingerprint shown on the Sessions page), fed by
+//! [`crate::agent_client::fetch_seeds`], and is no longer used for
+//! *signing* or *handshaking* anything in this crate.
 //!
 //! Correctness rests on shared crates, so nothing can drift from the
 //! daemon or the agent:
@@ -40,10 +42,9 @@
 //!   verifies before signing anything.
 //! - [`xenia_handshake::HandshakeManager`] provides the *same* Ed25519 +
 //!   ML-DSA-65 keygen the daemon's enrolled operators use, still needed
-//!   here for [`OperatorIdentity`]'s non-signing uses (display,
-//!   `.seeds()` for Track B). We only ever call its keygen methods (never
-//!   the `SystemTime`-using `establish()` paths), so it is wasm-safe at
-//!   runtime.
+//!   here for [`OperatorIdentity`]'s non-signing uses (display). We only
+//!   ever call its keygen methods (never the `SystemTime`-using
+//!   `establish()` paths), so it is wasm-safe at runtime.
 
 use serde::Deserialize;
 use zeroize::Zeroize;
@@ -82,27 +83,25 @@ const TRACK_A_SUITE: &str = "standard";
 /// and [`Self::enrollment_record_json`] can enroll it without a second key
 /// file or a second enrollment ceremony.
 ///
-/// `ed_seed`/`ml_seed` are zeroized on drop -- best-effort hygiene, not a
-/// guarantee: `hm` (the [`HandshakeManager`]) holds its own internal copy
-/// of the derived signing keys, which this does not reach, and Rust may
-/// have left other transient stack copies behind before this value was
-/// even constructed (e.g. in the seed tuple `Self::from_seeds` was called
-/// with). See `docs/security/OPERATOR_SECURITY_MODEL.md` §9 for the honest
-/// scope of what's protected today.
+/// Unlike an earlier revision of this type, `OperatorIdentity` does not
+/// retain the raw seeds past construction: [`Self::from_seeds`] zeroizes its
+/// local copies as soon as every derivation that needs them is done (see its
+/// doc comment). Since Step 6 of `docs/security/SIGNER_DELEGATION_DESIGN.md`
+/// landed, nothing in this crate needs the raw seeds again after that point
+/// -- the sealed-channel handshake now relays wire bytes through the local
+/// agent instead of driving `ViewerHandshake`/`ViewerHandshakeHighSec` here.
+/// This is best-effort hygiene, not a guarantee: `hm` (the
+/// [`HandshakeManager`]) holds its own internal copy of the derived signing
+/// keys, which this does not reach, and Rust may have left other transient
+/// stack copies behind before `from_seeds` was even called (e.g. in
+/// [`crate::agent_client::fetch_seeds`]'s decode step). See
+/// `docs/security/OPERATOR_SECURITY_MODEL.md` §9 for the honest scope of
+/// what's protected today.
 pub struct OperatorIdentity {
     hm: HandshakeManager,
     ed_pubkey: [u8; 32],
     ml_pubkey: Vec<u8>,
     ml87_pubkey: Vec<u8>,
-    ed_seed: [u8; 32],
-    ml_seed: [u8; 32],
-}
-
-impl Drop for OperatorIdentity {
-    fn drop(&mut self) {
-        self.ed_seed.zeroize();
-        self.ml_seed.zeroize();
-    }
 }
 
 impl OperatorIdentity {
@@ -111,7 +110,10 @@ impl OperatorIdentity {
     /// the seeds, so the returned public keys (and hence the enrollment
     /// fingerprint) are stable across page reloads as long as the agent's
     /// identity file doesn't change.
-    pub fn from_seeds(ed_seed: [u8; 32], ml_seed: [u8; 32]) -> Self {
+    ///
+    /// Zeroizes its local seed copies before returning -- nothing this type
+    /// exposes needs them again; see the struct doc comment.
+    pub fn from_seeds(mut ed_seed: [u8; 32], mut ml_seed: [u8; 32]) -> Self {
         let hm = HandshakeManager::from_identity_seeds(ed_seed, ml_seed);
         let ed_pubkey = hm.identity_public_key_bytes();
         let ml_pubkey = hm.ml_dsa_public_key_bytes().to_vec();
@@ -120,28 +122,20 @@ impl OperatorIdentity {
         // that's needed to reproduce the same high-security identity every
         // time. The `ed_seed`/`ml87_seed` pair are both always exactly 32
         // bytes here, so `from_identity` cannot actually fail.
-        let ml87_seed = derive_ml_dsa_87_seed_from_ed25519_secret(&ed_seed);
+        let mut ml87_seed = derive_ml_dsa_87_seed_from_ed25519_secret(&ed_seed);
         let ml87_pubkey = ViewerHandshakeHighSec::from_identity(&ed_seed, &ml87_seed)
             .expect("32-byte seeds always produce a valid high-security identity")
             .ml_dsa_public_key_bytes()
             .to_vec();
+        ed_seed.zeroize();
+        ml_seed.zeroize();
+        ml87_seed.zeroize();
         Self {
             hm,
             ed_pubkey,
             ml_pubkey,
             ml87_pubkey,
-            ed_seed,
-            ml_seed,
         }
-    }
-
-    /// The persisted identity seeds (Ed25519 secret, ML-DSA-65 seed). Used to
-    /// drive the sealed operator channel's PQC handshake with *this* enrolled
-    /// identity, so the handshake authenticates the operator (see
-    /// [`crate::sealed_consent`]). These never leave the browser except as the
-    /// public keys they derive.
-    pub fn seeds(&self) -> ([u8; 32], [u8; 32]) {
-        (self.ed_seed, self.ml_seed)
     }
 
     /// The Ed25519 public key, hex — what an admin enrolls in the daemon's

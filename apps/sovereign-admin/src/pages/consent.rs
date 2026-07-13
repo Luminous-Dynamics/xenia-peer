@@ -20,7 +20,7 @@ use leptos::task::spawn_local;
 use xenia_operator_proto::ConsentAction;
 
 use crate::agent_client::AgentConfig;
-use crate::app::{OperatorIdentityCtx, OperatorSessionCtx};
+use crate::app::OperatorSessionCtx;
 use crate::context::{daemon_config_context, missing_context_view};
 use crate::operator_session::build_consent_request;
 
@@ -46,7 +46,6 @@ fn display_scope(prompt: &str) -> String {
 #[component]
 pub fn ConsentModal() -> impl IntoView {
     let session = use_context::<OperatorSessionCtx>();
-    let identity_state = use_context::<OperatorIdentityCtx>();
     let Ok(config) = daemon_config_context() else {
         return missing_context_view("DaemonConfig").into_any();
     };
@@ -88,32 +87,15 @@ pub fn ConsentModal() -> impl IntoView {
     // action a non-`--require-operator-auth` daemon accepts. When the operator's
     // daemon runs `--operator-sealed`, the *same* payload is sealed over the PQC
     // handshake channel instead of sent plaintext (the daemon decodes it
-    // identically after opening the envelope).
+    // identically after opening the envelope) -- driven by the local agent
+    // (`crate::sealed_consent::drive_agent_handshake`) rather than raw seeds
+    // held here, so this component no longer needs the operator identity at
+    // all.
     let decide = move |action: ConsentAction| {
         let prompt = consent_req.get_untracked();
         let sess = session.and_then(|sig| sig.get_untracked());
         let session_id = prompt.as_deref().and_then(parse_session_id);
         let sealed = config.use_sealed_channel.get_untracked();
-
-        // The identity (the seeds) is only needed to drive the
-        // sealed-channel handshake now -- the signed, non-sealed consent
-        // request no longer needs it at all; the local agent holds the
-        // operator's identity and signs on the console's behalf (see
-        // `crate::operator_session::build_consent_request`).
-        let seeds = if sealed {
-            match identity_state.and_then(|sig| sig.get_untracked().identity()) {
-                Some(id) => Some(id.seeds()),
-                None => {
-                    leptos::logging::error!(
-                        "sealed consent needs the operator identity but the agent isn't \
-                         connected -- check the agent settings on the Sessions page"
-                    );
-                    return;
-                }
-            }
-        } else {
-            None
-        };
 
         let endpoint = config.endpoint.get_untracked();
         let agent_url = agent_config.agent_url.get_untracked();
@@ -149,19 +131,19 @@ pub fn ConsentModal() -> impl IntoView {
                 _ => action.as_str().to_string(),
             };
             if sealed {
-                let (ed_seed, ml_seed) = seeds.expect("sealed => seeds is Some");
                 let result = if high_security {
                     crate::sealed_consent::send_sealed_consent_highsec(
                         &sealed_url,
-                        &ed_seed,
+                        &agent_url,
+                        &agent_token,
                         payload.as_bytes(),
                     )
                     .await
                 } else {
                     crate::sealed_consent::send_sealed_consent(
                         &sealed_url,
-                        &ed_seed,
-                        &ml_seed,
+                        &agent_url,
+                        &agent_token,
                         payload.as_bytes(),
                     )
                     .await
