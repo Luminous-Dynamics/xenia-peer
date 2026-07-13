@@ -267,6 +267,18 @@ impl HostTrustStore {
     /// terminal confirmation showing exactly `host_alias`, `suite`, and
     /// the fingerprint(s) involved -- generated from these parameters, not
     /// from anything the caller supplies as free text.
+    ///
+    /// `host_alias` is expected to be a stable, caller-normalized label for
+    /// *where* this daemon is (e.g. its endpoint URL) -- not the fingerprint
+    /// itself. An earlier revision pinned by `hex::encode(fingerprint)`
+    /// directly, which meant a changed fingerprint always looked like a
+    /// brand-new host rather than "the daemon at this known slot changed
+    /// identity" -- the [`PinOutcome::Rotated`]/[`HostTrustError::FingerprintChanged`]
+    /// path was effectively unreachable in practice, since the old and new
+    /// keys never collided. `host_alias` fixes that by staying fixed across
+    /// a legitimate or illegitimate fingerprint change; see
+    /// `apps/xenia-operator-agent/src/main.rs`'s `normalize_daemon_endpoint`
+    /// for how the real callers derive it.
     pub fn check(
         &mut self,
         host_alias: &str,
@@ -281,7 +293,7 @@ impl HostTrustStore {
                     self.allow_noninteractive_privileged,
                     "Daemon identity changed",
                     &[
-                        ("host", host_alias.to_string()),
+                        ("daemon endpoint", host_alias.to_string()),
                         ("suite", suite.to_string()),
                         ("previously pinned fingerprint", hex::encode(pinned)),
                         ("newly presented fingerprint", hex::encode(fingerprint)),
@@ -306,9 +318,9 @@ impl HostTrustStore {
             None => {
                 let confirmed = confirm(
                     self.allow_noninteractive_privileged,
-                    "Trust this host for the first time?",
+                    "Trust this daemon for the first time?",
                     &[
-                        ("host", host_alias.to_string()),
+                        ("daemon endpoint", host_alias.to_string()),
                         ("suite", suite.to_string()),
                         ("fingerprint", hex::encode(fingerprint)),
                     ],

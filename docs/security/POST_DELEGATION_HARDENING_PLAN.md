@@ -17,8 +17,8 @@ credible pre-production system.
 
 ## Recommended PR order
 
-1. **Transactional native pin storage with failure injection.** ⬅ in progress
-2. **Stable endpoint/daemon scope for native host pins.**
+1. **Transactional native pin storage with failure injection.** ✅ done
+2. **Stable endpoint/daemon scope for native host pins.** ✅ done
 3. **Remove the legacy HMAC ledger/admin path.**
 4. **Replace the persistent pairing token with short-lived agent sessions.**
 5. **Resolve the hybrid-versus-classical HTTP authorization profile.**
@@ -64,6 +64,30 @@ instance ID from the signed certificate) + suite. The fingerprint stays the
 verified identity value; the scope is the slot identity continuity is
 checked against. First-use confirmation should show endpoint, daemon ID,
 suite, and fingerprint together.
+
+**Done.** Added `daemon_endpoint: String` to `SignRequestCommon` and
+`HandshakeRequestCommon` (`xenia-operator-agent-proto`, schema version bumped
+2 -> 3) -- the caller's own belief about which daemon it's talking to (the
+console's configured endpoint / sealed-channel WS URL), used *only* as the
+pin-store scope key, never as identity evidence; the agent normalizes it
+(`normalize_daemon_endpoint`: trim + lowercase) before using it, never
+trusting the caller's own normalization. `enforce_host_trust` (Track A) and
+`handshake_begin`/`handshake_finish` (Track B) now scope
+`check_host_trust_fingerprint` by this normalized endpoint instead of
+`hex::encode(fingerprint)`. Track B's pending-handshake state
+(`handshake_state.rs`) carries `daemon_endpoint` from `/begin` through to
+`/finish` (`HandshakeState::take` now returns a `TakenHandshake { suite,
+daemon_endpoint }`) since the fingerprint only becomes known at `finish`
+time. `host_trust.rs`'s confirmation prompts now label the field "daemon
+endpoint" (was "host"); `sign_revoke`'s own action-confirmation prompt also
+shows it alongside the fingerprint and suite. New test
+(`sign_challenge_detects_a_rotated_fingerprint_at_the_same_daemon_endpoint`)
+proves the actual fix: two different daemon identities presenting at the
+same `daemon_endpoint` land as one rotated pin-store entry, not two
+unrelated first-use entries -- the exact scenario that was unreachable
+before. An operator-assigned custom alias (configurable in the browser UI)
+remains a possible future enhancement, not implemented here -- the
+normalized endpoint alone already closes the reachability gap.
 
 ## 3. Remove the legacy browser HMAC admin-secret path
 
