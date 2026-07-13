@@ -52,9 +52,13 @@
 //!   as this process holds them in memory.
 
 // `host_trust` (native host-fingerprint trust policy), step 1 of
-// SIGNER_DELEGATION_DESIGN.md's recommended PR sequence, is now wired in
+// SIGNER_DELEGATION_DESIGN.md's recommended PR sequence, is wired in
 // (step 2: `POST /v1/sign/challenge`; step 3: `POST /v1/sign/consent-action`;
-// step 4: `POST /v1/sign/revoke`, below).
+// step 4: `POST /v1/sign/revoke`). `daemon_evidence` (PR "4.5b") replaces
+// the caller-supplied `daemon_fingerprint_hex` those steps originally used
+// with daemon-signed evidence the agent verifies itself -- see that
+// module's doc comment for the confused-deputy gap this closes.
+mod daemon_evidence;
 mod host_trust;
 mod secure_file;
 
@@ -77,6 +81,7 @@ use xenia_operator_agent_proto::{
 use xenia_operator_proto::{OperatorEnrollmentRecord, OperatorRole};
 use zeroize::Zeroizing;
 
+use daemon_evidence::decode_fixed_hex;
 use host_trust::HostTrustStore;
 
 #[derive(Parser, Debug)]
@@ -208,12 +213,16 @@ fn build_router(state: Arc<AgentState>) -> Router {
             state.clone(),
             auth_and_cors_middleware,
         ))
-        // The `/v1/sign/*` bodies are tiny, fixed-shape JSON (a handful of
-        // hex strings) -- refuse anything wildly larger up front rather
-        // than let a misbehaving or malicious caller buffer an oversized
-        // body before typed parsing even starts. GET routes have no body,
-        // so this only bounds the new POST routes in practice.
-        .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))
+        // The `/v1/sign/*` bodies are small, fixed-shape JSON, but no
+        // longer just "a handful of hex strings" now that they carry a
+        // `DaemonIdentityCertificate` (ML-DSA-65 alone is ~1952-byte
+        // pubkeys / ~3309-byte signatures, hex-doubled) plus, for
+        // /v1/sign/challenge, a second ML-DSA host attestation on top --
+        // a genuine such request runs ~17-18KB. 64KiB gives headroom while
+        // still refusing anything wildly larger up front, before typed
+        // parsing even starts. GET routes have no body, so this only
+        // bounds the POST routes in practice.
+        .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
         .with_state(state)
 }
 
@@ -354,28 +363,29 @@ async fn get_seeds(State(state): State<Arc<AgentState>>) -> Json<SeedsResponse> 
 /// `POST /v1/sign/challenge` -- sign the daemon's `/auth/challenge` nonce
 /// with both algorithms, proving possession of the enrolled operator key,
 /// without the raw seeds ever leaving this process. Step 2 of
-/// `docs/security/SIGNER_DELEGATION_DESIGN.md`'s PR sequence (Track A).
+/// `docs/security/SIGNER_DELEGATION_DESIGN.md`'s PR sequence (Track A);
+/// its host-trust gate was hardened in PR "4.5b" (see
+/// [`daemon_evidence`]'s module doc comment).
 ///
 /// Local-caller authentication (Origin + `X-Agent-Token`) already happened
-/// in `auth_and_cors_middleware` before this handler runs -- the design
-/// doc's Track A steps 1-2. What follows is steps 3-9, shared with every
-/// `/v1/sign/*` handler via [`validate_common`] and [`enforce_host_trust`]:
-/// 1. Reject an unrecognized `schema_version` or malformed `suite` rather
-///    than guessing at compatibility.
+/// in `auth_and_cors_middleware` before this handler runs. What follows:
+/// 1. Reject an unrecognized `schema_version` or malformed `suite`
+///    ([`validate_common`]).
 /// 2. Decode the typed hex fields; reject anything that isn't exactly the
 ///    expected length.
-/// 3. Check the target daemon fingerprint against native host-trust policy
-///    -- the destination-host authorization the design doc's "typed
-///    transcripts are not enough" section requires; this is a routine
-///    `/auth` challenge, so per the confirmation policy no *additional*
-///    per-request confirmation is added here beyond what the host-trust
-///    check itself already enforces for an unpinned or changed
-///    fingerprint.
-/// 4. Build the canonical transcript via `xenia_operator_proto`'s own
+/// 3. Verify `req.common.daemon_certificate`'s own signatures, compute the
+///    daemon's fingerprint from it, and check that fingerprint against
+///    native host-trust policy ([`enforce_host_trust`]) -- never trusting
+///    a caller-supplied fingerprint.
+/// 4. Verify the challenge host attestation proves *this exact nonce* was
+///    issued by that same, now-trusted daemon identity -- otherwise a
+///    compromised browser could ask the agent to sign an attacker-chosen
+///    nonce under an otherwise-legitimate daemon certificate.
+/// 5. Build the canonical transcript via `xenia_operator_proto`'s own
 ///    `challenge_transcript` -- never a caller-supplied byte string, so a
 ///    compromised browser can't use this endpoint as a blind signing
 ///    oracle.
-/// 5. Sign with both required algorithms and return the envelope.
+/// 6. Sign with both required algorithms and return the envelope.
 async fn sign_challenge(
     State(state): State<Arc<AgentState>>,
     Json(req): Json<SignChallengeRequest>,
@@ -383,7 +393,17 @@ async fn sign_challenge(
     validate_common(&req.common)?;
     let nonce = decode_fixed_hex::<32>(&req.nonce_hex)
         .ok_or_else(|| bad_request("nonce_hex must be 64 hex characters"))?;
-    enforce_host_trust(&state, &req.common, "/v1/sign/challenge").await?;
+    let identity = enforce_host_trust(&state, &req.common, "/v1/sign/challenge").await?;
+    daemon_evidence::verify_challenge_attestation(
+        &identity,
+        &nonce,
+        &req.host_ed_attestation_hex,
+        &req.host_ml_dsa_attestation_hex,
+    )
+    .map_err(|e| {
+        let agent_err = e.to_agent_error();
+        (status_for(agent_err.code), Json(agent_err))
+    })?;
 
     let ed_pubkey = state.manager.identity_public_key_bytes();
     let ml_dsa_pubkey = state.manager.ml_dsa_public_key_bytes();
@@ -406,13 +426,18 @@ async fn sign_challenge(
 /// enrollment -- that's the separate, mandatory-confirmation
 /// `/v1/sign/revoke` from step 4). Step 3 of the design doc's PR sequence.
 ///
-/// Same processing shape as [`sign_challenge`]. Per the confirmation
-/// policy, an ordinary approve/deny/consent-revoke against an
-/// already-pinned host needs no *additional* confirmation beyond the
-/// host-trust check itself -- it isn't on the design doc's
-/// mandatory-confirmation list (that list is enrollment, operator
-/// revocation, role/capability elevation, trust-root changes, and
-/// unusually broad *grants*, none of which this action shape can express).
+/// Same processing shape as [`sign_challenge`], except the evidence
+/// verified after host-trust is the relayed session token
+/// ([`daemon_evidence::verify_token`]) rather than a challenge attestation
+/// -- its signature must verify against the certificate's now-trusted
+/// delegated HTTP-auth key before its `token_nonce` is bound into the
+/// consent-action transcript. Per the confirmation policy, an ordinary
+/// approve/deny/consent-revoke against an already-pinned host needs no
+/// *additional* confirmation beyond the host-trust check itself -- it
+/// isn't on the design doc's mandatory-confirmation list (that list is
+/// enrollment, operator revocation, role/capability elevation, trust-root
+/// changes, and unusually broad *grants*, none of which this action shape
+/// can express).
 async fn sign_consent_action(
     State(state): State<Arc<AgentState>>,
     Json(req): Json<SignConsentActionRequest>,
@@ -420,9 +445,11 @@ async fn sign_consent_action(
     validate_common(&req.common)?;
     let session_id = decode_fixed_hex::<16>(&req.session_id_hex)
         .ok_or_else(|| bad_request("session_id_hex must be 32 hex characters"))?;
-    let token_nonce = decode_fixed_hex::<16>(&req.token_nonce_hex)
-        .ok_or_else(|| bad_request("token_nonce_hex must be 32 hex characters"))?;
-    enforce_host_trust(&state, &req.common, "/v1/sign/consent-action").await?;
+    let identity = enforce_host_trust(&state, &req.common, "/v1/sign/consent-action").await?;
+    let token_nonce = daemon_evidence::verify_token(&identity, &req.token).map_err(|e| {
+        let agent_err = e.to_agent_error();
+        (status_for(agent_err.code), Json(agent_err))
+    })?;
 
     let transcript =
         xenia_operator_proto::consent_action_transcript(req.action, &session_id, &token_nonce);
@@ -442,7 +469,9 @@ async fn sign_consent_action(
 /// *second*, independent confirmation
 /// (`host_trust::HostTrustStore::confirm_action`) on top of
 /// [`enforce_host_trust`]'s host-identity gate -- an already-pinned host
-/// does not exempt a revocation from being confirmed.
+/// does not exempt a revocation from being confirmed. Like
+/// [`sign_consent_action`], the relayed session token is verified
+/// ([`daemon_evidence::verify_token`]) before its `token_nonce` is trusted.
 async fn sign_revoke(
     State(state): State<Arc<AgentState>>,
     Json(req): Json<SignRevokeRequest>,
@@ -451,13 +480,15 @@ async fn sign_revoke(
     if req.target_operator_id.trim().is_empty() {
         return Err(bad_request("target_operator_id must not be empty"));
     }
-    let token_nonce = decode_fixed_hex::<16>(&req.token_nonce_hex)
-        .ok_or_else(|| bad_request("token_nonce_hex must be 32 hex characters"))?;
-    enforce_host_trust(&state, &req.common, "/v1/sign/revoke").await?;
+    let identity = enforce_host_trust(&state, &req.common, "/v1/sign/revoke").await?;
+    let token_nonce = daemon_evidence::verify_token(&identity, &req.token).map_err(|e| {
+        let agent_err = e.to_agent_error();
+        (status_for(agent_err.code), Json(agent_err))
+    })?;
 
     let confirm_state = state.clone();
     let target = req.target_operator_id.clone();
-    let daemon_fingerprint_hex = req.common.daemon_fingerprint_hex.clone();
+    let daemon_fingerprint_hex = hex::encode(identity.fingerprint);
     let suite = req.common.suite.clone();
     let confirmed = tokio::task::spawn_blocking(move || {
         confirm_state
@@ -521,12 +552,16 @@ fn validate_common(
     Ok(())
 }
 
-/// Step 3, shared by every `/v1/sign/*` handler: decode the daemon
-/// fingerprint and check it against native host-trust policy
-/// (`host_trust::HostTrustStore::check`), blocking on a native terminal
-/// confirmation for an unpinned or changed fingerprint. `check()` blocks
-/// on terminal I/O, so it runs via `spawn_blocking` rather than on an
-/// async worker thread.
+/// Step 3, shared by every `/v1/sign/*` handler: verify
+/// `common.daemon_certificate`'s own signatures
+/// ([`daemon_evidence::verify_daemon_certificate`]), then check the
+/// fingerprint *it computes* -- never one the caller supplies -- against
+/// native host-trust policy (`host_trust::HostTrustStore::check`),
+/// blocking on a native terminal confirmation for an unpinned or changed
+/// fingerprint. `check()` blocks on terminal I/O, so it runs via
+/// `spawn_blocking` rather than on an async worker thread. Returns the
+/// verified identity so callers can check further evidence (a challenge
+/// attestation or a session token) against its now-trusted keys.
 ///
 /// Track A has no separate `host_alias` field (unlike Track B's
 /// `/v1/handshake/begin`, which names an intended host *before*
@@ -541,19 +576,23 @@ async fn enforce_host_trust(
     state: &Arc<AgentState>,
     common: &xenia_operator_agent_proto::SignRequestCommon,
     endpoint_label: &'static str,
-) -> Result<(), (StatusCode, Json<AgentErrorResponse>)> {
-    let daemon_fingerprint = decode_fixed_hex::<32>(&common.daemon_fingerprint_hex)
-        .ok_or_else(|| bad_request("daemon_fingerprint_hex must be 64 hex characters"))?;
+) -> Result<daemon_evidence::VerifiedDaemonIdentity, (StatusCode, Json<AgentErrorResponse>)> {
+    let identity =
+        daemon_evidence::verify_daemon_certificate(&common.daemon_certificate).map_err(|e| {
+            let agent_err = e.to_agent_error();
+            (status_for(agent_err.code), Json(agent_err))
+        })?;
 
-    let host_alias = common.daemon_fingerprint_hex.clone();
+    let host_alias = hex::encode(identity.fingerprint);
     let suite = common.suite.clone();
+    let fingerprint = identity.fingerprint;
     let check_state = state.clone();
     let outcome = tokio::task::spawn_blocking(move || {
         check_state
             .host_trust
             .lock()
             .expect("host-trust mutex poisoned")
-            .check(&host_alias, &suite, daemon_fingerprint)
+            .check(&host_alias, &suite, fingerprint)
     })
     .await
     .map_err(|_| internal_error("host-trust check task panicked"))?
@@ -568,7 +607,7 @@ async fn enforce_host_trust(
         endpoint = endpoint_label,
         "host trust check passed"
     );
-    Ok(())
+    Ok(identity)
 }
 
 fn bad_request(message: impl Into<String>) -> (StatusCode, Json<AgentErrorResponse>) {
@@ -604,12 +643,6 @@ fn status_for(code: AgentErrorCode) -> StatusCode {
         AgentErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
         AgentErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
     }
-}
-
-/// Decode exactly `N` bytes of hex, rejecting anything shorter, longer, or
-/// malformed rather than silently truncating/padding.
-fn decode_fixed_hex<const N: usize>(s: &str) -> Option<[u8; N]> {
-    hex::decode(s.trim()).ok()?.try_into().ok()
 }
 
 /// Load the operator identity from `path`, or generate and persist a fresh
@@ -781,26 +814,33 @@ mod tests {
         })
     }
 
-    /// Like [`test_state_with_host_trust`], but with `(daemon_fingerprint_hex,
-    /// suite)` already pinned before the router is even built -- so a test
-    /// can exercise a *second*, action-level confirmation gate
+    /// Like [`test_state_with_host_trust`], but with `host`'s fingerprint
+    /// already pinned (for `suite`) before the router is even built -- so a
+    /// test can exercise a *second*, action-level confirmation gate
     /// (`sign_revoke`'s) in isolation, without the host-trust step's own
-    /// first-use confirmation getting in the way first.
+    /// first-use confirmation getting in the way first. Pins the *real*
+    /// fingerprint `daemon_evidence::verify_daemon_certificate` would
+    /// compute for `host`, so a request presenting a genuine certificate
+    /// for the same `host` passes host-trust cleanly.
     fn test_state_with_pinned_host(
         token: &str,
         allowed_origins: &[&str],
-        daemon_fingerprint_hex: &str,
+        host: &HandshakeManager,
         suite: &str,
         allow_noninteractive_privileged: bool,
     ) -> Arc<AgentState> {
         let pin_store_path = temp_pin_store_path("pinned");
+        let fingerprint = xenia_handshake::host_identity_fingerprint(
+            &host.identity_public_key_bytes(),
+            &host.ml_dsa_public_key_bytes(),
+        );
+        let host_alias = hex::encode(fingerprint);
         {
             // Seed with a permissive store so seeding itself never needs
             // the confirmation surface a test using this helper is trying
             // to isolate.
             let mut seed = HostTrustStore::load(pin_store_path.clone(), true).unwrap();
-            let fp: [u8; 32] = decode_fixed_hex(daemon_fingerprint_hex).unwrap();
-            seed.check(daemon_fingerprint_hex, suite, fp).unwrap();
+            seed.check(&host_alias, suite, fingerprint).unwrap();
         }
         Arc::new(AgentState {
             manager: HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]),
@@ -812,6 +852,68 @@ mod tests {
                 HostTrustStore::load(pin_store_path, allow_noninteractive_privileged).unwrap(),
             ),
         })
+    }
+
+    // ─── daemon-evidence test fixtures ──────────────────────────────────
+    //
+    // Every `/v1/sign/*` request now carries verifiable daemon-signed
+    // evidence rather than a bare caller-asserted fingerprint (PR "4.5b"),
+    // so tests build a real (host identity, HTTP-auth key) pair and sign
+    // real certificates/attestations/tokens with them -- exactly what a
+    // genuine daemon does, per `apps/xenia-peer`'s own equivalent test
+    // fixtures in `operator_http.rs`.
+
+    use ed25519_dalek::{Signer, SigningKey};
+    use xenia_operator_agent_proto::{DaemonIdentityCertificate, SignedTokenDto};
+
+    /// A daemon's host identity + its separate HTTP-auth signing key.
+    fn test_daemon_identity() -> (HandshakeManager, SigningKey) {
+        (
+            HandshakeManager::new(),
+            SigningKey::generate(&mut rand::thread_rng()),
+        )
+    }
+
+    fn test_certificate(
+        host: &HandshakeManager,
+        http_auth: &SigningKey,
+    ) -> DaemonIdentityCertificate {
+        let http_auth_pk = http_auth.verifying_key().to_bytes();
+        let transcript = xenia_operator_proto::daemon_delegation_transcript(&http_auth_pk);
+        DaemonIdentityCertificate {
+            host_ed25519_pubkey: hex::encode(host.identity_public_key_bytes()),
+            host_ml_dsa_pubkey: hex::encode(host.ml_dsa_public_key_bytes()),
+            http_auth_ed25519_pubkey: hex::encode(http_auth_pk),
+            host_ed_signature: hex::encode(host.sign(&transcript).to_bytes()),
+            host_ml_dsa_signature: hex::encode(host.sign_ml_dsa(&transcript)),
+        }
+    }
+
+    fn test_token(http_auth: &SigningKey, token_nonce: [u8; 16]) -> SignedTokenDto {
+        let canonical = xenia_operator_proto::operator_token_canonical_bytes(
+            "alice",
+            OperatorRole::Admin,
+            1000,
+            2000,
+            &token_nonce,
+        );
+        SignedTokenDto {
+            operator_id: "alice".to_string(),
+            role: OperatorRole::Admin,
+            issued_at: 1000,
+            expires_at: 2000,
+            token_nonce_hex: hex::encode(token_nonce),
+            signature_hex: hex::encode(http_auth.sign(&canonical).to_bytes()),
+        }
+    }
+
+    fn merge_overrides(body: &mut serde_json::Value, overrides: serde_json::Value) {
+        if let (Some(body_map), Some(override_map)) = (body.as_object_mut(), overrides.as_object())
+        {
+            for (k, v) in override_map {
+                body_map.insert(k.clone(), v.clone());
+            }
+        }
     }
 
     #[tokio::test]
@@ -907,20 +1009,28 @@ mod tests {
         post_signed_json(app, "/v1/sign/challenge", token, body).await
     }
 
-    fn challenge_request_body(overrides: serde_json::Value) -> serde_json::Value {
+    /// Builds a valid `/v1/sign/challenge` body signed by `host`'s
+    /// identity (both the certificate delegation and the nonce
+    /// attestation), then applies `overrides` on top -- so a test that
+    /// only cares about one bad field doesn't have to hand-build the rest.
+    fn challenge_request_body(
+        cert: &DaemonIdentityCertificate,
+        host: &HandshakeManager,
+        nonce: [u8; 32],
+        overrides: serde_json::Value,
+    ) -> serde_json::Value {
+        let attestation_transcript =
+            xenia_operator_proto::challenge_host_attestation_transcript(&nonce);
         let mut body = serde_json::json!({
             "schema_version": xenia_operator_agent_proto::SCHEMA_VERSION,
-            "daemon_fingerprint_hex": "aa".repeat(32),
+            "daemon_certificate": cert,
             "suite": "standard",
             "request_id": "test-req-1",
-            "nonce_hex": "bb".repeat(32),
+            "nonce_hex": hex::encode(nonce),
+            "host_ed_attestation_hex": hex::encode(host.sign(&attestation_transcript).to_bytes()),
+            "host_ml_dsa_attestation_hex": hex::encode(host.sign_ml_dsa(&attestation_transcript)),
         });
-        if let (Some(body_map), Some(override_map)) = (body.as_object_mut(), overrides.as_object())
-        {
-            for (k, v) in override_map {
-                body_map.insert(k.clone(), v.clone());
-            }
-        }
+        merge_overrides(&mut body, overrides);
         body
     }
 
@@ -928,8 +1038,11 @@ mod tests {
     async fn sign_challenge_trusts_a_new_daemon_on_first_use_and_returns_valid_signatures() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let (status, json) =
-            post_sign_challenge(app, "secret", challenge_request_body(serde_json::json!({}))).await;
+        let (host, http_auth) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth);
+        let nonce = [0xbbu8; 32];
+        let body = challenge_request_body(&cert, &host, nonce, serde_json::json!({}));
+        let (status, json) = post_sign_challenge(app, "secret", body).await;
         assert_eq!(status, StatusCode::OK, "body: {json}");
 
         let resp: SignChallengeResponse = serde_json::from_value(json).unwrap();
@@ -945,7 +1058,6 @@ mod tests {
 
         // The signature must actually verify over the canonical transcript
         // the agent is supposed to have built itself -- not just be present.
-        let nonce: [u8; 32] = decode_fixed_hex(&"bb".repeat(32)).unwrap();
         let ed_pubkey = expected_manager.identity_public_key_bytes();
         let ml_dsa_pubkey = expected_manager.ml_dsa_public_key_bytes();
         let transcript =
@@ -964,7 +1076,14 @@ mod tests {
     async fn sign_challenge_rejects_an_unsupported_schema_version() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let body = challenge_request_body(serde_json::json!({ "schema_version": 999 }));
+        let (host, http_auth) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth);
+        let body = challenge_request_body(
+            &cert,
+            &host,
+            [0xbbu8; 32],
+            serde_json::json!({ "schema_version": 999 }),
+        );
         let (status, json) = post_sign_challenge(app, "secret", body).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
         assert_eq!(json["code"], "bad_request");
@@ -974,7 +1093,14 @@ mod tests {
     async fn sign_challenge_rejects_an_unrecognized_suite() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let body = challenge_request_body(serde_json::json!({ "suite": "quantum" }));
+        let (host, http_auth) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth);
+        let body = challenge_request_body(
+            &cert,
+            &host,
+            [0xbbu8; 32],
+            serde_json::json!({ "suite": "quantum" }),
+        );
         let (status, json) = post_sign_challenge(app, "secret", body).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
         assert_eq!(json["code"], "bad_request");
@@ -984,7 +1110,14 @@ mod tests {
     async fn sign_challenge_rejects_malformed_hex_fields() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let body = challenge_request_body(serde_json::json!({ "nonce_hex": "not-hex" }));
+        let (host, http_auth) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth);
+        let body = challenge_request_body(
+            &cert,
+            &host,
+            [0xbbu8; 32],
+            serde_json::json!({ "nonce_hex": "not-hex" }),
+        );
         let (status, json) = post_sign_challenge(app, "secret", body).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
         assert_eq!(json["code"], "bad_request");
@@ -995,10 +1128,49 @@ mod tests {
     {
         let state = test_state_with_host_trust("secret", &["http://localhost:8134"], false);
         let app = build_router(state);
-        let (status, json) =
-            post_sign_challenge(app, "secret", challenge_request_body(serde_json::json!({}))).await;
+        let (host, http_auth) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth);
+        let body = challenge_request_body(&cert, &host, [0xbbu8; 32], serde_json::json!({}));
+        let (status, json) = post_sign_challenge(app, "secret", body).await;
         assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "body: {json}");
         assert_eq!(json["code"], "confirmation_required");
+    }
+
+    #[tokio::test]
+    async fn sign_challenge_rejects_a_certificate_whose_delegation_signature_does_not_verify() {
+        // The certificate claims to delegate to a different HTTP-auth key
+        // than the one the signature was actually computed over -- the
+        // exact confused-deputy shape "4.5b" closes: a compromised browser
+        // can no longer get the agent to trust a fabricated certificate.
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let (host, http_auth) = test_daemon_identity();
+        let mut cert = test_certificate(&host, &http_auth);
+        let (_other_host, other_http_auth) = test_daemon_identity();
+        cert.http_auth_ed25519_pubkey = hex::encode(other_http_auth.verifying_key().to_bytes());
+        let body = challenge_request_body(&cert, &host, [0xbbu8; 32], serde_json::json!({}));
+        let (status, json) = post_sign_challenge(app, "secret", body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "body: {json}");
+        assert_eq!(json["code"], "host_not_trusted");
+    }
+
+    #[tokio::test]
+    async fn sign_challenge_rejects_a_host_attestation_for_a_different_nonce() {
+        // A compromised browser relays an attestation for one nonce while
+        // asking the agent to sign a different one -- must be refused even
+        // though the certificate itself is genuine and already trusted.
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let (host, http_auth) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth);
+        let attested_nonce = [0xbbu8; 32];
+        let mut body = challenge_request_body(&cert, &host, attested_nonce, serde_json::json!({}));
+        // Ask the agent to sign a *different* nonce than the one the
+        // attestation actually covers.
+        body["nonce_hex"] = serde_json::json!(hex::encode([0xccu8; 32]));
+        let (status, json) = post_sign_challenge(app, "secret", body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "body: {json}");
+        assert_eq!(json["code"], "host_not_trusted");
     }
 
     #[tokio::test]
@@ -1006,34 +1178,36 @@ mod tests {
         use tower::ServiceExt;
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
+        let (host, http_auth) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth);
+        let body = challenge_request_body(&cert, &host, [0xbbu8; 32], serde_json::json!({}));
         let req = axum::http::Request::builder()
             .method("POST")
             .uri("/v1/sign/challenge")
             .header("content-type", "application/json")
-            .body(axum::body::Body::from(
-                challenge_request_body(serde_json::json!({})).to_string(),
-            ))
+            .body(axum::body::Body::from(body.to_string()))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
-    fn consent_action_request_body(overrides: serde_json::Value) -> serde_json::Value {
+    /// Builds a valid `/v1/sign/consent-action` body carrying `cert` and
+    /// `token`, then applies `overrides` on top.
+    fn consent_action_request_body(
+        cert: &DaemonIdentityCertificate,
+        token: &SignedTokenDto,
+        overrides: serde_json::Value,
+    ) -> serde_json::Value {
         let mut body = serde_json::json!({
             "schema_version": xenia_operator_agent_proto::SCHEMA_VERSION,
-            "daemon_fingerprint_hex": "cc".repeat(32),
+            "daemon_certificate": cert,
             "suite": "highsec",
             "request_id": "test-req-2",
             "action": "Approve",
             "session_id_hex": "dd".repeat(16),
-            "token_nonce_hex": "ee".repeat(16),
+            "token": token,
         });
-        if let (Some(body_map), Some(override_map)) = (body.as_object_mut(), overrides.as_object())
-        {
-            for (k, v) in override_map {
-                body_map.insert(k.clone(), v.clone());
-            }
-        }
+        merge_overrides(&mut body, overrides);
         body
     }
 
@@ -1041,19 +1215,17 @@ mod tests {
     async fn sign_consent_action_trusts_a_new_daemon_on_first_use_and_returns_a_valid_signature() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let (status, json) = post_signed_json(
-            app,
-            "/v1/sign/consent-action",
-            "secret",
-            consent_action_request_body(serde_json::json!({})),
-        )
-        .await;
+        let (host, http_auth) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth);
+        let token_nonce = [0xeeu8; 16];
+        let token = test_token(&http_auth, token_nonce);
+        let body = consent_action_request_body(&cert, &token, serde_json::json!({}));
+        let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
         assert_eq!(status, StatusCode::OK, "body: {json}");
 
         let resp: SignConsentActionResponse = serde_json::from_value(json).unwrap();
         let expected_manager = HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]);
         let session_id: [u8; 16] = decode_fixed_hex(&"dd".repeat(16)).unwrap();
-        let token_nonce: [u8; 16] = decode_fixed_hex(&"ee".repeat(16)).unwrap();
         let transcript = xenia_operator_proto::consent_action_transcript(
             xenia_operator_proto::ConsentAction::Approve,
             &session_id,
@@ -1076,19 +1248,18 @@ mod tests {
         // action tag.
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let (status, json) = post_signed_json(
-            app,
-            "/v1/sign/consent-action",
-            "secret",
-            consent_action_request_body(serde_json::json!({ "action": "Deny" })),
-        )
-        .await;
+        let (host, http_auth) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth);
+        let token_nonce = [0xeeu8; 16];
+        let token = test_token(&http_auth, token_nonce);
+        let body =
+            consent_action_request_body(&cert, &token, serde_json::json!({ "action": "Deny" }));
+        let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
         assert_eq!(status, StatusCode::OK, "body: {json}");
         let resp: SignConsentActionResponse = serde_json::from_value(json).unwrap();
 
         let expected_manager = HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]);
         let session_id: [u8; 16] = decode_fixed_hex(&"dd".repeat(16)).unwrap();
-        let token_nonce: [u8; 16] = decode_fixed_hex(&"ee".repeat(16)).unwrap();
         let wrong_transcript = xenia_operator_proto::consent_action_transcript(
             xenia_operator_proto::ConsentAction::Approve,
             &session_id,
@@ -1096,19 +1267,28 @@ mod tests {
         );
         let ed_sig_bytes: [u8; 64] = decode_fixed_hex(&resp.ed_signature_hex).unwrap();
         let ed_sig = ed25519_dalek::Signature::from_bytes(&ed_sig_bytes);
-        assert!(HandshakeManager::verify(
-            &expected_manager.identity_public_key(),
-            &wrong_transcript,
-            &ed_sig,
-        )
-        .is_err());
+        assert!(
+            HandshakeManager::verify(
+                &expected_manager.identity_public_key(),
+                &wrong_transcript,
+                &ed_sig,
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]
     async fn sign_consent_action_rejects_an_unsupported_schema_version() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let body = consent_action_request_body(serde_json::json!({ "schema_version": 999 }));
+        let (host, http_auth) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth);
+        let token = test_token(&http_auth, [0xeeu8; 16]);
+        let body = consent_action_request_body(
+            &cert,
+            &token,
+            serde_json::json!({ "schema_version": 999 }),
+        );
         let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
         assert_eq!(json["code"], "bad_request");
@@ -1118,7 +1298,14 @@ mod tests {
     async fn sign_consent_action_rejects_malformed_hex_fields() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let body = consent_action_request_body(serde_json::json!({ "session_id_hex": "nope" }));
+        let (host, http_auth) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth);
+        let token = test_token(&http_auth, [0xeeu8; 16]);
+        let body = consent_action_request_body(
+            &cert,
+            &token,
+            serde_json::json!({ "session_id_hex": "nope" }),
+        );
         let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
         assert_eq!(json["code"], "bad_request");
@@ -1128,7 +1315,14 @@ mod tests {
     async fn sign_consent_action_rejects_an_unrecognized_action() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let body = consent_action_request_body(serde_json::json!({ "action": "Frobnicate" }));
+        let (host, http_auth) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth);
+        let token = test_token(&http_auth, [0xeeu8; 16]);
+        let body = consent_action_request_body(
+            &cert,
+            &token,
+            serde_json::json!({ "action": "Frobnicate" }),
+        );
         let (status, _json) =
             post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
         // `ConsentAction` derives `Deserialize` over its exact variant
@@ -1139,36 +1333,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sign_consent_action_fails_closed_when_a_new_host_needs_confirmation_and_none_is_available(
-    ) {
+    async fn sign_consent_action_fails_closed_when_a_new_host_needs_confirmation_and_none_is_available()
+     {
         let state = test_state_with_host_trust("secret", &["http://localhost:8134"], false);
         let app = build_router(state);
-        let (status, json) = post_signed_json(
-            app,
-            "/v1/sign/consent-action",
-            "secret",
-            consent_action_request_body(serde_json::json!({})),
-        )
-        .await;
+        let (host, http_auth) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth);
+        let token = test_token(&http_auth, [0xeeu8; 16]);
+        let body = consent_action_request_body(&cert, &token, serde_json::json!({}));
+        let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
         assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "body: {json}");
         assert_eq!(json["code"], "confirmation_required");
     }
 
-    fn revoke_request_body(overrides: serde_json::Value) -> serde_json::Value {
+    #[tokio::test]
+    async fn sign_consent_action_rejects_a_token_signed_by_the_wrong_key() {
+        // The relayed token's signature doesn't verify against the
+        // certificate's delegated HTTP-auth key -- e.g. a compromised
+        // browser inventing its own token_nonce, the same confused-deputy
+        // shape "4.5b" closes for tokens.
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let (host, http_auth) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth);
+        let (_other_host, attacker_http_auth) = test_daemon_identity();
+        let token = test_token(&attacker_http_auth, [0xeeu8; 16]);
+        let body = consent_action_request_body(&cert, &token, serde_json::json!({}));
+        let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "body: {json}");
+        assert_eq!(json["code"], "host_not_trusted");
+    }
+
+    /// Builds a valid `/v1/sign/revoke` body carrying `cert` and `token`,
+    /// then applies `overrides` on top.
+    fn revoke_request_body(
+        cert: &DaemonIdentityCertificate,
+        token: &SignedTokenDto,
+        overrides: serde_json::Value,
+    ) -> serde_json::Value {
         let mut body = serde_json::json!({
             "schema_version": xenia_operator_agent_proto::SCHEMA_VERSION,
-            "daemon_fingerprint_hex": "aa".repeat(32),
+            "daemon_certificate": cert,
             "suite": "standard",
             "request_id": "test-req-3",
             "target_operator_id": "op-42",
-            "token_nonce_hex": "11".repeat(16),
+            "token": token,
         });
-        if let (Some(body_map), Some(override_map)) = (body.as_object_mut(), overrides.as_object())
-        {
-            for (k, v) in override_map {
-                body_map.insert(k.clone(), v.clone());
-            }
-        }
+        merge_overrides(&mut body, overrides);
         body
     }
 
@@ -1176,18 +1387,16 @@ mod tests {
     async fn sign_revoke_signs_with_confirmation_when_allowed() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let (status, json) = post_signed_json(
-            app,
-            "/v1/sign/revoke",
-            "secret",
-            revoke_request_body(serde_json::json!({})),
-        )
-        .await;
+        let (host, http_auth) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth);
+        let token_nonce = [0x11u8; 16];
+        let token = test_token(&http_auth, token_nonce);
+        let body = revoke_request_body(&cert, &token, serde_json::json!({}));
+        let (status, json) = post_signed_json(app, "/v1/sign/revoke", "secret", body).await;
         assert_eq!(status, StatusCode::OK, "body: {json}");
 
         let resp: SignRevokeResponse = serde_json::from_value(json).unwrap();
         let expected_manager = HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]);
-        let token_nonce: [u8; 16] = decode_fixed_hex(&"11".repeat(16)).unwrap();
         let transcript = xenia_operator_proto::revoke_operator_transcript("op-42", &token_nonce);
         let ed_sig_bytes: [u8; 64] = decode_fixed_hex(&resp.ed_signature_hex).unwrap();
         let ed_sig = ed25519_dalek::Signature::from_bytes(&ed_sig_bytes);
@@ -1205,35 +1414,33 @@ mod tests {
         // already pinned) -- this proves sign_revoke's mandatory
         // *action*-level confirmation is a genuinely separate gate, not
         // just a side effect of host-trust's own first-use check.
-        let daemon_fingerprint_hex = "ff".repeat(32);
+        let (host, http_auth) = test_daemon_identity();
         let state = test_state_with_pinned_host(
             "secret",
             &["http://localhost:8134"],
-            &daemon_fingerprint_hex,
+            &host,
             "standard",
             false,
         );
         let app = build_router(state);
-        let body = revoke_request_body(
-            serde_json::json!({ "daemon_fingerprint_hex": daemon_fingerprint_hex }),
-        );
+        let cert = test_certificate(&host, &http_auth);
+        let token = test_token(&http_auth, [0x11u8; 16]);
+        let body = revoke_request_body(&cert, &token, serde_json::json!({}));
         let (status, json) = post_signed_json(app, "/v1/sign/revoke", "secret", body).await;
         assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "body: {json}");
         assert_eq!(json["code"], "confirmation_required");
     }
 
     #[tokio::test]
-    async fn sign_revoke_fails_closed_when_the_host_itself_needs_confirmation_and_none_is_available(
-    ) {
+    async fn sign_revoke_fails_closed_when_the_host_itself_needs_confirmation_and_none_is_available()
+     {
         let state = test_state_with_host_trust("secret", &["http://localhost:8134"], false);
         let app = build_router(state);
-        let (status, json) = post_signed_json(
-            app,
-            "/v1/sign/revoke",
-            "secret",
-            revoke_request_body(serde_json::json!({})),
-        )
-        .await;
+        let (host, http_auth) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth);
+        let token = test_token(&http_auth, [0x11u8; 16]);
+        let body = revoke_request_body(&cert, &token, serde_json::json!({}));
+        let (status, json) = post_signed_json(app, "/v1/sign/revoke", "secret", body).await;
         assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "body: {json}");
         assert_eq!(json["code"], "confirmation_required");
     }
@@ -1242,7 +1449,14 @@ mod tests {
     async fn sign_revoke_rejects_an_empty_target_operator_id() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let body = revoke_request_body(serde_json::json!({ "target_operator_id": "" }));
+        let (host, http_auth) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth);
+        let token = test_token(&http_auth, [0x11u8; 16]);
+        let body = revoke_request_body(
+            &cert,
+            &token,
+            serde_json::json!({ "target_operator_id": "" }),
+        );
         let (status, json) = post_signed_json(app, "/v1/sign/revoke", "secret", body).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
         assert_eq!(json["code"], "bad_request");
@@ -1252,7 +1466,18 @@ mod tests {
     async fn sign_revoke_rejects_malformed_hex_fields() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let body = revoke_request_body(serde_json::json!({ "token_nonce_hex": "nope" }));
+        let (host, http_auth) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth);
+        let mut token = serde_json::to_value(test_token(&http_auth, [0x11u8; 16])).unwrap();
+        token["token_nonce_hex"] = serde_json::json!("nope");
+        let body = serde_json::json!({
+            "schema_version": xenia_operator_agent_proto::SCHEMA_VERSION,
+            "daemon_certificate": cert,
+            "suite": "standard",
+            "request_id": "test-req-3",
+            "target_operator_id": "op-42",
+            "token": token,
+        });
         let (status, json) = post_signed_json(app, "/v1/sign/revoke", "secret", body).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
         assert_eq!(json["code"], "bad_request");
@@ -1262,10 +1487,27 @@ mod tests {
     async fn sign_revoke_rejects_an_unsupported_schema_version() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let body = revoke_request_body(serde_json::json!({ "schema_version": 999 }));
+        let (host, http_auth) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth);
+        let token = test_token(&http_auth, [0x11u8; 16]);
+        let body = revoke_request_body(&cert, &token, serde_json::json!({ "schema_version": 999 }));
         let (status, json) = post_signed_json(app, "/v1/sign/revoke", "secret", body).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
         assert_eq!(json["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn sign_revoke_rejects_a_token_signed_by_the_wrong_key() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let (host, http_auth) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth);
+        let (_other_host, attacker_http_auth) = test_daemon_identity();
+        let token = test_token(&attacker_http_auth, [0x11u8; 16]);
+        let body = revoke_request_body(&cert, &token, serde_json::json!({}));
+        let (status, json) = post_signed_json(app, "/v1/sign/revoke", "secret", body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "body: {json}");
+        assert_eq!(json["code"], "host_not_trusted");
     }
 
     #[tokio::test]
@@ -1273,13 +1515,15 @@ mod tests {
         use tower::ServiceExt;
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
+        let (host, http_auth) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth);
+        let token = test_token(&http_auth, [0x11u8; 16]);
+        let body = revoke_request_body(&cert, &token, serde_json::json!({}));
         let req = axum::http::Request::builder()
             .method("POST")
             .uri("/v1/sign/revoke")
             .header("content-type", "application/json")
-            .body(axum::body::Body::from(
-                revoke_request_body(serde_json::json!({})).to_string(),
-            ))
+            .body(axum::body::Body::from(body.to_string()))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
