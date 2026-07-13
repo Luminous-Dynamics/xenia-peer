@@ -47,6 +47,37 @@ use serde::{Deserialize, Serialize};
 
 use crate::secure_file;
 
+/// Storage abstraction for the pin-store file. Exists so the transactional
+/// persist-then-adopt logic in [`HostTrustStore`] is unit-testable against
+/// injected read/write failures without needing real filesystem faults --
+/// mirrors `sovereign-admin`'s `host_pin.rs::PinStore` trait for the same
+/// reason: decision logic tested via an in-memory double, the production
+/// glue ([`SecureFilePinStorage`]) thin and untested beyond that.
+trait PinStorage: Send + Sync {
+    /// Read the raw file bytes, or `None` if the file doesn't exist yet.
+    fn read(&self) -> Result<Option<Vec<u8>>, HostTrustError>;
+    /// Atomically overwrite the file with `bytes`.
+    fn write(&self, bytes: &[u8]) -> Result<(), HostTrustError>;
+}
+
+/// Production [`PinStorage`]: the `0600` pin-store file on disk, via
+/// [`secure_file`]'s atomic read/write helpers.
+struct SecureFilePinStorage {
+    path: PathBuf,
+}
+
+impl PinStorage for SecureFilePinStorage {
+    fn read(&self) -> Result<Option<Vec<u8>>, HostTrustError> {
+        secure_file::read_secure_file_if_exists(&self.path)
+            .map_err(|e| HostTrustError::Storage(e.to_string()))
+    }
+
+    fn write(&self, bytes: &[u8]) -> Result<(), HostTrustError> {
+        secure_file::secure_overwrite(&self.path, bytes)
+            .map_err(|e| HostTrustError::Storage(e.to_string()))
+    }
+}
+
 /// Why a host-trust check refused to proceed.
 #[derive(Debug)]
 pub enum HostTrustError {
@@ -135,8 +166,18 @@ struct PinFile {
 
 /// The native host-trust pin store: one process-local file, one entry per
 /// `(host_alias, suite)`.
+///
+/// **Transactional writes**: [`Self::set_pin`]/[`Self::forget`] build a
+/// *candidate* map, persist that candidate to storage, and only adopt it
+/// into `self.pins` once the persist succeeds. This closes a real bug an
+/// earlier revision had: mutating `self.pins` first and persisting
+/// afterward meant a persistence failure still left the new (or removed)
+/// pin trusted in memory for the rest of the process's life -- a retry in
+/// the same process could then see `Matched` for a pin that was never
+/// durably stored. Every mutating path here now leaves `self.pins`
+/// untouched on any storage failure, matching what's actually on disk.
 pub struct HostTrustStore {
-    path: PathBuf,
+    storage: Box<dyn PinStorage>,
     pins: HashMap<String, [u8; 32]>,
     /// Whether a privileged (mandatory-confirmation) check may proceed
     /// without an interactive confirmation if no terminal is available.
@@ -155,28 +196,49 @@ impl HostTrustStore {
         path: PathBuf,
         allow_noninteractive_privileged: bool,
     ) -> Result<Self, HostTrustError> {
-        let pins = match secure_file::read_secure_file_if_exists(&path)
-            .map_err(|e| HostTrustError::Storage(e.to_string()))?
-        {
+        Self::load_with_storage(
+            Box::new(SecureFilePinStorage { path }),
+            allow_noninteractive_privileged,
+        )
+    }
+
+    fn load_with_storage(
+        storage: Box<dyn PinStorage>,
+        allow_noninteractive_privileged: bool,
+    ) -> Result<Self, HostTrustError> {
+        let pins = match storage.read()? {
             None => HashMap::new(),
-            Some(bytes) => {
-                let file: PinFile = serde_json::from_slice(&bytes)
-                    .map_err(|e| HostTrustError::Storage(format!("malformed pin store: {e}")))?;
-                file.pins
-                    .into_iter()
-                    .filter_map(|(k, v)| {
-                        let bytes = hex::decode(&v).ok()?;
-                        let arr: [u8; 32] = bytes.try_into().ok()?;
-                        Some((k, arr))
-                    })
-                    .collect()
-            }
+            Some(bytes) => Self::parse_pins(&bytes)?,
         };
         Ok(Self {
-            path,
+            storage,
             pins,
             allow_noninteractive_privileged,
         })
+    }
+
+    /// Parse the pin file's contents, failing closed on **any** malformed
+    /// entry rather than silently discarding it. A security-state file
+    /// that partially loads (an earlier revision used `filter_map` here,
+    /// dropping invalid hex or wrong-length entries) can quietly downgrade
+    /// "this host is pinned" into "this host looks like first use" --
+    /// exactly the confused-host state this store exists to prevent.
+    fn parse_pins(bytes: &[u8]) -> Result<HashMap<String, [u8; 32]>, HostTrustError> {
+        let file: PinFile = serde_json::from_slice(bytes)
+            .map_err(|e| HostTrustError::Storage(format!("malformed pin store: {e}")))?;
+        let mut pins = HashMap::with_capacity(file.pins.len());
+        for (key, hex_val) in file.pins {
+            let bytes = hex::decode(&hex_val).map_err(|e| {
+                HostTrustError::Storage(format!("pin store entry '{key}' has invalid hex: {e}"))
+            })?;
+            let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+                HostTrustError::Storage(format!(
+                    "pin store entry '{key}' is not a 32-byte fingerprint"
+                ))
+            })?;
+            pins.insert(key, arr);
+        }
+        Ok(pins)
     }
 
     fn key(host_alias: &str, suite: &str) -> String {
@@ -266,11 +328,20 @@ impl HostTrustStore {
     /// rotation without going through the interactive confirmation flow --
     /// e.g. from a future admin CLI subcommand). Not called from any
     /// endpoint yet.
+    ///
+    /// Transactional: builds the post-removal map, persists it, and only
+    /// then adopts it -- if persistence fails, the old pin stays live in
+    /// memory (matching what's still durably on disk) rather than silently
+    /// "forgetting" a pin that a crash or write failure never actually
+    /// removed from storage.
     #[allow(dead_code)]
     pub fn forget(&mut self, host_alias: &str, suite: &str) -> Result<(), HostTrustError> {
         let key = Self::key(host_alias, suite);
-        self.pins.remove(&key);
-        self.persist()
+        let mut candidate = self.pins.clone();
+        candidate.remove(&key);
+        self.persist(&candidate)?;
+        self.pins = candidate;
+        Ok(())
     }
 
     /// Block on a native confirmation for an *action*-specific
@@ -287,23 +358,32 @@ impl HostTrustStore {
         confirm(self.allow_noninteractive_privileged, title, fields)
     }
 
+    /// Transactional: builds the post-insert map, persists it, and only
+    /// then adopts it into `self.pins` -- see the struct doc comment for
+    /// why. If `persist` fails, `self.pins` is untouched, so the new pin
+    /// is never trusted in memory without also being durably stored.
     fn set_pin(&mut self, key: &str, fingerprint: [u8; 32]) -> Result<(), HostTrustError> {
-        self.pins.insert(key.to_string(), fingerprint);
-        self.persist()
+        let mut candidate = self.pins.clone();
+        candidate.insert(key.to_string(), fingerprint);
+        self.persist(&candidate)?;
+        self.pins = candidate;
+        Ok(())
     }
 
-    fn persist(&self) -> Result<(), HostTrustError> {
+    /// Persist `candidate` to storage. Takes the candidate map explicitly
+    /// (rather than reading `self.pins`) so callers can persist *before*
+    /// committing a change to `self.pins` -- the whole point of the
+    /// transactional discipline here.
+    fn persist(&self, candidate: &HashMap<String, [u8; 32]>) -> Result<(), HostTrustError> {
         let file = PinFile {
-            pins: self
-                .pins
+            pins: candidate
                 .iter()
                 .map(|(k, v)| (k.clone(), hex::encode(v)))
                 .collect(),
         };
         let bytes =
             serde_json::to_vec_pretty(&file).map_err(|e| HostTrustError::Storage(e.to_string()))?;
-        secure_file::secure_overwrite(&self.path, &bytes)
-            .map_err(|e| HostTrustError::Storage(e.to_string()))
+        self.storage.write(&bytes)
     }
 }
 
@@ -369,6 +449,63 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("pins.json")
+    }
+
+    /// In-memory [`PinStorage`] for fault injection. `clone()` shares the
+    /// same underlying bytes (via `Arc<Mutex<_>>` -- not `Rc<RefCell<_>>`,
+    /// since [`PinStorage`] requires `Send + Sync` to match
+    /// [`HostTrustStore`]'s real requirement of living inside `Arc<AgentState>`
+    /// behind a `std::sync::Mutex`), so a test can simulate "reload after
+    /// restart" by loading a second [`HostTrustStore`] from a clone of the
+    /// same handle -- mirroring the disk-backed tests' drop-then-reload
+    /// pattern, but for injected-fault scenarios too.
+    #[derive(Clone, Default)]
+    struct MockPinStorage(std::sync::Arc<std::sync::Mutex<MockPinStorageInner>>);
+
+    #[derive(Default)]
+    struct MockPinStorageInner {
+        bytes: Option<Vec<u8>>,
+        fail_read: bool,
+        fail_write: bool,
+    }
+
+    impl MockPinStorage {
+        fn fail_read(&self, v: bool) {
+            self.0.lock().unwrap().fail_read = v;
+        }
+        fn fail_write(&self, v: bool) {
+            self.0.lock().unwrap().fail_write = v;
+        }
+        fn raw_bytes(&self) -> Option<Vec<u8>> {
+            self.0.lock().unwrap().bytes.clone()
+        }
+    }
+
+    impl PinStorage for MockPinStorage {
+        fn read(&self) -> Result<Option<Vec<u8>>, HostTrustError> {
+            let inner = self.0.lock().unwrap();
+            if inner.fail_read {
+                return Err(HostTrustError::Storage("mock read failure".to_string()));
+            }
+            Ok(inner.bytes.clone())
+        }
+
+        fn write(&self, bytes: &[u8]) -> Result<(), HostTrustError> {
+            let mut inner = self.0.lock().unwrap();
+            if inner.fail_write {
+                return Err(HostTrustError::Storage("mock write failure".to_string()));
+            }
+            inner.bytes = Some(bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    fn mock_store(
+        storage: MockPinStorage,
+        allow_noninteractive_privileged: bool,
+    ) -> HostTrustStore {
+        HostTrustStore::load_with_storage(Box::new(storage), allow_noninteractive_privileged)
+            .unwrap()
     }
 
     // These exercise the pin-storage logic with `allow_noninteractive_privileged:
@@ -492,9 +629,11 @@ mod tests {
     fn confirm_action_respects_the_store_s_noninteractive_policy() {
         let allowed_path = temp_path("confirm-action-allowed");
         let allowed = HostTrustStore::load(allowed_path.clone(), true).unwrap();
-        assert!(allowed
-            .confirm_action("Revoke?", &[("target", "op-1".to_string())])
-            .unwrap());
+        assert!(
+            allowed
+                .confirm_action("Revoke?", &[("target", "op-1".to_string())])
+                .unwrap()
+        );
         std::fs::remove_dir_all(allowed_path.parent().unwrap()).ok();
 
         let blocked_path = temp_path("confirm-action-blocked");
@@ -507,5 +646,125 @@ mod tests {
             HostTrustError::ConfirmationUnavailable { .. }
         ));
         std::fs::remove_dir_all(blocked_path.parent().unwrap()).ok();
+    }
+
+    // ─── transactional storage + fault injection ──────────────────────────
+
+    #[test]
+    fn a_single_malformed_pin_entry_fails_the_whole_load_closed() {
+        let storage = MockPinStorage::default();
+        // One good entry, one entry with invalid hex -- the whole file must
+        // be rejected, not silently loaded minus the bad entry.
+        let raw = serde_json::json!({
+            "pins": {
+                "daemon-a:standard": hex::encode([1u8; 32]),
+                "daemon-b:standard": "not-valid-hex",
+            }
+        });
+        storage.write(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        let err = HostTrustStore::load_with_storage(Box::new(storage), true)
+            .err()
+            .unwrap();
+        assert!(matches!(err, HostTrustError::Storage(_)));
+    }
+
+    #[test]
+    fn a_wrong_length_pin_entry_fails_the_whole_load_closed() {
+        let storage = MockPinStorage::default();
+        let raw = serde_json::json!({
+            "pins": {
+                "daemon-a:standard": hex::encode([1u8; 16]),
+            }
+        });
+        storage.write(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        let err = HostTrustStore::load_with_storage(Box::new(storage), true)
+            .err()
+            .unwrap();
+        assert!(matches!(err, HostTrustError::Storage(_)));
+    }
+
+    #[test]
+    fn a_read_failure_at_load_time_fails_closed() {
+        let storage = MockPinStorage::default();
+        storage.fail_read(true);
+        let err = HostTrustStore::load_with_storage(Box::new(storage), true)
+            .err()
+            .unwrap();
+        assert!(matches!(err, HostTrustError::Storage(_)));
+    }
+
+    #[test]
+    fn first_pin_write_failure_leaves_nothing_trusted_in_memory() {
+        let storage = MockPinStorage::default();
+        storage.fail_write(true);
+        let mut store = mock_store(storage.clone(), true);
+        let err = store.check("daemon-a", "standard", [1u8; 32]).unwrap_err();
+        assert!(matches!(err, HostTrustError::Storage(_)));
+        // Not trusted in memory, and nothing durable either -- this is the
+        // exact bug the transactional rewrite closes: a failed persist must
+        // not leave `check()` returning `Matched` on a later call in the
+        // same process.
+        assert_eq!(store.lookup("daemon-a", "standard"), None);
+        assert_eq!(storage.raw_bytes(), None);
+    }
+
+    #[test]
+    fn rotation_write_failure_leaves_the_old_pin_live_and_durable() {
+        let storage = MockPinStorage::default();
+        let mut store = mock_store(storage.clone(), true);
+        store.check("daemon-b", "standard", [1u8; 32]).unwrap();
+
+        storage.fail_write(true);
+        let err = store.check("daemon-b", "standard", [2u8; 32]).unwrap_err();
+        assert!(matches!(err, HostTrustError::Storage(_)));
+        // The old pin is still trusted -- a failed rotation must not adopt
+        // the new fingerprint in memory while the disk still holds the old
+        // one (or worse, holds neither).
+        assert_eq!(store.lookup("daemon-b", "standard"), Some([1u8; 32]));
+
+        // Confirm the on-disk state agrees: reload from the same storage
+        // (write succeeding again) and check nothing rotated underneath us.
+        storage.fail_write(false);
+        let store2 = mock_store(storage, true);
+        assert_eq!(store2.lookup("daemon-b", "standard"), Some([1u8; 32]));
+    }
+
+    #[test]
+    fn forget_write_failure_leaves_the_pin_live_and_durable() {
+        let storage = MockPinStorage::default();
+        let mut store = mock_store(storage.clone(), true);
+        store.check("daemon-c", "standard", [3u8; 32]).unwrap();
+
+        storage.fail_write(true);
+        let err = store.forget("daemon-c", "standard").unwrap_err();
+        assert!(matches!(err, HostTrustError::Storage(_)));
+        // Forgetting failed to persist -- the pin must still be trusted,
+        // not silently dropped from memory while disk still has it.
+        assert_eq!(store.lookup("daemon-c", "standard"), Some([3u8; 32]));
+
+        storage.fail_write(false);
+        let store2 = mock_store(storage, true);
+        assert_eq!(store2.lookup("daemon-c", "standard"), Some([3u8; 32]));
+    }
+
+    #[test]
+    fn every_successful_operation_survives_a_reload() {
+        let storage = MockPinStorage::default();
+        let mut store = mock_store(storage.clone(), true);
+
+        // First use.
+        store.check("daemon-d", "standard", [1u8; 32]).unwrap();
+        let reloaded = mock_store(storage.clone(), true);
+        assert_eq!(reloaded.lookup("daemon-d", "standard"), Some([1u8; 32]));
+
+        // Rotation.
+        store.check("daemon-d", "standard", [2u8; 32]).unwrap();
+        let reloaded = mock_store(storage.clone(), true);
+        assert_eq!(reloaded.lookup("daemon-d", "standard"), Some([2u8; 32]));
+
+        // Forget.
+        store.forget("daemon-d", "standard").unwrap();
+        let reloaded = mock_store(storage, true);
+        assert_eq!(reloaded.lookup("daemon-d", "standard"), None);
     }
 }
