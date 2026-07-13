@@ -32,6 +32,18 @@ pub const CONSENT_ACTION_DOMAIN: &[u8] = b"xenia-operator-consent-action-v1";
 /// another operator (the `/operator/revoke` admin action).
 pub const REVOKE_OPERATOR_DOMAIN: &[u8] = b"xenia-operator-revoke-operator-v1";
 
+/// Domain-separation tag for the daemon's *host identity* delegating trust
+/// to its separate HTTP-auth signing key (see [`DaemonIdentityCertificate`]).
+pub const DAEMON_DELEGATION_DOMAIN: &[u8] = b"xenia-daemon-identity-delegation-v1";
+
+/// Domain-separation tag for the daemon's host-identity attestation over an
+/// issued `/auth/challenge` nonce (see [`challenge_host_attestation_transcript`]).
+pub const CHALLENGE_HOST_ATTESTATION_DOMAIN: &[u8] = b"xenia-challenge-host-attestation-v1";
+
+/// Domain-separation tag for an operator session token's daemon signature
+/// (see [`operator_token_canonical_bytes`]).
+pub const OPERATOR_TOKEN_DOMAIN: &[u8] = b"xenia-operator-token-v1";
+
 /// An operator's role. Strictly hierarchical: a higher role can do everything
 /// a lower one can, plus more (see [`OperatorRole::rank`]). Serializes to the
 /// variant name (`"Viewer"`, `"Admin"`, …) — the console gates its UI on the
@@ -227,6 +239,111 @@ pub fn revoke_operator_transcript(target_operator_id: &str, token_nonce: &[u8; 1
     t
 }
 
+/// The bytes the daemon's *host identity* signs to delegate trust to its
+/// separate HTTP-auth signing key: "this Ed25519 key issues this daemon's
+/// HTTP auth tokens and challenge attestations." Exists because the daemon
+/// deliberately uses two different keys -- `host_identity_key_path` (the
+/// sealed-channel identity, the one thing peers already pin) and
+/// `operator_key_path` (`daemon_key`, which only ever signs HTTP session
+/// tokens) -- and a caller with no live connection to the daemon (e.g. the
+/// operator agent) has no other way to learn that the second key is
+/// genuinely vouched for by the first. See [`DaemonIdentityCertificate`].
+///
+/// Layout: `DAEMON_DELEGATION_DOMAIN || http_auth_ed25519_pubkey(32)`.
+pub fn daemon_delegation_transcript(http_auth_ed25519_pubkey: &[u8; 32]) -> Vec<u8> {
+    let mut t = Vec::with_capacity(DAEMON_DELEGATION_DOMAIN.len() + 32);
+    t.extend_from_slice(DAEMON_DELEGATION_DOMAIN);
+    t.extend_from_slice(http_auth_ed25519_pubkey);
+    t
+}
+
+/// The bytes the daemon's host identity signs to attest that it issued a
+/// specific `/auth/challenge` nonce. Lets a caller with no live connection
+/// to the daemon (the operator agent) verify that a *specific* nonce really
+/// came from a host it trusts, rather than trusting a caller-supplied label
+/// detached from the bytes actually being signed.
+///
+/// Layout: `CHALLENGE_HOST_ATTESTATION_DOMAIN || nonce(32)`.
+pub fn challenge_host_attestation_transcript(nonce: &[u8; 32]) -> Vec<u8> {
+    let mut t = Vec::with_capacity(CHALLENGE_HOST_ATTESTATION_DOMAIN.len() + 32);
+    t.extend_from_slice(CHALLENGE_HOST_ATTESTATION_DOMAIN);
+    t.extend_from_slice(nonce);
+    t
+}
+
+/// The canonical bytes an operator session token's daemon signature covers.
+/// Exposed here (rather than living only inside the daemon's own auth
+/// module) so a caller that never talks to the daemon directly -- the
+/// operator agent, verifying a token the browser relayed to it -- can
+/// reconstruct the exact same bytes and independently check the token's
+/// signature, with no risk of the two implementations drifting apart.
+///
+/// Layout: `OPERATOR_TOKEN_DOMAIN || len(operator_id)(8, le) || operator_id
+/// || role_tag(1) || issued_at(8, le) || expires_at(8, le) || token_nonce(16)`.
+pub fn operator_token_canonical_bytes(
+    operator_id: &str,
+    role: OperatorRole,
+    issued_at: u64,
+    expires_at: u64,
+    token_nonce: &[u8; 16],
+) -> Vec<u8> {
+    let id = operator_id.as_bytes();
+    let mut b = Vec::with_capacity(OPERATOR_TOKEN_DOMAIN.len() + 8 + id.len() + 1 + 8 + 8 + 16);
+    b.extend_from_slice(OPERATOR_TOKEN_DOMAIN);
+    b.extend_from_slice(&(id.len() as u64).to_le_bytes());
+    b.extend_from_slice(id);
+    b.push(role_tag(role));
+    b.extend_from_slice(&issued_at.to_le_bytes());
+    b.extend_from_slice(&expires_at.to_le_bytes());
+    b.extend_from_slice(token_nonce);
+    b
+}
+
+/// Stable one-byte wire tag for a role, used inside
+/// [`operator_token_canonical_bytes`]. Not the same as any serde
+/// representation -- this is a fixed-width tag inside a signed byte
+/// transcript, not JSON.
+fn role_tag(role: OperatorRole) -> u8 {
+    match role {
+        OperatorRole::Viewer => 0,
+        OperatorRole::Approver => 1,
+        OperatorRole::Operator => 2,
+        OperatorRole::Admin => 3,
+    }
+}
+
+/// The daemon's host identity vouching for its separate HTTP-auth signing
+/// key (see [`daemon_delegation_transcript`]). Computed once by the daemon
+/// at startup (both keys are static for the process's lifetime) and served
+/// over `GET /auth/daemon-identity` -- no authentication required, since
+/// this *is* the daemon's own public, independently-verifiable identity
+/// evidence, the same trust model as the sealed-channel handshake's host
+/// identity.
+///
+/// A caller verifies both signatures against the presented host public
+/// keys, then computes the daemon's fingerprint itself via
+/// `xenia_handshake::host_identity_fingerprint(host_ed25519_pubkey,
+/// host_ml_dsa_pubkey)` -- never accepting a fingerprint asserted directly
+/// by an untrusted caller. Both Ed25519 and ML-DSA-65 signatures are
+/// required (no classical-only fallback), matching this project's hybrid
+/// posture everywhere else a daemon or peer identity is proven.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonIdentityCertificate {
+    /// The daemon's host (sealed-channel) identity Ed25519 public key, hex.
+    pub host_ed25519_pubkey: String,
+    /// The daemon's host (sealed-channel) identity ML-DSA-65 public key, hex.
+    pub host_ml_dsa_pubkey: String,
+    /// The daemon's separate HTTP-auth signing key's Ed25519 public key,
+    /// hex -- the key that actually signs issued session tokens and
+    /// challenge attestations.
+    pub http_auth_ed25519_pubkey: String,
+    /// Host identity's Ed25519 signature over
+    /// `daemon_delegation_transcript(http_auth_ed25519_pubkey)`, hex.
+    pub host_ed_signature: String,
+    /// Host identity's ML-DSA-65 signature over the same transcript, hex.
+    pub host_ml_dsa_signature: String,
+}
+
 /// The daemon's `--operators-file` enrollment record shape, shared so the
 /// console (which generates one per identity) and the daemon (which parses
 /// it) can never drift on field names or casing -- the exact drift that let
@@ -403,5 +520,66 @@ mod tests {
         assert_eq!(approve[CONSENT_ACTION_DOMAIN.len()], 1);
         assert_eq!(revoke[CONSENT_ACTION_DOMAIN.len()], 3);
         assert_eq!(approve.len(), CONSENT_ACTION_DOMAIN.len() + 1 + 16 + 16);
+    }
+
+    #[test]
+    fn daemon_delegation_transcript_layout_is_exact_and_key_bound() {
+        let key_a = [0x33u8; 32];
+        let key_b = [0x44u8; 32];
+        let t = daemon_delegation_transcript(&key_a);
+        assert_eq!(
+            &t[..DAEMON_DELEGATION_DOMAIN.len()],
+            DAEMON_DELEGATION_DOMAIN
+        );
+        assert_eq!(&t[DAEMON_DELEGATION_DOMAIN.len()..], &key_a);
+        assert_eq!(t.len(), DAEMON_DELEGATION_DOMAIN.len() + 32);
+        // Different delegated key -> different bytes (a certificate for one
+        // HTTP-auth key can't be replayed as vouching for a different one).
+        assert_ne!(t, daemon_delegation_transcript(&key_b));
+    }
+
+    #[test]
+    fn challenge_host_attestation_transcript_layout_is_exact_and_nonce_bound() {
+        let nonce_a = [0x55u8; 32];
+        let nonce_b = [0x66u8; 32];
+        let t = challenge_host_attestation_transcript(&nonce_a);
+        assert_eq!(
+            &t[..CHALLENGE_HOST_ATTESTATION_DOMAIN.len()],
+            CHALLENGE_HOST_ATTESTATION_DOMAIN
+        );
+        assert_eq!(&t[CHALLENGE_HOST_ATTESTATION_DOMAIN.len()..], &nonce_a);
+        assert_eq!(t.len(), CHALLENGE_HOST_ATTESTATION_DOMAIN.len() + 32);
+        // An attestation over one nonce can't be replayed as attesting a
+        // different one -- that's the whole point of this transcript.
+        assert_ne!(t, challenge_host_attestation_transcript(&nonce_b));
+    }
+
+    #[test]
+    fn operator_token_canonical_bytes_layout_is_exact_and_field_bound() {
+        let base =
+            operator_token_canonical_bytes("alice", OperatorRole::Admin, 1000, 2000, &[9u8; 16]);
+        assert_eq!(&base[..OPERATOR_TOKEN_DOMAIN.len()], OPERATOR_TOKEN_DOMAIN);
+        // Changing any one field must change the bytes -- otherwise a
+        // tampered token field wouldn't actually invalidate the signature.
+        assert_ne!(
+            base,
+            operator_token_canonical_bytes("bob", OperatorRole::Admin, 1000, 2000, &[9u8; 16])
+        );
+        assert_ne!(
+            base,
+            operator_token_canonical_bytes("alice", OperatorRole::Viewer, 1000, 2000, &[9u8; 16])
+        );
+        assert_ne!(
+            base,
+            operator_token_canonical_bytes("alice", OperatorRole::Admin, 1001, 2000, &[9u8; 16])
+        );
+        assert_ne!(
+            base,
+            operator_token_canonical_bytes("alice", OperatorRole::Admin, 1000, 2001, &[9u8; 16])
+        );
+        assert_ne!(
+            base,
+            operator_token_canonical_bytes("alice", OperatorRole::Admin, 1000, 2000, &[8u8; 16])
+        );
     }
 }

@@ -1754,15 +1754,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         None => crate::operator::OperatorPolicy::default(),
     };
-    let operator_auth_state = Arc::new(crate::operator_http::OperatorAuthState {
-        policy: operator_policy,
-        challenges: AsyncMutex::new(crate::operator_auth::ChallengeStore::new()),
-        daemon_key: signing_key.clone(),
-        rate_limiter: AsyncMutex::new(crate::operator_auth::RateLimiter::new(
-            crate::operator_auth::AUTH_RATE_MAX,
-            crate::operator_auth::AUTH_RATE_WINDOW_SECS,
-        )),
-    });
+    // The host identity is loaded again here (idempotent -- reads the
+    // already-persisted file the same way the sealed-channel setup below
+    // does) solely to build `daemon_certificate`: the host identity's
+    // delegation of trust to `signing_key` (the *separate* key that signs
+    // HTTP auth tokens/challenges), so a caller with no live connection to
+    // this daemon -- the operator agent -- can verify that delegation
+    // itself rather than trust a caller-supplied daemon identity. See
+    // `DaemonIdentityCertificate`'s doc comment in `xenia_operator_proto`.
+    let operator_auth_host_identity = load_or_create_host_identity(&args.host_identity_key_path)?;
+    let operator_auth_state = Arc::new(crate::operator_http::OperatorAuthState::new(
+        operator_policy,
+        signing_key.clone(),
+        operator_auth_host_identity,
+        crate::operator_auth::AUTH_RATE_MAX,
+        crate::operator_auth::AUTH_RATE_WINDOW_SECS,
+    ));
 
     // Live operator revocation list — shared by the admin `/operator/revoke`
     // endpoint (below) and the sealed operator endpoint. A failed load is fatal:

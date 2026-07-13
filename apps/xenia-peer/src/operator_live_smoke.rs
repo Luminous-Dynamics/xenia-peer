@@ -17,14 +17,13 @@
 use std::sync::Arc;
 
 use ed25519_dalek::SigningKey;
-use tokio::sync::Mutex;
 
 use xenia_handshake::HandshakeManager;
 use xenia_operator_proto::challenge_transcript;
 
 use crate::operator::{EnrolledOperator, OperatorPolicy, OperatorRole};
-use crate::operator_auth::{ChallengeStore, RateLimiter, AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS};
-use crate::operator_http::{router, OperatorAuthState};
+use crate::operator_auth::{AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS};
+use crate::operator_http::{OperatorAuthState, router};
 
 #[tokio::test]
 async fn operator_auth_ceremony_works_over_real_http() {
@@ -39,12 +38,13 @@ async fn operator_auth_ceremony_works_over_real_http() {
         role: OperatorRole::Admin,
     }])
     .unwrap();
-    let state = Arc::new(OperatorAuthState {
+    let state = Arc::new(OperatorAuthState::new(
         policy,
-        challenges: Mutex::new(ChallengeStore::new()),
-        daemon_key: daemon,
-        rate_limiter: Mutex::new(RateLimiter::new(AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS)),
-    });
+        daemon,
+        HandshakeManager::new(),
+        AUTH_RATE_MAX,
+        AUTH_RATE_WINDOW_SECS,
+    ));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

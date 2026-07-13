@@ -25,7 +25,6 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::Request;
 use ed25519_dalek::SigningKey;
-use tokio::sync::Mutex;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -35,10 +34,10 @@ use xenia_ledger::{Chain, Verifier};
 use crate::operator::{EnrolledOperator, OperatorPolicy, OperatorRole};
 use crate::operator_audit::operator_consent_audit_event;
 use crate::operator_auth::{
-    challenge_transcript, consent_action_transcript, ChallengeStore, ConsentAction, RateLimiter,
-    AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS,
+    AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS, ConsentAction, challenge_transcript,
+    consent_action_transcript,
 };
-use crate::operator_http::{router, OperatorAuthState};
+use crate::operator_http::{OperatorAuthState, router};
 
 async fn post(router: &axum::Router, path: &str, body: String) -> (u16, String) {
     let resp = router
@@ -76,12 +75,13 @@ async fn operator_rbac_full_chain_smoke() {
     }])
     .unwrap();
 
-    let state = Arc::new(OperatorAuthState {
+    let state = Arc::new(OperatorAuthState::new(
         policy,
-        challenges: Mutex::new(ChallengeStore::new()),
-        daemon_key: daemon.clone(),
-        rate_limiter: Mutex::new(RateLimiter::new(AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS)),
-    });
+        daemon.clone(),
+        HandshakeManager::new(),
+        AUTH_RATE_MAX,
+        AUTH_RATE_WINDOW_SECS,
+    ));
     let http = router(
         state.clone(),
         crate::operator_revocations::OperatorRevocations::empty(),
