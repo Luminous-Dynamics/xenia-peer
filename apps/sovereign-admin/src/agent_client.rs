@@ -13,24 +13,29 @@
 //! module fetches them into memory once per page session over a
 //! token-authenticated, origin-restricted `127.0.0.1` API.
 //!
-//! **Scope note** (updated — Step 5 of
-//! `docs/security/SIGNER_DELEGATION_DESIGN.md` landed): the `/auth/*` HTTP
-//! ceremony (challenge / consent-action / revoke — "Track A") now asks the
-//! agent to sign via [`sign_challenge`]/[`sign_consent_action`]/
-//! [`sign_revoke`] instead of holding the seeds in memory and signing
-//! locally with them. [`fetch_seeds`] still exists and is still called:
-//! the sealed-channel handshake ("Track B",
-//! `crate::sealed_consent`/`crate::pages::consent`) hasn't been migrated
-//! yet, so the console still needs the raw seeds for that one path. Once
-//! Track B migrates too (a separately reviewed follow-up), `GET /seeds`
-//! and this function are retired entirely.
+//! **Scope note** (updated — Steps 5 and 6 of
+//! `docs/security/SIGNER_DELEGATION_DESIGN.md` have both landed): the
+//! `/auth/*` HTTP ceremony (challenge / consent-action / revoke — "Track A")
+//! asks the agent to sign via [`sign_challenge`]/[`sign_consent_action`]/
+//! [`sign_revoke`], and the sealed-channel handshake ("Track B",
+//! `crate::sealed_consent`) asks the agent to drive the handshake itself via
+//! [`handshake_begin`]/[`handshake_finish`] — neither path holds the
+//! operator's raw seeds in the browser or signs/handshakes locally with
+//! them anymore. [`fetch_seeds`] is no longer called from
+//! `crate::pages::consent`'s decision path, but it, and the `GET /seeds`
+//! route it calls, are kept for now: `crate::operator_session::OperatorIdentity`
+//! still uses the fetched seeds to derive and *display* the operator's
+//! public fingerprint/pubkeys on the Sessions page (never to sign or
+//! handshake). Retiring `GET /seeds` entirely (Step 7) needs that display
+//! path re-derived from agent-side public info instead.
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use web_sys::Storage;
 
 use xenia_operator_agent_proto::{
-    AgentErrorResponse, SignChallengeRequest, SignChallengeResponse, SignConsentActionRequest,
+    AgentErrorResponse, HandshakeBeginRequest, HandshakeBeginResponse, HandshakeFinishRequest,
+    HandshakeFinishResponse, SignChallengeRequest, SignChallengeResponse, SignConsentActionRequest,
     SignConsentActionResponse, SignRevokeRequest, SignRevokeResponse,
 };
 
@@ -170,7 +175,31 @@ pub async fn sign_revoke(
     agent_post(agent_url, token, "/v1/sign/revoke", req).await
 }
 
-/// POST a typed `/v1/sign/*` request and decode the typed response. On a
+/// Ask the local agent to run the viewer half of the sealed-channel
+/// handshake against a daemon's `HostHello`. See
+/// `crate::sealed_consent::drive_agent_handshake`, the only caller.
+pub async fn handshake_begin(
+    agent_url: &str,
+    token: &str,
+    req: &HandshakeBeginRequest,
+) -> Result<HandshakeBeginResponse, String> {
+    agent_post(agent_url, token, "/v1/handshake/begin", req).await
+}
+
+/// Ask the local agent to finish a pending handshake against a daemon's
+/// `HostFinalize`, releasing session key material once its host-trust
+/// policy accepts the resulting authenticated fingerprint. See
+/// `crate::sealed_consent::drive_agent_handshake`, the only caller.
+pub async fn handshake_finish(
+    agent_url: &str,
+    token: &str,
+    req: &HandshakeFinishRequest,
+) -> Result<HandshakeFinishResponse, String> {
+    agent_post(agent_url, token, "/v1/handshake/finish", req).await
+}
+
+/// POST a typed `/v1/sign/*` or `/v1/handshake/*` request and decode the
+/// typed response. On a
 /// non-2xx, tries to parse the agent's typed [`AgentErrorResponse`] for an
 /// accurate message (e.g. "host not trusted, confirm on the agent's
 /// terminal") rather than surfacing a bare status code; falls back to the

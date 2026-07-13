@@ -1,11 +1,19 @@
 # Design: agent-side signing delegation (retiring `GET /seeds`)
 
-**Status:** design pass (no code). Follow-up to `apps/xenia-operator-agent`
+**Status:** steps 1-6 of the PR sequence below have landed (PRs #69-72,
+#73/#74 for the 4.5a/4.5b confused-deputy fix, #75 for step 5, #76 + a
+following PR for step 6's agent-side and browser-side halves). Only step 7
+(deleting `GET /seeds`) remains, and it's now unblocked: neither the
+`/auth/*` ceremony nor the sealed-channel handshake signs or handshakes
+locally in the browser anymore. `fetch_seeds`/`GET /seeds` are still called
+once, but only to derive *display* data (`OperatorIdentity`'s enrollment
+record/fingerprint on the Sessions page) — see step 7's note below for what
+retiring them fully still needs. Follow-up to `apps/xenia-operator-agent`
 (PR #65) and its hardening pass (PR #66) — see
 `OPERATOR_SECURITY_MODEL.md` §9 for the gap this closes: the agent moved the
 operator's Ed25519/ML-DSA seeds out of browser `localStorage`, but the
-console still fetches them into memory and signs locally with them, for
-both the `/auth/*` ceremony and the sealed-channel handshake. This doc plans
+console used to fetch them into memory and sign locally with them, for both
+the `/auth/*` ceremony and the sealed-channel handshake. This doc plans
 having the agent sign directly, so raw key material never reaches the
 browser process at all, not even transiently.
 
@@ -268,12 +276,16 @@ Agent processing for `/v1/handshake/finish`:
 The browser receives no long-term identity material at any point in this
 flow.
 
-`send_sealed_consent`/`send_sealed_consent_highsec` in `sealed_consent.rs`
-get restructured around this: instead of driving `ViewerHandshake` locally
-against `id.seeds()`, they relay `HostHello`/`HostFinalize` bytes through
-the agent and install whatever session material comes back.
-`OperatorIdentity::seeds()` — the one remaining caller of the raw
-seeds — goes away entirely once this lands.
+**Landed.** `send_sealed_consent`/`send_sealed_consent_highsec` in
+`sealed_consent.rs` are restructured around this: instead of driving
+`ViewerHandshake` locally against `id.seeds()`, they relay
+`HostHello`/`HostFinalize` bytes through the agent (via a shared
+`drive_agent_handshake` helper, since both suites now differ only in the
+`suite` string) and install whatever session material comes back.
+`OperatorIdentity::seeds()` — the one remaining caller of the raw seeds —
+is deleted; `OperatorIdentity` no longer retains `ed_seed`/`ml_seed` as
+struct fields at all (see the "Once both tracks land" note above for the
+one raw-seed call site that's still left, for display only).
 
 ### Pending-handshake state
 
@@ -325,7 +337,14 @@ client with its own reachability requirements.
 - `OperatorIdentity` stops holding `ed_seed`/`ml_seed` at all; it becomes a
   thin handle around "call the agent for X," carrying only public
   information (pubkeys, fingerprint) fetched from the unchanged
-  `GET /identity`.
+  `GET /identity`. **Partially true already, as of step 6 landing**:
+  `OperatorIdentity` no longer *stores* the seeds past construction
+  (`from_seeds` zeroizes its local copies once it's derived the pubkeys),
+  but it's still *constructed from* raw seeds fetched via `fetch_seeds`/
+  `GET /seeds`, one call at a time, for the display path only. Fully
+  closing this bullet means switching that one remaining call site to a
+  new agent endpoint that returns public info directly (e.g. `GET
+  /identity`) instead of raw seeds — the actual work of step 7.
 - The zeroize-on-drop work from the hardening pass becomes moot for the
   browser side (nothing left to zeroize) but stays exactly as valuable on
   the agent side, where the seeds permanently live.
