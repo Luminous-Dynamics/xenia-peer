@@ -17,9 +17,10 @@
 //! is no longer the authoritative check once the agent performs the
 //! signing/handshake itself.
 //!
-//! Wired into `POST /v1/sign/challenge` (step 2 of the recommended PR
-//! sequence); `/v1/sign/consent-action`, `/v1/sign/revoke`, and
-//! `/v1/handshake/*` land in later PRs and call into this module too.
+//! Wired into `POST /v1/sign/challenge` (step 2) and
+//! `POST /v1/sign/consent-action` (step 3) of the recommended PR sequence;
+//! `/v1/sign/revoke` and `/v1/handshake/*` land in later PRs and call into
+//! this module too.
 //!
 //! ## Confirmation UI (v1 scope)
 //!

@@ -53,7 +53,8 @@
 
 // `host_trust` (native host-fingerprint trust policy), step 1 of
 // SIGNER_DELEGATION_DESIGN.md's recommended PR sequence, is now wired in
-// (step 2: `POST /v1/sign/challenge`, below).
+// (step 2: `POST /v1/sign/challenge`; step 3: `POST /v1/sign/consent-action`,
+// below).
 mod host_trust;
 mod secure_file;
 
@@ -71,6 +72,7 @@ use serde::Serialize;
 use xenia_handshake::HandshakeManager;
 use xenia_operator_agent_proto::{
     AgentErrorCode, AgentErrorResponse, SignChallengeRequest, SignChallengeResponse,
+    SignConsentActionRequest, SignConsentActionResponse,
 };
 use xenia_operator_proto::{OperatorEnrollmentRecord, OperatorRole};
 use zeroize::Zeroizing;
@@ -200,6 +202,7 @@ fn build_router(state: Arc<AgentState>) -> Router {
         .route("/identity", get(get_identity))
         .route("/seeds", get(get_seeds))
         .route("/v1/sign/challenge", post(sign_challenge))
+        .route("/v1/sign/consent-action", post(sign_consent_action))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_and_cors_middleware,
@@ -354,20 +357,19 @@ async fn get_seeds(State(state): State<Arc<AgentState>>) -> Json<SeedsResponse> 
 ///
 /// Local-caller authentication (Origin + `X-Agent-Token`) already happened
 /// in `auth_and_cors_middleware` before this handler runs -- the design
-/// doc's Track A steps 1-2. What follows is steps 3-9:
+/// doc's Track A steps 1-2. What follows is steps 3-9, shared with every
+/// `/v1/sign/*` handler via [`validate_common`] and [`enforce_host_trust`]:
 /// 1. Reject an unrecognized `schema_version` or malformed `suite` rather
 ///    than guessing at compatibility.
 /// 2. Decode the typed hex fields; reject anything that isn't exactly the
 ///    expected length.
 /// 3. Check the target daemon fingerprint against native host-trust policy
-///    (`host_trust::HostTrustStore::check`) -- the destination-host
-///    authorization the design doc's "typed transcripts are not enough"
-///    section requires; this is a routine `/auth` challenge, so per the
-///    confirmation policy no *additional* per-request confirmation is
-///    added here beyond what `check()` itself already enforces for an
-///    unpinned or changed fingerprint. `check()` blocks on terminal I/O,
-///    so it runs via `spawn_blocking` rather than on an async worker
-///    thread.
+///    -- the destination-host authorization the design doc's "typed
+///    transcripts are not enough" section requires; this is a routine
+///    `/auth` challenge, so per the confirmation policy no *additional*
+///    per-request confirmation is added here beyond what the host-trust
+///    check itself already enforces for an unpinned or changed
+///    fingerprint.
 /// 4. Build the canonical transcript via `xenia_operator_proto`'s own
 ///    `challenge_transcript` -- never a caller-supplied byte string, so a
 ///    compromised browser can't use this endpoint as a blind signing
@@ -377,35 +379,107 @@ async fn sign_challenge(
     State(state): State<Arc<AgentState>>,
     Json(req): Json<SignChallengeRequest>,
 ) -> Result<Json<SignChallengeResponse>, (StatusCode, Json<AgentErrorResponse>)> {
-    if req.common.schema_version != xenia_operator_agent_proto::SCHEMA_VERSION {
+    validate_common(&req.common)?;
+    let nonce = decode_fixed_hex::<32>(&req.nonce_hex)
+        .ok_or_else(|| bad_request("nonce_hex must be 64 hex characters"))?;
+    enforce_host_trust(&state, &req.common, "/v1/sign/challenge").await?;
+
+    let ed_pubkey = state.manager.identity_public_key_bytes();
+    let ml_dsa_pubkey = state.manager.ml_dsa_public_key_bytes();
+    let transcript = xenia_operator_proto::challenge_transcript(&nonce, &ed_pubkey, &ml_dsa_pubkey);
+    let ed_signature = state.manager.sign(&transcript);
+    let ml_dsa_signature = state.manager.sign_ml_dsa(&transcript);
+
+    Ok(Json(SignChallengeResponse {
+        ed25519_pubkey_hex: hex::encode(ed_pubkey),
+        ml_dsa_pubkey_hex: hex::encode(ml_dsa_pubkey),
+        ed_signature_hex: hex::encode(ed_signature.to_bytes()),
+        ml_dsa_signature_hex: hex::encode(ml_dsa_signature),
+    }))
+}
+
+/// `POST /v1/sign/consent-action` -- sign a session-bound consent decision
+/// (Approve/Deny/Revoke -- see [`xenia_operator_proto::ConsentAction`];
+/// `Revoke` here means revoking a *consent grant*, e.g. ending an
+/// already-approved screen-share session, not revoking an operator's
+/// enrollment -- that's the separate, mandatory-confirmation
+/// `/v1/sign/revoke` from step 4). Step 3 of the design doc's PR sequence.
+///
+/// Same processing shape as [`sign_challenge`]. Per the confirmation
+/// policy, an ordinary approve/deny/consent-revoke against an
+/// already-pinned host needs no *additional* confirmation beyond the
+/// host-trust check itself -- it isn't on the design doc's
+/// mandatory-confirmation list (that list is enrollment, operator
+/// revocation, role/capability elevation, trust-root changes, and
+/// unusually broad *grants*, none of which this action shape can express).
+async fn sign_consent_action(
+    State(state): State<Arc<AgentState>>,
+    Json(req): Json<SignConsentActionRequest>,
+) -> Result<Json<SignConsentActionResponse>, (StatusCode, Json<AgentErrorResponse>)> {
+    validate_common(&req.common)?;
+    let session_id = decode_fixed_hex::<16>(&req.session_id_hex)
+        .ok_or_else(|| bad_request("session_id_hex must be 32 hex characters"))?;
+    let token_nonce = decode_fixed_hex::<16>(&req.token_nonce_hex)
+        .ok_or_else(|| bad_request("token_nonce_hex must be 32 hex characters"))?;
+    enforce_host_trust(&state, &req.common, "/v1/sign/consent-action").await?;
+
+    let transcript =
+        xenia_operator_proto::consent_action_transcript(req.action, &session_id, &token_nonce);
+    let ed_signature = state.manager.sign(&transcript);
+
+    Ok(Json(SignConsentActionResponse {
+        ed_signature_hex: hex::encode(ed_signature.to_bytes()),
+    }))
+}
+
+/// Steps 1-2 shared by every `/v1/sign/*` handler: reject an unrecognized
+/// `schema_version` or malformed `suite` rather than guessing at
+/// compatibility.
+fn validate_common(
+    common: &xenia_operator_agent_proto::SignRequestCommon,
+) -> Result<(), (StatusCode, Json<AgentErrorResponse>)> {
+    if common.schema_version != xenia_operator_agent_proto::SCHEMA_VERSION {
         return Err(bad_request(format!(
             "unsupported schema_version {} (expected {})",
-            req.common.schema_version,
+            common.schema_version,
             xenia_operator_agent_proto::SCHEMA_VERSION
         )));
     }
-    if req.common.suite != "standard" && req.common.suite != "highsec" {
+    if common.suite != "standard" && common.suite != "highsec" {
         return Err(bad_request(format!(
             "suite must be \"standard\" or \"highsec\", got {:?}",
-            req.common.suite
+            common.suite
         )));
     }
-    let daemon_fingerprint = decode_fixed_hex::<32>(&req.common.daemon_fingerprint_hex)
-        .ok_or_else(|| bad_request("daemon_fingerprint_hex must be 64 hex characters"))?;
-    let nonce = decode_fixed_hex::<32>(&req.nonce_hex)
-        .ok_or_else(|| bad_request("nonce_hex must be 64 hex characters"))?;
+    Ok(())
+}
 
-    // Track A has no separate `host_alias` field (unlike Track B's
-    // `/v1/handshake/begin`, which names an intended host *before*
-    // authentication completes) -- the fingerprint itself is the pin key.
-    // This still gives the core TOFU property: a fingerprint the operator
-    // has never confirmed before requires confirmation; a rotated
-    // fingerprint for what the daemon claims is the same host looks like
-    // "first use of a new fingerprint" rather than a flagged rotation,
-    // since there's no stable name to rotate *against*. That distinction
-    // is exactly what Track B's alias-based pinning adds later.
-    let host_alias = req.common.daemon_fingerprint_hex.clone();
-    let suite = req.common.suite.clone();
+/// Step 3, shared by every `/v1/sign/*` handler: decode the daemon
+/// fingerprint and check it against native host-trust policy
+/// (`host_trust::HostTrustStore::check`), blocking on a native terminal
+/// confirmation for an unpinned or changed fingerprint. `check()` blocks
+/// on terminal I/O, so it runs via `spawn_blocking` rather than on an
+/// async worker thread.
+///
+/// Track A has no separate `host_alias` field (unlike Track B's
+/// `/v1/handshake/begin`, which names an intended host *before*
+/// authentication completes) -- the fingerprint itself is the pin key.
+/// This still gives the core TOFU property: a fingerprint the operator
+/// has never confirmed before requires confirmation; a rotated
+/// fingerprint for what the daemon claims is the same host looks like
+/// "first use of a new fingerprint" rather than a flagged rotation, since
+/// there's no stable name to rotate *against*. That distinction is
+/// exactly what Track B's alias-based pinning adds later.
+async fn enforce_host_trust(
+    state: &Arc<AgentState>,
+    common: &xenia_operator_agent_proto::SignRequestCommon,
+    endpoint_label: &'static str,
+) -> Result<(), (StatusCode, Json<AgentErrorResponse>)> {
+    let daemon_fingerprint = decode_fixed_hex::<32>(&common.daemon_fingerprint_hex)
+        .ok_or_else(|| bad_request("daemon_fingerprint_hex must be 64 hex characters"))?;
+
+    let host_alias = common.daemon_fingerprint_hex.clone();
+    let suite = common.suite.clone();
     let check_state = state.clone();
     let outcome = tokio::task::spawn_blocking(move || {
         check_state
@@ -421,24 +495,13 @@ async fn sign_challenge(
         (status_for(agent_err.code), Json(agent_err))
     })?;
     tracing::info!(
-        request_id = %req.common.request_id,
-        suite = %req.common.suite,
+        request_id = %common.request_id,
+        suite = %common.suite,
         outcome = ?outcome,
-        "host trust check passed for /v1/sign/challenge"
+        endpoint = endpoint_label,
+        "host trust check passed"
     );
-
-    let ed_pubkey = state.manager.identity_public_key_bytes();
-    let ml_dsa_pubkey = state.manager.ml_dsa_public_key_bytes();
-    let transcript = xenia_operator_proto::challenge_transcript(&nonce, &ed_pubkey, &ml_dsa_pubkey);
-    let ed_signature = state.manager.sign(&transcript);
-    let ml_dsa_signature = state.manager.sign_ml_dsa(&transcript);
-
-    Ok(Json(SignChallengeResponse {
-        ed25519_pubkey_hex: hex::encode(ed_pubkey),
-        ml_dsa_pubkey_hex: hex::encode(ml_dsa_pubkey),
-        ed_signature_hex: hex::encode(ed_signature.to_bytes()),
-        ml_dsa_signature_hex: hex::encode(ml_dsa_signature),
-    }))
+    Ok(())
 }
 
 fn bad_request(message: impl Into<String>) -> (StatusCode, Json<AgentErrorResponse>) {
@@ -712,15 +775,16 @@ mod tests {
         );
     }
 
-    async fn post_sign_challenge(
+    async fn post_signed_json(
         app: Router,
+        path: &str,
         token: &str,
         body: serde_json::Value,
     ) -> (StatusCode, serde_json::Value) {
         use tower::ServiceExt;
         let req = axum::http::Request::builder()
             .method("POST")
-            .uri("/v1/sign/challenge")
+            .uri(path)
             .header("origin", "http://localhost:8134")
             .header("x-agent-token", token)
             .header("content-type", "application/json")
@@ -733,6 +797,14 @@ mod tests {
             .unwrap();
         let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
         (status, json)
+    }
+
+    async fn post_sign_challenge(
+        app: Router,
+        token: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        post_signed_json(app, "/v1/sign/challenge", token, body).await
     }
 
     fn challenge_request_body(overrides: serde_json::Value) -> serde_json::Value {
@@ -844,5 +916,141 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    fn consent_action_request_body(overrides: serde_json::Value) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "schema_version": xenia_operator_agent_proto::SCHEMA_VERSION,
+            "daemon_fingerprint_hex": "cc".repeat(32),
+            "suite": "highsec",
+            "request_id": "test-req-2",
+            "action": "Approve",
+            "session_id_hex": "dd".repeat(16),
+            "token_nonce_hex": "ee".repeat(16),
+        });
+        if let (Some(body_map), Some(override_map)) = (body.as_object_mut(), overrides.as_object())
+        {
+            for (k, v) in override_map {
+                body_map.insert(k.clone(), v.clone());
+            }
+        }
+        body
+    }
+
+    #[tokio::test]
+    async fn sign_consent_action_trusts_a_new_daemon_on_first_use_and_returns_a_valid_signature() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let (status, json) = post_signed_json(
+            app,
+            "/v1/sign/consent-action",
+            "secret",
+            consent_action_request_body(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {json}");
+
+        let resp: SignConsentActionResponse = serde_json::from_value(json).unwrap();
+        let expected_manager = HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]);
+        let session_id: [u8; 16] = decode_fixed_hex(&"dd".repeat(16)).unwrap();
+        let token_nonce: [u8; 16] = decode_fixed_hex(&"ee".repeat(16)).unwrap();
+        let transcript = xenia_operator_proto::consent_action_transcript(
+            xenia_operator_proto::ConsentAction::Approve,
+            &session_id,
+            &token_nonce,
+        );
+        let ed_sig_bytes: [u8; 64] = decode_fixed_hex(&resp.ed_signature_hex).unwrap();
+        let ed_sig = ed25519_dalek::Signature::from_bytes(&ed_sig_bytes);
+        HandshakeManager::verify(
+            &expected_manager.identity_public_key(),
+            &transcript,
+            &ed_sig,
+        )
+        .expect("agent's Ed25519 signature must verify over the consent-action transcript");
+    }
+
+    #[tokio::test]
+    async fn sign_consent_action_binds_the_signature_to_the_exact_action() {
+        // A signature for Deny must not verify against an Approve transcript
+        // -- the whole point of consent_action_transcript embedding the
+        // action tag.
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let (status, json) = post_signed_json(
+            app,
+            "/v1/sign/consent-action",
+            "secret",
+            consent_action_request_body(serde_json::json!({ "action": "Deny" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {json}");
+        let resp: SignConsentActionResponse = serde_json::from_value(json).unwrap();
+
+        let expected_manager = HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]);
+        let session_id: [u8; 16] = decode_fixed_hex(&"dd".repeat(16)).unwrap();
+        let token_nonce: [u8; 16] = decode_fixed_hex(&"ee".repeat(16)).unwrap();
+        let wrong_transcript = xenia_operator_proto::consent_action_transcript(
+            xenia_operator_proto::ConsentAction::Approve,
+            &session_id,
+            &token_nonce,
+        );
+        let ed_sig_bytes: [u8; 64] = decode_fixed_hex(&resp.ed_signature_hex).unwrap();
+        let ed_sig = ed25519_dalek::Signature::from_bytes(&ed_sig_bytes);
+        assert!(HandshakeManager::verify(
+            &expected_manager.identity_public_key(),
+            &wrong_transcript,
+            &ed_sig,
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn sign_consent_action_rejects_an_unsupported_schema_version() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let body = consent_action_request_body(serde_json::json!({ "schema_version": 999 }));
+        let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
+        assert_eq!(json["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn sign_consent_action_rejects_malformed_hex_fields() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let body = consent_action_request_body(serde_json::json!({ "session_id_hex": "nope" }));
+        let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
+        assert_eq!(json["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn sign_consent_action_rejects_an_unrecognized_action() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let body = consent_action_request_body(serde_json::json!({ "action": "Frobnicate" }));
+        let (status, _json) =
+            post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
+        // `ConsentAction` derives `Deserialize` over its exact variant
+        // names -- an unrecognized action fails the `Json<T>` extractor
+        // itself before the handler runs, so this is axum's own rejection
+        // status rather than the typed `AgentErrorResponse` shape.
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn sign_consent_action_fails_closed_when_a_new_host_needs_confirmation_and_none_is_available(
+    ) {
+        let state = test_state_with_host_trust("secret", &["http://localhost:8134"], false);
+        let app = build_router(state);
+        let (status, json) = post_signed_json(
+            app,
+            "/v1/sign/consent-action",
+            "secret",
+            consent_action_request_body(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "body: {json}");
+        assert_eq!(json["code"], "confirmation_required");
     }
 }
