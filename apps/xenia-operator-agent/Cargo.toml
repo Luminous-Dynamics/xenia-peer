@@ -25,6 +25,10 @@ rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# `daemon_evidence` verifies daemon-signed Ed25519 signatures directly
+# (`xenia-handshake` doesn't re-export the `Signature` type). Matches the
+# version pinned by `xenia-handshake`/`xenia-peer`.
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
 
 [target.'cfg(unix)'.dependencies]
 # Only for a safe getuid() (no unsafe code, per workspace lints) --
@@ -36,11 +40,6 @@ rustix = { version = "0.38", default-features = false, features = ["process", "s
 # `ServiceExt::oneshot` for driving the axum routes in tests without
 # binding a real socket.
 tower = { version = "0.5", features = ["util"] }
-# Only to independently re-verify a returned Ed25519 signature in
-# `/v1/sign/challenge` tests (`xenia-handshake` doesn't re-export the
-# `Signature` type). Matches the version pinned by `xenia-handshake`/
-# `xenia-peer`.
-ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
 
 [lints]
 workspace = true

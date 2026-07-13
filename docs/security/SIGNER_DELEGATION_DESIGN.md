@@ -133,17 +133,45 @@ POST /v1/sign/revoke
 POST /v1/sign/enroll-operator     (later)
 ```
 
+**Revision (PR "4.5b"):** the first implementation of this section gave
+every request a bare `daemon_fingerprint_hex` field the *caller* named
+directly. Building Step 5 (the browser wiring below) surfaced that this is
+unverifiable: the agent had no way to check the fingerprint actually
+corresponded to anything, so a compromised browser could label any
+request with an already-trusted fingerprint regardless of what it was
+actually asking to be signed — undermining the confirmation policy above,
+since "already pinned → skip confirmation" then meant nothing. Fixed by
+replacing the bare fingerprint with daemon-signed *evidence* the agent
+verifies itself and computes the fingerprint from — see
+`xenia_operator_proto::DaemonIdentityCertificate`'s doc comment and
+`apps/xenia-operator-agent/src/daemon_evidence.rs` for the full design.
+The summary: the daemon's *host identity* (the same one the sealed channel
+already uses, and the one thing `host_pin.rs`/`host_trust.rs` already know
+how to pin) signs a delegation certificate vouching for its separate
+HTTP-auth signing key, plus a per-nonce attestation on `/auth/challenge`
+and — implicitly, via that delegation — the session tokens it issues. The
+browser now *relays* this evidence; it never tells the agent which daemon
+to trust.
+
 Every request carries:
 - schema version;
-- the target daemon's identity fingerprint (so the agent can check it
-  against its trust policy before signing anything);
+- the target daemon's host-identity delegation certificate
+  (`daemon_certificate`, fetched by the caller from that daemon's
+  `GET /auth/daemon-identity` and relayed verbatim — the agent verifies
+  both of its signatures and computes the fingerprint itself before
+  checking it against trust policy, never trusting a caller-named
+  fingerprint);
 - the operator identity/key fingerprint the caller believes it's acting
   as;
 - a protocol-specific request id;
 - a nonce;
 - action-specific typed fields (exactly the fields
   `challenge_transcript`/`consent_action_transcript`/
-  `revoke_operator_transcript` need — nothing else);
+  `revoke_operator_transcript` need — nothing else — plus, per action, the
+  daemon-signed evidence that binds those fields to a real daemon: a host
+  attestation over the nonce for `/v1/sign/challenge`, or the full signed
+  session token, verified against the certificate's delegated key, for
+  `/v1/sign/consent-action`/`/v1/sign/revoke`);
 - freshness/expiry information where the underlying protocol has it.
 
 Agent processing, in order:
@@ -152,16 +180,19 @@ Agent processing, in order:
 2. Validate Origin and request size.
 3. Parse the exact typed request (reject anything that doesn't match one
    of the known shapes — no partial/duck-typed acceptance).
-4. Check the target daemon fingerprint against native trust policy.
-5. Enforce freshness and field limits.
-6. Construct the canonical transcript itself, through
+4. Verify `daemon_certificate`'s own signatures, compute the fingerprint
+   from it, and check *that* fingerprint against native trust policy.
+5. Verify the action's daemon-signed evidence (challenge attestation or
+   session token) against the now-trusted certificate.
+6. Enforce freshness and field limits.
+7. Construct the canonical transcript itself, through
    `xenia_operator_proto`'s existing `challenge_transcript`/
    `consent_action_transcript`/`revoke_operator_transcript` functions.
-7. Apply the confirmation policy above.
-8. Sign with both required algorithms (Ed25519 + ML-DSA — no
+8. Apply the confirmation policy above.
+9. Sign with both required algorithms (Ed25519 + ML-DSA — no
    classical-only fallback, matching the rest of this project's hybrid
    posture).
-9. Return a typed signature envelope.
+10. Return a typed signature envelope.
 
 **There is no endpoint that accepts:** arbitrary bytes, arbitrary
 transcript strings, caller-supplied domain separators, or a
@@ -315,6 +346,15 @@ client with its own reachability requirements.
 4. `POST /v1/sign/revoke`, with the native confirmation policy wired in
    (this is the first endpoint that actually exercises the mandatory-
    confirmation path).
+4.5. **Inserted after steps 1-4 shipped:** daemon-signed evidence
+   (`DaemonIdentityCertificate`, challenge host attestations, signed
+   session tokens) replacing the bare caller-named `daemon_fingerprint_hex`
+   those steps originally used — see the revision note under Track A
+   above. Landed as two PRs: "4.5a" (daemon + shared-proto evidence,
+   additive/backward-compatible) then "4.5b" (agent verifies it,
+   supersedes steps 2-4's trust model). Step 5 below was blocked on this
+   landing first, since it would otherwise have wired the browser up to
+   the same unverifiable-fingerprint gap.
 5. Remove those three signing uses from browser-held `OperatorIdentity`.
 6. Track B, as its own separately reviewed PR.
 7. Delete `GET /seeds` only once both tracks are fully migrated and
