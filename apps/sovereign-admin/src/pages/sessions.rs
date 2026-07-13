@@ -250,9 +250,8 @@ pub fn SessionsPage() -> impl IntoView {
                     <p class="prose">
                         {move || match identity_state.get() {
                             OperatorIdentityState::Loading => "Connecting…".to_string(),
-                            state @ OperatorIdentityState::Ready { .. } => {
-                                let id = state.identity().expect("just matched Ready");
-                                format!("Connected. Fingerprint: {}…", &id.fingerprint_hex()[..16])
+                            OperatorIdentityState::Ready { fingerprint_hex, .. } => {
+                                format!("Connected. Fingerprint: {}…", &fingerprint_hex[..16])
                             }
                             OperatorIdentityState::Unavailable(reason) => reason,
                         }}

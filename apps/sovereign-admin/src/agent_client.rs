@@ -8,26 +8,22 @@
 //! The console used to generate the operator's Ed25519 + ML-DSA seeds
 //! itself and persist them in `localStorage` — plaintext hex, readable by
 //! an XSS bug, a malicious browser extension, or a compromised same-origin
-//! dependency. Instead, the seeds now live in a permission-restricted file
-//! held by a small native agent process the operator runs locally, and this
-//! module fetches them into memory once per page session over a
-//! token-authenticated, origin-restricted `127.0.0.1` API.
+//! dependency. Later revisions moved the seeds into a permission-restricted
+//! file held by a small native agent process, but still fetched them into
+//! the browser's memory each page session to sign/handshake locally.
 //!
-//! **Scope note** (updated — Steps 5 and 6 of
-//! `docs/security/SIGNER_DELEGATION_DESIGN.md` have both landed): the
-//! `/auth/*` HTTP ceremony (challenge / consent-action / revoke — "Track A")
-//! asks the agent to sign via [`sign_challenge`]/[`sign_consent_action`]/
-//! [`sign_revoke`], and the sealed-channel handshake ("Track B",
+//! **Scope note** (updated — all seven steps of
+//! `docs/security/SIGNER_DELEGATION_DESIGN.md` have landed): the raw seeds
+//! no longer reach this process at all, not even transiently. The `/auth/*`
+//! HTTP ceremony (challenge / consent-action / revoke — "Track A") asks the
+//! agent to sign via [`sign_challenge`]/[`sign_consent_action`]/
+//! [`sign_revoke`]; the sealed-channel handshake ("Track B",
 //! `crate::sealed_consent`) asks the agent to drive the handshake itself via
-//! [`handshake_begin`]/[`handshake_finish`] — neither path holds the
-//! operator's raw seeds in the browser or signs/handshakes locally with
-//! them anymore. [`fetch_seeds`] is no longer called from
-//! `crate::pages::consent`'s decision path, but it, and the `GET /seeds`
-//! route it calls, are kept for now: `crate::operator_session::OperatorIdentity`
-//! still uses the fetched seeds to derive and *display* the operator's
-//! public fingerprint/pubkeys on the Sessions page (never to sign or
-//! handshake). Retiring `GET /seeds` entirely (Step 7) needs that display
-//! path re-derived from agent-side public info instead.
+//! [`handshake_begin`]/[`handshake_finish`]; and the Sessions-page
+//! enrollment display (`crate::app::OperatorIdentityState`) fetches only
+//! *public* data via [`fetch_identity_info`]. `GET /seeds` and this
+//! module's old `fetch_seeds` are gone -- there is no HTTP surface left, on
+//! either side, that transmits the seeds.
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -50,9 +46,10 @@ fn local_storage() -> Option<Storage> {
 
 /// The operator agent's connection settings: its URL and pairing token.
 ///
-/// Unlike the seeds themselves, these *are* persisted in `localStorage` --
-/// they're configuration, not secret key material. The token alone lets a
-/// caller fetch seeds from the agent, but only from `127.0.0.1` on the same
+/// Unlike the seeds themselves (which never reach this process at all), these
+/// *are* persisted in `localStorage` -- they're configuration, not secret key
+/// material. The token alone lets a caller ask the agent to sign, handshake,
+/// or report public identity info, but only from `127.0.0.1` on the same
 /// machine the agent is running on (the agent never binds a wider address),
 /// so a leaked token isn't independently exploitable the way a leaked
 /// signing key would be.
@@ -96,20 +93,23 @@ fn persist_to_storage(key: &str, val: &str) {
     }
 }
 
+/// The fields of the agent's `GET /identity` response this console actually
+/// uses -- the fingerprint and a paste-ready enrollment record, never the
+/// seeds those are derived from. The response also carries the individual
+/// public keys (`ed25519_pubkey_hex`/`ml_dsa_pubkey_hex`/
+/// `ml_dsa_87_pubkey_hex`); serde ignores them here since nothing in this
+/// crate needs them separately from the record they're already embedded in.
 #[derive(Deserialize)]
-struct SeedsDto {
-    ed25519_secret_hex: String,
-    ml_dsa_seed_hex: String,
+pub struct IdentityDto {
+    pub fingerprint_hex: String,
+    pub enrollment_record_json: String,
 }
 
-/// Fetch the operator's seeds from the agent at `agent_url`, authenticated
-/// with `token`. The caller is responsible for holding the result only in
-/// memory (never persisting it) -- see the module doc comment.
-pub async fn fetch_seeds(agent_url: &str, token: &str) -> Result<([u8; 32], [u8; 32]), String> {
-    let dto: SeedsDto = agent_get(agent_url, token, "/seeds").await?;
-    let ed = decode32(&dto.ed25519_secret_hex)?;
-    let ml = decode32(&dto.ml_dsa_seed_hex)?;
-    Ok((ed, ml))
+/// Fetch the operator's *public* identity info from the agent at
+/// `agent_url`, authenticated with `token`. Never returns seed material --
+/// see the module doc comment.
+pub async fn fetch_identity_info(agent_url: &str, token: &str) -> Result<IdentityDto, String> {
+    agent_get(agent_url, token, "/identity").await
 }
 
 async fn agent_get<T: for<'de> Deserialize<'de>>(
@@ -133,13 +133,6 @@ async fn agent_get<T: for<'de> Deserialize<'de>>(
         ));
     }
     resp.json::<T>().await.map_err(|e| e.to_string())
-}
-
-fn decode32(s: &str) -> Result<[u8; 32], String> {
-    hex::decode(s.trim())
-        .ok()
-        .and_then(|b| b.try_into().ok())
-        .ok_or_else(|| "operator agent returned a malformed seed".to_string())
 }
 
 /// Ask the local agent to sign the daemon's `/auth/challenge` nonce (both

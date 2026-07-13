@@ -15,11 +15,10 @@ use crate::agent_client::AgentConfig;
 use crate::auth::AuthState;
 use crate::config::DaemonConfig;
 use crate::context::{auth_context, daemon_config_context, missing_context_view};
-use crate::operator_session::{OperatorIdentity, OperatorSession, authenticate};
+use crate::operator_session::{OperatorSession, authenticate};
 use crate::pages::{
     ConsentModal, DevicesPage, GovernancePage, LoginPage, MonitorPage, PolicyPage, SessionsPage,
 };
-use xenia_operator_proto::OperatorRole;
 
 /// Shared operator-RBAC session: `Some` once the operator completes the
 /// challenge/verify ceremony against the daemon, carrying the role the daemon
@@ -27,20 +26,18 @@ use xenia_operator_proto::OperatorRole;
 /// privileged control) can gate on the real role rather than a client claim.
 pub type OperatorSessionCtx = RwSignal<Option<OperatorSession>>;
 
-/// The operator's seeds, fetched from the local agent (see
-/// `crate::agent_client`) rather than generated/persisted in the browser.
-/// Holds the raw seeds (not an `OperatorIdentity`/`Rc` wrapper) so this type
-/// stays `Send + Sync` and fits a plain `RwSignal` -- `OperatorIdentity`
-/// wraps non-`Send` wasm-bindgen-adjacent crypto state, and constructing one
-/// from seeds is cheap (no keygen, just derivation), so callers just build
-/// one on demand from whichever variant they get.
+/// The operator's *public* identity info, fetched from the local agent's
+/// `GET /identity` (see `crate::agent_client::fetch_identity_info`) --
+/// never the raw seeds, which no longer reach this process at all (Step 7 of
+/// `docs/security/SIGNER_DELEGATION_DESIGN.md`). Used only for the
+/// Sessions-page enrollment display; nothing here signs or handshakes.
 #[derive(Clone)]
 pub enum OperatorIdentityState {
     /// Fetch in flight (or not yet started).
     Loading,
     Ready {
-        ed_seed: [u8; 32],
-        ml_seed: [u8; 32],
+        fingerprint_hex: String,
+        enrollment_record_json: String,
     },
     /// No token configured, or the agent fetch failed -- carries a
     /// user-facing reason.
@@ -48,14 +45,10 @@ pub enum OperatorIdentityState {
 }
 
 impl OperatorIdentityState {
-    /// Build an [`OperatorIdentity`] if the seeds are ready.
-    pub fn identity(&self) -> Option<OperatorIdentity> {
-        match self {
-            OperatorIdentityState::Ready { ed_seed, ml_seed } => {
-                Some(OperatorIdentity::from_seeds(*ed_seed, *ml_seed))
-            }
-            _ => None,
-        }
+    /// Whether the agent has reported its identity info -- used as a
+    /// reachability heartbeat (see [`OperatorAuthPanel`]'s `sign_in`).
+    pub fn is_ready(&self) -> bool {
+        matches!(self, OperatorIdentityState::Ready { .. })
     }
 }
 
@@ -94,10 +87,11 @@ pub fn App() -> impl IntoView {
                 ));
                 return;
             }
-            match crate::agent_client::fetch_seeds(&url, &token).await {
-                Ok((ed_seed, ml_seed)) => {
-                    identity_state.set(OperatorIdentityState::Ready { ed_seed, ml_seed })
-                }
+            match crate::agent_client::fetch_identity_info(&url, &token).await {
+                Ok(info) => identity_state.set(OperatorIdentityState::Ready {
+                    fingerprint_hex: info.fingerprint_hex,
+                    enrollment_record_json: info.enrollment_record_json,
+                }),
                 Err(e) => identity_state.set(OperatorIdentityState::Unavailable(e)),
             }
         });
@@ -151,10 +145,9 @@ fn AuthStatus() -> impl IntoView {
     let identity_state = use_context::<OperatorIdentityCtx>();
     let sign_out = move |_| {
         auth.sign_out();
-        // Best-effort hygiene: drop this page's fetched copy of the
-        // operator seeds out of the reactive graph on sign-out, rather
-        // than leaving them reachable for the rest of the page's
-        // lifetime. Re-fetched from the agent on demand afterward.
+        // Drop this page's fetched copy of the operator's public identity
+        // info out of the reactive graph on sign-out. Re-fetched from the
+        // agent on demand afterward.
         if let Some(sig) = identity_state {
             sig.set(OperatorIdentityState::Loading);
         }
@@ -199,12 +192,12 @@ fn OperatorAuthPanel() -> impl IntoView {
     let (error, set_error) = signal(None::<String>);
 
     let sign_in = move |_| {
-        // `authenticate()` no longer needs `OperatorIdentity`/its seeds at
-        // all (the agent signs, and returns the operator's public keys
+        // `authenticate()` doesn't need the operator's public identity info
+        // at all (the agent signs, and returns the operator's public keys
         // itself) -- this check is purely a reachability heartbeat: if the
-        // agent can't even answer `GET /seeds`, `/v1/sign/challenge` will
+        // agent can't even answer `GET /identity`, `/v1/sign/challenge` will
         // fail too, so there's no point attempting the ceremony.
-        if identity_state.get_untracked().identity().is_none() {
+        if !identity_state.get_untracked().is_ready() {
             set_error.set(Some(
                 "Operator agent identity isn't ready -- check the agent settings on the \
                  Sessions page."
@@ -238,19 +231,17 @@ fn OperatorAuthPanel() -> impl IntoView {
                         OperatorIdentityState::Unavailable(reason) => view! {
                             <span class="operator-agent-status operator-error">{reason}</span>
                         }.into_any(),
-                        state @ OperatorIdentityState::Ready { .. } => {
-                            let identity = state.identity().expect("just matched Ready");
-                            // Template record: the admin sets operator_id + role, then adds
-                            // it to the daemon's --operators-file. All three public keys
-                            // matter -- omitting ml_dsa_87_pubkey means this operator can
-                            // never use the high-security sealed channel, even if they
-                            // select it in the console.
-                            let fingerprint = identity.fingerprint_hex();
+                        OperatorIdentityState::Ready { fingerprint_hex, enrollment_record_json } => {
+                            // Template record (built by the agent's `GET /identity` --
+                            // see `crate::agent_client::IdentityDto`): the admin sets
+                            // operator_id + role, then adds it to the daemon's
+                            // --operators-file. All three public keys matter --
+                            // omitting ml_dsa_87_pubkey means this operator can never
+                            // use the high-security sealed channel, even if they select
+                            // it in the console.
+                            let fingerprint = fingerprint_hex;
                             let fp_short = fingerprint.chars().take(16).collect::<String>();
-                            let record = identity.enrollment_record_json(
-                                "your-operator-id",
-                                OperatorRole::Viewer,
-                            );
+                            let record = enrollment_record_json;
                             view! {
                                 <button
                                     class="operator-signin"
