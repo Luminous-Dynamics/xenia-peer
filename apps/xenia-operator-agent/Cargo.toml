@@ -14,6 +14,7 @@ publish = false
 xenia-handshake = { path = "../../crates/xenia-handshake" }
 xenia-wire = { workspace = true, features = ["handshake"] }
 xenia-operator-proto = { workspace = true }
+xenia-operator-agent-proto = { workspace = true }
 axum = "0.8"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal"] }
 clap = { version = "4", features = ["derive"] }
