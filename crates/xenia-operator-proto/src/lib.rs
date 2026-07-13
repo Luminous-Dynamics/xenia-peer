@@ -122,7 +122,10 @@ pub fn role_permits(role: OperatorRole, action: OperatorAction) -> bool {
 }
 
 /// A consent decision an operator can authorize on a live/pending session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Serializes to the variant name (`"Approve"`, `"Deny"`, `"Revoke"`),
+/// byte-identical to [`Self::as_str`] -- used directly (not just via
+/// `as_str`) by `xenia-operator-agent-proto`'s typed signing requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConsentAction {
     /// Grant the session.
     Approve,
@@ -357,6 +360,16 @@ mod tests {
         assert_eq!(ConsentAction::from_wire("approve"), None);
         assert_eq!(ConsentAction::from_wire("nonsense"), None);
         assert_eq!(ConsentAction::Deny.as_str(), "Deny");
+    }
+
+    #[test]
+    fn consent_action_serde_is_the_variant_name() {
+        assert_eq!(
+            serde_json::to_string(&ConsentAction::Revoke).unwrap(),
+            "\"Revoke\""
+        );
+        let a: ConsentAction = serde_json::from_str("\"Deny\"").unwrap();
+        assert_eq!(a, ConsentAction::Deny);
     }
 
     #[test]

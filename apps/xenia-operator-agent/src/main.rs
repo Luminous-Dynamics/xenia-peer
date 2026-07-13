@@ -51,6 +51,17 @@
 //! - The seeds are held zeroize-on-drop (`zeroize::Zeroizing`) for as long
 //!   as this process holds them in memory.
 
+// `host_trust` (native host-fingerprint trust policy) is step 1 of
+// SIGNER_DELEGATION_DESIGN.md's recommended PR sequence: the foundation
+// the `/v1/sign/*` and `/v1/handshake/*` endpoints from later steps build
+// on. Not called from `main`/`AgentState` yet -- that lands with those
+// endpoints -- so it's fully exercised by its own unit tests but
+// otherwise dead code today. Mirrors `apps/xenia-peer`'s `operator.rs`
+// (Phase 1 of `OPERATOR_RBAC_PLAN.md`), which carries the identical
+// "foundation module, not yet wired, allow removed when it is" shape.
+mod host_trust;
+mod secure_file;
+
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -342,75 +353,10 @@ fn load_or_create_token(path: &Path) -> Result<String, Box<dyn std::error::Error
 /// already exists, refuse to use it unless it's a regular file (not a
 /// symlink) owned by this process's user, then return its contents --
 /// closing off a symlink-swap or different-local-user substitution attack
-/// on a file this process is about to trust as key material.
-fn load_or_create_secure_file(
-    path: &Path,
-    generate: impl FnOnce() -> Vec<u8>,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    match secure_create_new(path) {
-        Ok(mut file) => {
-            use std::io::Write;
-            let contents = generate();
-            file.write_all(&contents)?;
-            Ok(contents)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            check_existing_file_is_safe(path)?;
-            Ok(std::fs::read(path)?)
-        }
-        Err(e) => Err(e.into()),
-    }
-}
-
-#[cfg(unix)]
-fn secure_create_new(path: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-}
-#[cfg(not(unix))]
-fn secure_create_new(path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-}
-
-#[cfg(unix)]
-fn check_existing_file_is_safe(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    let meta = std::fs::symlink_metadata(path)?;
-    if meta.file_type().is_symlink() {
-        return Err(format!(
-            "{} is a symlink -- refusing to use it for sensitive material",
-            path.display()
-        )
-        .into());
-    }
-    if !meta.is_file() {
-        return Err(format!("{} is not a regular file", path.display()).into());
-    }
-    let owner_uid = meta.uid();
-    let current_uid = rustix::process::getuid().as_raw();
-    if owner_uid != current_uid {
-        return Err(format!(
-            "{} is owned by uid {owner_uid}, not this process's uid {current_uid} -- refusing to use it",
-            path.display()
-        )
-        .into());
-    }
-    // Re-tighten permissions in case they drifted since creation (defense
-    // in depth).
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-#[cfg(not(unix))]
-fn check_existing_file_is_safe(_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    Ok(())
-}
+/// on a file this process is about to trust as key material. See
+/// `secure_file` for the implementation, shared with `host_trust`'s pin
+/// store.
+use secure_file::load_or_create_secure_file;
 
 #[cfg(test)]
 mod tests {

@@ -1,0 +1,22 @@
+# Copyright (c) 2026 Tristan Stoltz / Luminous Dynamics
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[package]
+name = "xenia-operator-agent-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-or-later"
+repository.workspace = true
+homepage.workspace = true
+description = "Shared browser-console <-> native-operator-agent protocol: the exact typed request/response shapes for the agent's signing and handshake-delegation API, used by both apps/xenia-operator-agent and apps/sovereign-admin so neither side can drift from the other."
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+xenia-operator-proto = { path = "../xenia-operator-proto" }
+
+[dev-dependencies]
+serde_json = "1"
