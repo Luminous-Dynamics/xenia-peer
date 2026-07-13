@@ -3,6 +3,10 @@
 Xenia is a remote-session and operator-control stack. Treat every production
 claim as blocked until these gates pass.
 
+See `POST_DELEGATION_HARDENING_PLAN.md` for the concrete, PR-by-PR milestone
+(`post-delegation-production-hardening-v0.1`) feeding mainly Gates 1, 4, 5
+below.
+
 ## Gate 0 — Workspace integrity
 
 - No `target/`, `dist/`, tarballs, or migration scripts in active source paths.
