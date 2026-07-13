@@ -13,12 +13,13 @@
 //! permitted operator.
 
 use futures_util::{SinkExt, StreamExt};
-use gloo_net::websocket::{futures::WebSocket, Message};
+use gloo_net::websocket::{Message, futures::WebSocket};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use xenia_operator_proto::ConsentAction;
 
+use crate::agent_client::AgentConfig;
 use crate::app::{OperatorIdentityCtx, OperatorSessionCtx};
 use crate::context::{daemon_config_context, missing_context_view};
 use crate::operator_session::build_consent_request;
@@ -48,6 +49,9 @@ pub fn ConsentModal() -> impl IntoView {
     let identity_state = use_context::<OperatorIdentityCtx>();
     let Ok(config) = daemon_config_context() else {
         return missing_context_view("DaemonConfig").into_any();
+    };
+    let Some(agent_config) = use_context::<AgentConfig>() else {
+        return missing_context_view("AgentConfig").into_any();
     };
 
     let (consent_req, set_consent_req) = signal(None::<String>);
@@ -91,18 +95,17 @@ pub fn ConsentModal() -> impl IntoView {
         let session_id = prompt.as_deref().and_then(parse_session_id);
         let sealed = config.use_sealed_channel.get_untracked();
 
-        // The identity is only needed to build a token-bound payload (when
-        // we have a session + session_id) or to drive the sealed-channel
-        // handshake (which authenticates via the handshake itself,
-        // regardless of whether an operator session exists) -- so only
-        // require it when one of those actually applies.
-        let needs_identity = (sess.is_some() && session_id.is_some()) || sealed;
-        let id = if needs_identity {
+        // The identity (the seeds) is only needed to drive the
+        // sealed-channel handshake now -- the signed, non-sealed consent
+        // request no longer needs it at all; the local agent holds the
+        // operator's identity and signs on the console's behalf (see
+        // `crate::operator_session::build_consent_request`).
+        let seeds = if sealed {
             match identity_state.and_then(|sig| sig.get_untracked().identity()) {
-                Some(id) => Some(id),
+                Some(id) => Some(id.seeds()),
                 None => {
                     leptos::logging::error!(
-                        "consent decision needs the operator identity but the agent isn't \
+                        "sealed consent needs the operator identity but the agent isn't \
                          connected -- check the agent settings on the Sessions page"
                     );
                     return;
@@ -112,15 +115,41 @@ pub fn ConsentModal() -> impl IntoView {
             None
         };
 
-        let payload = match (&sess, session_id, &id) {
-            (Some(s), Some(sid), Some(id)) => build_consent_request(id, s, action, &sid),
-            _ => action.as_str().to_string(),
-        };
-        if sealed {
-            let (ed_seed, ml_seed) = id.expect("sealed => needs_identity => Some").seeds();
-            let sealed_url = config.sealed_ws_url();
-            let high_security = config.high_security.get_untracked();
-            spawn_local(async move {
+        let endpoint = config.endpoint.get_untracked();
+        let agent_url = agent_config.agent_url.get_untracked();
+        let agent_token = agent_config.agent_token.get_untracked();
+        let sealed_url = config.sealed_ws_url();
+        let high_security = config.high_security.get_untracked();
+        let consent_url = config.consent_ws_url();
+
+        // The payload now needs an `await` (asking the agent to sign) even
+        // in the non-sealed case, so both dispatch paths live inside one
+        // `spawn_local` after it resolves rather than each starting their
+        // own.
+        spawn_local(async move {
+            let payload = match (&sess, session_id) {
+                (Some(s), Some(sid)) => {
+                    match build_consent_request(
+                        &endpoint,
+                        &agent_url,
+                        &agent_token,
+                        s,
+                        action,
+                        &sid,
+                    )
+                    .await
+                    {
+                        Ok(p) => p,
+                        Err(e) => {
+                            leptos::logging::error!("failed to build signed consent request: {e}");
+                            return;
+                        }
+                    }
+                }
+                _ => action.as_str().to_string(),
+            };
+            if sealed {
+                let (ed_seed, ml_seed) = seeds.expect("sealed => seeds is Some");
                 let result = if high_security {
                     crate::sealed_consent::send_sealed_consent_highsec(
                         &sealed_url,
@@ -140,16 +169,11 @@ pub fn ConsentModal() -> impl IntoView {
                 if let Err(err) = result {
                     leptos::logging::error!("sealed consent decision failed: {err}");
                 }
-            });
-        } else {
-            let consent_url = config.consent_ws_url();
-            spawn_local(async move {
-                if let Ok(ws) = WebSocket::open(&consent_url) {
-                    let (mut writer, _) = ws.split();
-                    let _ = writer.send(Message::Text(payload)).await;
-                }
-            });
-        }
+            } else if let Ok(ws) = WebSocket::open(&consent_url) {
+                let (mut writer, _) = ws.split();
+                let _ = writer.send(Message::Text(payload)).await;
+            }
+        });
         set_is_open.set(false);
     };
 

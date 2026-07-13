@@ -7,7 +7,7 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::{
-    components::{Route, Router, Routes, A},
+    components::{A, Route, Router, Routes},
     path,
 };
 
@@ -15,7 +15,7 @@ use crate::agent_client::AgentConfig;
 use crate::auth::AuthState;
 use crate::config::DaemonConfig;
 use crate::context::{auth_context, daemon_config_context, missing_context_view};
-use crate::operator_session::{authenticate, OperatorIdentity, OperatorSession};
+use crate::operator_session::{OperatorIdentity, OperatorSession, authenticate};
 use crate::pages::{
     ConsentModal, DevicesPage, GovernancePage, LoginPage, MonitorPage, PolicyPage, SessionsPage,
 };
@@ -192,23 +192,33 @@ fn OperatorAuthPanel() -> impl IntoView {
     let Some(identity_state) = use_context::<OperatorIdentityCtx>() else {
         return missing_context_view("OperatorIdentity").into_any();
     };
+    let Some(agent_config) = use_context::<AgentConfig>() else {
+        return missing_context_view("AgentConfig").into_any();
+    };
     let (busy, set_busy) = signal(false);
     let (error, set_error) = signal(None::<String>);
 
     let sign_in = move |_| {
-        let Some(identity) = identity_state.get_untracked().identity() else {
+        // `authenticate()` no longer needs `OperatorIdentity`/its seeds at
+        // all (the agent signs, and returns the operator's public keys
+        // itself) -- this check is purely a reachability heartbeat: if the
+        // agent can't even answer `GET /seeds`, `/v1/sign/challenge` will
+        // fail too, so there's no point attempting the ceremony.
+        if identity_state.get_untracked().identity().is_none() {
             set_error.set(Some(
                 "Operator agent identity isn't ready -- check the agent settings on the \
                  Sessions page."
                     .to_string(),
             ));
             return;
-        };
+        }
         set_busy.set(true);
         set_error.set(None);
         let endpoint = config.endpoint.get();
+        let agent_url = agent_config.agent_url.get_untracked();
+        let agent_token = agent_config.agent_token.get_untracked();
         spawn_local(async move {
-            match authenticate(&endpoint, &identity).await {
+            match authenticate(&endpoint, &agent_url, &agent_token).await {
                 Ok(s) => session.set(Some(s)),
                 Err(e) => set_error.set(Some(e)),
             }

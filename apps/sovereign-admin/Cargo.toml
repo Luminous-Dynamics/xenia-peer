@@ -38,6 +38,11 @@ xenia-ledger = { path = "../../crates/xenia-ledger" }
 # SystemTime-using establish() paths, so it is wasm-safe at runtime.)
 xenia-operator-proto = { path = "../../crates/xenia-operator-proto" }
 xenia-handshake = { path = "../../crates/xenia-handshake" }
+# Typed /v1/sign/* request/response shapes for the local xenia-operator-agent
+# (see docs/security/SIGNER_DELEGATION_DESIGN.md) -- the console now asks the
+# agent to sign the /auth/* ceremony instead of holding the operator's seeds
+# in memory and signing locally.
+xenia-operator-agent-proto = { path = "../../crates/xenia-operator-agent-proto" }
 hex = "0.4"
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
 rand_core = { version = "0.6", features = ["getrandom"] }

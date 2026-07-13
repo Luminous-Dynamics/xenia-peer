@@ -13,17 +13,26 @@
 //! module fetches them into memory once per page session over a
 //! token-authenticated, origin-restricted `127.0.0.1` API.
 //!
-//! **Scope note**: this removes the seeds' *persistent* browser-side
-//! storage, not their presence in the browser process's memory during a
-//! session — the console still holds the fetched seeds in memory and signs
-//! locally with them (both the `/auth/*` ceremony and the sealed-channel
-//! handshake). A follow-up that has the agent perform the signing itself,
-//! so raw key material never reaches the browser process at all, is scoped
-//! but not built — see `docs/security/OPERATOR_SECURITY_MODEL.md` §9.
+//! **Scope note** (updated — Step 5 of
+//! `docs/security/SIGNER_DELEGATION_DESIGN.md` landed): the `/auth/*` HTTP
+//! ceremony (challenge / consent-action / revoke — "Track A") now asks the
+//! agent to sign via [`sign_challenge`]/[`sign_consent_action`]/
+//! [`sign_revoke`] instead of holding the seeds in memory and signing
+//! locally with them. [`fetch_seeds`] still exists and is still called:
+//! the sealed-channel handshake ("Track B",
+//! `crate::sealed_consent`/`crate::pages::consent`) hasn't been migrated
+//! yet, so the console still needs the raw seeds for that one path. Once
+//! Track B migrates too (a separately reviewed follow-up), `GET /seeds`
+//! and this function are retired entirely.
 
 use leptos::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use web_sys::Storage;
+
+use xenia_operator_agent_proto::{
+    AgentErrorResponse, SignChallengeRequest, SignChallengeResponse, SignConsentActionRequest,
+    SignConsentActionResponse, SignRevokeRequest, SignRevokeResponse,
+};
 
 const AGENT_URL_KEY: &str = "xenia-admin.agent.url";
 const AGENT_TOKEN_KEY: &str = "xenia-admin.agent.token";
@@ -126,4 +135,80 @@ fn decode32(s: &str) -> Result<[u8; 32], String> {
         .ok()
         .and_then(|b| b.try_into().ok())
         .ok_or_else(|| "operator agent returned a malformed seed".to_string())
+}
+
+/// Ask the local agent to sign the daemon's `/auth/challenge` nonce (both
+/// algorithms), proving possession of the enrolled operator key without
+/// the raw seeds ever leaving the agent process. See
+/// `crate::operator_session::authenticate`, the only caller.
+pub async fn sign_challenge(
+    agent_url: &str,
+    token: &str,
+    req: &SignChallengeRequest,
+) -> Result<SignChallengeResponse, String> {
+    agent_post(agent_url, token, "/v1/sign/challenge", req).await
+}
+
+/// Ask the local agent to sign a session-bound consent decision. See
+/// `crate::operator_session::build_consent_request`, the only caller.
+pub async fn sign_consent_action(
+    agent_url: &str,
+    token: &str,
+    req: &SignConsentActionRequest,
+) -> Result<SignConsentActionResponse, String> {
+    agent_post(agent_url, token, "/v1/sign/consent-action", req).await
+}
+
+/// Ask the local agent to sign an admin's authorization to revoke another
+/// operator. See `crate::operator_session::build_revoke_request`, the only
+/// caller.
+pub async fn sign_revoke(
+    agent_url: &str,
+    token: &str,
+    req: &SignRevokeRequest,
+) -> Result<SignRevokeResponse, String> {
+    agent_post(agent_url, token, "/v1/sign/revoke", req).await
+}
+
+/// POST a typed `/v1/sign/*` request and decode the typed response. On a
+/// non-2xx, tries to parse the agent's typed [`AgentErrorResponse`] for an
+/// accurate message (e.g. "host not trusted, confirm on the agent's
+/// terminal") rather than surfacing a bare status code; falls back to the
+/// raw response body if that parse fails. Reads the body exactly once (as
+/// text) either way, since a `fetch` response body can only be consumed
+/// once.
+async fn agent_post<Req: Serialize, Resp: DeserializeOwned>(
+    agent_url: &str,
+    token: &str,
+    path: &str,
+    body: &Req,
+) -> Result<Resp, String> {
+    use gloo_net::http::Request;
+    let url = format!("{}{path}", agent_url.trim_end_matches('/'));
+    let json_body = serde_json::to_string(body).map_err(|e| e.to_string())?;
+    let resp = Request::post(&url)
+        .header("X-Agent-Token", token)
+        .header("content-type", "application/json")
+        .body(json_body)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| {
+            format!("couldn't reach the operator agent at {agent_url} -- is it running? ({e})")
+        })?;
+    let ok = resp.ok();
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !ok {
+        if let Ok(err) = serde_json::from_str::<AgentErrorResponse>(&text) {
+            return Err(format!(
+                "operator agent refused ({:?}): {}",
+                err.code, err.message
+            ));
+        }
+        return Err(format!(
+            "operator agent at {agent_url} refused the request (HTTP {status}): {text}"
+        ));
+    }
+    serde_json::from_str(&text).map_err(|e| e.to_string())
 }
