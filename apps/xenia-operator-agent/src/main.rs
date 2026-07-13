@@ -59,6 +59,7 @@
 // with daemon-signed evidence the agent verifies itself -- see that
 // module's doc comment for the confused-deputy gap this closes.
 mod daemon_evidence;
+mod handshake_state;
 mod host_trust;
 mod secure_file;
 
@@ -75,13 +76,19 @@ use clap::Parser;
 use serde::Serialize;
 use xenia_handshake::HandshakeManager;
 use xenia_operator_agent_proto::{
-    AgentErrorCode, AgentErrorResponse, SignChallengeRequest, SignChallengeResponse,
+    AgentErrorCode, AgentErrorResponse, HandshakeBeginRequest, HandshakeBeginResponse,
+    HandshakeFinishRequest, HandshakeFinishResponse, SignChallengeRequest, SignChallengeResponse,
     SignConsentActionRequest, SignConsentActionResponse, SignRevokeRequest, SignRevokeResponse,
 };
 use xenia_operator_proto::{OperatorEnrollmentRecord, OperatorRole};
+use xenia_wire::handshake::ViewerHandshake;
+use xenia_wire::handshake_highsec::{
+    ViewerHandshakeHighSec, derive_ml_dsa_87_seed_from_ed25519_secret,
+};
 use zeroize::Zeroizing;
 
-use daemon_evidence::decode_fixed_hex;
+use daemon_evidence::{decode_fixed_hex, decode_hex_vec};
+use handshake_state::{HandshakeState, PendingSuite};
 use host_trust::HostTrustStore;
 
 #[derive(Parser, Debug)]
@@ -117,10 +124,10 @@ struct Args {
     allowed_origin: Vec<String>,
 
     /// Native host-trust pin-store path (`host_trust::HostTrustStore`).
-    /// Grows over time as `/v1/sign/*` and (later) `/v1/handshake/*`
-    /// requests name daemon fingerprints to trust; unlike the identity/
-    /// token files this has no fixed first-run content, so it's simply
-    /// created empty on first use.
+    /// Grows over time as `/v1/sign/*` and `/v1/handshake/*` requests name
+    /// daemon fingerprints to trust; unlike the identity/token files this
+    /// has no fixed first-run content, so it's simply created empty on
+    /// first use.
     #[arg(long, default_value = "operator-agent-host-trust.json")]
     pin_store_path: PathBuf,
 
@@ -139,11 +146,16 @@ struct AgentState {
     ml_dsa_seed: Zeroizing<[u8; 32]>,
     token: String,
     allowed_origins: Vec<String>,
-    /// Native host-trust policy for `/v1/sign/*` and (later)
-    /// `/v1/handshake/*`. `HostTrustStore::check` blocks on terminal I/O,
-    /// so callers must reach it through `tokio::task::spawn_blocking`
-    /// rather than locking it directly on an async worker thread.
+    /// Native host-trust policy for `/v1/sign/*` and `/v1/handshake/*`.
+    /// `HostTrustStore::check` blocks on terminal I/O, so callers must
+    /// reach it through `tokio::task::spawn_blocking` rather than locking
+    /// it directly on an async worker thread.
     host_trust: StdMutex<HostTrustStore>,
+    /// Pending Track B handshakes (`handshake_state`'s module doc
+    /// comment). Locked only for brief map operations -- the crypto work
+    /// itself (`ViewerHandshake::begin`/`finish`) runs on an owned local
+    /// value outside the lock.
+    handshake_state: StdMutex<HandshakeState>,
 }
 
 #[tokio::main]
@@ -183,6 +195,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         token,
         allowed_origins: args.allowed_origin,
         host_trust: StdMutex::new(host_trust),
+        handshake_state: StdMutex::new(HandshakeState::new(handshake_state::DEFAULT_TTL)),
     });
 
     let app = build_router(state);
@@ -209,6 +222,8 @@ fn build_router(state: Arc<AgentState>) -> Router {
         .route("/v1/sign/challenge", post(sign_challenge))
         .route("/v1/sign/consent-action", post(sign_consent_action))
         .route("/v1/sign/revoke", post(sign_revoke))
+        .route("/v1/handshake/begin", post(handshake_begin))
+        .route("/v1/handshake/finish", post(handshake_finish))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_and_cors_middleware,
@@ -218,10 +233,12 @@ fn build_router(state: Arc<AgentState>) -> Router {
         // `DaemonIdentityCertificate` (ML-DSA-65 alone is ~1952-byte
         // pubkeys / ~3309-byte signatures, hex-doubled) plus, for
         // /v1/sign/challenge, a second ML-DSA host attestation on top --
-        // a genuine such request runs ~17-18KB. 64KiB gives headroom while
-        // still refusing anything wildly larger up front, before typed
-        // parsing even starts. GET routes have no body, so this only
-        // bounds the POST routes in practice.
+        // a genuine such request runs ~17-18KB. `/v1/handshake/*` bodies
+        // stay small (a single bincode-encoded handshake message, at most
+        // a few KB for the ML-KEM-1024 high-security suite). 64KiB gives
+        // headroom for all of these while still refusing anything wildly
+        // larger up front, before typed parsing even starts. GET routes
+        // have no body, so this only bounds the POST routes in practice.
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
         .with_state(state)
 }
@@ -530,6 +547,179 @@ async fn sign_revoke(
     }))
 }
 
+/// `POST /v1/handshake/begin` -- Track B of
+/// `docs/security/SIGNER_DELEGATION_DESIGN.md`: runs the viewer half of
+/// the sealed-channel handshake against the daemon's relayed `HostHello`,
+/// using the agent's own persisted operator identity (the seeds never
+/// leave this process). Holds the resulting pending state (see
+/// [`handshake_state`]) for the matching `/v1/handshake/finish` call.
+///
+/// Unlike every `/v1/sign/*` handler, there is no host-trust check here --
+/// `begin` doesn't yet know the daemon's identity (that's only revealed by
+/// *completing* the handshake); the check happens in
+/// [`handshake_finish`], gating whether any session material is ever
+/// released.
+async fn handshake_begin(
+    State(state): State<Arc<AgentState>>,
+    headers: HeaderMap,
+    Json(req): Json<HandshakeBeginRequest>,
+) -> Result<Json<HandshakeBeginResponse>, (StatusCode, Json<AgentErrorResponse>)> {
+    if req.common.schema_version != xenia_operator_agent_proto::SCHEMA_VERSION {
+        return Err(bad_request(format!(
+            "unsupported schema_version {} (expected {})",
+            req.common.schema_version,
+            xenia_operator_agent_proto::SCHEMA_VERSION
+        )));
+    }
+    let origin = origin_header(&headers)?;
+    let hello = decode_hex_vec(&req.host_hello_hex)
+        .ok_or_else(|| bad_request("host_hello_hex must be valid hex"))?;
+
+    let (pending, viewer_response) = match req.common.suite.as_str() {
+        "standard" => {
+            let mut vh = ViewerHandshake::from_identity(
+                &state.ed25519_secret[..],
+                &state.ml_dsa_seed[..],
+            )
+            .map_err(|e| bad_request(format!("could not construct viewer handshake: {e}")))?;
+            let resp = vh
+                .begin(&hello)
+                .map_err(|e| bad_request(format!("handshake begin failed: {e}")))?;
+            (PendingSuite::Standard(Box::new(vh)), resp)
+        }
+        "highsec" => {
+            let ml_dsa_87_seed = derive_ml_dsa_87_seed_from_ed25519_secret(&state.ed25519_secret);
+            let mut vh = ViewerHandshakeHighSec::from_identity(
+                &state.ed25519_secret[..],
+                &ml_dsa_87_seed,
+            )
+            .map_err(|e| bad_request(format!("could not construct viewer handshake: {e}")))?;
+            let resp = vh
+                .begin(&hello)
+                .map_err(|e| bad_request(format!("handshake begin failed: {e}")))?;
+            (PendingSuite::HighSec(Box::new(vh)), resp)
+        }
+        _ => {
+            return Err(bad_request(format!(
+                "suite must be \"standard\" or \"highsec\", got {:?}",
+                req.common.suite
+            )));
+        }
+    };
+
+    let handshake_id = {
+        let mut hs = state
+            .handshake_state
+            .lock()
+            .expect("handshake-state mutex poisoned");
+        hs.purge_expired();
+        hs.begin(&origin, pending)
+            .map_err(|e| bad_request(e.message()))?
+    };
+
+    tracing::info!(
+        request_id = %req.common.request_id,
+        suite = %req.common.suite,
+        handshake_id = %hex::encode(handshake_id),
+        "handshake begin succeeded, pending finish"
+    );
+
+    Ok(Json(HandshakeBeginResponse {
+        handshake_id_hex: hex::encode(handshake_id),
+        viewer_response_hex: hex::encode(viewer_response),
+        expires_in_secs: handshake_state::DEFAULT_TTL.as_secs(),
+    }))
+}
+
+/// `POST /v1/handshake/finish` -- completes the pending handshake with the
+/// daemon's relayed `HostFinalize`. The resulting
+/// `host_identity_fingerprint` is the *authenticated* host identity --
+/// derived from the handshake's own signature verification inside
+/// `ViewerHandshake::finish`/`ViewerHandshakeHighSec::finish`, never a
+/// caller assertion -- checked against native trust policy via
+/// [`check_host_trust_fingerprint`] before any session material is
+/// returned. The pending entry is consumed (single-use) regardless of
+/// whether `finish` or the trust check succeeds or fails.
+async fn handshake_finish(
+    State(state): State<Arc<AgentState>>,
+    headers: HeaderMap,
+    Json(req): Json<HandshakeFinishRequest>,
+) -> Result<Json<HandshakeFinishResponse>, (StatusCode, Json<AgentErrorResponse>)> {
+    if req.schema_version != xenia_operator_agent_proto::SCHEMA_VERSION {
+        return Err(bad_request(format!(
+            "unsupported schema_version {} (expected {})",
+            req.schema_version,
+            xenia_operator_agent_proto::SCHEMA_VERSION
+        )));
+    }
+    let origin = origin_header(&headers)?;
+    let handshake_id = decode_fixed_hex::<16>(&req.handshake_id_hex)
+        .ok_or_else(|| bad_request("handshake_id_hex must be 32 hex characters"))?;
+    let finalize = decode_hex_vec(&req.host_finalize_hex)
+        .ok_or_else(|| bad_request("host_finalize_hex must be valid hex"))?;
+
+    let pending = {
+        let mut hs = state
+            .handshake_state
+            .lock()
+            .expect("handshake-state mutex poisoned");
+        hs.take(&handshake_id, &origin)
+            .map_err(|e| bad_request(e.not_found_message()))?
+    };
+
+    let (schedule, suite_label) = match pending {
+        PendingSuite::Standard(mut vh) => {
+            let schedule = vh.finish(&finalize).map_err(|e| {
+                bad_request(format!(
+                    "handshake finish failed (host rejected or MITM): {e}"
+                ))
+            })?;
+            (schedule, "standard")
+        }
+        PendingSuite::HighSec(mut vh) => {
+            let schedule = vh.finish(&finalize).map_err(|e| {
+                bad_request(format!(
+                    "handshake finish failed (host rejected or MITM): {e}"
+                ))
+            })?;
+            (schedule, "highsec")
+        }
+    };
+
+    let outcome =
+        check_host_trust_fingerprint(&state, schedule.host_identity_fingerprint, suite_label)
+            .await?;
+    tracing::info!(
+        handshake_id = %req.handshake_id_hex,
+        suite = suite_label,
+        outcome = ?outcome,
+        "host trust check passed for /v1/handshake/finish"
+    );
+
+    Ok(Json(HandshakeFinishResponse {
+        aead_key_hex: hex::encode(schedule.aead),
+        rekey_root_hex: hex::encode(schedule.rekey),
+        transcript_hash_hex: hex::encode(schedule.transcript_hash),
+        authenticated_host_fingerprint_hex: hex::encode(schedule.host_identity_fingerprint),
+    }))
+}
+
+/// The `Origin` header value, already validated (present + allowlisted) by
+/// `auth_and_cors_middleware` before any handler runs -- re-extracted here
+/// only to *record* which caller a pending handshake belongs to. Missing
+/// would mean the middleware didn't actually run, which would be a bug in
+/// this binary, not a caller error -- hence `internal_error`, not
+/// `bad_request`.
+fn origin_header(headers: &HeaderMap) -> Result<String, (StatusCode, Json<AgentErrorResponse>)> {
+    headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            internal_error("missing Origin header past auth middleware (should be unreachable)")
+        })
+}
+
 /// Steps 1-2 shared by every `/v1/sign/*` handler: reject an unrecognized
 /// `schema_version` or malformed `suite` rather than guessing at
 /// compatibility.
@@ -555,23 +745,15 @@ fn validate_common(
 /// Step 3, shared by every `/v1/sign/*` handler: verify
 /// `common.daemon_certificate`'s own signatures
 /// ([`daemon_evidence::verify_daemon_certificate`]), then check the
-/// fingerprint *it computes* -- never one the caller supplies -- against
-/// native host-trust policy (`host_trust::HostTrustStore::check`),
-/// blocking on a native terminal confirmation for an unpinned or changed
-/// fingerprint. `check()` blocks on terminal I/O, so it runs via
-/// `spawn_blocking` rather than on an async worker thread. Returns the
-/// verified identity so callers can check further evidence (a challenge
-/// attestation or a session token) against its now-trusted keys.
+/// fingerprint it computes against native host-trust policy via
+/// [`check_host_trust_fingerprint`]. Returns the verified identity so
+/// callers can check further evidence (a challenge attestation or a
+/// session token) against its now-trusted keys.
 ///
-/// Track A has no separate `host_alias` field (unlike Track B's
-/// `/v1/handshake/begin`, which names an intended host *before*
-/// authentication completes) -- the fingerprint itself is the pin key.
-/// This still gives the core TOFU property: a fingerprint the operator
-/// has never confirmed before requires confirmation; a rotated
-/// fingerprint for what the daemon claims is the same host looks like
-/// "first use of a new fingerprint" rather than a flagged rotation, since
-/// there's no stable name to rotate *against*. That distinction is
-/// exactly what Track B's alias-based pinning adds later.
+/// Track A has no separate `host_alias` field -- the fingerprint itself is
+/// the pin key (see [`check_host_trust_fingerprint`]'s doc comment for why
+/// Track B, which *could* have introduced a separate alias concept, uses
+/// the exact same fingerprint-as-alias scheme instead, for consistency).
 async fn enforce_host_trust(
     state: &Arc<AgentState>,
     common: &xenia_operator_agent_proto::SignRequestCommon,
@@ -583,11 +765,46 @@ async fn enforce_host_trust(
             (status_for(agent_err.code), Json(agent_err))
         })?;
 
-    let host_alias = hex::encode(identity.fingerprint);
-    let suite = common.suite.clone();
-    let fingerprint = identity.fingerprint;
+    let outcome = check_host_trust_fingerprint(state, identity.fingerprint, &common.suite).await?;
+    tracing::info!(
+        request_id = %common.request_id,
+        suite = %common.suite,
+        outcome = ?outcome,
+        endpoint = endpoint_label,
+        "host trust check passed"
+    );
+    Ok(identity)
+}
+
+/// Check `fingerprint` (already agent-computed -- from a verified
+/// [`daemon_evidence::VerifiedDaemonIdentity`] for Track A, or from
+/// completing a handshake for Track B; never one a caller simply asserts)
+/// against native host-trust policy (`host_trust::HostTrustStore::check`),
+/// blocking on a native terminal confirmation for an unpinned or changed
+/// fingerprint. `check()` blocks on terminal I/O, so this runs via
+/// `spawn_blocking` rather than on an async worker thread.
+///
+/// Shared by [`enforce_host_trust`] (Track A) and [`handshake_finish`]
+/// (Track B) -- both pin against the bare fingerprint itself rather than a
+/// separate human-meaningful alias. Track B's `/v1/handshake/begin` could
+/// have introduced an "intended host alias" the way an earlier design
+/// sketch considered, but doing so would only matter if `begin` needed to
+/// express *which* host it expects to authenticate -- it doesn't: the
+/// browser relays whatever `HostHello` its own WebSocket connection
+/// received, and the *result* of completing the handshake is the only
+/// place a host identity exists to check at all. Keeping both tracks on
+/// the same fingerprint-as-alias scheme avoids two different pinning
+/// models for what is, from the trust-policy's point of view, the same
+/// question: "have I seen and confirmed this exact fingerprint before?"
+async fn check_host_trust_fingerprint(
+    state: &Arc<AgentState>,
+    fingerprint: [u8; 32],
+    suite: &str,
+) -> Result<host_trust::PinOutcome, (StatusCode, Json<AgentErrorResponse>)> {
+    let host_alias = hex::encode(fingerprint);
+    let suite = suite.to_string();
     let check_state = state.clone();
-    let outcome = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         check_state
             .host_trust
             .lock()
@@ -599,15 +816,7 @@ async fn enforce_host_trust(
     .map_err(|e| {
         let agent_err = e.to_agent_error();
         (status_for(agent_err.code), Json(agent_err))
-    })?;
-    tracing::info!(
-        request_id = %common.request_id,
-        suite = %common.suite,
-        outcome = ?outcome,
-        endpoint = endpoint_label,
-        "host trust check passed"
-    );
-    Ok(identity)
+    })
 }
 
 fn bad_request(message: impl Into<String>) -> (StatusCode, Json<AgentErrorResponse>) {
@@ -811,6 +1020,7 @@ mod tests {
             host_trust: StdMutex::new(
                 HostTrustStore::load(pin_store_path, allow_noninteractive_privileged).unwrap(),
             ),
+            handshake_state: StdMutex::new(HandshakeState::new(handshake_state::DEFAULT_TTL)),
         })
     }
 
@@ -851,6 +1061,7 @@ mod tests {
             host_trust: StdMutex::new(
                 HostTrustStore::load(pin_store_path, allow_noninteractive_privileged).unwrap(),
             ),
+            handshake_state: StdMutex::new(HandshakeState::new(handshake_state::DEFAULT_TTL)),
         })
     }
 
@@ -1524,6 +1735,291 @@ mod tests {
             .uri("/v1/sign/revoke")
             .header("content-type", "application/json")
             .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    // ─── Track B: /v1/handshake/* ───────────────────────────────────────
+
+    fn handshake_begin_body(suite: &str, hello: &[u8]) -> serde_json::Value {
+        serde_json::to_value(HandshakeBeginRequest {
+            common: xenia_operator_agent_proto::HandshakeRequestCommon {
+                schema_version: xenia_operator_agent_proto::SCHEMA_VERSION,
+                suite: suite.to_string(),
+                request_id: "test-hs".to_string(),
+            },
+            host_hello_hex: hex::encode(hello),
+        })
+        .unwrap()
+    }
+
+    fn handshake_finish_body(handshake_id_hex: &str, finalize: &[u8]) -> serde_json::Value {
+        serde_json::to_value(HandshakeFinishRequest {
+            schema_version: xenia_operator_agent_proto::SCHEMA_VERSION,
+            handshake_id_hex: handshake_id_hex.to_string(),
+            host_finalize_hex: hex::encode(finalize),
+        })
+        .unwrap()
+    }
+
+    /// Genuine end-to-end round trip for the standard suite, against a
+    /// *real* host counterpart (`xenia_peer_core::handshake::
+    /// perform_host_handshake_authenticating_peer`, the exact function the
+    /// real daemon calls) over a real loopback TCP socket -- proving the
+    /// agent's viewer handling is genuinely wire-compatible, not just
+    /// internally self-consistent.
+    #[tokio::test]
+    async fn handshake_round_trip_standard_suite_against_a_real_host() {
+        use xenia_peer_core::handshake::perform_host_handshake_authenticating_peer;
+        use xenia_peer_core::transport::{TcpTransport, Transport};
+
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let host_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut transport = TcpTransport::new(stream);
+            let mut host_mgr = HandshakeManager::new();
+            perform_host_handshake_authenticating_peer(
+                &mut transport,
+                &mut host_mgr,
+                "operator",
+                None,
+            )
+            .await
+            .unwrap()
+        });
+        let client_stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut client_transport = TcpTransport::new(client_stream);
+
+        // 1. Host's HostHello -> POST /v1/handshake/begin.
+        let hello = client_transport.recv_envelope().await.unwrap();
+        let (status, json) = post_signed_json(
+            app.clone(),
+            "/v1/handshake/begin",
+            "secret",
+            handshake_begin_body("standard", &hello),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {json}");
+        let begin_resp: HandshakeBeginResponse = serde_json::from_value(json).unwrap();
+
+        // 2. Relay the viewer response to the host.
+        let viewer_response = decode_hex_vec(&begin_resp.viewer_response_hex).unwrap();
+        client_transport
+            .send_envelope(&viewer_response)
+            .await
+            .unwrap();
+
+        // 3. Host's HostFinalize -> POST /v1/handshake/finish.
+        let finalize = client_transport.recv_envelope().await.unwrap();
+        let (status, json) = post_signed_json(
+            app,
+            "/v1/handshake/finish",
+            "secret",
+            handshake_finish_body(&begin_resp.handshake_id_hex, &finalize),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {json}");
+        let finish_resp: HandshakeFinishResponse = serde_json::from_value(json).unwrap();
+
+        let (outcome, _peer) = host_task.await.unwrap();
+        // The agent's derived session material matches what the real host
+        // independently derived -- not just "no error," genuine agreement.
+        assert_eq!(
+            finish_resp.aead_key_hex,
+            hex::encode(outcome.key_schedule.aead)
+        );
+        assert_eq!(
+            finish_resp.authenticated_host_fingerprint_hex,
+            hex::encode(outcome.host_identity_fingerprint)
+        );
+        assert_eq!(
+            finish_resp.transcript_hash_hex,
+            hex::encode(outcome.transcript_hash)
+        );
+    }
+
+    /// Same shape as the standard-suite round trip, but for the
+    /// high-security suite -- `HostHandshakeHighSec` is plain byte-in/
+    /// byte-out (no `Transport`/socket needed), so this test drives it
+    /// directly.
+    #[tokio::test]
+    async fn handshake_round_trip_highsec_suite_against_a_real_host() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+
+        let mut host = xenia_wire::handshake_highsec::HostHandshakeHighSec::new();
+        let hello = host.hello(None);
+
+        let (status, json) = post_signed_json(
+            app.clone(),
+            "/v1/handshake/begin",
+            "secret",
+            handshake_begin_body("highsec", &hello),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {json}");
+        let begin_resp: HandshakeBeginResponse = serde_json::from_value(json).unwrap();
+
+        let viewer_response = decode_hex_vec(&begin_resp.viewer_response_hex).unwrap();
+        let (finalize, schedule, _peer) = host.finish(&viewer_response).unwrap();
+
+        let (status, json) = post_signed_json(
+            app,
+            "/v1/handshake/finish",
+            "secret",
+            handshake_finish_body(&begin_resp.handshake_id_hex, &finalize),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {json}");
+        let finish_resp: HandshakeFinishResponse = serde_json::from_value(json).unwrap();
+
+        assert_eq!(finish_resp.aead_key_hex, hex::encode(schedule.aead));
+        assert_eq!(
+            finish_resp.authenticated_host_fingerprint_hex,
+            hex::encode(schedule.host_identity_fingerprint)
+        );
+        assert_eq!(
+            finish_resp.transcript_hash_hex,
+            hex::encode(schedule.transcript_hash)
+        );
+    }
+
+    #[tokio::test]
+    async fn handshake_begin_rejects_an_unrecognized_suite() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let (status, json) = post_signed_json(
+            app,
+            "/v1/handshake/begin",
+            "secret",
+            handshake_begin_body("quantum", b"whatever"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
+        assert_eq!(json["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn handshake_begin_rejects_a_malformed_host_hello() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let (status, json) = post_signed_json(
+            app,
+            "/v1/handshake/begin",
+            "secret",
+            handshake_begin_body("standard", b"not a real host hello"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
+        assert_eq!(json["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn handshake_finish_rejects_an_unknown_handshake_id() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let (status, json) = post_signed_json(
+            app,
+            "/v1/handshake/finish",
+            "secret",
+            handshake_finish_body(&"aa".repeat(16), b"whatever"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
+        assert_eq!(json["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn handshake_finish_rejects_a_forged_host_finalize_and_still_consumes_the_id() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+
+        let mut host = xenia_wire::handshake_highsec::HostHandshakeHighSec::new();
+        let hello = host.hello(None);
+        let (status, json) = post_signed_json(
+            app.clone(),
+            "/v1/handshake/begin",
+            "secret",
+            handshake_begin_body("highsec", &hello),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {json}");
+        let begin_resp: HandshakeBeginResponse = serde_json::from_value(json).unwrap();
+
+        // Forged/garbage HostFinalize instead of the real one.
+        let (status, json) = post_signed_json(
+            app.clone(),
+            "/v1/handshake/finish",
+            "secret",
+            handshake_finish_body(&begin_resp.handshake_id_hex, b"forged finalize bytes"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
+        assert_eq!(json["code"], "bad_request");
+
+        // The id is burned -- a second attempt (even with a well-formed
+        // finalize, hypothetically) gets "unknown handshake" now, not
+        // another crypto-failure message.
+        let (status, json) = post_signed_json(
+            app,
+            "/v1/handshake/finish",
+            "secret",
+            handshake_finish_body(&begin_resp.handshake_id_hex, b"forged finalize bytes"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
+        assert_eq!(json["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn handshake_finish_fails_closed_when_the_new_host_needs_confirmation_and_none_is_available()
+     {
+        let state = test_state_with_host_trust("secret", &["http://localhost:8134"], false);
+        let app = build_router(state);
+
+        let mut host = xenia_wire::handshake_highsec::HostHandshakeHighSec::new();
+        let hello = host.hello(None);
+        let (status, json) = post_signed_json(
+            app.clone(),
+            "/v1/handshake/begin",
+            "secret",
+            handshake_begin_body("highsec", &hello),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {json}");
+        let begin_resp: HandshakeBeginResponse = serde_json::from_value(json).unwrap();
+
+        let viewer_response = decode_hex_vec(&begin_resp.viewer_response_hex).unwrap();
+        let (finalize, _schedule, _peer) = host.finish(&viewer_response).unwrap();
+
+        let (status, json) = post_signed_json(
+            app,
+            "/v1/handshake/finish",
+            "secret",
+            handshake_finish_body(&begin_resp.handshake_id_hex, &finalize),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "body: {json}");
+        assert_eq!(json["code"], "confirmation_required");
+    }
+
+    #[tokio::test]
+    async fn handshake_begin_requires_origin_and_token_like_every_other_route() {
+        use tower::ServiceExt;
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/handshake/begin")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                handshake_begin_body("standard", b"whatever").to_string(),
+            ))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
