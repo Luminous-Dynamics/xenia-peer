@@ -73,21 +73,23 @@ pub fn App() -> impl IntoView {
 
     // Fetch the operator identity from the agent whenever its connection
     // settings change (including once, on mount, with whatever was
-    // persisted from a prior session).
+    // persisted from a prior session) -- tracked `.get()` on
+    // `agent_session` so pairing (or a session expiring) re-triggers this,
+    // not just an edit to the URL field.
     Effect::new(move |_| {
         let url = agent_config.agent_url.get();
-        let token = agent_config.agent_token.get();
+        let _session_changed = agent_config.agent_session.get();
         identity_state.set(OperatorIdentityState::Loading);
         spawn_local(async move {
-            if token.trim().is_empty() {
-                identity_state.set(OperatorIdentityState::Unavailable(
-                    "Operator agent not configured -- set its URL and pairing token on the \
-                     Sessions page to enable operator sign-in."
-                        .to_string(),
-                ));
-                return;
-            }
-            match crate::agent_client::fetch_identity_info(&url, &token).await {
+            let session = match crate::agent_client::ensure_fresh_session(&url, &agent_config).await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    identity_state.set(OperatorIdentityState::Unavailable(e));
+                    return;
+                }
+            };
+            match crate::agent_client::fetch_identity_info(&url, &session).await {
                 Ok(info) => identity_state.set(OperatorIdentityState::Ready {
                     fingerprint_hex: info.fingerprint_hex,
                     enrollment_record_json: info.enrollment_record_json,
@@ -209,9 +211,13 @@ fn OperatorAuthPanel() -> impl IntoView {
         set_error.set(None);
         let endpoint = config.endpoint.get();
         let agent_url = agent_config.agent_url.get_untracked();
-        let agent_token = agent_config.agent_token.get_untracked();
         spawn_local(async move {
-            match authenticate(&endpoint, &agent_url, &agent_token).await {
+            let outcome =
+                match crate::agent_client::ensure_fresh_session(&agent_url, &agent_config).await {
+                    Ok(agent_session) => authenticate(&endpoint, &agent_url, &agent_session).await,
+                    Err(e) => Err(e),
+                };
+            match outcome {
                 Ok(s) => session.set(Some(s)),
                 Err(e) => set_error.set(Some(e)),
             }

@@ -42,8 +42,8 @@
 use serde::Deserialize;
 
 use xenia_operator_agent_proto::{
-    SignChallengeRequest, SignConsentActionRequest, SignRequestCommon, SignRevokeRequest,
-    SignedTokenDto,
+    AgentSessionToken, SignChallengeRequest, SignConsentActionRequest, SignRequestCommon,
+    SignRevokeRequest, SignedTokenDto,
 };
 use xenia_operator_proto::{
     ConsentAction, DaemonIdentityCertificate, OperatorAction, OperatorRole,
@@ -144,12 +144,12 @@ struct TokenFields {
 /// Run the full challenge → agent-sign → verify ceremony against the
 /// daemon's `/auth/*` routes at `endpoint`, returning a role-scoped
 /// session. The operator's seeds never reach this process: the agent (at
-/// `agent_url`, authenticated with `agent_token`) verifies the daemon's
+/// `agent_url`, authenticated with `agent_session`) verifies the daemon's
 /// identity evidence and signs on the console's behalf.
 pub async fn authenticate(
     endpoint: &str,
     agent_url: &str,
-    agent_token: &str,
+    agent_session: &AgentSessionToken,
 ) -> Result<OperatorSession, String> {
     let base = endpoint.trim_end_matches('/');
 
@@ -167,7 +167,7 @@ pub async fn authenticate(
     //    attestation itself, then signs with both algorithms.
     let signed = crate::agent_client::sign_challenge(
         agent_url,
-        agent_token,
+        agent_session,
         &SignChallengeRequest {
             common: SignRequestCommon {
                 schema_version: xenia_operator_agent_proto::SCHEMA_VERSION,
@@ -219,7 +219,7 @@ pub async fn authenticate(
 pub async fn build_consent_request(
     endpoint: &str,
     agent_url: &str,
-    agent_token: &str,
+    agent_session: &AgentSessionToken,
     session: &OperatorSession,
     action: ConsentAction,
     session_id: &[u8; 16],
@@ -228,7 +228,7 @@ pub async fn build_consent_request(
     let cert = fetch_daemon_certificate(base).await?;
     let signed = crate::agent_client::sign_consent_action(
         agent_url,
-        agent_token,
+        agent_session,
         &SignConsentActionRequest {
             common: SignRequestCommon {
                 schema_version: xenia_operator_agent_proto::SCHEMA_VERSION,
@@ -264,7 +264,7 @@ pub async fn build_consent_request(
 pub async fn build_revoke_request(
     endpoint: &str,
     agent_url: &str,
-    agent_token: &str,
+    agent_session: &AgentSessionToken,
     session: &OperatorSession,
     target_operator_id: &str,
 ) -> Result<String, String> {
@@ -272,7 +272,7 @@ pub async fn build_revoke_request(
     let cert = fetch_daemon_certificate(base).await?;
     let signed = crate::agent_client::sign_revoke(
         agent_url,
-        agent_token,
+        agent_session,
         &SignRevokeRequest {
             common: SignRequestCommon {
                 schema_version: xenia_operator_agent_proto::SCHEMA_VERSION,

@@ -232,6 +232,123 @@ pub struct SignRevokeResponse {
     pub ed_signature_hex: String,
 }
 
+/// Domain-separation tag for an agent session token's MAC (see
+/// [`agent_session_mac_message`]). Distinct from the key-derivation context
+/// the agent uses to turn the raw pairing token into a MAC key -- that
+/// context string lives natively in `apps/xenia-operator-agent` (the only
+/// place that ever computes a MAC), since deriving keys is cryptographic
+/// work this deliberately crypto-free crate doesn't do. This constant only
+/// domain-separates the *message* the MAC covers, the same role
+/// `xenia_operator_proto::OPERATOR_TOKEN_DOMAIN` plays for daemon session
+/// tokens.
+pub const AGENT_SESSION_MAC_DOMAIN: &[u8] = b"xenia-operator-agent-session-mac-v1";
+
+/// The canonical bytes an agent session token's MAC covers. Exposed here
+/// (pure byte-layout construction, no hashing) so the agent -- the only
+/// party that ever computes or verifies this MAC -- has exactly one
+/// implementation to reconstruct it from, mirroring
+/// `xenia_operator_proto::operator_token_canonical_bytes`'s reasoning.
+///
+/// Layout: `AGENT_SESSION_MAC_DOMAIN || session_id(16) || issued_at(8, le)
+/// || expires_at(8, le)`.
+pub fn agent_session_mac_message(
+    session_id: &[u8; 16],
+    issued_at: u64,
+    expires_at: u64,
+) -> Vec<u8> {
+    let mut b = Vec::with_capacity(AGENT_SESSION_MAC_DOMAIN.len() + 16 + 8 + 8);
+    b.extend_from_slice(AGENT_SESSION_MAC_DOMAIN);
+    b.extend_from_slice(session_id);
+    b.extend_from_slice(&issued_at.to_le_bytes());
+    b.extend_from_slice(&expires_at.to_le_bytes());
+    b
+}
+
+/// A short-lived bearer credential minted by `POST /v1/pair` (authenticated
+/// with the raw, file-persisted pairing token) or renewed by
+/// `POST /v1/session/refresh` (authenticated with a still-valid session of
+/// this same shape), and presented as the `X-Agent-Session` header on every
+/// other request -- replacing the raw pairing token as the credential used
+/// day-to-day.
+///
+/// **Why**: the raw pairing token used to be sent, unbounded in time, on
+/// every single request, and the console persisted it in `localStorage`
+/// indefinitely -- a one-time read of `localStorage` (XSS, a malicious
+/// extension, a compromised dependency) yielded indefinite ability to
+/// command the agent. A session token bounds that: it expires
+/// (`expires_at`), so a leaked *unused* one is only good until then, and an
+/// *idle* console (closed past the TTL) can't silently keep operating --
+/// it must re-present the raw pairing token to `/v1/pair` again. An
+/// *actively used* console renews via `/v1/session/refresh` before expiry
+/// and never needs to re-pair. There is deliberately no way to revoke a
+/// single outstanding session before its natural expiry (verification is
+/// stateless -- the agent keeps no session table); the only revocation
+/// lever is regenerating the pairing-token file, which changes the MAC key
+/// and invalidates every outstanding session at once. That's the same
+/// blunt-instrument revocation the old static pairing token already had
+/// (delete the token file to force a new one) -- this change only adds the
+/// time bound, it doesn't regress revocation.
+///
+/// The four fields are carried as a single compact, dot-joined bearer
+/// string (see [`AgentSessionToken::to_header_value`]/
+/// [`AgentSessionToken::from_header_value`]) so both sides format/parse it
+/// identically rather than risking drift between two ad hoc
+/// implementations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSessionToken {
+    /// Random 128 bits identifying this session, hex-encoded. Not secret by
+    /// itself -- it's part of what the MAC covers, not a credential on its
+    /// own -- but unique per mint so two sessions issued in the same second
+    /// never collide.
+    pub session_id_hex: String,
+    /// Unix seconds this session was minted at.
+    pub issued_at: u64,
+    /// Unix seconds this session expires at.
+    pub expires_at: u64,
+    /// The agent's keyed-hash MAC over
+    /// [`agent_session_mac_message`]`(session_id, issued_at, expires_at)`,
+    /// hex-encoded. The key is derived from the raw pairing token but is
+    /// never the pairing token's own bytes -- see
+    /// `apps/xenia-operator-agent`'s `agent_session` module.
+    pub mac_hex: String,
+}
+
+impl AgentSessionToken {
+    /// Format as the single string sent in the `X-Agent-Session` header:
+    /// `session_id_hex.issued_at.expires_at.mac_hex`. `.` is safe as a
+    /// separator since none of the fields can themselves contain one (hex
+    /// digits and decimal digits only).
+    pub fn to_header_value(&self) -> String {
+        format!(
+            "{}.{}.{}.{}",
+            self.session_id_hex, self.issued_at, self.expires_at, self.mac_hex
+        )
+    }
+
+    /// Parse a `X-Agent-Session` header value produced by
+    /// [`to_header_value`](Self::to_header_value). Rejects anything that
+    /// isn't exactly four dot-separated parts (too few, too many, or a
+    /// non-numeric `issued_at`/`expires_at`) rather than guessing -- this is
+    /// a shape check only, not a MAC/expiry check (see the agent's
+    /// `agent_session::verify`).
+    pub fn from_header_value(s: &str) -> Option<Self> {
+        let mut parts = s.split('.');
+        let session_id_hex = parts.next()?.to_string();
+        let issued_at: u64 = parts.next()?.parse().ok()?;
+        let expires_at: u64 = parts.next()?.parse().ok()?;
+        let mac_hex = parts.next()?.to_string();
+        if parts.next().is_some() {
+            return None;
+        }
+        Some(Self {
+            session_id_hex,
+            issued_at,
+            expires_at,
+            mac_hex,
+        })
+    }
+}
+
 /// A typed error the agent returns instead of a bare HTTP status, so the
 /// console can render an accurate message rather than guessing from a
 /// status code alone.
@@ -448,6 +565,54 @@ mod tests {
         let parsed: SignConsentActionRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.action, ConsentAction::Approve);
         assert_eq!(parsed.token, req.token);
+    }
+
+    #[test]
+    fn agent_session_mac_message_layout_is_exact_and_field_bound() {
+        let id_a = [0x11u8; 16];
+        let id_b = [0x22u8; 16];
+        let m = agent_session_mac_message(&id_a, 1000, 2000);
+        assert_eq!(
+            &m[..AGENT_SESSION_MAC_DOMAIN.len()],
+            AGENT_SESSION_MAC_DOMAIN
+        );
+        assert_eq!(m.len(), AGENT_SESSION_MAC_DOMAIN.len() + 16 + 8 + 8);
+        // Every field the MAC covers actually changes the bytes -- a
+        // forged token can't reuse another session's MAC by only changing
+        // the field(s) the verifier doesn't happen to check.
+        assert_ne!(m, agent_session_mac_message(&id_b, 1000, 2000));
+        assert_ne!(m, agent_session_mac_message(&id_a, 1001, 2000));
+        assert_ne!(m, agent_session_mac_message(&id_a, 1000, 2001));
+    }
+
+    #[test]
+    fn agent_session_token_header_value_round_trips() {
+        let token = AgentSessionToken {
+            session_id_hex: "aa".repeat(16),
+            issued_at: 1000,
+            expires_at: 4600,
+            mac_hex: "bb".repeat(32),
+        };
+        let header = token.to_header_value();
+        assert_eq!(
+            header,
+            format!("{}.1000.4600.{}", "aa".repeat(16), "bb".repeat(32))
+        );
+        let parsed = AgentSessionToken::from_header_value(&header).unwrap();
+        assert_eq!(parsed, token);
+    }
+
+    #[test]
+    fn agent_session_token_header_value_rejects_malformed_shapes() {
+        // Too few parts.
+        assert!(AgentSessionToken::from_header_value("a.1000.4600").is_none());
+        // Too many parts (trailing garbage appended by a tampering attempt).
+        assert!(AgentSessionToken::from_header_value("a.1000.4600.bb.extra").is_none());
+        // Non-numeric issued_at/expires_at.
+        assert!(AgentSessionToken::from_header_value("a.not-a-number.4600.bb").is_none());
+        assert!(AgentSessionToken::from_header_value("a.1000.not-a-number.bb").is_none());
+        // Empty string.
+        assert!(AgentSessionToken::from_header_value("").is_none());
     }
 
     #[test]

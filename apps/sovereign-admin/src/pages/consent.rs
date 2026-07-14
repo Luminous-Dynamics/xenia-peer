@@ -99,7 +99,6 @@ pub fn ConsentModal() -> impl IntoView {
 
         let endpoint = config.endpoint.get_untracked();
         let agent_url = agent_config.agent_url.get_untracked();
-        let agent_token = agent_config.agent_token.get_untracked();
         let sealed_url = config.sealed_ws_url();
         let high_security = config.high_security.get_untracked();
         let consent_url = config.consent_ws_url();
@@ -109,12 +108,29 @@ pub fn ConsentModal() -> impl IntoView {
         // `spawn_local` after it resolves rather than each starting their
         // own.
         spawn_local(async move {
-            let payload = match (&sess, session_id) {
-                (Some(s), Some(sid)) => {
+            // Both a signed consent payload and the sealed channel's own
+            // handshake need a live agent session -- fetch (and
+            // transparently renew, if it's close to expiry) it once up
+            // front rather than separately for each.
+            let needs_agent = (sess.is_some() && session_id.is_some()) || sealed;
+            let agent_session = if needs_agent {
+                match crate::agent_client::ensure_fresh_session(&agent_url, &agent_config).await {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        leptos::logging::error!("operator agent session unavailable: {e}");
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+
+            let payload = match (&sess, session_id, &agent_session) {
+                (Some(s), Some(sid), Some(agent_session)) => {
                     match build_consent_request(
                         &endpoint,
                         &agent_url,
-                        &agent_token,
+                        agent_session,
                         s,
                         action,
                         &sid,
@@ -131,11 +147,15 @@ pub fn ConsentModal() -> impl IntoView {
                 _ => action.as_str().to_string(),
             };
             if sealed {
+                let Some(agent_session) = agent_session else {
+                    leptos::logging::error!("sealed consent decision needs an agent session");
+                    return;
+                };
                 let result = if high_security {
                     crate::sealed_consent::send_sealed_consent_highsec(
                         &sealed_url,
                         &agent_url,
-                        &agent_token,
+                        &agent_session,
                         payload.as_bytes(),
                     )
                     .await
@@ -143,7 +163,7 @@ pub fn ConsentModal() -> impl IntoView {
                     crate::sealed_consent::send_sealed_consent(
                         &sealed_url,
                         &agent_url,
-                        &agent_token,
+                        &agent_session,
                         payload.as_bytes(),
                     )
                     .await
