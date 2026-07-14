@@ -20,7 +20,7 @@ credible pre-production system.
 1. **Transactional native pin storage with failure injection.** ✅ done
 2. **Stable endpoint/daemon scope for native host pins.** ✅ done
 3. **Remove the legacy HMAC ledger/admin path.** ✅ done
-4. **Replace the persistent pairing token with short-lived agent sessions.**
+4. **Replace the persistent pairing token with short-lived agent sessions.** ✅ done
 5. **Resolve the hybrid-versus-classical HTTP authorization profile.**
 6. **Add the full headless-browser vertical slice.**
 7. **Zeroization, serialization migration, and fuzzing.**
@@ -194,6 +194,58 @@ manually replaced. Replace with pairing + session:
 
 Add rate limits to agent endpoints against accidental loops and
 same-origin abuse.
+
+**Done**, but with real, deliberate divergences from the numbered sketch
+above -- recorded here rather than silently reinterpreted.
+
+- Landed the core exchange: the raw pairing token (`X-Agent-Token`,
+  file-persisted, printed once at agent startup) now authenticates exactly
+  one route, `POST /v1/pair`. Every other agent route (`/identity`,
+  `/v1/sign/*`, `/v1/handshake/*`, `/v1/session/refresh`) requires a
+  short-lived `AgentSessionToken` (`X-Agent-Session`) instead --
+  1-hour default TTL (`--session-ttl-secs`), stateless keyed-BLAKE3 MAC
+  (`blake3::derive_key` off the pairing token, then `blake3::keyed_hash`;
+  new shared shapes in `xenia-operator-agent-proto`, verification logic in
+  the agent's new `agent_session` module). `POST /v1/session/refresh`
+  (itself session-gated, not token-gated) lets an actively-used console
+  renew indefinitely without ever re-presenting the raw token; the browser
+  (`sovereign-admin`'s `agent_client::ensure_fresh_session`) renews
+  automatically once a session is within 5 minutes of expiry, falling back
+  to the still-valid current session if a renewal attempt fails.
+- **Not a one-use pairing code (item 1), no native-confirmation-of-Origin
+  step (item 2).** Pairing is still "paste the persisted token, get a
+  session" -- the token itself is reusable and durable on disk exactly as
+  before, and `/v1/pair` grants a session to *any* request presenting it
+  from an allowed Origin, with no additional native terminal confirmation
+  step the way `host_trust`'s TOFU/rotation checks have. This is a smaller
+  change than the original sketch: it bounds the *time* a leaked
+  credential works for, but doesn't add a fresh out-of-band approval to
+  each pairing event.
+- **Session lives in `localStorage`, not `sessionStorage` (item 4).**
+  Deliberate: an unbounded credential in durable storage was the actual
+  problem: now that the stored value expires on its own, persisting it
+  across tab closes/restarts (so the operator isn't forced to re-pair on
+  every page load) was judged worth more than the extra tightening
+  `sessionStorage` would add. Revisit if that tradeoff turns out wrong in
+  practice.
+- **Sessions intentionally survive an agent restart (item 6 not done, and
+  not planned as specified).** The MAC key is derived deterministically
+  from the persisted pairing-token file, not a fresh per-process secret,
+  specifically so restarting the agent doesn't silently log out every open
+  console tab. The tradeoff: there is **no way to revoke a single
+  outstanding session** before its natural expiry -- verification is
+  stateless (no session table). The only revocation lever is regenerating
+  the pairing-token file, which invalidates every outstanding session at
+  once. That blunt instrument already existed for the old static token
+  (delete the file to force a new one); this change adds a time bound on
+  top of it without regressing what was already there. Per-session
+  listing/revocation (item 5) would require the agent to hold live state
+  and was scoped out rather than half-built.
+- **Item 7 (bootstrap secret not printed into logs) and rate limiting: not
+  done.** The agent still prints the raw pairing token to stdout on every
+  launch (unchanged from before this item) and neither `/v1/pair` nor
+  `/v1/session/refresh` carry any new rate limiting. Both are real,
+  reasonable follow-ups, not done here.
 
 ## 5. Decide what "PQC authorization" means
 

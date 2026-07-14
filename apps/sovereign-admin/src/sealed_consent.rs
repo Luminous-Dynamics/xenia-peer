@@ -49,7 +49,8 @@ use futures_util::{SinkExt, StreamExt};
 use gloo_net::websocket::{Message, WebSocketError, futures::WebSocket};
 
 use xenia_operator_agent_proto::{
-    HandshakeBeginRequest, HandshakeFinishRequest, HandshakeRequestCommon, SCHEMA_VERSION,
+    AgentSessionToken, HandshakeBeginRequest, HandshakeFinishRequest, HandshakeRequestCommon,
+    SCHEMA_VERSION,
 };
 use xenia_wire::handshake::SessionKeySchedule;
 use xenia_wire::operator_rekey::{self, OperatorRekeyMessage};
@@ -75,7 +76,7 @@ const OPERATOR_CHANNEL_SOURCE_ID: [u8; 8] = *b"xnaopch1";
 async fn drive_agent_handshake(
     sealed_ws_url: &str,
     agent_url: &str,
-    agent_token: &str,
+    agent_session: &AgentSessionToken,
     suite: &str,
     payload: &[u8],
 ) -> Result<(), String> {
@@ -87,7 +88,7 @@ async fn drive_agent_handshake(
     let hello = recv_binary(&mut reader).await?;
     let begin_resp = crate::agent_client::handshake_begin(
         agent_url,
-        agent_token,
+        agent_session,
         &HandshakeBeginRequest {
             common: HandshakeRequestCommon {
                 schema_version: SCHEMA_VERSION,
@@ -109,7 +110,7 @@ async fn drive_agent_handshake(
     let finalize = recv_binary(&mut reader).await?;
     let finish_resp = crate::agent_client::handshake_finish(
         agent_url,
-        agent_token,
+        agent_session,
         &HandshakeFinishRequest {
             schema_version: SCHEMA_VERSION,
             handshake_id_hex: begin_resp.handshake_id_hex,
@@ -151,10 +152,10 @@ async fn drive_agent_handshake(
 pub async fn send_sealed_consent(
     sealed_ws_url: &str,
     agent_url: &str,
-    agent_token: &str,
+    agent_session: &AgentSessionToken,
     payload: &[u8],
 ) -> Result<(), String> {
-    drive_agent_handshake(sealed_ws_url, agent_url, agent_token, "standard", payload).await
+    drive_agent_handshake(sealed_ws_url, agent_url, agent_session, "standard", payload).await
 }
 
 /// Like [`send_sealed_consent`], but selects the high-security handshake
@@ -167,10 +168,10 @@ pub async fn send_sealed_consent(
 pub async fn send_sealed_consent_highsec(
     sealed_ws_url: &str,
     agent_url: &str,
-    agent_token: &str,
+    agent_session: &AgentSessionToken,
     payload: &[u8],
 ) -> Result<(), String> {
-    drive_agent_handshake(sealed_ws_url, agent_url, agent_token, "highsec", payload).await
+    drive_agent_handshake(sealed_ws_url, agent_url, agent_session, "highsec", payload).await
 }
 
 /// TOFU-check `fingerprint` against the pin stored for `(sealed_ws_url,

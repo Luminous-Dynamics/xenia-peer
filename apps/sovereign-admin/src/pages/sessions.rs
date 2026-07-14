@@ -63,6 +63,33 @@ pub fn SessionsPage() -> impl IntoView {
         return missing_context_view("OperatorIdentity").into_any();
     };
 
+    // Pairing: the raw pairing token is held only in this page-local,
+    // never-persisted signal for exactly as long as it takes to exchange
+    // it for a session (see `crate::agent_client`'s module doc comment) --
+    // unlike the old `AgentConfig::agent_token` field it replaces, it never
+    // touches `localStorage`.
+    let (pairing_token_input, set_pairing_token_input) = signal(String::new());
+    let (pairing_status, set_pairing_status) = signal(String::new());
+    let do_pair = move |_| {
+        let token = pairing_token_input.get_untracked();
+        if token.trim().is_empty() {
+            set_pairing_status.set("Enter the pairing token printed by the agent.".to_string());
+            return;
+        }
+        let agent_url = agent_config.agent_url.get_untracked();
+        set_pairing_status.set("Pairing…".to_string());
+        spawn_local(async move {
+            match crate::agent_client::pair(&agent_url, &token).await {
+                Ok(session) => {
+                    agent_config.set_session(session);
+                    set_pairing_token_input.set(String::new());
+                    set_pairing_status.set(String::new());
+                }
+                Err(e) => set_pairing_status.set(format!("Pairing failed: {e}")),
+            }
+        });
+    };
+
     // Operator-revocation control — shown only to an authenticated operator whose
     // role permits it (EnrollOperator = Admin, the same gate the daemon enforces).
     let operator_session = use_context::<OperatorSessionCtx>();
@@ -117,17 +144,24 @@ pub fn SessionsPage() -> impl IntoView {
         };
         let endpoint = config.endpoint.get_untracked();
         let agent_url = agent_config.agent_url.get_untracked();
-        let agent_token = agent_config.agent_token.get_untracked();
         let url = format!("{}/operator/revoke", endpoint.trim_end_matches('/'));
         set_revoke_status.set(format!("Revoking '{target}'…"));
         spawn_local(async move {
+            let agent_session =
+                match crate::agent_client::ensure_fresh_session(&agent_url, &agent_config).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        set_revoke_status.set(format!("Operator agent session unavailable: {e}"));
+                        return;
+                    }
+                };
             // `build_revoke_request` no longer needs `OperatorIdentity` --
             // the local agent holds the operator's identity, verifies
             // `sess`'s token, and signs on the console's behalf, running
             // its own mandatory native confirmation for this privileged
             // action (see `crate::operator_session::build_revoke_request`).
             let body =
-                match build_revoke_request(&endpoint, &agent_url, &agent_token, &sess, &target)
+                match build_revoke_request(&endpoint, &agent_url, &agent_session, &sess, &target)
                     .await
                 {
                     Ok(body) => body,
@@ -239,7 +273,9 @@ pub fn SessionsPage() -> impl IntoView {
                         <code>"xenia-operator-agent"</code>
                         " process, not this browser's storage. Run it once "
                         "(" <code>"cargo run -p xenia-operator-agent"</code> "), copy the pairing "
-                        "token it prints, and paste it below."
+                        "token it prints, and paste it below to pair. Pairing exchanges the token "
+                        "for a session that expires on its own -- the raw token itself is never "
+                        "stored in this browser, only used once, here."
                     </p>
                     <div class="config-grid">
                         <div class="field">
@@ -247,21 +283,25 @@ pub fn SessionsPage() -> impl IntoView {
                             <input
                                 type="text"
                                 prop:value=move || agent_config.agent_url.get()
-                                on:input=move |ev| agent_config.agent_url.set(event_target_value(&ev))
+                                on:input=move |ev| {
+                                    agent_config.agent_url.set(event_target_value(&ev));
+                                    agent_config.save();
+                                }
                             />
                         </div>
                         <div class="field">
                             <label>"Pairing Token"</label>
                             <input
                                 type="password"
-                                prop:value=move || agent_config.agent_token.get()
-                                on:input=move |ev| agent_config.agent_token.set(event_target_value(&ev))
+                                prop:value=move || pairing_token_input.get()
+                                on:input=move |ev| set_pairing_token_input.set(event_target_value(&ev))
                             />
                         </div>
-                        <button class="primary" on:click=move |_| agent_config.save()>
-                            "Save & Connect"
+                        <button class="primary" on:click=do_pair>
+                            "Pair"
                         </button>
                     </div>
+                    <p class="prose">{move || pairing_status.get()}</p>
                     <p class="prose">
                         {move || match identity_state.get() {
                             OperatorIdentityState::Loading => "Connecting…".to_string(),
@@ -271,6 +311,20 @@ pub fn SessionsPage() -> impl IntoView {
                             OperatorIdentityState::Unavailable(reason) => reason,
                         }}
                     </p>
+                    {move || agent_config.agent_session.get().map(|s| {
+                        let secs_left = s.expires_at.saturating_sub(
+                            (js_sys::Date::now() / 1000.0) as u64
+                        );
+                        view! {
+                            <p class="prose dim">
+                                {format!(
+                                    "Session valid for about {} more minute(s) (auto-renews while \
+                                     this console stays active).",
+                                    secs_left / 60
+                                )}
+                            </p>
+                        }
+                    })}
                 </section>
 
                 <Show when=move || config.use_sealed_channel.get()>

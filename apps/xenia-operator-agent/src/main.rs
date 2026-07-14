@@ -30,9 +30,17 @@
 //! ## Security model
 //!
 //! - Binds to `127.0.0.1` only -- never configurable to a wider address.
-//! - Every request must present the pairing token (`X-Agent-Token` header),
-//!   generated on first run and persisted alongside the identity. The
-//!   operator copies it into the console's agent settings once.
+//! - The pairing token (`X-Agent-Token` header, generated on first run and
+//!   persisted alongside the identity) is bootstrap-only: it authenticates
+//!   exactly one route, `POST /v1/pair`, which mints a short-lived
+//!   [`xenia_operator_agent_proto::AgentSessionToken`]. Every other route
+//!   requires that session token (`X-Agent-Session` header) instead --
+//!   see [`agent_session`]'s module doc comment for why a permanent bearer
+//!   secret sent on every request was replaced with one that expires. The
+//!   operator copies the raw pairing token into the console's agent
+//!   settings once, to pair; from then on the console renews its own
+//!   session via `POST /v1/session/refresh` and doesn't need the raw token
+//!   again unless it goes idle past the session TTL.
 //! - Every request must carry an `Origin` header matching an allowed origin
 //!   (`--allowed-origin`, repeatable; defaults to the console's dev
 //!   origins) -- a missing, malformed, or unrecognized `Origin` is refused,
@@ -59,6 +67,7 @@
 // the caller-supplied `daemon_fingerprint_hex` those steps originally used
 // with daemon-signed evidence the agent verifies itself -- see that
 // module's doc comment for the confused-deputy gap this closes.
+mod agent_session;
 mod daemon_evidence;
 mod handshake_state;
 mod host_trust;
@@ -77,9 +86,10 @@ use clap::Parser;
 use serde::Serialize;
 use xenia_handshake::HandshakeManager;
 use xenia_operator_agent_proto::{
-    AgentErrorCode, AgentErrorResponse, HandshakeBeginRequest, HandshakeBeginResponse,
-    HandshakeFinishRequest, HandshakeFinishResponse, SignChallengeRequest, SignChallengeResponse,
-    SignConsentActionRequest, SignConsentActionResponse, SignRevokeRequest, SignRevokeResponse,
+    AgentErrorCode, AgentErrorResponse, AgentSessionToken, HandshakeBeginRequest,
+    HandshakeBeginResponse, HandshakeFinishRequest, HandshakeFinishResponse, SignChallengeRequest,
+    SignChallengeResponse, SignConsentActionRequest, SignConsentActionResponse, SignRevokeRequest,
+    SignRevokeResponse,
 };
 use xenia_operator_proto::{OperatorEnrollmentRecord, OperatorRole};
 use xenia_wire::handshake::ViewerHandshake;
@@ -139,13 +149,29 @@ struct Args {
     /// see `host_trust`'s module docs for why there's no silent fallback.
     #[arg(long, default_value_t = false)]
     allow_noninteractive_privileged_confirmation: bool,
+
+    /// How long a session minted by `POST /v1/pair` or
+    /// `POST /v1/session/refresh` stays valid, in seconds. See
+    /// `agent_session`'s module doc comment for the tradeoff this bounds.
+    #[arg(long, default_value_t = agent_session::DEFAULT_SESSION_TTL_SECS)]
+    session_ttl_secs: u64,
 }
 
 struct AgentState {
     manager: HandshakeManager,
     ed25519_secret: Zeroizing<[u8; 32]>,
     ml_dsa_seed: Zeroizing<[u8; 32]>,
+    /// The raw, file-persisted pairing token -- accepted only on
+    /// `POST /v1/pair` (see `agent_session`'s module doc comment). Every
+    /// other route requires `session_mac_key` to verify an
+    /// `X-Agent-Session` header instead.
     token: String,
+    /// Derived from `token` once at startup (`agent_session::session_mac_key`).
+    /// Cached rather than recomputed per-request; stable across restarts
+    /// since it's deterministic in the persisted `token`.
+    session_mac_key: [u8; 32],
+    /// Lifetime of a freshly minted or refreshed session, in seconds.
+    session_ttl_secs: u64,
     allowed_origins: Vec<String>,
     /// Native host-trust policy for `/v1/sign/*` and `/v1/handshake/*`.
     /// `HostTrustStore::check` blocks on terminal I/O, so callers must
@@ -185,15 +211,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "xenia-operator-agent listening on http://127.0.0.1:{}",
         args.port
     );
-    println!("pairing token (paste into the console's agent settings):");
+    println!("pairing token (paste into the console's agent settings once, to pair):");
     println!("  {token}");
     println!("token also persisted at: {}", args.token_path.display());
+    println!(
+        "sessions minted from it last {}s before the console must re-pair",
+        args.session_ttl_secs
+    );
 
+    let session_mac_key = agent_session::session_mac_key(&token);
     let state = Arc::new(AgentState {
         manager,
         ed25519_secret: Zeroizing::new(ed25519_secret),
         ml_dsa_seed: Zeroizing::new(ml_dsa_seed),
         token,
+        session_mac_key,
+        session_ttl_secs: args.session_ttl_secs,
         allowed_origins: args.allowed_origin,
         host_trust: StdMutex::new(host_trust),
         handshake_state: StdMutex::new(HandshakeState::new(handshake_state::DEFAULT_TTL)),
@@ -219,6 +252,8 @@ async fn shutdown_signal() {
 fn build_router(state: Arc<AgentState>) -> Router {
     Router::new()
         .route("/identity", get(get_identity))
+        .route("/v1/pair", post(mint_session))
+        .route("/v1/session/refresh", post(mint_session))
         .route("/v1/sign/challenge", post(sign_challenge))
         .route("/v1/sign/consent-action", post(sign_consent_action))
         .route("/v1/sign/revoke", post(sign_revoke))
@@ -243,16 +278,26 @@ fn build_router(state: Arc<AgentState>) -> Router {
         .with_state(state)
 }
 
-/// Enforces both defenses on every route: the `Origin` allowlist and the
-/// pairing token. Also answers CORS preflight (`OPTIONS`) requests and
-/// stamps `Access-Control-Allow-Origin` on real responses so the browser
-/// will actually let the console's JS read them.
+/// Enforces both defenses on every route: the `Origin` allowlist, then a
+/// per-route credential check. Also answers CORS preflight (`OPTIONS`)
+/// requests and stamps `Access-Control-Allow-Origin` on real responses so
+/// the browser will actually let the console's JS read them.
 ///
 /// A missing, malformed (non-UTF-8), or unrecognized `Origin` is refused --
 /// not treated as trusted. The agent and console are different origins by
 /// construction, so a genuine console request is always cross-origin and
 /// always carries this header; a request without one is not the console
 /// (see the module doc comment).
+///
+/// **Credential check is per-route**: `POST /v1/pair` is the one place the
+/// raw pairing token (`X-Agent-Token`) still works -- it's how a session
+/// gets minted in the first place. Every other route, including
+/// `POST /v1/session/refresh`, requires a live session
+/// (`X-Agent-Session`) instead; see [`agent_session`]'s module doc comment
+/// for why. The raw pairing token is never accepted on any route other
+/// than `/v1/pair`, so a leaked session token can't be used to mint
+/// another session the way a leaked pairing token could re-derive one --
+/// only the pairing token itself can do that.
 async fn auth_and_cors_middleware(
     State(state): State<Arc<AgentState>>,
     method: Method,
@@ -276,12 +321,22 @@ async fn auth_and_cors_middleware(
         );
     }
 
-    let presented = headers
-        .get("x-agent-token")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if !constant_time_eq(presented.as_bytes(), state.token.as_bytes()) {
-        return (StatusCode::UNAUTHORIZED, "missing or invalid X-Agent-Token").into_response();
+    if request.uri().path() == "/v1/pair" {
+        let presented = headers
+            .get("x-agent-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !constant_time_eq(presented.as_bytes(), state.token.as_bytes()) {
+            return (StatusCode::UNAUTHORIZED, "missing or invalid X-Agent-Token").into_response();
+        }
+    } else {
+        let presented = headers
+            .get("x-agent-session")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if let Err(e) = agent_session::verify(&state.session_mac_key, unix_now_secs(), presented) {
+            return (StatusCode::UNAUTHORIZED, e.message()).into_response();
+        }
     }
 
     cors_headers(origin, next.run(request).await)
@@ -296,7 +351,7 @@ fn cors_headers(origin: Option<&str>, mut response: Response) -> Response {
         }
         response.headers_mut().insert(
             axum::http::header::ACCESS_CONTROL_ALLOW_HEADERS,
-            HeaderValue::from_static("x-agent-token, content-type"),
+            HeaderValue::from_static("x-agent-token, x-agent-session, content-type"),
         );
         response.headers_mut().insert(
             axum::http::header::ACCESS_CONTROL_ALLOW_METHODS,
@@ -318,6 +373,29 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+/// `POST /v1/pair` (raw-pairing-token-gated) and `POST /v1/session/refresh`
+/// (session-gated) share this handler -- both just mint a fresh session;
+/// the only difference between them is which credential
+/// `auth_and_cors_middleware` demanded to reach here. See
+/// [`agent_session`]'s module doc comment.
+async fn mint_session(State(state): State<Arc<AgentState>>) -> Json<AgentSessionToken> {
+    Json(agent_session::mint(
+        &state.session_mac_key,
+        unix_now_secs(),
+        state.session_ttl_secs,
+    ))
+}
+
+/// Current Unix time in seconds. Falls back to 0 only if the system clock
+/// is somehow set before 1970 -- not a case worth failing requests over;
+/// see `xenia-peer`'s identical `unix_now_secs` for the same reasoning.
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[derive(Serialize)]
@@ -367,8 +445,9 @@ async fn get_identity(State(state): State<Arc<AgentState>>) -> Json<IdentityResp
 /// its host-trust gate was hardened in PR "4.5b" (see
 /// [`daemon_evidence`]'s module doc comment).
 ///
-/// Local-caller authentication (Origin + `X-Agent-Token`) already happened
-/// in `auth_and_cors_middleware` before this handler runs. What follows:
+/// Local-caller authentication (Origin + `X-Agent-Session`) already
+/// happened in `auth_and_cors_middleware` before this handler runs. What
+/// follows:
 /// 1. Reject an unrecognized `schema_version` or malformed `suite`
 ///    ([`validate_common`]).
 /// 2. Decode the typed hex fields; reject anything that isn't exactly the
@@ -1029,6 +1108,8 @@ mod tests {
             manager: HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]),
             ed25519_secret: Zeroizing::new([1u8; 32]),
             ml_dsa_seed: Zeroizing::new([2u8; 32]),
+            session_mac_key: agent_session::session_mac_key(token),
+            session_ttl_secs: agent_session::DEFAULT_SESSION_TTL_SECS,
             token: token.to_string(),
             allowed_origins: allowed_origins.iter().map(|s| s.to_string()).collect(),
             host_trust: StdMutex::new(
@@ -1073,6 +1154,8 @@ mod tests {
             manager: HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]),
             ed25519_secret: Zeroizing::new([1u8; 32]),
             ml_dsa_seed: Zeroizing::new([2u8; 32]),
+            session_mac_key: agent_session::session_mac_key(token),
+            session_ttl_secs: agent_session::DEFAULT_SESSION_TTL_SECS,
             token: token.to_string(),
             allowed_origins: allowed_origins.iter().map(|s| s.to_string()).collect(),
             host_trust: StdMutex::new(
@@ -1144,12 +1227,20 @@ mod tests {
         }
     }
 
+    // ─── pairing-token tests (`POST /v1/pair`) ──────────────────────────
+    //
+    // `/v1/pair` is the one route the raw pairing token still authenticates
+    // (see `agent_session`'s module doc comment) -- these mirror the old
+    // "every route needs the pairing token" tests, just retargeted at the
+    // one route that still works that way.
+
     #[tokio::test]
-    async fn missing_origin_is_refused_even_with_a_valid_token() {
+    async fn missing_origin_is_refused_even_with_a_valid_pairing_token() {
         use tower::ServiceExt;
         let app = build_router(test_state("secret", &["http://localhost:8134"]));
         let req = axum::http::Request::builder()
-            .uri("/identity")
+            .method("POST")
+            .uri("/v1/pair")
             .header("x-agent-token", "secret")
             .body(axum::body::Body::empty())
             .unwrap();
@@ -1158,11 +1249,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wrong_origin_is_refused() {
+    async fn wrong_origin_is_refused_on_pair() {
         use tower::ServiceExt;
         let app = build_router(test_state("secret", &["http://localhost:8134"]));
         let req = axum::http::Request::builder()
-            .uri("/identity")
+            .method("POST")
+            .uri("/v1/pair")
             .header("origin", "http://evil.example")
             .header("x-agent-token", "secret")
             .body(axum::body::Body::empty())
@@ -1172,11 +1264,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn right_origin_but_wrong_token_is_refused() {
+    async fn right_origin_but_wrong_pairing_token_is_refused() {
         use tower::ServiceExt;
         let app = build_router(test_state("secret", &["http://localhost:8134"]));
         let req = axum::http::Request::builder()
-            .uri("/identity")
+            .method("POST")
+            .uri("/v1/pair")
             .header("origin", "http://localhost:8134")
             .header("x-agent-token", "not-the-secret")
             .body(axum::body::Body::empty())
@@ -1186,11 +1279,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn right_origin_and_token_succeeds() {
+    async fn right_origin_and_pairing_token_mints_a_session() {
         use tower::ServiceExt;
         let app = build_router(test_state("secret", &["http://localhost:8134"]));
         let req = axum::http::Request::builder()
-            .uri("/identity")
+            .method("POST")
+            .uri("/v1/pair")
             .header("origin", "http://localhost:8134")
             .header("x-agent-token", "secret")
             .body(axum::body::Body::empty())
@@ -1203,20 +1297,164 @@ mod tests {
                 .unwrap(),
             "http://localhost:8134"
         );
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let session: AgentSessionToken = serde_json::from_slice(&bytes).unwrap();
+        assert!(session.expires_at > session.issued_at);
+    }
+
+    #[tokio::test]
+    async fn the_raw_pairing_token_does_not_authenticate_any_other_route() {
+        use tower::ServiceExt;
+        let app = build_router(test_state("secret", &["http://localhost:8134"]));
+        let req = axum::http::Request::builder()
+            .uri("/identity")
+            .header("origin", "http://localhost:8134")
+            .header("x-agent-token", "secret")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "the raw pairing token must not double as a session credential"
+        );
+    }
+
+    // ─── session tests (`X-Agent-Session`, everything but `/v1/pair`) ───
+
+    /// Pairs against `app` and returns the resulting session's compact
+    /// `X-Agent-Session` header value. The one place `"secret"` (the
+    /// pairing token every `test_state*` helper seeds) is actually used as
+    /// a bearer credential in most tests -- everything else in this module
+    /// goes through a minted session instead, matching production.
+    async fn pair(app: Router, pairing_token: &str) -> String {
+        use tower::ServiceExt;
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/pair")
+            .header("origin", "http://localhost:8134")
+            .header("x-agent-token", pairing_token)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "test fixture pairing failed");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let session: AgentSessionToken = serde_json::from_slice(&bytes).unwrap();
+        session.to_header_value()
+    }
+
+    #[tokio::test]
+    async fn identity_refuses_a_missing_session() {
+        use tower::ServiceExt;
+        let app = build_router(test_state("secret", &["http://localhost:8134"]));
+        let req = axum::http::Request::builder()
+            .uri("/identity")
+            .header("origin", "http://localhost:8134")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn identity_refuses_a_session_minted_under_a_different_pairing_token() {
+        use tower::ServiceExt;
+        // Mint a session against one agent's pairing token, then present it
+        // to a *different* agent instance (different token -> different
+        // session-MAC key) -- simulating a stale session surviving a
+        // pairing-token rotation.
+        let minted_elsewhere = pair(
+            build_router(test_state("other-secret", &["http://localhost:8134"])),
+            "other-secret",
+        )
+        .await;
+        let app = build_router(test_state("secret", &["http://localhost:8134"]));
+        let req = axum::http::Request::builder()
+            .uri("/identity")
+            .header("origin", "http://localhost:8134")
+            .header("x-agent-session", minted_elsewhere)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn identity_succeeds_with_a_freshly_paired_session() {
+        use tower::ServiceExt;
+        let app = build_router(test_state("secret", &["http://localhost:8134"]));
+        let session = pair(app.clone(), "secret").await;
+        let req = axum::http::Request::builder()
+            .uri("/identity")
+            .header("origin", "http://localhost:8134")
+            .header("x-agent-session", session)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn session_refresh_mints_a_new_session_from_a_valid_one() {
+        use tower::ServiceExt;
+        let app = build_router(test_state("secret", &["http://localhost:8134"]));
+        let session = pair(app.clone(), "secret").await;
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/session/refresh")
+            .header("origin", "http://localhost:8134")
+            .header("x-agent-session", &session)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let refreshed: AgentSessionToken = serde_json::from_slice(&bytes).unwrap();
+        assert_ne!(
+            refreshed.to_header_value(),
+            session,
+            "a refresh must mint a genuinely new session, not echo the old one"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_refresh_refuses_the_raw_pairing_token() {
+        use tower::ServiceExt;
+        let app = build_router(test_state("secret", &["http://localhost:8134"]));
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/session/refresh")
+            .header("origin", "http://localhost:8134")
+            .header("x-agent-session", "secret")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "the raw pairing token is not a well-formed session and must not refresh one"
+        );
     }
 
     async fn post_signed_json(
         app: Router,
         path: &str,
-        token: &str,
+        pairing_token: &str,
         body: serde_json::Value,
     ) -> (StatusCode, serde_json::Value) {
         use tower::ServiceExt;
+        let session = pair(app.clone(), pairing_token).await;
         let req = axum::http::Request::builder()
             .method("POST")
             .uri(path)
             .header("origin", "http://localhost:8134")
-            .header("x-agent-token", token)
+            .header("x-agent-session", session)
             .header("content-type", "application/json")
             .body(axum::body::Body::from(body.to_string()))
             .unwrap();
