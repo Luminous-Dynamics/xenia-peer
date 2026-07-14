@@ -1823,6 +1823,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(crate::operator_http::router(
             operator_auth_state.clone(),
             revocations.clone(),
+            shared_ledger.clone(),
         ));
 
     let listener = TcpListener::bind(format!("{}:{}", args.operator_bind, args.admin_port)).await?;

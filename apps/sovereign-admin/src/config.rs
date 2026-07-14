@@ -10,7 +10,6 @@ use leptos::prelude::*;
 use web_sys::Storage;
 
 const ENDPOINT_KEY: &str = "xenia-admin.daemon-endpoint";
-const SECRET_KEY: &str = "xenia-admin.daemon-secret";
 const CONSENT_PORT_KEY: &str = "xenia-admin.daemon-consent-port";
 const SEALED_PORT_KEY: &str = "xenia-admin.daemon-sealed-port";
 const SEALED_ENABLED_KEY: &str = "xenia-admin.daemon-sealed-enabled";
@@ -33,7 +32,6 @@ const DEFAULT_SEALED_PORT: u16 = 8083;
 #[derive(Clone, Copy)]
 pub struct DaemonConfig {
     pub endpoint: RwSignal<String>,
-    pub hmac_secret: RwSignal<String>,
     /// The daemon's consent port. The admin port is taken from `endpoint`; the
     /// consent decisions go to this separate port on the same host.
     pub consent_port: RwSignal<u16>,
@@ -59,7 +57,6 @@ impl DaemonConfig {
         let endpoint = RwSignal::new(
             load_from_storage(ENDPOINT_KEY).unwrap_or_else(|| DEFAULT_ADMIN_ENDPOINT.into()),
         );
-        let hmac_secret = RwSignal::new(load_from_storage(SECRET_KEY).unwrap_or_default());
         let consent_port = RwSignal::new(
             load_from_storage(CONSENT_PORT_KEY)
                 .and_then(|s| s.parse().ok())
@@ -82,7 +79,6 @@ impl DaemonConfig {
         );
         Self {
             endpoint,
-            hmac_secret,
             consent_port,
             sealed_port,
             use_sealed_channel,
@@ -92,7 +88,6 @@ impl DaemonConfig {
 
     pub fn save(&self) {
         persist_to_storage(ENDPOINT_KEY, &self.endpoint.get());
-        persist_to_storage(SECRET_KEY, &self.hmac_secret.get());
         persist_to_storage(CONSENT_PORT_KEY, &self.consent_port.get().to_string());
         persist_to_storage(SEALED_PORT_KEY, &self.sealed_port.get().to_string());
         persist_to_storage(

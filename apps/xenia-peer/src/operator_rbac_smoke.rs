@@ -82,9 +82,17 @@ async fn operator_rbac_full_chain_smoke() {
         AUTH_RATE_MAX,
         AUTH_RATE_WINDOW_SECS,
     ));
+    // A separate, throwaway ledger for the router's new `/v1/audit/*`
+    // routes -- this test verifies ledger attribution via its own `chain`
+    // below (built from `crate::decode_consent_decision`'s real output),
+    // not via those routes.
+    let router_ledger = Arc::new(tokio::sync::Mutex::new(Chain::new(SigningKey::generate(
+        &mut rand::thread_rng(),
+    ))));
     let http = router(
         state.clone(),
         crate::operator_revocations::OperatorRevocations::empty(),
+        router_ledger,
     );
 
     // --- 1. GET a challenge from the real endpoint ---

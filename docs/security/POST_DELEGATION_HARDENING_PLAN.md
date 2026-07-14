@@ -19,7 +19,7 @@ credible pre-production system.
 
 1. **Transactional native pin storage with failure injection.** ✅ done
 2. **Stable endpoint/daemon scope for native host pins.** ✅ done
-3. **Remove the legacy HMAC ledger/admin path.**
+3. **Remove the legacy HMAC ledger/admin path.** ✅ done
 4. **Replace the persistent pairing token with short-lived agent sessions.**
 5. **Resolve the hybrid-versus-classical HTTP authorization profile.**
 6. **Add the full headless-browser vertical slice.**
@@ -105,6 +105,75 @@ possibly a dead ledger flow -- are still live surface. Consolidate:
   verifiable, or token-authorized? Avoid a parallel static-secret system.
 - Remove or formally revive `api/mod.rs` rather than leave it orphaned.
 - Make the sealed authenticated control path canonical.
+
+**Done.** Landed the model an external review recommended: **private contents,
+public commitments, portable proofs.**
+
+- Confirmed `apps/xenia-peer/src/api/mod.rs` was genuinely dead, not just
+  legacy: no `mod api;` declaration anywhere in the crate, and its
+  `create_router(state: Arc<AppState>)` referenced an `AppState` type that
+  doesn't exist anywhere in `xenia-peer`. It had never compiled as part of
+  the crate. Deleted outright (nothing to migrate).
+- Deleted `DaemonConfig::hmac_secret` (browser `localStorage`), the "Admin
+  Secret (HMAC Hex)" UI field, `X-Admin-HMAC`, and the whole dead
+  `RealLedger`/`fetch_identity`/`fetch_ledger` browser flow that called
+  `GET /identity`/`GET /ledger` -- routes that had only ever existed in the
+  orphaned `api/mod.rs`, so that flow 404'd against every real daemon that
+  ever ran it.
+- **New `xenia_ledger::LedgerCheckpoint`** (crate addition, not
+  daemon-specific): `schema`, `entry_count`, `head_hash`
+  (`Chain::last_hash()`), `ledger_public_key`, `timestamp_unix_secs`,
+  Ed25519 `signature` over a domain-separated message of the other fields.
+  Deliberately carries zero event contents (no session/request IDs, no
+  scope strings) -- see its doc comment for the "third party retains
+  checkpoints, later detects rewriting/truncation without ever seeing
+  ledger contents" argument. `Chain::sign_checkpoint(timestamp)` produces
+  one from the ledger's own signing key (the same key that signs every
+  entry -- no new key introduced); `Verifier::verify_checkpoint` checks it.
+  9 new tests incl. a `serde_json` round-trip asserting the JSON text never
+  contains a known scope string, and tampered entry_count/head_hash/schema/
+  wrong-key all rejected.
+- **`GET /v1/audit/checkpoint`** (new route, `operator_http.rs`): public,
+  no authentication, signs and returns the live `shared_ledger`'s
+  checkpoint fresh on every call.
+- **`GET /v1/audit/ledger`** (new route): the full in-memory entry export
+  plus a checkpoint over the same state, gated by a new
+  `operator_auth::authorize_ledger_read` (token must verify, unexpired,
+  role must permit `OperatorAction::ReadAudit`, operator still enrolled).
+  That action/role pairing **already existed** in `xenia-operator-proto`
+  (`Viewer`'s doc comment literally says "see... the audit ledger") --
+  nothing new to add there. Deliberately has **no separate per-request
+  Ed25519 signature** the way consent-action/revoke do: those exist to
+  bind a *mutating, non-repudiable* decision to a specific human; a read
+  has nothing beyond what the bearer token's own role/expiry already
+  gates. Token travels in an `X-Operator-Token` header (JSON, same shape
+  `POST /auth/verify` already returns) since `GET` request bodies are
+  awkward across HTTP clients. 7 new tests: public/no-auth for the
+  checkpoint, missing/malformed/expired/tampered/unenrolled token all
+  refused (403/401/400 as appropriate), and a real round trip proving the
+  export's entry count and checkpoint agree.
+- Browser: `OperatorSession` gained `token_json_string()` (the private
+  `token_json` field stayed private; this is a scoped accessor, not a
+  visibility widening) so `pages/sessions.rs`'s new `LedgerAudit` component
+  can build the header. `LedgerAudit` always shows the public checkpoint;
+  once the operator has an active RBAC session (reactively -- signing in
+  or out re-triggers the fetch) it also fetches and locally verifies the
+  full export via the existing `VerifiableLedger` display component.
+- **Redaction** (the "don't mutate history, produce a separately signed
+  disclosure bundle" half of the reviewed design) is **not implemented** --
+  there is no redaction *policy* or bounded-bundle-with-omission-manifest
+  concept anywhere yet for this to hook into. Recorded as explicitly
+  deferred, not silently dropped: a real redaction feature needs its own
+  design pass (what may be withheld, under what policy, how the omission
+  is proven) rather than a speculative stub here.
+- Not done (also out of scope for this PR, noted for whoever picks up
+  ledger work next): `consent.ledger` is still never written back to disk
+  after `Chain::append` (only read once at startup) -- appends are
+  in-memory-only and lost on daemon restart, so `GET /v1/audit/*` only
+  ever reflects the current process's uptime. `M1RuntimeSession` also
+  holds a second, entirely independent `Chain` under a different signing
+  key (`--m1-consent-key-path`) that `/v1/audit/*` does not see at all.
+  Both are real, pre-existing gaps this PR did not create and did not fix.
 
 ## 4. Replace the static pairing token
 

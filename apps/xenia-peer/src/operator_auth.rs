@@ -360,6 +360,36 @@ pub(crate) fn authorize_consent_action(
     })
 }
 
+/// Authorize a ledger-read request: the presented token must be
+/// daemon-signed and unexpired, its role must permit
+/// [`OperatorAction::ReadAudit`], and the operator must still be enrolled.
+///
+/// Unlike [`authorize_consent_action`]/[`authorize_operator_revocation`],
+/// this needs no separate per-request Ed25519 signature -- those exist so a
+/// captured bearer token alone can't authorize a *mutating*, non-repudiable
+/// decision (approve/deny/revoke); a read has nothing for a stolen-but-still-
+/// valid token to do beyond what the token's own role and expiry already
+/// gate. `GET /v1/audit/checkpoint` needs no authorization at all (see
+/// `xenia_ledger::LedgerCheckpoint`'s doc comment) -- this function is only
+/// for `GET /v1/audit/ledger`'s full entry export.
+pub(crate) fn authorize_ledger_read(
+    policy: &OperatorPolicy,
+    daemon_pubkey: &VerifyingKey,
+    now: u64,
+    token: &SignedOperatorToken,
+) -> Result<OperatorToken, AuthError> {
+    let token = verify_token(daemon_pubkey, now, token)?;
+    if !crate::operator::role_permits(token.role, OperatorAction::ReadAudit) {
+        return Err(AuthError::RoleNotPermitted);
+    }
+    // A de-enrolled operator's token is dead even if unexpired, matching
+    // authorize_consent_action/authorize_operator_revocation.
+    policy
+        .lookup_by_id(&token.operator_id)
+        .ok_or(AuthError::NotEnrolled)?;
+    Ok(token)
+}
+
 /// An admin's authenticated request to revoke another operator: their session
 /// token plus a signature over (revoke domain + target id + token nonce),
 /// proving the *admin* (not just a token bearer) authorized this exact

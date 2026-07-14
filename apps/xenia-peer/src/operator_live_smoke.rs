@@ -46,6 +46,9 @@ async fn operator_auth_ceremony_works_over_real_http() {
         AUTH_RATE_WINDOW_SECS,
     ));
 
+    let ledger = Arc::new(tokio::sync::Mutex::new(xenia_ledger::Chain::new(
+        SigningKey::generate(&mut rand::thread_rng()),
+    )));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -54,6 +57,7 @@ async fn operator_auth_ceremony_works_over_real_http() {
             router(
                 state,
                 crate::operator_revocations::OperatorRevocations::empty(),
+                ledger,
             ),
         )
         .await;
