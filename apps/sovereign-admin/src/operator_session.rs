@@ -93,6 +93,16 @@ impl OperatorSession {
         now_secs < self.expires_at
     }
 
+    /// The daemon's raw `POST /auth/verify` response for this session,
+    /// serialized -- the exact JSON shape `GET /v1/audit/ledger`'s
+    /// `X-Operator-Token` header expects (see
+    /// `apps/xenia-peer/src/operator_http.rs`'s `TokenDto`). Exposed as a
+    /// method rather than a public field so `OperatorSession`'s other
+    /// private fields (parsed out of this same JSON) stay encapsulated.
+    pub fn token_json_string(&self) -> String {
+        self.token_json.to_string()
+    }
+
     /// This session's token in the shape the agent's `/v1/sign/*` endpoints
     /// expect, so it can verify the daemon's own signature over it before
     /// trusting the `token_nonce` bound into a consent-action/revoke

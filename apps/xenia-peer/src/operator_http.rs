@@ -18,12 +18,18 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+use axum::{
+    Json, Router,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    routing::{get, post},
+};
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use xenia_handshake::{HandshakeManager, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN};
+use xenia_ledger::{Chain, LedgerCheckpoint, LedgerEntry};
 use xenia_operator_proto::{DaemonIdentityCertificate, challenge_host_attestation_transcript};
 
 use crate::operator::{OperatorPolicy, OperatorRole};
@@ -355,13 +361,104 @@ async fn revoke_operator_handler(
     }
 }
 
-/// A `Router` carrying the auth routes plus the admin revoke route, each with its
-/// own state already applied, so it can be `.merge()`d into the stateless admin
-/// router. `revocations` is the *same* handle the sealed endpoint consults.
-pub(crate) fn router(state: Arc<OperatorAuthState>, revocations: OperatorRevocations) -> Router {
+/// State for the `/v1/audit/*` routes: the auth state (token/role
+/// verification) plus the live ledger to read from.
+#[derive(Clone)]
+struct AuditState {
+    auth: Arc<OperatorAuthState>,
+    ledger: Arc<Mutex<Chain>>,
+}
+
+/// `GET /v1/audit/checkpoint` -- a public, signed commitment to the ledger's
+/// current length and head hash. No authentication required: it reveals
+/// nothing beyond what `xenia_ledger::LedgerCheckpoint`'s doc comment
+/// explains is already safe to publish (see
+/// `docs/security/POST_DELEGATION_HARDENING_PLAN.md` item 3's "private
+/// contents, public commitments" model).
+async fn audit_checkpoint_handler(State(state): State<AuditState>) -> Json<LedgerCheckpoint> {
+    let ledger = state.ledger.lock().await;
+    Json(ledger.sign_checkpoint(unix_now_secs()))
+}
+
+/// Response body for `GET /v1/audit/ledger`: the full in-memory ledger plus
+/// a checkpoint over the same state, so a caller can confirm
+/// `entries.last().entry_hash == checkpoint.head_hash` (or, for an empty
+/// ledger, that both agree it's empty) without trusting the daemon that
+/// served the export.
+#[derive(Serialize)]
+struct AuditLedgerExportDto {
+    entries: Vec<LedgerEntry>,
+    checkpoint: LedgerCheckpoint,
+}
+
+/// `GET /v1/audit/ledger` -- an authenticated, role-gated export of the
+/// full in-memory consent ledger. Requires a valid, unexpired operator
+/// token in the `X-Operator-Token` header (same JSON shape `POST
+/// /operator/revoke` embeds in its body) whose role permits
+/// [`crate::operator_auth::authorize_ledger_read`] (`ReadAudit`, `Viewer`
+/// and above -- every enrolled role). Every auth failure returns `403`
+/// without disclosing which check failed, matching `revoke_operator_handler`.
+async fn audit_ledger_handler(
+    State(state): State<AuditState>,
+    headers: HeaderMap,
+) -> Result<Json<AuditLedgerExportDto>, (StatusCode, String)> {
+    let token_header = headers
+        .get("X-Operator-Token")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                "missing X-Operator-Token header".to_string(),
+            )
+        })?;
+    let token_dto: TokenDto = serde_json::from_str(token_header).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("malformed X-Operator-Token: {e}"),
+        )
+    })?;
+    let signed = token_dto
+        .into_signed()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    if crate::operator_auth::authorize_ledger_read(
+        &state.auth.policy,
+        &state.auth.daemon_key.verifying_key(),
+        unix_now_secs(),
+        &signed,
+    )
+    .is_err()
+    {
+        tracing::warn!("ledger read refused");
+        return Err((StatusCode::FORBIDDEN, "ledger read refused".to_string()));
+    }
+
+    let ledger = state.ledger.lock().await;
+    let checkpoint = ledger.sign_checkpoint(unix_now_secs());
+    let entries: Vec<LedgerEntry> = ledger.iter().cloned().collect();
+    Ok(Json(AuditLedgerExportDto {
+        entries,
+        checkpoint,
+    }))
+}
+
+/// A `Router` carrying the auth routes plus the admin revoke route and the
+/// `/v1/audit/*` routes, each with its own state already applied, so it can
+/// be `.merge()`d into the stateless admin router. `revocations` is the
+/// *same* handle the sealed endpoint consults; `ledger` is the *same*
+/// shared ledger every consent path appends to.
+pub(crate) fn router(
+    state: Arc<OperatorAuthState>,
+    revocations: OperatorRevocations,
+    ledger: Arc<Mutex<Chain>>,
+) -> Router {
     let mutation = AdminMutationState {
         auth: state.clone(),
         revocations,
+    };
+    let audit = AuditState {
+        auth: state.clone(),
+        ledger,
     };
     Router::new()
         .route("/auth/challenge", post(challenge_handler))
@@ -371,6 +468,12 @@ pub(crate) fn router(state: Arc<OperatorAuthState>, revocations: OperatorRevocat
             axum::routing::get(daemon_identity_handler),
         )
         .with_state(state)
+        .merge(
+            Router::new()
+                .route("/v1/audit/checkpoint", get(audit_checkpoint_handler))
+                .route("/v1/audit/ledger", get(audit_ledger_handler))
+                .with_state(audit),
+        )
         .merge(
             Router::new()
                 .route("/operator/revoke", post(revoke_operator_handler))
@@ -406,6 +509,14 @@ mod tests {
         ))
     }
 
+    /// A fresh, empty ledger for tests that don't care about its contents --
+    /// just need `router()`'s new third parameter satisfied.
+    fn empty_ledger() -> Arc<Mutex<Chain>> {
+        Arc::new(Mutex::new(Chain::new(SigningKey::generate(
+            &mut rand::thread_rng(),
+        ))))
+    }
+
     #[tokio::test]
     async fn verify_is_rate_limited() {
         let op = HandshakeManager::new();
@@ -426,7 +537,7 @@ mod tests {
             1,
             3600,
         ));
-        let router = router(state, OperatorRevocations::empty());
+        let router = router(state, OperatorRevocations::empty(), empty_ledger());
         // A well-formed VerifyRequestDto (all fields present) so the handler
         // runs -- the crypto is garbage, but the rate limiter fires before
         // verification. (Malformed JSON is rejected by the extractor before
@@ -486,12 +597,41 @@ mod tests {
         (status, String::from_utf8(bytes.to_vec()).unwrap())
     }
 
+    async fn get_json_with_header(
+        router: &Router,
+        path: &str,
+        header: &str,
+        value: &str,
+    ) -> (StatusCode, String) {
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(path)
+                    .header(header, value)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
     #[tokio::test]
     async fn daemon_identity_certificate_is_self_consistent_and_matches_the_daemon_key() {
         let op = HandshakeManager::new();
         let daemon = SigningKey::generate(&mut rand::thread_rng());
         let daemon_pk = daemon.verifying_key();
-        let router = router(state_with(&op, daemon), OperatorRevocations::empty());
+        let router = router(
+            state_with(&op, daemon),
+            OperatorRevocations::empty(),
+            empty_ledger(),
+        );
 
         let (status, body) = get_json(&router, "/auth/daemon-identity").await;
         assert_eq!(status, StatusCode::OK, "body: {body}");
@@ -530,7 +670,11 @@ mod tests {
     async fn challenge_host_attestation_verifies_against_the_daemon_identity_certificate() {
         let op = HandshakeManager::new();
         let daemon = SigningKey::generate(&mut rand::thread_rng());
-        let router = router(state_with(&op, daemon), OperatorRevocations::empty());
+        let router = router(
+            state_with(&op, daemon),
+            OperatorRevocations::empty(),
+            empty_ledger(),
+        );
 
         let (status, cert_body) = get_json(&router, "/auth/daemon-identity").await;
         assert_eq!(status, StatusCode::OK);
@@ -578,7 +722,7 @@ mod tests {
         let daemon = SigningKey::generate(&mut rand::thread_rng());
         let daemon_pk = daemon.verifying_key();
         let state = state_with(&op, daemon);
-        let router = router(state, OperatorRevocations::empty());
+        let router = router(state, OperatorRevocations::empty(), empty_ledger());
 
         // 1. get a challenge.
         let (status, body) = post_json(&router, "/auth/challenge", "{}".to_string()).await;
@@ -628,7 +772,11 @@ mod tests {
     async fn verify_without_a_challenge_is_unauthorized() {
         let op = HandshakeManager::new();
         let daemon = SigningKey::generate(&mut rand::thread_rng());
-        let router = router(state_with(&op, daemon), OperatorRevocations::empty());
+        let router = router(
+            state_with(&op, daemon),
+            OperatorRevocations::empty(),
+            empty_ledger(),
+        );
         // A well-formed but never-issued nonce.
         let ml_pk = op.ml_dsa_public_key_bytes().to_vec();
         let body = serde_json::json!({
@@ -691,7 +839,7 @@ mod tests {
         let daemon = SigningKey::generate(&mut rand::thread_rng());
         let state = state_with(&op, daemon.clone()); // "alice" enrolled as Admin
         let revocations = OperatorRevocations::empty();
-        let router = router(state, revocations.clone());
+        let router = router(state, revocations.clone(), empty_ledger());
         let now = now_secs();
 
         // An Admin token authorizes the revocation: 204 + target revoked.
@@ -716,5 +864,176 @@ mod tests {
         let (status3, _) = post_json(&router, "/operator/revoke", tampered).await;
         assert_eq!(status3, StatusCode::FORBIDDEN);
         assert!(!revocations.is_revoked("eve"));
+    }
+
+    // ─── /v1/audit/* ────────────────────────────────────────────────────
+
+    fn ledger_with_entries(sk: SigningKey, count: usize) -> Arc<Mutex<Chain>> {
+        use uuid::Uuid;
+        use xenia_ledger::{ConsentEventRecord, ConsentKind};
+        let mut chain = Chain::new(sk);
+        for _ in 0..count {
+            chain
+                .append(ConsentEventRecord {
+                    source_id: [0xABu8; 32],
+                    session_id: Uuid::new_v4(),
+                    request_id: Uuid::new_v4(),
+                    kind: ConsentKind::Approval,
+                    scope: "view screen".to_string(),
+                })
+                .unwrap();
+        }
+        Arc::new(Mutex::new(chain))
+    }
+
+    #[tokio::test]
+    async fn audit_checkpoint_is_public_and_signed() {
+        let op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let ledger_key = SigningKey::generate(&mut rand::thread_rng());
+        let router = router(
+            state_with(&op, daemon),
+            OperatorRevocations::empty(),
+            ledger_with_entries(ledger_key, 3),
+        );
+
+        // No auth header at all -- the checkpoint is public.
+        let (status, body) = get_json(&router, "/v1/audit/checkpoint").await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let checkpoint: LedgerCheckpoint = serde_json::from_str(&body).unwrap();
+        assert_eq!(checkpoint.entry_count, 3);
+        xenia_ledger::Verifier::verify_checkpoint(&checkpoint).unwrap();
+    }
+
+    #[tokio::test]
+    async fn audit_ledger_requires_a_token_header() {
+        let op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let router = router(
+            state_with(&op, daemon),
+            OperatorRevocations::empty(),
+            empty_ledger(),
+        );
+
+        let (status, _) = get_json(&router, "/v1/audit/ledger").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn audit_ledger_succeeds_for_the_lowest_permitted_role_and_matches_the_checkpoint() {
+        // "Viewer" is the lowest role in the hierarchy, and ReadAudit's
+        // min_role is Viewer -- if the wiring is right, every enrolled
+        // operator can read the ledger regardless of role.
+        let op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let ledger_key = SigningKey::generate(&mut rand::thread_rng());
+        let router = router(
+            state_with(&op, daemon.clone()),
+            OperatorRevocations::empty(),
+            ledger_with_entries(ledger_key, 2),
+        );
+        let (token, _nonce) = token_json_for(&daemon, OperatorRole::Viewer, now_secs());
+
+        let (status, body) = get_json_with_header(
+            &router,
+            "/v1/audit/ledger",
+            "X-Operator-Token",
+            &token.to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let entries = parsed["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        let checkpoint: LedgerCheckpoint =
+            serde_json::from_value(parsed["checkpoint"].clone()).unwrap();
+        assert_eq!(checkpoint.entry_count, 2);
+        xenia_ledger::Verifier::verify_checkpoint(&checkpoint).unwrap();
+    }
+
+    #[tokio::test]
+    async fn audit_ledger_rejects_a_missing_or_unenrolled_operator() {
+        let op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let router = router(
+            state_with(&op, daemon.clone()),
+            OperatorRevocations::empty(),
+            empty_ledger(),
+        );
+
+        // A token for an operator id that was never enrolled (state_with
+        // only enrolls "alice").
+        let authed = crate::operator_auth::AuthenticatedOperator {
+            operator_id: "not-alice".to_string(),
+            role: OperatorRole::Admin,
+        };
+        let signed = issue_token(&daemon, &authed, now_secs(), TOKEN_TTL_SECS, [0x77; 16]);
+        let token = serde_json::to_value(TokenDto::from_signed(&signed))
+            .unwrap()
+            .to_string();
+
+        let (status, _) =
+            get_json_with_header(&router, "/v1/audit/ledger", "X-Operator-Token", &token).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn audit_ledger_rejects_an_expired_token() {
+        let op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let router = router(
+            state_with(&op, daemon.clone()),
+            OperatorRevocations::empty(),
+            empty_ledger(),
+        );
+
+        let authed = crate::operator_auth::AuthenticatedOperator {
+            operator_id: "alice".to_string(),
+            role: OperatorRole::Viewer,
+        };
+        // issued and already-expired well in the past.
+        let signed = issue_token(&daemon, &authed, 1_000, 1, [0x11; 16]);
+        let token = serde_json::to_value(TokenDto::from_signed(&signed))
+            .unwrap()
+            .to_string();
+
+        let (status, _) =
+            get_json_with_header(&router, "/v1/audit/ledger", "X-Operator-Token", &token).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn audit_ledger_rejects_a_token_with_a_tampered_signature() {
+        let op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let router = router(
+            state_with(&op, daemon.clone()),
+            OperatorRevocations::empty(),
+            empty_ledger(),
+        );
+
+        let (token_json, _nonce) = token_json_for(&daemon, OperatorRole::Viewer, now_secs());
+        let mut token: TokenDto = serde_json::from_value(token_json).unwrap();
+        token.signature = "ff".repeat(64);
+        let tampered = serde_json::to_string(&token).unwrap();
+
+        let (status, _) =
+            get_json_with_header(&router, "/v1/audit/ledger", "X-Operator-Token", &tampered).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn audit_ledger_rejects_a_malformed_token_header() {
+        let op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let router = router(
+            state_with(&op, daemon),
+            OperatorRevocations::empty(),
+            empty_ledger(),
+        );
+
+        let (status, _) =
+            get_json_with_header(&router, "/v1/audit/ledger", "X-Operator-Token", "not json").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }

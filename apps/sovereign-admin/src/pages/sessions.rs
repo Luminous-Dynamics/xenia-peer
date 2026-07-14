@@ -1,7 +1,27 @@
 // Copyright (c) 2026 Tristan Stoltz / Luminous Dynamics
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Sessions page — live xenia-ledger verification.
+// Sessions page — operator authentication/revocation, live ledger
+// audit (public checkpoint + RBAC-gated full export), and offline
+// xenia-ledger verification (paste-and-verify or a synthetic demo chain).
+//
+// The live ledger flow used to be gated by a long-lived HMAC secret held in
+// browser localStorage (`DaemonConfig::hmac_secret`, `X-Admin-HMAC`),
+// calling `GET /identity`/`GET /ledger` on the daemon -- routes that were
+// never actually mounted by the real router
+// (`apps/xenia-peer/src/operator_http.rs`'s `router()` only ever served
+// `/auth/*` and `/operator/revoke`; the `/ledger`/`/identity` handlers
+// lived only in an orphaned, never-`mod`-declared
+// `apps/xenia-peer/src/api/mod.rs` stub that didn't even reference a real
+// state type). That flow always 404'd against a real daemon. Replaced,
+// per `docs/security/POST_DELEGATION_HARDENING_PLAN.md` item 3's "private
+// contents, public commitments, portable proofs" model, by
+// [`LedgerAudit`]: `GET /v1/audit/checkpoint` (public, signed, entry
+// count + head hash only -- see `xenia_ledger::LedgerCheckpoint`'s doc
+// comment for why this alone is safe to publish) plus, only when the
+// operator has an active RBAC session, `GET /v1/audit/ledger` (requires
+// `X-Operator-Token`, `OperatorAction::ReadAudit` -- every enrolled role,
+// since it's Viewer-level) for the full entry export.
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use gloo_net::http::Request;
@@ -10,7 +30,9 @@ use leptos::task::spawn_local;
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use xenia_ledger::{Chain, ConsentEventRecord, ConsentKind, LedgerEntry, Verifier, VerifyError};
+use xenia_ledger::{
+    Chain, ConsentEventRecord, ConsentKind, LedgerCheckpoint, LedgerEntry, Verifier, VerifyError,
+};
 use xenia_operator_proto::OperatorAction;
 
 use crate::agent_client::AgentConfig;
@@ -144,8 +166,9 @@ pub fn SessionsPage() -> impl IntoView {
                 <section class="config-section">
                     <h1>"Sovereign Audit Console"</h1>
                     <p class="prose">
-                        "Connect to an active Xenia daemon to fetch its verifiable consent ledger. "
-                        "All verification is performed locally in your browser."
+                        "Connect to an active Xenia daemon to authenticate as an operator and "
+                        "verify its signed consent ledger. All verification is performed locally "
+                        "in your browser."
                     </p>
                     <div class="config-grid">
                         <div class="field">
@@ -154,14 +177,6 @@ pub fn SessionsPage() -> impl IntoView {
                                 type="text"
                                 prop:value=move || config.endpoint.get()
                                 on:input=move |ev| config.endpoint.set(event_target_value(&ev))
-                            />
-                        </div>
-                        <div class="field">
-                            <label>"Admin Secret (HMAC Hex)"</label>
-                            <input
-                                type="password"
-                                prop:value=move || config.hmac_secret.get()
-                                on:input=move |ev| config.hmac_secret.set(event_target_value(&ev))
                             />
                         </div>
                         <div class="field">
@@ -296,12 +311,10 @@ pub fn SessionsPage() -> impl IntoView {
                     </section>
                 </Show>
 
-                <RealLedger config/>
-
-                <hr class="separator"/>
+                <LedgerAudit config/>
 
                 <div class="demo-toggle">
-                    "Want to see the verification logic in action without a daemon? "
+                    "See the ledger verification logic in action with a synthetic chain: "
                     <LedgerDemo/>
                 </div>
 
@@ -311,64 +324,132 @@ pub fn SessionsPage() -> impl IntoView {
     }.into_any()
 }
 
+/// Fetch the daemon's public, signed ledger checkpoint (`GET
+/// /v1/audit/checkpoint`) -- no authentication needed or sent. Deserializes
+/// directly into the same `xenia_ledger::LedgerCheckpoint` type the daemon
+/// signs, so the browser can call `Verifier::verify_checkpoint` without a
+/// separate DTO.
+async fn fetch_checkpoint(endpoint: &str) -> Result<LedgerCheckpoint, String> {
+    let url = format!("{}/v1/audit/checkpoint", endpoint.trim_end_matches('/'));
+    Request::get(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .json::<LedgerCheckpoint>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Response body of `GET /v1/audit/ledger` -- mirrors
+/// `apps/xenia-peer/src/operator_http.rs`'s `AuditLedgerExportDto`.
+#[derive(Deserialize)]
+struct AuditLedgerExportDto {
+    entries: Vec<LedgerEntry>,
+    checkpoint: LedgerCheckpoint,
+}
+
+/// Fetch the full ledger export (`GET /v1/audit/ledger`), authenticated
+/// with the operator's current session token in the `X-Operator-Token`
+/// header (the exact JSON `POST /auth/verify` returned -- see
+/// `OperatorSession::token_json_string`). Requires a role that permits
+/// `OperatorAction::ReadAudit` (every enrolled role, since it's the
+/// lowest/`Viewer` permission) -- see
+/// `apps/xenia-peer/src/operator_auth.rs::authorize_ledger_read`.
+async fn fetch_audit_ledger(
+    endpoint: &str,
+    token_json: &str,
+) -> Result<AuditLedgerExportDto, String> {
+    let url = format!("{}/v1/audit/ledger", endpoint.trim_end_matches('/'));
+    let resp = Request::get(&url)
+        .header("X-Operator-Token", token_json)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("server returned {}", resp.status()));
+    }
+    resp.json::<AuditLedgerExportDto>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Live ledger audit: always shows the daemon's public, signed checkpoint
+/// (entry count + head hash, no auth needed); additionally fetches and
+/// verifies the full entry export once the operator has an active RBAC
+/// session (re-fetches whenever the session or daemon endpoint changes).
 #[component]
-fn RealLedger(config: DaemonConfig) -> impl IntoView {
-    let data = RwSignal::new(None::<(String, Vec<LedgerEntry>)>);
-    let error = RwSignal::new(None::<String>);
-    let loading = RwSignal::new(false);
+fn LedgerAudit(config: DaemonConfig) -> impl IntoView {
+    let session = use_context::<OperatorSessionCtx>();
+    let checkpoint_status = RwSignal::new(String::from("Fetching checkpoint…"));
+    let ledger_data = RwSignal::new(None::<(String, Vec<LedgerEntry>)>);
+    let ledger_status = RwSignal::new(String::new());
 
-    let fetch = move || {
-        let endpoint = config.endpoint.get();
-        let secret = config.hmac_secret.get();
-        if secret.is_empty() {
-            return;
-        }
-        loading.set(true);
-        error.set(None);
-        spawn_local(async move {
-            match fetch_identity(&endpoint).await {
-                Ok(pk) => match fetch_ledger(&endpoint, &secret).await {
-                    Ok(entries) => {
-                        data.set(Some((pk, entries)));
-                    }
-                    Err(e) => error.set(Some(format!("Ledger fetch failed: {e}"))),
-                },
-                Err(e) => error.set(Some(format!("Identity fetch failed: {e}"))),
-            }
-            loading.set(false);
-        });
-    };
-
-    // Refetch when config changes.
     Effect::new(move |_| {
-        fetch();
+        let endpoint = config.endpoint.get();
+        // Tracked `.get()`, not `.get_untracked()` -- signing in or out
+        // should re-trigger this effect and refetch accordingly.
+        let token_json = session
+            .and_then(|sig| sig.get())
+            .map(|s| s.token_json_string());
+
+        spawn_local({
+            let endpoint = endpoint.clone();
+            async move {
+                match fetch_checkpoint(&endpoint).await {
+                    Ok(cp) => checkpoint_status.set(format!(
+                        "{} entries, head {}…",
+                        cp.entry_count,
+                        hex_short(&cp.head_hash)
+                    )),
+                    Err(e) => checkpoint_status.set(format!("checkpoint fetch failed: {e}")),
+                }
+            }
+        });
+
+        match token_json {
+            Some(token_json) => {
+                spawn_local(async move {
+                    match fetch_audit_ledger(&endpoint, &token_json).await {
+                        Ok(export) => {
+                            let pk_hex = hex::encode(export.checkpoint.ledger_public_key);
+                            ledger_data.set(Some((pk_hex, export.entries)));
+                            ledger_status.set(String::new());
+                        }
+                        Err(e) => {
+                            ledger_data.set(None);
+                            ledger_status.set(format!("ledger fetch failed: {e}"));
+                        }
+                    }
+                });
+            }
+            None => {
+                ledger_data.set(None);
+                ledger_status.set(
+                    "Sign in as an operator (above) to fetch and verify the full ledger."
+                        .to_string(),
+                );
+            }
+        }
     });
 
     view! {
-        <div class="real-ledger">
-            <Show when=move || loading.get()>
-                <p>"Fetching live ledger..."</p>
-            </Show>
-            <Show when=move || error.get().is_some()>
-                <p class="error">{move || error.get().unwrap_or_else(|| "Unknown session error".to_string())}</p>
-            </Show>
-            {move || data.get().map(|(pk_hex, entries)| {
-                view! {
+        <section class="ledger-audit">
+            <h2>"Live Ledger Audit"</h2>
+            <p class="prose">"Public checkpoint: " {move || checkpoint_status.get()}</p>
+            {move || match ledger_data.get() {
+                Some((pk_hex, entries)) => view! {
                     <VerifiableLedger
                         title="Live Session Ledger".to_string()
-                        description="This data was fetched from your active Xenia daemon. Verification is live.".to_string()
+                        description="Fetched from your active Xenia daemon as an authenticated \
+                            operator (GET /v1/audit/ledger). Verification is performed locally."
+                            .to_string()
                         initial_pk_hex=pk_hex
                         initial_entries=entries
                     />
-                }
-            })}
-            <Show when=move || data.get().is_none() && !loading.get() && error.get().is_none()>
-                <div class="verify-row">
-                    <span class="badge err">"Disconnected"</span>
-                    <span class="badge-note">"Enter your daemon secret to fetch the live ledger."</span>
-                </div>
-            </Show>
-        </div>
+                }.into_any(),
+                None => view! { <p class="prose dim">{move || ledger_status.get()}</p> }.into_any(),
+            }}
+        </section>
     }
 }
 
@@ -624,34 +705,6 @@ fn parse_and_verify(text: &str) -> Result<ImportedSummary, String> {
         entry_count: exported.entries.len(),
         public_key_hex: exported.public_key_hex,
     })
-}
-
-async fn fetch_identity(endpoint: &str) -> Result<String, String> {
-    let url = format!("{}/identity", endpoint);
-    Request::get(&url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .text()
-        .await
-        .map_err(|e| e.to_string())
-}
-
-async fn fetch_ledger(endpoint: &str, secret: &str) -> Result<Vec<LedgerEntry>, String> {
-    let url = format!("{}/ledger", endpoint);
-    let resp = Request::get(&url)
-        .header("X-Admin-HMAC", secret)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if !resp.ok() {
-        return Err(format!("Server returned {}", resp.status()));
-    }
-
-    resp.json::<Vec<LedgerEntry>>()
-        .await
-        .map_err(|e| e.to_string())
 }
 
 fn decode_hex_32(s: &str) -> Option<[u8; 32]> {
