@@ -21,7 +21,6 @@ use xenia_capture::{
     TestCapture,
 };
 use xenia_handshake::{HandshakeManager, derive_negotiated_context_key};
-use xenia_ledger::{Chain, LedgerEntry};
 #[cfg(feature = "audio-opus")]
 use xenia_peer_core::OpusAudioCodec;
 #[cfg(any(feature = "audio-capture", test))]
@@ -55,6 +54,7 @@ use xenia_capture::CpalAudioCapture;
 use xenia_capture::ScapCapture;
 
 mod admin_ui;
+mod audit_ledger_store;
 mod consent_server;
 mod evidence_verifier;
 mod file_transfer;
@@ -363,6 +363,16 @@ struct Args {
     /// so runtime keys are not written into the repository root.
     #[arg(long, default_value = "operator.key")]
     operator_key_path: std::path::PathBuf,
+
+    /// Live consent-ledger path (`shared_ledger`, backing `/v1/audit/*`).
+    /// Loaded and cryptographically verified at startup if it exists --
+    /// the daemon refuses to start rather than trust a ledger file that
+    /// doesn't verify under `operator_key_path`. Every append (a consent
+    /// decision or operator-action audit event) is durably, atomically
+    /// persisted here before the action that produced it is considered
+    /// complete. Smokes should point this at a temporary path.
+    #[arg(long, default_value = "consent.ledger")]
+    consent_ledger_path: std::path::PathBuf,
 
     /// M1 consent-ledger signing key path. Signs the consent grant/deny/revoke
     /// boundary events; generated on first run with owner-only (0600)
@@ -1731,14 +1741,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "daemon audio codec configured"
     );
 
-    let ledger_path = std::path::Path::new("consent.ledger");
-    let ledger = if ledger_path.exists() {
-        let bytes = std::fs::read(ledger_path)?;
-        let entries: Vec<LedgerEntry> = bincode::deserialize(&bytes)?;
-        Chain::from_entries(entries, signing_key.clone())
-    } else {
-        Chain::new(signing_key.clone())
-    };
+    // Fails closed: a present-but-corrupt-or-tampered consent-ledger file
+    // refuses startup rather than being silently trusted or discarded.
+    // See `audit_ledger_store`'s module doc comment for the two gaps this
+    // closes (no persistence at all, and an unverified reload path).
+    let ledger_path = std::sync::Arc::new(args.consent_ledger_path.clone());
+    let ledger = audit_ledger_store::load_verified(&ledger_path, &signing_key).map_err(
+        |err| -> Box<dyn std::error::Error> {
+            format!(
+                "failed to load --consent-ledger-path {}: {err}",
+                ledger_path.display()
+            )
+            .into()
+        },
+    )?;
+    info!(
+        path = %ledger_path.display(),
+        entries = ledger.len(),
+        "consent ledger loaded and verified"
+    );
     let shared_ledger = std::sync::Arc::new(tokio::sync::Mutex::new(ledger));
 
     let policy_path = std::path::Path::new("policy.json");
@@ -2005,6 +2026,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let consent_session_id = *session_id.as_bytes();
     let consent_session_uuid = session_id;
     let consent_ledger = shared_ledger.clone();
+    let consent_ledger_path = ledger_path.clone();
 
     // Consent server. With --operator-sealed the console talks over a
     // xenia-wire-sealed operator channel (PQC confidentiality + handshake
@@ -2036,6 +2058,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     session_id: consent_session_id,
                     session_uuid: consent_session_uuid,
                     ledger: consent_ledger,
+                    ledger_path: consent_ledger_path,
                     revoked: revoked_for_consent,
                     revocations: revocations.clone(),
                     rekey_interval: (args.operator_rekey_interval_secs > 0)
@@ -2071,6 +2094,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     session_id: consent_session_id,
                     session_uuid: consent_session_uuid,
                     ledger: consent_ledger,
+                    ledger_path: consent_ledger_path,
                     grant_tx: consent_decision_tx,
                     revoked: revoked_for_consent,
                     revocations: revocations.clone(),

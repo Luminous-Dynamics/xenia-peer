@@ -15,6 +15,7 @@
 //! decision is a signed, role-authorized action attributed in the ledger; with
 //! it off, legacy plaintext `Approve`/`Deny`/`Revoke`.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -31,7 +32,8 @@ use crate::operator_http::OperatorAuthState;
 pub(crate) enum ConsentFollowup {
     /// Non-terminal (an Approve): keep the socket open for a later Revoke.
     KeepServing,
-    /// Terminal (Deny or Revoke): stop.
+    /// Terminal (Deny, Revoke, or a decision refused because its audit
+    /// entry could not be durably committed): stop.
     Stop,
 }
 
@@ -40,22 +42,43 @@ pub(crate) enum ConsentFollowup {
 /// ledger, resolve the grant exactly once (Approve → true, Deny → false), or
 /// set the `revoked` flag. Shared by the plaintext [`ConsentServer`] and the
 /// sealed operator channel, so the decision semantics live in one tested place.
+///
+/// An authenticated decision's audit entry must be durably persisted
+/// (`ledger_path`) before the decision itself takes effect -- if persistence
+/// fails, the decision is refused (the grant is left unresolved, which the
+/// caller observes as a closed channel) rather than silently applying a
+/// privileged action with no durable record of who authorized it.
 pub(crate) async fn apply_consent_decision(
     decoded: crate::DecodedConsent,
     grant_tx: &mut Option<oneshot::Sender<bool>>,
     revoked: &AtomicBool,
     ledger: &Mutex<Chain>,
+    ledger_path: &Path,
     session_uuid: Uuid,
 ) -> ConsentFollowup {
-    // Attribute an authenticated decision in the tamper-evident ledger.
+    // Attribute an authenticated decision in the tamper-evident ledger --
+    // durably, before the decision takes effect.
     if let Some(authorized) = &decoded.authorized {
         let event = crate::operator_audit::operator_consent_audit_event(
             authorized,
             session_uuid,
             Uuid::new_v4(),
         );
-        if let Err(err) = ledger.lock().await.append(event) {
-            tracing::warn!(error = %err, "failed to append operator-action audit entry");
+        let mut chain = ledger.lock().await;
+        let committed = tokio::task::block_in_place(|| {
+            chain
+                .append_transactional(event, |entries| {
+                    crate::audit_ledger_store::persist_entries_atomic(ledger_path, entries)
+                })
+                .map(|_entry| ())
+        });
+        drop(chain);
+        if let Err(err) = committed {
+            tracing::error!(
+                error = %err,
+                "operator action refused: its audit entry could not be durably committed"
+            );
+            return ConsentFollowup::Stop;
         }
     }
     match decoded.action {
@@ -93,6 +116,9 @@ pub(crate) struct ConsentServer {
     pub(crate) session_uuid: Uuid,
     /// The tamper-evident consent ledger.
     pub(crate) ledger: Arc<Mutex<Chain>>,
+    /// Durable path `ledger`'s entries are atomically persisted to on every
+    /// authenticated append -- see [`apply_consent_decision`].
+    pub(crate) ledger_path: Arc<std::path::PathBuf>,
     /// Resolves the initial grant exactly once (Approve → true, Deny → false).
     pub(crate) grant_tx: oneshot::Sender<bool>,
     /// Set true on a Revoke so the main send loop tears the session down.
@@ -112,6 +138,7 @@ impl ConsentServer {
             session_id,
             session_uuid,
             ledger,
+            ledger_path,
             grant_tx,
             revoked,
             revocations,
@@ -158,6 +185,7 @@ impl ConsentServer {
                     &mut grant_tx,
                     &revoked,
                     &ledger,
+                    &ledger_path,
                     session_uuid,
                 )
                 .await
@@ -201,6 +229,11 @@ mod tests {
             session_id: [0x5a; 16],
             session_uuid: Uuid::from_u128(1),
             ledger,
+            // Never actually written -- this test always runs
+            // `require_operator_auth: false`, the legacy plaintext path
+            // that never appends to the ledger (see
+            // `apply_consent_decision`'s doc comment).
+            ledger_path: Arc::new(std::env::temp_dir().join("xenia-consent-server-test.ledger")),
             grant_tx,
             revoked,
             revocations: crate::operator_revocations::OperatorRevocations::empty(),
@@ -224,6 +257,9 @@ mod tests {
         let daemon = SigningKey::generate(&mut rand::thread_rng());
         let ledger = TokioMutex::new(Chain::new(daemon));
         let uuid = Uuid::from_u128(2);
+        // Never actually written -- every decision below has
+        // `authorized: None` (the legacy plaintext path never appends).
+        let ledger_path = std::env::temp_dir().join("xenia-consent-server-test-decisions.ledger");
 
         // Approve -> grant true, keep serving, no revoke.
         let (tx, rx) = oneshot::channel();
@@ -237,6 +273,7 @@ mod tests {
             &mut tx,
             &revoked,
             &ledger,
+            &ledger_path,
             uuid,
         )
         .await;
@@ -255,6 +292,7 @@ mod tests {
             &mut tx2,
             &revoked,
             &ledger,
+            &ledger_path,
             uuid,
         )
         .await;
@@ -273,11 +311,113 @@ mod tests {
             &mut tx3,
             &revoked2,
             &ledger,
+            &ledger_path,
             uuid,
         )
         .await;
         assert!(matches!(f3, ConsentFollowup::Stop));
         assert!(!rx3.await.unwrap());
+    }
+
+    fn authorized_action(action: ConsentAction) -> crate::operator_auth::AuthorizedConsentAction {
+        crate::operator_auth::AuthorizedConsentAction {
+            action,
+            operator_id: "alice".to_string(),
+            role: crate::operator::OperatorRole::Admin,
+            ed25519_pubkey: [0x11; 32],
+        }
+    }
+
+    fn test_ledger_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "xenia-consent-server-durable-test-{label}-{}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_authenticated_decision_is_durably_persisted_before_the_grant_resolves() {
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let ledger = TokioMutex::new(Chain::new(daemon));
+        let dir = test_ledger_dir("committed");
+        let ledger_path = dir.join("consent.ledger");
+        let uuid = Uuid::from_u128(9);
+
+        let (tx, rx) = oneshot::channel();
+        let mut tx = Some(tx);
+        let revoked = AtomicBool::new(false);
+        let outcome = apply_consent_decision(
+            crate::DecodedConsent {
+                action: ConsentAction::Approve,
+                authorized: Some(authorized_action(ConsentAction::Approve)),
+            },
+            &mut tx,
+            &revoked,
+            &ledger,
+            &ledger_path,
+            uuid,
+        )
+        .await;
+
+        assert!(matches!(outcome, ConsentFollowup::KeepServing));
+        assert!(rx.await.unwrap(), "the grant must still resolve true");
+
+        // The audit entry must actually be on disk, not just in memory.
+        let bytes = std::fs::read(&ledger_path).unwrap();
+        let entries: Vec<xenia_ledger::LedgerEntry> = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(entries.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_decision_is_refused_when_its_audit_entry_cannot_be_durably_committed() {
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let ledger = TokioMutex::new(Chain::new(daemon));
+        let dir = test_ledger_dir("refused");
+        let ledger_path = dir.join("consent.ledger");
+        let uuid = Uuid::from_u128(10);
+
+        // Make the destination directory unwritable so persistence fails.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+            let (tx, rx) = oneshot::channel();
+            let mut tx = Some(tx);
+            let revoked = AtomicBool::new(false);
+            let outcome = apply_consent_decision(
+                crate::DecodedConsent {
+                    action: ConsentAction::Approve,
+                    authorized: Some(authorized_action(ConsentAction::Approve)),
+                },
+                &mut tx,
+                &revoked,
+                &ledger,
+                &ledger_path,
+                uuid,
+            )
+            .await;
+
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+            assert!(
+                matches!(outcome, ConsentFollowup::Stop),
+                "an uncommittable audit entry must refuse the decision, not silently apply it"
+            );
+            // The grant was never resolved -- dropping `tx` (still `Some`,
+            // never `.take()`n) closes the channel instead.
+            drop(tx);
+            assert!(rx.await.is_err());
+            assert_eq!(
+                ledger.lock().await.len(),
+                0,
+                "the failed append must be rolled back"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

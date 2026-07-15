@@ -1790,6 +1790,19 @@ pub enum LedgerError {
     AppendInvariant,
 }
 
+/// Why [`Chain::append_transactional`] failed to commit an entry.
+#[derive(Debug, Error)]
+pub enum TransactionalAppendError<E> {
+    /// The append itself failed (see [`LedgerError`]) -- persistence was
+    /// never attempted.
+    #[error("ledger append failed: {0}")]
+    Ledger(LedgerError),
+    /// The append succeeded in memory but `persist` failed; the entry was
+    /// rolled back and the chain is exactly as it was before this call.
+    #[error("ledger entry could not be durably persisted: {0}")]
+    Persist(E),
+}
+
 /// Errors surfaced by [`Verifier`] operations.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum VerifyError {
@@ -2048,6 +2061,30 @@ impl Chain {
         self.entries
             .get(entry_index)
             .ok_or(LedgerError::AppendInvariant)
+    }
+
+    /// Append a new consent event, but only keep it if `persist` -- given
+    /// the full, now-including-this-entry list -- succeeds. On a `persist`
+    /// failure the just-added entry is removed before returning, so a
+    /// caller never observes a successful append that wasn't durably
+    /// committed. This crate doesn't know or care *how* persistence
+    /// works -- `persist` is any caller-supplied closure (typically a
+    /// verified-atomic-file-write, but tests can use an in-memory stub).
+    pub fn append_transactional<E>(
+        &mut self,
+        event: ConsentEventRecord,
+        persist: impl FnOnce(&[LedgerEntry]) -> Result<(), E>,
+    ) -> Result<&LedgerEntry, TransactionalAppendError<E>> {
+        self.append(event)
+            .map_err(TransactionalAppendError::Ledger)?;
+        if let Err(err) = persist(&self.entries) {
+            self.entries.pop();
+            return Err(TransactionalAppendError::Persist(err));
+        }
+        Ok(self
+            .entries
+            .last()
+            .expect("append_transactional: entry was just pushed and persist succeeded"))
     }
 
     /// Consume the chain and return its entries. Useful for persistence.
@@ -2955,6 +2992,63 @@ mod tests {
         backend
             .verify_signature(&pk.to_bytes(), &entry.entry_hash, &entry.signature)
             .expect("current Ed25519 backend should verify ledger entry signatures");
+    }
+
+    #[test]
+    fn transactional_append_keeps_the_entry_when_persist_succeeds() {
+        let sk = new_signing_key();
+        let mut chain = Chain::new(sk);
+        let entry = chain
+            .append_transactional(sample_event(ConsentKind::Request), |_entries| {
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .unwrap();
+        assert_eq!(entry.seq, 0);
+        assert_eq!(chain.len(), 1);
+    }
+
+    #[test]
+    fn transactional_append_rolls_back_when_persist_fails() {
+        let sk = new_signing_key();
+        let mut chain = Chain::new(sk);
+        // A prior, already-committed entry -- proves the rollback removes
+        // only the failed entry, not the whole chain.
+        chain.append(sample_event(ConsentKind::Request)).unwrap();
+
+        let err = chain
+            .append_transactional(sample_event(ConsentKind::Approval), |_entries| {
+                Err("disk full")
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            TransactionalAppendError::Persist("disk full")
+        ));
+        // The failed entry must not be observable -- length and head hash
+        // are exactly as before the failed call.
+        assert_eq!(chain.len(), 1);
+        assert_eq!(
+            chain.iter().last().unwrap().event.kind,
+            ConsentKind::Request
+        );
+    }
+
+    #[test]
+    fn transactional_append_persist_closure_sees_the_full_entry_list_including_the_new_one() {
+        let sk = new_signing_key();
+        let mut chain = Chain::new(sk);
+        chain.append(sample_event(ConsentKind::Request)).unwrap();
+        let mut observed_len = 0usize;
+        chain
+            .append_transactional(sample_event(ConsentKind::Approval), |entries| {
+                observed_len = entries.len();
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .unwrap();
+        assert_eq!(
+            observed_len, 2,
+            "persist must see the just-appended entry too"
+        );
     }
 
     #[test]

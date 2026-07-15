@@ -25,6 +25,7 @@ credible pre-production system.
 6. **Add the full headless-browser vertical slice.**
 7. **Zeroization, serialization migration, and fuzzing.**
 8. **Packaging, recovery, and independent audit.**
+9. **Durable, verified consent-ledger persistence.** ✅ done
 
 ## 1. Transactional native pin storage
 
@@ -373,6 +374,47 @@ on a workstation).
   session revocation, and identity rotation -- without logging secrets.
 - Commission independent review of `xenia-wire` once wire formats stop
   changing.
+
+## 9. Durable, verified consent-ledger persistence
+
+Not one of the original 8 items -- discovered as a real, disclosed gap while
+reviewing an external (OpenAI-authored) audit-hardening patch series against
+this codebase, and independently confirmed by reading the actual code: item
+3's `shared_ledger` was **never written to disk at all** (every append lived
+only in the in-process `Arc<Mutex<Chain>>`, lost on restart), and the one
+place a persisted ledger *was* read back, if a `consent.ledger` file
+happened to already exist, was **never verified**
+(`xenia_ledger::Chain::from_entries`'s own doc comment says as much). A
+tampered or corrupted on-disk file would have been silently trusted and
+served as genuine signed history over `/v1/audit/*`.
+
+**Done.**
+
+- New `xenia_ledger::Chain::append_transactional`: appends an entry, then
+  calls a caller-supplied `persist` closure with the resulting full entry
+  list; on a `persist` failure the entry is rolled back before returning,
+  so a caller never observes a successful append that wasn't durably
+  committed.
+- New `apps/xenia-peer/src/audit_ledger_store.rs`: `load_verified` (decode
+  + `Verifier::verify_chain` before trusting -- fails closed, refuses
+  startup on a corrupt/tampered file) and `persist_entries_atomic` (temp
+  file → `fsync` data → `rename` → `fsync` the containing directory --
+  skipping that last directory fsync is the most common way "atomic" file
+  replacement still isn't actually crash-safe).
+- New `--consent-ledger-path` flag (default `consent.ledger`, unchanged
+  from the old hardcoded value).
+- `consent_server::apply_consent_decision` now durably persists an
+  authenticated decision's audit entry (via `block_in_place`, since the
+  daemon's `#[tokio::main]` is multi-threaded) before the decision takes
+  effect. If persistence fails, the decision is **refused** -- the grant
+  is left unresolved (observed as a closed channel) -- rather than
+  silently applying a privileged action with no durable record of who
+  authorized it. Threaded through both `ConsentServer` (plaintext) and
+  `SealedConsentDeps` (sealed channel), which share this code path.
+- Not done: the separate `M1RuntimeSession` ledger (keyed by
+  `--m1-consent-key-path`) already has its own persistence path and was
+  out of scope here. No log-scrubbing or rotation of the ledger file
+  itself (item 8's territory).
 
 ## See also
 
