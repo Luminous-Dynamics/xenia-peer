@@ -43,6 +43,50 @@ jobs:
       - name: Validate inside Nix CI shell
         run: nix develop .#ci -c bash scripts/xenia-validate.sh .
 
+  # Item 6 of docs/security/POST_DELEGATION_HARDENING_PLAN.md: the real
+  # browser-driven vertical slice -- launches the actual xenia-peer daemon,
+  # xenia-operator-agent, xenia-viewer, and the compiled sovereign-admin
+  # console under a headless Playwright browser and proves all 13 numbered
+  # properties end-to-end (pairing, JSON-path enrollment, operator auth,
+  # native host-trust approval, the hybrid sealed handshake, consent,
+  # frame/input gating, rekey, revocation, changed-identity refusal,
+  # restart recovery, and no durable secrets in browser storage). Every
+  # build step here is a genuine cold compile per CI run (no persistent
+  # cache across runs in this job, only within one run via actions/cache);
+  # if that turns out too slow/flaky for every PR, tune it (e.g. a
+  # dedicated cache key, or gate to a label) rather than dropping it from
+  # CI -- this is the one test in the repo that actually proves the
+  # browser console works against a live daemon, not a mock.
+  e2e:
+    runs-on: ubuntu-latest
+    if: ${{ hashFiles('flake.nix') != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: e2e-cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            e2e-cargo-${{ runner.os }}-
+      - name: Real browser-driven vertical slice
+        run: nix develop .#e2e -c bash scripts/xenia-e2e-vertical-slice.sh .
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-failure-diagnostics
+          path: /tmp/xenia-e2e-vertical-slice/
+          if-no-files-found: ignore
+
   xenia-wire:
     runs-on: ubuntu-latest
     if: ${{ hashFiles('xenia-wire/Cargo.toml') != '' }}

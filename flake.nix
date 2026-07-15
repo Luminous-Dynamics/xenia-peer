@@ -65,6 +65,24 @@
           binaryen
         ];
 
+        # Item 6 (docs/security/POST_DELEGATION_HARDENING_PLAN.md): the
+        # browser-driven vertical-slice test. Python (not Node) drives
+        # Playwright, matching this project's existing bias toward Python
+        # for verification scripts; `playwright-driver.browsers` supplies
+        # pre-fetched, `autoPatchelfHook`-patched browser binaries, which is
+        # the idiomatic NixOS-recommended path and avoids needing a
+        # `buildFHSEnv` wrapper (Playwright's own bundled browsers need real
+        # FHS dynamic-linker paths, which pure Nix binaries don't have).
+        # `pexpect` drives `xenia-operator-agent`'s interactive host-trust
+        # confirmation prompt over a real pseudo-terminal -- a plain piped
+        # subprocess stdin does not satisfy `is_terminal()` and would
+        # silently take the noninteractive-refusal path instead of the real
+        # approval path this test exists to exercise.
+        e2eTools = with pkgs; [
+          (python3.withPackages (ps: [ ps.playwright ps.pexpect ]))
+          playwright-driver.browsers
+        ];
+
         # Heap-profiling tools for chasing real memory growth (e.g. the
         # scap/dbus-rs Linux capture leak documented in ROADMAP.md).
         # heaptrack is the default choice -- much lower overhead than
@@ -205,6 +223,39 @@
           includeWebTools = true;
         };
 
+        # e2e shell: everything `web` has (Trunk builds the real
+        # sovereign-admin console) plus Python/Playwright/pexpect for the
+        # item-6 browser-driven vertical-slice test. Kept separate from
+        # `web`/`ci` so ordinary Rust/web work never pays for the browser
+        # binary closure.
+        devShells.e2e = pkgs.mkShell {
+          name = "xenia-peer-e2e";
+
+          nativeBuildInputs = commonNativeBuildInputs;
+
+          buildInputs =
+            rustCoreTools
+            ++ mediaAndPlatformInputs
+            ++ rustDevTools
+            ++ auditTools
+            ++ webTools
+            ++ e2eTools;
+
+          shellHook = ''
+            ${xeniaEnv}
+
+            export RUST_BACKTRACE=1
+            export PLAYWRIGHT_BROWSERS_PATH="${pkgs.playwright-driver.browsers}"
+            export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
+
+            cat <<'BANNER'
+            xenia-peer e2e shell — Playwright + pexpect ready for the item-6
+            browser-driven vertical-slice test.
+              scripts/xenia-e2e-vertical-slice.sh .
+            BANNER
+          '';
+        };
+
         formatter = pkgs.nixpkgs-fmt;
 
         apps.fast = mkValidationApp "xenia-fast-check" "Fast Xenia Rust/protocol validation gate" ''
@@ -222,6 +273,33 @@
         apps.ci = mkValidationApp "xenia-ci-check" "Default Xenia CI validation gate" ''
           scripts/xenia-ci-check.sh .
         '';
+
+        apps.e2e =
+          let
+            script = pkgs.writeShellApplication {
+              name = "xenia-e2e-check";
+              runtimeInputs =
+                commonNativeBuildInputs
+                ++ rustCoreTools
+                ++ mediaAndPlatformInputs
+                ++ auditTools
+                ++ webTools
+                ++ e2eTools
+                ++ [ pkgs.coreutils pkgs.nix pkgs.nixpkgs-fmt ];
+              text = ''
+                set -euo pipefail
+                ${xeniaEnv}
+                export PLAYWRIGHT_BROWSERS_PATH="${pkgs.playwright-driver.browsers}"
+                export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
+                scripts/xenia-e2e-vertical-slice.sh .
+              '';
+            };
+          in
+          {
+            type = "app";
+            program = "${script}/bin/xenia-e2e-check";
+            meta.description = "Item 6: real browser-driven vertical-slice test (daemon + agent + console + Playwright)";
+          };
 
         apps.default = apps.ci;
 

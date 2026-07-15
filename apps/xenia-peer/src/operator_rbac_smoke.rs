@@ -94,6 +94,7 @@ async fn operator_rbac_full_chain_smoke() {
         state.clone(),
         crate::operator_revocations::OperatorRevocations::empty(),
         router_ledger,
+        Arc::new(Vec::new()),
     );
 
     // --- 1. GET a challenge from the real endpoint ---
