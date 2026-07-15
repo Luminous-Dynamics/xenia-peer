@@ -175,10 +175,13 @@ pub struct SignedTokenDto {
     /// verified, this is what gets bound into the consent-action/revoke
     /// transcript.
     pub token_nonce_hex: String,
-    /// The daemon's signature over
+    /// The daemon's Ed25519 signature over
     /// `xenia_operator_proto::operator_token_canonical_bytes(...)` for
     /// this token's fields, hex-encoded.
     pub signature_hex: String,
+    /// The daemon's ML-DSA-65 signature over the same canonical bytes,
+    /// hex-encoded -- both are required, no classical-only fallback.
+    pub ml_dsa_signature_hex: String,
 }
 
 /// `POST /v1/sign/consent-action` request: sign a session-bound consent
@@ -206,6 +209,9 @@ pub struct SignConsentActionRequest {
 pub struct SignConsentActionResponse {
     /// Ed25519 signature over the consent-action transcript, hex-encoded.
     pub ed_signature_hex: String,
+    /// ML-DSA-65 signature over the same transcript, hex-encoded -- both
+    /// required, the daemon AND-verifies them.
+    pub ml_dsa_signature_hex: String,
 }
 
 /// `POST /v1/sign/revoke` request: sign an admin's authorization to revoke
@@ -230,6 +236,9 @@ pub struct SignRevokeRequest {
 pub struct SignRevokeResponse {
     /// Ed25519 signature over the revoke transcript, hex-encoded.
     pub ed_signature_hex: String,
+    /// ML-DSA-65 signature over the same transcript, hex-encoded -- both
+    /// required, the daemon AND-verifies them.
+    pub ml_dsa_signature_hex: String,
 }
 
 /// Domain-separation tag for an agent session token's MAC (see
@@ -503,6 +512,7 @@ mod tests {
             host_ed25519_pubkey: "11".repeat(32),
             host_ml_dsa_pubkey: "22".repeat(1952),
             http_auth_ed25519_pubkey: "33".repeat(32),
+            http_auth_ml_dsa_pubkey: "77".repeat(1952),
             host_ed_signature: "44".repeat(64),
             host_ml_dsa_signature: "55".repeat(3309),
         }
@@ -516,6 +526,7 @@ mod tests {
             expires_at: 2000,
             token_nonce_hex: "ee".repeat(16),
             signature_hex: "66".repeat(64),
+            ml_dsa_signature_hex: "88".repeat(3309),
         }
     }
 

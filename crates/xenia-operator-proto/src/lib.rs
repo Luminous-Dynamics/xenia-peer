@@ -240,20 +240,34 @@ pub fn revoke_operator_transcript(target_operator_id: &str, token_nonce: &[u8; 1
 }
 
 /// The bytes the daemon's *host identity* signs to delegate trust to its
-/// separate HTTP-auth signing key: "this Ed25519 key issues this daemon's
-/// HTTP auth tokens and challenge attestations." Exists because the daemon
-/// deliberately uses two different keys -- `host_identity_key_path` (the
-/// sealed-channel identity, the one thing peers already pin) and
-/// `operator_key_path` (`daemon_key`, which only ever signs HTTP session
-/// tokens) -- and a caller with no live connection to the daemon (e.g. the
-/// operator agent) has no other way to learn that the second key is
-/// genuinely vouched for by the first. See [`DaemonIdentityCertificate`].
+/// separate HTTP-auth signing identity: "this Ed25519 key and this ML-DSA-65
+/// key together issue this daemon's HTTP auth tokens and challenge
+/// attestations." Exists because the daemon deliberately uses different keys
+/// for different roles -- `host_identity_key_path` (the sealed-channel
+/// identity, the one thing peers already pin) and `operator_key_path`
+/// (`daemon_key`, which signs HTTP session tokens -- and the ledger's hash
+/// chain, so it can't simply be replaced wholesale) -- and a caller with no
+/// live connection to the daemon (e.g. the operator agent) has no other way
+/// to learn that the HTTP-auth identity is genuinely vouched for by the host
+/// identity. See [`DaemonIdentityCertificate`].
 ///
-/// Layout: `DAEMON_DELEGATION_DOMAIN || http_auth_ed25519_pubkey(32)`.
-pub fn daemon_delegation_transcript(http_auth_ed25519_pubkey: &[u8; 32]) -> Vec<u8> {
-    let mut t = Vec::with_capacity(DAEMON_DELEGATION_DOMAIN.len() + 32);
+/// `http_auth_ml_dsa_pubkey` is a *separate* key from `daemon_key`'s own
+/// Ed25519 key, not a second algorithm bolted onto the same keypair --
+/// `xenia-peer`'s `operator_key_path` predates this hybridization and stays
+/// Ed25519-only (see above), so the ML-DSA half of HTTP-auth token signing
+/// lives in its own dedicated `xenia_handshake::MlDsaIdentity`.
+///
+/// Layout: `DAEMON_DELEGATION_DOMAIN || http_auth_ed25519_pubkey(32) ||
+/// http_auth_ml_dsa_pubkey(1952)`.
+pub fn daemon_delegation_transcript(
+    http_auth_ed25519_pubkey: &[u8; 32],
+    http_auth_ml_dsa_pubkey: &[u8],
+) -> Vec<u8> {
+    let mut t =
+        Vec::with_capacity(DAEMON_DELEGATION_DOMAIN.len() + 32 + http_auth_ml_dsa_pubkey.len());
     t.extend_from_slice(DAEMON_DELEGATION_DOMAIN);
     t.extend_from_slice(http_auth_ed25519_pubkey);
+    t.extend_from_slice(http_auth_ml_dsa_pubkey);
     t
 }
 
@@ -333,12 +347,18 @@ pub struct DaemonIdentityCertificate {
     pub host_ed25519_pubkey: String,
     /// The daemon's host (sealed-channel) identity ML-DSA-65 public key, hex.
     pub host_ml_dsa_pubkey: String,
-    /// The daemon's separate HTTP-auth signing key's Ed25519 public key,
-    /// hex -- the key that actually signs issued session tokens and
-    /// challenge attestations.
+    /// The daemon's separate HTTP-auth signing identity's Ed25519 public
+    /// key, hex -- together with `http_auth_ml_dsa_pubkey`, the pair that
+    /// actually signs issued session tokens and challenge attestations.
     pub http_auth_ed25519_pubkey: String,
+    /// The daemon's separate HTTP-auth signing identity's ML-DSA-65 public
+    /// key, hex. A distinct key from `http_auth_ed25519_pubkey`'s pair, not
+    /// the same key under a different algorithm -- see
+    /// [`daemon_delegation_transcript`]'s doc comment for why.
+    pub http_auth_ml_dsa_pubkey: String,
     /// Host identity's Ed25519 signature over
-    /// `daemon_delegation_transcript(http_auth_ed25519_pubkey)`, hex.
+    /// `daemon_delegation_transcript(http_auth_ed25519_pubkey,
+    /// http_auth_ml_dsa_pubkey)`, hex.
     pub host_ed_signature: String,
     /// Host identity's ML-DSA-65 signature over the same transcript, hex.
     pub host_ml_dsa_signature: String,
@@ -524,18 +544,26 @@ mod tests {
 
     #[test]
     fn daemon_delegation_transcript_layout_is_exact_and_key_bound() {
-        let key_a = [0x33u8; 32];
-        let key_b = [0x44u8; 32];
-        let t = daemon_delegation_transcript(&key_a);
+        let ed_a = [0x33u8; 32];
+        let ed_b = [0x44u8; 32];
+        let ml_a = vec![0x55u8; 1952];
+        let ml_b = vec![0x66u8; 1952];
+        let t = daemon_delegation_transcript(&ed_a, &ml_a);
         assert_eq!(
             &t[..DAEMON_DELEGATION_DOMAIN.len()],
             DAEMON_DELEGATION_DOMAIN
         );
-        assert_eq!(&t[DAEMON_DELEGATION_DOMAIN.len()..], &key_a);
-        assert_eq!(t.len(), DAEMON_DELEGATION_DOMAIN.len() + 32);
-        // Different delegated key -> different bytes (a certificate for one
-        // HTTP-auth key can't be replayed as vouching for a different one).
-        assert_ne!(t, daemon_delegation_transcript(&key_b));
+        assert_eq!(
+            &t[DAEMON_DELEGATION_DOMAIN.len()..DAEMON_DELEGATION_DOMAIN.len() + 32],
+            &ed_a
+        );
+        assert_eq!(&t[DAEMON_DELEGATION_DOMAIN.len() + 32..], ml_a.as_slice());
+        assert_eq!(t.len(), DAEMON_DELEGATION_DOMAIN.len() + 32 + 1952);
+        // Either delegated key changing -> different bytes (a certificate
+        // for one HTTP-auth identity can't be replayed as vouching for a
+        // different Ed25519 key, a different ML-DSA key, or both).
+        assert_ne!(t, daemon_delegation_transcript(&ed_b, &ml_a));
+        assert_ne!(t, daemon_delegation_transcript(&ed_a, &ml_b));
     }
 
     #[test]

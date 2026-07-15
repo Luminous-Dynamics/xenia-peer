@@ -533,9 +533,11 @@ async fn sign_consent_action(
     let transcript =
         xenia_operator_proto::consent_action_transcript(req.action, &session_id, &token_nonce);
     let ed_signature = state.manager.sign(&transcript);
+    let ml_dsa_signature = state.manager.sign_ml_dsa(&transcript);
 
     Ok(Json(SignConsentActionResponse {
         ed_signature_hex: hex::encode(ed_signature.to_bytes()),
+        ml_dsa_signature_hex: hex::encode(ml_dsa_signature),
     }))
 }
 
@@ -605,9 +607,11 @@ async fn sign_revoke(
     let transcript =
         xenia_operator_proto::revoke_operator_transcript(&req.target_operator_id, &token_nonce);
     let ed_signature = state.manager.sign(&transcript);
+    let ml_dsa_signature = state.manager.sign_ml_dsa(&transcript);
 
     Ok(Json(SignRevokeResponse {
         ed_signature_hex: hex::encode(ed_signature.to_bytes()),
+        ml_dsa_signature_hex: hex::encode(ml_dsa_signature),
     }))
 }
 
@@ -1175,32 +1179,43 @@ mod tests {
     // fixtures in `operator_http.rs`.
 
     use ed25519_dalek::{Signer, SigningKey};
+    use xenia_handshake::MlDsaIdentity;
     use xenia_operator_agent_proto::{DaemonIdentityCertificate, SignedTokenDto};
 
-    /// A daemon's host identity + its separate HTTP-auth signing key.
-    fn test_daemon_identity() -> (HandshakeManager, SigningKey) {
+    /// A daemon's host identity + its separate HTTP-auth signing identity
+    /// (both algorithms).
+    fn test_daemon_identity() -> (HandshakeManager, SigningKey, MlDsaIdentity) {
         (
             HandshakeManager::new(),
             SigningKey::generate(&mut rand::thread_rng()),
+            MlDsaIdentity::from_seed(rand::random()),
         )
     }
 
     fn test_certificate(
         host: &HandshakeManager,
         http_auth: &SigningKey,
+        http_auth_ml_dsa: &MlDsaIdentity,
     ) -> DaemonIdentityCertificate {
         let http_auth_pk = http_auth.verifying_key().to_bytes();
-        let transcript = xenia_operator_proto::daemon_delegation_transcript(&http_auth_pk);
+        let http_auth_ml_dsa_pk = http_auth_ml_dsa.public_key_bytes();
+        let transcript =
+            xenia_operator_proto::daemon_delegation_transcript(&http_auth_pk, &http_auth_ml_dsa_pk);
         DaemonIdentityCertificate {
             host_ed25519_pubkey: hex::encode(host.identity_public_key_bytes()),
             host_ml_dsa_pubkey: hex::encode(host.ml_dsa_public_key_bytes()),
             http_auth_ed25519_pubkey: hex::encode(http_auth_pk),
+            http_auth_ml_dsa_pubkey: hex::encode(http_auth_ml_dsa_pk),
             host_ed_signature: hex::encode(host.sign(&transcript).to_bytes()),
             host_ml_dsa_signature: hex::encode(host.sign_ml_dsa(&transcript)),
         }
     }
 
-    fn test_token(http_auth: &SigningKey, token_nonce: [u8; 16]) -> SignedTokenDto {
+    fn test_token(
+        http_auth: &SigningKey,
+        http_auth_ml_dsa: &MlDsaIdentity,
+        token_nonce: [u8; 16],
+    ) -> SignedTokenDto {
         let canonical = xenia_operator_proto::operator_token_canonical_bytes(
             "alice",
             OperatorRole::Admin,
@@ -1215,6 +1230,7 @@ mod tests {
             expires_at: 2000,
             token_nonce_hex: hex::encode(token_nonce),
             signature_hex: hex::encode(http_auth.sign(&canonical).to_bytes()),
+            ml_dsa_signature_hex: hex::encode(http_auth_ml_dsa.sign(&canonical)),
         }
     }
 
@@ -1505,8 +1521,8 @@ mod tests {
     async fn sign_challenge_trusts_a_new_daemon_on_first_use_and_returns_valid_signatures() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let (host, http_auth) = test_daemon_identity();
-        let cert = test_certificate(&host, &http_auth);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
         let nonce = [0xbbu8; 32];
         let body = challenge_request_body(&cert, &host, nonce, serde_json::json!({}));
         let (status, json) = post_sign_challenge(app, "secret", body).await;
@@ -1553,16 +1569,16 @@ mod tests {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state.clone());
 
-        let (host_a, http_auth_a) = test_daemon_identity();
-        let cert_a = test_certificate(&host_a, &http_auth_a);
+        let (host_a, http_auth_a, http_auth_a_ml_dsa) = test_daemon_identity();
+        let cert_a = test_certificate(&host_a, &http_auth_a, &http_auth_a_ml_dsa);
         let body_a = challenge_request_body(&cert_a, &host_a, [0x01u8; 32], serde_json::json!({}));
         let (status_a, json_a) = post_sign_challenge(app.clone(), "secret", body_a).await;
         assert_eq!(status_a, StatusCode::OK, "body: {json_a}");
 
         // A second, unrelated daemon identity -- different Ed25519/ML-DSA
         // keys entirely -- claiming the exact same `daemon_endpoint`.
-        let (host_b, http_auth_b) = test_daemon_identity();
-        let cert_b = test_certificate(&host_b, &http_auth_b);
+        let (host_b, http_auth_b, http_auth_b_ml_dsa) = test_daemon_identity();
+        let cert_b = test_certificate(&host_b, &http_auth_b, &http_auth_b_ml_dsa);
         let body_b = challenge_request_body(&cert_b, &host_b, [0x02u8; 32], serde_json::json!({}));
         let (status_b, json_b) = post_sign_challenge(app, "secret", body_b).await;
         assert_eq!(status_b, StatusCode::OK, "body: {json_b}");
@@ -1600,8 +1616,8 @@ mod tests {
     async fn sign_challenge_rejects_an_unsupported_schema_version() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let (host, http_auth) = test_daemon_identity();
-        let cert = test_certificate(&host, &http_auth);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
         let body = challenge_request_body(
             &cert,
             &host,
@@ -1617,8 +1633,8 @@ mod tests {
     async fn sign_challenge_rejects_an_unrecognized_suite() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let (host, http_auth) = test_daemon_identity();
-        let cert = test_certificate(&host, &http_auth);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
         let body = challenge_request_body(
             &cert,
             &host,
@@ -1634,8 +1650,8 @@ mod tests {
     async fn sign_challenge_rejects_malformed_hex_fields() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let (host, http_auth) = test_daemon_identity();
-        let cert = test_certificate(&host, &http_auth);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
         let body = challenge_request_body(
             &cert,
             &host,
@@ -1652,8 +1668,8 @@ mod tests {
     {
         let state = test_state_with_host_trust("secret", &["http://localhost:8134"], false);
         let app = build_router(state);
-        let (host, http_auth) = test_daemon_identity();
-        let cert = test_certificate(&host, &http_auth);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
         let body = challenge_request_body(&cert, &host, [0xbbu8; 32], serde_json::json!({}));
         let (status, json) = post_sign_challenge(app, "secret", body).await;
         assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "body: {json}");
@@ -1668,9 +1684,9 @@ mod tests {
         // can no longer get the agent to trust a fabricated certificate.
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let (host, http_auth) = test_daemon_identity();
-        let mut cert = test_certificate(&host, &http_auth);
-        let (_other_host, other_http_auth) = test_daemon_identity();
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let mut cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let (_other_host, other_http_auth, _other_http_auth_ml_dsa) = test_daemon_identity();
         cert.http_auth_ed25519_pubkey = hex::encode(other_http_auth.verifying_key().to_bytes());
         let body = challenge_request_body(&cert, &host, [0xbbu8; 32], serde_json::json!({}));
         let (status, json) = post_sign_challenge(app, "secret", body).await;
@@ -1685,8 +1701,8 @@ mod tests {
         // though the certificate itself is genuine and already trusted.
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let (host, http_auth) = test_daemon_identity();
-        let cert = test_certificate(&host, &http_auth);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
         let attested_nonce = [0xbbu8; 32];
         let mut body = challenge_request_body(&cert, &host, attested_nonce, serde_json::json!({}));
         // Ask the agent to sign a *different* nonce than the one the
@@ -1702,8 +1718,8 @@ mod tests {
         use tower::ServiceExt;
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let (host, http_auth) = test_daemon_identity();
-        let cert = test_certificate(&host, &http_auth);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
         let body = challenge_request_body(&cert, &host, [0xbbu8; 32], serde_json::json!({}));
         let req = axum::http::Request::builder()
             .method("POST")
@@ -1740,10 +1756,10 @@ mod tests {
     async fn sign_consent_action_trusts_a_new_daemon_on_first_use_and_returns_a_valid_signature() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let (host, http_auth) = test_daemon_identity();
-        let cert = test_certificate(&host, &http_auth);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
         let token_nonce = [0xeeu8; 16];
-        let token = test_token(&http_auth, token_nonce);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, token_nonce);
         let body = consent_action_request_body(&cert, &token, serde_json::json!({}));
         let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
         assert_eq!(status, StatusCode::OK, "body: {json}");
@@ -1773,10 +1789,10 @@ mod tests {
         // action tag.
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let (host, http_auth) = test_daemon_identity();
-        let cert = test_certificate(&host, &http_auth);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
         let token_nonce = [0xeeu8; 16];
-        let token = test_token(&http_auth, token_nonce);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, token_nonce);
         let body =
             consent_action_request_body(&cert, &token, serde_json::json!({ "action": "Deny" }));
         let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
@@ -1806,9 +1822,9 @@ mod tests {
     async fn sign_consent_action_rejects_an_unsupported_schema_version() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let (host, http_auth) = test_daemon_identity();
-        let cert = test_certificate(&host, &http_auth);
-        let token = test_token(&http_auth, [0xeeu8; 16]);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0xeeu8; 16]);
         let body = consent_action_request_body(
             &cert,
             &token,
@@ -1823,9 +1839,9 @@ mod tests {
     async fn sign_consent_action_rejects_malformed_hex_fields() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let (host, http_auth) = test_daemon_identity();
-        let cert = test_certificate(&host, &http_auth);
-        let token = test_token(&http_auth, [0xeeu8; 16]);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0xeeu8; 16]);
         let body = consent_action_request_body(
             &cert,
             &token,
@@ -1840,9 +1856,9 @@ mod tests {
     async fn sign_consent_action_rejects_an_unrecognized_action() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let (host, http_auth) = test_daemon_identity();
-        let cert = test_certificate(&host, &http_auth);
-        let token = test_token(&http_auth, [0xeeu8; 16]);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0xeeu8; 16]);
         let body = consent_action_request_body(
             &cert,
             &token,
@@ -1862,9 +1878,9 @@ mod tests {
      {
         let state = test_state_with_host_trust("secret", &["http://localhost:8134"], false);
         let app = build_router(state);
-        let (host, http_auth) = test_daemon_identity();
-        let cert = test_certificate(&host, &http_auth);
-        let token = test_token(&http_auth, [0xeeu8; 16]);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0xeeu8; 16]);
         let body = consent_action_request_body(&cert, &token, serde_json::json!({}));
         let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
         assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "body: {json}");
@@ -1879,10 +1895,14 @@ mod tests {
         // shape "4.5b" closes for tokens.
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let (host, http_auth) = test_daemon_identity();
-        let cert = test_certificate(&host, &http_auth);
-        let (_other_host, attacker_http_auth) = test_daemon_identity();
-        let token = test_token(&attacker_http_auth, [0xeeu8; 16]);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let (_other_host, attacker_http_auth, attacker_http_auth_ml_dsa) = test_daemon_identity();
+        let token = test_token(
+            &attacker_http_auth,
+            &attacker_http_auth_ml_dsa,
+            [0xeeu8; 16],
+        );
         let body = consent_action_request_body(&cert, &token, serde_json::json!({}));
         let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "body: {json}");
@@ -1913,10 +1933,10 @@ mod tests {
     async fn sign_revoke_signs_with_confirmation_when_allowed() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let (host, http_auth) = test_daemon_identity();
-        let cert = test_certificate(&host, &http_auth);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
         let token_nonce = [0x11u8; 16];
-        let token = test_token(&http_auth, token_nonce);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, token_nonce);
         let body = revoke_request_body(&cert, &token, serde_json::json!({}));
         let (status, json) = post_signed_json(app, "/v1/sign/revoke", "secret", body).await;
         assert_eq!(status, StatusCode::OK, "body: {json}");
@@ -1940,7 +1960,7 @@ mod tests {
         // already pinned) -- this proves sign_revoke's mandatory
         // *action*-level confirmation is a genuinely separate gate, not
         // just a side effect of host-trust's own first-use check.
-        let (host, http_auth) = test_daemon_identity();
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
         let state = test_state_with_pinned_host(
             "secret",
             &["http://localhost:8134"],
@@ -1949,8 +1969,8 @@ mod tests {
             false,
         );
         let app = build_router(state);
-        let cert = test_certificate(&host, &http_auth);
-        let token = test_token(&http_auth, [0x11u8; 16]);
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0x11u8; 16]);
         let body = revoke_request_body(&cert, &token, serde_json::json!({}));
         let (status, json) = post_signed_json(app, "/v1/sign/revoke", "secret", body).await;
         assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "body: {json}");
@@ -1962,9 +1982,9 @@ mod tests {
      {
         let state = test_state_with_host_trust("secret", &["http://localhost:8134"], false);
         let app = build_router(state);
-        let (host, http_auth) = test_daemon_identity();
-        let cert = test_certificate(&host, &http_auth);
-        let token = test_token(&http_auth, [0x11u8; 16]);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0x11u8; 16]);
         let body = revoke_request_body(&cert, &token, serde_json::json!({}));
         let (status, json) = post_signed_json(app, "/v1/sign/revoke", "secret", body).await;
         assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "body: {json}");
@@ -1975,9 +1995,9 @@ mod tests {
     async fn sign_revoke_rejects_an_empty_target_operator_id() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let (host, http_auth) = test_daemon_identity();
-        let cert = test_certificate(&host, &http_auth);
-        let token = test_token(&http_auth, [0x11u8; 16]);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0x11u8; 16]);
         let body = revoke_request_body(
             &cert,
             &token,
@@ -1992,9 +2012,10 @@ mod tests {
     async fn sign_revoke_rejects_malformed_hex_fields() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let (host, http_auth) = test_daemon_identity();
-        let cert = test_certificate(&host, &http_auth);
-        let mut token = serde_json::to_value(test_token(&http_auth, [0x11u8; 16])).unwrap();
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let mut token =
+            serde_json::to_value(test_token(&http_auth, &http_auth_ml_dsa, [0x11u8; 16])).unwrap();
         token["token_nonce_hex"] = serde_json::json!("nope");
         let body = serde_json::json!({
             "schema_version": xenia_operator_agent_proto::SCHEMA_VERSION,
@@ -2014,9 +2035,9 @@ mod tests {
     async fn sign_revoke_rejects_an_unsupported_schema_version() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let (host, http_auth) = test_daemon_identity();
-        let cert = test_certificate(&host, &http_auth);
-        let token = test_token(&http_auth, [0x11u8; 16]);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0x11u8; 16]);
         let body = revoke_request_body(&cert, &token, serde_json::json!({ "schema_version": 999 }));
         let (status, json) = post_signed_json(app, "/v1/sign/revoke", "secret", body).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
@@ -2027,10 +2048,14 @@ mod tests {
     async fn sign_revoke_rejects_a_token_signed_by_the_wrong_key() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let (host, http_auth) = test_daemon_identity();
-        let cert = test_certificate(&host, &http_auth);
-        let (_other_host, attacker_http_auth) = test_daemon_identity();
-        let token = test_token(&attacker_http_auth, [0x11u8; 16]);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let (_other_host, attacker_http_auth, attacker_http_auth_ml_dsa) = test_daemon_identity();
+        let token = test_token(
+            &attacker_http_auth,
+            &attacker_http_auth_ml_dsa,
+            [0x11u8; 16],
+        );
         let body = revoke_request_body(&cert, &token, serde_json::json!({}));
         let (status, json) = post_signed_json(app, "/v1/sign/revoke", "secret", body).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "body: {json}");
@@ -2042,9 +2067,9 @@ mod tests {
         use tower::ServiceExt;
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
-        let (host, http_auth) = test_daemon_identity();
-        let cert = test_certificate(&host, &http_auth);
-        let token = test_token(&http_auth, [0x11u8; 16]);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0x11u8; 16]);
         let body = revoke_request_body(&cert, &token, serde_json::json!({}));
         let req = axum::http::Request::builder()
             .method("POST")

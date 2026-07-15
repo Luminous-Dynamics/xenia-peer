@@ -189,6 +189,7 @@ mod tests {
         let auth_state = Arc::new(OperatorAuthState::new(
             crate::operator::OperatorPolicy::default(),
             daemon.clone(),
+            xenia_handshake::MlDsaIdentity::from_seed([0xAAu8; 32]),
             xenia_handshake::HandshakeManager::new(),
             crate::operator_auth::AUTH_RATE_MAX,
             crate::operator_auth::AUTH_RATE_WINDOW_SECS,

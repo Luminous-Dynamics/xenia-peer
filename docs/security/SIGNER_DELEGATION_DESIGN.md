@@ -185,8 +185,9 @@ Every request carries:
 - freshness/expiry information where the underlying protocol has it.
 
 Agent processing, in order:
-1. Authenticate the local caller (Origin + `X-Agent-Token`, unchanged from
-   the hardening pass).
+1. Authenticate the local caller (Origin + a live session credential --
+   `X-Agent-Session`, not the raw pairing token; see item 4 of
+   `docs/security/POST_DELEGATION_HARDENING_PLAN.md`).
 2. Validate Origin and request size.
 3. Parse the exact typed request (reject anything that doesn't match one
    of the known shapes — no partial/duck-typed acceptance).

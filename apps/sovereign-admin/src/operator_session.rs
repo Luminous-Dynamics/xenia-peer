@@ -74,6 +74,7 @@ pub struct OperatorSession {
     issued_at: u64,
     token_nonce: [u8; 16],
     signature_hex: String,
+    ml_dsa_signature_hex: String,
     token_json: serde_json::Value,
 }
 
@@ -116,6 +117,7 @@ impl OperatorSession {
             expires_at: self.expires_at,
             token_nonce_hex: hex::encode(self.token_nonce),
             signature_hex: self.signature_hex.clone(),
+            ml_dsa_signature_hex: self.ml_dsa_signature_hex.clone(),
         }
     }
 }
@@ -139,6 +141,7 @@ struct TokenFields {
     expires_at: u64,
     token_nonce: String,
     signature: String,
+    ml_dsa_signature: String,
 }
 
 /// Run the full challenge → agent-sign → verify ceremony against the
@@ -206,13 +209,15 @@ pub async fn authenticate(
         issued_at: fields.issued_at,
         token_nonce,
         signature_hex: fields.signature,
+        ml_dsa_signature_hex: fields.ml_dsa_signature,
         token_json,
     })
 }
 
-/// Build the authenticated consent-action JSON the daemon parses on the consent
-/// socket: `{ token, action, action_signature }`. The per-action Ed25519
-/// signature binds the action to the exact session and token, so a captured
+/// Build the authenticated consent-action JSON the daemon parses on the
+/// consent socket: `{ token, action, action_signature,
+/// ml_dsa_action_signature }`. The per-action signatures -- both required
+/// -- bind the action to the exact session and token, so a captured
 /// signature can't be replayed for a different action/session/token. The
 /// agent verifies `session`'s token before signing -- see
 /// [`OperatorSession::to_signed_token_dto`].
@@ -247,16 +252,18 @@ pub async fn build_consent_request(
         "token": session.token_json,
         "action": action.as_str(),
         "action_signature": signed.ed_signature_hex,
+        "ml_dsa_action_signature": signed.ml_dsa_signature_hex,
     })
     .to_string())
 }
 
 /// Build the authenticated `POST /operator/revoke` body the daemon parses:
-/// `{ token, target_operator_id, action_signature }`. The per-action Ed25519
-/// signature is over the shared `revoke_operator_transcript(target,
-/// token_nonce)` -- built by the agent, which also verifies `session`'s
-/// token first (see [`OperatorSession::to_signed_token_dto`]) -- so it binds
-/// this revocation to the exact target and the admin's current token,
+/// `{ token, target_operator_id, action_signature,
+/// ml_dsa_action_signature }`. The per-action signatures -- both required
+/// -- are over the shared `revoke_operator_transcript(target, token_nonce)`
+/// -- built by the agent, which also verifies `session`'s token first (see
+/// [`OperatorSession::to_signed_token_dto`]) -- so they bind this
+/// revocation to the exact target and the admin's current token,
 /// byte-identical to what the daemon verifies. Only an Admin session's
 /// token will be authorized daemon-side. Privileged: the agent runs its own
 /// mandatory native confirmation for this action regardless of how
@@ -290,6 +297,7 @@ pub async fn build_revoke_request(
         "token": session.token_json,
         "target_operator_id": target_operator_id,
         "action_signature": signed.ed_signature_hex,
+        "ml_dsa_action_signature": signed.ml_dsa_signature_hex,
     })
     .to_string())
 }

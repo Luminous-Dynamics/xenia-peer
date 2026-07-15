@@ -533,6 +533,7 @@ mod tests {
             let auth_state = Arc::new(OperatorAuthState::new(
                 OperatorPolicy::default(),
                 daemon.clone(),
+                xenia_handshake::MlDsaIdentity::from_seed([0xAAu8; 32]),
                 HandshakeManager::new(),
                 AUTH_RATE_MAX,
                 AUTH_RATE_WINDOW_SECS,
@@ -620,6 +621,7 @@ mod tests {
         let auth_state = Arc::new(OperatorAuthState::new(
             OperatorPolicy::default(),
             daemon.clone(),
+            xenia_handshake::MlDsaIdentity::from_seed([0xAAu8; 32]),
             HandshakeManager::new(),
             AUTH_RATE_MAX,
             AUTH_RATE_WINDOW_SECS,
@@ -710,6 +712,7 @@ mod tests {
         let auth_state = Arc::new(OperatorAuthState::new(
             OperatorPolicy::default(),
             daemon.clone(),
+            xenia_handshake::MlDsaIdentity::from_seed([0xAAu8; 32]),
             HandshakeManager::new(),
             AUTH_RATE_MAX,
             AUTH_RATE_WINDOW_SECS,
@@ -852,6 +855,7 @@ mod tests {
         let auth_state = Arc::new(OperatorAuthState::new(
             OperatorPolicy::default(),
             daemon.clone(),
+            xenia_handshake::MlDsaIdentity::from_seed([0xAAu8; 32]),
             HandshakeManager::new(),
             AUTH_RATE_MAX,
             AUTH_RATE_WINDOW_SECS,
@@ -959,6 +963,7 @@ mod tests {
         let auth_state = Arc::new(OperatorAuthState::new(
             OperatorPolicy::default(),
             daemon.clone(),
+            xenia_handshake::MlDsaIdentity::from_seed([0xAAu8; 32]),
             HandshakeManager::new(),
             AUTH_RATE_MAX,
             AUTH_RATE_WINDOW_SECS,
@@ -1061,6 +1066,7 @@ mod tests {
         let auth_state = Arc::new(OperatorAuthState::new(
             OperatorPolicy::default(),
             daemon.clone(),
+            xenia_handshake::MlDsaIdentity::from_seed([0xAAu8; 32]),
             HandshakeManager::new(),
             AUTH_RATE_MAX,
             AUTH_RATE_WINDOW_SECS,
@@ -1145,6 +1151,7 @@ mod tests {
             let auth_state = Arc::new(OperatorAuthState::new(
                 OperatorPolicy::default(),
                 daemon.clone(),
+                xenia_handshake::MlDsaIdentity::from_seed([0xAAu8; 32]),
                 HandshakeManager::new(),
                 AUTH_RATE_MAX,
                 AUTH_RATE_WINDOW_SECS,

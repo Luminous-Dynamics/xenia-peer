@@ -92,7 +92,9 @@ deterministically-testable pure core (`operator_auth.rs`):
 3. `POST /auth/verify` → the daemon verifies both signatures, consumes the
    challenge, confirms enrollment, and mints a **daemon-signed, role-scoped
    token** (`OperatorToken`: operator_id, role, issued_at, expires_at,
-   token_nonce). The token is signed by the daemon's key; the operator cannot
+   token_nonce). The token is signed by **both** of the daemon's HTTP-auth
+   keys (Ed25519 + a separate ML-DSA-65 identity, AND-verified -- see item 5
+   of `docs/security/POST_DELEGATION_HARDENING_PLAN.md`); the operator cannot
    forge one, and cannot upgrade its own role (the role is copied from the
    policy at mint time).
 
@@ -125,10 +127,12 @@ Authorization checks the **token's own role**, not the policy's current role for
 that id and not any client UI — an honestly-issued lower-role token cannot
 perform a higher-role action, and a forged higher-role token fails token
 signature verification. Every privileged action additionally carries a
-**per-action Ed25519 signature** over a transcript bound to the exact
-action/target + the token's `token_nonce`, so a captured signature cannot be
-replayed for a different action, session, target, or token
-(`authorize_consent_action`, `authorize_operator_revocation`).
+**per-action Ed25519 + ML-DSA-65 signature pair** (both required, AND-verified
+against the operator's enrolled keys -- no classical-only fallback, see item 5
+of `docs/security/POST_DELEGATION_HARDENING_PLAN.md`) over a transcript bound
+to the exact action/target + the token's `token_nonce`, so a captured
+signature cannot be replayed for a different action, session, target, or
+token (`authorize_consent_action`, `authorize_operator_revocation`).
 
 ---
 

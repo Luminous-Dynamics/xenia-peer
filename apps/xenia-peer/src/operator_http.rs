@@ -28,7 +28,7 @@ use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use xenia_handshake::{HandshakeManager, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN};
+use xenia_handshake::{HandshakeManager, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN, MlDsaIdentity};
 use xenia_ledger::{Chain, LedgerCheckpoint, LedgerEntry};
 use xenia_operator_proto::{DaemonIdentityCertificate, challenge_host_attestation_transcript};
 
@@ -44,43 +44,63 @@ use crate::operator_revocations::OperatorRevocations;
 pub(crate) struct OperatorAuthState {
     pub(crate) policy: OperatorPolicy,
     pub(crate) challenges: Mutex<ChallengeStore>,
-    /// The daemon's own signing key, used to sign issued tokens.
+    /// The daemon's own signing key, used to sign issued tokens. Also the
+    /// key `xenia_ledger::Chain` signs the consent hash-chain with -- it
+    /// predates hybridization and stays Ed25519-only; see
+    /// `daemon_ml_dsa`'s doc comment for why the ML-DSA half lives in a
+    /// separate key rather than being folded in here.
     pub(crate) daemon_key: SigningKey,
+    /// The daemon's HTTP-auth ML-DSA-65 identity: a *separate* key from
+    /// `daemon_key`, signing the exact same bytes `daemon_key` signs
+    /// (issued tokens, challenge/consent-action/revoke transcripts) as a
+    /// second, independently-verified algorithm -- AND-verified together,
+    /// no classical-only fallback, matching this project's hybrid posture
+    /// everywhere else. Kept separate from `daemon_key` rather than
+    /// bolted onto it because `daemon_key` already has an established,
+    /// independently-used role (the ledger's signing key) that
+    /// hybridizing shouldn't disturb.
+    pub(crate) daemon_ml_dsa: MlDsaIdentity,
     /// Bounds auth attempts against brute-force / flooding.
     pub(crate) rate_limiter: Mutex<RateLimiter>,
     /// The daemon's *host* identity (the same one the sealed-channel
     /// handshake uses and `host_pin.rs`/`host_trust.rs` pin) -- used to
     /// sign each challenge's host attestation at issuance time. Kept
-    /// separate from `daemon_key`; see [`DaemonIdentityCertificate`]'s doc
-    /// comment for why the two aren't unified.
+    /// separate from `daemon_key`/`daemon_ml_dsa`; see
+    /// [`DaemonIdentityCertificate`]'s doc comment for why the three
+    /// aren't unified.
     pub(crate) host_identity: HandshakeManager,
-    /// Host identity's delegation of trust to `daemon_key`, computed once
-    /// at startup and served verbatim over `GET /auth/daemon-identity`.
+    /// Host identity's delegation of trust to `daemon_key`/`daemon_ml_dsa`,
+    /// computed once at startup and served verbatim over
+    /// `GET /auth/daemon-identity`.
     pub(crate) daemon_certificate: DaemonIdentityCertificate,
 }
 
 impl OperatorAuthState {
-    /// Build a state, computing `daemon_certificate` from `host_identity`
-    /// and `daemon_key` once here (both keys are static for the state's
-    /// lifetime, so there's no reason to recompute it per-request). The
-    /// single constructor keeps every call site (`main.rs`'s real daemon
-    /// bootstrap, and the several test harnesses across this crate) from
-    /// having to know how the certificate is built, and means adding a
-    /// future field to this struct doesn't require touching every one of
-    /// them.
+    /// Build a state, computing `daemon_certificate` from `host_identity`,
+    /// `daemon_key`, and `daemon_ml_dsa` once here (all three are static
+    /// for the state's lifetime, so there's no reason to recompute it per
+    /// request). The single constructor keeps every call site (`main.rs`'s
+    /// real daemon bootstrap, and the several test harnesses across this
+    /// crate) from having to know how the certificate is built.
     pub(crate) fn new(
         policy: OperatorPolicy,
         daemon_key: SigningKey,
+        daemon_ml_dsa: MlDsaIdentity,
         host_identity: HandshakeManager,
         rate_limit_max: u32,
         rate_limit_window_secs: u64,
     ) -> Self {
-        let http_auth_pubkey = daemon_key.verifying_key().to_bytes();
-        let transcript = xenia_operator_proto::daemon_delegation_transcript(&http_auth_pubkey);
+        let http_auth_ed_pubkey = daemon_key.verifying_key().to_bytes();
+        let http_auth_ml_dsa_pubkey = daemon_ml_dsa.public_key_bytes();
+        let transcript = xenia_operator_proto::daemon_delegation_transcript(
+            &http_auth_ed_pubkey,
+            &http_auth_ml_dsa_pubkey,
+        );
         let daemon_certificate = DaemonIdentityCertificate {
             host_ed25519_pubkey: hex::encode(host_identity.identity_public_key_bytes()),
             host_ml_dsa_pubkey: hex::encode(host_identity.ml_dsa_public_key_bytes()),
-            http_auth_ed25519_pubkey: hex::encode(http_auth_pubkey),
+            http_auth_ed25519_pubkey: hex::encode(http_auth_ed_pubkey),
+            http_auth_ml_dsa_pubkey: hex::encode(http_auth_ml_dsa_pubkey),
             host_ed_signature: hex::encode(host_identity.sign(&transcript).to_bytes()),
             host_ml_dsa_signature: hex::encode(host_identity.sign_ml_dsa(&transcript)),
         };
@@ -88,6 +108,7 @@ impl OperatorAuthState {
             policy,
             challenges: Mutex::new(ChallengeStore::new()),
             daemon_key,
+            daemon_ml_dsa,
             rate_limiter: Mutex::new(RateLimiter::new(rate_limit_max, rate_limit_window_secs)),
             host_identity,
             daemon_certificate,
@@ -135,6 +156,9 @@ struct TokenDto {
     expires_at: u64,
     token_nonce: String,
     signature: String,
+    /// Hex ML-DSA-65 signature over the same canonical bytes `signature`
+    /// covers -- both are required, no classical-only fallback.
+    ml_dsa_signature: String,
 }
 
 impl TokenDto {
@@ -146,6 +170,7 @@ impl TokenDto {
             expires_at: signed.token.expires_at,
             token_nonce: hex::encode(signed.token.token_nonce),
             signature: hex::encode(signed.signature),
+            ml_dsa_signature: hex::encode(signed.ml_dsa_signature),
         }
     }
 }
@@ -239,7 +264,14 @@ async fn verify_handler(
     };
 
     let token_nonce: [u8; 16] = rand::random();
-    let signed = issue_token(&state.daemon_key, &authed, now, TOKEN_TTL_SECS, token_nonce);
+    let signed = issue_token(
+        &state.daemon_key,
+        &state.daemon_ml_dsa,
+        &authed,
+        now,
+        TOKEN_TTL_SECS,
+        token_nonce,
+    );
     Ok(Json(TokenDto::from_signed(&signed)))
 }
 
@@ -257,6 +289,8 @@ impl TokenDto {
                 token_nonce: decode_fixed::<16>(&self.token_nonce).map_err(|(_, m)| m)?,
             },
             signature: decode_fixed::<64>(&self.signature).map_err(|(_, m)| m)?,
+            ml_dsa_signature: decode_fixed::<ML_DSA_65_SIG_LEN>(&self.ml_dsa_signature)
+                .map_err(|(_, m)| m)?,
         })
     }
 }
@@ -269,6 +303,9 @@ struct AuthenticatedConsentActionDto {
     /// `"Approve"`, `"Deny"`, or `"Revoke"`.
     action: String,
     action_signature: String,
+    /// Hex ML-DSA-65 signature over the same transcript `action_signature`
+    /// covers -- both required.
+    ml_dsa_action_signature: String,
 }
 
 /// Parse a JSON authenticated consent action from the consent socket into the
@@ -286,21 +323,26 @@ pub(crate) fn parse_authenticated_consent_action(
         other => return Err(format!("unknown consent action: {other:?}")),
     };
     let action_signature = decode_fixed::<64>(&dto.action_signature).map_err(|(_, m)| m)?;
+    let ml_dsa_action_signature =
+        decode_fixed::<ML_DSA_65_SIG_LEN>(&dto.ml_dsa_action_signature).map_err(|(_, m)| m)?;
     Ok(AuthenticatedConsentAction {
         token: dto.token.into_signed()?,
         action,
         action_signature,
+        ml_dsa_action_signature,
     })
 }
 
 /// Wire form of an admin's operator-revocation request:
-/// `{ token, target_operator_id, action_signature }`.
+/// `{ token, target_operator_id, action_signature, ml_dsa_action_signature }`.
 #[derive(Deserialize)]
 struct AuthenticatedRevocationDto {
     token: TokenDto,
     target_operator_id: String,
     /// Hex Ed25519 signature over `revoke_operator_transcript(target, token_nonce)`.
     action_signature: String,
+    /// Hex ML-DSA-65 signature over the same transcript -- both required.
+    ml_dsa_action_signature: String,
 }
 
 /// Parse the JSON body of a `/operator/revoke` request into an
@@ -310,10 +352,13 @@ pub(crate) fn parse_authenticated_revocation(
 ) -> Result<AuthenticatedRevocation, String> {
     let dto: AuthenticatedRevocationDto = serde_json::from_str(json).map_err(|e| e.to_string())?;
     let action_signature = decode_fixed::<64>(&dto.action_signature).map_err(|(_, m)| m)?;
+    let ml_dsa_action_signature =
+        decode_fixed::<ML_DSA_65_SIG_LEN>(&dto.ml_dsa_action_signature).map_err(|(_, m)| m)?;
     Ok(AuthenticatedRevocation {
         token: dto.token.into_signed()?,
         target_operator_id: dto.target_operator_id,
         action_signature,
+        ml_dsa_action_signature,
     })
 }
 
@@ -342,6 +387,7 @@ async fn revoke_operator_handler(
     match crate::operator_auth::authorize_operator_revocation(
         &state.auth.policy,
         &state.auth.daemon_key.verifying_key(),
+        &state.auth.daemon_ml_dsa.public_key_bytes(),
         unix_now_secs(),
         &request,
     ) {
@@ -424,6 +470,7 @@ async fn audit_ledger_handler(
     if crate::operator_auth::authorize_ledger_read(
         &state.auth.policy,
         &state.auth.daemon_key.verifying_key(),
+        &state.auth.daemon_ml_dsa.public_key_bytes(),
         unix_now_secs(),
         &signed,
     )
@@ -491,6 +538,16 @@ mod tests {
     use tower::ServiceExt; // for `oneshot`
     use xenia_handshake::HandshakeManager;
 
+    /// Fixed seed for every test's daemon ML-DSA identity, so a test that
+    /// only has the daemon's Ed25519 `SigningKey` in hand (not the
+    /// `OperatorAuthState` it built) can still reconstruct the matching
+    /// public key deterministically.
+    const TEST_DAEMON_ML_DSA_SEED: [u8; 32] = [0xAAu8; 32];
+
+    fn test_daemon_ml_dsa() -> MlDsaIdentity {
+        MlDsaIdentity::from_seed(TEST_DAEMON_ML_DSA_SEED)
+    }
+
     fn state_with(op: &HandshakeManager, daemon: SigningKey) -> Arc<OperatorAuthState> {
         let policy = OperatorPolicy::from_operators(vec![EnrolledOperator {
             operator_id: "alice".to_string(),
@@ -503,6 +560,7 @@ mod tests {
         Arc::new(OperatorAuthState::new(
             policy,
             daemon,
+            test_daemon_ml_dsa(),
             HandshakeManager::new(),
             crate::operator_auth::AUTH_RATE_MAX,
             crate::operator_auth::AUTH_RATE_WINDOW_SECS,
@@ -533,6 +591,7 @@ mod tests {
         let state = Arc::new(OperatorAuthState::new(
             policy,
             daemon,
+            xenia_handshake::MlDsaIdentity::from_seed([0xAAu8; 32]),
             HandshakeManager::new(),
             1,
             3600,
@@ -637,10 +696,12 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "body: {body}");
         let cert: DaemonIdentityCertificate = serde_json::from_str(&body).unwrap();
 
-        // The certificate's delegated key really is this daemon's HTTP-auth
-        // (token-signing) key.
+        // The certificate's delegated keys really are this daemon's
+        // HTTP-auth (token-signing) identity, both algorithms.
         let http_auth_pk: [u8; 32] = decode_fixed(&cert.http_auth_ed25519_pubkey).unwrap();
         assert_eq!(http_auth_pk, daemon_pk.to_bytes());
+        let http_auth_ml_dsa_pk = hex::decode(&cert.http_auth_ml_dsa_pubkey).unwrap();
+        assert_eq!(http_auth_ml_dsa_pk, test_daemon_ml_dsa().public_key_bytes());
 
         // Both of the host identity's signatures over the delegation
         // transcript verify against the certificate's own presented host
@@ -653,7 +714,8 @@ mod tests {
             .unwrap()
             .try_into()
             .unwrap();
-        let transcript = xenia_operator_proto::daemon_delegation_transcript(&http_auth_pk);
+        let transcript =
+            xenia_operator_proto::daemon_delegation_transcript(&http_auth_pk, &http_auth_ml_dsa_pk);
 
         let ed_sig_bytes: [u8; 64] = decode_fixed(&cert.host_ed_signature).unwrap();
         let ed_sig = ed25519_dalek::Signature::from_bytes(&ed_sig_bytes);
@@ -754,7 +816,8 @@ mod tests {
         assert_eq!(token.operator_id, "alice");
         assert_eq!(token.role, OperatorRole::Admin);
 
-        // 3. the returned token verifies under the daemon key.
+        // 3. the returned token verifies under the daemon's keys, both
+        // algorithms.
         let signed = SignedOperatorToken {
             token: crate::operator_auth::OperatorToken {
                 operator_id: token.operator_id,
@@ -764,8 +827,17 @@ mod tests {
                 token_nonce: decode_fixed(&token.token_nonce).unwrap(),
             },
             signature: decode_fixed(&token.signature).unwrap(),
+            ml_dsa_signature: decode_fixed(&token.ml_dsa_signature).unwrap(),
         };
-        assert!(verify_token(&daemon_pk, token.issued_at + 1, &signed).is_ok());
+        assert!(
+            verify_token(
+                &daemon_pk,
+                &test_daemon_ml_dsa().public_key_bytes(),
+                token.issued_at + 1,
+                &signed
+            )
+            .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -810,7 +882,14 @@ mod tests {
             role,
         };
         let nonce = [0x2b; 16];
-        let signed = issue_token(daemon, &authed, now, TOKEN_TTL_SECS, nonce);
+        let signed = issue_token(
+            daemon,
+            &test_daemon_ml_dsa(),
+            &authed,
+            now,
+            TOKEN_TTL_SECS,
+            nonce,
+        );
         (
             serde_json::to_value(TokenDto::from_signed(&signed)).unwrap(),
             nonce,
@@ -829,6 +908,7 @@ mod tests {
             "token": token_json,
             "target_operator_id": target,
             "action_signature": hex::encode(op.sign(&transcript).to_bytes()),
+            "ml_dsa_action_signature": hex::encode(op.sign_ml_dsa(&transcript)),
         })
         .to_string()
     }
@@ -967,7 +1047,14 @@ mod tests {
             operator_id: "not-alice".to_string(),
             role: OperatorRole::Admin,
         };
-        let signed = issue_token(&daemon, &authed, now_secs(), TOKEN_TTL_SECS, [0x77; 16]);
+        let signed = issue_token(
+            &daemon,
+            &test_daemon_ml_dsa(),
+            &authed,
+            now_secs(),
+            TOKEN_TTL_SECS,
+            [0x77; 16],
+        );
         let token = serde_json::to_value(TokenDto::from_signed(&signed))
             .unwrap()
             .to_string();
@@ -992,7 +1079,14 @@ mod tests {
             role: OperatorRole::Viewer,
         };
         // issued and already-expired well in the past.
-        let signed = issue_token(&daemon, &authed, 1_000, 1, [0x11; 16]);
+        let signed = issue_token(
+            &daemon,
+            &test_daemon_ml_dsa(),
+            &authed,
+            1_000,
+            1,
+            [0x11; 16],
+        );
         let token = serde_json::to_value(TokenDto::from_signed(&signed))
             .unwrap()
             .to_string();
