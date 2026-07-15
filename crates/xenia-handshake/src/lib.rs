@@ -61,17 +61,17 @@ use std::time::SystemTime;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use ml_dsa::{
+    B32, EncodedSignature as MlDsaEncodedSignature,
+    EncodedVerifyingKey as MlDsaEncodedVerifyingKey, MlDsa65, Signature as MlDsaSignatureT,
+    SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey,
     signature::{Keypair as MlDsaKeypair, Signer as MlDsaSigner, Verifier as MlDsaVerifier},
-    EncodedSignature as MlDsaEncodedSignature, EncodedVerifyingKey as MlDsaEncodedVerifyingKey,
-    MlDsa65, Signature as MlDsaSignatureT, SigningKey as MlDsaSigningKey,
-    VerifyingKey as MlDsaVerifyingKey, B32,
 };
 use ml_kem::{
+    MlKem768, TryKeyInit,
     kem::{Decapsulate, Encapsulate, Kem, KeyExport},
     ml_kem_768::{
         Ciphertext as MlKemCiphertext, DecapsulationKey as MlKemDk, EncapsulationKey as MlKemEk,
     },
-    MlKem768, TryKeyInit,
 };
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -942,6 +942,70 @@ impl Default for HandshakeManager {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// MlDsaIdentity
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A standalone ML-DSA-65 signing identity, with no Ed25519 half.
+///
+/// `HandshakeManager` always couples Ed25519 + ML-DSA-65 into one hybrid
+/// identity, which is correct for a *new* signing role. But some existing
+/// roles in this codebase already have a long-lived, independently-used
+/// Ed25519 key that hybridizing shouldn't disturb -- e.g. `xenia-peer`'s
+/// operator/ledger signing key, which `xenia_ledger::Chain` already signs
+/// the consent hash-chain with and can't be casually swapped for a
+/// different key type. For those, this type supplies *just* the ML-DSA-65
+/// half as a second, independent signature alongside the existing Ed25519
+/// one -- the pair is still verified AND-together by the caller, exactly
+/// like every other hybrid signature in this codebase; this type just
+/// doesn't bundle both keys into one struct the way `HandshakeManager`
+/// does.
+pub struct MlDsaIdentity {
+    signing_key: MlDsaSigningKey<MlDsa65>,
+}
+
+impl MlDsaIdentity {
+    /// Reconstruct from a persisted 32-byte seed (FIPS-204 ξ). Given the
+    /// same seed, always produces the same public identity.
+    pub fn from_seed(seed: [u8; 32]) -> Self {
+        let seed: B32 = seed.into();
+        Self {
+            signing_key: MlDsaSigningKey::<MlDsa65>::from_seed(&seed),
+        }
+    }
+
+    /// Raw bytes of this identity's ML-DSA-65 verifying key.
+    pub fn public_key_bytes(&self) -> [u8; ML_DSA_65_PK_LEN] {
+        let encoded = self.signing_key.verifying_key().encode();
+        let mut out = [0u8; ML_DSA_65_PK_LEN];
+        out.copy_from_slice(encoded.as_slice());
+        out
+    }
+
+    /// Sign a message. Callers pair this with a separate Ed25519 signature
+    /// over the same message and verify both -- there is no classical-only
+    /// fallback, matching [`HandshakeManager::sign_ml_dsa`].
+    pub fn sign(&self, message: &[u8]) -> [u8; ML_DSA_65_SIG_LEN] {
+        let signature: MlDsaSignatureT<MlDsa65> = self.signing_key.sign(message);
+        let encoded = signature.encode();
+        let mut out = [0u8; ML_DSA_65_SIG_LEN];
+        out.copy_from_slice(encoded.as_slice());
+        out
+    }
+
+    /// Verify an ML-DSA-65 signature from a peer's verifying-key bytes.
+    /// Identical to [`HandshakeManager::verify_ml_dsa`] -- re-exposed here
+    /// too so a caller working exclusively with [`MlDsaIdentity`] doesn't
+    /// need to reach into `HandshakeManager` just for this static method.
+    pub fn verify(
+        peer_pk: &[u8; ML_DSA_65_PK_LEN],
+        message: &[u8],
+        signature: &[u8; ML_DSA_65_SIG_LEN],
+    ) -> Result<()> {
+        HandshakeManager::verify_ml_dsa(peer_pk, message, signature)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Key derivation
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1139,6 +1203,27 @@ fn derive_labeled_session_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ml_dsa_identity_sign_verify_round_trips() {
+        let id = MlDsaIdentity::from_seed([0x77u8; 32]);
+        let pk = id.public_key_bytes();
+        let sig = id.sign(b"hello");
+        MlDsaIdentity::verify(&pk, b"hello", &sig).expect("genuine signature must verify");
+        assert!(
+            MlDsaIdentity::verify(&pk, b"tampered", &sig).is_err(),
+            "signature must not verify over a different message"
+        );
+    }
+
+    #[test]
+    fn ml_dsa_identity_is_deterministic_from_seed_and_distinct_across_seeds() {
+        let a1 = MlDsaIdentity::from_seed([0x11u8; 32]);
+        let a2 = MlDsaIdentity::from_seed([0x11u8; 32]);
+        let b = MlDsaIdentity::from_seed([0x22u8; 32]);
+        assert_eq!(a1.public_key_bytes(), a2.public_key_bytes());
+        assert_ne!(a1.public_key_bytes(), b.public_key_bytes());
+    }
 
     #[test]
     fn kem_public_key_is_1184_bytes() {

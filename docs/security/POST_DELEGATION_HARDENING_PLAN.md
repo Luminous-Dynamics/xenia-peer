@@ -21,7 +21,7 @@ credible pre-production system.
 2. **Stable endpoint/daemon scope for native host pins.** ✅ done
 3. **Remove the legacy HMAC ledger/admin path.** ✅ done
 4. **Replace the persistent pairing token with short-lived agent sessions.** ✅ done
-5. **Resolve the hybrid-versus-classical HTTP authorization profile.**
+5. **Resolve the hybrid-versus-classical HTTP authorization profile.** ✅ done
 6. **Add the full headless-browser vertical slice.**
 7. **Zeroization, serialization migration, and fuzzing.**
 8. **Packaging, recovery, and independent audit.**
@@ -265,6 +265,71 @@ not for consent-action/revoke. Pick one explicit posture:
   classify HTTP token authorization as a compatibility/classical path.
 
 Whichever is chosen, fix the design doc's inaccurate blanket claim.
+
+**Done.** User chose **full hybrid HTTP authorization** over the sealed-channel
+alternative (that alternative would have meant building a wholly new
+sealed-channel message type for operator revocation -- the only currently-live
+privileged action; enrollment/role-changes/key-rotation have no live HTTP
+endpoint at all, only static config files -- for a narrower fix than closing
+the gap everywhere at once).
+
+- **New `xenia_handshake::MlDsaIdentity`**: a standalone ML-DSA-65 signing
+  identity with no Ed25519 half, for roles that already have an
+  independently-used Ed25519 key `HandshakeManager`'s always-hybrid design
+  can't just replace. Concretely: `apps/xenia-peer`'s `operator_key_path`
+  key is *also* `xenia_ledger::Chain`'s signing key -- hybridizing it in
+  place would have meant hybridizing the ledger's signature scheme too,
+  well outside this item's scope. The daemon now loads a *second*, new key
+  (`--http-auth-ml-dsa-key-path`, a bare 32-byte seed, default
+  `operator-http-ml-dsa.key`) purely for this role.
+- **`DaemonIdentityCertificate`** (`xenia-operator-proto`) gained
+  `http_auth_ml_dsa_pubkey`; `daemon_delegation_transcript` now covers both
+  HTTP-auth pubkeys, so the host identity's delegation signature vouches
+  for the *pair*, not just the Ed25519 half.
+- **Daemon session tokens** (`OperatorToken`/`SignedOperatorToken`,
+  `TokenDto`): `issue_token`/`verify_token` now produce/require both an
+  Ed25519 and an ML-DSA-65 signature over the identical canonical bytes,
+  AND-verified. `POST /auth/verify`'s response, and every internal
+  `verify_token`/`authorize_*` call site (consent-action, ledger-read,
+  operator-revocation) thread the daemon's ML-DSA pubkey through.
+- **Consent-action / operator-revocation per-action signatures**: the
+  operator agent already held the operator's ML-DSA seed in memory for the
+  challenge step; it just wasn't asked to sign consent-action/revoke
+  transcripts with it. Now it signs both algorithms for
+  `/v1/sign/consent-action` and `/v1/sign/revoke`, and the daemon
+  AND-verifies against the operator's already-enrolled ML-DSA pubkey
+  (`EnrolledOperator.ml_dsa_pubkey` -- no new enrollment data needed).
+  `AuthenticatedConsentAction`/`AuthenticatedRevocation` and their wire DTOs
+  gained `ml_dsa_action_signature`(`_hex`).
+- **Agent verification** (`daemon_evidence.rs`): `verify_daemon_certificate`
+  now AND-verifies the delegation signature against both HTTP-auth pubkeys;
+  `verify_token` AND-verifies both signatures on a relayed
+  `SignedTokenDto` before trusting its `token_nonce`.
+- **Browser**: `OperatorSession` carries and relays the daemon's ML-DSA
+  token signature (`ml_dsa_signature_hex`) verbatim (same pattern as the
+  Ed25519 one); `build_consent_request`/`build_revoke_request` now embed
+  both signatures the agent returns in the JSON sent to the daemon.
+- Fixed the design docs: `SIGNER_DELEGATION_DESIGN.md`'s step 1 no longer
+  describes the (now-removed, see item 4) raw pairing token as the agent's
+  local-caller credential; `OPERATOR_SECURITY_MODEL.md` no longer says
+  "per-action Ed25519 signature" or "signed by the daemon's key" without
+  qualification -- both now correctly say hybrid, AND-verified, both
+  algorithms required.
+- Verified: `cargo test` green across `xenia-handshake` (2 new
+  `MlDsaIdentity` tests), `xenia-operator-proto`, `xenia-operator-agent-proto`,
+  `xenia-peer` (117 tests, incl. the full `operator_rbac_smoke` integration
+  test updated to sign both algorithms), `xenia-operator-agent` (89 tests,
+  incl. new wrong-ML-DSA-key rejection tests mirroring the existing
+  wrong-Ed25519-key ones); clippy clean on every touched native crate and on
+  `sovereign-admin`'s wasm32 target.
+- Not done (real, deliberate scope limits, not oversights): no rate limiting
+  or log-scrubbing of the new ML-DSA key material (same gap item 4 already
+  flagged for the pairing token); the ledger's own signing key
+  (`operator_key_path`) stays classical-only Ed25519, unrelated to this
+  item's HTTP-authorization scope; enrollment/role-change/key-rotation still
+  have no live HTTP surface at all (config-file-only), so "full hybrid" here
+  covers every privileged action that actually exists today, not a
+  hypothetical future one.
 
 ## 6. The real browser-driven vertical slice
 

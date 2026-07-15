@@ -29,7 +29,7 @@
 
 use ed25519_dalek::Signature;
 use xenia_handshake::{
-    host_identity_fingerprint, HandshakeManager, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN,
+    HandshakeManager, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN, MlDsaIdentity, host_identity_fingerprint,
 };
 use xenia_operator_agent_proto::{DaemonIdentityCertificate, SignedTokenDto};
 use xenia_operator_proto::{
@@ -88,9 +88,15 @@ pub struct VerifiedDaemonIdentity {
     pub host_ed25519_pubkey: [u8; 32],
     /// The daemon's host identity ML-DSA-65 public key.
     pub host_ml_dsa_pubkey: [u8; ML_DSA_65_PK_LEN],
-    /// The daemon's separate HTTP-auth signing key, now known to be
+    /// The daemon's separate HTTP-auth Ed25519 signing key, now known to be
     /// genuinely delegated-to by the host identity above.
     pub http_auth_ed25519_pubkey: [u8; 32],
+    /// The daemon's separate HTTP-auth ML-DSA-65 signing key -- a distinct
+    /// key from `http_auth_ed25519_pubkey`'s pair, also delegated-to by
+    /// the host identity above (see
+    /// `xenia_operator_proto::daemon_delegation_transcript`'s doc
+    /// comment).
+    pub http_auth_ml_dsa_pubkey: [u8; ML_DSA_65_PK_LEN],
     /// `xenia_handshake::host_identity_fingerprint(host_ed25519_pubkey,
     /// host_ml_dsa_pubkey)` -- computed here, not accepted from the
     /// caller.
@@ -99,8 +105,9 @@ pub struct VerifiedDaemonIdentity {
 
 /// Verify a [`DaemonIdentityCertificate`]: decode its hex fields, verify
 /// both the Ed25519 and ML-DSA-65 signatures over
-/// `daemon_delegation_transcript(http_auth_ed25519_pubkey)` against the
-/// certificate's own presented host keys, and compute the fingerprint.
+/// `daemon_delegation_transcript(http_auth_ed25519_pubkey,
+/// http_auth_ml_dsa_pubkey)` against the certificate's own presented host
+/// keys, and compute the fingerprint.
 pub fn verify_daemon_certificate(
     cert: &DaemonIdentityCertificate,
 ) -> Result<VerifiedDaemonIdentity, EvidenceError> {
@@ -121,6 +128,13 @@ pub fn verify_daemon_certificate(
                 "http_auth_ed25519_pubkey must be 64 hex characters".to_string(),
             )
         })?;
+    let http_auth_ml_dsa_pubkey =
+        decode_fixed_hex::<ML_DSA_65_PK_LEN>(&cert.http_auth_ml_dsa_pubkey).ok_or_else(|| {
+            EvidenceError::Malformed(format!(
+                "http_auth_ml_dsa_pubkey must be {} hex bytes",
+                ML_DSA_65_PK_LEN
+            ))
+        })?;
     let host_ed_signature = decode_fixed_hex::<64>(&cert.host_ed_signature).ok_or_else(|| {
         EvidenceError::Malformed("host_ed_signature must be 128 hex characters".to_string())
     })?;
@@ -136,7 +150,8 @@ pub fn verify_daemon_certificate(
         HandshakeManager::parse_peer_public_key(&host_ed25519_pubkey).map_err(|_| {
             EvidenceError::Malformed("host_ed25519_pubkey is not a valid point".to_string())
         })?;
-    let transcript = daemon_delegation_transcript(&http_auth_ed25519_pubkey);
+    let transcript =
+        daemon_delegation_transcript(&http_auth_ed25519_pubkey, &http_auth_ml_dsa_pubkey);
 
     HandshakeManager::verify(
         &host_ed_pk,
@@ -161,6 +176,7 @@ pub fn verify_daemon_certificate(
         host_ed25519_pubkey,
         host_ml_dsa_pubkey,
         http_auth_ed25519_pubkey,
+        http_auth_ml_dsa_pubkey,
         fingerprint,
     })
 }
@@ -210,9 +226,9 @@ pub fn verify_challenge_attestation(
     Ok(())
 }
 
-/// Verify a [`SignedTokenDto`]'s signature against `identity`'s
-/// (now-verified) delegated HTTP-auth key, reconstructing the exact bytes
-/// the daemon's own signature covers
+/// Verify a [`SignedTokenDto`]'s signatures -- both algorithms -- against
+/// `identity`'s (now-verified) delegated HTTP-auth keys, reconstructing
+/// the exact bytes the daemon's own signatures cover
 /// (`xenia_operator_proto::operator_token_canonical_bytes`). Returns the
 /// token's nonce -- only once verified is it safe to bind into a
 /// consent-action/revoke transcript.
@@ -226,6 +242,13 @@ pub fn verify_token(
     let signature = decode_fixed_hex::<64>(&token.signature_hex).ok_or_else(|| {
         EvidenceError::Malformed("signature_hex must be 128 hex characters".to_string())
     })?;
+    let ml_dsa_signature = decode_fixed_hex::<ML_DSA_65_SIG_LEN>(&token.ml_dsa_signature_hex)
+        .ok_or_else(|| {
+            EvidenceError::Malformed(format!(
+                "ml_dsa_signature_hex must be {} hex bytes",
+                ML_DSA_65_SIG_LEN
+            ))
+        })?;
 
     let canonical = operator_token_canonical_bytes(
         &token.operator_id,
@@ -245,7 +268,20 @@ pub fn verify_token(
     )
     .map_err(|_| {
         EvidenceError::SignatureInvalid(
-            "operator token signature does not verify against the certificate's delegated key"
+            "operator token Ed25519 signature does not verify against the certificate's \
+             delegated key"
+                .to_string(),
+        )
+    })?;
+    MlDsaIdentity::verify(
+        &identity.http_auth_ml_dsa_pubkey,
+        &canonical,
+        &ml_dsa_signature,
+    )
+    .map_err(|_| {
+        EvidenceError::SignatureInvalid(
+            "operator token ML-DSA signature does not verify against the certificate's \
+             delegated key"
                 .to_string(),
         )
     })?;
@@ -273,23 +309,27 @@ mod tests {
     use super::*;
     use ed25519_dalek::Signer;
 
-    fn daemon_and_http_auth() -> (HandshakeManager, ed25519_dalek::SigningKey) {
+    fn daemon_and_http_auth() -> (HandshakeManager, ed25519_dalek::SigningKey, MlDsaIdentity) {
         (
             HandshakeManager::new(),
             ed25519_dalek::SigningKey::generate(&mut rand::thread_rng()),
+            MlDsaIdentity::from_seed(rand::random()),
         )
     }
 
     fn certificate_for(
         host: &HandshakeManager,
         http_auth: &ed25519_dalek::SigningKey,
+        http_auth_ml_dsa: &MlDsaIdentity,
     ) -> DaemonIdentityCertificate {
         let http_auth_pk = http_auth.verifying_key().to_bytes();
-        let transcript = daemon_delegation_transcript(&http_auth_pk);
+        let http_auth_ml_dsa_pk = http_auth_ml_dsa.public_key_bytes();
+        let transcript = daemon_delegation_transcript(&http_auth_pk, &http_auth_ml_dsa_pk);
         DaemonIdentityCertificate {
             host_ed25519_pubkey: hex::encode(host.identity_public_key_bytes()),
             host_ml_dsa_pubkey: hex::encode(host.ml_dsa_public_key_bytes()),
             http_auth_ed25519_pubkey: hex::encode(http_auth_pk),
+            http_auth_ml_dsa_pubkey: hex::encode(http_auth_ml_dsa_pk),
             host_ed_signature: hex::encode(host.sign(&transcript).to_bytes()),
             host_ml_dsa_signature: hex::encode(host.sign_ml_dsa(&transcript)),
         }
@@ -297,20 +337,24 @@ mod tests {
 
     #[test]
     fn verify_daemon_certificate_accepts_a_genuine_certificate_and_computes_the_fingerprint() {
-        let (host, http_auth) = daemon_and_http_auth();
-        let cert = certificate_for(&host, &http_auth);
+        let (host, http_auth, http_auth_ml_dsa) = daemon_and_http_auth();
+        let cert = certificate_for(&host, &http_auth, &http_auth_ml_dsa);
         let verified = verify_daemon_certificate(&cert).unwrap();
         assert_eq!(verified.fingerprint, host.identity_fingerprint());
         assert_eq!(
             verified.http_auth_ed25519_pubkey,
             http_auth.verifying_key().to_bytes()
         );
+        assert_eq!(
+            verified.http_auth_ml_dsa_pubkey,
+            http_auth_ml_dsa.public_key_bytes()
+        );
     }
 
     #[test]
     fn verify_daemon_certificate_rejects_a_tampered_delegated_key() {
-        let (host, http_auth) = daemon_and_http_auth();
-        let mut cert = certificate_for(&host, &http_auth);
+        let (host, http_auth, http_auth_ml_dsa) = daemon_and_http_auth();
+        let mut cert = certificate_for(&host, &http_auth, &http_auth_ml_dsa);
         // The certificate now claims to delegate to a *different* key than
         // the one the signature was actually computed over.
         let other = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
@@ -320,14 +364,27 @@ mod tests {
     }
 
     #[test]
+    fn verify_daemon_certificate_rejects_a_tampered_delegated_ml_dsa_key() {
+        let (host, http_auth, http_auth_ml_dsa) = daemon_and_http_auth();
+        let mut cert = certificate_for(&host, &http_auth, &http_auth_ml_dsa);
+        let other = MlDsaIdentity::from_seed(rand::random());
+        cert.http_auth_ml_dsa_pubkey = hex::encode(other.public_key_bytes());
+        let err = verify_daemon_certificate(&cert).unwrap_err();
+        assert!(matches!(err, EvidenceError::SignatureInvalid(_)));
+    }
+
+    #[test]
     fn verify_daemon_certificate_rejects_a_forged_signature_from_an_untrusted_host() {
-        let (host, http_auth) = daemon_and_http_auth();
-        let mut cert = certificate_for(&host, &http_auth);
+        let (host, http_auth, http_auth_ml_dsa) = daemon_and_http_auth();
+        let mut cert = certificate_for(&host, &http_auth, &http_auth_ml_dsa);
         // An attacker's own host identity signs the same transcript, but
         // the certificate still claims the *real* host's public keys --
         // the signature must not verify against them.
         let attacker_host = HandshakeManager::new();
-        let transcript = daemon_delegation_transcript(&http_auth.verifying_key().to_bytes());
+        let transcript = daemon_delegation_transcript(
+            &http_auth.verifying_key().to_bytes(),
+            &http_auth_ml_dsa.public_key_bytes(),
+        );
         cert.host_ed_signature = hex::encode(attacker_host.sign(&transcript).to_bytes());
         let err = verify_daemon_certificate(&cert).unwrap_err();
         assert!(matches!(err, EvidenceError::SignatureInvalid(_)));
@@ -335,8 +392,8 @@ mod tests {
 
     #[test]
     fn verify_daemon_certificate_rejects_malformed_hex() {
-        let (host, http_auth) = daemon_and_http_auth();
-        let mut cert = certificate_for(&host, &http_auth);
+        let (host, http_auth, http_auth_ml_dsa) = daemon_and_http_auth();
+        let mut cert = certificate_for(&host, &http_auth, &http_auth_ml_dsa);
         cert.host_ed25519_pubkey = "not-hex".to_string();
         let err = verify_daemon_certificate(&cert).unwrap_err();
         assert!(matches!(err, EvidenceError::Malformed(_)));
@@ -344,8 +401,8 @@ mod tests {
 
     #[test]
     fn verify_challenge_attestation_accepts_a_genuine_attestation_bound_to_the_exact_nonce() {
-        let (host, http_auth) = daemon_and_http_auth();
-        let cert = certificate_for(&host, &http_auth);
+        let (host, http_auth, http_auth_ml_dsa) = daemon_and_http_auth();
+        let cert = certificate_for(&host, &http_auth, &http_auth_ml_dsa);
         let identity = verify_daemon_certificate(&cert).unwrap();
 
         let nonce = [7u8; 32];
@@ -363,13 +420,13 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn verify_token_accepts_a_genuine_token_and_returns_its_nonce() {
-        let (host, http_auth) = daemon_and_http_auth();
-        let cert = certificate_for(&host, &http_auth);
-        let identity = verify_daemon_certificate(&cert).unwrap();
-
-        let token_nonce = [9u8; 16];
+    /// Build a genuinely daemon-signed `SignedTokenDto` -- both algorithms
+    /// -- so tests only need to override the field(s) they're exercising.
+    fn signed_token(
+        http_auth: &ed25519_dalek::SigningKey,
+        http_auth_ml_dsa: &MlDsaIdentity,
+        token_nonce: [u8; 16],
+    ) -> SignedTokenDto {
         let canonical = operator_token_canonical_bytes(
             "alice",
             xenia_operator_proto::OperatorRole::Admin,
@@ -377,44 +434,71 @@ mod tests {
             2000,
             &token_nonce,
         );
-        let token = SignedTokenDto {
+        SignedTokenDto {
             operator_id: "alice".to_string(),
             role: xenia_operator_proto::OperatorRole::Admin,
             issued_at: 1000,
             expires_at: 2000,
             token_nonce_hex: hex::encode(token_nonce),
             signature_hex: hex::encode(http_auth.sign(&canonical).to_bytes()),
-        };
+            ml_dsa_signature_hex: hex::encode(http_auth_ml_dsa.sign(&canonical)),
+        }
+    }
+
+    #[test]
+    fn verify_token_accepts_a_genuine_token_and_returns_its_nonce() {
+        let (host, http_auth, http_auth_ml_dsa) = daemon_and_http_auth();
+        let cert = certificate_for(&host, &http_auth, &http_auth_ml_dsa);
+        let identity = verify_daemon_certificate(&cert).unwrap();
+
+        let token_nonce = [9u8; 16];
+        let token = signed_token(&http_auth, &http_auth_ml_dsa, token_nonce);
 
         let verified_nonce = verify_token(&identity, &token).unwrap();
         assert_eq!(verified_nonce, token_nonce);
     }
 
     #[test]
-    fn verify_token_rejects_a_token_signed_by_the_wrong_key() {
-        let (host, http_auth) = daemon_and_http_auth();
-        let cert = certificate_for(&host, &http_auth);
+    fn verify_token_rejects_a_token_signed_by_the_wrong_ed25519_key() {
+        let (host, http_auth, http_auth_ml_dsa) = daemon_and_http_auth();
+        let cert = certificate_for(&host, &http_auth, &http_auth_ml_dsa);
         let identity = verify_daemon_certificate(&cert).unwrap();
 
         let token_nonce = [9u8; 16];
-        let canonical = operator_token_canonical_bytes(
-            "alice",
-            xenia_operator_proto::OperatorRole::Admin,
-            1000,
-            2000,
-            &token_nonce,
-        );
+        let mut token = signed_token(&http_auth, &http_auth_ml_dsa, token_nonce);
         // Signed by a key that isn't the certificate's delegated HTTP-auth
         // key -- e.g. a compromised browser inventing its own token.
         let attacker = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-        let token = SignedTokenDto {
-            operator_id: "alice".to_string(),
-            role: xenia_operator_proto::OperatorRole::Admin,
-            issued_at: 1000,
-            expires_at: 2000,
-            token_nonce_hex: hex::encode(token_nonce),
-            signature_hex: hex::encode(attacker.sign(&canonical).to_bytes()),
-        };
+        let canonical = operator_token_canonical_bytes(
+            &token.operator_id,
+            token.role,
+            token.issued_at,
+            token.expires_at,
+            &token_nonce,
+        );
+        token.signature_hex = hex::encode(attacker.sign(&canonical).to_bytes());
+
+        let err = verify_token(&identity, &token).unwrap_err();
+        assert!(matches!(err, EvidenceError::SignatureInvalid(_)));
+    }
+
+    #[test]
+    fn verify_token_rejects_a_token_signed_by_the_wrong_ml_dsa_key() {
+        let (host, http_auth, http_auth_ml_dsa) = daemon_and_http_auth();
+        let cert = certificate_for(&host, &http_auth, &http_auth_ml_dsa);
+        let identity = verify_daemon_certificate(&cert).unwrap();
+
+        let token_nonce = [9u8; 16];
+        let mut token = signed_token(&http_auth, &http_auth_ml_dsa, token_nonce);
+        let attacker_ml_dsa = MlDsaIdentity::from_seed(rand::random());
+        let canonical = operator_token_canonical_bytes(
+            &token.operator_id,
+            token.role,
+            token.issued_at,
+            token.expires_at,
+            &token_nonce,
+        );
+        token.ml_dsa_signature_hex = hex::encode(attacker_ml_dsa.sign(&canonical));
 
         let err = verify_token(&identity, &token).unwrap_err();
         assert!(matches!(err, EvidenceError::SignatureInvalid(_)));
@@ -422,28 +506,14 @@ mod tests {
 
     #[test]
     fn verify_token_rejects_a_tampered_field() {
-        let (host, http_auth) = daemon_and_http_auth();
-        let cert = certificate_for(&host, &http_auth);
+        let (host, http_auth, http_auth_ml_dsa) = daemon_and_http_auth();
+        let cert = certificate_for(&host, &http_auth, &http_auth_ml_dsa);
         let identity = verify_daemon_certificate(&cert).unwrap();
 
         let token_nonce = [9u8; 16];
-        let canonical = operator_token_canonical_bytes(
-            "alice",
-            xenia_operator_proto::OperatorRole::Admin,
-            1000,
-            2000,
-            &token_nonce,
-        );
-        let mut token = SignedTokenDto {
-            operator_id: "alice".to_string(),
-            role: xenia_operator_proto::OperatorRole::Admin,
-            issued_at: 1000,
-            expires_at: 2000,
-            token_nonce_hex: hex::encode(token_nonce),
-            signature_hex: hex::encode(http_auth.sign(&canonical).to_bytes()),
-        };
-        // Escalate the role after signing: the signature no longer covers
-        // this field's new value.
+        let mut token = signed_token(&http_auth, &http_auth_ml_dsa, token_nonce);
+        // Escalate the role after signing: neither signature covers this
+        // field's new value.
         token.role = xenia_operator_proto::OperatorRole::Viewer;
         let err = verify_token(&identity, &token).unwrap_err();
         assert!(matches!(err, EvidenceError::SignatureInvalid(_)));

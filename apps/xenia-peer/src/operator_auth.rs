@@ -26,7 +26,7 @@ use std::collections::HashMap;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 
-use xenia_handshake::{HandshakeManager, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN};
+use xenia_handshake::{HandshakeManager, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN, MlDsaIdentity};
 
 use crate::operator::{OperatorPolicy, OperatorRole};
 
@@ -259,16 +259,24 @@ impl OperatorToken {
     }
 }
 
-/// A token plus the daemon's signature over its canonical bytes.
+/// A token plus the daemon's signatures over its canonical bytes. Both
+/// Ed25519 (`signature`, from `daemon_key`) and ML-DSA-65
+/// (`ml_dsa_signature`, from the daemon's separate `daemon_ml_dsa`
+/// identity) are required -- no classical-only fallback, matching this
+/// project's hybrid posture everywhere else.
 #[derive(Debug, Clone)]
 pub(crate) struct SignedOperatorToken {
     pub(crate) token: OperatorToken,
     pub(crate) signature: [u8; 64],
+    pub(crate) ml_dsa_signature: [u8; ML_DSA_65_SIG_LEN],
 }
 
-/// Mint a signed token for an authenticated operator.
+/// Mint a signed token for an authenticated operator, signed by both
+/// `daemon_key` (Ed25519) and `daemon_ml_dsa` (ML-DSA-65) over the
+/// identical canonical bytes.
 pub(crate) fn issue_token(
     daemon_key: &SigningKey,
+    daemon_ml_dsa: &MlDsaIdentity,
     operator: &AuthenticatedOperator,
     now: u64,
     ttl_secs: u64,
@@ -281,19 +289,29 @@ pub(crate) fn issue_token(
         expires_at: now.saturating_add(ttl_secs),
         token_nonce,
     };
-    let signature = daemon_key.sign(&token.canonical_bytes()).to_bytes();
-    SignedOperatorToken { token, signature }
+    let bytes = token.canonical_bytes();
+    let signature = daemon_key.sign(&bytes).to_bytes();
+    let ml_dsa_signature = daemon_ml_dsa.sign(&bytes);
+    SignedOperatorToken {
+        token,
+        signature,
+        ml_dsa_signature,
+    }
 }
 
-/// Verify a token was signed by `daemon_pubkey` and has not expired. Returns
-/// the token (operator id + role) for the authorization check.
+/// Verify a token was signed by *both* `daemon_pubkey` (Ed25519) and
+/// `daemon_ml_dsa_pubkey` (ML-DSA-65), and has not expired. Returns the
+/// token (operator id + role) for the authorization check.
 pub(crate) fn verify_token(
     daemon_pubkey: &VerifyingKey,
+    daemon_ml_dsa_pubkey: &[u8; ML_DSA_65_PK_LEN],
     now: u64,
     signed: &SignedOperatorToken,
 ) -> Result<OperatorToken, AuthError> {
+    let bytes = signed.token.canonical_bytes();
     let sig = Signature::from_bytes(&signed.signature);
-    HandshakeManager::verify(daemon_pubkey, &signed.token.canonical_bytes(), &sig)
+    HandshakeManager::verify(daemon_pubkey, &bytes, &sig).map_err(|_| AuthError::InvalidToken)?;
+    MlDsaIdentity::verify(daemon_ml_dsa_pubkey, &bytes, &signed.ml_dsa_signature)
         .map_err(|_| AuthError::InvalidToken)?;
     if now > signed.token.expires_at {
         return Err(AuthError::InvalidToken);
@@ -303,11 +321,15 @@ pub(crate) fn verify_token(
 
 /// An operator's authenticated request to perform a consent action: their
 /// session token plus a per-action signature (over the action + session +
-/// token nonce) proving they, not just a token bearer, authorized it.
+/// token nonce) proving they, not just a token bearer, authorized it. Both
+/// algorithms are required, matching every other hybrid signature in this
+/// codebase (the daemon already has the operator's ML-DSA-65 public key on
+/// file from enrollment).
 pub(crate) struct AuthenticatedConsentAction {
     pub(crate) token: SignedOperatorToken,
     pub(crate) action: ConsentAction,
     pub(crate) action_signature: [u8; 64],
+    pub(crate) ml_dsa_action_signature: [u8; ML_DSA_65_SIG_LEN],
 }
 
 /// A consent action authorized to a specific operator, ready to apply + audit.
@@ -322,20 +344,22 @@ pub(crate) struct AuthorizedConsentAction {
 }
 
 /// Authorize a consent action, fail-closed at every step:
-/// 1. the token is daemon-signed and unexpired;
+/// 1. the token is daemon-signed (both algorithms) and unexpired;
 /// 2. the token's role permits the action;
 /// 3. the operator is *still* enrolled (a de-enrolled operator's token is
 ///    dead even if unexpired);
-/// 4. the per-action signature verifies against that operator's enrolled
-///    Ed25519 key over this exact action + session + token nonce.
+/// 4. the per-action signature verifies -- both algorithms -- against that
+///    operator's enrolled keys over this exact action + session + token
+///    nonce.
 pub(crate) fn authorize_consent_action(
     policy: &OperatorPolicy,
     daemon_pubkey: &VerifyingKey,
+    daemon_ml_dsa_pubkey: &[u8; ML_DSA_65_PK_LEN],
     now: u64,
     session_id: &[u8; 16],
     request: &AuthenticatedConsentAction,
 ) -> Result<AuthorizedConsentAction, AuthError> {
-    let token = verify_token(daemon_pubkey, now, &request.token)?;
+    let token = verify_token(daemon_pubkey, daemon_ml_dsa_pubkey, now, &request.token)?;
 
     if !crate::operator::role_permits(token.role, request.action.required_permission()) {
         return Err(AuthError::RoleNotPermitted);
@@ -351,6 +375,17 @@ pub(crate) fn authorize_consent_action(
     let sig = Signature::from_bytes(&request.action_signature);
     HandshakeManager::verify(&ed_vk, &transcript, &sig)
         .map_err(|_| AuthError::Ed25519VerifyFailed)?;
+    let operator_ml_dsa_pubkey: [u8; ML_DSA_65_PK_LEN] = operator
+        .ml_dsa_pubkey
+        .as_slice()
+        .try_into()
+        .map_err(|_| AuthError::MalformedKey)?;
+    MlDsaIdentity::verify(
+        &operator_ml_dsa_pubkey,
+        &transcript,
+        &request.ml_dsa_action_signature,
+    )
+    .map_err(|_| AuthError::MlDsaVerifyFailed)?;
 
     Ok(AuthorizedConsentAction {
         action: request.action,
@@ -375,10 +410,11 @@ pub(crate) fn authorize_consent_action(
 pub(crate) fn authorize_ledger_read(
     policy: &OperatorPolicy,
     daemon_pubkey: &VerifyingKey,
+    daemon_ml_dsa_pubkey: &[u8; ML_DSA_65_PK_LEN],
     now: u64,
     token: &SignedOperatorToken,
 ) -> Result<OperatorToken, AuthError> {
-    let token = verify_token(daemon_pubkey, now, token)?;
+    let token = verify_token(daemon_pubkey, daemon_ml_dsa_pubkey, now, token)?;
     if !crate::operator::role_permits(token.role, OperatorAction::ReadAudit) {
         return Err(AuthError::RoleNotPermitted);
     }
@@ -398,6 +434,7 @@ pub(crate) struct AuthenticatedRevocation {
     pub(crate) token: SignedOperatorToken,
     pub(crate) target_operator_id: String,
     pub(crate) action_signature: [u8; 64],
+    pub(crate) ml_dsa_action_signature: [u8; ML_DSA_65_SIG_LEN],
 }
 
 /// A revocation authorized to a specific admin operator, ready to apply + audit.
@@ -426,10 +463,11 @@ pub(crate) struct AuthorizedRevocation {
 pub(crate) fn authorize_operator_revocation(
     policy: &OperatorPolicy,
     daemon_pubkey: &VerifyingKey,
+    daemon_ml_dsa_pubkey: &[u8; ML_DSA_65_PK_LEN],
     now: u64,
     request: &AuthenticatedRevocation,
 ) -> Result<AuthorizedRevocation, AuthError> {
-    let token = verify_token(daemon_pubkey, now, &request.token)?;
+    let token = verify_token(daemon_pubkey, daemon_ml_dsa_pubkey, now, &request.token)?;
 
     // "Enroll or revoke an operator" is Admin-only.
     if !crate::operator::role_permits(token.role, OperatorAction::EnrollOperator) {
@@ -446,6 +484,17 @@ pub(crate) fn authorize_operator_revocation(
     let sig = Signature::from_bytes(&request.action_signature);
     HandshakeManager::verify(&ed_vk, &transcript, &sig)
         .map_err(|_| AuthError::Ed25519VerifyFailed)?;
+    let operator_ml_dsa_pubkey: [u8; ML_DSA_65_PK_LEN] = operator
+        .ml_dsa_pubkey
+        .as_slice()
+        .try_into()
+        .map_err(|_| AuthError::MalformedKey)?;
+    MlDsaIdentity::verify(
+        &operator_ml_dsa_pubkey,
+        &transcript,
+        &request.ml_dsa_action_signature,
+    )
+    .map_err(|_| AuthError::MlDsaVerifyFailed)?;
 
     Ok(AuthorizedRevocation {
         target_operator_id: request.target_operator_id.clone(),
@@ -604,57 +653,103 @@ mod tests {
         );
     }
 
+    /// A fresh daemon HTTP-auth identity for a test: an Ed25519 `SigningKey`
+    /// plus its *separate* ML-DSA-65 counterpart (see `daemon_ml_dsa`'s doc
+    /// comment on [`OperatorAuthState`] for why these are two keys, not one).
+    fn test_daemon() -> (SigningKey, MlDsaIdentity) {
+        (
+            SigningKey::generate(&mut rand::thread_rng()),
+            MlDsaIdentity::from_seed(rand::random()),
+        )
+    }
+
     #[test]
     fn token_round_trip_and_expiry() {
-        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let (daemon, daemon_ml_dsa) = test_daemon();
         let daemon_pk = daemon.verifying_key();
+        let daemon_ml_dsa_pk = daemon_ml_dsa.public_key_bytes();
         let operator = AuthenticatedOperator {
             operator_id: "op".to_string(),
             role: OperatorRole::Operator,
         };
-        let signed = issue_token(&daemon, &operator, 2000, TOKEN_TTL_SECS, [1u8; 16]);
+        let signed = issue_token(
+            &daemon,
+            &daemon_ml_dsa,
+            &operator,
+            2000,
+            TOKEN_TTL_SECS,
+            [1u8; 16],
+        );
 
         // Valid within TTL.
-        let token = verify_token(&daemon_pk, 2100, &signed).unwrap();
+        let token = verify_token(&daemon_pk, &daemon_ml_dsa_pk, 2100, &signed).unwrap();
         assert_eq!(token.operator_id, "op");
         assert_eq!(token.role, OperatorRole::Operator);
 
         // Expired.
         assert_eq!(
-            verify_token(&daemon_pk, 2000 + TOKEN_TTL_SECS + 1, &signed),
+            verify_token(
+                &daemon_pk,
+                &daemon_ml_dsa_pk,
+                2000 + TOKEN_TTL_SECS + 1,
+                &signed
+            ),
             Err(AuthError::InvalidToken)
         );
 
-        // Wrong daemon key.
+        // Wrong daemon Ed25519 key.
         let attacker = SigningKey::generate(&mut rand::thread_rng());
         assert_eq!(
-            verify_token(&attacker.verifying_key(), 2100, &signed),
+            verify_token(&attacker.verifying_key(), &daemon_ml_dsa_pk, 2100, &signed),
+            Err(AuthError::InvalidToken)
+        );
+
+        // Wrong daemon ML-DSA key.
+        let attacker_ml_dsa = MlDsaIdentity::from_seed(rand::random());
+        assert_eq!(
+            verify_token(
+                &daemon_pk,
+                &attacker_ml_dsa.public_key_bytes(),
+                2100,
+                &signed
+            ),
             Err(AuthError::InvalidToken)
         );
     }
 
     #[test]
     fn tampered_token_fields_fail_verification() {
-        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let (daemon, daemon_ml_dsa) = test_daemon();
         let daemon_pk = daemon.verifying_key();
+        let daemon_ml_dsa_pk = daemon_ml_dsa.public_key_bytes();
         let operator = AuthenticatedOperator {
             operator_id: "op".to_string(),
             role: OperatorRole::Viewer,
         };
-        let mut signed = issue_token(&daemon, &operator, 2000, TOKEN_TTL_SECS, [1u8; 16]);
+        let mut signed = issue_token(
+            &daemon,
+            &daemon_ml_dsa,
+            &operator,
+            2000,
+            TOKEN_TTL_SECS,
+            [1u8; 16],
+        );
         // Escalate the role in the token body: signature no longer matches.
         signed.token.role = OperatorRole::Admin;
         assert_eq!(
-            verify_token(&daemon_pk, 2100, &signed),
+            verify_token(&daemon_pk, &daemon_ml_dsa_pk, 2100, &signed),
             Err(AuthError::InvalidToken)
         );
     }
 
     /// Build an authenticated consent action: a token for `op` at `role`,
-    /// plus `op`'s Ed25519 signature over the action + session + token nonce.
+    /// plus `op`'s Ed25519 + ML-DSA-65 signatures over the action + session
+    /// + token nonce.
+    #[allow(clippy::too_many_arguments)]
     fn authed_action(
         op: &HandshakeManager,
         daemon: &SigningKey,
+        daemon_ml_dsa: &MlDsaIdentity,
         role: OperatorRole,
         session_id: &[u8; 16],
         action: ConsentAction,
@@ -664,13 +759,22 @@ mod tests {
             operator_id: "op".to_string(),
             role,
         };
-        let signed = issue_token(daemon, &authed, now, TOKEN_TTL_SECS, [5u8; 16]);
+        let signed = issue_token(
+            daemon,
+            daemon_ml_dsa,
+            &authed,
+            now,
+            TOKEN_TTL_SECS,
+            [5u8; 16],
+        );
         let transcript = consent_action_transcript(action, session_id, &signed.token.token_nonce);
         let action_signature = op.sign(&transcript).to_bytes();
+        let ml_dsa_action_signature = op.sign_ml_dsa(&transcript);
         AuthenticatedConsentAction {
             token: signed,
             action,
             action_signature,
+            ml_dsa_action_signature,
         }
     }
 
@@ -679,6 +783,7 @@ mod tests {
     fn authed_revocation(
         op: &HandshakeManager,
         daemon: &SigningKey,
+        daemon_ml_dsa: &MlDsaIdentity,
         role: OperatorRole,
         target: &str,
         now: u64,
@@ -687,24 +792,46 @@ mod tests {
             operator_id: "op".to_string(),
             role,
         };
-        let signed = issue_token(daemon, &authed, now, TOKEN_TTL_SECS, [9u8; 16]);
+        let signed = issue_token(
+            daemon,
+            daemon_ml_dsa,
+            &authed,
+            now,
+            TOKEN_TTL_SECS,
+            [9u8; 16],
+        );
         let transcript = revoke_operator_transcript(target, &signed.token.token_nonce);
         let action_signature = op.sign(&transcript).to_bytes();
+        let ml_dsa_action_signature = op.sign_ml_dsa(&transcript);
         AuthenticatedRevocation {
             token: signed,
             target_operator_id: target.to_string(),
             action_signature,
+            ml_dsa_action_signature,
         }
     }
 
     #[test]
     fn revocation_authorized_for_admin() {
         let op = HandshakeManager::new();
-        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let (daemon, daemon_ml_dsa) = test_daemon();
         let policy = policy_with(&op, OperatorRole::Admin);
-        let req = authed_revocation(&op, &daemon, OperatorRole::Admin, "mallory", 3000);
-        let authorized =
-            authorize_operator_revocation(&policy, &daemon.verifying_key(), 3010, &req).unwrap();
+        let req = authed_revocation(
+            &op,
+            &daemon,
+            &daemon_ml_dsa,
+            OperatorRole::Admin,
+            "mallory",
+            3000,
+        );
+        let authorized = authorize_operator_revocation(
+            &policy,
+            &daemon.verifying_key(),
+            &daemon_ml_dsa.public_key_bytes(),
+            3010,
+            &req,
+        )
+        .unwrap();
         assert_eq!(authorized.target_operator_id, "mallory");
         assert_eq!(authorized.operator_id, "op");
     }
@@ -712,13 +839,26 @@ mod tests {
     #[test]
     fn revocation_denied_for_non_admin() {
         let op = HandshakeManager::new();
-        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let (daemon, daemon_ml_dsa) = test_daemon();
         // Approver is below Admin; even an honestly-issued Approver token can't
         // revoke an operator.
         let policy = policy_with(&op, OperatorRole::Approver);
-        let req = authed_revocation(&op, &daemon, OperatorRole::Approver, "mallory", 3000);
+        let req = authed_revocation(
+            &op,
+            &daemon,
+            &daemon_ml_dsa,
+            OperatorRole::Approver,
+            "mallory",
+            3000,
+        );
         assert_eq!(
-            authorize_operator_revocation(&policy, &daemon.verifying_key(), 3010, &req),
+            authorize_operator_revocation(
+                &policy,
+                &daemon.verifying_key(),
+                &daemon_ml_dsa.public_key_bytes(),
+                3010,
+                &req
+            ),
             Err(AuthError::RoleNotPermitted)
         );
     }
@@ -726,14 +866,27 @@ mod tests {
     #[test]
     fn revocation_signature_bound_to_target() {
         let op = HandshakeManager::new();
-        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let (daemon, daemon_ml_dsa) = test_daemon();
         let policy = policy_with(&op, OperatorRole::Admin);
         // Signature is over "mallory"; swap the target to "alice" → the per-action
         // signature no longer verifies (can't be replayed for a different target).
-        let mut req = authed_revocation(&op, &daemon, OperatorRole::Admin, "mallory", 3000);
+        let mut req = authed_revocation(
+            &op,
+            &daemon,
+            &daemon_ml_dsa,
+            OperatorRole::Admin,
+            "mallory",
+            3000,
+        );
         req.target_operator_id = "alice".to_string();
         assert_eq!(
-            authorize_operator_revocation(&policy, &daemon.verifying_key(), 3010, &req),
+            authorize_operator_revocation(
+                &policy,
+                &daemon.verifying_key(),
+                &daemon_ml_dsa.public_key_bytes(),
+                3010,
+                &req
+            ),
             Err(AuthError::Ed25519VerifyFailed)
         );
     }
@@ -741,14 +894,22 @@ mod tests {
     #[test]
     fn revocation_rejected_for_expired_token() {
         let op = HandshakeManager::new();
-        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let (daemon, daemon_ml_dsa) = test_daemon();
         let policy = policy_with(&op, OperatorRole::Admin);
-        let req = authed_revocation(&op, &daemon, OperatorRole::Admin, "mallory", 3000);
+        let req = authed_revocation(
+            &op,
+            &daemon,
+            &daemon_ml_dsa,
+            OperatorRole::Admin,
+            "mallory",
+            3000,
+        );
         // now is past the token's expiry.
         assert_eq!(
             authorize_operator_revocation(
                 &policy,
                 &daemon.verifying_key(),
+                &daemon_ml_dsa.public_key_bytes(),
                 3000 + TOKEN_TTL_SECS + 1,
                 &req
             ),
@@ -759,20 +920,27 @@ mod tests {
     #[test]
     fn consent_action_authorized_for_permitted_role() {
         let op = HandshakeManager::new();
-        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let (daemon, daemon_ml_dsa) = test_daemon();
         let policy = policy_with(&op, OperatorRole::Approver);
         let session = [7u8; 16];
         let req = authed_action(
             &op,
             &daemon,
+            &daemon_ml_dsa,
             OperatorRole::Approver,
             &session,
             ConsentAction::Approve,
             3000,
         );
-        let authorized =
-            authorize_consent_action(&policy, &daemon.verifying_key(), 3010, &session, &req)
-                .unwrap();
+        let authorized = authorize_consent_action(
+            &policy,
+            &daemon.verifying_key(),
+            &daemon_ml_dsa.public_key_bytes(),
+            3010,
+            &session,
+            &req,
+        )
+        .unwrap();
         assert_eq!(authorized.action, ConsentAction::Approve);
         assert_eq!(authorized.operator_id, "op");
         assert_eq!(authorized.role, OperatorRole::Approver);
@@ -781,7 +949,7 @@ mod tests {
     #[test]
     fn consent_action_denied_for_insufficient_role() {
         let op = HandshakeManager::new();
-        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let (daemon, daemon_ml_dsa) = test_daemon();
         let policy = policy_with(&op, OperatorRole::Viewer);
         let session = [7u8; 16];
         // A Viewer-role token can't approve. (The token is honestly issued at
@@ -789,13 +957,21 @@ mod tests {
         let req = authed_action(
             &op,
             &daemon,
+            &daemon_ml_dsa,
             OperatorRole::Viewer,
             &session,
             ConsentAction::Approve,
             3000,
         );
         assert_eq!(
-            authorize_consent_action(&policy, &daemon.verifying_key(), 3010, &session, &req),
+            authorize_consent_action(
+                &policy,
+                &daemon.verifying_key(),
+                &daemon_ml_dsa.public_key_bytes(),
+                3010,
+                &session,
+                &req
+            ),
             Err(AuthError::RoleNotPermitted)
         );
     }
@@ -803,20 +979,28 @@ mod tests {
     #[test]
     fn consent_action_signature_bound_to_session() {
         let op = HandshakeManager::new();
-        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let (daemon, daemon_ml_dsa) = test_daemon();
         let policy = policy_with(&op, OperatorRole::Admin);
         // Signed for one session, presented against another: the per-action
         // signature no longer verifies (replay across sessions is refused).
         let req = authed_action(
             &op,
             &daemon,
+            &daemon_ml_dsa,
             OperatorRole::Admin,
             &[1u8; 16],
             ConsentAction::Revoke,
             3000,
         );
         assert_eq!(
-            authorize_consent_action(&policy, &daemon.verifying_key(), 3010, &[2u8; 16], &req),
+            authorize_consent_action(
+                &policy,
+                &daemon.verifying_key(),
+                &daemon_ml_dsa.public_key_bytes(),
+                3010,
+                &[2u8; 16],
+                &req
+            ),
             Err(AuthError::Ed25519VerifyFailed)
         );
     }
@@ -824,20 +1008,28 @@ mod tests {
     #[test]
     fn consent_action_rejected_after_operator_de_enrolled() {
         let op = HandshakeManager::new();
-        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let (daemon, daemon_ml_dsa) = test_daemon();
         // Empty policy: the operator was de-enrolled after the token was issued.
         let policy = OperatorPolicy::default();
         let session = [7u8; 16];
         let req = authed_action(
             &op,
             &daemon,
+            &daemon_ml_dsa,
             OperatorRole::Admin,
             &session,
             ConsentAction::Revoke,
             3000,
         );
         assert_eq!(
-            authorize_consent_action(&policy, &daemon.verifying_key(), 3010, &session, &req),
+            authorize_consent_action(
+                &policy,
+                &daemon.verifying_key(),
+                &daemon_ml_dsa.public_key_bytes(),
+                3010,
+                &session,
+                &req
+            ),
             Err(AuthError::NotEnrolled)
         );
     }

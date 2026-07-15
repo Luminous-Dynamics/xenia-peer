@@ -379,6 +379,18 @@ struct Args {
     #[arg(long, default_value = "host-identity.key")]
     host_identity_key_path: std::path::PathBuf,
 
+    /// HTTP-auth ML-DSA-65 signing key path (32-byte seed). Generated on
+    /// first run with owner-only (0600) permissions and reused thereafter.
+    /// Signs issued session tokens and challenge/consent-action/revoke
+    /// transcripts alongside `operator_key_path`'s Ed25519 signature -- a
+    /// *separate* key, not a second algorithm folded into
+    /// `operator_key_path` itself, since that key already has an
+    /// established, independently-used role (the consent ledger's signing
+    /// key) that hybridizing shouldn't disturb. See
+    /// `xenia_operator_proto::daemon_delegation_transcript`'s doc comment.
+    #[arg(long, default_value = "operator-http-ml-dsa.key")]
+    http_auth_ml_dsa_key_path: std::path::PathBuf,
+
     /// Operator enrollment file (JSON): the operators allowed to authenticate
     /// to this daemon's admin surface, each an Ed25519 + ML-DSA-65 public key
     /// bound to a role. When unset, the `/auth/*` endpoints still exist but no
@@ -1197,6 +1209,40 @@ fn load_or_create_signing_key(
     }
 }
 
+/// Load the HTTP-auth ML-DSA-65 seed from `path`, or generate and persist a
+/// fresh one on first use -- the ML-DSA counterpart to
+/// [`load_or_create_signing_key`]'s Ed25519 key, but a genuinely separate
+/// key rather than a second algorithm for the same one (see
+/// `Args::http_auth_ml_dsa_key_path`'s doc comment). A 32-byte seed (FIPS-204
+/// ξ), not the full `xenia_handshake::MlDsaIdentity` -- reconstructed via
+/// [`xenia_handshake::MlDsaIdentity::from_seed`] at each call site.
+fn load_or_create_ml_dsa_seed(
+    path: &std::path::Path,
+) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    fn restrict_permissions(path: &std::path::Path) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(not(unix))]
+    fn restrict_permissions(_path: &std::path::Path) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    if path.exists() {
+        let bytes = std::fs::read(path)?;
+        restrict_permissions(path)?;
+        bytes
+            .try_into()
+            .map_err(|_| "Invalid ML-DSA seed length".into())
+    } else {
+        let seed: [u8; 32] = rand::random();
+        std::fs::write(path, seed)?;
+        restrict_permissions(path)?;
+        Ok(seed)
+    }
+}
+
 /// Load the host's persistent signing identity from `path`, or generate and
 /// persist a fresh one (0600) on first use. The file is a 64-byte blob:
 /// 32-byte Ed25519 secret followed by a 32-byte ML-DSA-65 seed. Reconstructed
@@ -1352,6 +1398,7 @@ fn decode_consent_decision(
     match crate::operator_auth::authorize_consent_action(
         &auth_state.policy,
         &auth_state.daemon_key.verifying_key(),
+        &auth_state.daemon_ml_dsa.public_key_bytes(),
         now,
         session_id,
         &request,
@@ -1757,15 +1804,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The host identity is loaded again here (idempotent -- reads the
     // already-persisted file the same way the sealed-channel setup below
     // does) solely to build `daemon_certificate`: the host identity's
-    // delegation of trust to `signing_key` (the *separate* key that signs
-    // HTTP auth tokens/challenges), so a caller with no live connection to
-    // this daemon -- the operator agent -- can verify that delegation
-    // itself rather than trust a caller-supplied daemon identity. See
+    // delegation of trust to `signing_key`/`http_auth_ml_dsa` (the
+    // *separate* keys that sign HTTP auth tokens/challenges/consent-action/
+    // revoke transcripts), so a caller with no live connection to this
+    // daemon -- the operator agent -- can verify that delegation itself
+    // rather than trust a caller-supplied daemon identity. See
     // `DaemonIdentityCertificate`'s doc comment in `xenia_operator_proto`.
     let operator_auth_host_identity = load_or_create_host_identity(&args.host_identity_key_path)?;
+    let http_auth_ml_dsa_seed = load_or_create_ml_dsa_seed(&args.http_auth_ml_dsa_key_path)?;
+    let http_auth_ml_dsa = xenia_handshake::MlDsaIdentity::from_seed(http_auth_ml_dsa_seed);
     let operator_auth_state = Arc::new(crate::operator_http::OperatorAuthState::new(
         operator_policy,
         signing_key.clone(),
+        http_auth_ml_dsa,
         operator_auth_host_identity,
         crate::operator_auth::AUTH_RATE_MAX,
         crate::operator_auth::AUTH_RATE_WINDOW_SECS,

@@ -78,6 +78,7 @@ async fn operator_rbac_full_chain_smoke() {
     let state = Arc::new(OperatorAuthState::new(
         policy,
         daemon.clone(),
+        xenia_handshake::MlDsaIdentity::from_seed([0xAAu8; 32]),
         HandshakeManager::new(),
         AUTH_RATE_MAX,
         AUTH_RATE_WINDOW_SECS,
@@ -131,6 +132,7 @@ async fn operator_rbac_full_chain_smoke() {
         "token": token,
         "action": "Approve",
         "action_signature": hex::encode(op.sign(&action_transcript).to_bytes()),
+        "ml_dsa_action_signature": hex::encode(op.sign_ml_dsa(&action_transcript)),
     })
     .to_string();
 
