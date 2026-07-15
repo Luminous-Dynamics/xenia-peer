@@ -197,6 +197,9 @@ pub(crate) struct SealedConsentDeps {
     pub(crate) session_id: [u8; 16],
     pub(crate) session_uuid: uuid::Uuid,
     pub(crate) ledger: std::sync::Arc<tokio::sync::Mutex<xenia_ledger::Chain>>,
+    /// Durable path `ledger`'s entries are atomically persisted to on every
+    /// authenticated append -- see `consent_server::apply_consent_decision`.
+    pub(crate) ledger_path: std::sync::Arc<std::path::PathBuf>,
     pub(crate) revoked: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Live operator revocation list. Consulted after the handshake authenticates
     /// the peer, so a compromised operator is refused without a daemon restart.
@@ -368,6 +371,7 @@ pub(crate) async fn serve_sealed_operator_channel<T: Transport>(
                     grant_tx,
                     &deps.revoked,
                     &deps.ledger,
+                    &deps.ledger_path,
                     deps.session_uuid,
                 )
                 .await
@@ -548,6 +552,9 @@ mod tests {
                 session_id: [0x5a; 16],
                 session_uuid: Uuid::from_u128(3),
                 ledger,
+                ledger_path: std::sync::Arc::new(
+                    std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+                ),
                 revoked: revoked_daemon,
                 revocations: crate::operator_revocations::OperatorRevocations::empty(),
                 rekey_interval: None,
@@ -632,6 +639,9 @@ mod tests {
             session_id: [0x33; 16],
             session_uuid: Uuid::from_u128(21),
             ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
+            ledger_path: std::sync::Arc::new(
+                std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+            ),
             revoked: revoked.clone(),
             revocations: crate::operator_revocations::OperatorRevocations::empty(),
             rekey_interval: None,
@@ -723,6 +733,9 @@ mod tests {
             session_id: [0x44; 16],
             session_uuid: Uuid::from_u128(41),
             ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
+            ledger_path: std::sync::Arc::new(
+                std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+            ),
             revoked: revoked.clone(),
             revocations: crate::operator_revocations::OperatorRevocations::empty(),
             // Short enough that the test doesn't need to wait long, long
@@ -866,6 +879,9 @@ mod tests {
             session_id: [0x55; 16],
             session_uuid: Uuid::from_u128(51),
             ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
+            ledger_path: std::sync::Arc::new(
+                std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+            ),
             revoked: revoked.clone(),
             revocations: crate::operator_revocations::OperatorRevocations::empty(),
             rekey_interval: None,
@@ -974,6 +990,9 @@ mod tests {
             session_id: [0x56; 16],
             session_uuid: Uuid::from_u128(61),
             ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
+            ledger_path: std::sync::Arc::new(
+                std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+            ),
             revoked: Arc::new(AtomicBool::new(false)),
             revocations: crate::operator_revocations::OperatorRevocations::empty(),
             rekey_interval: None,
@@ -1077,6 +1096,9 @@ mod tests {
             session_id: [0x71; 16],
             session_uuid: Uuid::from_u128(71),
             ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
+            ledger_path: std::sync::Arc::new(
+                std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+            ),
             revoked: Arc::new(AtomicBool::new(false)),
             revocations: crate::operator_revocations::OperatorRevocations::empty(),
             rekey_interval: None,
@@ -1162,6 +1184,9 @@ mod tests {
                 session_id: [0x77; 16],
                 session_uuid: Uuid::from_u128(31),
                 ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
+                ledger_path: std::sync::Arc::new(
+                    std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+                ),
                 revoked: Arc::new(AtomicBool::new(false)),
                 revocations,
                 rekey_interval: None,
