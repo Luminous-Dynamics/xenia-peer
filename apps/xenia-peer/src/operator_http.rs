@@ -19,25 +19,25 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
+    Json, Router,
     extract::State,
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     response::Response,
     routing::{get, post},
-    Json, Router,
 };
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use xenia_handshake::{HandshakeManager, MlDsaIdentity, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN};
+use xenia_handshake::{HandshakeManager, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN, MlDsaIdentity};
 use xenia_ledger::{Chain, LedgerCheckpoint, LedgerEntry};
-use xenia_operator_proto::{challenge_host_attestation_transcript, DaemonIdentityCertificate};
+use xenia_operator_proto::{DaemonIdentityCertificate, challenge_host_attestation_transcript};
 
 use crate::operator::{OperatorPolicy, OperatorRole};
 use crate::operator_auth::{
-    issue_token, verify_challenge_response, AuthenticatedConsentAction, AuthenticatedRevocation,
-    ChallengeResponse, ChallengeStore, ConsentAction, OperatorToken, RateLimiter,
-    SignedOperatorToken, CHALLENGE_TTL_SECS, TOKEN_TTL_SECS,
+    AuthenticatedConsentAction, AuthenticatedRevocation, CHALLENGE_TTL_SECS, ChallengeResponse,
+    ChallengeStore, ConsentAction, OperatorToken, RateLimiter, SignedOperatorToken, TOKEN_TTL_SECS,
+    issue_token, verify_challenge_response,
 };
 use crate::operator_revocations::OperatorRevocations;
 
@@ -910,13 +910,15 @@ mod tests {
             signature: decode_fixed(&token.signature).unwrap(),
             ml_dsa_signature: decode_fixed(&token.ml_dsa_signature).unwrap(),
         };
-        assert!(verify_token(
-            &daemon_pk,
-            &test_daemon_ml_dsa().public_key_bytes(),
-            token.issued_at + 1,
-            &signed
-        )
-        .is_ok());
+        assert!(
+            verify_token(
+                &daemon_pk,
+                &test_daemon_ml_dsa().public_key_bytes(),
+                token.issued_at + 1,
+                &signed
+            )
+            .is_ok()
+        );
     }
 
     #[tokio::test]
