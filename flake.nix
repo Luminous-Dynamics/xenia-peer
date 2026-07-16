@@ -63,6 +63,17 @@
           trunk
           wasm-bindgen-cli
           binaryen
+          # nixpkgs' rustc/cargo derivation sets
+          # CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_LINKER=lld via its own
+          # setup hook (not something this flake or the repo configures),
+          # so any wasm32 build under this flake's shells needs a real
+          # `lld` binary on PATH regardless of whether the host machine
+          # happens to have one system-wide. Found live: this worked on
+          # a NixOS dev machine with system-wide lld/mold, then failed in
+          # GitHub Actions (a bare ubuntu-latest runner) with
+          # "error: linker `lld` not found" the first time `trunk build`
+          # actually ran there.
+          lld
         ];
 
         # Item 6 (docs/security/POST_DELEGATION_HARDENING_PLAN.md): the
