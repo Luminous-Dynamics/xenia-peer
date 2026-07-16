@@ -23,7 +23,7 @@ credible pre-production system.
 4. **Replace the persistent pairing token with short-lived agent sessions.** ✅ done
 5. **Resolve the hybrid-versus-classical HTTP authorization profile.** ✅ done
 6. **Add the full headless-browser vertical slice.**
-7. **Zeroization, serialization migration, and fuzzing.**
+7. **Zeroization, serialization migration, and fuzzing.** Mostly done (bincode migration deliberately deferred)
 8. **Packaging, recovery, and independent audit.**
 9. **Durable, verified consent-ledger persistence.** ✅ done
 
@@ -365,6 +365,92 @@ on a workstation).
   request type.
 - Agent state in a dedicated `0700` directory.
 - Descriptor-relative/no-follow filesystem access + parent-directory checks.
+
+**Mostly done** -- 4 of the 5 bullets above. Landed across two `xenia-wire`
+PRs plus one `xenia-peer` PR, deliberately *not* including the bincode
+migration (see below).
+
+- **Zeroize** (`xenia-wire` PR #15): `PendingState` (`handshake.rs`) and
+  `ViewerPendingState`/`HostPendingState` (`handshake_highsec.rs`) held the
+  handshake's raw derived `root_key` -- the actual shared secret feeding
+  `SessionKeySchedule::derive` -- as a plain `[u8; 32]` with no
+  `Drop`/`Zeroize` at all. Added `#[derive(Zeroize, ZeroizeOnDrop)]` to all
+  three (`host_verifying_key`/`kem_dk` skipped: the former is a public key
+  and `ed25519_dalek::VerifyingKey` doesn't implement `Zeroize` anyway; the
+  latter, `ml_kem::DecapsulationKey`, already has its own zeroizing `Drop`
+  via this crate's existing `ml-kem` "zeroize" feature, which still fires
+  automatically as a normal field drop even when skipped from the derive).
+  Separately, `ml-dsa`'s own "zeroize" feature was never enabled in this
+  crate's `Cargo.toml`, so `MlDsaSigningKey<MlDsa65>`'s `Drop` impl -- which
+  exists unconditionally but only actually calls `.zeroize()` on the seed
+  when that feature is on -- was silently a no-op; one-line fix.
+  `ViewerHandshake`/`ViewerHandshakeHighSec` themselves needed no new `Drop`
+  impl once these two were closed. **Deliberately not touched**:
+  `SessionKeySchedule` derives `Copy` (identically on this crate's and the
+  native `xenia-handshake` mirror's side), and `Copy`+`Drop` cannot coexist
+  in Rust -- retrofitting it would mean dropping `Copy` on both
+  independently-mirrored copies, a real API-compat question for its own
+  future item, not bundled in here.
+- **Agent state hardening** (`xenia-peer` PR, `secure_file.rs`): two real
+  gaps closed. No dedicated state directory -- every `--xxx-path` flag
+  defaulted to a bare CWD-relative filename, and `create_dir_all` left
+  parent directories at whatever the ambient umask gave (typically `0755`,
+  world-listable); defaults now point inside a new
+  `xenia-operator-agent-state/` directory, created and re-verified `0700`
+  on every access. TOCTOU between the symlink/ownership check and the
+  actual open, and no check on the parent directory itself (only the final
+  file) -- `check_existing_file_is_safe` called `symlink_metadata`, then a
+  *separate* `fs::read` that could follow a symlink swapped in between the
+  two calls. Rewrote the module around rustix's safe (no `unsafe` code, per
+  this workspace's `deny(unsafe_code)` lint) `openat`/`fstat`/`renameat`:
+  the parent directory is opened `O_NOFOLLOW` and `fstat`-verified once,
+  and every file open thereafter is descriptor-relative to that verified
+  directory and also `O_NOFOLLOW` -- closing the race (the safety check and
+  the open are now the same syscall) and rejecting an attacker-controlled
+  parent directory, not just an attacker-swapped leaf file. Public API
+  unchanged; non-unix fallback keeps the old simpler behavior (this
+  hardening is POSIX-permission-bit specific). 94 tests pass (9 new).
+- **Fuzzing** (`xenia-wire` PR #16 + new `xenia-peer` `fuzz/`): `xenia-wire`
+  already had a real cargo-fuzz harness, but none of its 5 targets exercised
+  the `handshake`/`operator-rekey` features. Added `fuzz_handshake_begin`,
+  `fuzz_handshake_highsec_begin` (`ViewerHandshake`/`ViewerHandshakeHighSec`
+  `::begin()` -- the real network-facing entry point for a `HostHello`
+  envelope, reached before any authentication), and `fuzz_operator_rekey`
+  (`OperatorRekeyMessage::decode()`). `xenia-peer` had *zero* fuzz
+  infrastructure; bootstrapped a new `fuzz/` (same shape, not a member of
+  the root workspace since it uses an explicit `members` list rather than a
+  glob) with `fuzz_agent_request` (the union of `/v1/*` request DTOs via
+  `serde_json`) and `fuzz_evidence_verify` (JSON-decodes a
+  `DaemonIdentityCertificate`, then reruns `daemon_evidence::verify_daemon_certificate`'s
+  hex-decode + dual-signature-verify + fingerprint steps using the same
+  public library primitives -- **not** a direct call to that function
+  itself, which lives in a binary-only crate with no library target and so
+  isn't reachable from an external fuzz crate; a real, disclosed gap, not
+  silently worked around). `cargo-fuzz` itself isn't installed in the
+  environment this was developed in, so verification used a direct
+  `cargo +nightly build --bins` + standalone run rather than the full
+  `cargo fuzz run` wrapper -- all 5 new targets ran clean across millions
+  of executions combined, no crashes, though without sanitizer-coverage
+  instrumentation this is a random-input smoke test, not a true
+  coverage-guided campaign.
+- **Not done, deliberately**: migrating off bincode 1.3.3. Research
+  surfaced that this is *not* an active vulnerability -- `xenia-wire`'s own
+  CI already ignores RUSTSEC-2025-0141 with an explicit comment that it's
+  an unmaintained-crate flag, not an exploit, and that migration is
+  "tracked as a v1.0-blocker decision, not a CI-blocking vulnerability"
+  because `SPEC.md` §12.3 normatively specifies bincode v1's exact encoding
+  as the canonical wire format, and a third-party Node.js
+  conformance-verification suite (`test-vectors/conformance/`) would also
+  need its decoder updated to match any new format, on top of ~39 call
+  sites in `xenia-wire` alone, the native `xenia-peer-core`/`xenia-handshake`
+  mirrors, 12 test-vector files, and a formal draft-04 spec bump. A
+  deliberate, already-documented deferral, not an oversight -- left for its
+  own future item.
+- Also not done: rate limiting on agent endpoints (flagged since item 4);
+  log-scrubbing of key material; the daemon (`xenia-peer`) has its own,
+  separately-authored, scattered `0600`-file-permission code with the same
+  class of filesystem exposure this item closed on the agent side, noted
+  as a real, undone follow-up rather than silently expanded scope.
 
 ## 8. Packaging, recovery, audit
 
