@@ -42,7 +42,19 @@ import pexpect
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(os.environ["XENIA_E2E_ROOT"])
+# Binaries are spawned with cwd=<per-run temp work_dir>, not ROOT, so a
+# relative TARGET_DIR ("target", the default when CARGO_TARGET_DIR isn't
+# set) must be resolved against ROOT here, not left relative -- otherwise
+# it resolves against whatever cwd happens to be active at spawn time.
+# Found live: this worked locally only because this session's
+# CARGO_TARGET_DIR happens to always be an absolute path (a per-session
+# dev-environment convention, not something CI has); the first real CI
+# run failed with "No such file or directory: target/debug/xenia-operator-agent"
+# because there CARGO_TARGET_DIR is unset and the relative path resolved
+# against the wrong directory.
 TARGET_DIR = Path(os.environ.get("XENIA_E2E_TARGET_DIR", "target"))
+if not TARGET_DIR.is_absolute():
+    TARGET_DIR = ROOT / TARGET_DIR
 LOG_DIR = Path(os.environ["XENIA_E2E_LOG_DIR"])
 DIST_DIR = Path(os.environ["XENIA_E2E_DIST_DIR"])
 
