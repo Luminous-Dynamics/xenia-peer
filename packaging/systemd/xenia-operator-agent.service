@@ -1,0 +1,35 @@
+[Unit]
+Description=Xenia operator signing agent (native counterpart to the browser console)
+Documentation=https://github.com/Luminous-Dynamics/xenia-peer
+After=network.target
+
+[Service]
+Type=simple
+
+# `xenia-operator-agent` must be on PATH -- see xenia-peer.service's
+# comment for install options. No flags are required to start; the
+# sovereign-admin console must be configured to reach this agent's
+# `--port` (default 8180, loopback-only) for the signing-delegation flow
+# to work at all -- see docs/deploy/systemd-user-service.md.
+ExecStart=xenia-operator-agent
+
+# Mirrors xenia-peer.service: StateDirectory=/WorkingDirectory= puts the
+# agent's CWD at `%S/xenia-operator-agent`, so its own relative
+# `xenia-operator-agent-state/` default (already established before this
+# unit existed -- see apps/xenia-operator-agent/src/main.rs) nests one
+# level inside, same shape as the daemon's.
+StateDirectory=xenia-operator-agent
+WorkingDirectory=%S/xenia-operator-agent
+
+Restart=on-failure
+RestartSec=5
+
+# Hardening -- identical rationale to xenia-peer.service.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%S/xenia-operator-agent
+
+[Install]
+WantedBy=default.target

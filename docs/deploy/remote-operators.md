@@ -4,6 +4,10 @@ The **interim** transport-security layer for exposing the operator surface
 beyond loopback (see `docs/security/OPERATOR_RBAC_PLAN.md` → *Transport
 security* for why this is interim and what the destination is).
 
+For running the daemon and its signing agent as persistent, restart-on-failure
+background services in the first place (before worrying about exposing them
+beyond loopback), see `docs/deploy/systemd-user-service.md`.
+
 ## What you're securing, and what's already secure
 
 The operator surface is three endpoints on two daemon ports:

@@ -376,9 +376,12 @@ struct Args {
     #[arg(long, help_heading = "Pre-production fixtures")]
     m1_preprod_auto_consent: bool,
 
-    /// Operator signing key path. Smokes should point this at a temporary path
-    /// so runtime keys are not written into the repository root.
-    #[arg(long, default_value = "operator.key")]
+    /// Operator signing key path. Defaults into a dedicated `xenia-peer-state/`
+    /// subdirectory (created on first run), mirroring
+    /// `xenia-operator-agent`'s `xenia-operator-agent-state/` convention --
+    /// the predictable subdirectory a systemd `StateDirectory=` unit needs to
+    /// point at. Smokes should point this at a temporary path.
+    #[arg(long, default_value = "xenia-peer-state/operator.key")]
     operator_key_path: std::path::PathBuf,
 
     /// Live consent-ledger path (`shared_ledger`, backing `/v1/audit/*`).
@@ -388,14 +391,14 @@ struct Args {
     /// decision or operator-action audit event) is durably, atomically
     /// persisted here before the action that produced it is considered
     /// complete. Smokes should point this at a temporary path.
-    #[arg(long, default_value = "consent.ledger")]
+    #[arg(long, default_value = "xenia-peer-state/consent.ledger")]
     consent_ledger_path: std::path::PathBuf,
 
     /// M1 consent-ledger signing key path. Signs the consent grant/deny/revoke
     /// boundary events; generated on first run with owner-only (0600)
     /// permissions. Must be a real per-host secret -- a shared or well-known
     /// key lets anyone forge a fully-verifying consent transcript.
-    #[arg(long, default_value = "consent-ledger.key")]
+    #[arg(long, default_value = "xenia-peer-state/consent-ledger.key")]
     m1_consent_key_path: std::path::PathBuf,
 
     /// Host signing-identity path (Ed25519 secret + ML-DSA-65 seed, 64 bytes).
@@ -403,7 +406,7 @@ struct Args {
     /// thereafter, giving the host a stable identity a viewer can pin
     /// (trust-on-first-use). Its BLAKE3 fingerprint is logged at startup so
     /// an operator can share it out-of-band for verification.
-    #[arg(long, default_value = "host-identity.key")]
+    #[arg(long, default_value = "xenia-peer-state/host-identity.key")]
     host_identity_key_path: std::path::PathBuf,
 
     /// HTTP-auth ML-DSA-65 signing key path (32-byte seed). Generated on
@@ -415,7 +418,7 @@ struct Args {
     /// established, independently-used role (the consent ledger's signing
     /// key) that hybridizing shouldn't disturb. See
     /// `xenia_operator_proto::daemon_delegation_transcript`'s doc comment.
-    #[arg(long, default_value = "operator-http-ml-dsa.key")]
+    #[arg(long, default_value = "xenia-peer-state/operator-http-ml-dsa.key")]
     http_auth_ml_dsa_key_path: std::path::PathBuf,
 
     /// Operator enrollment file (JSON): the operators allowed to authenticate
@@ -1229,6 +1232,9 @@ fn load_or_create_signing_key(
         restrict_permissions(path)?;
         Ok(key)
     } else {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let key = SigningKey::generate(&mut rand::thread_rng());
         std::fs::write(path, key.to_bytes())?;
         restrict_permissions(path)?;
@@ -1263,6 +1269,9 @@ fn load_or_create_ml_dsa_seed(
             .try_into()
             .map_err(|_| "Invalid ML-DSA seed length".into())
     } else {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let seed: [u8; 32] = rand::random();
         std::fs::write(path, seed)?;
         restrict_permissions(path)?;
@@ -1296,6 +1305,9 @@ fn load_or_create_host_identity(
         }
         bytes
     } else {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let mut blob = Vec::with_capacity(64);
         blob.extend_from_slice(&rand::random::<[u8; 32]>());
         blob.extend_from_slice(&rand::random::<[u8; 32]>());
@@ -1341,6 +1353,9 @@ fn load_or_create_host_identity_highsec(
         }
         bytes
     } else {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let mut blob = Vec::with_capacity(64);
         blob.extend_from_slice(&rand::random::<[u8; 32]>());
         blob.extend_from_slice(&rand::random::<[u8; 32]>());
