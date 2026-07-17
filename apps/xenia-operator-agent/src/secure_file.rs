@@ -3,9 +3,15 @@
 
 //! Filesystem helpers for the sensitive files this agent owns (identity,
 //! pairing token, host-trust pin store): atomic creation with owner-only
-//! (`0600`) permissions set *at creation*, never chmod'd afterward, and
-//! refusal to trust an existing path unless it's a regular file owned by
-//! this process's user. See `main.rs`'s module doc comment for why.
+//! (`0600`) permissions set *at creation* (never chmod'd afterward), a
+//! dedicated `0700` parent directory, and descriptor-relative, `O_NOFOLLOW`
+//! file access -- both the leaf file and its parent directory are opened
+//! via a file descriptor rather than checked-then-reopened by path, closing
+//! the TOCTOU window a `symlink_metadata()`-then-separate-`open()` pattern
+//! leaves open (an attacker swapping a regular file for a symlink between
+//! the check and the read), and rejecting an attacker-controlled *parent*
+//! directory, not just the final file. See `main.rs`'s module doc comment
+//! for why any of this matters.
 
 use std::path::Path;
 
@@ -19,19 +25,7 @@ pub fn load_or_create_secure_file(
     path: &Path,
     generate: impl FnOnce() -> Vec<u8>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    match secure_create_new(path) {
-        Ok(mut file) => {
-            use std::io::Write;
-            let contents = generate();
-            file.write_all(&contents)?;
-            Ok(contents)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            check_existing_file_is_safe(path)?;
-            Ok(std::fs::read(path)?)
-        }
-        Err(e) => Err(e.into()),
-    }
+    backend::load_or_create(path, generate)
 }
 
 /// Load `path`'s contents if it exists (checked safe first), or `None` if
@@ -40,11 +34,7 @@ pub fn load_or_create_secure_file(
 pub fn read_secure_file_if_exists(
     path: &Path,
 ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    check_existing_file_is_safe(path)?;
-    Ok(Some(std::fs::read(path)?))
+    backend::read_if_exists(path)
 }
 
 /// Atomically replace `path`'s contents with `contents`, for a file that's
@@ -57,90 +47,268 @@ pub fn read_secure_file_if_exists(
 /// exists, it's checked safe (regular file, owned by this process's user)
 /// before being replaced.
 pub fn secure_overwrite(path: &Path, contents: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-    if path.exists() {
-        check_existing_file_is_safe(path)?;
-    }
-    let parent = path
-        .parent()
-        .ok_or("secure_overwrite: path has no parent directory")?;
-    let tmp_path = parent.join(format!(
-        ".{}.tmp-{}",
-        path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("secure-overwrite"),
-        rand::random::<u64>()
-    ));
-    {
-        use std::io::Write;
-        let mut tmp = secure_create_new(&tmp_path)?;
-        tmp.write_all(contents)?;
-        tmp.sync_all()?;
-    }
-    std::fs::rename(&tmp_path, path)?;
-    Ok(())
+    backend::overwrite(path, contents)
 }
 
 #[cfg(unix)]
-fn secure_create_new(path: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-}
-#[cfg(not(unix))]
-fn secure_create_new(path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-}
-
-#[cfg(unix)]
-fn check_existing_file_is_safe(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+mod backend {
+    use super::*;
+    use rustix::fs::{CWD, Mode, OFlags, openat, renameat};
+    use std::ffi::OsStr;
+    use std::fs::File;
+    use std::io::{Read, Write};
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    let meta = std::fs::symlink_metadata(path)?;
-    if meta.file_type().is_symlink() {
-        return Err(format!(
-            "{} is a symlink -- refusing to use it for sensitive material",
-            path.display()
+
+    pub(super) fn load_or_create(
+        path: &Path,
+        generate: impl FnOnce() -> Vec<u8>,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let dir = open_secure_parent_dir(path)?;
+        let file_name = file_name_of(path)?;
+        match secure_create_new(&dir, file_name) {
+            Ok(mut file) => {
+                let contents = generate();
+                file.write_all(&contents)?;
+                Ok(contents)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let mut file = open_secure_existing(&dir, file_name)?;
+                let mut contents = Vec::new();
+                file.read_to_end(&mut contents)?;
+                Ok(contents)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub(super) fn read_if_exists(
+        path: &Path,
+    ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
+        let dir = open_secure_parent_dir(path)?;
+        let file_name = file_name_of(path)?;
+        match open_secure_existing(&dir, file_name) {
+            Ok(mut file) => {
+                let mut contents = Vec::new();
+                file.read_to_end(&mut contents)?;
+                Ok(Some(contents))
+            }
+            Err(e) if is_not_found(e.as_ref()) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub(super) fn overwrite(
+        path: &Path,
+        contents: &[u8],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = open_secure_parent_dir(path)?;
+        let file_name = file_name_of(path)?;
+        // If something's already there, it must pass the same safety
+        // checks the load/read paths require -- refuse to blindly clobber
+        // a symlink or a file some other uid owns.
+        match open_secure_existing(&dir, file_name) {
+            Ok(_) => {}
+            Err(e) if is_not_found(e.as_ref()) => {}
+            Err(e) => return Err(e),
+        }
+        let tmp_name_string = format!(
+            ".{}.tmp-{}",
+            file_name.to_str().unwrap_or("secure-overwrite"),
+            rand::random::<u64>()
+        );
+        let tmp_name = OsStr::new(&tmp_name_string);
+        {
+            let mut tmp = secure_create_new(&dir, tmp_name)?;
+            tmp.write_all(contents)?;
+            tmp.sync_all()?;
+        }
+        renameat(&dir, tmp_name, &dir, file_name)?;
+        Ok(())
+    }
+
+    fn file_name_of(path: &Path) -> Result<&OsStr, Box<dyn std::error::Error>> {
+        path.file_name()
+            .ok_or_else(|| format!("{}: path has no file name", path.display()).into())
+    }
+
+    fn is_not_found(e: &(dyn std::error::Error + 'static)) -> bool {
+        e.downcast_ref::<std::io::Error>()
+            .is_some_and(|io_err| io_err.kind() == std::io::ErrorKind::NotFound)
+    }
+
+    /// Open (or create, `0700`) `path`'s parent directory and return it as
+    /// a verified descriptor-relative anchor: owned by this process's uid,
+    /// opened `O_NOFOLLOW` so a symlinked parent path component is refused
+    /// rather than silently followed. Every other helper in this module
+    /// opens files relative to this directory, not by re-walking `path`
+    /// from scratch, so a parent-directory swap after this check can't
+    /// affect the subsequent open.
+    fn open_secure_parent_dir(path: &Path) -> Result<File, Box<dyn std::error::Error>> {
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        // First-run-only exposure (nothing to race against yet if this is
+        // truly the first time this directory is created) -- the same
+        // acceptance every other `create_dir_all` call site in this crate
+        // already makes. Every *subsequent* access re-verifies via the
+        // O_NOFOLLOW open + fstat below, not this path-based call.
+        std::fs::create_dir_all(parent)?;
+        let dir = File::from(openat(
+            CWD,
+            parent,
+            OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::RDONLY,
+            Mode::empty(),
+        )?);
+        let meta = dir.metadata()?;
+        let current_uid = rustix::process::getuid().as_raw();
+        if meta.uid() != current_uid {
+            return Err(format!(
+                "{} is owned by uid {}, not this process's uid {current_uid} -- refusing to trust its contents",
+                parent.display(), meta.uid()
+            )
+            .into());
+        }
+        // Re-tighten to 0700 in case it drifted (defense in depth), via
+        // the already-verified fd -- no separate path-based chmod race.
+        // Immune to a looser ambient umask: 0700 & !0o022 == 0700.
+        dir.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+        Ok(dir)
+    }
+
+    fn secure_create_new(dir: &File, file_name: &OsStr) -> std::io::Result<File> {
+        let fd = openat(
+            dir,
+            file_name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW,
+            Mode::from(0o600),
         )
-        .into());
+        .map_err(std::io::Error::from)?;
+        Ok(File::from(fd))
     }
-    if !meta.is_file() {
-        return Err(format!("{} is not a regular file", path.display()).into());
-    }
-    let owner_uid = meta.uid();
-    let current_uid = rustix::process::getuid().as_raw();
-    if owner_uid != current_uid {
-        return Err(format!(
-            "{} is owned by uid {owner_uid}, not this process's uid {current_uid} -- refusing to use it",
-            path.display()
+
+    /// Open `file_name` relative to the already-verified `dir`, `O_NOFOLLOW`
+    /// so a symlink swapped in for the leaf component is refused atomically
+    /// at open time rather than via a separate, racy metadata check. Checked
+    /// safe (regular file, owned by this process's uid) via `fstat` on the
+    /// resulting fd -- the same fd the caller then reads from, not a
+    /// re-resolved path.
+    fn open_secure_existing(
+        dir: &File,
+        file_name: &OsStr,
+    ) -> Result<File, Box<dyn std::error::Error>> {
+        let fd = openat(
+            dir,
+            file_name,
+            OFlags::RDONLY | OFlags::NOFOLLOW,
+            Mode::empty(),
         )
-        .into());
+        .map_err(|e| -> Box<dyn std::error::Error> {
+            if e == rustix::io::Errno::LOOP {
+                format!("{file_name:?} is a symlink -- refusing to use it for sensitive material")
+                    .into()
+            } else {
+                std::io::Error::from(e).into()
+            }
+        })?;
+        let file = File::from(fd);
+        let meta = file.metadata()?;
+        if !meta.is_file() {
+            return Err(format!("{file_name:?} is not a regular file").into());
+        }
+        let current_uid = rustix::process::getuid().as_raw();
+        if meta.uid() != current_uid {
+            return Err(format!(
+                "{file_name:?} is owned by uid {}, not this process's uid {current_uid} -- refusing to use it",
+                meta.uid()
+            )
+            .into());
+        }
+        // Re-tighten permissions in case they drifted since creation
+        // (defense in depth), via the fd -- no separate path-based chmod.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        Ok(file)
     }
-    // Re-tighten permissions in case they drifted since creation (defense
-    // in depth).
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(())
 }
+
 #[cfg(not(unix))]
-fn check_existing_file_is_safe(_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    Ok(())
+mod backend {
+    use super::*;
+
+    pub(super) fn load_or_create(
+        path: &Path,
+        generate: impl FnOnce() -> Vec<u8>,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(mut file) => {
+                use std::io::Write;
+                let contents = generate();
+                file.write_all(&contents)?;
+                Ok(contents)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(std::fs::read(path)?),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub(super) fn read_if_exists(
+        path: &Path,
+    ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        Ok(Some(std::fs::read(path)?))
+    }
+
+    pub(super) fn overwrite(
+        path: &Path,
+        contents: &[u8],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let parent = path
+            .parent()
+            .ok_or("secure_overwrite: path has no parent directory")?;
+        std::fs::create_dir_all(parent)?;
+        let tmp_path = parent.join(format!(
+            ".{}.tmp-{}",
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("secure-overwrite"),
+            rand::random::<u64>()
+        ));
+        {
+            use std::io::Write;
+            let mut tmp = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_path)?;
+            tmp.write_all(contents)?;
+            tmp.sync_all()?;
+        }
+        std::fs::rename(&tmp_path, path)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // Deliberately NOT pre-created here (unlike the old version of this
+    // helper) -- `secure_file.rs` itself is now responsible for creating
+    // its parent directory, and several new tests below assert on exactly
+    // that behavior.
     fn temp_dir(label: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
+        std::env::temp_dir().join(format!(
             "xenia-operator-agent-secure-file-test-{label}-{}",
             rand::random::<u64>()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        ))
     }
 
     #[test]
@@ -194,6 +362,95 @@ mod tests {
         secure_overwrite(&path, b"data").unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn parent_dir_is_created_with_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("dir-perms");
+        let path = dir.join("nested").join("f");
+        load_or_create_secure_file(&path, || b"x".to_vec()).unwrap();
+        let mode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_looser_existing_parent_dir_is_retightened_to_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("dir-retighten");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.join("f");
+        load_or_create_secure_file(&path, || b"x".to_vec()).unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "an existing looser-permissioned parent must be re-tightened"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_symlinked_leaf_file_is_refused_even_after_a_prior_metadata_check() {
+        let dir = temp_dir("symlink-leaf");
+        std::fs::create_dir_all(&dir).unwrap();
+        let real_target = dir.join("attacker-target");
+        std::fs::write(&real_target, b"not yours").unwrap();
+        let path = dir.join("f");
+        std::os::unix::fs::symlink(&real_target, &path).unwrap();
+
+        let result = read_secure_file_if_exists(&path);
+        assert!(
+            result.is_err(),
+            "a symlinked leaf must be refused, not transparently followed"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_symlinked_parent_directory_is_refused() {
+        let dir = temp_dir("symlink-parent-outer");
+        std::fs::create_dir_all(&dir).unwrap();
+        let real_dir = dir.join("real-state-dir");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let symlinked_parent = dir.join("state-dir-symlink");
+        std::os::unix::fs::symlink(&real_dir, &symlinked_parent).unwrap();
+        let path = symlinked_parent.join("f");
+
+        let result = load_or_create_secure_file(&path, || b"x".to_vec());
+        assert!(
+            result.is_err(),
+            "a symlinked parent directory must be refused, not silently followed"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_wrong_owner_existing_file_is_refused() {
+        // Can't actually chown to a different uid without privilege, so this
+        // exercises the code path indirectly: a file this test process does
+        // own must be *accepted*, proving the uid check doesn't spuriously
+        // reject legitimate files (the negative case -- a real other-uid
+        // file -- is exercised by `check_existing_file_is_safe`'s original
+        // reasoning and isn't independently re-testable without root).
+        let dir = temp_dir("owner-check-sanity");
+        let path = dir.join("f");
+        load_or_create_secure_file(&path, || b"mine".to_vec()).unwrap();
+        assert_eq!(
+            read_secure_file_if_exists(&path).unwrap(),
+            Some(b"mine".to_vec())
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

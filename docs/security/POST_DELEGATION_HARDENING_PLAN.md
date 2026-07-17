@@ -22,9 +22,9 @@ credible pre-production system.
 3. **Remove the legacy HMAC ledger/admin path.** ✅ done
 4. **Replace the persistent pairing token with short-lived agent sessions.** ✅ done
 5. **Resolve the hybrid-versus-classical HTTP authorization profile.** ✅ done
-6. **Add the full headless-browser vertical slice.**
-7. **Zeroization, serialization migration, and fuzzing.**
-8. **Packaging, recovery, and independent audit.** Partly done -- agent audit log + health endpoints (packaging/backup/recovery deferred)
+6. **Add the full headless-browser vertical slice.** ✅ done
+7. **Zeroization, serialization migration, and fuzzing.** Mostly done (bincode migration deliberately deferred)
+8. **Packaging, recovery, and independent audit.** Partly done (agent audit logging, health endpoints, and operator-key recovery are done; systemd packaging, token/session auto-rotation, and backup remain deferred)
 9. **Durable, verified consent-ledger persistence.** ✅ done
 
 ## 1. Transactional native pin storage
@@ -356,6 +356,101 @@ test capture/input backend. It must prove:
 Playwright, installed reproducibly through Nix (not whatever happens to be
 on a workstation).
 
+**Done.**
+
+- New `devShells.e2e` / `apps.e2e` in `flake.nix`: `playwright-driver.browsers`
+  (pre-fetched, `autoPatchelfHook`-patched Chromium -- avoids needing a
+  `buildFHSEnv` wrapper) + `python3Packages.playwright` + `pexpect`, the
+  latter required because `xenia-operator-agent`'s native confirmation
+  prompt (`host_trust::confirm()`) checks `is_terminal()` on stdin/stdout
+  and fails closed on a plain piped subprocess -- the agent has to be
+  spawned attached to a real pseudo-terminal.
+- New `scripts/xenia-e2e-vertical-slice.sh` (build orchestrator: the three
+  real binaries + `trunk build` for the console) and
+  `scripts/e2e/vertical_slice.py` (the actual driver -- one sequential,
+  causally-ordered scenario across seven stages, not 13 independent
+  tests, since the steps depend on each other). Real processes throughout:
+  `xenia-peer`, `xenia-operator-agent` (under pexpect), `xenia-viewer`,
+  and the Trunk-built `sovereign-admin` console driven by a real headless
+  Chromium via Playwright. All 13 numbered properties above are exercised
+  and asserted on, most via log-grep against the real daemon/agent/viewer
+  output (matching `scripts/xenia-audio-e2e-smoke.sh`'s established
+  convention) plus DOM assertions and a `localStorage` dump for property
+  13. New `--send-synthetic-input` / `--send-synthetic-input-after-frames`
+  flags on `xenia-viewer` make property 8 (input gating) testable
+  headlessly -- real captured input requires a real GUI window
+  (`--gui` + a compositor), so these send one real
+  `xenia_inject::InputEvent` through the exact same seal + send path the
+  GUI capture path uses, timed relative to frame receipt (before vs.
+  after consent) the same way `--play-audio synthetic` already supplies
+  audio without a real microphone.
+- New `e2e:` job in `.github/workflows/xenia-validate.yml`, landed in this
+  same change (not deferred) -- runs the full vertical slice under
+  `nix develop .#e2e` on every PR, with an `actions/cache` for the cargo
+  registry/target dir (a from-scratch compile is otherwise the long pole:
+  the pinned nixpkgs rustc differs from most workstations' ambient
+  toolchain, so this is genuinely a cold build the first time any given
+  cache key is seen) and a failure-diagnostics artifact upload.
+- **Real, previously-undiscovered bugs found and fixed** -- this is the
+  first time this console had ever actually been driven by a real
+  browser against a real daemon; every one of these had compiled clean
+  and passed every existing unit/integration test, because none of them
+  exercise an actual `fetch()`/`WebSocket` from an actual browser origin:
+  - **The daemon's admin HTTP router had no CORS handling at all.** The
+    console is always cross-origin from the daemon's admin port by
+    construction (fixed Trunk dev-serve port vs. an operator-configured
+    admin port), so every `fetch()` to `/auth/*` or `/v1/audit/*` failed
+    with a generic `TypeError: Failed to fetch` and no clearer signal.
+    `xenia-operator-agent` already had a working Origin-allowlist + CORS
+    pattern (`auth_and_cors_middleware`); added the daemon-side
+    equivalent (`operator_http::cors_middleware`) plus a new
+    `--allowed-origin` flag (same defaults as the agent's).
+  - **`ConsentModal`'s WebSocket connection opened once at component
+    mount and never reconnected.** The console fully supports changing
+    the daemon endpoint and clicking "Save & Reconnect" -- every other
+    part of the UI honors it -- but the consent-broadcast listener stayed
+    silently pointed at whatever endpoint was configured on first page
+    load, forever. Wrapped the connection logic in an `Effect::new`
+    tracking `config.endpoint`.
+  - **`identity_state` got permanently stuck on `Loading` after any
+    operator or DID sign-out, with no way back short of a full page
+    reload.** Both sign-out handlers reset it to `Loading` "to force a
+    refresh," but the effect that fetches it only depends on
+    `agent_config.agent_url`/`agent_config.agent_session`, not on
+    `identity_state` itself -- nothing ever re-triggered the fetch.
+    Removed both resets; the agent's already-fetched identity/enrollment
+    info doesn't actually go stale on sign-out, so nothing needed to be
+    dropped in the first place.
+  - **Daemon defaults to `--transport auto` (a QUIC-advertisement
+    discovery/probe exchange before falling back to TCP); a viewer
+    started with `--transport tcp` skips that and speaks the raw
+    handshake immediately.** The daemon then misreads those bytes as a
+    discovery probe, producing a real bincode deserialization error on
+    the viewer side and a `BrokenPipe` on the daemon side once the viewer
+    had already exited. `scripts/xenia-audio-e2e-smoke.sh` already avoids
+    this by passing `--transport` explicitly on both sides; the new e2e
+    harness now does too.
+  - Two Track-A/Track-B host-trust confirmation prompts this test
+    surfaced that weren't previously obvious from reading the design
+    docs alone: `/v1/sign/revoke` runs its own *separate*,
+    action-specific native confirmation (`confirm_action`) on top of
+    (not instead of) the ordinary host-identity check, and every
+    `enforce_host_trust` call is scoped by the caller's exact
+    `daemon_endpoint` string -- so Track A (HTTP admin port) and Track B
+    (sealed WS port) pin independently, and any daemon restart onto a
+    new port is a genuine first-use for whichever track's endpoint
+    changed, confirmation prompt and all.
+- Not done: property 9 ("rekey succeeds") is proven via the *viewer
+  session's* frame-encryption epoch rekey (the same mechanism
+  `xenia-audio-e2e-smoke.sh` already validates), not the *operator
+  channel's* own forward-secrecy rekey
+  (`--operator-rekey-interval-secs`). The latter has no browser-reachable
+  path yet: `sovereign-admin`'s sealed-channel driver
+  (`sealed_consent.rs`) is a one-shot connect/decide/close and never
+  calls the already-real, already-tested
+  `handle_operator_rekey_envelope` -- a genuine gap for a future
+  persistent-console mode, explicitly out of scope here.
+
 ## 7. Protocol and operational hardening (after the vertical slice)
 
 - `Zeroize`/`Drop` for `ViewerHandshake`/`ViewerHandshakeHighSec` so pending
@@ -365,6 +460,92 @@ on a workstation).
   request type.
 - Agent state in a dedicated `0700` directory.
 - Descriptor-relative/no-follow filesystem access + parent-directory checks.
+
+**Mostly done** -- 4 of the 5 bullets above. Landed across two `xenia-wire`
+PRs plus one `xenia-peer` PR, deliberately *not* including the bincode
+migration (see below).
+
+- **Zeroize** (`xenia-wire` PR #15): `PendingState` (`handshake.rs`) and
+  `ViewerPendingState`/`HostPendingState` (`handshake_highsec.rs`) held the
+  handshake's raw derived `root_key` -- the actual shared secret feeding
+  `SessionKeySchedule::derive` -- as a plain `[u8; 32]` with no
+  `Drop`/`Zeroize` at all. Added `#[derive(Zeroize, ZeroizeOnDrop)]` to all
+  three (`host_verifying_key`/`kem_dk` skipped: the former is a public key
+  and `ed25519_dalek::VerifyingKey` doesn't implement `Zeroize` anyway; the
+  latter, `ml_kem::DecapsulationKey`, already has its own zeroizing `Drop`
+  via this crate's existing `ml-kem` "zeroize" feature, which still fires
+  automatically as a normal field drop even when skipped from the derive).
+  Separately, `ml-dsa`'s own "zeroize" feature was never enabled in this
+  crate's `Cargo.toml`, so `MlDsaSigningKey<MlDsa65>`'s `Drop` impl -- which
+  exists unconditionally but only actually calls `.zeroize()` on the seed
+  when that feature is on -- was silently a no-op; one-line fix.
+  `ViewerHandshake`/`ViewerHandshakeHighSec` themselves needed no new `Drop`
+  impl once these two were closed. **Deliberately not touched**:
+  `SessionKeySchedule` derives `Copy` (identically on this crate's and the
+  native `xenia-handshake` mirror's side), and `Copy`+`Drop` cannot coexist
+  in Rust -- retrofitting it would mean dropping `Copy` on both
+  independently-mirrored copies, a real API-compat question for its own
+  future item, not bundled in here.
+- **Agent state hardening** (`xenia-peer` PR, `secure_file.rs`): two real
+  gaps closed. No dedicated state directory -- every `--xxx-path` flag
+  defaulted to a bare CWD-relative filename, and `create_dir_all` left
+  parent directories at whatever the ambient umask gave (typically `0755`,
+  world-listable); defaults now point inside a new
+  `xenia-operator-agent-state/` directory, created and re-verified `0700`
+  on every access. TOCTOU between the symlink/ownership check and the
+  actual open, and no check on the parent directory itself (only the final
+  file) -- `check_existing_file_is_safe` called `symlink_metadata`, then a
+  *separate* `fs::read` that could follow a symlink swapped in between the
+  two calls. Rewrote the module around rustix's safe (no `unsafe` code, per
+  this workspace's `deny(unsafe_code)` lint) `openat`/`fstat`/`renameat`:
+  the parent directory is opened `O_NOFOLLOW` and `fstat`-verified once,
+  and every file open thereafter is descriptor-relative to that verified
+  directory and also `O_NOFOLLOW` -- closing the race (the safety check and
+  the open are now the same syscall) and rejecting an attacker-controlled
+  parent directory, not just an attacker-swapped leaf file. Public API
+  unchanged; non-unix fallback keeps the old simpler behavior (this
+  hardening is POSIX-permission-bit specific). 94 tests pass (9 new).
+- **Fuzzing** (`xenia-wire` PR #16 + new `xenia-peer` `fuzz/`): `xenia-wire`
+  already had a real cargo-fuzz harness, but none of its 5 targets exercised
+  the `handshake`/`operator-rekey` features. Added `fuzz_handshake_begin`,
+  `fuzz_handshake_highsec_begin` (`ViewerHandshake`/`ViewerHandshakeHighSec`
+  `::begin()` -- the real network-facing entry point for a `HostHello`
+  envelope, reached before any authentication), and `fuzz_operator_rekey`
+  (`OperatorRekeyMessage::decode()`). `xenia-peer` had *zero* fuzz
+  infrastructure; bootstrapped a new `fuzz/` (same shape, not a member of
+  the root workspace since it uses an explicit `members` list rather than a
+  glob) with `fuzz_agent_request` (the union of `/v1/*` request DTOs via
+  `serde_json`) and `fuzz_evidence_verify` (JSON-decodes a
+  `DaemonIdentityCertificate`, then reruns `daemon_evidence::verify_daemon_certificate`'s
+  hex-decode + dual-signature-verify + fingerprint steps using the same
+  public library primitives -- **not** a direct call to that function
+  itself, which lives in a binary-only crate with no library target and so
+  isn't reachable from an external fuzz crate; a real, disclosed gap, not
+  silently worked around). `cargo-fuzz` itself isn't installed in the
+  environment this was developed in, so verification used a direct
+  `cargo +nightly build --bins` + standalone run rather than the full
+  `cargo fuzz run` wrapper -- all 5 new targets ran clean across millions
+  of executions combined, no crashes, though without sanitizer-coverage
+  instrumentation this is a random-input smoke test, not a true
+  coverage-guided campaign.
+- **Not done, deliberately**: migrating off bincode 1.3.3. Research
+  surfaced that this is *not* an active vulnerability -- `xenia-wire`'s own
+  CI already ignores RUSTSEC-2025-0141 with an explicit comment that it's
+  an unmaintained-crate flag, not an exploit, and that migration is
+  "tracked as a v1.0-blocker decision, not a CI-blocking vulnerability"
+  because `SPEC.md` §12.3 normatively specifies bincode v1's exact encoding
+  as the canonical wire format, and a third-party Node.js
+  conformance-verification suite (`test-vectors/conformance/`) would also
+  need its decoder updated to match any new format, on top of ~39 call
+  sites in `xenia-wire` alone, the native `xenia-peer-core`/`xenia-handshake`
+  mirrors, 12 test-vector files, and a formal draft-04 spec bump. A
+  deliberate, already-documented deferral, not an oversight -- left for its
+  own future item.
+- Also not done: rate limiting on agent endpoints (flagged since item 4);
+  log-scrubbing of key material; the daemon (`xenia-peer`) has its own,
+  separately-authored, scattered `0600`-file-permission code with the same
+  class of filesystem exposure this item closed on the agent side, noted
+  as a real, undone follow-up rather than silently expanded scope.
 
 ## 8. Packaging, recovery, audit
 

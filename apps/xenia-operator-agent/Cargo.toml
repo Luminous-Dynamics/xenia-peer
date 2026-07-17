@@ -43,10 +43,13 @@ bincode = "1"
 serde-big-array = "0.5"
 
 [target.'cfg(unix)'.dependencies]
-# Only for a safe getuid() (no unsafe code, per workspace lints) --
+# `process`: safe getuid() (no unsafe code, per workspace lints) --
 # verifying an existing identity/token file is owned by this process's
-# user before trusting it.
-rustix = { version = "0.38", default-features = false, features = ["process", "std"] }
+# user before trusting it. `fs`: safe openat/fstat/mkdirat/renameat --
+# descriptor-relative, O_NOFOLLOW file access in `secure_file.rs`, closing
+# the TOCTOU window a metadata-check-then-separate-open pattern leaves
+# open, without any unsafe code.
+rustix = { version = "0.38", default-features = false, features = ["process", "std", "fs"] }
 
 [dev-dependencies]
 # `ServiceExt::oneshot` for driving the axum routes in tests without

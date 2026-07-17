@@ -144,15 +144,8 @@ fn AuthStatus() -> impl IntoView {
     let Ok(auth) = auth_context() else {
         return missing_context_view("AuthState").into_any();
     };
-    let identity_state = use_context::<OperatorIdentityCtx>();
     let sign_out = move |_| {
         auth.sign_out();
-        // Drop this page's fetched copy of the operator's public identity
-        // info out of the reactive graph on sign-out. Re-fetched from the
-        // agent on demand afterward.
-        if let Some(sig) = identity_state {
-            sig.set(OperatorIdentityState::Loading);
-        }
     };
     view! {
         <div class="auth-status">
@@ -251,6 +244,7 @@ fn OperatorAuthPanel() -> impl IntoView {
                             view! {
                                 <button
                                     class="operator-signin"
+                                    data-testid="operator-signin-button"
                                     prop:disabled=move || busy.get()
                                     on:click=sign_in
                                 >
@@ -263,17 +257,17 @@ fn OperatorAuthPanel() -> impl IntoView {
                                     <p class="operator-enroll-hint">
                                         "Add to the daemon's --operators-file (set operator_id + role):"
                                     </p>
-                                    <code class="operator-enroll-record">{record}</code>
+                                    <code class="operator-enroll-record" data-testid="operator-enrollment-record">{record}</code>
                                 </details>
                                 {move || error.get().map(|e| view! {
-                                    <span class="operator-error">{e}</span>
+                                    <span class="operator-error" data-testid="operator-auth-error">{e}</span>
                                 })}
                             }.into_any()
                         }
                     }}
                 }
             >
-                <span class="operator-role-chip">
+                <span class="operator-role-chip" data-testid="operator-role-chip">
                     {move || session.with(|s| {
                         s.as_ref().map(|s| format!("{} · {}", s.operator_id, s.role.as_str()))
                             .unwrap_or_default()
@@ -281,11 +275,22 @@ fn OperatorAuthPanel() -> impl IntoView {
                 </span>
                 <button
                     class="operator-signout"
+                    data-testid="operator-signout-button"
                     on:click=move |_| {
+                        // Only clears the RBAC session -- `identity_state`
+                        // (the agent's fingerprint + enrollment record) is
+                        // independent and still valid, so it's deliberately
+                        // left alone. It used to be reset to `Loading` here,
+                        // but nothing ever re-triggers the fetch that would
+                        // move it back out of that state (the effect that
+                        // fetches it only depends on `agent_url`/
+                        // `agent_session`, not on this signal) -- found live
+                        // running the real browser-driven vertical slice
+                        // (item 6): every operator sign-out permanently
+                        // stuck the panel on "Connecting to operator
+                        // agent…", with no way back in short of a full page
+                        // reload.
                         session.set(None);
-                        // Best-effort hygiene, matching AuthStatus's sign-out --
-                        // see that handler's comment.
-                        identity_state.set(OperatorIdentityState::Loading);
                     }
                 >
                     "End operator session"

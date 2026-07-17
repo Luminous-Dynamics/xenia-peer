@@ -209,6 +209,7 @@ pub fn SessionsPage() -> impl IntoView {
                             <label>"Daemon Endpoint"</label>
                             <input
                                 type="text"
+                                data-testid="daemon-endpoint-input"
                                 prop:value=move || config.endpoint.get()
                                 on:input=move |ev| config.endpoint.set(event_target_value(&ev))
                             />
@@ -217,6 +218,7 @@ pub fn SessionsPage() -> impl IntoView {
                             <label>"Consent Port"</label>
                             <input
                                 type="number"
+                                data-testid="daemon-consent-port-input"
                                 prop:value=move || config.consent_port.get().to_string()
                                 on:input=move |ev| {
                                     if let Ok(p) = event_target_value(&ev).parse::<u16>() {
@@ -229,6 +231,7 @@ pub fn SessionsPage() -> impl IntoView {
                             <label class="checkbox">
                                 <input
                                     type="checkbox"
+                                    data-testid="use-sealed-channel-checkbox"
                                     prop:checked=move || config.use_sealed_channel.get()
                                     on:change=move |ev| {
                                         config.use_sealed_channel.set(event_target_checked(&ev))
@@ -241,6 +244,7 @@ pub fn SessionsPage() -> impl IntoView {
                             <label>"Sealed Port"</label>
                             <input
                                 type="number"
+                                data-testid="daemon-sealed-port-input"
                                 prop:value=move || config.sealed_port.get().to_string()
                                 on:input=move |ev| {
                                     if let Ok(p) = event_target_value(&ev).parse::<u16>() {
@@ -253,6 +257,7 @@ pub fn SessionsPage() -> impl IntoView {
                             <label class="checkbox">
                                 <input
                                     type="checkbox"
+                                    data-testid="high-security-checkbox"
                                     prop:checked=move || config.high_security.get()
                                     on:change=move |ev| {
                                         config.high_security.set(event_target_checked(&ev))
@@ -262,7 +267,7 @@ pub fn SessionsPage() -> impl IntoView {
                                 "--operator-high-security too; the two suites don't interoperate"
                             </label>
                         </div>
-                        <button class="primary" on:click=move |_| config.save()>"Save & Reconnect"</button>
+                        <button class="primary" data-testid="save-reconnect-button" on:click=move |_| config.save()>"Save & Reconnect"</button>
                     </div>
                 </section>
 
@@ -282,6 +287,7 @@ pub fn SessionsPage() -> impl IntoView {
                             <label>"Agent URL"</label>
                             <input
                                 type="text"
+                                data-testid="agent-url-input"
                                 prop:value=move || agent_config.agent_url.get()
                                 on:input=move |ev| {
                                     agent_config.agent_url.set(event_target_value(&ev));
@@ -293,16 +299,17 @@ pub fn SessionsPage() -> impl IntoView {
                             <label>"Pairing Token"</label>
                             <input
                                 type="password"
+                                data-testid="pairing-token-input"
                                 prop:value=move || pairing_token_input.get()
                                 on:input=move |ev| set_pairing_token_input.set(event_target_value(&ev))
                             />
                         </div>
-                        <button class="primary" on:click=do_pair>
+                        <button class="primary" data-testid="pair-button" on:click=do_pair>
                             "Pair"
                         </button>
                     </div>
-                    <p class="prose">{move || pairing_status.get()}</p>
-                    <p class="prose">
+                    <p class="prose" data-testid="pairing-status">{move || pairing_status.get()}</p>
+                    <p class="prose" data-testid="agent-identity-status">
                         {move || match identity_state.get() {
                             OperatorIdentityState::Loading => "Connecting…".to_string(),
                             OperatorIdentityState::Ready { fingerprint_hex, .. } => {
@@ -337,10 +344,10 @@ pub fn SessionsPage() -> impl IntoView {
                             "intentionally rotated the daemon's key — otherwise a changed "
                             "fingerprint means a possible impersonation attempt."
                         </p>
-                        <button class="danger" on:click=do_forget_pin>
+                        <button class="danger" data-testid="forget-pin-button" on:click=do_forget_pin>
                             "Forget Pinned Host Fingerprint"
                         </button>
-                        <p class="prose">{move || forget_status.get()}</p>
+                        <p class="prose" data-testid="forget-pin-status">{move || forget_status.get()}</p>
                     </section>
                 </Show>
 
@@ -356,12 +363,13 @@ pub fn SessionsPage() -> impl IntoView {
                             <label>"Operator ID to revoke"</label>
                             <input
                                 type="text"
+                                data-testid="revoke-operator-input"
                                 prop:value=move || revoke_target.get()
                                 on:input=move |ev| set_revoke_target.set(event_target_value(&ev))
                             />
                         </div>
-                        <button class="danger" on:click=do_revoke>"Revoke Operator"</button>
-                        <p class="prose">{move || revoke_status.get()}</p>
+                        <button class="danger" data-testid="revoke-operator-button" on:click=do_revoke>"Revoke Operator"</button>
+                        <p class="prose" data-testid="revoke-status">{move || revoke_status.get()}</p>
                     </section>
                 </Show>
 

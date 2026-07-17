@@ -51,12 +51,18 @@
 //!   on the theory that the token was the primary defense -- tightened
 //!   after review, since "trust absence" is exactly the failure mode this
 //!   check exists to close.)
-//! - The identity file and token file are created **atomically** with
+//! - The identity file, token file, and host-trust pin store all default to
+//!   living under a dedicated `xenia-operator-agent-state/` directory
+//!   (still overridable per-file via `--xxx-path`), created and re-verified
+//!   `0700` on every access. Every file is created **atomically** with
 //!   owner-only (`0600`) permissions set *at creation*, not chmod'd
 //!   afterward (closing the window where a racing process could read them
-//!   between write and chmod), and refuse to open an existing path that
-//!   isn't a regular file they own (defends against a symlink swapped in
-//!   for the real file, or a file created by a different local user).
+//!   between write and chmod), and every open -- of the parent directory
+//!   and the leaf file alike -- is descriptor-relative and `O_NOFOLLOW`,
+//!   so neither a symlinked parent path component nor a symlink swapped in
+//!   for the leaf file itself can be followed, and each is also checked
+//!   owned by this process's uid. See `secure_file.rs`'s module doc comment
+//!   for the full reasoning.
 //! - The seeds are held zeroize-on-drop (`zeroize::Zeroizing`) for as long
 //!   as this process holds them in memory.
 
@@ -117,13 +123,19 @@ struct Args {
     /// Operator identity path (Ed25519 secret + ML-DSA-65 seed, 64 bytes).
     /// Generated on first run with owner-only (0600) permissions and reused
     /// thereafter, mirroring xenia-peer's own host-identity file.
-    #[arg(long, default_value = "operator-agent-identity.key")]
+    #[arg(
+        long,
+        default_value = "xenia-operator-agent-state/operator-agent-identity.key"
+    )]
     identity_path: PathBuf,
 
     /// Pairing-token path (32 random bytes, hex-encoded). Generated on
     /// first run (0600); the operator copies this value into the
     /// console's agent settings once.
-    #[arg(long, default_value = "operator-agent-token.key")]
+    #[arg(
+        long,
+        default_value = "xenia-operator-agent-state/operator-agent-token.key"
+    )]
     token_path: PathBuf,
 
     /// Origin the console is served from. Repeatable. A request whose
@@ -140,7 +152,10 @@ struct Args {
     /// daemon fingerprints to trust; unlike the identity/token files this
     /// has no fixed first-run content, so it's simply created empty on
     /// first use.
-    #[arg(long, default_value = "operator-agent-host-trust.json")]
+    #[arg(
+        long,
+        default_value = "xenia-operator-agent-state/operator-agent-host-trust.json"
+    )]
     pin_store_path: PathBuf,
 
     /// Allow a privileged confirmation (first trust of a daemon

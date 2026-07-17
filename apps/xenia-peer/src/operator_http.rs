@@ -21,7 +21,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::{
     Json, Router,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, Method, StatusCode},
+    response::Response,
     routing::{get, post},
 };
 use ed25519_dalek::SigningKey;
@@ -526,10 +527,23 @@ async fn audit_ledger_handler(
 /// be `.merge()`d into the stateless admin router. `revocations` is the
 /// *same* handle the sealed endpoint consults; `ledger` is the *same*
 /// shared ledger every consent path appends to.
+///
+/// `allowed_origins` gates every route here with the same Origin-allowlist
+/// and CORS-header pattern `xenia-operator-agent`'s `auth_and_cors_middleware`
+/// already uses (see that function's doc comment) -- these routes are the
+/// console's own `fetch()` targets, always cross-origin from the console's
+/// perspective (it's served on a fixed Trunk dev-serve port, the daemon's
+/// admin port is operator-configured and never the same port). Without
+/// this, no browser can call any of them at all: found live running the
+/// real console against a real daemon for the first time (item 6's
+/// browser-driven vertical slice), every `fetch()` failed with a generic
+/// `TypeError: Failed to fetch` and no clearer signal -- these routes had
+/// never actually been exercised from a real browser before.
 pub(crate) fn router(
     state: Arc<OperatorAuthState>,
     revocations: OperatorRevocations,
     ledger: Arc<Mutex<Chain>>,
+    allowed_origins: Arc<Vec<String>>,
 ) -> Router {
     let mutation = AdminMutationState {
         auth: state.clone(),
@@ -567,6 +581,61 @@ pub(crate) fn router(
                 .route("/health", get(health_handler))
                 .with_state(health),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            allowed_origins,
+            cors_middleware,
+        ))
+}
+
+/// Answers CORS preflight (`OPTIONS`) requests and stamps
+/// `Access-Control-Allow-Origin` on every response so a browser will
+/// actually let the console's JS read them. Unlike the operator agent's
+/// `auth_and_cors_middleware`, this does **not** enforce an Origin
+/// allowlist as a security boundary -- every route it wraps already does
+/// its own real authentication (a signed token, a challenge/response
+/// ceremony, or is deliberately public per
+/// `docs/security/POST_DELEGATION_HARDENING_PLAN.md` item 3's "private
+/// contents, public commitments, portable proofs" model). `allowed_origins`
+/// only controls which `Origin` a *browser* will actually deliver the
+/// response body to -- a non-browser client (curl, the audit smoke
+/// scripts) is unaffected either way, since CORS is enforced by the
+/// browser, not the server.
+async fn cors_middleware(
+    axum::extract::State(allowed_origins): axum::extract::State<Arc<Vec<String>>>,
+    method: Method,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let origin = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .filter(|o| allowed_origins.iter().any(|a| a == o));
+
+    if method == Method::OPTIONS {
+        return with_cors_headers(origin, Response::new(axum::body::Body::empty()));
+    }
+
+    with_cors_headers(origin, next.run(request).await)
+}
+
+fn with_cors_headers(origin: Option<&str>, mut response: Response) -> Response {
+    if let Some(origin) = origin {
+        if let Ok(value) = HeaderValue::from_str(origin) {
+            response
+                .headers_mut()
+                .insert(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
+        }
+        response.headers_mut().insert(
+            axum::http::header::ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static("x-operator-token, content-type"),
+        );
+        response.headers_mut().insert(
+            axum::http::header::ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("GET, POST, OPTIONS"),
+        );
+    }
+    response
 }
 
 #[cfg(test)]
@@ -637,7 +706,12 @@ mod tests {
             1,
             3600,
         ));
-        let router = router(state, OperatorRevocations::empty(), empty_ledger());
+        let router = router(
+            state,
+            OperatorRevocations::empty(),
+            empty_ledger(),
+            Arc::new(Vec::new()),
+        );
         // A well-formed VerifyRequestDto (all fields present) so the handler
         // runs -- the crypto is garbage, but the rate limiter fires before
         // verification. (Malformed JSON is rejected by the extractor before
@@ -731,6 +805,7 @@ mod tests {
             state_with(&op, daemon),
             OperatorRevocations::empty(),
             empty_ledger(),
+            Arc::new(Vec::new()),
         );
 
         let (status, body) = get_json(&router, "/auth/daemon-identity").await;
@@ -777,6 +852,7 @@ mod tests {
             state_with(&op, daemon),
             OperatorRevocations::empty(),
             empty_ledger(),
+            Arc::new(Vec::new()),
         );
 
         let (status, cert_body) = get_json(&router, "/auth/daemon-identity").await;
@@ -825,7 +901,12 @@ mod tests {
         let daemon = SigningKey::generate(&mut rand::thread_rng());
         let daemon_pk = daemon.verifying_key();
         let state = state_with(&op, daemon);
-        let router = router(state, OperatorRevocations::empty(), empty_ledger());
+        let router = router(
+            state,
+            OperatorRevocations::empty(),
+            empty_ledger(),
+            Arc::new(Vec::new()),
+        );
 
         // 1. get a challenge.
         let (status, body) = post_json(&router, "/auth/challenge", "{}".to_string()).await;
@@ -889,6 +970,7 @@ mod tests {
             state_with(&op, daemon),
             OperatorRevocations::empty(),
             empty_ledger(),
+            Arc::new(Vec::new()),
         );
         // A well-formed but never-issued nonce.
         let ml_pk = op.ml_dsa_public_key_bytes().to_vec();
@@ -960,7 +1042,12 @@ mod tests {
         let daemon = SigningKey::generate(&mut rand::thread_rng());
         let state = state_with(&op, daemon.clone()); // "alice" enrolled as Admin
         let revocations = OperatorRevocations::empty();
-        let router = router(state, revocations.clone(), empty_ledger());
+        let router = router(
+            state,
+            revocations.clone(),
+            empty_ledger(),
+            Arc::new(Vec::new()),
+        );
         let now = now_secs();
 
         // An Admin token authorizes the revocation: 204 + target revoked.
@@ -1016,6 +1103,7 @@ mod tests {
             state_with(&op, daemon),
             OperatorRevocations::empty(),
             ledger_with_entries(ledger_key, 3),
+            Arc::new(Vec::new()),
         );
 
         // No auth header at all -- the checkpoint is public.
@@ -1035,6 +1123,7 @@ mod tests {
             state_with(&op, daemon),
             OperatorRevocations::empty(),
             ledger_with_entries(ledger_key, 3),
+            Arc::new(Vec::new()),
         );
 
         // No auth header at all -- health is public, like the checkpoint.
@@ -1054,6 +1143,7 @@ mod tests {
             state_with(&op, daemon),
             OperatorRevocations::empty(),
             empty_ledger(),
+            Arc::new(Vec::new()),
         );
 
         let (status, _) = get_json(&router, "/v1/audit/ledger").await;
@@ -1072,6 +1162,7 @@ mod tests {
             state_with(&op, daemon.clone()),
             OperatorRevocations::empty(),
             ledger_with_entries(ledger_key, 2),
+            Arc::new(Vec::new()),
         );
         let (token, _nonce) = token_json_for(&daemon, OperatorRole::Viewer, now_secs());
 
@@ -1100,6 +1191,7 @@ mod tests {
             state_with(&op, daemon.clone()),
             OperatorRevocations::empty(),
             empty_ledger(),
+            Arc::new(Vec::new()),
         );
 
         // A token for an operator id that was never enrolled (state_with
@@ -1133,6 +1225,7 @@ mod tests {
             state_with(&op, daemon.clone()),
             OperatorRevocations::empty(),
             empty_ledger(),
+            Arc::new(Vec::new()),
         );
 
         let authed = crate::operator_auth::AuthenticatedOperator {
@@ -1165,6 +1258,7 @@ mod tests {
             state_with(&op, daemon.clone()),
             OperatorRevocations::empty(),
             empty_ledger(),
+            Arc::new(Vec::new()),
         );
 
         let (token_json, _nonce) = token_json_for(&daemon, OperatorRole::Viewer, now_secs());
@@ -1185,6 +1279,7 @@ mod tests {
             state_with(&op, daemon),
             OperatorRevocations::empty(),
             empty_ledger(),
+            Arc::new(Vec::new()),
         );
 
         let (status, _) =
