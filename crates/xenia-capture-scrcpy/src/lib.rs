@@ -13,7 +13,9 @@
 //! AGPL-3.0-or-later license) -- see that module's doc comment. `capture`
 //! is the new glue wrapping it as a `ScreenCapture` backend.
 
+#[cfg(feature = "hevc")]
 pub mod capture;
 pub mod scrcpy;
 
+#[cfg(feature = "hevc")]
 pub use capture::ScrcpyScreenCapture;

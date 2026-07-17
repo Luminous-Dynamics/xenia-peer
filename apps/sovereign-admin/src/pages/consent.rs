@@ -58,8 +58,25 @@ pub fn ConsentModal() -> impl IntoView {
 
     // Listen for consent prompts the daemon broadcasts on its admin `/ws`
     // (derived from DaemonConfig, not hardcoded, so the console targets the
-    // configured daemon).
-    if let Ok(ws) = WebSocket::open(&config.admin_ws_url()) {
+    // configured daemon). Wrapped in an `Effect` tracking `config.endpoint`
+    // so changing the daemon endpoint + "Save & Reconnect" actually
+    // reopens this connection against the new daemon -- it used to open
+    // once at component mount and never again, so the operator could
+    // reconnect the *rest* of the console to a different daemon but this
+    // listener stayed silently pointed at whatever endpoint was configured
+    // on first page load. Found live running the real browser-driven
+    // vertical slice (item 6): a real consent prompt from a freshly
+    // reconnected daemon never reached the console at all. The stale
+    // connection to the old (usually already-dead, on a restart) daemon
+    // is left to close on its own rather than explicitly cancelled here --
+    // this component never previously did that either, and a dead
+    // server-side connection ends the reader loop naturally.
+    Effect::new(move |_| {
+        let ws_url = config.admin_ws_url();
+        let Ok(ws) = WebSocket::open(&ws_url) else {
+            leptos::logging::error!("failed to open consent-prompt websocket at {ws_url}");
+            return;
+        };
         let (_writer, mut reader) = ws.split();
         spawn_local(async move {
             while let Some(msg) = reader.next().await {
@@ -69,7 +86,7 @@ pub fn ConsentModal() -> impl IntoView {
                 }
             }
         });
-    }
+    });
 
     // Whether the current session's role permits `action` — or, with no
     // session, whether the legacy plaintext path allows it (Approve/Deny only).
@@ -181,23 +198,23 @@ pub fn ConsentModal() -> impl IntoView {
 
     view! {
         <Show when=move || is_open.get()>
-            <div class="modal-overlay">
+            <div class="modal-overlay" data-testid="consent-modal">
                 <div class="modal">
                     <h2>"New Session Request"</h2>
                     <p>{move || consent_req.get().map(|p| display_scope(&p)).unwrap_or_default()}</p>
                     <div class="button-row">
                         <Show when=move || can(ConsentAction::Approve)>
-                            <button class="primary" on:click=move |_| decide(ConsentAction::Approve)>
+                            <button class="primary" data-testid="consent-approve-button" on:click=move |_| decide(ConsentAction::Approve)>
                                 "Approve"
                             </button>
                         </Show>
                         <Show when=move || can(ConsentAction::Deny)>
-                            <button class="secondary" on:click=move |_| decide(ConsentAction::Deny)>
+                            <button class="secondary" data-testid="consent-deny-button" on:click=move |_| decide(ConsentAction::Deny)>
                                 "Deny"
                             </button>
                         </Show>
                         <Show when=move || can(ConsentAction::Revoke)>
-                            <button class="danger" on:click=move |_| decide(ConsentAction::Revoke)>
+                            <button class="danger" data-testid="consent-revoke-button" on:click=move |_| decide(ConsentAction::Revoke)>
                                 "Revoke"
                             </button>
                         </Show>

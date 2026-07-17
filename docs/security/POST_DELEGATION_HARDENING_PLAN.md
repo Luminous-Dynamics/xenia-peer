@@ -22,7 +22,7 @@ credible pre-production system.
 3. **Remove the legacy HMAC ledger/admin path.** ✅ done
 4. **Replace the persistent pairing token with short-lived agent sessions.** ✅ done
 5. **Resolve the hybrid-versus-classical HTTP authorization profile.** ✅ done
-6. **Add the full headless-browser vertical slice.**
+6. **Add the full headless-browser vertical slice.** ✅ done
 7. **Zeroization, serialization migration, and fuzzing.**
 8. **Packaging, recovery, and independent audit.**
 9. **Durable, verified consent-ledger persistence.** ✅ done
@@ -355,6 +355,101 @@ test capture/input backend. It must prove:
 
 Playwright, installed reproducibly through Nix (not whatever happens to be
 on a workstation).
+
+**Done.**
+
+- New `devShells.e2e` / `apps.e2e` in `flake.nix`: `playwright-driver.browsers`
+  (pre-fetched, `autoPatchelfHook`-patched Chromium -- avoids needing a
+  `buildFHSEnv` wrapper) + `python3Packages.playwright` + `pexpect`, the
+  latter required because `xenia-operator-agent`'s native confirmation
+  prompt (`host_trust::confirm()`) checks `is_terminal()` on stdin/stdout
+  and fails closed on a plain piped subprocess -- the agent has to be
+  spawned attached to a real pseudo-terminal.
+- New `scripts/xenia-e2e-vertical-slice.sh` (build orchestrator: the three
+  real binaries + `trunk build` for the console) and
+  `scripts/e2e/vertical_slice.py` (the actual driver -- one sequential,
+  causally-ordered scenario across seven stages, not 13 independent
+  tests, since the steps depend on each other). Real processes throughout:
+  `xenia-peer`, `xenia-operator-agent` (under pexpect), `xenia-viewer`,
+  and the Trunk-built `sovereign-admin` console driven by a real headless
+  Chromium via Playwright. All 13 numbered properties above are exercised
+  and asserted on, most via log-grep against the real daemon/agent/viewer
+  output (matching `scripts/xenia-audio-e2e-smoke.sh`'s established
+  convention) plus DOM assertions and a `localStorage` dump for property
+  13. New `--send-synthetic-input` / `--send-synthetic-input-after-frames`
+  flags on `xenia-viewer` make property 8 (input gating) testable
+  headlessly -- real captured input requires a real GUI window
+  (`--gui` + a compositor), so these send one real
+  `xenia_inject::InputEvent` through the exact same seal + send path the
+  GUI capture path uses, timed relative to frame receipt (before vs.
+  after consent) the same way `--play-audio synthetic` already supplies
+  audio without a real microphone.
+- New `e2e:` job in `.github/workflows/xenia-validate.yml`, landed in this
+  same change (not deferred) -- runs the full vertical slice under
+  `nix develop .#e2e` on every PR, with an `actions/cache` for the cargo
+  registry/target dir (a from-scratch compile is otherwise the long pole:
+  the pinned nixpkgs rustc differs from most workstations' ambient
+  toolchain, so this is genuinely a cold build the first time any given
+  cache key is seen) and a failure-diagnostics artifact upload.
+- **Real, previously-undiscovered bugs found and fixed** -- this is the
+  first time this console had ever actually been driven by a real
+  browser against a real daemon; every one of these had compiled clean
+  and passed every existing unit/integration test, because none of them
+  exercise an actual `fetch()`/`WebSocket` from an actual browser origin:
+  - **The daemon's admin HTTP router had no CORS handling at all.** The
+    console is always cross-origin from the daemon's admin port by
+    construction (fixed Trunk dev-serve port vs. an operator-configured
+    admin port), so every `fetch()` to `/auth/*` or `/v1/audit/*` failed
+    with a generic `TypeError: Failed to fetch` and no clearer signal.
+    `xenia-operator-agent` already had a working Origin-allowlist + CORS
+    pattern (`auth_and_cors_middleware`); added the daemon-side
+    equivalent (`operator_http::cors_middleware`) plus a new
+    `--allowed-origin` flag (same defaults as the agent's).
+  - **`ConsentModal`'s WebSocket connection opened once at component
+    mount and never reconnected.** The console fully supports changing
+    the daemon endpoint and clicking "Save & Reconnect" -- every other
+    part of the UI honors it -- but the consent-broadcast listener stayed
+    silently pointed at whatever endpoint was configured on first page
+    load, forever. Wrapped the connection logic in an `Effect::new`
+    tracking `config.endpoint`.
+  - **`identity_state` got permanently stuck on `Loading` after any
+    operator or DID sign-out, with no way back short of a full page
+    reload.** Both sign-out handlers reset it to `Loading` "to force a
+    refresh," but the effect that fetches it only depends on
+    `agent_config.agent_url`/`agent_config.agent_session`, not on
+    `identity_state` itself -- nothing ever re-triggered the fetch.
+    Removed both resets; the agent's already-fetched identity/enrollment
+    info doesn't actually go stale on sign-out, so nothing needed to be
+    dropped in the first place.
+  - **Daemon defaults to `--transport auto` (a QUIC-advertisement
+    discovery/probe exchange before falling back to TCP); a viewer
+    started with `--transport tcp` skips that and speaks the raw
+    handshake immediately.** The daemon then misreads those bytes as a
+    discovery probe, producing a real bincode deserialization error on
+    the viewer side and a `BrokenPipe` on the daemon side once the viewer
+    had already exited. `scripts/xenia-audio-e2e-smoke.sh` already avoids
+    this by passing `--transport` explicitly on both sides; the new e2e
+    harness now does too.
+  - Two Track-A/Track-B host-trust confirmation prompts this test
+    surfaced that weren't previously obvious from reading the design
+    docs alone: `/v1/sign/revoke` runs its own *separate*,
+    action-specific native confirmation (`confirm_action`) on top of
+    (not instead of) the ordinary host-identity check, and every
+    `enforce_host_trust` call is scoped by the caller's exact
+    `daemon_endpoint` string -- so Track A (HTTP admin port) and Track B
+    (sealed WS port) pin independently, and any daemon restart onto a
+    new port is a genuine first-use for whichever track's endpoint
+    changed, confirmation prompt and all.
+- Not done: property 9 ("rekey succeeds") is proven via the *viewer
+  session's* frame-encryption epoch rekey (the same mechanism
+  `xenia-audio-e2e-smoke.sh` already validates), not the *operator
+  channel's* own forward-secrecy rekey
+  (`--operator-rekey-interval-secs`). The latter has no browser-reachable
+  path yet: `sovereign-admin`'s sealed-channel driver
+  (`sealed_consent.rs`) is a one-shot connect/decide/close and never
+  calls the already-real, already-tested
+  `handle_operator_rekey_envelope` -- a genuine gap for a future
+  persistent-console mode, explicitly out of scope here.
 
 ## 7. Protocol and operational hardening (after the vertical slice)
 

@@ -12,7 +12,21 @@ publish = false
 
 [dependencies]
 xenia-capture = { path = "../xenia-capture" }
-ffmpeg-next = { version = "7", default-features = false, features = ["codec", "format", "software-scaling"] }
+# Optional, unlike xenia-video's own `ffmpeg-next` dep this mirrors: this
+# crate is a workspace member, so `cargo check --workspace` builds it
+# directly regardless of which downstream feature (if any) pulls it in --
+# a plain (non-optional) ffmpeg-next here means every `cargo check
+# --workspace` on any machine, CI or not, requires system libavutil dev
+# headers just to typecheck this one crate. Gated behind `hevc` instead,
+# default = [], matching xenia-video's existing convention.
+ffmpeg-next = { version = "7", default-features = false, features = ["codec", "format", "software-scaling"], optional = true }
 sha2 = "0.10"
 thiserror.workspace = true
 tracing.workspace = true
+
+[features]
+default = []
+# The actual scrcpy decode pipeline (HEVC via ffmpeg-next). Without it,
+# only the ADB/process-lifecycle helpers and the pure wire-protocol parser
+# in `scrcpy::wire` (no I/O, no ffmpeg) are compiled.
+hevc = ["dep:ffmpeg-next"]

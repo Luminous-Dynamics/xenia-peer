@@ -28,9 +28,17 @@ jobs:
           cargo test -p xenia-peer --features pqc-signatures --no-fail-fast
 
 
+  # `flake.nix` is always present in this repo, so this job runs
+  # unconditionally -- it used to guard on `if: hashFiles('flake.nix') !=
+  # ''`, but `hashFiles()` is only a valid expression in step-level
+  # contexts (`jobs.<id>.steps.*`), not job-level `if:`. GitHub rejects
+  # the *entire workflow file* when any job's `if:` uses a
+  # context/function it isn't valid in, which is why this workflow had
+  # been silently producing zero jobs ("this run likely failed because of
+  # a workflow file issue") on every push for days -- found live while
+  # verifying the new `e2e` job below actually ran in CI.
   nix:
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('flake.nix') != '' }}
     steps:
       - uses: actions/checkout@v4
       - name: Install Nix
@@ -43,14 +51,73 @@ jobs:
       - name: Validate inside Nix CI shell
         run: nix develop .#ci -c bash scripts/xenia-validate.sh .
 
-  xenia-wire:
+  # Item 6 of docs/security/POST_DELEGATION_HARDENING_PLAN.md: the real
+  # browser-driven vertical slice -- launches the actual xenia-peer daemon,
+  # xenia-operator-agent, xenia-viewer, and the compiled sovereign-admin
+  # console under a headless Playwright browser and proves all 13 numbered
+  # properties end-to-end (pairing, JSON-path enrollment, operator auth,
+  # native host-trust approval, the hybrid sealed handshake, consent,
+  # frame/input gating, rekey, revocation, changed-identity refusal,
+  # restart recovery, and no durable secrets in browser storage). Every
+  # build step here is a genuine cold compile per CI run (no persistent
+  # cache across runs in this job, only within one run via actions/cache);
+  # if that turns out too slow/flaky for every PR, tune it (e.g. a
+  # dedicated cache key, or gate to a label) rather than dropping it from
+  # CI -- this is the one test in the repo that actually proves the
+  # browser console works against a live daemon, not a mock.
+  e2e:
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('xenia-wire/Cargo.toml') != '' }}
     steps:
       - uses: actions/checkout@v4
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: e2e-cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            e2e-cargo-${{ runner.os }}-
+      - name: Real browser-driven vertical slice
+        run: nix develop .#e2e -c bash scripts/xenia-e2e-vertical-slice.sh .
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-failure-diagnostics
+          path: /tmp/xenia-e2e-vertical-slice/
+          if-no-files-found: ignore
+
+  # `xenia-wire/` isn't currently checked into this repo (unlike
+  # `flake.nix`, which always is -- see the `nix`/`e2e` jobs above for why
+  # this can't be a job-level `if: hashFiles(...)` any more), so this job
+  # genuinely needs a real existence check. Done as a step-level guard
+  # instead: `hashFiles()` (and any expression) is only valid inside
+  # `jobs.<id>.steps.*`, so the check itself becomes a step whose output
+  # later steps gate on, rather than a job-level `if:`.
+  xenia-wire:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check xenia-wire exists
+        id: check
+        run: |
+          if [ -f xenia-wire/Cargo.toml ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Install Rust toolchain
+        if: steps.check.outputs.exists == 'true'
         uses: dtolnay/rust-toolchain@stable
       - name: Check xenia-wire
+        if: steps.check.outputs.exists == 'true'
         run: |
           cd xenia-wire
           cargo metadata --format-version 1 --no-deps >/dev/null

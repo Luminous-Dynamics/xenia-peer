@@ -1122,6 +1122,28 @@ struct Args {
     #[arg(long)]
     verify: bool,
 
+    /// CLI mode only: send exactly one synthetic `xenia_inject::InputEvent`
+    /// (a centered pointer press) immediately after the handshake, through
+    /// the same seal_input_event + send_envelope path `--gui` mode's real
+    /// captured-OS-event sender uses. Real captured input requires an
+    /// actual windowing system (`--gui` + a compositor/Xvfb) to generate --
+    /// this exists so headless test harnesses (see
+    /// docs/security/POST_DELEGATION_HARDENING_PLAN.md item 6) can prove
+    /// the daemon's consent-gated input path end-to-end without one, the
+    /// same way `--play-audio synthetic` supplies audio without a real
+    /// microphone.
+    #[arg(long)]
+    send_synthetic_input: bool,
+
+    /// CLI mode only, requires `--send-synthetic-input`: wait for this many
+    /// real decoded frames before sending the synthetic input event, instead
+    /// of sending it immediately after the handshake. Frames only flow after
+    /// M1 consent is granted, so `0` (default) exercises the pre-consent
+    /// rejection path and a positive value exercises the post-consent
+    /// acceptance path -- see item 6's property 8.
+    #[arg(long, default_value_t = 0, requires = "send_synthetic_input")]
+    send_synthetic_input_after_frames: u64,
+
     /// Codec the daemon is using. Must match the daemon's
     /// `--codec` flag.
     #[arg(long, value_enum, default_value_t = CodecChoice::Passthrough)]
@@ -1279,6 +1301,34 @@ fn pin_or_verify_known_hosts(
     Ok(())
 }
 
+/// Send exactly one synthetic `xenia_inject::InputEvent` (a centered
+/// pointer press) through the same seal_input_event + send_envelope path
+/// `--gui` mode's real captured-OS-event sender uses -- see `--send-
+/// synthetic-input`'s doc comment on [`Args`].
+async fn send_synthetic_input(
+    transport: &mut AnyTransport,
+    session: &mut LaneSession,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let event = xenia_inject::InputEvent::Pointer {
+        x: 0.5,
+        y: 0.5,
+        button: 0,
+        pressed: true,
+    };
+    let payload = bincode::serialize(&event).map_err(|e| -> Box<dyn std::error::Error> {
+        format!("encode synthetic input: {e}").into()
+    })?;
+    let envelope =
+        session
+            .seal_input_event(payload)
+            .map_err(|e| -> Box<dyn std::error::Error> {
+                format!("seal synthetic input: {e}").into()
+            })?;
+    transport.send_envelope(&envelope).await?;
+    info!("sent synthetic input event (--send-synthetic-input headless test hook)");
+    Ok(())
+}
+
 fn parse_source_id(hex: &str) -> Result<[u8; 8], String> {
     if hex.len() != 16 {
         return Err(format!("source_id must be 16 hex chars, got {}", hex.len()));
@@ -1351,6 +1401,10 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     );
     let mut session = LaneSession::with_fixture(source_id, args.epoch);
     session.install_schedule(&handshake.key_schedule);
+
+    if args.send_synthetic_input && args.send_synthetic_input_after_frames == 0 {
+        send_synthetic_input(&mut transport, &mut session).await?;
+    }
 
     let mut decoder = make_decoder(args.codec)?;
     let expected_frame_fmt = codec_to_frame_format(args.codec);
@@ -1514,6 +1568,13 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         };
         for decoded in frames {
             received += 1;
+
+            if args.send_synthetic_input
+                && args.send_synthetic_input_after_frames != 0
+                && received == args.send_synthetic_input_after_frames
+            {
+                send_synthetic_input(&mut transport, &mut session).await?;
+            }
 
             if let Some(ref mut mirror) = expected_mirror {
                 let expected = match mirror.capture() {
