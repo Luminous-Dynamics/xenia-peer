@@ -36,7 +36,7 @@ use crate::operator::{OperatorPolicy, OperatorRole};
 // call sites (main.rs, operator_http, the smoke test) stay unchanged.
 pub(crate) use xenia_operator_proto::{
     ConsentAction, OperatorAction, challenge_transcript, consent_action_transcript,
-    operator_token_canonical_bytes, revoke_operator_transcript,
+    operator_token_canonical_bytes, replace_operator_key_transcript, revoke_operator_transcript,
 };
 
 /// Default lifetime of an issued challenge (seconds). Short: a challenge is
@@ -503,6 +503,102 @@ pub(crate) fn authorize_operator_revocation(
     })
 }
 
+/// An admin's authenticated request to replace another operator's enrolled
+/// key material -- operator-key recovery. Their session token plus a
+/// signature over (replace domain + target id + every byte of the new key
+/// material + token nonce), proving the *admin* (not just a token bearer)
+/// authorized this exact replacement, for this exact target, with this
+/// exact new key.
+pub(crate) struct AuthenticatedKeyReplacement {
+    pub(crate) token: SignedOperatorToken,
+    pub(crate) target_operator_id: String,
+    pub(crate) new_ed25519_pubkey: [u8; 32],
+    pub(crate) new_ml_dsa_pubkey: Vec<u8>,
+    pub(crate) new_ml_dsa_87_pubkey: Option<Vec<u8>>,
+    pub(crate) action_signature: [u8; 64],
+    pub(crate) ml_dsa_action_signature: [u8; ML_DSA_65_SIG_LEN],
+}
+
+/// A key replacement authorized to a specific admin operator, ready to apply
+/// + audit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuthorizedKeyReplacement {
+    /// The operator whose key material is being replaced.
+    pub(crate) target_operator_id: String,
+    pub(crate) new_ed25519_pubkey: [u8; 32],
+    pub(crate) new_ml_dsa_pubkey: Vec<u8>,
+    pub(crate) new_ml_dsa_87_pubkey: Option<Vec<u8>>,
+    /// The admin who authorized the replacement (for audit attribution).
+    pub(crate) operator_id: String,
+}
+
+/// Authorize an operator-key-replacement request, fail-closed at every step
+/// -- structurally identical to [`authorize_operator_revocation`]:
+/// 1. the token is daemon-signed and unexpired;
+/// 2. the token's role is `Admin` (via the `EnrollOperator` permission, which
+///    is "enroll or revoke an operator" -- replacing an operator's key
+///    material is the same privilege level as enrolling or revoking one,
+///    not a separate action);
+/// 3. the authorizing admin is *still* enrolled;
+/// 4. the per-action signature verifies against that admin's enrolled
+///    Ed25519 key over this exact target id + new key material + token
+///    nonce.
+///
+/// This authorizes *who may replace the key*; it does not itself validate
+/// that `target_operator_id` is currently enrolled or that the new key
+/// doesn't collide with a different operator -- both are enforced by
+/// [`crate::operator::OperatorPolicy::replace_operator_key`], the caller's
+/// next step after authorization succeeds.
+pub(crate) fn authorize_operator_key_replacement(
+    policy: &OperatorPolicy,
+    daemon_pubkey: &VerifyingKey,
+    daemon_ml_dsa_pubkey: &[u8; ML_DSA_65_PK_LEN],
+    now: u64,
+    request: &AuthenticatedKeyReplacement,
+) -> Result<AuthorizedKeyReplacement, AuthError> {
+    let token = verify_token(daemon_pubkey, daemon_ml_dsa_pubkey, now, &request.token)?;
+
+    if !crate::operator::role_permits(token.role, OperatorAction::EnrollOperator) {
+        return Err(AuthError::RoleNotPermitted);
+    }
+
+    let operator = policy
+        .lookup_by_id(&token.operator_id)
+        .ok_or(AuthError::NotEnrolled)?;
+
+    let transcript = replace_operator_key_transcript(
+        &request.target_operator_id,
+        &request.new_ed25519_pubkey,
+        &request.new_ml_dsa_pubkey,
+        request.new_ml_dsa_87_pubkey.as_deref(),
+        &token.token_nonce,
+    );
+    let ed_vk = HandshakeManager::parse_peer_public_key(&operator.ed25519_pubkey)
+        .map_err(|_| AuthError::MalformedKey)?;
+    let sig = Signature::from_bytes(&request.action_signature);
+    HandshakeManager::verify(&ed_vk, &transcript, &sig)
+        .map_err(|_| AuthError::Ed25519VerifyFailed)?;
+    let operator_ml_dsa_pubkey: [u8; ML_DSA_65_PK_LEN] = operator
+        .ml_dsa_pubkey
+        .as_slice()
+        .try_into()
+        .map_err(|_| AuthError::MalformedKey)?;
+    MlDsaIdentity::verify(
+        &operator_ml_dsa_pubkey,
+        &transcript,
+        &request.ml_dsa_action_signature,
+    )
+    .map_err(|_| AuthError::MlDsaVerifyFailed)?;
+
+    Ok(AuthorizedKeyReplacement {
+        target_operator_id: request.target_operator_id.clone(),
+        new_ed25519_pubkey: request.new_ed25519_pubkey,
+        new_ml_dsa_pubkey: request.new_ml_dsa_pubkey.clone(),
+        new_ml_dsa_87_pubkey: request.new_ml_dsa_87_pubkey.clone(),
+        operator_id: token.operator_id,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -914,6 +1010,234 @@ mod tests {
                 &req
             ),
             Err(AuthError::InvalidToken)
+        );
+    }
+
+    /// Build a signed operator-key-replacement request: `op` (role `role`)
+    /// authorizes replacing `target`'s key material with `new_ed`/`new_ml`
+    /// (and optionally `new_ml_87`).
+    #[allow(clippy::too_many_arguments)]
+    fn authed_key_replacement(
+        op: &HandshakeManager,
+        daemon: &SigningKey,
+        daemon_ml_dsa: &MlDsaIdentity,
+        role: OperatorRole,
+        target: &str,
+        new_ed: [u8; 32],
+        new_ml: Vec<u8>,
+        new_ml_87: Option<Vec<u8>>,
+        now: u64,
+    ) -> AuthenticatedKeyReplacement {
+        let authed = AuthenticatedOperator {
+            operator_id: "op".to_string(),
+            role,
+        };
+        let signed = issue_token(
+            daemon,
+            daemon_ml_dsa,
+            &authed,
+            now,
+            TOKEN_TTL_SECS,
+            [11u8; 16],
+        );
+        let transcript = replace_operator_key_transcript(
+            target,
+            &new_ed,
+            &new_ml,
+            new_ml_87.as_deref(),
+            &signed.token.token_nonce,
+        );
+        let action_signature = op.sign(&transcript).to_bytes();
+        let ml_dsa_action_signature = op.sign_ml_dsa(&transcript);
+        AuthenticatedKeyReplacement {
+            token: signed,
+            target_operator_id: target.to_string(),
+            new_ed25519_pubkey: new_ed,
+            new_ml_dsa_pubkey: new_ml,
+            new_ml_dsa_87_pubkey: new_ml_87,
+            action_signature,
+            ml_dsa_action_signature,
+        }
+    }
+
+    #[test]
+    fn key_replacement_authorized_for_admin() {
+        let op = HandshakeManager::new();
+        let (daemon, daemon_ml_dsa) = test_daemon();
+        let policy = policy_with(&op, OperatorRole::Admin);
+        let req = authed_key_replacement(
+            &op,
+            &daemon,
+            &daemon_ml_dsa,
+            OperatorRole::Admin,
+            "mallory",
+            [4u8; 32],
+            vec![0xAAu8; ML_DSA_65_PK_LEN],
+            None,
+            3000,
+        );
+        let authorized = authorize_operator_key_replacement(
+            &policy,
+            &daemon.verifying_key(),
+            &daemon_ml_dsa.public_key_bytes(),
+            3010,
+            &req,
+        )
+        .unwrap();
+        assert_eq!(authorized.target_operator_id, "mallory");
+        assert_eq!(authorized.operator_id, "op");
+        assert_eq!(authorized.new_ed25519_pubkey, [4u8; 32]);
+    }
+
+    #[test]
+    fn key_replacement_denied_for_non_admin() {
+        let op = HandshakeManager::new();
+        let (daemon, daemon_ml_dsa) = test_daemon();
+        // Approver is below Admin; even an honestly-issued Approver token
+        // can't replace another operator's key material.
+        let policy = policy_with(&op, OperatorRole::Approver);
+        let req = authed_key_replacement(
+            &op,
+            &daemon,
+            &daemon_ml_dsa,
+            OperatorRole::Approver,
+            "mallory",
+            [4u8; 32],
+            vec![0xAAu8; ML_DSA_65_PK_LEN],
+            None,
+            3000,
+        );
+        assert_eq!(
+            authorize_operator_key_replacement(
+                &policy,
+                &daemon.verifying_key(),
+                &daemon_ml_dsa.public_key_bytes(),
+                3010,
+                &req
+            ),
+            Err(AuthError::RoleNotPermitted)
+        );
+    }
+
+    #[test]
+    fn key_replacement_signature_bound_to_target() {
+        let op = HandshakeManager::new();
+        let (daemon, daemon_ml_dsa) = test_daemon();
+        let policy = policy_with(&op, OperatorRole::Admin);
+        let mut req = authed_key_replacement(
+            &op,
+            &daemon,
+            &daemon_ml_dsa,
+            OperatorRole::Admin,
+            "mallory",
+            [4u8; 32],
+            vec![0xAAu8; ML_DSA_65_PK_LEN],
+            None,
+            3000,
+        );
+        // Swap the target after signing -> the per-action signature no
+        // longer verifies (can't be replayed for a different target).
+        req.target_operator_id = "alice".to_string();
+        assert_eq!(
+            authorize_operator_key_replacement(
+                &policy,
+                &daemon.verifying_key(),
+                &daemon_ml_dsa.public_key_bytes(),
+                3010,
+                &req
+            ),
+            Err(AuthError::Ed25519VerifyFailed)
+        );
+    }
+
+    #[test]
+    fn key_replacement_signature_bound_to_the_new_key_material() {
+        let op = HandshakeManager::new();
+        let (daemon, daemon_ml_dsa) = test_daemon();
+        let policy = policy_with(&op, OperatorRole::Admin);
+        let mut req = authed_key_replacement(
+            &op,
+            &daemon,
+            &daemon_ml_dsa,
+            OperatorRole::Admin,
+            "mallory",
+            [4u8; 32],
+            vec![0xAAu8; ML_DSA_65_PK_LEN],
+            None,
+            3000,
+        );
+        // Swap the new Ed25519 key after signing -> a captured signature
+        // must not authorize installing a *different* key than the admin
+        // actually approved.
+        req.new_ed25519_pubkey = [5u8; 32];
+        assert_eq!(
+            authorize_operator_key_replacement(
+                &policy,
+                &daemon.verifying_key(),
+                &daemon_ml_dsa.public_key_bytes(),
+                3010,
+                &req
+            ),
+            Err(AuthError::Ed25519VerifyFailed)
+        );
+    }
+
+    #[test]
+    fn key_replacement_rejected_for_expired_token() {
+        let op = HandshakeManager::new();
+        let (daemon, daemon_ml_dsa) = test_daemon();
+        let policy = policy_with(&op, OperatorRole::Admin);
+        let req = authed_key_replacement(
+            &op,
+            &daemon,
+            &daemon_ml_dsa,
+            OperatorRole::Admin,
+            "mallory",
+            [4u8; 32],
+            vec![0xAAu8; ML_DSA_65_PK_LEN],
+            None,
+            3000,
+        );
+        assert_eq!(
+            authorize_operator_key_replacement(
+                &policy,
+                &daemon.verifying_key(),
+                &daemon_ml_dsa.public_key_bytes(),
+                3000 + TOKEN_TTL_SECS + 1,
+                &req
+            ),
+            Err(AuthError::InvalidToken)
+        );
+    }
+
+    #[test]
+    fn key_replacement_rejected_after_requesting_admin_de_enrolled() {
+        let op = HandshakeManager::new();
+        let (daemon, daemon_ml_dsa) = test_daemon();
+        // Empty policy: the admin who signed this was de-enrolled after the
+        // token was issued -- their signature is genuine but they no longer
+        // have standing to authorize anything.
+        let policy = OperatorPolicy::default();
+        let req = authed_key_replacement(
+            &op,
+            &daemon,
+            &daemon_ml_dsa,
+            OperatorRole::Admin,
+            "mallory",
+            [4u8; 32],
+            vec![0xAAu8; ML_DSA_65_PK_LEN],
+            None,
+            3000,
+        );
+        assert_eq!(
+            authorize_operator_key_replacement(
+                &policy,
+                &daemon.verifying_key(),
+                &daemon_ml_dsa.public_key_bytes(),
+                3010,
+                &req
+            ),
+            Err(AuthError::NotEnrolled)
         );
     }
 

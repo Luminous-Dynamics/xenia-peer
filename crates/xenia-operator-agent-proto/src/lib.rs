@@ -241,6 +241,53 @@ pub struct SignRevokeResponse {
     pub ml_dsa_signature_hex: String,
 }
 
+/// `POST /v1/sign/replace-key` request: sign an admin's authorization to
+/// replace *another operator's* enrolled key material -- operator-key
+/// recovery for an operator who lost their signing key. Privileged --
+/// `docs/security/SIGNER_DELEGATION_DESIGN.md` already names "recovery-key
+/// or trust-root changes" on the mandatory-native-confirmation list, so
+/// this is confirmed the same way [`SignRevokeRequest`] is, regardless of
+/// how well-trusted the target daemon already is.
+///
+/// The new key material is relayed here as typed, individually-verified
+/// hex fields -- not a caller-supplied transcript -- for the same reason
+/// every other `/v1/sign/*` request is: the agent reconstructs
+/// `xenia_operator_proto::replace_operator_key_transcript(...)` itself from
+/// these fields, so a compromised browser can never smuggle bytes the
+/// operator didn't actually see and confirm.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignReplaceKeyRequest {
+    /// Fields shared by every `/v1/sign/*` request.
+    #[serde(flatten)]
+    pub common: SignRequestCommon,
+    /// The operator id whose key material is being replaced.
+    pub target_operator_id: String,
+    /// Hex Ed25519 public key of the operator's replacement identity
+    /// (their freshly-generated agent's own public key).
+    pub new_ed25519_pubkey_hex: String,
+    /// Hex ML-DSA-65 public key of the replacement identity -- required,
+    /// every operator has a standard-suite identity.
+    pub new_ml_dsa_pubkey_hex: String,
+    /// Hex ML-DSA-87 public key, only if the operator is re-enrolling for
+    /// the high-security sealed channel -- `None`, not an empty string, if
+    /// they are not.
+    pub new_ml_dsa_87_pubkey_hex: Option<String>,
+    /// The admin's current daemon-issued session token, verified by the
+    /// agent before its `token_nonce_hex` is trusted (see
+    /// [`SignedTokenDto`]).
+    pub token: SignedTokenDto,
+}
+
+/// Response to [`SignReplaceKeyRequest`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignReplaceKeyResponse {
+    /// Ed25519 signature over the key-replacement transcript, hex-encoded.
+    pub ed_signature_hex: String,
+    /// ML-DSA-65 signature over the same transcript, hex-encoded -- both
+    /// required, the daemon AND-verifies them.
+    pub ml_dsa_signature_hex: String,
+}
+
 /// Domain-separation tag for an agent session token's MAC (see
 /// [`agent_session_mac_message`]). Distinct from the key-derivation context
 /// the agent uses to turn the raw pairing token into a MAC key -- that
