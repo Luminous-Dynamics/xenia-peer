@@ -154,8 +154,11 @@ pub enum PinOutcome {
     /// Not previously pinned; confirmed and now pinned.
     TrustedOnFirstUse,
     /// A different fingerprint was previously pinned; confirmed and the
-    /// pin was rotated.
-    Rotated,
+    /// pin was rotated. Carries the fingerprint that was previously
+    /// pinned, so a caller building a durable audit record (`audit_log`'s
+    /// `HostTrustRotation` event) can show both the old and new identity,
+    /// not just that *a* rotation happened.
+    Rotated { old_fingerprint: [u8; 32] },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -313,7 +316,9 @@ impl HostTrustStore {
                     });
                 }
                 self.set_pin(&key, fingerprint)?;
-                Ok(PinOutcome::Rotated)
+                Ok(PinOutcome::Rotated {
+                    old_fingerprint: pinned,
+                })
             }
             None => {
                 let confirmed = confirm(
@@ -562,7 +567,12 @@ mod tests {
         let mut store = HostTrustStore::load(path.clone(), true).unwrap();
         store.check("daemon-c", "standard", [1u8; 32]).unwrap();
         let outcome = store.check("daemon-c", "standard", [2u8; 32]).unwrap();
-        assert_eq!(outcome, PinOutcome::Rotated);
+        assert_eq!(
+            outcome,
+            PinOutcome::Rotated {
+                old_fingerprint: [1u8; 32]
+            }
+        );
         assert_eq!(store.lookup("daemon-c", "standard"), Some([2u8; 32]));
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }

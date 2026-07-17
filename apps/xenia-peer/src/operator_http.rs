@@ -415,6 +415,38 @@ struct AuditState {
     ledger: Arc<Mutex<Chain>>,
 }
 
+/// State for `GET /health`: just enough to report liveness, no auth state.
+#[derive(Clone)]
+struct HealthState {
+    started_at: std::time::Instant,
+    ledger: Arc<Mutex<Chain>>,
+}
+
+/// Response body for `GET /health`. Deliberately minimal, mirroring
+/// `xenia-operator-agent`'s `GET /v1/health` shape -- a liveness probe
+/// needs to know the process is up and roughly how long it's been
+/// running, not anything an operator would consider sensitive.
+/// `ledger_entry_count` is already public via `GET /v1/audit/checkpoint`'s
+/// `entry_count` field; repeating it here just saves a probe an extra
+/// round trip.
+#[derive(Serialize)]
+struct HealthResponse {
+    status: &'static str,
+    uptime_secs: u64,
+    ledger_entry_count: u64,
+}
+
+/// `GET /health` -- unauthenticated liveness probe. No secret material,
+/// no operator state, no session tokens.
+async fn health_handler(State(state): State<HealthState>) -> Json<HealthResponse> {
+    let ledger = state.ledger.lock().await;
+    Json(HealthResponse {
+        status: "ok",
+        uptime_secs: state.started_at.elapsed().as_secs(),
+        ledger_entry_count: ledger.len() as u64,
+    })
+}
+
 /// `GET /v1/audit/checkpoint` -- a public, signed commitment to the ledger's
 /// current length and head hash. No authentication required: it reveals
 /// nothing beyond what `xenia_ledger::LedgerCheckpoint`'s doc comment
@@ -505,6 +537,10 @@ pub(crate) fn router(
     };
     let audit = AuditState {
         auth: state.clone(),
+        ledger: ledger.clone(),
+    };
+    let health = HealthState {
+        started_at: std::time::Instant::now(),
         ledger,
     };
     Router::new()
@@ -525,6 +561,11 @@ pub(crate) fn router(
             Router::new()
                 .route("/operator/revoke", post(revoke_operator_handler))
                 .with_state(mutation),
+        )
+        .merge(
+            Router::new()
+                .route("/health", get(health_handler))
+                .with_state(health),
         )
 }
 
@@ -983,6 +1024,26 @@ mod tests {
         let checkpoint: LedgerCheckpoint = serde_json::from_str(&body).unwrap();
         assert_eq!(checkpoint.entry_count, 3);
         xenia_ledger::Verifier::verify_checkpoint(&checkpoint).unwrap();
+    }
+
+    #[tokio::test]
+    async fn health_is_public_and_reports_ledger_entry_count() {
+        let op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let ledger_key = SigningKey::generate(&mut rand::thread_rng());
+        let router = router(
+            state_with(&op, daemon),
+            OperatorRevocations::empty(),
+            ledger_with_entries(ledger_key, 3),
+        );
+
+        // No auth header at all -- health is public, like the checkpoint.
+        let (status, body) = get_json(&router, "/health").await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(parsed["ledger_entry_count"], 3);
+        assert!(parsed["uptime_secs"].is_u64());
     }
 
     #[tokio::test]
