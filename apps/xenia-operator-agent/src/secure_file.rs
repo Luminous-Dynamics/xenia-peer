@@ -300,16 +300,15 @@ mod backend {
 mod tests {
     use super::*;
 
+    // Deliberately NOT pre-created here (unlike the old version of this
+    // helper) -- `secure_file.rs` itself is now responsible for creating
+    // its parent directory, and several new tests below assert on exactly
+    // that behavior.
     fn temp_dir(label: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
+        std::env::temp_dir().join(format!(
             "xenia-operator-agent-secure-file-test-{label}-{}",
             rand::random::<u64>()
-        ));
-        // Deliberately NOT pre-created here (unlike the old version of this
-        // helper) -- `secure_file.rs` itself is now responsible for
-        // creating its parent directory, and several new tests below
-        // assert on exactly that behavior.
-        dir
+        ))
     }
 
     #[test]
