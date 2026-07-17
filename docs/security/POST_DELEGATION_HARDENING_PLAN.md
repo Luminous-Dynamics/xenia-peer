@@ -24,7 +24,7 @@ credible pre-production system.
 5. **Resolve the hybrid-versus-classical HTTP authorization profile.** ✅ done
 6. **Add the full headless-browser vertical slice.** ✅ done
 7. **Zeroization, serialization migration, and fuzzing.** Mostly done (bincode migration deliberately deferred)
-8. **Packaging, recovery, and independent audit.** Partly done (agent audit logging, health endpoints, and operator-key recovery are done; systemd packaging, token/session auto-rotation, and backup remain deferred)
+8. **Packaging, recovery, and independent audit.** Partly done (agent audit logging, health endpoints, operator-key recovery, and systemd user-service packaging are done; token/session auto-rotation and backup remain deferred)
 9. **Durable, verified consent-ledger persistence.** ✅ done
 
 ## 1. Transactional native pin storage
@@ -641,9 +641,57 @@ vs. explicitly deferred.
   *every* enrolled Admin has simultaneously lost their key -- that needs a
   genuinely separate offline recovery-key/trust-root mechanism, not
   something to improvise as an extension of this flow.
-- **Not done, deliberately deferred**: systemd packaging (zero prior art
-  anywhere in the repo), token/session automatic rotation (only passive TTL
-  expiry + manual refresh exists today), and backup tooling/procedures.
+- **Systemd user-service packaging.** Done. Zero prior art existed
+  anywhere in the repo before this (confirmed via research: no
+  `*.service` file, `flake.nix` was devShells-only). Three pieces:
+  - `xenia-peer`'s 5 state-file CLI flags (`--operator-key-path` etc.)
+    defaulted to bare, CWD-relative filenames, unlike
+    `xenia-operator-agent`, which already defaults every one of its own
+    state files into a dedicated `xenia-operator-agent-state/`
+    subdirectory. Unified to the same convention
+    (`xenia-peer-state/<file>`) -- mechanical default-value change, no
+    new flag, individual overrides unaffected. Surfaced a real gap in
+    passing: `load_or_create_signing_key`/`load_or_create_ml_dsa_seed`/
+    `load_or_create_host_identity`/`_highsec` all wrote their generated
+    key via a bare `std::fs::write` with no parent-directory creation,
+    which would fail once the default pointed into a subdirectory --
+    each now creates its parent directory first, mirroring
+    `audit_ledger_store.rs`'s existing pattern.
+  - Two new plain, portable unit files under `packaging/systemd/`
+    (`systemctl --user` installable regardless of install method --
+    `cargo install`, `nix build`, or a distro package -- since
+    `ExecStart=` relies on `PATH`). Each sets `StateDirectory=`/
+    `WorkingDirectory=` at `%S/<name>`, so the binary's own relative
+    state-dir default nests predictably inside it, plus
+    `Restart=on-failure` and hardening (`NoNewPrivileges`, `PrivateTmp`,
+    `ProtectSystem=strict`, `ProtectHome=read-only`, `ReadWritePaths`
+    scoped to the state dir) adapted from
+    `symthaea/nix/modules/symthaea-service.nix`'s pattern for
+    *user*-service context (no `DynamicUser`/`User=`, that's
+    system-unit-only). Verified end-to-end against this environment's
+    real user systemd instance (`systemd-run --user` with the identical
+    properties): both binaries start cleanly under the full hardening
+    profile, state directories are created with correct permissions,
+    and both `/health` endpoints respond.
+  - New `docs/deploy/systemd-user-service.md` (cross-linked from
+    `remote-operators.md`): install, unit setup, enrolling operators via
+    a `systemctl --user edit` drop-in, start/verify/stop, and what the
+    hardening does and doesn't cover.
+  - **Not done, discovered mid-implementation, honestly deferred**: a
+    Nix package derivation (`nix build .#xenia-peer`). Attempted and
+    blocked on a real issue, not left undone by omission: this repo's
+    `Cargo.lock` is deliberately `.gitignore`d, and Nix flakes only see
+    git-tracked files when resolving a local path reference --
+    `buildRustPackage`'s `cargoLock.lockFile = ./Cargo.lock` fails
+    outright ("Path 'Cargo.lock' ... is not tracked by Git"). Reversing
+    that gitignore is a real project-convention decision, not something
+    to change as a side effect of a packaging PR -- `cargo install
+    --path ... --locked` is documented as the primary install path
+    instead, and the Nix package is left as a follow-up for whoever owns
+    that call.
+- **Not done, deliberately deferred**: token/session automatic rotation
+  (only passive TTL expiry + manual refresh exists today) and backup
+  tooling/procedures.
 - **Not done, confirmed not ripe**: "commission independent review of
   `xenia-wire`." Checked against the project's own stated criterion --
   `xenia-wire` is `0.2.0-alpha.8`, `SPEC.md`'s own header says "Pre-alpha --
