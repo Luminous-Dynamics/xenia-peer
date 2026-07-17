@@ -1,0 +1,42 @@
+[Unit]
+Description=Xenia peer-to-peer remote-session daemon
+Documentation=https://github.com/Luminous-Dynamics/xenia-peer
+After=network.target
+
+[Service]
+Type=simple
+
+# `xenia-peer` must be on PATH -- works whichever way it was installed
+# (`cargo install --path apps/xenia-peer --locked`, `nix build .#xenia-peer`,
+# or a distro package). See docs/deploy/systemd-user-service.md.
+#
+# `--operators-file` is REQUIRED for the admin surface to authenticate
+# anyone (an unset policy denies every operator by design -- fail closed,
+# not "wide open"). This unit deliberately does not hardcode one; add it
+# via a drop-in (`systemctl --user edit xenia-peer.service`) or copy this
+# file and append your own flags to ExecStart, e.g.:
+#   ExecStart=xenia-peer --operators-file %S/xenia-peer/operators.json
+ExecStart=xenia-peer
+
+# `StateDirectory=` creates and owns `%S/xenia-peer` (`~/.local/state/xenia-peer`
+# for a user unit); `WorkingDirectory` puts the daemon's CWD there, so its
+# own relative `xenia-peer-state/` default (see apps/xenia-peer/src/main.rs)
+# nests one level inside -- harmless, and keeps a manually-run `xenia-peer`
+# and this unit's managed instance behaviorally identical.
+StateDirectory=xenia-peer
+WorkingDirectory=%S/xenia-peer
+
+Restart=on-failure
+RestartSec=5
+
+# Hardening, adapted for *user*-service context (no DynamicUser/User=,
+# those are system-unit-only -- a user unit already runs as the invoking
+# user). Mirrors symthaea/nix/modules/symthaea-service.nix's pattern.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%S/xenia-peer
+
+[Install]
+WantedBy=default.target
