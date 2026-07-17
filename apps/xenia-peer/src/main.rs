@@ -174,6 +174,23 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1")]
     operator_bind: String,
 
+    /// Browser Origin allowed to call the admin HTTP surface's
+    /// `/auth/*`, `/v1/audit/*`, and `/operator/revoke` routes
+    /// (`crate::operator_http`). Repeatable. A request whose `Origin`
+    /// header doesn't match any of these gets no
+    /// `Access-Control-Allow-Origin` in the response, so a browser refuses
+    /// to let the console's JS read it -- CORS is a browser-enforced
+    /// policy, not a substitute for each route's own real authentication
+    /// (a signed token, a challenge/response ceremony, or a deliberately
+    /// public route). Defaults cover the console's Trunk dev-serve
+    /// origins, mirroring `xenia-operator-agent --allowed-origin`'s
+    /// default.
+    #[arg(
+        long,
+        default_values = ["http://localhost:8134", "http://127.0.0.1:8134"]
+    )]
+    allowed_origin: Vec<String>,
+
     /// Seconds to wait for an Approve/Deny decision on --consent-port before
     /// giving up and exiting. Ignored when --m1-preprod-auto-consent is set.
     #[arg(long, default_value_t = 120)]
@@ -1896,6 +1913,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             operator_auth_state.clone(),
             revocations.clone(),
             shared_ledger.clone(),
+            std::sync::Arc::new(args.allowed_origin.clone()),
         ));
 
     let listener = TcpListener::bind(format!("{}:{}", args.operator_bind, args.admin_port)).await?;

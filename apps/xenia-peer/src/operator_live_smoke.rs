@@ -59,6 +59,7 @@ async fn operator_auth_ceremony_works_over_real_http() {
                 state,
                 crate::operator_revocations::OperatorRevocations::empty(),
                 ledger,
+                Arc::new(Vec::new()),
             ),
         )
         .await;
