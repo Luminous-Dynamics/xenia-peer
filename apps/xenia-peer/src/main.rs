@@ -1914,6 +1914,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             revocations.clone(),
             shared_ledger.clone(),
             std::sync::Arc::new(args.allowed_origin.clone()),
+            args.operators_file.clone(),
         ));
 
     let listener = TcpListener::bind(format!("{}:{}", args.operator_bind, args.admin_port)).await?;

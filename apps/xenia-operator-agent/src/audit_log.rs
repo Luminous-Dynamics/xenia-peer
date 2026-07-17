@@ -63,6 +63,15 @@ pub enum AgentAuditEvent {
         target_operator_id: String,
         daemon_endpoint: String,
     },
+    /// `POST /v1/sign/replace-key` succeeded: the operator confirmed and
+    /// this agent signed a key-replacement transcript, authorizing
+    /// `target_operator_id`'s enrolled key to be replaced with
+    /// `new_ed25519_pubkey_hex` -- operator-key recovery.
+    KeyReplacementSigned {
+        target_operator_id: String,
+        new_ed25519_pubkey_hex: String,
+        daemon_endpoint: String,
+    },
 }
 
 impl AgentAuditEvent {
@@ -75,6 +84,7 @@ impl AgentAuditEvent {
             Self::Paired => "session.paired",
             Self::SessionRefreshed => "session.refreshed",
             Self::RevocationSigned { .. } => "revocation.signed",
+            Self::KeyReplacementSigned { .. } => "key_replacement.signed",
         }
     }
 }
@@ -615,6 +625,11 @@ mod tests {
             AgentAuditEvent::SessionRefreshed,
             AgentAuditEvent::RevocationSigned {
                 target_operator_id: String::new(),
+                daemon_endpoint: String::new(),
+            },
+            AgentAuditEvent::KeyReplacementSigned {
+                target_operator_id: String::new(),
+                new_ed25519_pubkey_hex: String::new(),
                 daemon_endpoint: String::new(),
             },
         ];

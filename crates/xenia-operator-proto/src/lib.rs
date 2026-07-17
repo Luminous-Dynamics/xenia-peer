@@ -44,6 +44,11 @@ pub const CHALLENGE_HOST_ATTESTATION_DOMAIN: &[u8] = b"xenia-challenge-host-atte
 /// (see [`operator_token_canonical_bytes`]).
 pub const OPERATOR_TOKEN_DOMAIN: &[u8] = b"xenia-operator-token-v1";
 
+/// Domain-separation tag for an admin's signature authorizing a live
+/// replacement of another operator's enrolled key material (the
+/// `/operator/replace-key` admin action -- operator-key recovery).
+pub const REPLACE_OPERATOR_KEY_DOMAIN: &[u8] = b"xenia-operator-replace-key-v1";
+
 /// An operator's role. Strictly hierarchical: a higher role can do everything
 /// a lower one can, plus more (see [`OperatorRole::rank`]). Serializes to the
 /// variant name (`"Viewer"`, `"Admin"`, …) — the console gates its UI on the
@@ -235,6 +240,63 @@ pub fn revoke_operator_transcript(target_operator_id: &str, token_nonce: &[u8; 1
     t.extend_from_slice(REVOKE_OPERATOR_DOMAIN);
     t.extend_from_slice(&(target.len() as u32).to_be_bytes());
     t.extend_from_slice(target);
+    t.extend_from_slice(token_nonce);
+    t
+}
+
+/// The bytes an Admin signs to authorize replacing `target_operator_id`'s
+/// enrolled key material -- operator-key recovery: an operator who lost
+/// their signing key gets a fresh identity re-enrolled under the same id
+/// and role, authorized by a *different*, still-enrolled Admin. Bound to
+/// the admin's current token (via `token_nonce`) and to every byte of the
+/// new key material, so a captured signature can't be replayed against a
+/// different token, target, or key.
+///
+/// This crate deliberately carries no cryptographic key-length constants
+/// (see the module doc comment), so every variable-length field --
+/// including the two fixed-length keys, whose lengths differ by suite --
+/// is explicitly length-prefixed rather than assumed.
+///
+/// Layout: `REPLACE_OPERATOR_KEY_DOMAIN || len(target)(4, be) || target ||
+/// len(new_ed25519_pubkey)(4, be) || new_ed25519_pubkey ||
+/// len(new_ml_dsa_pubkey)(4, be) || new_ml_dsa_pubkey || has_87(1) ||
+/// [len(new_ml_dsa_87_pubkey)(4, be) || new_ml_dsa_87_pubkey if has_87] ||
+/// token_nonce(16)`.
+pub fn replace_operator_key_transcript(
+    target_operator_id: &str,
+    new_ed25519_pubkey: &[u8],
+    new_ml_dsa_pubkey: &[u8],
+    new_ml_dsa_87_pubkey: Option<&[u8]>,
+    token_nonce: &[u8; 16],
+) -> Vec<u8> {
+    let target = target_operator_id.as_bytes();
+    let mut t = Vec::with_capacity(
+        REPLACE_OPERATOR_KEY_DOMAIN.len()
+            + 4
+            + target.len()
+            + 4
+            + new_ed25519_pubkey.len()
+            + 4
+            + new_ml_dsa_pubkey.len()
+            + 1
+            + new_ml_dsa_87_pubkey.map(|k| 4 + k.len()).unwrap_or(0)
+            + 16,
+    );
+    t.extend_from_slice(REPLACE_OPERATOR_KEY_DOMAIN);
+    t.extend_from_slice(&(target.len() as u32).to_be_bytes());
+    t.extend_from_slice(target);
+    t.extend_from_slice(&(new_ed25519_pubkey.len() as u32).to_be_bytes());
+    t.extend_from_slice(new_ed25519_pubkey);
+    t.extend_from_slice(&(new_ml_dsa_pubkey.len() as u32).to_be_bytes());
+    t.extend_from_slice(new_ml_dsa_pubkey);
+    match new_ml_dsa_87_pubkey {
+        Some(k) => {
+            t.push(1);
+            t.extend_from_slice(&(k.len() as u32).to_be_bytes());
+            t.extend_from_slice(k);
+        }
+        None => t.push(0),
+    }
     t.extend_from_slice(token_nonce);
     t
 }
@@ -608,6 +670,47 @@ mod tests {
         assert_ne!(
             base,
             operator_token_canonical_bytes("alice", OperatorRole::Admin, 1000, 2000, &[8u8; 16])
+        );
+    }
+
+    #[test]
+    fn replace_operator_key_transcript_is_domain_separated_and_field_bound() {
+        let ed = [1u8; 32];
+        let ml = [2u8; 4];
+        let nonce = [9u8; 16];
+        let base = replace_operator_key_transcript("alice", &ed, &ml, None, &nonce);
+        assert_eq!(
+            &base[..REPLACE_OPERATOR_KEY_DOMAIN.len()],
+            REPLACE_OPERATOR_KEY_DOMAIN
+        );
+        // Changing any one field must change the bytes -- a captured
+        // signature over one target/key/nonce combination must not verify
+        // against a different one.
+        assert_ne!(
+            base,
+            replace_operator_key_transcript("bob", &ed, &ml, None, &nonce)
+        );
+        assert_ne!(
+            base,
+            replace_operator_key_transcript("alice", &[3u8; 32], &ml, None, &nonce)
+        );
+        assert_ne!(
+            base,
+            replace_operator_key_transcript("alice", &ed, &[4u8; 4], None, &nonce)
+        );
+        assert_ne!(
+            base,
+            replace_operator_key_transcript("alice", &ed, &ml, None, &[8u8; 16])
+        );
+        // Presence of an ML-DSA-87 key changes the transcript even if
+        // everything else matches -- an admin who only saw (and signed
+        // over) a standard-suite replacement can't have that signature
+        // reinterpreted as also authorizing a high-security enrollment.
+        let with_87 = replace_operator_key_transcript("alice", &ed, &ml, Some(&[5u8; 4]), &nonce);
+        assert_ne!(base, with_87);
+        assert_ne!(
+            with_87,
+            replace_operator_key_transcript("alice", &ed, &ml, Some(&[6u8; 4]), &nonce)
         );
     }
 }

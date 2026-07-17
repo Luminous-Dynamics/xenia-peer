@@ -23,7 +23,11 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::Path;
+use std::sync::{Arc, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -35,7 +39,7 @@ use xenia_wire::handshake_highsec::ML_DSA_87_PK_LEN;
 // console authorize against *identical* rules: a role the console greys out is
 // exactly a role the daemon also refuses. Only the enrollment/policy-file
 // machinery below is daemon-specific.
-pub(crate) use xenia_operator_proto::{role_permits, OperatorAction, OperatorRole};
+pub(crate) use xenia_operator_proto::{OperatorAction, OperatorRole, role_permits};
 
 /// The outcome of an authorization check, kept distinct so the caller can
 /// audit and message "not enrolled" separately from "enrolled but role too
@@ -102,9 +106,20 @@ pub(crate) struct EnrolledOperator {
 }
 
 /// The set of enrolled operators, indexed by Ed25519 public key.
+///
+/// `by_ed25519` is `Arc<RwLock<...>>`, not a plain `HashMap`, so that
+/// [`Self::replace_operator_key`] can mutate the *live* policy in place --
+/// mirroring [`crate::operator_revocations::OperatorRevocations`]'s exact
+/// shape. `#[derive(Clone)]` therefore gives a cheap, *shared* clone (same
+/// underlying map, same lock): every place that already holds a cloned
+/// `OperatorPolicy` (the sealed-channel task, the admin mutation state, …)
+/// sees a key replacement immediately, the same way a live revocation
+/// already reaches the sealed channel today. All read methods return an
+/// owned [`EnrolledOperator`] rather than a reference, since a reference
+/// borrowed from inside the lock guard cannot outlive the guard.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct OperatorPolicy {
-    by_ed25519: HashMap<[u8; 32], EnrolledOperator>,
+    by_ed25519: Arc<RwLock<HashMap<[u8; 32], EnrolledOperator>>>,
 }
 
 impl OperatorPolicy {
@@ -118,7 +133,9 @@ impl OperatorPolicy {
                 return Err(OperatorPolicyError::DuplicateKey(op.operator_id));
             }
         }
-        Ok(Self { by_ed25519 })
+        Ok(Self {
+            by_ed25519: Arc::new(RwLock::new(by_ed25519)),
+        })
     }
 
     /// Parse and validate a policy from JSON bytes.
@@ -171,8 +188,20 @@ impl OperatorPolicy {
     /// [`Self::lookup_verified`] instead, or the ML-DSA signature buys
     /// nothing: an attacker holding only the enrolled Ed25519 secret could
     /// pair it with a self-generated ML-DSA keypair and still authenticate.
-    pub(crate) fn lookup(&self, ed25519_pubkey: &[u8; 32]) -> Option<&EnrolledOperator> {
-        self.by_ed25519.get(ed25519_pubkey)
+    pub(crate) fn lookup(&self, ed25519_pubkey: &[u8; 32]) -> Option<EnrolledOperator> {
+        self.read_map()?.get(ed25519_pubkey).cloned()
+    }
+
+    /// Read-lock the map, failing closed (returning `None`, as if the map
+    /// were empty) if the lock is poisoned -- a write-side panic must never
+    /// turn into every subsequent lookup silently succeeding against
+    /// whatever pre-panic state happened to be readable, matching
+    /// [`crate::operator_revocations::OperatorRevocations`]'s documented
+    /// fail-closed poison handling.
+    fn read_map(
+        &self,
+    ) -> Option<std::sync::RwLockReadGuard<'_, HashMap<[u8; 32], EnrolledOperator>>> {
+        self.by_ed25519.read().ok()
     }
 
     /// Look up an enrolled operator, requiring **both** the Ed25519 and
@@ -185,8 +214,8 @@ impl OperatorPolicy {
         &self,
         ed25519_pubkey: &[u8; 32],
         ml_dsa_pubkey: &[u8],
-    ) -> Option<&EnrolledOperator> {
-        self.by_ed25519.get(ed25519_pubkey).filter(|op| {
+    ) -> Option<EnrolledOperator> {
+        self.read_map()?.get(ed25519_pubkey).cloned().filter(|op| {
             // Constant-time-ish is not required here (both are public keys),
             // but a plain slice comparison is exact and simple.
             op.ml_dsa_pubkey.as_slice() == ml_dsa_pubkey
@@ -204,8 +233,8 @@ impl OperatorPolicy {
         &self,
         ed25519_pubkey: &[u8; 32],
         ml_dsa_87_pubkey: &[u8],
-    ) -> Option<&EnrolledOperator> {
-        self.by_ed25519.get(ed25519_pubkey).filter(|op| {
+    ) -> Option<EnrolledOperator> {
+        self.read_map()?.get(ed25519_pubkey).cloned().filter(|op| {
             op.ml_dsa_87_pubkey
                 .as_deref()
                 .is_some_and(|enrolled| enrolled == ml_dsa_87_pubkey)
@@ -216,10 +245,11 @@ impl OperatorPolicy {
     /// enrollment and recover the signing key at action time (so a token
     /// issued to an operator who has since been de-enrolled no longer
     /// authorizes anything).
-    pub(crate) fn lookup_by_id(&self, operator_id: &str) -> Option<&EnrolledOperator> {
-        self.by_ed25519
+    pub(crate) fn lookup_by_id(&self, operator_id: &str) -> Option<EnrolledOperator> {
+        self.read_map()?
             .values()
             .find(|op| op.operator_id == operator_id)
+            .cloned()
     }
 
     /// Authorize `action` for the operator holding `ed25519_pubkey`.
@@ -244,12 +274,111 @@ impl OperatorPolicy {
 
     /// Number of enrolled operators.
     pub(crate) fn len(&self) -> usize {
-        self.by_ed25519.len()
+        self.read_map().map(|m| m.len()).unwrap_or(0)
     }
 
     /// Whether any operator is enrolled.
     pub(crate) fn is_empty(&self) -> bool {
-        self.by_ed25519.is_empty()
+        self.len() == 0
+    }
+
+    /// Replace an enrolled operator's key material live, in-process -- the
+    /// entry point for the authenticated admin `POST /operator/replace-key`
+    /// endpoint (and used by tests). Mirrors
+    /// [`crate::operator_revocations::OperatorRevocations::revoke`]'s
+    /// interior-mutability shape (`&self`, not `&mut self`): every clone of
+    /// this `OperatorPolicy` shares the same underlying map, so the change
+    /// is visible everywhere immediately, no restart required.
+    ///
+    /// Preserves `operator_id` and `role`; only the key material changes.
+    /// Refuses (fail-closed, no partial mutation) if:
+    /// - `operator_id` is not currently enrolled -- recovering an identity
+    ///   that was never there makes no sense, and would let a caller mint a
+    ///   brand-new enrollment through what is supposed to be a narrow
+    ///   "replace an existing key" action;
+    /// - the new Ed25519 key collides with a *different* already-enrolled
+    ///   operator (mirrors [`Self::from_operators`]'s duplicate-key
+    ///   rejection);
+    /// - the write lock is poisoned.
+    ///
+    /// Durability is a separate concern: this only updates the in-memory
+    /// map. Callers that need the change to survive a restart must also
+    /// call [`Self::persist_to`].
+    pub(crate) fn replace_operator_key(
+        &self,
+        operator_id: &str,
+        new_ed25519_pubkey: [u8; 32],
+        new_ml_dsa_pubkey: Vec<u8>,
+        new_ml_dsa_87_pubkey: Option<Vec<u8>>,
+    ) -> Result<(), OperatorPolicyError> {
+        let mut map = self
+            .by_ed25519
+            .write()
+            .map_err(|_| OperatorPolicyError::Io("operator policy lock poisoned".to_string()))?;
+
+        let old_key = map
+            .iter()
+            .find(|(_, op)| op.operator_id == operator_id)
+            .map(|(k, _)| *k)
+            .ok_or_else(|| OperatorPolicyError::UnknownOperator(operator_id.to_string()))?;
+
+        if let Some(existing) = map.get(&new_ed25519_pubkey)
+            && existing.operator_id != operator_id
+        {
+            return Err(OperatorPolicyError::DuplicateKey(operator_id.to_string()));
+        }
+
+        // Safe to unwrap: `old_key` was just found in this same map above.
+        let role = map.get(&old_key).unwrap().role;
+        map.remove(&old_key);
+        map.insert(
+            new_ed25519_pubkey,
+            EnrolledOperator {
+                operator_id: operator_id.to_string(),
+                ed25519_pubkey: new_ed25519_pubkey,
+                ml_dsa_pubkey: new_ml_dsa_pubkey,
+                ml_dsa_87_pubkey: new_ml_dsa_87_pubkey,
+                role,
+            },
+        );
+        Ok(())
+    }
+
+    /// Serialize the current live operator set back to the
+    /// `--operators-file` JSON shape and atomically replace `path` with it:
+    /// write a temp file in the same directory (owner-only permissions on
+    /// Unix), `fsync` its data, rename it over `path`, then `fsync` the
+    /// containing directory so the rename itself survives a crash --
+    /// mirroring `audit_ledger_store.rs::persist_entries_atomic`'s exact
+    /// sequence. Closes the durability gap
+    /// [`crate::operator_revocations::OperatorRevocations::revoke`]'s own
+    /// doc comment flags and accepts for revocation: without this, a live
+    /// [`Self::replace_operator_key`] would vanish on the next restart or
+    /// reload from `path`.
+    pub(crate) fn persist_to(&self, path: &Path) -> std::io::Result<()> {
+        let file = {
+            let map = self
+                .read_map()
+                .ok_or_else(|| std::io::Error::other("operator policy lock poisoned"))?;
+            let mut operators: Vec<OperatorRecord> = map
+                .values()
+                .map(|op| OperatorRecord {
+                    operator_id: op.operator_id.clone(),
+                    ed25519_pubkey: hex::encode(op.ed25519_pubkey),
+                    ml_dsa_pubkey: hex::encode(&op.ml_dsa_pubkey),
+                    ml_dsa_87_pubkey: op.ml_dsa_87_pubkey.as_deref().map(hex::encode),
+                    role: op.role,
+                })
+                .collect();
+            // Deterministic output (stable diffs, easier to audit) --
+            // otherwise HashMap iteration order would reshuffle the file on
+            // every persist even when nothing changed.
+            operators.sort_by(|a, b| a.operator_id.cmp(&b.operator_id));
+            OperatorPolicyFile { operators }
+        };
+        let bytes = serde_json::to_vec_pretty(&file)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        write_atomic(path, &bytes)
     }
 }
 
@@ -266,6 +395,65 @@ fn restrict_permissions(path: &Path) {
 #[cfg(not(unix))]
 fn restrict_permissions(_path: &Path) {}
 
+/// Atomically replace `path` with `bytes`: write a temp file in the same
+/// directory (owner-only permissions on Unix), `fsync` its data, rename it
+/// over `path`, then `fsync` the containing directory so the rename itself
+/// survives a crash. A failed write leaves the previous file untouched.
+/// Mirrors `audit_ledger_store.rs::persist_entries_atomic`, generalized to
+/// arbitrary bytes rather than bincode-encoded ledger entries.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("operators.json");
+    let temp_path = parent.join(format!(".{name}.tmp-{}-{nanos}", std::process::id()));
+
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let write_result: std::io::Result<()> = (|| {
+        let mut file = options.open(&temp_path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temp_path, path)?;
+        sync_directory(parent)
+    })();
+
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    write_result
+}
+
+/// `fsync` a directory so a prior `rename` into it is durable across a
+/// crash -- POSIX only.
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        File::open(path)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
 /// Errors loading or validating an operator policy.
 #[derive(Debug)]
 pub(crate) enum OperatorPolicyError {
@@ -275,6 +463,9 @@ pub(crate) enum OperatorPolicyError {
     BadKey(String),
     /// Two records share an Ed25519 public key.
     DuplicateKey(String),
+    /// [`OperatorPolicy::replace_operator_key`] was asked to replace an
+    /// operator id that isn't currently enrolled.
+    UnknownOperator(String),
 }
 
 impl std::fmt::Display for OperatorPolicyError {
@@ -290,6 +481,9 @@ impl std::fmt::Display for OperatorPolicyError {
                     f,
                     "operator {id:?} shares an Ed25519 key with another operator"
                 )
+            }
+            OperatorPolicyError::UnknownOperator(id) => {
+                write!(f, "operator {id:?} is not currently enrolled")
             }
         }
     }
@@ -472,8 +666,8 @@ mod tests {
     }
 
     #[test]
-    fn lookup_verified_highsec_requires_the_enrolled_ml_dsa_87_key_and_refuses_standard_only_operators(
-    ) {
+    fn lookup_verified_highsec_requires_the_enrolled_ml_dsa_87_key_and_refuses_standard_only_operators()
+     {
         let ed = [3u8; 32];
         let ml65 = vec![0xAAu8; ML_DSA_65_PK_LEN];
         let ml87 = vec![0xBBu8; ML_DSA_87_PK_LEN];
@@ -485,14 +679,18 @@ mod tests {
             role: OperatorRole::Admin,
         }])
         .unwrap();
-        assert!(policy_with_highsec
-            .lookup_verified_highsec(&ed, &ml87)
-            .is_some());
+        assert!(
+            policy_with_highsec
+                .lookup_verified_highsec(&ed, &ml87)
+                .is_some()
+        );
         // A foreign ML-DSA-87 key is refused even though the Ed25519 key is enrolled.
         let foreign_ml87 = vec![0xCCu8; ML_DSA_87_PK_LEN];
-        assert!(policy_with_highsec
-            .lookup_verified_highsec(&ed, &foreign_ml87)
-            .is_none());
+        assert!(
+            policy_with_highsec
+                .lookup_verified_highsec(&ed, &foreign_ml87)
+                .is_none()
+        );
 
         // An operator enrolled only for the standard suite (no
         // ml_dsa_87_pubkey at all) must be refused for the high-security
@@ -507,5 +705,172 @@ mod tests {
         }])
         .unwrap();
         assert!(standard_only.lookup_verified_highsec(&ed, &ml87).is_none());
+    }
+
+    #[test]
+    fn replace_operator_key_preserves_id_and_role_and_drops_the_old_key() {
+        let old_ed = [4u8; 32];
+        let new_ed = [5u8; 32];
+        let policy =
+            OperatorPolicy::from_operators(vec![record("alice", old_ed, OperatorRole::Operator)])
+                .unwrap();
+
+        let new_ml = vec![0xEEu8; ML_DSA_65_PK_LEN];
+        policy
+            .replace_operator_key("alice", new_ed, new_ml.clone(), None)
+            .unwrap();
+
+        assert!(
+            policy.lookup(&old_ed).is_none(),
+            "old key must no longer authenticate"
+        );
+        let replaced = policy.lookup(&new_ed).unwrap();
+        assert_eq!(replaced.operator_id, "alice");
+        assert_eq!(
+            replaced.role,
+            OperatorRole::Operator,
+            "role must be preserved"
+        );
+        assert_eq!(replaced.ml_dsa_pubkey, new_ml);
+        assert_eq!(
+            policy.len(),
+            1,
+            "replace must not change the enrolled count"
+        );
+    }
+
+    #[test]
+    fn replace_operator_key_is_visible_through_a_shared_clone_immediately() {
+        // `OperatorPolicy::clone()` is a shared (Arc) clone -- a caller that
+        // stashed one earlier (e.g. the sealed-channel task) must see a
+        // live replacement without re-fetching from `OperatorAuthState`.
+        let old_ed = [6u8; 32];
+        let new_ed = [7u8; 32];
+        let policy =
+            OperatorPolicy::from_operators(vec![record("bob", old_ed, OperatorRole::Admin)])
+                .unwrap();
+        let shared = policy.clone();
+
+        policy
+            .replace_operator_key("bob", new_ed, vec![0xAAu8; ML_DSA_65_PK_LEN], None)
+            .unwrap();
+
+        assert!(shared.lookup(&old_ed).is_none());
+        assert!(shared.lookup(&new_ed).is_some());
+    }
+
+    #[test]
+    fn replace_operator_key_refuses_an_unenrolled_operator_id() {
+        let policy =
+            OperatorPolicy::from_operators(vec![record("alice", [1u8; 32], OperatorRole::Admin)])
+                .unwrap();
+        let err = policy
+            .replace_operator_key("nobody", [9u8; 32], vec![0u8; ML_DSA_65_PK_LEN], None)
+            .unwrap_err();
+        assert!(matches!(err, OperatorPolicyError::UnknownOperator(id) if id == "nobody"));
+        // Nothing changed.
+        assert!(policy.lookup(&[1u8; 32]).is_some());
+        assert_eq!(policy.len(), 1);
+    }
+
+    #[test]
+    fn replace_operator_key_refuses_a_key_already_enrolled_to_someone_else() {
+        let alice_ed = [1u8; 32];
+        let bob_ed = [2u8; 32];
+        let policy = OperatorPolicy::from_operators(vec![
+            record("alice", alice_ed, OperatorRole::Admin),
+            record("bob", bob_ed, OperatorRole::Viewer),
+        ])
+        .unwrap();
+
+        // Trying to replace alice's key with bob's already-enrolled key must
+        // be refused -- and must not have deleted alice's original entry
+        // first (fail-closed: check before mutate).
+        let err = policy
+            .replace_operator_key("alice", bob_ed, vec![0u8; ML_DSA_65_PK_LEN], None)
+            .unwrap_err();
+        assert!(matches!(err, OperatorPolicyError::DuplicateKey(id) if id == "alice"));
+        assert!(
+            policy.lookup(&alice_ed).is_some(),
+            "alice's original key must survive a refused replace"
+        );
+        assert_eq!(policy.len(), 2);
+    }
+
+    #[test]
+    fn replace_operator_key_allows_reusing_the_same_ed25519_key_the_operator_already_has() {
+        // Not a realistic recovery case (the point of recovery is a *new*
+        // key), but the collision check must compare against *other*
+        // operators, not refuse a no-op replace of one's own key.
+        let ed = [3u8; 32];
+        let policy =
+            OperatorPolicy::from_operators(vec![record("alice", ed, OperatorRole::Admin)]).unwrap();
+        let new_ml = vec![0x11u8; ML_DSA_65_PK_LEN];
+        policy
+            .replace_operator_key("alice", ed, new_ml.clone(), None)
+            .unwrap();
+        assert_eq!(policy.lookup(&ed).unwrap().ml_dsa_pubkey, new_ml);
+    }
+
+    #[test]
+    fn persist_to_round_trips_through_load() {
+        let dir = std::env::temp_dir().join(format!(
+            "xenia-operator-policy-persist-test-{}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("operators.json");
+
+        let ed = [8u8; 32];
+        let ml = vec![0x22u8; ML_DSA_65_PK_LEN];
+        let ml87 = vec![0x33u8; ML_DSA_87_PK_LEN];
+        let policy = OperatorPolicy::from_operators(vec![EnrolledOperator {
+            operator_id: "alice".to_string(),
+            ed25519_pubkey: ed,
+            ml_dsa_pubkey: ml.clone(),
+            ml_dsa_87_pubkey: Some(ml87.clone()),
+            role: OperatorRole::Admin,
+        }])
+        .unwrap();
+        policy.persist_to(&path).unwrap();
+
+        let reloaded = OperatorPolicy::load(&path).unwrap();
+        assert_eq!(reloaded.len(), 1);
+        let op = reloaded.lookup(&ed).unwrap();
+        assert_eq!(op.operator_id, "alice");
+        assert_eq!(op.role, OperatorRole::Admin);
+        assert_eq!(op.ml_dsa_pubkey, ml);
+        assert_eq!(op.ml_dsa_87_pubkey, Some(ml87));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn persist_to_reflects_a_live_replace_operator_key() {
+        let dir = std::env::temp_dir().join(format!(
+            "xenia-operator-policy-persist-replace-test-{}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("operators.json");
+
+        let old_ed = [9u8; 32];
+        let new_ed = [10u8; 32];
+        let policy =
+            OperatorPolicy::from_operators(vec![record("alice", old_ed, OperatorRole::Admin)])
+                .unwrap();
+        policy.persist_to(&path).unwrap();
+
+        policy
+            .replace_operator_key("alice", new_ed, vec![0x44u8; ML_DSA_65_PK_LEN], None)
+            .unwrap();
+        policy.persist_to(&path).unwrap();
+
+        let reloaded = OperatorPolicy::load(&path).unwrap();
+        assert_eq!(reloaded.len(), 1);
+        assert!(reloaded.lookup(&old_ed).is_none());
+        assert!(reloaded.lookup(&new_ed).is_some());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

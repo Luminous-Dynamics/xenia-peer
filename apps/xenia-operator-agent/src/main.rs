@@ -91,17 +91,17 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::Parser;
 use serde::Serialize;
-use xenia_handshake::HandshakeManager;
+use xenia_handshake::{HandshakeManager, ML_DSA_65_PK_LEN};
 use xenia_operator_agent_proto::{
     AgentErrorCode, AgentErrorResponse, AgentSessionToken, HandshakeBeginRequest,
     HandshakeBeginResponse, HandshakeFinishRequest, HandshakeFinishResponse, SignChallengeRequest,
-    SignChallengeResponse, SignConsentActionRequest, SignConsentActionResponse, SignRevokeRequest,
-    SignRevokeResponse,
+    SignChallengeResponse, SignConsentActionRequest, SignConsentActionResponse,
+    SignReplaceKeyRequest, SignReplaceKeyResponse, SignRevokeRequest, SignRevokeResponse,
 };
 use xenia_operator_proto::{OperatorEnrollmentRecord, OperatorRole};
 use xenia_wire::handshake::ViewerHandshake;
 use xenia_wire::handshake_highsec::{
-    ViewerHandshakeHighSec, derive_ml_dsa_87_seed_from_ed25519_secret,
+    ML_DSA_87_PK_LEN, ViewerHandshakeHighSec, derive_ml_dsa_87_seed_from_ed25519_secret,
 };
 use zeroize::Zeroizing;
 
@@ -303,6 +303,7 @@ fn build_router(state: Arc<AgentState>) -> Router {
         .route("/v1/sign/challenge", post(sign_challenge))
         .route("/v1/sign/consent-action", post(sign_consent_action))
         .route("/v1/sign/revoke", post(sign_revoke))
+        .route("/v1/sign/replace-key", post(sign_replace_key))
         .route("/v1/handshake/begin", post(handshake_begin))
         .route("/v1/handshake/finish", post(handshake_finish))
         .layer(axum::middleware::from_fn_with_state(
@@ -750,6 +751,107 @@ async fn sign_revoke(
     .await?;
 
     Ok(Json(SignRevokeResponse {
+        ed_signature_hex: hex::encode(ed_signature.to_bytes()),
+        ml_dsa_signature_hex: hex::encode(ml_dsa_signature),
+    }))
+}
+
+/// `POST /v1/sign/replace-key` -- sign an admin's authorization to replace
+/// *another operator's* enrolled key material: operator-key recovery for
+/// an operator who lost their signing key. `docs/security/SIGNER_DELEGATION_DESIGN.md`
+/// already lists "recovery-key or trust-root changes" on the
+/// mandatory-*action*-confirmation list, so this handler runs its own
+/// [`host_trust::HostTrustStore::confirm_action`] on top of
+/// [`enforce_host_trust`]'s host-identity gate, mirroring [`sign_revoke`]
+/// exactly. The relayed session token is verified
+/// ([`daemon_evidence::verify_token`]) before its `token_nonce` is trusted,
+/// same as every other privileged `/v1/sign/*` handler.
+async fn sign_replace_key(
+    State(state): State<Arc<AgentState>>,
+    Json(req): Json<SignReplaceKeyRequest>,
+) -> Result<Json<SignReplaceKeyResponse>, (StatusCode, Json<AgentErrorResponse>)> {
+    validate_common(&req.common)?;
+    if req.target_operator_id.trim().is_empty() {
+        return Err(bad_request("target_operator_id must not be empty"));
+    }
+    let new_ed25519_pubkey = decode_fixed_hex::<32>(&req.new_ed25519_pubkey_hex)
+        .ok_or_else(|| bad_request("new_ed25519_pubkey_hex must be 32 bytes of hex"))?;
+    let new_ml_dsa_pubkey = decode_fixed_hex::<ML_DSA_65_PK_LEN>(&req.new_ml_dsa_pubkey_hex)
+        .ok_or_else(|| bad_request("new_ml_dsa_pubkey_hex must be a valid ML-DSA-65 public key"))?;
+    let new_ml_dsa_87_pubkey =
+        match &req.new_ml_dsa_87_pubkey_hex {
+            None => None,
+            Some(hex_str) => Some(decode_fixed_hex::<ML_DSA_87_PK_LEN>(hex_str).ok_or_else(
+                || bad_request("new_ml_dsa_87_pubkey_hex must be a valid ML-DSA-87 public key"),
+            )?),
+        };
+
+    let identity = enforce_host_trust(&state, &req.common, "/v1/sign/replace-key").await?;
+    let token_nonce = daemon_evidence::verify_token(&identity, &req.token).map_err(|e| {
+        let agent_err = e.to_agent_error();
+        (status_for(agent_err.code), Json(agent_err))
+    })?;
+
+    let confirm_state = state.clone();
+    let target = req.target_operator_id.clone();
+    let daemon_endpoint = normalize_daemon_endpoint(&req.common.daemon_endpoint);
+    let daemon_fingerprint_hex = hex::encode(identity.fingerprint);
+    let suite = req.common.suite.clone();
+    let new_ed25519_pubkey_hex = req.new_ed25519_pubkey_hex.clone();
+    let confirmed = tokio::task::spawn_blocking(move || {
+        confirm_state
+            .host_trust
+            .lock()
+            .expect("host-trust mutex poisoned")
+            .confirm_action(
+                "Replace operator enrollment key?",
+                &[
+                    ("target operator id", target),
+                    ("new Ed25519 public key", new_ed25519_pubkey_hex),
+                    ("daemon endpoint", daemon_endpoint),
+                    ("daemon fingerprint", daemon_fingerprint_hex),
+                    ("suite", suite),
+                ],
+            )
+    })
+    .await
+    .map_err(|_| internal_error("key-replacement confirmation task panicked"))?
+    .map_err(|e| {
+        let agent_err = e.to_agent_error();
+        (status_for(agent_err.code), Json(agent_err))
+    })?;
+    if !confirmed {
+        let agent_err = AgentErrorResponse {
+            code: AgentErrorCode::ConfirmationDeclined,
+            message: format!(
+                "operator declined to confirm key replacement for '{}'",
+                req.target_operator_id
+            ),
+        };
+        return Err((status_for(agent_err.code), Json(agent_err)));
+    }
+
+    let transcript = xenia_operator_proto::replace_operator_key_transcript(
+        &req.target_operator_id,
+        &new_ed25519_pubkey,
+        &new_ml_dsa_pubkey,
+        new_ml_dsa_87_pubkey.as_ref().map(|k| k.as_slice()),
+        &token_nonce,
+    );
+    let ed_signature = state.manager.sign(&transcript);
+    let ml_dsa_signature = state.manager.sign_ml_dsa(&transcript);
+
+    record_audit_event(
+        &state,
+        audit_log::AgentAuditEvent::KeyReplacementSigned {
+            target_operator_id: req.target_operator_id.clone(),
+            new_ed25519_pubkey_hex: req.new_ed25519_pubkey_hex.clone(),
+            daemon_endpoint: normalize_daemon_endpoint(&req.common.daemon_endpoint),
+        },
+    )
+    .await?;
+
+    Ok(Json(SignReplaceKeyResponse {
         ed_signature_hex: hex::encode(ed_signature.to_bytes()),
         ml_dsa_signature_hex: hex::encode(ml_dsa_signature),
     }))
@@ -2307,6 +2409,220 @@ mod tests {
         let req = axum::http::Request::builder()
             .method("POST")
             .uri("/v1/sign/revoke")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Builds a valid `/v1/sign/replace-key` body carrying `cert` and
+    /// `token`, then applies `overrides` on top. Mirrors
+    /// [`revoke_request_body`].
+    fn replace_key_request_body(
+        cert: &DaemonIdentityCertificate,
+        token: &SignedTokenDto,
+        overrides: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "schema_version": xenia_operator_agent_proto::SCHEMA_VERSION,
+            "daemon_certificate": cert,
+            "daemon_endpoint": TEST_DAEMON_ENDPOINT,
+            "suite": "standard",
+            "request_id": "test-req-4",
+            "target_operator_id": "op-42",
+            "new_ed25519_pubkey_hex": "11".repeat(32),
+            "new_ml_dsa_pubkey_hex": "22".repeat(ML_DSA_65_PK_LEN),
+            "new_ml_dsa_87_pubkey_hex": null,
+            "token": token,
+        });
+        merge_overrides(&mut body, overrides);
+        body
+    }
+
+    #[tokio::test]
+    async fn sign_replace_key_signs_with_confirmation_when_allowed() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token_nonce = [0x22u8; 16];
+        let token = test_token(&http_auth, &http_auth_ml_dsa, token_nonce);
+        let body = replace_key_request_body(&cert, &token, serde_json::json!({}));
+        let (status, json) = post_signed_json(app, "/v1/sign/replace-key", "secret", body).await;
+        assert_eq!(status, StatusCode::OK, "body: {json}");
+
+        let resp: SignReplaceKeyResponse = serde_json::from_value(json).unwrap();
+        let expected_manager = HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]);
+        let new_ed: [u8; 32] = decode_fixed_hex(&"11".repeat(32)).unwrap();
+        let new_ml: Vec<u8> = hex::decode("22".repeat(ML_DSA_65_PK_LEN)).unwrap();
+        let transcript = xenia_operator_proto::replace_operator_key_transcript(
+            "op-42",
+            &new_ed,
+            &new_ml,
+            None,
+            &token_nonce,
+        );
+        let ed_sig_bytes: [u8; 64] = decode_fixed_hex(&resp.ed_signature_hex).unwrap();
+        let ed_sig = ed25519_dalek::Signature::from_bytes(&ed_sig_bytes);
+        HandshakeManager::verify(
+            &expected_manager.identity_public_key(),
+            &transcript,
+            &ed_sig,
+        )
+        .expect("agent's Ed25519 signature must verify over the key-replacement transcript");
+    }
+
+    #[tokio::test]
+    async fn sign_replace_key_requires_its_own_confirmation_even_when_the_host_is_already_pinned() {
+        // Mirrors sign_revoke's equivalent test: the host-trust step alone
+        // would pass here (the fingerprint is already pinned) -- this
+        // proves the mandatory *action*-level confirmation
+        // (SIGNER_DELEGATION_DESIGN.md's "recovery-key or trust-root
+        // changes") is a genuinely separate gate.
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let state = test_state_with_pinned_host(
+            "secret",
+            &["http://localhost:8134"],
+            &host,
+            "standard",
+            false,
+        );
+        let app = build_router(state);
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0x22u8; 16]);
+        let body = replace_key_request_body(&cert, &token, serde_json::json!({}));
+        let (status, json) = post_signed_json(app, "/v1/sign/replace-key", "secret", body).await;
+        assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "body: {json}");
+        assert_eq!(json["code"], "confirmation_required");
+    }
+
+    #[tokio::test]
+    async fn sign_replace_key_fails_closed_when_the_host_itself_needs_confirmation_and_none_is_available()
+     {
+        let state = test_state_with_host_trust("secret", &["http://localhost:8134"], false);
+        let app = build_router(state);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0x22u8; 16]);
+        let body = replace_key_request_body(&cert, &token, serde_json::json!({}));
+        let (status, json) = post_signed_json(app, "/v1/sign/replace-key", "secret", body).await;
+        assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "body: {json}");
+        assert_eq!(json["code"], "confirmation_required");
+    }
+
+    #[tokio::test]
+    async fn sign_replace_key_rejects_an_empty_target_operator_id() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0x22u8; 16]);
+        let body = replace_key_request_body(
+            &cert,
+            &token,
+            serde_json::json!({ "target_operator_id": "" }),
+        );
+        let (status, json) = post_signed_json(app, "/v1/sign/replace-key", "secret", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
+        assert_eq!(json["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn sign_replace_key_rejects_malformed_new_ed25519_pubkey_hex() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0x22u8; 16]);
+        let body = replace_key_request_body(
+            &cert,
+            &token,
+            serde_json::json!({ "new_ed25519_pubkey_hex": "nope" }),
+        );
+        let (status, json) = post_signed_json(app, "/v1/sign/replace-key", "secret", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
+        assert_eq!(json["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn sign_replace_key_rejects_a_wrong_length_new_ml_dsa_pubkey_hex() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0x22u8; 16]);
+        let body = replace_key_request_body(
+            &cert,
+            &token,
+            serde_json::json!({ "new_ml_dsa_pubkey_hex": "ab" }),
+        );
+        let (status, json) = post_signed_json(app, "/v1/sign/replace-key", "secret", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
+        assert_eq!(json["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn sign_replace_key_rejects_a_wrong_length_new_ml_dsa_87_pubkey_hex() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0x22u8; 16]);
+        let body = replace_key_request_body(
+            &cert,
+            &token,
+            serde_json::json!({ "new_ml_dsa_87_pubkey_hex": "ab" }),
+        );
+        let (status, json) = post_signed_json(app, "/v1/sign/replace-key", "secret", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
+        assert_eq!(json["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn sign_replace_key_rejects_an_unsupported_schema_version() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0x22u8; 16]);
+        let body =
+            replace_key_request_body(&cert, &token, serde_json::json!({ "schema_version": 999 }));
+        let (status, json) = post_signed_json(app, "/v1/sign/replace-key", "secret", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
+        assert_eq!(json["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn sign_replace_key_rejects_a_token_signed_by_the_wrong_key() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let (_other_host, attacker_http_auth, attacker_http_auth_ml_dsa) = test_daemon_identity();
+        let token = test_token(
+            &attacker_http_auth,
+            &attacker_http_auth_ml_dsa,
+            [0x22u8; 16],
+        );
+        let body = replace_key_request_body(&cert, &token, serde_json::json!({}));
+        let (status, json) = post_signed_json(app, "/v1/sign/replace-key", "secret", body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "body: {json}");
+        assert_eq!(json["code"], "host_not_trusted");
+    }
+
+    #[tokio::test]
+    async fn sign_replace_key_requires_origin_and_token_like_every_other_route() {
+        use tower::ServiceExt;
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0x22u8; 16]);
+        let body = replace_key_request_body(&cert, &token, serde_json::json!({}));
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/sign/replace-key")
             .header("content-type", "application/json")
             .body(axum::body::Body::from(body.to_string()))
             .unwrap();

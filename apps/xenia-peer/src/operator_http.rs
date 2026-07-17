@@ -32,12 +32,13 @@ use tokio::sync::Mutex;
 use xenia_handshake::{HandshakeManager, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN, MlDsaIdentity};
 use xenia_ledger::{Chain, LedgerCheckpoint, LedgerEntry};
 use xenia_operator_proto::{DaemonIdentityCertificate, challenge_host_attestation_transcript};
+use xenia_wire::handshake_highsec::ML_DSA_87_PK_LEN;
 
 use crate::operator::{OperatorPolicy, OperatorRole};
 use crate::operator_auth::{
-    AuthenticatedConsentAction, AuthenticatedRevocation, CHALLENGE_TTL_SECS, ChallengeResponse,
-    ChallengeStore, ConsentAction, OperatorToken, RateLimiter, SignedOperatorToken, TOKEN_TTL_SECS,
-    issue_token, verify_challenge_response,
+    AuthenticatedConsentAction, AuthenticatedKeyReplacement, AuthenticatedRevocation,
+    CHALLENGE_TTL_SECS, ChallengeResponse, ChallengeStore, ConsentAction, OperatorToken,
+    RateLimiter, SignedOperatorToken, TOKEN_TTL_SECS, issue_token, verify_challenge_response,
 };
 use crate::operator_revocations::OperatorRevocations;
 
@@ -369,6 +370,12 @@ pub(crate) fn parse_authenticated_revocation(
 struct AdminMutationState {
     auth: Arc<OperatorAuthState>,
     revocations: OperatorRevocations,
+    /// Where to persist the live operator policy after a
+    /// `replace_operator_key_handler` mutation, so an operator-key
+    /// recovery survives a restart -- `None` if the daemon wasn't given
+    /// an `--operators-file` (the live mutation still applies in-process;
+    /// there is simply nowhere durable to write it back to).
+    operators_file: Option<std::path::PathBuf>,
 }
 
 /// `POST /operator/revoke` — an authenticated `Admin` revokes another operator
@@ -406,6 +413,138 @@ async fn revoke_operator_handler(
             Err((StatusCode::FORBIDDEN, "revocation refused".to_string()))
         }
     }
+}
+
+/// Wire form of an admin's operator-key-replacement request:
+/// `{ token, target_operator_id, new_ed25519_pubkey, new_ml_dsa_pubkey,
+/// new_ml_dsa_87_pubkey?, action_signature, ml_dsa_action_signature }` --
+/// operator-key recovery.
+#[derive(Deserialize)]
+struct AuthenticatedKeyReplacementDto {
+    token: TokenDto,
+    target_operator_id: String,
+    /// Hex Ed25519 public key of the operator's replacement identity.
+    new_ed25519_pubkey: String,
+    /// Hex ML-DSA-65 public key of the replacement identity -- required,
+    /// mirroring `crate::operator::OperatorRecord`'s `ml_dsa_pubkey` field
+    /// (private to that module, so not a linkable intra-doc reference here).
+    new_ml_dsa_pubkey: String,
+    /// Hex ML-DSA-87 public key, only if the operator is re-enrolling for
+    /// the high-security sealed channel -- omitted (not null) otherwise,
+    /// mirroring `crate::operator::OperatorRecord`'s `ml_dsa_87_pubkey` field.
+    #[serde(default)]
+    new_ml_dsa_87_pubkey: Option<String>,
+    /// Hex Ed25519 signature over
+    /// `replace_operator_key_transcript(target, new keys, token_nonce)`.
+    action_signature: String,
+    /// Hex ML-DSA-65 signature over the same transcript -- both required.
+    ml_dsa_action_signature: String,
+}
+
+/// Parse the JSON body of a `/operator/replace-key` request into an
+/// [`AuthenticatedKeyReplacement`], mirroring [`parse_authenticated_revocation`].
+pub(crate) fn parse_authenticated_key_replacement(
+    json: &str,
+) -> Result<AuthenticatedKeyReplacement, String> {
+    let dto: AuthenticatedKeyReplacementDto =
+        serde_json::from_str(json).map_err(|e| e.to_string())?;
+    let new_ed25519_pubkey = decode_fixed::<32>(&dto.new_ed25519_pubkey).map_err(|(_, m)| m)?;
+    let new_ml_dsa_pubkey =
+        decode_fixed::<ML_DSA_65_PK_LEN>(&dto.new_ml_dsa_pubkey).map_err(|(_, m)| m)?;
+    let new_ml_dsa_87_pubkey = match dto.new_ml_dsa_87_pubkey {
+        None => None,
+        Some(hex_str) => Some(
+            decode_fixed::<ML_DSA_87_PK_LEN>(&hex_str)
+                .map_err(|(_, m)| m)?
+                .to_vec(),
+        ),
+    };
+    let action_signature = decode_fixed::<64>(&dto.action_signature).map_err(|(_, m)| m)?;
+    let ml_dsa_action_signature =
+        decode_fixed::<ML_DSA_65_SIG_LEN>(&dto.ml_dsa_action_signature).map_err(|(_, m)| m)?;
+    Ok(AuthenticatedKeyReplacement {
+        token: dto.token.into_signed()?,
+        target_operator_id: dto.target_operator_id,
+        new_ed25519_pubkey,
+        new_ml_dsa_pubkey: new_ml_dsa_pubkey.to_vec(),
+        new_ml_dsa_87_pubkey,
+        action_signature,
+        ml_dsa_action_signature,
+    })
+}
+
+/// `POST /operator/replace-key` — an authenticated `Admin` replaces another
+/// operator's enrolled key material live (no restart): operator-key
+/// recovery. Fail-closed exactly like [`revoke_operator_handler`]: only a
+/// valid, unexpired, `Admin`-role token whose per-action signature verifies
+/// over the exact target and new key material may replace it; every auth
+/// failure returns `403` without disclosing which check failed.
+///
+/// On success the live policy is also persisted back to `--operators-file`
+/// (if the daemon was given one) so the replacement survives a restart --
+/// unlike [`crate::operator_revocations::OperatorRevocations::revoke`],
+/// whose own doc comment accepts that gap for revocation. A persist
+/// failure (e.g. a full or read-only disk) is logged but does not undo the
+/// already-applied in-process mutation or fail the request: the operator
+/// is unblocked immediately, which is the whole point of recovery, and a
+/// failed durability write is an operational issue for the daemon operator
+/// to fix, not a reason to leave the recovering operator locked out.
+async fn replace_operator_key_handler(
+    State(state): State<AdminMutationState>,
+    body: String,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let request = parse_authenticated_key_replacement(&body).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("malformed key-replacement request: {e}"),
+        )
+    })?;
+    let authorized = match crate::operator_auth::authorize_operator_key_replacement(
+        &state.auth.policy,
+        &state.auth.daemon_key.verifying_key(),
+        &state.auth.daemon_ml_dsa.public_key_bytes(),
+        unix_now_secs(),
+        &request,
+    ) {
+        Ok(authorized) => authorized,
+        Err(err) => {
+            tracing::warn!(error = %err, "operator key replacement refused");
+            return Err((StatusCode::FORBIDDEN, "key replacement refused".to_string()));
+        }
+    };
+
+    if let Err(err) = state.auth.policy.replace_operator_key(
+        &authorized.target_operator_id,
+        authorized.new_ed25519_pubkey,
+        authorized.new_ml_dsa_pubkey,
+        authorized.new_ml_dsa_87_pubkey,
+    ) {
+        tracing::warn!(
+            error = %err,
+            target = %authorized.target_operator_id,
+            "operator key replacement refused"
+        );
+        return Err((StatusCode::FORBIDDEN, "key replacement refused".to_string()));
+    }
+
+    if let Some(path) = &state.operators_file
+        && let Err(err) = state.auth.policy.persist_to(path)
+    {
+        tracing::error!(
+            error = %err,
+            path = %path.display(),
+            target = %authorized.target_operator_id,
+            "failed to persist operator policy after key replacement -- \
+             the replacement is live but will not survive a restart until fixed"
+        );
+    }
+
+    tracing::warn!(
+        target = %authorized.target_operator_id,
+        by = %authorized.operator_id,
+        "operator key replaced via admin endpoint"
+    );
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// State for the `/v1/audit/*` routes: the auth state (token/role
@@ -522,11 +661,14 @@ async fn audit_ledger_handler(
     }))
 }
 
-/// A `Router` carrying the auth routes plus the admin revoke route and the
-/// `/v1/audit/*` routes, each with its own state already applied, so it can
-/// be `.merge()`d into the stateless admin router. `revocations` is the
-/// *same* handle the sealed endpoint consults; `ledger` is the *same*
-/// shared ledger every consent path appends to.
+/// A `Router` carrying the auth routes plus the admin revoke/replace-key
+/// routes and the `/v1/audit/*` routes, each with its own state already
+/// applied, so it can be `.merge()`d into the stateless admin router.
+/// `revocations` is the *same* handle the sealed endpoint consults;
+/// `ledger` is the *same* shared ledger every consent path appends to;
+/// `operators_file` is where `replace_operator_key_handler` persists a live
+/// key replacement so it survives a restart (`None` if the daemon wasn't
+/// given an `--operators-file`).
 ///
 /// `allowed_origins` gates every route here with the same Origin-allowlist
 /// and CORS-header pattern `xenia-operator-agent`'s `auth_and_cors_middleware`
@@ -544,10 +686,12 @@ pub(crate) fn router(
     revocations: OperatorRevocations,
     ledger: Arc<Mutex<Chain>>,
     allowed_origins: Arc<Vec<String>>,
+    operators_file: Option<std::path::PathBuf>,
 ) -> Router {
     let mutation = AdminMutationState {
         auth: state.clone(),
         revocations,
+        operators_file,
     };
     let audit = AuditState {
         auth: state.clone(),
@@ -574,6 +718,7 @@ pub(crate) fn router(
         .merge(
             Router::new()
                 .route("/operator/revoke", post(revoke_operator_handler))
+                .route("/operator/replace-key", post(replace_operator_key_handler))
                 .with_state(mutation),
         )
         .merge(
@@ -711,6 +856,7 @@ mod tests {
             OperatorRevocations::empty(),
             empty_ledger(),
             Arc::new(Vec::new()),
+            None,
         );
         // A well-formed VerifyRequestDto (all fields present) so the handler
         // runs -- the crypto is garbage, but the rate limiter fires before
@@ -806,6 +952,7 @@ mod tests {
             OperatorRevocations::empty(),
             empty_ledger(),
             Arc::new(Vec::new()),
+            None,
         );
 
         let (status, body) = get_json(&router, "/auth/daemon-identity").await;
@@ -853,6 +1000,7 @@ mod tests {
             OperatorRevocations::empty(),
             empty_ledger(),
             Arc::new(Vec::new()),
+            None,
         );
 
         let (status, cert_body) = get_json(&router, "/auth/daemon-identity").await;
@@ -906,6 +1054,7 @@ mod tests {
             OperatorRevocations::empty(),
             empty_ledger(),
             Arc::new(Vec::new()),
+            None,
         );
 
         // 1. get a challenge.
@@ -971,6 +1120,7 @@ mod tests {
             OperatorRevocations::empty(),
             empty_ledger(),
             Arc::new(Vec::new()),
+            None,
         );
         // A well-formed but never-issued nonce.
         let ml_pk = op.ml_dsa_public_key_bytes().to_vec();
@@ -1036,6 +1186,242 @@ mod tests {
         .to_string()
     }
 
+    /// Like [`state_with`], but also enrolls a second operator `mallory`
+    /// (role `target_role`) with her own real handshake identity `target_op`
+    /// -- needed to test replacing *her* key material while `alice` (Admin)
+    /// authorizes the replacement.
+    fn state_with_target(
+        admin_op: &HandshakeManager,
+        daemon: SigningKey,
+        target_op: &HandshakeManager,
+        target_role: OperatorRole,
+    ) -> Arc<OperatorAuthState> {
+        let policy = OperatorPolicy::from_operators(vec![
+            EnrolledOperator {
+                operator_id: "alice".to_string(),
+                ed25519_pubkey: admin_op.identity_public_key_bytes(),
+                ml_dsa_pubkey: admin_op.ml_dsa_public_key_bytes().to_vec(),
+                ml_dsa_87_pubkey: None,
+                role: OperatorRole::Admin,
+            },
+            EnrolledOperator {
+                operator_id: "mallory".to_string(),
+                ed25519_pubkey: target_op.identity_public_key_bytes(),
+                ml_dsa_pubkey: target_op.ml_dsa_public_key_bytes().to_vec(),
+                ml_dsa_87_pubkey: None,
+                role: target_role,
+            },
+        ])
+        .unwrap();
+        Arc::new(OperatorAuthState::new(
+            policy,
+            daemon,
+            test_daemon_ml_dsa(),
+            HandshakeManager::new(),
+            crate::operator_auth::AUTH_RATE_MAX,
+            crate::operator_auth::AUTH_RATE_WINDOW_SECS,
+        ))
+    }
+
+    /// Build a signed `POST /operator/replace-key` body replacing `target`'s
+    /// key material with `new_ed`/`new_ml`, signed by `op` (the authorizing
+    /// admin).
+    #[allow(clippy::too_many_arguments)]
+    fn replace_key_body(
+        op: &HandshakeManager,
+        token_json: serde_json::Value,
+        target: &str,
+        new_ed: [u8; 32],
+        new_ml: &[u8],
+        new_ml_87: Option<&[u8]>,
+        nonce: &[u8; 16],
+    ) -> String {
+        let transcript = crate::operator_auth::replace_operator_key_transcript(
+            target, &new_ed, new_ml, new_ml_87, nonce,
+        );
+        serde_json::json!({
+            "token": token_json,
+            "target_operator_id": target,
+            "new_ed25519_pubkey": hex::encode(new_ed),
+            "new_ml_dsa_pubkey": hex::encode(new_ml),
+            "new_ml_dsa_87_pubkey": new_ml_87.map(hex::encode),
+            "action_signature": hex::encode(op.sign(&transcript).to_bytes()),
+            "ml_dsa_action_signature": hex::encode(op.sign_ml_dsa(&transcript)),
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn admin_replace_key_endpoint_replaces_target_and_gates_by_role() {
+        let admin_op = HandshakeManager::new();
+        let target_op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let state = state_with_target(
+            &admin_op,
+            daemon.clone(),
+            &target_op,
+            OperatorRole::Operator,
+        );
+        let router = router(
+            state.clone(),
+            OperatorRevocations::empty(),
+            empty_ledger(),
+            Arc::new(Vec::new()),
+            None,
+        );
+        let now = now_secs();
+
+        let old_ed = target_op.identity_public_key_bytes();
+        let new_ed = [0x77u8; 32];
+        let new_ml = vec![0xEEu8; ML_DSA_65_PK_LEN];
+
+        // An Admin token authorizes the replacement: 204 + the target's key
+        // is live-replaced -- the old key no longer authenticates, the new
+        // one does, and the role/id are preserved.
+        let (admin_token, nonce) = token_json_for(&daemon, OperatorRole::Admin, now);
+        let body = replace_key_body(
+            &admin_op,
+            admin_token,
+            "mallory",
+            new_ed,
+            &new_ml,
+            None,
+            &nonce,
+        );
+        let (status, _) = post_json(&router, "/operator/replace-key", body).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(
+            state.policy.lookup(&old_ed).is_none(),
+            "the old key must no longer authenticate"
+        );
+        let replaced = state
+            .policy
+            .lookup(&new_ed)
+            .expect("new key must be enrolled");
+        assert_eq!(replaced.operator_id, "mallory");
+        assert_eq!(
+            replaced.role,
+            OperatorRole::Operator,
+            "role must be preserved"
+        );
+
+        // A follow-up request signed with the OLD (now-replaced) key must be
+        // refused by the *sealed channel*'s enrollment lookup -- this HTTP
+        // test only proves the policy itself was mutated; the cross-surface
+        // effect (sealed channel, /auth/challenge) is exercised by
+        // `operator_sealed_channel`'s own tests against a live-mutated
+        // `OperatorPolicy`.
+
+        // An honestly-issued NON-Admin token is refused (403) and replaces
+        // nothing -- the daemon gates on the token's own role, not on any
+        // client UI.
+        let target_op2 = HandshakeManager::new();
+        let (approver_token, nonce2) = token_json_for(&daemon, OperatorRole::Approver, now);
+        let body2 = replace_key_body(
+            &admin_op,
+            approver_token,
+            "mallory",
+            target_op2.identity_public_key_bytes(),
+            &new_ml,
+            None,
+            &nonce2,
+        );
+        let (status2, _) = post_json(&router, "/operator/replace-key", body2).await;
+        assert_eq!(status2, StatusCode::FORBIDDEN);
+        assert!(
+            state.policy.lookup(&new_ed).is_some(),
+            "the successful replacement from above must be untouched by a refused request"
+        );
+
+        // Signature is over "mallory" but the body claims "eve": the
+        // per-action signature no longer verifies -> refused, nothing
+        // replaced.
+        let (admin_token2, nonce3) = token_json_for(&daemon, OperatorRole::Admin, now);
+        let mut tampered_body = serde_json::from_str::<serde_json::Value>(&replace_key_body(
+            &admin_op,
+            admin_token2,
+            "mallory",
+            target_op2.identity_public_key_bytes(),
+            &new_ml,
+            None,
+            &nonce3,
+        ))
+        .unwrap();
+        tampered_body["target_operator_id"] = serde_json::json!("eve");
+        let (status3, _) =
+            post_json(&router, "/operator/replace-key", tampered_body.to_string()).await;
+        assert_eq!(status3, StatusCode::FORBIDDEN);
+        assert!(
+            state.policy.lookup(&new_ed).is_some(),
+            "a tampered request must not mutate the policy"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_replace_key_endpoint_persists_to_the_operators_file() {
+        // A full round trip proving the daemon's own durability promise:
+        // replace a key over HTTP, then re-load a *fresh* `OperatorPolicy`
+        // from the same `--operators-file` path (simulating a restart) and
+        // confirm the replacement survived, closing the gap
+        // `OperatorRevocations::revoke`'s own doc comment accepts for
+        // revocation.
+        let admin_op = HandshakeManager::new();
+        let target_op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let state = state_with_target(&admin_op, daemon.clone(), &target_op, OperatorRole::Viewer);
+
+        let dir = std::env::temp_dir().join(format!(
+            "xenia-operator-http-persist-test-{}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let operators_file = dir.join("operators.json");
+        // Seed the file with the same starting policy the daemon would have
+        // loaded it from at startup, so the round trip is realistic.
+        state.policy.persist_to(&operators_file).unwrap();
+
+        let router = router(
+            state.clone(),
+            OperatorRevocations::empty(),
+            empty_ledger(),
+            Arc::new(Vec::new()),
+            Some(operators_file.clone()),
+        );
+        let now = now_secs();
+        let new_ed = [0x99u8; 32];
+        let new_ml = vec![0xCCu8; ML_DSA_65_PK_LEN];
+
+        let (admin_token, nonce) = token_json_for(&daemon, OperatorRole::Admin, now);
+        let body = replace_key_body(
+            &admin_op,
+            admin_token,
+            "mallory",
+            new_ed,
+            &new_ml,
+            None,
+            &nonce,
+        );
+        let (status, _) = post_json(&router, "/operator/replace-key", body).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // Simulate a restart: load a brand-new `OperatorPolicy` from disk,
+        // sharing nothing in-process with `state.policy`.
+        let reloaded = OperatorPolicy::load(&operators_file).unwrap();
+        assert!(
+            reloaded
+                .lookup(&target_op.identity_public_key_bytes())
+                .is_none(),
+            "the old key must not reappear after a reload"
+        );
+        let op = reloaded
+            .lookup(&new_ed)
+            .expect("the replacement must have been persisted to disk");
+        assert_eq!(op.operator_id, "mallory");
+        assert_eq!(op.role, OperatorRole::Viewer);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[tokio::test]
     async fn admin_revoke_endpoint_revokes_target_and_gates_by_role() {
         let op = HandshakeManager::new();
@@ -1047,6 +1433,7 @@ mod tests {
             revocations.clone(),
             empty_ledger(),
             Arc::new(Vec::new()),
+            None,
         );
         let now = now_secs();
 
@@ -1104,6 +1491,7 @@ mod tests {
             OperatorRevocations::empty(),
             ledger_with_entries(ledger_key, 3),
             Arc::new(Vec::new()),
+            None,
         );
 
         // No auth header at all -- the checkpoint is public.
@@ -1124,6 +1512,7 @@ mod tests {
             OperatorRevocations::empty(),
             ledger_with_entries(ledger_key, 3),
             Arc::new(Vec::new()),
+            None,
         );
 
         // No auth header at all -- health is public, like the checkpoint.
@@ -1144,6 +1533,7 @@ mod tests {
             OperatorRevocations::empty(),
             empty_ledger(),
             Arc::new(Vec::new()),
+            None,
         );
 
         let (status, _) = get_json(&router, "/v1/audit/ledger").await;
@@ -1163,6 +1553,7 @@ mod tests {
             OperatorRevocations::empty(),
             ledger_with_entries(ledger_key, 2),
             Arc::new(Vec::new()),
+            None,
         );
         let (token, _nonce) = token_json_for(&daemon, OperatorRole::Viewer, now_secs());
 
@@ -1192,6 +1583,7 @@ mod tests {
             OperatorRevocations::empty(),
             empty_ledger(),
             Arc::new(Vec::new()),
+            None,
         );
 
         // A token for an operator id that was never enrolled (state_with
@@ -1226,6 +1618,7 @@ mod tests {
             OperatorRevocations::empty(),
             empty_ledger(),
             Arc::new(Vec::new()),
+            None,
         );
 
         let authed = crate::operator_auth::AuthenticatedOperator {
@@ -1259,6 +1652,7 @@ mod tests {
             OperatorRevocations::empty(),
             empty_ledger(),
             Arc::new(Vec::new()),
+            None,
         );
 
         let (token_json, _nonce) = token_json_for(&daemon, OperatorRole::Viewer, now_secs());
@@ -1280,6 +1674,7 @@ mod tests {
             OperatorRevocations::empty(),
             empty_ledger(),
             Arc::new(Vec::new()),
+            None,
         );
 
         let (status, _) =

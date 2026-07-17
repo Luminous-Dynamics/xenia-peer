@@ -591,16 +591,59 @@ vs. explicitly deferred.
   `auth_and_cors_middleware`'s layer, rather than a path special-case
   inside that function. Minimal response shape (status, uptime, a public
   fingerprint/entry-count) -- no secret material.
+- **Operator-key recovery.** Done. Before this, losing
+  `operator-agent-identity.key` was genuinely catastrophic -- no self-service
+  re-enroll path existed; recovery meant the daemon operator manually editing
+  the static `--operators-file` and restarting (dropping every live session).
+  The recovery flow mirrors the exact out-of-band-key/in-band-authorization
+  shape initial enrollment already uses: the locked-out operator starts a
+  fresh agent instance (already generates a new keypair when the identity
+  file is absent -- no new code needed), reads the new public keys off the
+  existing `GET /identity`, and hands them out-of-band to a *different*,
+  still-enrolled Admin. That admin's own agent gets a new
+  `POST /v1/sign/replace-key` request, gated by
+  `enforce_host_trust` plus a second, independent
+  `HostTrustStore::confirm_action` ("Replace operator enrollment key?") --
+  `SIGNER_DELEGATION_DESIGN.md` already named "recovery-key or trust-root
+  changes" as mandatory-confirmation, so an already-pinned host does not
+  exempt this action, mirroring how `sign_revoke` is confirmed. On confirm,
+  the agent reconstructs `replace_operator_key_transcript` from typed,
+  individually-verified fields (never a caller-supplied transcript) and
+  signs with its own already-enrolled identity (both algorithms), recording
+  a new `KeyReplacementSigned` audit event.
+  That signed request goes to the daemon's new `POST /operator/replace-key`,
+  authorized the same way `POST /operator/revoke` is
+  (`authorize_operator_key_replacement`, Admin-only via the `EnrollOperator`
+  permission, dual-signature verified over the transcript), then mutates the
+  live policy (`OperatorPolicy::replace_operator_key` -- `by_ed25519` is now
+  `Arc<RwLock<...>>`, mirroring `OperatorRevocations`'s exact shape, so every
+  existing holder of a cloned `OperatorPolicy` sees the replacement
+  immediately) and **persists it** (`OperatorPolicy::persist_to`, atomic
+  temp-file+fsync+rename+dir-fsync, mirroring
+  `audit_ledger_store.rs::persist_entries_atomic`) -- closing the durability
+  gap `OperatorRevocations::revoke`'s own doc comment accepts for revocation,
+  rather than repeating it. A persist failure is logged but does not undo
+  the already-applied in-process mutation or fail the request: the operator
+  is unblocked immediately (the point of recovery), and a failed durability
+  write is an operational disk/permissions issue to fix, not a reason to
+  leave them locked out. Verified with new unit tests
+  (`OperatorPolicy::replace_operator_key`/`persist_to`, the transcript's
+  domain separation/field-binding, `authorize_operator_key_replacement`'s
+  role/signature/enrollment gates) and integration tests proving the full
+  round trip over real HTTP (old key stops authenticating, new key works,
+  role/id preserved, a restart-simulating reload from `--operators-file`
+  keeps the replacement) and over the agent's real `/v1/sign/replace-key`
+  route (confirmation required and independent of host-trust, malformed/
+  wrong-length key hex rejected, wrong-key tokens refused).
+  **Deliberately out of scope**: a `sovereign-admin` browser UI for this
+  flow (curl/API-only for now, matching how every other admin action in
+  this codebase started backend-first), and the catastrophic case where
+  *every* enrolled Admin has simultaneously lost their key -- that needs a
+  genuinely separate offline recovery-key/trust-root mechanism, not
+  something to improvise as an extension of this flow.
 - **Not done, deliberately deferred**: systemd packaging (zero prior art
   anywhere in the repo), token/session automatic rotation (only passive TTL
-  expiry + manual refresh exists today), backup tooling/procedures, and
-  operator-key recovery (currently genuinely catastrophic if an operator
-  loses their identity key file -- no self-service re-enroll path exists;
-  recovery today means the daemon operator manually editing the static
-  `--operators-file` and restarting). Key recovery in particular is the
-  riskiest of these to design well -- a careless self-service re-enroll
-  flow becomes new attack surface -- and is left for its own dedicated item
-  rather than rushed.
+  expiry + manual refresh exists today), and backup tooling/procedures.
 - **Not done, confirmed not ripe**: "commission independent review of
   `xenia-wire`." Checked against the project's own stated criterion --
   `xenia-wire` is `0.2.0-alpha.8`, `SPEC.md`'s own header says "Pre-alpha --
