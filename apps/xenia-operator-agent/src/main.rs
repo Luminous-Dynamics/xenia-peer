@@ -74,6 +74,7 @@
 // with daemon-signed evidence the agent verifies itself -- see that
 // module's doc comment for the confused-deputy gap this closes.
 mod agent_session;
+mod audit_log;
 mod daemon_evidence;
 mod handshake_state;
 mod host_trust;
@@ -170,6 +171,15 @@ struct Args {
     /// `agent_session`'s module doc comment for the tradeoff this bounds.
     #[arg(long, default_value_t = agent_session::DEFAULT_SESSION_TTL_SECS)]
     session_ttl_secs: u64,
+
+    /// Durable audit-trail path (`audit_log::AgentAuditChain`) -- host-trust
+    /// first-use/rotation, pairing, session refresh, and revocation, each
+    /// hash-chained and signed with this agent's own identity key. Unlike
+    /// the pin store, this file must never partially load or silently
+    /// truncate: a corrupt or tampered audit log fails startup outright
+    /// rather than serving an audit trail that looks intact but isn't.
+    #[arg(long, default_value = "xenia-operator-agent-state/audit.log")]
+    audit_log_path: PathBuf,
 }
 
 struct AgentState {
@@ -198,6 +208,16 @@ struct AgentState {
     /// itself (`ViewerHandshake::begin`/`finish`) runs on an owned local
     /// value outside the lock.
     handshake_state: StdMutex<HandshakeState>,
+    /// Durable audit trail of this agent's own trust decisions
+    /// (`audit_log`'s module doc comment). Locked only for brief
+    /// append/read operations -- no blocking I/O happens under the lock
+    /// itself beyond the transactional persist, which is a plain local
+    /// file write.
+    audit_log: StdMutex<audit_log::AgentAuditChain>,
+    audit_log_path: PathBuf,
+    /// Wall-clock time this process started, for `GET /v1/health`'s
+    /// `uptime_secs`.
+    started_at: std::time::Instant,
 }
 
 #[tokio::main]
@@ -214,12 +234,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.pin_store_path.clone(),
         args.allow_noninteractive_privileged_confirmation,
     )?;
+    // Same identity key as `manager`'s Ed25519 half -- no new key material.
+    // `ed25519_secret` is `[u8; 32]: Copy`, so reusing it here doesn't
+    // conflict with `manager`'s own earlier construction above.
+    let audit_signing_key = ed25519_dalek::SigningKey::from_bytes(&ed25519_secret);
+    let audit_log = audit_log::load_verified(&args.audit_log_path, audit_signing_key)?;
 
     tracing::info!(
         fingerprint = %hex::encode(manager.identity_fingerprint()),
         identity_path = %args.identity_path.display(),
         allowed_origins = ?args.allowed_origin,
         pin_store_path = %args.pin_store_path.display(),
+        audit_log_path = %args.audit_log_path.display(),
+        audit_log_entries = audit_log.len(),
         "operator agent identity loaded"
     );
     println!(
@@ -245,6 +272,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         allowed_origins: args.allowed_origin,
         host_trust: StdMutex::new(host_trust),
         handshake_state: StdMutex::new(HandshakeState::new(handshake_state::DEFAULT_TTL)),
+        audit_log: StdMutex::new(audit_log),
+        audit_log_path: args.audit_log_path,
+        started_at: std::time::Instant::now(),
     });
 
     let app = build_router(state);
@@ -265,10 +295,11 @@ async fn shutdown_signal() {
 /// `main` so tests can drive it with `tower::ServiceExt::oneshot` instead of
 /// binding a real socket.
 fn build_router(state: Arc<AgentState>) -> Router {
-    Router::new()
+    let authenticated = Router::new()
         .route("/identity", get(get_identity))
-        .route("/v1/pair", post(mint_session))
-        .route("/v1/session/refresh", post(mint_session))
+        .route("/v1/audit", get(get_audit_log))
+        .route("/v1/pair", post(pair_handler))
+        .route("/v1/session/refresh", post(refresh_handler))
         .route("/v1/sign/challenge", post(sign_challenge))
         .route("/v1/sign/consent-action", post(sign_consent_action))
         .route("/v1/sign/revoke", post(sign_revoke))
@@ -277,7 +308,16 @@ fn build_router(state: Arc<AgentState>) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_and_cors_middleware,
-        ))
+        ));
+    // `/v1/health` deliberately sits outside `auth_and_cors_middleware`
+    // entirely (own router, merged in below, no `.layer()`) rather than a
+    // path special-case inside that function: a liveness probe (systemd,
+    // a monitoring script) has no reason to send an Origin header or hold
+    // a session, and the health response itself carries no secret
+    // material -- see `get_health`'s doc comment.
+    let health = Router::new().route("/v1/health", get(get_health));
+    authenticated
+        .merge(health)
         // The `/v1/sign/*` bodies are small, fixed-shape JSON, but no
         // longer just "a handful of hex strings" now that they carry a
         // `DaemonIdentityCertificate` (ML-DSA-65 alone is ~1952-byte
@@ -390,17 +430,38 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// `POST /v1/pair` (raw-pairing-token-gated) and `POST /v1/session/refresh`
-/// (session-gated) share this handler -- both just mint a fresh session;
-/// the only difference between them is which credential
-/// `auth_and_cors_middleware` demanded to reach here. See
-/// [`agent_session`]'s module doc comment.
-async fn mint_session(State(state): State<Arc<AgentState>>) -> Json<AgentSessionToken> {
-    Json(agent_session::mint(
+/// `POST /v1/pair` (raw-pairing-token-gated): the credential
+/// `auth_and_cors_middleware` demanded to reach here proves the caller
+/// holds the pairing token, so this is a genuine pairing event -- audited
+/// distinctly from a session refresh.
+async fn pair_handler(
+    State(state): State<Arc<AgentState>>,
+) -> Result<Json<AgentSessionToken>, (StatusCode, Json<AgentErrorResponse>)> {
+    let token = mint_session_inner(&state);
+    record_audit_event(&state, audit_log::AgentAuditEvent::Paired).await?;
+    Ok(Json(token))
+}
+
+/// `POST /v1/session/refresh` (session-gated): the caller already held a
+/// valid session and is renewing it before it expires.
+async fn refresh_handler(
+    State(state): State<Arc<AgentState>>,
+) -> Result<Json<AgentSessionToken>, (StatusCode, Json<AgentErrorResponse>)> {
+    let token = mint_session_inner(&state);
+    record_audit_event(&state, audit_log::AgentAuditEvent::SessionRefreshed).await?;
+    Ok(Json(token))
+}
+
+/// Shared by [`pair_handler`] and [`refresh_handler`] -- both just mint a
+/// fresh session; the only difference between them is which credential
+/// `auth_and_cors_middleware` demanded to reach here, and which audit
+/// event that implies. See [`agent_session`]'s module doc comment.
+fn mint_session_inner(state: &AgentState) -> AgentSessionToken {
+    agent_session::mint(
         &state.session_mac_key,
         unix_now_secs(),
         state.session_ttl_secs,
-    ))
+    )
 }
 
 /// Current Unix time in seconds. Falls back to 0 only if the system clock
@@ -450,6 +511,61 @@ async fn get_identity(State(state): State<Arc<AgentState>>) -> Json<IdentityResp
         ml_dsa_87_pubkey_hex: hex::encode(highsec.ml_dsa_public_key_bytes()),
         fingerprint_hex: hex::encode(state.manager.identity_fingerprint()),
         enrollment_record_json: record.to_json_string(),
+    })
+}
+
+/// Response body for `GET /v1/health`. Deliberately minimal: a liveness
+/// probe needs to know the process is up and roughly how long it's been
+/// running, not anything an operator would consider sensitive.
+/// `fingerprint_hex` is already public (the same value `GET /identity`
+/// exposes, and what an operator names when enrolling this agent), and
+/// `active` is always `true` once this handler is reachable at all --
+/// kept as a field rather than the response's mere existence so the
+/// shape stays extensible if a future check needs to report degraded
+/// (not just up/down) state.
+#[derive(Serialize)]
+struct HealthResponse {
+    status: &'static str,
+    uptime_secs: u64,
+    fingerprint_hex: String,
+    active: bool,
+}
+
+/// `GET /v1/health` -- unauthenticated liveness probe (see `build_router`'s
+/// doc comment for why this sits outside `auth_and_cors_middleware`
+/// entirely). No secret material, no pairing token, no session state.
+async fn get_health(State(state): State<Arc<AgentState>>) -> Json<HealthResponse> {
+    Json(HealthResponse {
+        status: "ok",
+        uptime_secs: state.started_at.elapsed().as_secs(),
+        fingerprint_hex: hex::encode(state.manager.identity_fingerprint()),
+        active: true,
+    })
+}
+
+/// Response body for `GET /v1/audit`: the full in-memory audit trail plus
+/// a checkpoint over the same state, mirroring the daemon's
+/// `AuditLedgerExportDto` shape (`operator_http.rs`) so a caller can
+/// confirm `entries.last().entry_hash == checkpoint.head_hash` without
+/// trusting the agent that served the export.
+#[derive(Serialize)]
+struct AgentAuditExportDto {
+    entries: Vec<audit_log::AgentAuditEntry>,
+    checkpoint: audit_log::AgentAuditCheckpoint,
+}
+
+/// `GET /v1/audit` -- this agent's own durable audit trail (host-trust
+/// first-use/rotation, pairing, session refresh, revocation). Gated by
+/// the same `X-Agent-Session` requirement `auth_and_cors_middleware`
+/// already applies to every route but `/v1/pair` -- no separate
+/// authorization check needed here.
+async fn get_audit_log(State(state): State<Arc<AgentState>>) -> Json<AgentAuditExportDto> {
+    let chain = state.audit_log.lock().expect("audit-log mutex poisoned");
+    let checkpoint = chain.sign_checkpoint(unix_now_secs());
+    let entries = chain.entries().to_vec();
+    Json(AgentAuditExportDto {
+        entries,
+        checkpoint,
     })
 }
 
@@ -623,6 +739,15 @@ async fn sign_revoke(
         xenia_operator_proto::revoke_operator_transcript(&req.target_operator_id, &token_nonce);
     let ed_signature = state.manager.sign(&transcript);
     let ml_dsa_signature = state.manager.sign_ml_dsa(&transcript);
+
+    record_audit_event(
+        &state,
+        audit_log::AgentAuditEvent::RevocationSigned {
+            target_operator_id: req.target_operator_id.clone(),
+            daemon_endpoint: normalize_daemon_endpoint(&req.common.daemon_endpoint),
+        },
+    )
+    .await?;
 
     Ok(Json(SignRevokeResponse {
         ed_signature_hex: hex::encode(ed_signature.to_bytes()),
@@ -907,22 +1032,49 @@ async fn check_host_trust_fingerprint(
     host_alias: &str,
     suite: &str,
 ) -> Result<host_trust::PinOutcome, (StatusCode, Json<AgentErrorResponse>)> {
-    let host_alias = host_alias.to_string();
-    let suite = suite.to_string();
+    let host_alias_owned = host_alias.to_string();
+    let suite_owned = suite.to_string();
     let check_state = state.clone();
-    tokio::task::spawn_blocking(move || {
+    let outcome = tokio::task::spawn_blocking(move || {
         check_state
             .host_trust
             .lock()
             .expect("host-trust mutex poisoned")
-            .check(&host_alias, &suite, fingerprint)
+            .check(&host_alias_owned, &suite_owned, fingerprint)
     })
     .await
     .map_err(|_| internal_error("host-trust check task panicked"))?
     .map_err(|e| {
         let agent_err = e.to_agent_error();
         (status_for(agent_err.code), Json(agent_err))
-    })
+    })?;
+
+    // First-use and rotation are trust *decisions* worth a durable
+    // record; `Matched` is the steady-state case and would otherwise
+    // dominate the audit trail with no new information.
+    let audit_event = match outcome {
+        host_trust::PinOutcome::TrustedOnFirstUse => {
+            Some(audit_log::AgentAuditEvent::HostTrustFirstUse {
+                daemon_endpoint: host_alias.to_string(),
+                suite: suite.to_string(),
+                fingerprint_hex: hex::encode(fingerprint),
+            })
+        }
+        host_trust::PinOutcome::Rotated { old_fingerprint } => {
+            Some(audit_log::AgentAuditEvent::HostTrustRotation {
+                daemon_endpoint: host_alias.to_string(),
+                suite: suite.to_string(),
+                old_fingerprint_hex: hex::encode(old_fingerprint),
+                new_fingerprint_hex: hex::encode(fingerprint),
+            })
+        }
+        host_trust::PinOutcome::Matched => None,
+    };
+    if let Some(event) = audit_event {
+        record_audit_event(state, event).await?;
+    }
+
+    Ok(outcome)
 }
 
 fn bad_request(message: impl Into<String>) -> (StatusCode, Json<AgentErrorResponse>) {
@@ -943,6 +1095,38 @@ fn internal_error(message: impl Into<String>) -> (StatusCode, Json<AgentErrorRes
             message: message.into(),
         }),
     )
+}
+
+/// Durably append `event` to this agent's audit trail before the caller's
+/// action is considered complete -- fails closed, matching the daemon's
+/// own consent-ledger discipline (item 9: "if persistence fails, the
+/// decision is refused... rather than silently applying a privileged
+/// action with no durable record of who authorized it"). Runs the
+/// transactional append + file write via `spawn_blocking`, matching how
+/// every other blocking op in this file (`host_trust`'s `check`/
+/// `confirm_action`) is already handled.
+async fn record_audit_event(
+    state: &Arc<AgentState>,
+    event: audit_log::AgentAuditEvent,
+) -> Result<(), (StatusCode, Json<AgentErrorResponse>)> {
+    let event_name = event.stable_name();
+    let task_state = state.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut chain = task_state
+            .audit_log
+            .lock()
+            .expect("audit-log mutex poisoned");
+        chain
+            .append_transactional(event, |entries| {
+                audit_log::persist(&task_state.audit_log_path, entries)
+            })
+            .map(|_entry| ())
+    })
+    .await
+    .map_err(|_| internal_error("audit log append task panicked"))?
+    .map_err(|e| internal_error(format!("failed to durably record audit event: {e}")))?;
+    tracing::info!(event = event_name, "audit event recorded");
+    Ok(())
 }
 
 /// Maps a typed [`AgentErrorCode`] to the HTTP status the console sees.
@@ -1135,6 +1319,11 @@ mod tests {
                 HostTrustStore::load(pin_store_path, allow_noninteractive_privileged).unwrap(),
             ),
             handshake_state: StdMutex::new(HandshakeState::new(handshake_state::DEFAULT_TTL)),
+            audit_log: StdMutex::new(audit_log::AgentAuditChain::new(
+                ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]),
+            )),
+            audit_log_path: temp_pin_store_path("audit"),
+            started_at: std::time::Instant::now(),
         })
     }
 
@@ -1181,6 +1370,11 @@ mod tests {
                 HostTrustStore::load(pin_store_path, allow_noninteractive_privileged).unwrap(),
             ),
             handshake_state: StdMutex::new(HandshakeState::new(handshake_state::DEFAULT_TTL)),
+            audit_log: StdMutex::new(audit_log::AgentAuditChain::new(
+                ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]),
+            )),
+            audit_log_path: temp_pin_store_path("audit"),
+            started_at: std::time::Instant::now(),
         })
     }
 
@@ -1389,6 +1583,30 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn health_requires_neither_origin_nor_session() {
+        use tower::ServiceExt;
+        let app = build_router(test_state("secret", &["http://localhost:8134"]));
+        // Deliberately no `origin` and no `x-agent-session` header -- the
+        // whole point of `/v1/health` sitting outside
+        // `auth_and_cors_middleware` is that a liveness probe shouldn't
+        // need either.
+        let req = axum::http::Request::builder()
+            .uri("/v1/health")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(parsed["active"], true);
+        assert!(parsed["fingerprint_hex"].is_string());
+        assert!(parsed["uptime_secs"].is_u64());
     }
 
     #[tokio::test]

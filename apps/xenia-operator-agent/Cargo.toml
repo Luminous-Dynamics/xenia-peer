@@ -33,6 +33,14 @@ ed25519-dalek = { version = "2", default-features = false, features = ["std", "r
 # (`derive_key`) and MACs each session token (`keyed_hash`). Same version
 # already used by `xenia-ledger`/`xenia-peer` for their hash chain.
 blake3 = "1.5"
+# `audit_log`: canonical entry-hash preimage encoding, mirroring
+# `xenia_ledger::Chain`'s own bincode-v1-then-blake3 pattern (same
+# reasoning: deterministic, length-prefixed encoding).
+bincode = "1"
+# `audit_log`: `AgentAuditEntry::signature` is a 64-byte Ed25519 signature;
+# serde's built-in array support doesn't cover that length. Same crate
+# `xenia-ledger` already uses for its own 64-byte `LedgerEntry::signature`.
+serde-big-array = "0.5"
 
 [target.'cfg(unix)'.dependencies]
 # `process`: safe getuid() (no unsafe code, per workspace lints) --

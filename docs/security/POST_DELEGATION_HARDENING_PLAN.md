@@ -556,6 +556,59 @@ migration (see below).
 - Commission independent review of `xenia-wire` once wire formats stop
   changing.
 
+**Partly done.** Research (a forked-agent survey, verified against the live
+repo) found this item bundles genuinely independent sub-projects at very
+different levels of readiness -- see the scope notes below for what's done
+vs. explicitly deferred.
+
+- **Agent-side audit logging.** New `apps/xenia-operator-agent/src/audit_log.rs`:
+  a hash-chained, Ed25519-signed audit trail for this agent's own trust
+  decisions. `xenia_ledger::Chain` (the daemon's consent ledger, item 9)
+  can't be reused directly -- its `LedgerEntry.event` is hard-typed to
+  `ConsentEventRecord` (`session_id`, `request_id`, `ConsentKind`, `scope`),
+  which doesn't fit "host X's identity changed" or "pairing token consumed"
+  without distorting a consent-specific shape. Mirrors `Chain`'s proven
+  pattern instead (`append_transactional` persist-then-commit, `verify_chain`
+  sequence/hash-link/signature checks, `sign_checkpoint`) over a new
+  `AgentAuditEvent` type. Persists via `secure_file.rs`'s existing hardened,
+  descriptor-relative, `O_NOFOLLOW` access (item 7) -- no new
+  filesystem-safety code needed. Wired at 5 real event sites that previously
+  produced nothing but an ephemeral `tracing` call: host-trust first-use/
+  rotation (`host_trust::PinOutcome::Rotated` extended to carry the old
+  fingerprint -- a real gap closed in passing, since the audit event
+  otherwise couldn't show what changed), pairing, session refresh, and
+  revocation. Each append fails closed (refuses the action if persistence
+  fails), matching item 9's consent-ledger discipline. New `GET /v1/audit`
+  route, gated by the same session-token middleware every other `/v1/*`
+  route already uses. Closes the clearest gap against
+  `PRE_PRODUCTION_GATES.md` **Gate 5** ("admin actions... produce durable
+  audit records") -- consent was already covered, admin/policy actions on
+  the agent side were not.
+- **Health-check endpoints.** New `GET /v1/health` on the agent and
+  `GET /health` on the daemon -- neither existed before. Both
+  unauthenticated (a liveness probe has no session and shouldn't need one):
+  the agent's sits in its own router, merged in without
+  `auth_and_cors_middleware`'s layer, rather than a path special-case
+  inside that function. Minimal response shape (status, uptime, a public
+  fingerprint/entry-count) -- no secret material.
+- **Not done, deliberately deferred**: systemd packaging (zero prior art
+  anywhere in the repo), token/session automatic rotation (only passive TTL
+  expiry + manual refresh exists today), backup tooling/procedures, and
+  operator-key recovery (currently genuinely catastrophic if an operator
+  loses their identity key file -- no self-service re-enroll path exists;
+  recovery today means the daemon operator manually editing the static
+  `--operators-file` and restarting). Key recovery in particular is the
+  riskiest of these to design well -- a careless self-service re-enroll
+  flow becomes new attack surface -- and is left for its own dedicated item
+  rather than rushed.
+- **Not done, confirmed not ripe**: "commission independent review of
+  `xenia-wire`." Checked against the project's own stated criterion --
+  `xenia-wire` is `0.2.0-alpha.8`, `SPEC.md`'s own header says "Pre-alpha --
+  the format is subject to breaking change in subsequent drafts," and the
+  current draft-03 was itself a breaking change over draft-02r2. This also
+  isn't a codeable task -- it's commissioning a human reviewer once the
+  format stabilizes, not engineering work.
+
 ## 9. Durable, verified consent-ledger persistence
 
 Not one of the original 8 items -- discovered as a real, disclosed gap while
