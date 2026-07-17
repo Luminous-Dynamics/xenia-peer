@@ -32,7 +32,9 @@
 //! at 30 fps. HEVC HW gives ~50% better compression than H.264 — close
 //! enough to AV1's 30-40% that the USB 2.0 budget relief survives.
 
+#[cfg(feature = "hevc")]
 pub mod decoder;
+#[cfg(feature = "hevc")]
 pub mod stream;
 pub mod wire;
 
