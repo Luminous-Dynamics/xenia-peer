@@ -13,7 +13,7 @@
 //! permitted operator.
 
 use futures_util::{SinkExt, StreamExt};
-use gloo_net::websocket::{Message, futures::WebSocket};
+use gloo_net::websocket::{futures::WebSocket, Message};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
@@ -119,6 +119,17 @@ pub fn ConsentModal() -> impl IntoView {
         let high_security = config.high_security.get_untracked();
         let consent_url = config.consent_ws_url();
 
+        // Snapshot *before* the async refresh attempt below, to distinguish
+        // "never signed in as an operator" (the legitimate legacy-plaintext
+        // path, for a daemon run without --require-operator-auth) from "was
+        // signed in, but the session has now expired/failed to refresh" --
+        // the two used to be conflated (both produced `sess = None` from
+        // the refresh call below), which silently downgraded an
+        // authenticated operator's decision to an anonymous, unsigned one
+        // instead of erroring. Found in the 2026-07-18 audit of this PR's
+        // own rotation change.
+        let had_session = session.is_some_and(|sig| sig.get_untracked().is_some());
+
         // The payload now needs an `await` (asking the agent to sign) even
         // in the non-sealed case, so both dispatch paths live inside one
         // `spawn_local` after it resolves rather than each starting their
@@ -141,6 +152,17 @@ pub fn ConsentModal() -> impl IntoView {
                 .ok(),
                 None => None,
             };
+            if had_session && sess.is_none() {
+                // Was authenticated a moment ago; the session has since
+                // expired and couldn't be renewed. Abort rather than
+                // falling through to the anonymous/unsigned legacy path
+                // below, which would silently strip this decision of its
+                // operator attribution and signature.
+                leptos::logging::error!(
+                    "operator session expired and could not be renewed -- sign in again to submit this decision"
+                );
+                return;
+            }
 
             // Both a signed consent payload and the sealed channel's own
             // handshake need a live agent session -- fetch (and
