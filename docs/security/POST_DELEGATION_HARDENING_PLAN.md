@@ -802,16 +802,30 @@ vs. explicitly deferred.
     number, not a target: fully closing it means either auditing crates
     by hand or importing more trust sources, both real ongoing work, not
     a one-shot fix.
-  - **`dudect`** -- statistical constant-time-leak detection. Real target
-    identified: `ct_eq_32`/`verify_fingerprint_either_epoch` in
+  - **`dudect`** -- statistical constant-time-leak detection. **Done
+    (2026-07-18, [xenia-wire#17](https://github.com/Luminous-Dynamics/xenia-wire/pull/17)).**
+    Target: `ct_eq_32`/`verify_fingerprint_either_epoch` in
     `xenia-wire/src/session.rs`, which the code's own doc comment already
     flags as timing-sensitive (leaking which key-epoch a peer signed
-    under, during a rekey grace window). **Not implemented yet** --
-    deliberately deferred rather than risk a subtly-wrong timing harness
-    from an unfamiliar crate's exact API (a false-negative "verified
-    constant-time" claim would be worse than no claim at all). Next
-    session picking this up should read `dudect-bencher`'s actual docs
-    before writing the harness, not guess at the macro API.
+    under, during a rekey grace window). Added
+    `xenia-wire/examples/ctbench_fingerprint.rs` (via the `dudect-bencher`
+    crate, read from its real docs/source rather than guessed), gated
+    behind a new `bench-internals` feature that re-exposes the
+    otherwise-private primitive as `ct_eq_32_for_bench` for the benchmark
+    binary only. Compares timing of equal vs. single-byte-mismatched
+    32-byte pairs over 100k samples. **Real measured result: `max t =
+    -1.32603`**, well under the accepted ~5 threshold for "no
+    statistically significant timing difference found" -- consistent with
+    constant-time behavior. This is evidence, not formal proof: a clean
+    run doesn't rule out a leak too small for this sample size to detect.
+    CI (a genuinely clean baseline, unlike xenia-peer's 4 known-failure
+    classes) caught 4 real issues in the first push -- a private
+    intra-doc link, a case-sensitivity import-order mismatch, a
+    `clippy::useless_conversion`, and 3 new transitive `cargo-audit`
+    advisories from `dudect-bencher`'s own pin on old `clap` 2.x (dev-only,
+    ignored with documented rationale matching the existing
+    RUSTSEC-2025-0141 pattern) -- all fixed and verified green before
+    merge.
 
   Should wait for the format to stabilize (modeling a pre-alpha protocol
   is wasted rework as it keeps changing underneath the model):
