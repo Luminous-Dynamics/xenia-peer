@@ -196,16 +196,23 @@ consulted fail-closed on every privileged path.
 - **Enforced everywhere**: on the sealed channel it is checked right after the
   handshake authenticates the peer (`OperatorChannelError::Revoked`); on the
   consent-authorization path `decode_consent_decision` refuses a revoked
-  operator's still-valid, unexpired, correctly-signed token — so a revoked
-  operator is denied on the sealed handshake, the admin endpoint, **and** the
-  plaintext consent path, in both modes.
+  operator's still-valid, unexpired, correctly-signed token; and (fixed
+  2026-07-18, following an independent audit of the post-delegation-hardening
+  milestone) at `POST /auth/verify` (a revoked operator can no longer mint a
+  *fresh* token at all), `POST /operator/revoke`, `POST /operator/replace-key`,
+  and `GET /v1/audit/ledger` (a revoked-but-still-enrolled acting operator is
+  refused on each, even with an otherwise valid, unexpired, correctly-signed
+  token). Before that fix, revocation only covered the sealed handshake and
+  the plaintext consent path — a revoked Admin could still re-authenticate
+  indefinitely and use the still-valid token to revoke other operators or
+  seize their identities via `/operator/replace-key`, which defeated the
+  point of a live, no-restart kill switch for exactly the case (a compromised
+  Admin) it exists to handle. See
+  `docs/security/POST_DELEGATION_HARDENING_PLAN.md` item 8 for the audit
+  finding and fix detail.
 - **Fail-closed**: a poisoned lock reports revoked; a failed revocation-file load
   is fatal (the daemon won't run a privileged surface without the list it was
   told to enforce).
-
-Note (current scope): the `/auth/verify` route can still *mint* a token for a
-revoked operator, but that token authorizes nothing (every consumption path
-re-checks revocation). Refusing token issuance up front is a hardening follow-up.
 
 ---
 
@@ -281,7 +288,6 @@ re-checks revocation). Refusing token issuance up front is a hardening follow-up
   identity/token files are created atomically with owner-only permissions set
   at creation time, refusing to trust an existing path that isn't a regular
   file owned by the agent's own user.
-- `/auth/verify` still mints tokens for revoked operators (harmless — see §6).
 - `bincode` 1.3.3 is used for wire (handshake + envelopes) with a tracked RUSTSEC
   exception (an "unmaintained crate" advisory, not a CVE); a postcard/wincode
   migration is pre-RC1 debt, deliberately deferred.

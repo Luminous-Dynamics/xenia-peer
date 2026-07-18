@@ -38,5 +38,25 @@ ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=%S/xenia-peer
 
+# UMask is the highest-leverage line here: every file/directory this
+# process creates (state dir, key files, the consent ledger) defaults to
+# owner-only regardless of the invoking shell's ambient umask -- a
+# backstop for the daemon's own key-generation code, not a substitute for
+# it (see apps/xenia-peer/src/main.rs's load_or_create_* functions).
+UMask=0077
+# No legitimate need for kernel-tunable/module/log/cgroup access, non-IP
+# address families, SUID/SGID execution, realtime scheduling, changing
+# personality, SysV IPC, or writable+executable memory in this workload.
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RemoveIPC=true
+MemoryDenyWriteExecute=true
+
 [Install]
 WantedBy=default.target

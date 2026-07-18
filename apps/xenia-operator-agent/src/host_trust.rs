@@ -341,17 +341,19 @@ impl HostTrustStore {
         }
     }
 
-    /// Explicitly forget a pin (the operator's path for a legitimate
-    /// rotation without going through the interactive confirmation flow --
-    /// e.g. from a future admin CLI subcommand). Not called from any
-    /// endpoint yet.
+    /// Explicitly forget a pin -- the operator's path for a legitimate
+    /// rotation without going through the interactive confirmation flow
+    /// (e.g. from a future admin CLI subcommand), and also used by
+    /// `check_host_trust_fingerprint` in `main.rs` to roll back a
+    /// first-use/rotation pin whose matching audit-log append failed (see
+    /// that call site's doc comment) -- so a durably-trusted fingerprint
+    /// never exists without a durable record of why.
     ///
     /// Transactional: builds the post-removal map, persists it, and only
     /// then adopts it -- if persistence fails, the old pin stays live in
     /// memory (matching what's still durably on disk) rather than silently
     /// "forgetting" a pin that a crash or write failure never actually
     /// removed from storage.
-    #[allow(dead_code)]
     pub fn forget(&mut self, host_alias: &str, suite: &str) -> Result<(), HostTrustError> {
         let key = Self::key(host_alias, suite);
         let mut candidate = self.pins.clone();
@@ -651,11 +653,9 @@ mod tests {
     fn confirm_action_respects_the_store_s_noninteractive_policy() {
         let allowed_path = temp_path("confirm-action-allowed");
         let allowed = HostTrustStore::load(allowed_path.clone(), true).unwrap();
-        assert!(
-            allowed
-                .confirm_action("Revoke?", &[("target", "op-1".to_string())])
-                .unwrap()
-        );
+        assert!(allowed
+            .confirm_action("Revoke?", &[("target", "op-1".to_string())])
+            .unwrap());
         std::fs::remove_dir_all(allowed_path.parent().unwrap()).ok();
 
         let blocked_path = temp_path("confirm-action-blocked");

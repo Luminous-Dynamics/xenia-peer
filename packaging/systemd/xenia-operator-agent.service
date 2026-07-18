@@ -31,5 +31,17 @@ ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=%S/xenia-operator-agent
 
+UMask=0077
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RemoveIPC=true
+MemoryDenyWriteExecute=true
+
 [Install]
 WantedBy=default.target

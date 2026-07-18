@@ -221,14 +221,28 @@ fn decode_fixed<const N: usize>(s: &str) -> Result<[u8; N], (StatusCode, String)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, format!("expected {N} hex bytes")))
 }
 
+/// State for `POST /auth/verify`: the auth state plus the live revocation
+/// list. Unlike `challenge_handler`/`daemon_identity_handler` (unauthenticated,
+/// no operator identity involved), this route mints a fresh token for a
+/// specific operator -- without checking `revocations` here, a revoked
+/// operator's key (still enrolled; revocation != de-enrollment) could
+/// re-authenticate indefinitely after being revoked, defeating the whole
+/// point of `OperatorRevocations` as a live, no-restart kill switch.
+#[derive(Clone)]
+struct VerifyState {
+    auth: Arc<OperatorAuthState>,
+    revocations: OperatorRevocations,
+}
+
 /// `POST /auth/verify` -- verify a challenge response and mint a token.
 async fn verify_handler(
-    State(state): State<Arc<OperatorAuthState>>,
+    State(state): State<VerifyState>,
     Json(req): Json<VerifyRequestDto>,
 ) -> Result<Json<TokenDto>, (StatusCode, String)> {
+    let auth = &state.auth;
     // Rate-limit auth attempts before doing any (relatively expensive)
     // signature verification, to bound brute-force / flooding.
-    if !state.rate_limiter.lock().await.allow(unix_now_secs()) {
+    if !auth.rate_limiter.lock().await.allow(unix_now_secs()) {
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
             "too many authentication attempts; slow down".to_string(),
@@ -258,17 +272,25 @@ async fn verify_handler(
 
     let now = unix_now_secs();
     let authed = {
-        let mut challenges = state.challenges.lock().await;
-        verify_challenge_response(&state.policy, &mut challenges, now, &response)
+        let mut challenges = auth.challenges.lock().await;
+        verify_challenge_response(&auth.policy, &mut challenges, now, &response)
             // Auth failures are 401; do not leak which step failed beyond the
             // stable Display text.
             .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?
     };
 
+    if state.revocations.is_revoked(&authed.operator_id) {
+        tracing::warn!(operator = %authed.operator_id, "token issuance refused: operator is revoked");
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "operator is revoked".to_string(),
+        ));
+    }
+
     let token_nonce: [u8; 16] = rand::random();
     let signed = issue_token(
-        &state.daemon_key,
-        &state.daemon_ml_dsa,
+        &auth.daemon_key,
+        &auth.daemon_ml_dsa,
         &authed,
         now,
         TOKEN_TTL_SECS,
@@ -400,6 +422,19 @@ async fn revoke_operator_handler(
         &request,
     ) {
         Ok(authorized) => {
+            // A revoked admin's token is otherwise still cryptographically
+            // valid (revocation != de-enrollment) -- without this check
+            // they could keep revoking (or un-revoking, by replacing keys)
+            // other operators indefinitely after being revoked themselves.
+            // Mirrors main.rs's identical check on the plaintext consent
+            // path.
+            if state.revocations.is_revoked(&authorized.operator_id) {
+                tracing::warn!(
+                    operator = %authorized.operator_id,
+                    "operator revocation refused: acting operator is revoked"
+                );
+                return Err((StatusCode::FORBIDDEN, "revocation refused".to_string()));
+            }
             state.revocations.revoke(&authorized.target_operator_id);
             tracing::warn!(
                 target = %authorized.target_operator_id,
@@ -513,6 +548,18 @@ async fn replace_operator_key_handler(
         }
     };
 
+    // See the identical check in revoke_operator_handler: a revoked admin's
+    // token is otherwise still valid, and this endpoint's blast radius is
+    // worse -- it lets the caller seize any other enrolled operator's
+    // (including other admins') identity.
+    if state.revocations.is_revoked(&authorized.operator_id) {
+        tracing::warn!(
+            operator = %authorized.operator_id,
+            "operator key replacement refused: acting operator is revoked"
+        );
+        return Err((StatusCode::FORBIDDEN, "key replacement refused".to_string()));
+    }
+
     if let Err(err) = state.auth.policy.replace_operator_key(
         &authorized.target_operator_id,
         authorized.new_ed25519_pubkey,
@@ -548,11 +595,16 @@ async fn replace_operator_key_handler(
 }
 
 /// State for the `/v1/audit/*` routes: the auth state (token/role
-/// verification) plus the live ledger to read from.
+/// verification), the live ledger to read from, and the live revocation
+/// list (a de-enrolled operator's token is already refused by
+/// `authorize_ledger_read` via `OperatorPolicy::lookup_by_id`; a merely
+/// *revoked*-but-still-enrolled one is a separate check this state exists
+/// to make possible).
 #[derive(Clone)]
 struct AuditState {
     auth: Arc<OperatorAuthState>,
     ledger: Arc<Mutex<Chain>>,
+    revocations: OperatorRevocations,
 }
 
 /// State for `GET /health`: just enough to report liveness, no auth state.
@@ -639,16 +691,21 @@ async fn audit_ledger_handler(
         .into_signed()
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
-    if crate::operator_auth::authorize_ledger_read(
+    let token = match crate::operator_auth::authorize_ledger_read(
         &state.auth.policy,
         &state.auth.daemon_key.verifying_key(),
         &state.auth.daemon_ml_dsa.public_key_bytes(),
         unix_now_secs(),
         &signed,
-    )
-    .is_err()
-    {
-        tracing::warn!("ledger read refused");
+    ) {
+        Ok(token) => token,
+        Err(_) => {
+            tracing::warn!("ledger read refused");
+            return Err((StatusCode::FORBIDDEN, "ledger read refused".to_string()));
+        }
+    };
+    if state.revocations.is_revoked(&token.operator_id) {
+        tracing::warn!(operator = %token.operator_id, "ledger read refused: operator is revoked");
         return Err((StatusCode::FORBIDDEN, "ledger read refused".to_string()));
     }
 
@@ -690,12 +747,17 @@ pub(crate) fn router(
 ) -> Router {
     let mutation = AdminMutationState {
         auth: state.clone(),
-        revocations,
+        revocations: revocations.clone(),
         operators_file,
     };
     let audit = AuditState {
         auth: state.clone(),
         ledger: ledger.clone(),
+        revocations: revocations.clone(),
+    };
+    let verify = VerifyState {
+        auth: state.clone(),
+        revocations,
     };
     let health = HealthState {
         started_at: std::time::Instant::now(),
@@ -703,12 +765,12 @@ pub(crate) fn router(
     };
     Router::new()
         .route("/auth/challenge", post(challenge_handler))
-        .route("/auth/verify", post(verify_handler))
         .route(
             "/auth/daemon-identity",
             axum::routing::get(daemon_identity_handler),
         )
         .with_state(state)
+        .merge(Router::new().route("/auth/verify", post(verify_handler)).with_state(verify))
         .merge(
             Router::new()
                 .route("/v1/audit/checkpoint", get(audit_checkpoint_handler))
@@ -1459,6 +1521,138 @@ mod tests {
         let (status3, _) = post_json(&router, "/operator/revoke", tampered).await;
         assert_eq!(status3, StatusCode::FORBIDDEN);
         assert!(!revocations.is_revoked("eve"));
+    }
+
+    // ─── revoked-operator refusal (an operator can be revoked while their
+    // enrollment key stays valid -- these prove every authenticated path
+    // that used to only check enrollment also checks the live revocation
+    // list) ──────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn revoked_operator_cannot_mint_a_fresh_token() {
+        let op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let state = state_with(&op, daemon); // "alice" enrolled as Admin
+        let revocations = OperatorRevocations::empty();
+        revocations.revoke("alice");
+        let router = router(
+            state,
+            revocations,
+            empty_ledger(),
+            Arc::new(Vec::new()),
+            None,
+        );
+
+        let (status, chal_body) = post_json(&router, "/auth/challenge", "{}".to_string()).await;
+        assert_eq!(status, StatusCode::OK);
+        let chal: serde_json::Value = serde_json::from_str(&chal_body).unwrap();
+        let nonce: [u8; 32] = decode_fixed(chal["nonce"].as_str().unwrap()).unwrap();
+
+        let ed_pubkey = op.identity_public_key_bytes();
+        let ml_dsa_pubkey = op.ml_dsa_public_key_bytes().to_vec();
+        let transcript =
+            xenia_operator_proto::challenge_transcript(&nonce, &ed_pubkey, &ml_dsa_pubkey);
+        let body = serde_json::json!({
+            "nonce": hex::encode(nonce),
+            "ed_pubkey": hex::encode(ed_pubkey),
+            "ml_dsa_pubkey": hex::encode(&ml_dsa_pubkey),
+            "ed_signature": hex::encode(op.sign(&transcript).to_bytes()),
+            "ml_dsa_signature": hex::encode(op.sign_ml_dsa(&transcript)),
+        })
+        .to_string();
+        let (status, resp_body) = post_json(&router, "/auth/verify", body).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "revoked operator must not be able to mint a fresh token: {resp_body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoked_admin_cannot_revoke_another_operator() {
+        let op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let state = state_with(&op, daemon.clone()); // "alice" enrolled as Admin
+        let revocations = OperatorRevocations::empty();
+        revocations.revoke("alice");
+        let router = router(
+            state,
+            revocations.clone(),
+            empty_ledger(),
+            Arc::new(Vec::new()),
+            None,
+        );
+        // "alice"'s token is otherwise entirely valid -- unexpired, correctly
+        // signed, Admin role -- it's only her own revoked status that must
+        // stop this.
+        let (admin_token, nonce) = token_json_for(&daemon, OperatorRole::Admin, now_secs());
+        let body = revoke_body(&op, admin_token, "bob", &nonce);
+        let (status, _) = post_json(&router, "/operator/revoke", body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            !revocations.is_revoked("bob"),
+            "a revoked admin must not be able to revoke anyone else"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoked_admin_cannot_replace_another_operators_key() {
+        let admin_op = HandshakeManager::new();
+        let target_op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let state = state_with_target(&admin_op, daemon.clone(), &target_op, OperatorRole::Viewer);
+        let revocations = OperatorRevocations::empty();
+        revocations.revoke("alice");
+        let router = router(
+            state.clone(),
+            revocations,
+            empty_ledger(),
+            Arc::new(Vec::new()),
+            None,
+        );
+        let (admin_token, nonce) = token_json_for(&daemon, OperatorRole::Admin, now_secs());
+        let new_ed = [0x99u8; 32];
+        let new_ml = vec![0xCCu8; ML_DSA_65_PK_LEN];
+        let body = replace_key_body(
+            &admin_op,
+            admin_token,
+            "mallory",
+            new_ed,
+            &new_ml,
+            None,
+            &nonce,
+        );
+        let (status, _) = post_json(&router, "/operator/replace-key", body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            state.policy.lookup(&new_ed).is_none(),
+            "a revoked admin must not be able to seize another operator's identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoked_operator_cannot_read_the_audit_ledger() {
+        let op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let state = state_with(&op, daemon.clone()); // "alice" enrolled as Admin
+        let revocations = OperatorRevocations::empty();
+        revocations.revoke("alice");
+        let router = router(
+            state,
+            revocations,
+            empty_ledger(),
+            Arc::new(Vec::new()),
+            None,
+        );
+        let (token, _nonce) = token_json_for(&daemon, OperatorRole::Admin, now_secs());
+        let (status, _) = get_json_with_header(
+            &router,
+            "/v1/audit/ledger",
+            "X-Operator-Token",
+            &token.to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     // ─── /v1/audit/* ────────────────────────────────────────────────────

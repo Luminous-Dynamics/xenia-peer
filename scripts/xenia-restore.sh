@@ -103,6 +103,16 @@ if [[ "$archive" == *.age ]]; then
   plain_tar="$decrypted_tmp"
 fi
 
+# Explicit tar-slip guard: an absolute-path or `../`-traversal entry name
+# could otherwise write outside $target_dir. Modern GNU tar refuses these
+# on its own, but this script shouldn't depend on that implicitly --
+# this doc's own "what a bad restore looks like" section already
+# anticipates untrustworthy archives.
+if tar -tzf "$plain_tar" | grep -qE '(^/|(^|/)\.\.(/|$))'; then
+  echo "error: archive contains an absolute or path-traversal entry name -- refusing to extract" >&2
+  exit 1
+fi
+
 echo "Restoring into: $target_dir"
 tar --numeric-owner -p -xzf "$plain_tar" -C "$target_dir"
 
