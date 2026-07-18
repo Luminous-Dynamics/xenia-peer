@@ -6,8 +6,9 @@ native signing agent the browser console delegates to) as
 on failure, without a system-level install or root.
 
 See `docs/deploy/remote-operators.md` for exposing the daemon beyond
-loopback (TLS reverse-proxying); this doc only covers running the two
-binaries themselves.
+loopback (TLS reverse-proxying), and `docs/deploy/backup-and-restore.md`
+for backing up the state directories this doc establishes the layout of;
+this doc only covers running the two binaries themselves.
 
 ## Why two services
 

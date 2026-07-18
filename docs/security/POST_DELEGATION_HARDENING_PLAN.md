@@ -24,7 +24,7 @@ credible pre-production system.
 5. **Resolve the hybrid-versus-classical HTTP authorization profile.** ✅ done
 6. **Add the full headless-browser vertical slice.** ✅ done
 7. **Zeroization, serialization migration, and fuzzing.** Mostly done (bincode migration deliberately deferred)
-8. **Packaging, recovery, and independent audit.** Partly done (agent audit logging, health endpoints, operator-key recovery, and systemd user-service packaging are done; token/session auto-rotation and backup remain deferred)
+8. **Packaging, recovery, and independent audit.** Partly done (agent audit logging, health endpoints, operator-key recovery, systemd user-service packaging, and backup/restore tooling are done; token/session auto-rotation remains deferred, and independent `xenia-wire` review isn't ripe yet)
 9. **Durable, verified consent-ledger persistence.** ✅ done
 
 ## 1. Transactional native pin storage
@@ -689,9 +689,32 @@ vs. explicitly deferred.
     --path ... --locked` is documented as the primary install path
     instead, and the Nix package is left as a follow-up for whoever owns
     that call.
+- **Backup/restore tooling.** Done. `scripts/xenia-backup.sh`/
+  `scripts/xenia-restore.sh`, tractable now that systemd packaging gave
+  both binaries one predictable state directory each. Complements, not
+  replaces, operator-key recovery: recovery only covers a lost
+  *operator* identity and is a real ceremony (a different admin must
+  confirm a key-replacement transcript); the daemon's own host identity
+  and the agent's host-trust TOFU store have no recovery flow at all --
+  losing either silently breaks trust for every operator/daemon
+  respectively, which a backup avoids entirely. Backup auto-detects both
+  systemd-standard state directories (or accepts explicit `--state-dir`),
+  tars with permissions preserved, and optionally encrypts via `age`
+  (plaintext output is allowed for machines without `age`, but comes
+  with a loud warning, never a silent default). Restore refuses to
+  overwrite already-populated state without `--force` and re-asserts
+  `0600`/`0700` on everything extracted. Real round-trip tested (plain
+  and `age`-encrypted, both byte-identical via `sha256sum`), and a
+  deliberately corrupted key file surfaced an honest correction to the
+  original design assumption: a tampered `*.key` file has no internal
+  structure to reject, so it's silently accepted as a *different valid*
+  key rather than refused at startup -- only `consent.ledger`/`audit.log`
+  (real hash chains with per-entry signatures) actually fail closed the
+  way "a tampered restore is caught" was originally assumed to mean for
+  everything. Documented precisely in `docs/deploy/backup-and-restore.md`
+  rather than left as an inaccurate blanket claim.
 - **Not done, deliberately deferred**: token/session automatic rotation
-  (only passive TTL expiry + manual refresh exists today) and backup
-  tooling/procedures.
+  (only passive TTL expiry + manual refresh exists today).
 - **Not done, confirmed not ripe**: "commission independent review of
   `xenia-wire`." Checked against the project's own stated criterion --
   `xenia-wire` is `0.2.0-alpha.8`, `SPEC.md`'s own header says "Pre-alpha --
