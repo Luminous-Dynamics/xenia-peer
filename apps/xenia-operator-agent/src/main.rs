@@ -1193,38 +1193,38 @@ async fn check_host_trust_fingerprint(
         }
         host_trust::PinOutcome::Matched => None,
     };
-    if let Some(event) = audit_event {
-        if let Err(err) = record_audit_event(state, event).await {
-            // `check()` (above) already durably committed this pin via its
-            // own transactional persist-then-adopt discipline before we
-            // got here -- if we can't also durably record *why* we
-            // trusted it, best-effort roll the pin back via `forget()`
-            // (which uses the identical transactional discipline for
-            // removal) rather than leave a permanently-trusted fingerprint
-            // with zero audit record and no way to self-heal (a retry
-            // would otherwise just see `PinOutcome::Matched`, which isn't
-            // audit-worthy, and the gap would persist forever). For a
-            // rotation specifically, the rollback removes the pin
-            // entirely rather than restoring the *old* fingerprint -- a
-            // retry re-presents as first-use, not the original rotation,
-            // but still gets a fresh confirmation and a fresh chance to
-            // record it, which is what matters here. Best-effort: if the
-            // rollback itself also fails, we've already lost the durable
-            // pairing between trust decision and audit record either way,
-            // so surface the original audit error, not a rollback error.
-            let rollback_state = state.clone();
-            let host_alias_owned = host_alias.to_string();
-            let suite_owned = suite.to_string();
-            let _ = tokio::task::spawn_blocking(move || {
-                rollback_state
-                    .host_trust
-                    .lock()
-                    .expect("host-trust mutex poisoned")
-                    .forget(&host_alias_owned, &suite_owned)
-            })
-            .await;
-            return Err(err);
-        }
+    if let Some(event) = audit_event
+        && let Err(err) = record_audit_event(state, event).await
+    {
+        // `check()` (above) already durably committed this pin via its
+        // own transactional persist-then-adopt discipline before we
+        // got here -- if we can't also durably record *why* we
+        // trusted it, best-effort roll the pin back via `forget()`
+        // (which uses the identical transactional discipline for
+        // removal) rather than leave a permanently-trusted fingerprint
+        // with zero audit record and no way to self-heal (a retry
+        // would otherwise just see `PinOutcome::Matched`, which isn't
+        // audit-worthy, and the gap would persist forever). For a
+        // rotation specifically, the rollback removes the pin
+        // entirely rather than restoring the *old* fingerprint -- a
+        // retry re-presents as first-use, not the original rotation,
+        // but still gets a fresh confirmation and a fresh chance to
+        // record it, which is what matters here. Best-effort: if the
+        // rollback itself also fails, we've already lost the durable
+        // pairing between trust decision and audit record either way,
+        // so surface the original audit error, not a rollback error.
+        let rollback_state = state.clone();
+        let host_alias_owned = host_alias.to_string();
+        let suite_owned = suite.to_string();
+        let _ = tokio::task::spawn_blocking(move || {
+            rollback_state
+                .host_trust
+                .lock()
+                .expect("host-trust mutex poisoned")
+                .forget(&host_alias_owned, &suite_owned)
+        })
+        .await;
+        return Err(err);
     }
 
     Ok(outcome)
