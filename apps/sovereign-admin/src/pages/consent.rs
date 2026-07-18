@@ -110,7 +110,6 @@ pub fn ConsentModal() -> impl IntoView {
     // all.
     let decide = move |action: ConsentAction| {
         let prompt = consent_req.get_untracked();
-        let sess = session.and_then(|sig| sig.get_untracked());
         let session_id = prompt.as_deref().and_then(parse_session_id);
         let sealed = config.use_sealed_channel.get_untracked();
 
@@ -125,6 +124,24 @@ pub fn ConsentModal() -> impl IntoView {
         // `spawn_local` after it resolves rather than each starting their
         // own.
         spawn_local(async move {
+            // Proactively re-authenticate the operator session first if
+            // it's close to its (short, 15-minute) TTL -- mirrors the
+            // agent-session leg's `ensure_fresh_session` below, applied to
+            // the daemon-token leg. Otherwise a console left open past the
+            // TTL silently loses its privileged buttons (`can()` gates on
+            // `is_valid()`) with no way back short of a manual sign-in.
+            let sess = match session {
+                Some(sig) => crate::operator_session::ensure_fresh_operator_session(
+                    &endpoint,
+                    &agent_url,
+                    &agent_config,
+                    sig,
+                )
+                .await
+                .ok(),
+                None => None,
+            };
+
             // Both a signed consent payload and the sealed channel's own
             // handshake need a live agent session -- fetch (and
             // transparently renew, if it's close to expiry) it once up

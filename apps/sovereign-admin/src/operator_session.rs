@@ -39,6 +39,7 @@
 //!   `apps/xenia-operator-agent`'s `daemon_evidence` module for what it
 //!   verifies before signing anything.
 
+use leptos::prelude::*;
 use serde::Deserialize;
 
 use xenia_operator_agent_proto::{
@@ -212,6 +213,55 @@ pub async fn authenticate(
         ml_dsa_signature_hex: fields.ml_dsa_signature,
         token_json,
     })
+}
+
+/// A session within this many seconds of `expires_at` is proactively
+/// re-authenticated by [`ensure_fresh_operator_session`] rather than waited
+/// out -- mirrors `agent_client::REFRESH_MARGIN_SECS`, scaled down for this
+/// token's much shorter (15-minute, `TOKEN_TTL_SECS` in
+/// `apps/xenia-peer/src/operator_auth.rs`) TTL.
+const REFRESH_MARGIN_SECS: u64 = 120;
+
+fn now_secs() -> u64 {
+    (js_sys::Date::now() / 1000.0) as u64
+}
+
+/// Return the current operator session, transparently re-running the full
+/// [`authenticate`] ceremony first if it's within [`REFRESH_MARGIN_SECS`] of
+/// expiry -- so an actively-used console never hits a lapsed token
+/// mid-action, the same way `agent_client::ensure_fresh_session` already
+/// covers the agent-session leg. Falls back to the still-valid current
+/// session if the renewal attempt itself fails (network hiccup, agent
+/// momentarily unreachable); only a session that has *already* expired is a
+/// hard error, and that case also clears `session_ctx` so the UI falls back
+/// to its signed-out state instead of holding a dead token. Requires a live
+/// agent session under the hood (`authenticate` asks the agent to sign),
+/// obtained via [`crate::agent_client::ensure_fresh_session`] internally --
+/// same as every other privileged call site.
+pub async fn ensure_fresh_operator_session(
+    endpoint: &str,
+    agent_url: &str,
+    agent_config: &crate::agent_client::AgentConfig,
+    session_ctx: RwSignal<Option<OperatorSession>>,
+) -> Result<OperatorSession, String> {
+    let Some(current) = session_ctx.get_untracked() else {
+        return Err("not signed in as an operator -- sign in first".to_string());
+    };
+    if !current.is_valid() {
+        session_ctx.set(None);
+        return Err("operator session expired -- sign in again".to_string());
+    }
+    if now_secs() + REFRESH_MARGIN_SECS < current.expires_at {
+        return Ok(current);
+    }
+    let agent_session = crate::agent_client::ensure_fresh_session(agent_url, agent_config).await?;
+    match authenticate(endpoint, agent_url, &agent_session).await {
+        Ok(fresh) => {
+            session_ctx.set(Some(fresh.clone()));
+            Ok(fresh)
+        }
+        Err(_) => Ok(current),
+    }
 }
 
 /// Build the authenticated consent-action JSON the daemon parses on the
