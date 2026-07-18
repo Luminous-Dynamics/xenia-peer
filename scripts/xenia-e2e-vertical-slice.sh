@@ -31,7 +31,7 @@ rm -rf "$LOG_DIR"
 mkdir -p "$LOG_DIR"
 
 echo "=== building xenia-peer, xenia-operator-agent, xenia-viewer ===" >&2
-cargo build -p xenia-peer -p xenia-operator-agent -p xenia-viewer >&2
+cargo build --locked -p xenia-peer -p xenia-operator-agent -p xenia-viewer >&2
 
 echo "=== building sovereign-admin console (trunk) ===" >&2
 (cd apps/sovereign-admin && trunk build) >&2

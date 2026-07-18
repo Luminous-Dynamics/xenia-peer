@@ -5,7 +5,7 @@ ROOT="${1:-.}"
 cd "$ROOT"
 
 cargo fmt --check
-cargo test -p xenia-peer-core
-cargo test -p xenia-transport-ws --test transport_conformance
-cargo test -p xenia-transport-quic --test transport_conformance
+cargo test --locked -p xenia-peer-core
+cargo test --locked -p xenia-transport-ws --test transport_conformance
+cargo test --locked -p xenia-transport-quic --test transport_conformance
 git diff --check

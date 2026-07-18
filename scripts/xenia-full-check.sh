@@ -5,7 +5,7 @@ ROOT="${1:-.}"
 cd "$ROOT"
 
 cargo fmt --check
-cargo test --workspace
+cargo test --locked --workspace
 nixpkgs-fmt --check flake.nix
 git diff --check
 nix flake check

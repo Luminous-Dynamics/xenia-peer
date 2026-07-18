@@ -210,10 +210,18 @@ check_cargo_dir() {
   echo "== cargo validation: $dir =="
   (
     cd "$dir"
+    # `--locked` when a Cargo.lock is actually present -- xenia-peer commits
+    # one (application workspace: needs reproducible builds), but this
+    # function also runs against xenia-wire, a library that deliberately
+    # gitignores its lockfile (see xenia-wire/Cargo.toml's own convention).
+    # Forcing --locked unconditionally would break that case with no
+    # lockfile to lock against.
+    local locked_flag=()
+    [[ -f Cargo.lock ]] && locked_flag=(--locked)
     cargo metadata --format-version 1 --no-deps >/dev/null
     cargo fmt --all -- --check
-    cargo check --workspace --all-targets
-    cargo test --workspace --all-targets --no-run
+    cargo check "${locked_flag[@]}" --workspace --all-targets
+    cargo test "${locked_flag[@]}" --workspace --all-targets --no-run
   ) || fail "cargo validation failed in $dir"
 }
 
@@ -245,23 +253,21 @@ if [[ -f deny.toml ]]; then
 fi
 
 # `cargo vet` (audit provenance -- has this specific dependency *version*
-# actually been reviewed by someone, self or a trusted third party) is
-# deliberately advisory-only here, unlike cargo-deny above: this repo's
-# Cargo.lock is gitignored (see .gitignore -- a deliberate, pre-existing
-# convention, not something to reverse as a side effect of this check), so
-# the exact dependency versions CI resolves can drift from whatever was
-# current when `supply-chain/` was last updated -- cargo-vet's exemptions
-# are pinned to specific versions, so a routine upstream patch release
-# (not a real supply-chain event) would otherwise fail this unpredictably
-# on unrelated PRs. Runs and reports so drift is visible, but doesn't gate
-# the build; re-syncing `supply-chain/` (`cargo vet regenerate exemptions`
-# after a review pass) is a periodic maintenance task, not a per-commit gate.
+# actually been reviewed by someone, self or a trusted third party) is a
+# real gate here, same as cargo-deny above. This used to be advisory-only
+# because xenia-peer's Cargo.lock was gitignored, so the exact dependency
+# versions CI resolved could drift from whatever was current when
+# `supply-chain/` was last updated -- cargo-vet's exemptions are pinned to
+# specific versions, so a routine upstream patch release (not a real
+# supply-chain event) would otherwise fail this unpredictably on unrelated
+# PRs. Now that Cargo.lock is committed (2026-07-19), dependency versions
+# only change on a deliberate `cargo update`, so drift is no longer
+# spontaneous -- bump the lockfile and run `cargo vet regenerate
+# exemptions` (after actually reviewing what changed) in the same commit.
 if [[ -f supply-chain/config.toml ]]; then
   if command -v cargo-vet >/dev/null 2>&1 || cargo vet --version >/dev/null 2>&1; then
     echo "+ cargo vet --locked"
-    if ! cargo vet --locked; then
-      warn "cargo-vet found unvetted/drifted dependency versions (informational -- see comment above; not a build gate in this repo)"
-    fi
+    run cargo vet --locked
   else
     warn "cargo-vet not found; skipping supply-chain audit-provenance check"
   fi

@@ -34,5 +34,5 @@ backend whose suite exactly matches the manifest and every entry envelope. The
 `xenia-peer/pqc-signatures`.
 
 Before enabling this feature in a release lane, run local Rust validation with
-`cargo test -p xenia-ledger --features pqc-signatures --lib --no-fail-fast` and
+`cargo test --locked -p xenia-ledger --features pqc-signatures --lib --no-fail-fast` and
 record dependency review for the ML-DSA crate.
