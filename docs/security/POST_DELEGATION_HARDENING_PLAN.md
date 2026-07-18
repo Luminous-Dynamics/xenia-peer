@@ -784,14 +784,24 @@ vs. explicitly deferred.
     imported three public audit sets (Mozilla, Google, ISRG/Divvi Up) so
     much of the tree inherits real third-party review rather than a blank
     self-exemption -- `Vetting Succeeded (74 fully audited, 4 partially
-    audited, 760 exempted)`. `supply-chain/` committed; `cargo-vet` added
-    to the flake's `auditTools` (same list `cargo-deny` lives in, so it's
-    in the `#ci` shell for free) and wired into `xenia-validate.sh`
-    mirroring the existing advisory-unless-installed `cargo-deny` pattern
-    -- so it rides along in the existing `nix`/RC1 CI jobs rather than
-    needing a new one. 760 exemptions is an honest number, not a target:
-    fully closing it means either auditing crates by hand or importing
-    more trust sources, both real ongoing work, not a one-shot fix.
+    audited, 760 exempted)` locally at commit time. `supply-chain/`
+    committed; `cargo-vet` added to the flake's `auditTools` (same list
+    `cargo-deny` lives in, so it's in the `#ci` shell for free) and wired
+    into `xenia-validate.sh`, riding along in the existing `nix`/RC1 CI
+    jobs rather than needing a new one. **Deliberately advisory, not a
+    build gate** (a real gap found live: the first CI run failed with 39
+    "unvetted" dependencies -- not a real problem, just this repo's
+    gitignored `Cargo.lock` letting CI resolve slightly newer patch
+    versions than whatever was current when `supply-chain/`'s
+    version-pinned exemptions were last generated; cargo-deny's checks
+    tolerate this because they're not version-pinned, cargo-vet's
+    genuinely can't without a committed lockfile). Fixed by having the
+    script report drift via `warn` rather than fail the build --
+    re-syncing `supply-chain/` is a periodic maintenance task, not
+    something every PR should be blocked on. 760 exemptions is an honest
+    number, not a target: fully closing it means either auditing crates
+    by hand or importing more trust sources, both real ongoing work, not
+    a one-shot fix.
   - **`dudect`** -- statistical constant-time-leak detection. Real target
     identified: `ct_eq_32`/`verify_fingerprint_either_epoch` in
     `xenia-wire/src/session.rs`, which the code's own doc comment already
