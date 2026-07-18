@@ -3,7 +3,7 @@
 
 This check is intentionally static so it can run in lightweight release-review
 contexts before a Rust toolchain is available. It complements, but does not
-replace, `cargo test -p xenia-ledger --features pqc-signatures`.
+replace, `cargo test --locked -p xenia-ledger --features pqc-signatures`.
 """
 from __future__ import annotations
 
@@ -13,10 +13,10 @@ from pathlib import Path
 
 
 REQUIRED_LEDGER_FEATURE_TEST_COMMAND = (
-    "cargo test -p xenia-ledger --features pqc-signatures --lib --no-fail-fast"
+    "cargo test --locked -p xenia-ledger --features pqc-signatures --lib --no-fail-fast"
 )
 REQUIRED_PEER_FEATURE_TEST_COMMAND = (
-    "cargo test -p xenia-peer --features pqc-signatures --no-fail-fast"
+    "cargo test --locked -p xenia-peer --features pqc-signatures --no-fail-fast"
 )
 
 

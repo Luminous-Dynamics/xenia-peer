@@ -49,7 +49,7 @@ then
   exit 1
 fi
 
-if ! grep -Fq 'cargo test -p xenia-peer --features pqc-signatures --no-fail-fast' "$ci"; then
+if ! grep -Fq 'cargo test --locked -p xenia-peer --features pqc-signatures --no-fail-fast' "$ci"; then
   echo "CI must compile/test xenia-peer with pqc-signatures enabled" >&2
   exit 1
 fi

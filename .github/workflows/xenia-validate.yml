@@ -22,10 +22,10 @@ jobs:
           scripts/xenia-validate.sh .
       - name: Ledger PQC signature feature
         run: |
-          cargo test -p xenia-ledger --features pqc-signatures --lib --no-fail-fast
+          cargo test --locked -p xenia-ledger --features pqc-signatures --lib --no-fail-fast
       - name: Peer PQC verifier feature
         run: |
-          cargo test -p xenia-peer --features pqc-signatures --no-fail-fast
+          cargo test --locked -p xenia-peer --features pqc-signatures --no-fail-fast
 
 
   # `flake.nix` is always present in this repo, so this job runs

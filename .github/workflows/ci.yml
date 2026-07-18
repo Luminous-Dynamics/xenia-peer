@@ -40,11 +40,11 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
-        run: nix develop .#ci --command cargo clippy --all-targets -- -D warnings
+        run: nix develop .#ci --command cargo clippy --locked --all-targets -- -D warnings
       - name: Test
-        run: nix develop .#ci --command cargo test
+        run: nix develop .#ci --command cargo test --locked
       - name: Docs
-        run: nix develop .#ci --command bash -c 'RUSTDOCFLAGS="-D warnings" cargo doc --no-deps'
+        run: nix develop .#ci --command bash -c 'RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps'
 
   msrv:
     name: MSRV (Rust 1.94)
@@ -58,7 +58,7 @@ jobs:
       # validates the minimum toolchain on the portable host crates without
       # pulling ffmpeg. The scrcpy/wasm crates' toolchain is covered by
       # flake-checks / the wasm job.
-      - run: cargo build --all-targets --workspace --exclude xenia-capture-scrcpy --exclude sovereign-admin
+      - run: cargo build --locked --all-targets --workspace --exclude xenia-capture-scrcpy --exclude sovereign-admin
 
   # Feature builds that need extra system libraries also take them from the
   # flake (ffmpeg for h264, ALSA/Opus for audio) instead of apt-get.
@@ -73,15 +73,15 @@ jobs:
         run: |
           nix develop .#ci --command bash -c '
             set -euo pipefail
-            cargo test  -p xenia-video  --features h264
-            cargo build -p xenia-peer   --features h264
-            cargo build -p xenia-viewer --features h264'
+            cargo test  --locked -p xenia-video  --features h264
+            cargo build --locked -p xenia-peer   --features h264
+            cargo build --locked -p xenia-viewer --features h264'
       - name: audio (capture + output + opus)
         run: |
           nix develop .#ci --command bash -c '
             set -euo pipefail
-            cargo test  -p xenia-peer      --features audio-capture
-            cargo test  -p xenia-viewer    --features audio-output
-            cargo test  -p xenia-peer-core --features opus
-            cargo check -p xenia-peer      --features audio-opus
-            cargo check -p xenia-viewer    --features audio-opus'
+            cargo test  --locked -p xenia-peer      --features audio-capture
+            cargo test  --locked -p xenia-viewer    --features audio-output
+            cargo test  --locked -p xenia-peer-core --features opus
+            cargo check --locked -p xenia-peer      --features audio-opus
+            cargo check --locked -p xenia-viewer    --features audio-opus'

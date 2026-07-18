@@ -66,7 +66,7 @@ fi
 if command -v cargo >/dev/null 2>&1; then
   (
     cd "$root"
-    cargo test -p xenia-ledger --features pqc-signatures --lib --no-fail-fast
+    cargo test --locked -p xenia-ledger --features pqc-signatures --lib --no-fail-fast
   )
 else
   echo "cargo not found; static real-PQC backend checks passed, Rust feature tests skipped" >&2

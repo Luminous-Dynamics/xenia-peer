@@ -25,9 +25,9 @@ VIEWER_BIN="$TARGET_DIR/debug/xenia-viewer"
 
 build_binaries() {
   if [[ "$WITH_OPUS" -eq 1 ]]; then
-    cargo build -p xenia-peer -p xenia-viewer --features "xenia-peer/audio-opus xenia-viewer/audio-opus xenia-peer/preprod-fixtures" >/dev/null
+    cargo build --locked -p xenia-peer -p xenia-viewer --features "xenia-peer/audio-opus xenia-viewer/audio-opus xenia-peer/preprod-fixtures" >/dev/null
   else
-    cargo build -p xenia-peer -p xenia-viewer --features "xenia-peer/preprod-fixtures" >/dev/null
+    cargo build --locked -p xenia-peer -p xenia-viewer --features "xenia-peer/preprod-fixtures" >/dev/null
   fi
 }
 

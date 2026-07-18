@@ -110,7 +110,7 @@ python3 - "$case5/.github/workflows/xenia-validate.yml" <<'PY'
 import pathlib, sys
 path = pathlib.Path(sys.argv[1])
 text = path.read_text()
-text = text.replace('cargo test -p xenia-ledger --features pqc-signatures --lib --no-fail-fast', 'cargo test -p xenia-ledger --lib --no-fail-fast')
+text = text.replace('cargo test --locked -p xenia-ledger --features pqc-signatures --lib --no-fail-fast', 'cargo test --locked -p xenia-ledger --lib --no-fail-fast')
 path.write_text(text)
 PY
 expect_fail "$case5" "CI does not test ledger pqc-signatures feature"
@@ -162,7 +162,7 @@ python3 - "$case9/.github/workflows/xenia-validate.yml" <<'PY'
 import pathlib, sys
 path = pathlib.Path(sys.argv[1])
 text = path.read_text()
-text = text.replace('cargo test -p xenia-peer --features pqc-signatures --no-fail-fast', 'cargo test -p xenia-peer --no-fail-fast')
+text = text.replace('cargo test --locked -p xenia-peer --features pqc-signatures --no-fail-fast', 'cargo test --locked -p xenia-peer --no-fail-fast')
 path.write_text(text)
 PY
 expect_fail "$case9" "CI does not test peer pqc-signatures feature"
