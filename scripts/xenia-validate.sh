@@ -244,6 +244,20 @@ if [[ -f deny.toml ]]; then
   fi
 fi
 
+# `cargo vet` (audit provenance, not just license/advisory policy -- has this
+# specific dependency version actually been reviewed by someone, self or a
+# trusted third party) is advisory unless cargo-vet is installed, mirroring
+# the cargo-deny pattern above. `--locked` avoids a network fetch of fresh
+# imports mid-CI-run; the imports.lock committed to supply-chain/ is the
+# source of truth for what's trusted as of this commit.
+if [[ -f supply-chain/config.toml ]]; then
+  if command -v cargo-vet >/dev/null 2>&1 || cargo vet --version >/dev/null 2>&1; then
+    run cargo vet --locked
+  else
+    warn "cargo-vet not found; skipping supply-chain audit-provenance check"
+  fi
+fi
+
 # If this is a flat directory of crate tarball extracts with workspace-inherited
 # manifests, do not try to synthesize a workspace here. That normalization belongs
 # in the active repo, not in this validator.
