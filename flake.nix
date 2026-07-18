@@ -53,6 +53,7 @@
         auditTools = with pkgs; [
           cargo-audit
           cargo-deny
+          cargo-vet
           cargo-nextest
           cargo-llvm-cov
           ripgrep

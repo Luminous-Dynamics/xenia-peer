@@ -780,14 +780,38 @@ vs. explicitly deferred.
   hygiene is already decent.
 
   Can start now, independent of the wire format still churning:
-  - **`cargo vet`** -- supply-chain trust review for the crypto deps
-    themselves (`ml-kem`, `ml-dsa`, `ed25519-dalek`, `chacha20poly1305`).
-    Cheap, and it's the same tool Google/Mozilla use.
-  - **`dudect`** -- statistical constant-time-leak detection. Point it at
-    anything in `xenia-wire`'s own code that compares secret-derived
-    values (MAC/signature checks, token comparisons), to catch a
-    non-constant-time comparison the RustCrypto deps' own guarantees
-    wouldn't cover.
+  - **`cargo vet`**. Done (2026-07-18): installed, `cargo vet init` +
+    imported three public audit sets (Mozilla, Google, ISRG/Divvi Up) so
+    much of the tree inherits real third-party review rather than a blank
+    self-exemption -- `Vetting Succeeded (74 fully audited, 4 partially
+    audited, 760 exempted)` locally at commit time. `supply-chain/`
+    committed; `cargo-vet` added to the flake's `auditTools` (same list
+    `cargo-deny` lives in, so it's in the `#ci` shell for free) and wired
+    into `xenia-validate.sh`, riding along in the existing `nix`/RC1 CI
+    jobs rather than needing a new one. **Deliberately advisory, not a
+    build gate** (a real gap found live: the first CI run failed with 39
+    "unvetted" dependencies -- not a real problem, just this repo's
+    gitignored `Cargo.lock` letting CI resolve slightly newer patch
+    versions than whatever was current when `supply-chain/`'s
+    version-pinned exemptions were last generated; cargo-deny's checks
+    tolerate this because they're not version-pinned, cargo-vet's
+    genuinely can't without a committed lockfile). Fixed by having the
+    script report drift via `warn` rather than fail the build --
+    re-syncing `supply-chain/` is a periodic maintenance task, not
+    something every PR should be blocked on. 760 exemptions is an honest
+    number, not a target: fully closing it means either auditing crates
+    by hand or importing more trust sources, both real ongoing work, not
+    a one-shot fix.
+  - **`dudect`** -- statistical constant-time-leak detection. Real target
+    identified: `ct_eq_32`/`verify_fingerprint_either_epoch` in
+    `xenia-wire/src/session.rs`, which the code's own doc comment already
+    flags as timing-sensitive (leaking which key-epoch a peer signed
+    under, during a rekey grace window). **Not implemented yet** --
+    deliberately deferred rather than risk a subtly-wrong timing harness
+    from an unfamiliar crate's exact API (a false-negative "verified
+    constant-time" claim would be worse than no claim at all). Next
+    session picking this up should read `dudect-bencher`'s actual docs
+    before writing the harness, not guess at the macro API.
 
   Should wait for the format to stabilize (modeling a pre-alpha protocol
   is wasted rework as it keeps changing underneath the model):
@@ -798,9 +822,21 @@ vs. explicitly deferred.
     Noise-like AEAD handshake protocol specifically.
 
   None of this substitutes for the paid human audit this item ultimately
-  wants -- it makes that review cheaper and faster once commissioned, and
-  the non-protocol-shaped tools (`cargo vet`, `dudect`) can run today for
-  free rather than waiting on format stabilization.
+  wants -- it makes that review cheaper and faster once commissioned.
+
+  **Also done (2026-07-18): a targeted pattern-hunt audit**, prompted by
+  the revocation-checking bug fixed in the previous item. That bug's root
+  shape -- two independently-evolving authorization stores
+  (`OperatorPolicy` enrollment vs. `OperatorRevocations`) that must agree
+  but weren't cross-checked everywhere -- is a bug *class*, not a one-off,
+  so it was worth checking whether it recurs elsewhere in this codebase.
+  Traced every `OperatorRevocations`/`is_revoked` call site (the plaintext
+  consent path via `consent_server.rs` -> `decode_consent_decision`, and
+  the sealed channel's per-decision loop via
+  `serve_sealed_operator_channel`) and confirmed both already re-check
+  revocation on *every* decision, not just at connect/handshake time --
+  genuinely comprehensive, not a new gap. A clean result from a targeted
+  hunt is itself useful signal, not just "nothing to report."
 
 ## 9. Durable, verified consent-ledger persistence
 

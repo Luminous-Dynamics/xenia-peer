@@ -244,6 +244,29 @@ if [[ -f deny.toml ]]; then
   fi
 fi
 
+# `cargo vet` (audit provenance -- has this specific dependency *version*
+# actually been reviewed by someone, self or a trusted third party) is
+# deliberately advisory-only here, unlike cargo-deny above: this repo's
+# Cargo.lock is gitignored (see .gitignore -- a deliberate, pre-existing
+# convention, not something to reverse as a side effect of this check), so
+# the exact dependency versions CI resolves can drift from whatever was
+# current when `supply-chain/` was last updated -- cargo-vet's exemptions
+# are pinned to specific versions, so a routine upstream patch release
+# (not a real supply-chain event) would otherwise fail this unpredictably
+# on unrelated PRs. Runs and reports so drift is visible, but doesn't gate
+# the build; re-syncing `supply-chain/` (`cargo vet regenerate exemptions`
+# after a review pass) is a periodic maintenance task, not a per-commit gate.
+if [[ -f supply-chain/config.toml ]]; then
+  if command -v cargo-vet >/dev/null 2>&1 || cargo vet --version >/dev/null 2>&1; then
+    echo "+ cargo vet --locked"
+    if ! cargo vet --locked; then
+      warn "cargo-vet found unvetted/drifted dependency versions (informational -- see comment above; not a build gate in this repo)"
+    fi
+  else
+    warn "cargo-vet not found; skipping supply-chain audit-provenance check"
+  fi
+fi
+
 # If this is a flat directory of crate tarball extracts with workspace-inherited
 # manifests, do not try to synthesize a workspace here. That normalization belongs
 # in the active repo, not in this validator.
