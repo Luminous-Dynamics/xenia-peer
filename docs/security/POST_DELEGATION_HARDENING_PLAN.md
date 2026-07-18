@@ -24,7 +24,7 @@ credible pre-production system.
 5. **Resolve the hybrid-versus-classical HTTP authorization profile.** ✅ done
 6. **Add the full headless-browser vertical slice.** ✅ done
 7. **Zeroization, serialization migration, and fuzzing.** Mostly done (bincode migration deliberately deferred)
-8. **Packaging, recovery, and independent audit.** Partly done (agent audit logging, health endpoints, operator-key recovery, systemd user-service packaging, and backup/restore tooling are done; token/session auto-rotation remains deferred, and independent `xenia-wire` review isn't ripe yet)
+8. **Packaging, recovery, and independent audit.** Partly done (agent audit logging, health endpoints, operator-key recovery, systemd user-service packaging, backup/restore tooling, and token/session auto-rotation are done; independent `xenia-wire` review isn't ripe yet)
 9. **Durable, verified consent-ledger persistence.** ✅ done
 
 ## 1. Transactional native pin storage
@@ -713,8 +713,38 @@ vs. explicitly deferred.
   way "a tampered restore is caught" was originally assumed to mean for
   everything. Documented precisely in `docs/deploy/backup-and-restore.md`
   rather than left as an inaccurate blanket claim.
-- **Not done, deliberately deferred**: token/session automatic rotation
-  (only passive TTL expiry + manual refresh exists today).
+- **Token/session auto-rotation.** Done. Research found the browser console
+  actually holds *two* separately-TTL'd sessions, not one: the agent
+  session (console ↔ local `xenia-operator-agent`, 1-hour TTL) already
+  auto-rotated via `agent_client::ensure_fresh_session`, called at every
+  point of use -- that was never the gap. The daemon-operator-token leg
+  (console ↔ daemon, 15-minute `TOKEN_TTL_SECS` in `operator_auth.rs`,
+  `OperatorSession`) had zero refresh mechanism: once minted by
+  `OperatorAuthPanel`'s sign-in, it just sat in the `OperatorSessionCtx`
+  signal until `is_valid()` started returning `false`, silently disabling
+  every privileged control that gates on it (`ConsentModal::can()`, the
+  Sessions page's revoke gate) with no way back short of a manual
+  re-sign-in. Deliberately **not** fixed by adding a new "cheap" daemon
+  refresh endpoint -- that would be strictly weaker than the existing
+  AND-verified (Ed25519 + ML-DSA) challenge/response ceremony
+  (`OperatorSession::authenticate`), since refreshing without re-proving
+  key possession is a real security regression, not a UX nicety. Instead,
+  new `operator_session::ensure_fresh_operator_session` mirrors
+  `ensure_fresh_session`'s exact shape (return the current session if it's
+  outside a refresh margin; otherwise proactively re-run the existing,
+  already-tested `authenticate()` ceremony; fall back to the still-valid
+  current session if the renewal attempt itself fails; hard-error and clear
+  the signal only if the session has already actually expired) -- no new
+  backend endpoint or protocol change. Wired at the two places that
+  actually spend the token: `ConsentModal::decide()` and the Sessions
+  page's `do_revoke()`, both of which previously read the session
+  synchronously from the signal before dispatching. This codebase has no
+  periodic/background timer anywhere (confirmed before implementing --
+  every existing refresh is point-of-use or reactive-to-signal-change,
+  never a `setInterval`/`gloo_timers` poll), so this follows the same
+  point-of-use pattern rather than introducing a new one; a console left
+  genuinely idle (no privileged action taken) for the full 15 minutes will
+  still see its buttons blink off until the next click, which is expected.
 - **Not done, confirmed not ripe**: "commission independent review of
   `xenia-wire`." Checked against the project's own stated criterion --
   `xenia-wire` is `0.2.0-alpha.8`, `SPEC.md`'s own header says "Pre-alpha --

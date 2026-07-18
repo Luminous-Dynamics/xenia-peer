@@ -137,16 +137,38 @@ pub fn SessionsPage() -> impl IntoView {
             set_revoke_status.set("Enter an operator id to revoke.".to_string());
             return;
         }
-        let Some(sess) = operator_session.and_then(|sig| sig.get_untracked()) else {
+        let Some(sig) = operator_session else {
             set_revoke_status
                 .set("No operator session — sign in as an operator first.".to_string());
             return;
         };
+        if sig.get_untracked().is_none() {
+            set_revoke_status
+                .set("No operator session — sign in as an operator first.".to_string());
+            return;
+        }
         let endpoint = config.endpoint.get_untracked();
         let agent_url = agent_config.agent_url.get_untracked();
         let url = format!("{}/operator/revoke", endpoint.trim_end_matches('/'));
         set_revoke_status.set(format!("Revoking '{target}'…"));
         spawn_local(async move {
+            // Proactively re-authenticate the operator session first if
+            // it's close to its (short, 15-minute) TTL -- see
+            // `crate::operator_session::ensure_fresh_operator_session`.
+            let sess = match crate::operator_session::ensure_fresh_operator_session(
+                &endpoint,
+                &agent_url,
+                &agent_config,
+                sig,
+            )
+            .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    set_revoke_status.set(format!("Operator session unavailable: {e}"));
+                    return;
+                }
+            };
             let agent_session =
                 match crate::agent_client::ensure_fresh_session(&agent_url, &agent_config).await {
                     Ok(s) => s,
