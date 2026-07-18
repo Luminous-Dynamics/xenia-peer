@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Owner-only by default for everything this script creates (the plaintext
+# archive briefly holds raw private key material before -- or instead of,
+# if age fails -- encryption) -- independent of the invoking shell's
+# ambient umask.
+umask 077
+
 usage() {
   cat <<'USAGE'
 Usage: scripts/xenia-backup.sh [OPTIONS]
@@ -94,6 +100,23 @@ mkdir -p "$out_dir"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 archive_path="${out_dir%/}/xenia-backup-${timestamp}.tar.gz"
 
+# Never leave the plaintext archive (raw private key material) behind on
+# a failure partway through -- e.g. `age` erroring on a bad/unreachable
+# recipient or a non-interactive `--passphrase` prompt with no TTY, both
+# of which would otherwise abort under `set -e` after `tar` already
+# succeeded but before the encrypt-then-delete step ran. `backup_complete`
+# is set only once we've reached an actual, intentional success (either
+# branch below); until then, any exit removes a partially-produced
+# archive. A no-op once the encrypted branch has already `rm -f`'d
+# `$archive_path` itself.
+backup_complete=0
+cleanup_on_failure() {
+  if [[ "$backup_complete" -eq 0 ]]; then
+    rm -f "$archive_path"
+  fi
+}
+trap cleanup_on_failure EXIT
+
 # Interleaved -C/path pairs so the archive stores paths relative to each
 # item's own parent directory, never the absolute host path.
 tar_args=(--numeric-owner -p -czf "$archive_path")
@@ -141,9 +164,11 @@ if [[ -n "$encrypt_to" || "$use_passphrase" -eq 1 ]]; then
   fi
   rm -f "$archive_path"
   chmod 600 "$encrypted_path"
+  backup_complete=1
   echo "Encrypted backup written to: $encrypted_path"
 else
   chmod 600 "$archive_path"
+  backup_complete=1
   echo "WARNING: this archive is PLAINTEXT and contains raw private key material."
   echo "         Encrypt it yourself before copying it off this host, or re-run"
   echo "         with --encrypt-to/--passphrase. See docs/deploy/backup-and-restore.md."

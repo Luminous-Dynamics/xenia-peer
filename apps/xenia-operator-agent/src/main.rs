@@ -101,7 +101,7 @@ use xenia_operator_agent_proto::{
 use xenia_operator_proto::{OperatorEnrollmentRecord, OperatorRole};
 use xenia_wire::handshake::ViewerHandshake;
 use xenia_wire::handshake_highsec::{
-    ML_DSA_87_PK_LEN, ViewerHandshakeHighSec, derive_ml_dsa_87_seed_from_ed25519_secret,
+    derive_ml_dsa_87_seed_from_ed25519_secret, ViewerHandshakeHighSec, ML_DSA_87_PK_LEN,
 };
 use zeroize::Zeroizing;
 
@@ -227,6 +227,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
     let args = Args::parse();
 
+    // Captured before `load_or_create_identity_seeds` (below) can create
+    // it -- used after `audit_log::load_verified` to detect a suspicious
+    // combination: an identity that already existed (this agent has run
+    // before) but no audit log (see that call site's comment).
+    let identity_existed = args.identity_path.exists();
+
     let (ed25519_secret, ml_dsa_seed) = load_or_create_identity_seeds(&args.identity_path)?;
     let manager = HandshakeManager::from_identity_seeds(ed25519_secret, ml_dsa_seed);
     let token = load_or_create_token(&args.token_path)?;
@@ -238,6 +244,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `ed25519_secret` is `[u8; 32]: Copy`, so reusing it here doesn't
     // conflict with `manager`'s own earlier construction above.
     let audit_signing_key = ed25519_dalek::SigningKey::from_bytes(&ed25519_secret);
+    // `load_verified` treats a missing file as a legitimate fresh chain
+    // (the right call for a genuine first run -- hard-failing here would
+    // let an attacker with local write access, but no signing key,
+    // permanently brick the agent by deleting one file). But a missing
+    // audit log *combined with* a pre-existing identity is suspicious --
+    // it means this agent has run before, so a prior audit trail should
+    // exist. Loudly flag that combination rather than silently starting a
+    // fresh chain with no record anything was ever lost.
+    if identity_existed && !args.audit_log_path.exists() {
+        tracing::warn!(
+            audit_log_path = %args.audit_log_path.display(),
+            "this agent's identity already exists but its audit log is missing -- \
+             audit history was likely deleted; starting a fresh, empty chain"
+        );
+    }
     let audit_log = audit_log::load_verified(&args.audit_log_path, audit_signing_key)?;
 
     tracing::info!(
@@ -1173,7 +1194,37 @@ async fn check_host_trust_fingerprint(
         host_trust::PinOutcome::Matched => None,
     };
     if let Some(event) = audit_event {
-        record_audit_event(state, event).await?;
+        if let Err(err) = record_audit_event(state, event).await {
+            // `check()` (above) already durably committed this pin via its
+            // own transactional persist-then-adopt discipline before we
+            // got here -- if we can't also durably record *why* we
+            // trusted it, best-effort roll the pin back via `forget()`
+            // (which uses the identical transactional discipline for
+            // removal) rather than leave a permanently-trusted fingerprint
+            // with zero audit record and no way to self-heal (a retry
+            // would otherwise just see `PinOutcome::Matched`, which isn't
+            // audit-worthy, and the gap would persist forever). For a
+            // rotation specifically, the rollback removes the pin
+            // entirely rather than restoring the *old* fingerprint -- a
+            // retry re-presents as first-use, not the original rotation,
+            // but still gets a fresh confirmation and a fresh chance to
+            // record it, which is what matters here. Best-effort: if the
+            // rollback itself also fails, we've already lost the durable
+            // pairing between trust decision and audit record either way,
+            // so surface the original audit error, not a rollback error.
+            let rollback_state = state.clone();
+            let host_alias_owned = host_alias.to_string();
+            let suite_owned = suite.to_string();
+            let _ = tokio::task::spawn_blocking(move || {
+                rollback_state
+                    .host_trust
+                    .lock()
+                    .expect("host-trust mutex poisoned")
+                    .forget(&host_alias_owned, &suite_owned)
+            })
+            .await;
+            return Err(err);
+        }
     }
 
     Ok(outcome)
@@ -2143,14 +2194,12 @@ mod tests {
         );
         let ed_sig_bytes: [u8; 64] = decode_fixed_hex(&resp.ed_signature_hex).unwrap();
         let ed_sig = ed25519_dalek::Signature::from_bytes(&ed_sig_bytes);
-        assert!(
-            HandshakeManager::verify(
-                &expected_manager.identity_public_key(),
-                &wrong_transcript,
-                &ed_sig,
-            )
-            .is_err()
-        );
+        assert!(HandshakeManager::verify(
+            &expected_manager.identity_public_key(),
+            &wrong_transcript,
+            &ed_sig,
+        )
+        .is_err());
     }
 
     #[tokio::test]
@@ -2209,8 +2258,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sign_consent_action_fails_closed_when_a_new_host_needs_confirmation_and_none_is_available()
-     {
+    async fn sign_consent_action_fails_closed_when_a_new_host_needs_confirmation_and_none_is_available(
+    ) {
         let state = test_state_with_host_trust("secret", &["http://localhost:8134"], false);
         let app = build_router(state);
         let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
@@ -2313,8 +2362,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sign_revoke_fails_closed_when_the_host_itself_needs_confirmation_and_none_is_available()
-     {
+    async fn sign_revoke_fails_closed_when_the_host_itself_needs_confirmation_and_none_is_available(
+    ) {
         let state = test_state_with_host_trust("secret", &["http://localhost:8134"], false);
         let app = build_router(state);
         let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
@@ -2498,8 +2547,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sign_replace_key_fails_closed_when_the_host_itself_needs_confirmation_and_none_is_available()
-     {
+    async fn sign_replace_key_fails_closed_when_the_host_itself_needs_confirmation_and_none_is_available(
+    ) {
         let state = test_state_with_host_trust("secret", &["http://localhost:8134"], false);
         let app = build_router(state);
         let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
@@ -2868,8 +2917,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handshake_finish_fails_closed_when_the_new_host_needs_confirmation_and_none_is_available()
-     {
+    async fn handshake_finish_fails_closed_when_the_new_host_needs_confirmation_and_none_is_available(
+    ) {
         let state = test_state_with_host_trust("secret", &["http://localhost:8134"], false);
         let app = build_router(state);
 

@@ -465,6 +465,22 @@ on a workstation).
 PRs plus one `xenia-peer` PR, deliberately *not* including the bincode
 migration (see below).
 
+**Correction (2026-07-18, found by an independent audit of this
+milestone):** the description below was written once the `xenia-wire` PRs
+were *opened*, not once they actually shipped -- PR #15 (zeroize) and
+PR #16 (fuzz targets) sat open, unmerged, on the separate `xenia-wire`
+repo, while `xenia-peer`/`xenia-operator-agent` kept compiling against the
+crates.io `0.2.0-alpha.8` release, which had neither fix. Real secret
+material (the handshake's derived `root_key`) was left unzeroized in every
+binary actually shipped, despite this doc reading as "done." Both PRs
+(already CI-green, mergeable) are now actually merged, released as
+`xenia-wire` `0.2.0-alpha.9`, and `xenia-peer`/`xenia-operator-agent`'s
+dependency bumped to consume it -- verified by re-reading the compiled
+dependency's source, not just re-trusting the PR diff. Lesson for future
+entries in this doc: "done" for anything spanning a separate published
+crate means *published and consumed*, not *merged in that crate's own
+repo*, let alone *PR opened*.
+
 - **Zeroize** (`xenia-wire` PR #15): `PendingState` (`handshake.rs`) and
   `ViewerPendingState`/`HostPendingState` (`handshake_highsec.rs`) held the
   handshake's raw derived `root_key` -- the actual shared secret feeding
@@ -747,11 +763,44 @@ vs. explicitly deferred.
   still see its buttons blink off until the next click, which is expected.
 - **Not done, confirmed not ripe**: "commission independent review of
   `xenia-wire`." Checked against the project's own stated criterion --
-  `xenia-wire` is `0.2.0-alpha.8`, `SPEC.md`'s own header says "Pre-alpha --
+  `xenia-wire` is `0.2.0-alpha.9`, `SPEC.md`'s own header says "Pre-alpha --
   the format is subject to breaking change in subsequent drafts," and the
   current draft-03 was itself a breaking change over draft-02r2. This also
   isn't a codeable task -- it's commissioning a human reviewer once the
   format stabilizes, not engineering work.
+
+  **Tooling roadmap for this item** (2026-07-18, discussed with the user):
+  splits into work that needs the format to stabilize first vs. work that
+  doesn't.
+
+  Already in place, not re-adding: the fuzz targets (`xenia-wire` PR #16),
+  the "Cross-implementation conformance (Node)" CI job, and whatever backs
+  the "Security Audit"/"PQC Boundary Check" CI steps (looks like
+  `cargo audit`-class RUSTSEC scanning) -- generic supply-chain/fuzzing
+  hygiene is already decent.
+
+  Can start now, independent of the wire format still churning:
+  - **`cargo vet`** -- supply-chain trust review for the crypto deps
+    themselves (`ml-kem`, `ml-dsa`, `ed25519-dalek`, `chacha20poly1305`).
+    Cheap, and it's the same tool Google/Mozilla use.
+  - **`dudect`** -- statistical constant-time-leak detection. Point it at
+    anything in `xenia-wire`'s own code that compares secret-derived
+    values (MAC/signature checks, token comparisons), to catch a
+    non-constant-time comparison the RustCrypto deps' own guarantees
+    wouldn't cover.
+
+  Should wait for the format to stabilize (modeling a pre-alpha protocol
+  is wasted rework as it keeps changing underneath the model):
+  - **Tamarin Prover** or **ProVerif** -- purpose-built for symbolic
+    crypto-protocol analysis (secrecy, authentication, forward secrecy),
+    a better fit than a general state-machine tool (e.g. TLA+, also
+    discussed and deferred for the same stabilization reason) for a
+    Noise-like AEAD handshake protocol specifically.
+
+  None of this substitutes for the paid human audit this item ultimately
+  wants -- it makes that review cheaper and faster once commissioned, and
+  the non-protocol-shaped tools (`cargo vet`, `dudect`) can run today for
+  free rather than waiting on format stabilization.
 
 ## 9. Durable, verified consent-ledger persistence
 

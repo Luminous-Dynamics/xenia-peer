@@ -1209,6 +1209,43 @@ fn m1_consent_scope(telemetry_level: TelemetryLevel, audio_mode: AudioMode) -> S
     format!("display: screen stream; {telemetry}; {audio}")
 }
 
+/// Atomically create `path` at 0600 and write `bytes` -- no separate
+/// write-then-chmod window where a raw secret sits briefly world-readable
+/// (`fs::write` creates at the ambient umask, typically 0644). Also
+/// tightens `path`'s parent directory to 0700 after creating it, since
+/// `create_dir_all` alone leaves it at the ambient umask too (typically
+/// 0755, world-listable). Mirrors two patterns that already exist
+/// elsewhere in this repo -- `audit_ledger_store.rs`'s
+/// `OpenOptions::create_new+mode` for the file, and
+/// `apps/xenia-operator-agent/src/secure_file.rs`'s parent-directory
+/// re-tightening -- applied here to close the same gap in this crate's own
+/// key-generation code. `create_new(true)` is also a correctness
+/// improvement over plain `fs::write`: it fails rather than silently
+/// overwriting if the file was created by something else between the
+/// caller's `path.exists()` check and this call.
+#[cfg(unix)]
+fn create_secret_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?
+        .write_all(bytes)
+}
+#[cfg(not(unix))]
+fn create_secret_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, bytes)
+}
+
 /// Load an Ed25519 signing key from `path`, or generate and persist a fresh
 /// one on first use. The persisted key file is created with owner-only (0600)
 /// permissions, and existing files are re-tightened to 0600 on load, so a
@@ -1232,12 +1269,8 @@ fn load_or_create_signing_key(
         restrict_permissions(path)?;
         Ok(key)
     } else {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let key = SigningKey::generate(&mut rand::thread_rng());
-        std::fs::write(path, key.to_bytes())?;
-        restrict_permissions(path)?;
+        create_secret_file(path, &key.to_bytes())?;
         Ok(key)
     }
 }
@@ -1269,12 +1302,8 @@ fn load_or_create_ml_dsa_seed(
             .try_into()
             .map_err(|_| "Invalid ML-DSA seed length".into())
     } else {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let seed: [u8; 32] = rand::random();
-        std::fs::write(path, seed)?;
-        restrict_permissions(path)?;
+        create_secret_file(path, &seed)?;
         Ok(seed)
     }
 }
@@ -1305,14 +1334,10 @@ fn load_or_create_host_identity(
         }
         bytes
     } else {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let mut blob = Vec::with_capacity(64);
         blob.extend_from_slice(&rand::random::<[u8; 32]>());
         blob.extend_from_slice(&rand::random::<[u8; 32]>());
-        std::fs::write(path, &blob)?;
-        restrict_permissions(path)?;
+        create_secret_file(path, &blob)?;
         blob
     };
     let mut ed25519_secret = [0u8; 32];
@@ -1353,14 +1378,10 @@ fn load_or_create_host_identity_highsec(
         }
         bytes
     } else {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let mut blob = Vec::with_capacity(64);
         blob.extend_from_slice(&rand::random::<[u8; 32]>());
         blob.extend_from_slice(&rand::random::<[u8; 32]>());
-        std::fs::write(path, &blob)?;
-        restrict_permissions(path)?;
+        create_secret_file(path, &blob)?;
         blob
     };
     let mut ed25519_secret = [0u8; 32];
