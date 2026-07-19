@@ -1467,8 +1467,8 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             {
                 return Err("sealed capabilities do not match handshake context hash".into());
             }
-            if !capabilities.supports_current_lane_envelope() {
-                return Err("daemon advertised unsupported lane envelope version".into());
+            if !capabilities.supports_current_capability_contract() {
+                return Err("daemon advertised unsupported capability contract".into());
             }
             let _negotiated_context_key =
                 derive_negotiated_context_key(&handshake.key_schedule, &negotiated_context_hash);
@@ -1486,8 +1486,11 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             info!(
                 audio_codec = audio_codec.name(),
                 video_format = ?capabilities.video_format,
-                telemetry_enabled = capabilities.telemetry_enabled,
-                input_control_enabled = capabilities.input_control_enabled,
+                telemetry = ?capabilities.telemetry,
+                audio_source = ?capabilities.audio_source,
+                input_control = ?capabilities.input_control,
+                clipboard = ?capabilities.clipboard,
+                file_transfer = ?capabilities.file_transfer,
                 "sealed session capabilities applied"
             );
             continue;
@@ -1935,8 +1938,8 @@ async fn gui_receive_loop(
             {
                 return Err("sealed capabilities do not match handshake context hash".into());
             }
-            if !capabilities.supports_current_lane_envelope() {
-                return Err("daemon advertised unsupported lane envelope version".into());
+            if !capabilities.supports_current_capability_contract() {
+                return Err("daemon advertised unsupported capability contract".into());
             }
             let _negotiated_context_key =
                 derive_negotiated_context_key(&handshake.key_schedule, &negotiated_context_hash);
@@ -1954,8 +1957,11 @@ async fn gui_receive_loop(
             info!(
                 audio_codec = audio_codec.name(),
                 video_format = ?capabilities.video_format,
-                telemetry_enabled = capabilities.telemetry_enabled,
-                input_control_enabled = capabilities.input_control_enabled,
+                telemetry = ?capabilities.telemetry,
+                audio_source = ?capabilities.audio_source,
+                input_control = ?capabilities.input_control,
+                clipboard = ?capabilities.clipboard,
+                file_transfer = ?capabilities.file_transfer,
                 "sealed session capabilities applied"
             );
             continue;

@@ -100,9 +100,12 @@ change.
 The negotiated context flow is:
 
 - the daemon builds the exact `RawCapabilities` payload it will send first;
-- the daemon computes `blake3-256(bincode(NegotiatedSessionContextV1))`;
-- the context includes `schema = xenia-negotiated-session-context-v1`, selected
+- the daemon computes `blake3-256(bincode(NegotiatedSessionContextV2))`;
+- the context includes `schema = xenia-negotiated-session-context-v2`, selected
   transport, and the typed capabilities payload;
+- the capabilities payload commits to the exact telemetry disclosure, audio
+  source category, input authority, clipboard direction, file-transfer
+  direction, video format, audio advertisement, and lane-envelope contract;
 - the context hash is carried in `HostHello`;
 - both sides include that value in the signed transcript and canonical
   transcript;

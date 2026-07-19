@@ -18,7 +18,7 @@ use xenia_handshake::{
 };
 
 const HANDSHAKE_SIGNATURE_CONTEXT_V1: &str = "xenia-handshake-signature-v1";
-const NEGOTIATED_SESSION_CONTEXT_SCHEMA: &str = "xenia-negotiated-session-context-v1";
+const NEGOTIATED_SESSION_CONTEXT_SCHEMA: &str = "xenia-negotiated-session-context-v2";
 
 /// Handshake messages exchanged between host and viewer.
 ///
@@ -133,7 +133,7 @@ pub enum NegotiatedTransport {
 /// cryptographic transcript and negotiated session surface without changing the
 /// existing three-message handshake wire shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NegotiatedSessionContextV1 {
+pub struct NegotiatedSessionContextV2 {
     /// Stable context schema label.
     pub schema: String,
     /// Selected transport for this session.
@@ -142,7 +142,7 @@ pub struct NegotiatedSessionContextV1 {
     pub capabilities: RawCapabilities,
 }
 
-impl NegotiatedSessionContextV1 {
+impl NegotiatedSessionContextV2 {
     /// Build a canonical negotiated context.
     pub fn new(transport: NegotiatedTransport, capabilities: RawCapabilities) -> Self {
         Self {
@@ -168,7 +168,7 @@ pub fn negotiated_session_context_hash(
     transport: NegotiatedTransport,
     capabilities: RawCapabilities,
 ) -> Result<[u8; 32], bincode::Error> {
-    NegotiatedSessionContextV1::new(transport, capabilities).context_hash()
+    NegotiatedSessionContextV2::new(transport, capabilities).context_hash()
 }
 
 /// Policy controlling when repeatable session rekeys are allowed.
@@ -945,13 +945,16 @@ mod tests {
     #[test]
     fn negotiated_session_context_hash_binds_transport() {
         let capabilities = RawCapabilities {
+            schema_version: crate::frame::CAPABILITIES_SCHEMA_VERSION,
             frame_id: 1,
             timestamp_ms: 1_700_000_000_000,
             audio: None,
             video_format: crate::frame::PixelFormat::Passthrough,
-            telemetry_enabled: false,
-            input_control_enabled: false,
-            clipboard_enabled: false,
+            telemetry: crate::frame::TelemetryCapability::Off,
+            audio_source: crate::frame::AudioSourceCapability::Off,
+            input_control: crate::frame::InputControlCapability::Off,
+            clipboard: crate::frame::ClipboardCapability::Off,
+            file_transfer: crate::frame::FileTransferCapability::Off,
             lane_envelope_version: crate::frame::LANE_ENVELOPE_SCHEMA_VERSION,
             lane_envelope_magic: crate::frame::LANE_ENVELOPE_MAGIC,
         };
@@ -966,38 +969,73 @@ mod tests {
     }
 
     #[test]
-    fn negotiated_session_context_hash_binds_capabilities() {
-        let mut capabilities = RawCapabilities {
+    fn negotiated_session_context_hash_binds_each_capability_dimension() {
+        let capabilities = RawCapabilities {
+            schema_version: crate::frame::CAPABILITIES_SCHEMA_VERSION,
             frame_id: 1,
             timestamp_ms: 1_700_000_000_000,
             audio: None,
             video_format: crate::frame::PixelFormat::Passthrough,
-            telemetry_enabled: false,
-            input_control_enabled: false,
-            clipboard_enabled: false,
+            telemetry: crate::frame::TelemetryCapability::Off,
+            audio_source: crate::frame::AudioSourceCapability::Off,
+            input_control: crate::frame::InputControlCapability::Off,
+            clipboard: crate::frame::ClipboardCapability::Off,
+            file_transfer: crate::frame::FileTransferCapability::Off,
             lane_envelope_version: crate::frame::LANE_ENVELOPE_SCHEMA_VERSION,
             lane_envelope_magic: crate::frame::LANE_ENVELOPE_MAGIC,
         };
+        let baseline =
+            negotiated_session_context_hash(NegotiatedTransport::Tcp, capabilities.clone())
+                .unwrap();
 
-        let first = negotiated_session_context_hash(NegotiatedTransport::Tcp, capabilities.clone())
-            .unwrap();
-        capabilities.telemetry_enabled = true;
-        let second =
-            negotiated_session_context_hash(NegotiatedTransport::Tcp, capabilities).unwrap();
+        let mutations = [
+            {
+                let mut changed = capabilities.clone();
+                changed.telemetry = crate::frame::TelemetryCapability::BasicHostPerformance;
+                changed
+            },
+            {
+                let mut changed = capabilities.clone();
+                changed.audio_source = crate::frame::AudioSourceCapability::HostDeviceCapture;
+                changed
+            },
+            {
+                let mut changed = capabilities.clone();
+                changed.input_control = crate::frame::InputControlCapability::RemoteInputInjection;
+                changed
+            },
+            {
+                let mut changed = capabilities.clone();
+                changed.clipboard = crate::frame::ClipboardCapability::ViewerToHost;
+                changed
+            },
+            {
+                let mut changed = capabilities;
+                changed.file_transfer = crate::frame::FileTransferCapability::HostToViewer;
+                changed
+            },
+        ];
 
-        assert_ne!(first, second);
+        for changed in mutations {
+            let changed_hash =
+                negotiated_session_context_hash(NegotiatedTransport::Tcp, changed).unwrap();
+            assert_ne!(baseline, changed_hash);
+        }
     }
 
     #[test]
     fn negotiated_session_context_hash_binds_lane_envelope_version() {
         let mut capabilities = RawCapabilities {
+            schema_version: crate::frame::CAPABILITIES_SCHEMA_VERSION,
             frame_id: 1,
             timestamp_ms: 1_700_000_000_000,
             audio: None,
             video_format: crate::frame::PixelFormat::Passthrough,
-            telemetry_enabled: false,
-            input_control_enabled: false,
-            clipboard_enabled: false,
+            telemetry: crate::frame::TelemetryCapability::Off,
+            audio_source: crate::frame::AudioSourceCapability::Off,
+            input_control: crate::frame::InputControlCapability::Off,
+            clipboard: crate::frame::ClipboardCapability::Off,
+            file_transfer: crate::frame::FileTransferCapability::Off,
             lane_envelope_version: crate::frame::LANE_ENVELOPE_SCHEMA_VERSION,
             lane_envelope_magic: crate::frame::LANE_ENVELOPE_MAGIC,
         };

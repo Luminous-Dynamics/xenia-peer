@@ -1047,6 +1047,7 @@ mod tests {
     fn capabilities_control_frame_seal_open_roundtrip() {
         let (mut host, mut viewer) = paired();
         let capabilities = crate::frame::RawCapabilities {
+            schema_version: crate::frame::CAPABILITIES_SCHEMA_VERSION,
             frame_id: host.next_frame_id(),
             timestamp_ms: 1_700_000_000_900,
             audio: Some(crate::advertisement::AudioAdvertisement {
@@ -1057,9 +1058,11 @@ mod tests {
                 frame_duration_ms: vec![10, 20],
             }),
             video_format: crate::frame::PixelFormat::Passthrough,
-            telemetry_enabled: true,
-            input_control_enabled: false,
-            clipboard_enabled: false,
+            telemetry: crate::frame::TelemetryCapability::BasicHostPerformance,
+            audio_source: crate::frame::AudioSourceCapability::SyntheticTestSignal,
+            input_control: crate::frame::InputControlCapability::Off,
+            clipboard: crate::frame::ClipboardCapability::Off,
+            file_transfer: crate::frame::FileTransferCapability::Off,
             lane_envelope_version: crate::frame::LANE_ENVELOPE_SCHEMA_VERSION,
             lane_envelope_magic: crate::frame::LANE_ENVELOPE_MAGIC,
         };
@@ -1072,6 +1075,11 @@ mod tests {
             crate::frame::RawCapabilities::from_frame(&opened).unwrap(),
             capabilities
         );
+
+        let mut unsupported = capabilities;
+        unsupported.schema_version = unsupported.schema_version.saturating_add(1);
+        let unsupported_frame = unsupported.into_frame().unwrap();
+        assert!(crate::frame::RawCapabilities::from_frame(&unsupported_frame).is_err());
     }
 
     #[test]

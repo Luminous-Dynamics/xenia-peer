@@ -93,9 +93,71 @@ pub struct RawTelemetry {
     pub samples: Vec<TelemetrySample>,
 }
 
+/// Current schema version for [`RawCapabilities`].
+pub const CAPABILITIES_SCHEMA_VERSION: u16 = 2;
+
+/// Exact telemetry disclosure authorized for a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TelemetryCapability {
+    /// No telemetry lane data.
+    Off,
+    /// Aggregate CPU and memory performance only.
+    BasicHostPerformance,
+    /// System identity plus detailed performance telemetry.
+    SystemIdentityAndPerformance,
+}
+
+/// Source category permitted on the audio lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AudioSourceCapability {
+    /// No audio samples.
+    Off,
+    /// A daemon-generated test tone or noise source.
+    SyntheticTestSignal,
+    /// Capture from a host audio device.
+    HostDeviceCapture,
+}
+
+/// Input-control authority granted to the viewer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InputControlCapability {
+    /// Viewer input events are refused.
+    Off,
+    /// Viewer pointer, keyboard, or touch events may be injected.
+    RemoteInputInjection,
+}
+
+/// Clipboard synchronization direction authorized for a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClipboardCapability {
+    /// Clipboard synchronization is disabled.
+    Off,
+    /// Host clipboard data may flow to the viewer.
+    HostToViewer,
+    /// Viewer clipboard data may flow to the host.
+    ViewerToHost,
+    /// Clipboard data may flow in both directions.
+    Bidirectional,
+}
+
+/// File-transfer direction authorized for a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileTransferCapability {
+    /// File transfer is disabled.
+    Off,
+    /// Files may flow from host to viewer.
+    HostToViewer,
+    /// Files may flow from viewer to host.
+    ViewerToHost,
+    /// Files may flow in both directions.
+    Bidirectional,
+}
+
 /// Session capabilities sealed immediately after handshake.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawCapabilities {
+    /// Must equal [`CAPABILITIES_SCHEMA_VERSION`].
+    pub schema_version: u16,
     /// Monotonic metadata frame identifier.
     pub frame_id: u64,
     /// Host timestamp in milliseconds since Unix epoch.
@@ -104,12 +166,16 @@ pub struct RawCapabilities {
     pub audio: Option<crate::advertisement::AudioAdvertisement>,
     /// Selected video pixel/codec format.
     pub video_format: PixelFormat,
-    /// Telemetry lane is enabled for this session.
-    pub telemetry_enabled: bool,
-    /// Input-control lane is enabled for this session.
-    pub input_control_enabled: bool,
-    /// Clipboard sync is enabled for this session.
-    pub clipboard_enabled: bool,
+    /// Exact telemetry disclosure authorized for this session.
+    pub telemetry: TelemetryCapability,
+    /// Exact audio source category authorized for this session.
+    pub audio_source: AudioSourceCapability,
+    /// Exact input-control authority authorized for this session.
+    pub input_control: InputControlCapability,
+    /// Exact clipboard direction authorized for this session.
+    pub clipboard: ClipboardCapability,
+    /// Exact file-transfer direction authorized for this session.
+    pub file_transfer: FileTransferCapability,
     /// Lane envelope schema version used by this session.
     pub lane_envelope_version: u16,
     /// Cleartext lane envelope magic used before sealed lane payloads.
@@ -117,9 +183,10 @@ pub struct RawCapabilities {
 }
 
 impl RawCapabilities {
-    /// Return true when capabilities advertise the supported lane envelope.
-    pub fn supports_current_lane_envelope(&self) -> bool {
-        self.lane_envelope_version == LANE_ENVELOPE_SCHEMA_VERSION
+    /// Return true when both the capability schema and lane envelope are supported.
+    pub fn supports_current_capability_contract(&self) -> bool {
+        self.schema_version == CAPABILITIES_SCHEMA_VERSION
+            && self.lane_envelope_version == LANE_ENVELOPE_SCHEMA_VERSION
             && self.lane_envelope_magic == LANE_ENVELOPE_MAGIC
     }
 }
@@ -1086,7 +1153,15 @@ impl RawCapabilities {
         if frame.pixel_format != PixelFormat::Capabilities {
             return Err(WireError::decode("RawFrame is not capabilities"));
         }
-        bincode::deserialize(&frame.pixels).map_err(WireError::decode)
+        let capabilities: Self =
+            bincode::deserialize(&frame.pixels).map_err(WireError::decode)?;
+        if capabilities.schema_version != CAPABILITIES_SCHEMA_VERSION {
+            return Err(WireError::decode(format!(
+                "unsupported capabilities schema version {}",
+                capabilities.schema_version
+            )));
+        }
+        Ok(capabilities)
     }
 }
 

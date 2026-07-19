@@ -907,27 +907,58 @@ fn audio_advertisement(choice: AudioCodecChoice) -> AudioAdvertisement {
     }
 }
 
-fn session_capabilities_frame(
+fn session_capabilities(
     frame_id: u64,
     audio: AudioAdvertisement,
     video_format: FramePixelFormat,
-    telemetry_level: TelemetryLevel,
-    input_backend: InputBackendChoice,
-    clipboard: ClipboardMode,
-) -> Result<RawFrame, Box<dyn std::error::Error>> {
+    args: &Args,
+) -> xenia_peer_core::RawCapabilities {
+    use xenia_peer_core::{
+        AudioSourceCapability, ClipboardCapability, FileTransferCapability,
+        InputControlCapability, TelemetryCapability,
+    };
+
+    let telemetry = match args.telemetry_level {
+        TelemetryLevel::Off => TelemetryCapability::Off,
+        TelemetryLevel::Basic => TelemetryCapability::BasicHostPerformance,
+        TelemetryLevel::System => TelemetryCapability::SystemIdentityAndPerformance,
+    };
+    let audio_source = match args.audio {
+        AudioMode::Off => AudioSourceCapability::Off,
+        AudioMode::Sine | AudioMode::Noise => AudioSourceCapability::SyntheticTestSignal,
+        AudioMode::Capture => AudioSourceCapability::HostDeviceCapture,
+    };
+    let input_control = if args.input_backend == InputBackendChoice::Noop {
+        InputControlCapability::Off
+    } else {
+        InputControlCapability::RemoteInputInjection
+    };
+    let clipboard = match args.clipboard {
+        ClipboardMode::Off => ClipboardCapability::Off,
+        ClipboardMode::HostToViewer => ClipboardCapability::HostToViewer,
+        ClipboardMode::Bidirectional => ClipboardCapability::Bidirectional,
+    };
+    let file_transfer = match (args.send_file.is_some(), args.recv_file_dir.is_some()) {
+        (false, false) => FileTransferCapability::Off,
+        (true, false) => FileTransferCapability::HostToViewer,
+        (false, true) => FileTransferCapability::ViewerToHost,
+        (true, true) => FileTransferCapability::Bidirectional,
+    };
+
     xenia_peer_core::RawCapabilities {
+        schema_version: xenia_peer_core::frame::CAPABILITIES_SCHEMA_VERSION,
         frame_id,
         timestamp_ms: now_ms(),
         audio: Some(audio),
         video_format,
-        telemetry_enabled: telemetry_level != TelemetryLevel::Off,
-        input_control_enabled: input_backend != InputBackendChoice::Noop,
-        clipboard_enabled: clipboard != ClipboardMode::Off,
+        telemetry,
+        audio_source,
+        input_control,
+        clipboard,
+        file_transfer,
         lane_envelope_version: xenia_peer_core::frame::LANE_ENVELOPE_SCHEMA_VERSION,
         lane_envelope_magic: xenia_peer_core::frame::LANE_ENVELOPE_MAGIC,
     }
-    .into_frame()
-    .map_err(Into::into)
 }
 
 fn now_ms() -> u64 {
@@ -1196,40 +1227,61 @@ fn telemetry_sample_allowed(
     }
 }
 
-fn m1_consent_scope(args: &Args) -> xenia_operator_proto::ConsentScopeV1 {
-    let telemetry = match args.telemetry_level {
-        TelemetryLevel::Off => xenia_operator_proto::ConsentTelemetryScope::Off,
-        TelemetryLevel::Basic => xenia_operator_proto::ConsentTelemetryScope::BasicHostPerformance,
-        TelemetryLevel::System => {
+fn m1_consent_scope(
+    capabilities: &xenia_peer_core::RawCapabilities,
+) -> xenia_operator_proto::ConsentScopeV1 {
+    use xenia_peer_core::{
+        AudioSourceCapability, ClipboardCapability, FileTransferCapability,
+        InputControlCapability, TelemetryCapability,
+    };
+
+    let telemetry = match capabilities.telemetry {
+        TelemetryCapability::Off => xenia_operator_proto::ConsentTelemetryScope::Off,
+        TelemetryCapability::BasicHostPerformance => {
+            xenia_operator_proto::ConsentTelemetryScope::BasicHostPerformance
+        }
+        TelemetryCapability::SystemIdentityAndPerformance => {
             xenia_operator_proto::ConsentTelemetryScope::SystemIdentityAndPerformance
         }
     };
-    let audio = match args.audio {
-        AudioMode::Off => xenia_operator_proto::ConsentAudioScope::Off,
-        AudioMode::Sine | AudioMode::Noise => {
+    let audio = match capabilities.audio_source {
+        AudioSourceCapability::Off => xenia_operator_proto::ConsentAudioScope::Off,
+        AudioSourceCapability::SyntheticTestSignal => {
             xenia_operator_proto::ConsentAudioScope::SyntheticTestSignal
         }
-        AudioMode::Capture => xenia_operator_proto::ConsentAudioScope::HostDeviceCapture,
+        AudioSourceCapability::HostDeviceCapture => {
+            xenia_operator_proto::ConsentAudioScope::HostDeviceCapture
+        }
     };
-    let input = if args.input_backend == InputBackendChoice::Noop {
-        xenia_operator_proto::ConsentInputScope::Off
-    } else {
-        xenia_operator_proto::ConsentInputScope::RemoteInputInjection
+    let input = match capabilities.input_control {
+        InputControlCapability::Off => xenia_operator_proto::ConsentInputScope::Off,
+        InputControlCapability::RemoteInputInjection => {
+            xenia_operator_proto::ConsentInputScope::RemoteInputInjection
+        }
     };
-    let clipboard = match args.clipboard {
-        ClipboardMode::Off => xenia_operator_proto::ConsentClipboardScope::Off,
-        ClipboardMode::HostToViewer => {
+    let clipboard = match capabilities.clipboard {
+        ClipboardCapability::Off => xenia_operator_proto::ConsentClipboardScope::Off,
+        ClipboardCapability::HostToViewer => {
             xenia_operator_proto::ConsentClipboardScope::HostToViewer
         }
-        ClipboardMode::Bidirectional => {
+        ClipboardCapability::ViewerToHost => {
+            xenia_operator_proto::ConsentClipboardScope::ViewerToHost
+        }
+        ClipboardCapability::Bidirectional => {
             xenia_operator_proto::ConsentClipboardScope::Bidirectional
         }
     };
-    let file_transfer = match (args.send_file.is_some(), args.recv_file_dir.is_some()) {
-        (false, false) => xenia_operator_proto::ConsentFileTransferScope::Off,
-        (true, false) => xenia_operator_proto::ConsentFileTransferScope::HostToViewer,
-        (false, true) => xenia_operator_proto::ConsentFileTransferScope::ViewerToHost,
-        (true, true) => xenia_operator_proto::ConsentFileTransferScope::Bidirectional,
+    let file_transfer = match capabilities.file_transfer {
+        FileTransferCapability::Off => xenia_operator_proto::ConsentFileTransferScope::Off,
+        FileTransferCapability::HostToViewer => {
+            xenia_operator_proto::ConsentFileTransferScope::HostToViewer
+        }
+        FileTransferCapability::ViewerToHost => {
+            xenia_operator_proto::ConsentFileTransferScope::ViewerToHost
+        }
+        FileTransferCapability::Bidirectional => {
+            xenia_operator_proto::ConsentFileTransferScope::Bidirectional
+        }
     };
     xenia_operator_proto::ConsentScopeV1::screen_with_capabilities(
         telemetry,
@@ -1427,22 +1479,30 @@ fn load_or_create_host_identity_highsec(
     )
 }
 
-/// Derive the consent tiers to grant from the operator's configured flags.
+/// Derive runtime consent tiers from the exact sealed capability object.
 ///
-/// A single Approve should authorize only what the operator actually turned
-/// on: frame streaming is the daemon's core purpose and always granted, but
-/// input injection, clipboard apply, and file transfer are each unlocked only
-/// when their backing flag is enabled. This keeps an approval from silently
-/// authorizing capabilities the daemon isn't even wired to use.
-fn configured_permission_set(args: &Args) -> M1PermissionSet {
+/// The same `RawCapabilities` value is hashed into the viewer handshake, sent
+/// to the viewer, converted into the signed consent scope, and used here to
+/// derive the existing coarse M1 permission tiers. Direction-specific runtime
+/// handlers still enforce their immutable per-run configuration; in particular,
+/// `M1PermissionSet` currently represents file transfer as one tier rather than
+/// preserving its negotiated direction.
+fn configured_permission_set(capabilities: &xenia_peer_core::RawCapabilities) -> M1PermissionSet {
+    use xenia_peer_core::{ClipboardCapability, FileTransferCapability, InputControlCapability};
+
     M1PermissionSet {
         stream_frame: true,
-        inject_input: args.input_backend != InputBackendChoice::Noop,
-        clipboard_sync: args.clipboard == ClipboardMode::Bidirectional,
-        file_transfer: args.recv_file_dir.is_some() || args.send_file.is_some(),
+        inject_input: matches!(
+            capabilities.input_control,
+            InputControlCapability::RemoteInputInjection
+        ),
+        clipboard_sync: matches!(
+            capabilities.clipboard,
+            ClipboardCapability::ViewerToHost | ClipboardCapability::Bidirectional
+        ),
+        file_transfer: !matches!(capabilities.file_transfer, FileTransferCapability::Off),
     }
 }
-
 
 fn synthetic_audio_kind(mode: AudioMode) -> Option<SyntheticAudioKind> {
     match mode {
@@ -1976,18 +2036,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let negotiated_transport = transport.negotiated_transport();
     let mut session = LaneSession::with_fixture(source_id, args.epoch);
     let frame_format = codec_to_frame_format(args.codec);
-    let capabilities = session_capabilities_frame(
+    let raw_capabilities = session_capabilities(
         session.next_frame_id(),
         audio_advertisement.clone(),
         frame_format,
-        args.telemetry_level,
-        args.input_backend,
-        args.clipboard,
-    )?;
-    let negotiated_context_hash = negotiated_session_context_hash(
-        negotiated_transport,
-        xenia_peer_core::RawCapabilities::from_frame(&capabilities)?,
-    )?;
+        &args,
+    );
+    let capabilities = raw_capabilities.clone().into_frame()?;
+    let negotiated_context_hash =
+        negotiated_session_context_hash(negotiated_transport, raw_capabilities.clone())?;
 
     let mut mgr = load_or_create_host_identity(&args.host_identity_key_path)?;
     info!(
@@ -2028,7 +2085,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // round-trip for that binding. Reused verbatim (not recomputed) for the
     // M1 consent-scope offer/broadcast below, so semantics, display text,
     // audit text, and the signature digest all share one source of truth.
-    let consent_scope = m1_consent_scope(&args);
+    let consent_scope = m1_consent_scope(&raw_capabilities);
     let m1_scope = consent_scope.summary();
     let offer_issued_at = now_ms() / 1_000;
     let consent_offer = xenia_operator_proto::ConsentOfferV2::new(
@@ -2198,7 +2255,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let timeout = Duration::from_secs(args.consent_timeout_secs.max(1));
         match tokio::time::timeout(timeout, consent_decision_rx).await {
             Ok(Ok(true)) => {
-                let granted = configured_permission_set(&args);
+                let granted = configured_permission_set(&raw_capabilities);
                 m1_runtime.grant_consent_scoped(granted)?;
                 info!(
                     inject_input = granted.inject_input,
@@ -2748,13 +2805,23 @@ mod audio_tests {
     use super::*;
     use xenia_capture::SilentAudioCapture;
 
+    fn configured_scope(args: &Args) -> xenia_operator_proto::ConsentScopeV1 {
+        let capabilities = session_capabilities(
+            1,
+            audio_advertisement(args.audio_codec),
+            codec_to_frame_format(args.codec),
+            args,
+        );
+        m1_consent_scope(&capabilities)
+    }
+
     #[test]
     fn m1_scope_names_audio_off_and_telemetry_policy() {
         let mut args = Args::parse_from(["xenia-peer"]);
         args.telemetry_level = TelemetryLevel::Basic;
         args.audio = AudioMode::Off;
         assert_eq!(
-            m1_consent_scope(&args).summary(),
+            configured_scope(&args).summary(),
             "display: screen stream; telemetry: basic host performance; audio: off; input: off; clipboard: off; file transfer: off"
         );
     }
@@ -2765,7 +2832,7 @@ mod audio_tests {
         args.telemetry_level = TelemetryLevel::System;
         args.audio = AudioMode::Capture;
         assert_eq!(
-            m1_consent_scope(&args).summary(),
+            configured_scope(&args).summary(),
             "display: screen stream; telemetry: system identity and performance; audio: host device capture; input: off; clipboard: off; file transfer: off"
         );
     }
@@ -2872,10 +2939,27 @@ mod consent_scope_tests {
         args
     }
 
+    fn configured_capabilities(args: &Args) -> xenia_peer_core::RawCapabilities {
+        session_capabilities(
+            1,
+            audio_advertisement(args.audio_codec),
+            codec_to_frame_format(args.codec),
+            args,
+        )
+    }
+
+    fn configured_scope(args: &Args) -> xenia_operator_proto::ConsentScopeV1 {
+        m1_consent_scope(&configured_capabilities(args))
+    }
+
+    fn configured_permissions(args: &Args) -> M1PermissionSet {
+        configured_permission_set(&configured_capabilities(args))
+    }
+
     #[test]
     fn view_only_daemon_grants_only_frame_streaming() {
         let args = args_with(InputBackendChoice::Noop, ClipboardMode::Off, None, None);
-        let granted = configured_permission_set(&args);
+        let granted = configured_permissions(&args);
         assert!(granted.stream_frame);
         assert!(!granted.inject_input);
         assert!(!granted.clipboard_sync);
@@ -2885,8 +2969,8 @@ mod consent_scope_tests {
     #[test]
     fn each_enabled_capability_unlocks_exactly_its_own_tier() {
         let input = args_with(InputBackendChoice::Log, ClipboardMode::Off, None, None);
-        assert!(configured_permission_set(&input).inject_input);
-        assert!(!configured_permission_set(&input).clipboard_sync);
+        assert!(configured_permissions(&input).inject_input);
+        assert!(!configured_permissions(&input).clipboard_sync);
 
         let clip = args_with(
             InputBackendChoice::Noop,
@@ -2894,8 +2978,8 @@ mod consent_scope_tests {
             None,
             None,
         );
-        assert!(configured_permission_set(&clip).clipboard_sync);
-        assert!(!configured_permission_set(&clip).inject_input);
+        assert!(configured_permissions(&clip).clipboard_sync);
+        assert!(!configured_permissions(&clip).inject_input);
 
         // Host-to-viewer clipboard is not a host-write grant.
         let clip_one_way = args_with(
@@ -2904,7 +2988,7 @@ mod consent_scope_tests {
             None,
             None,
         );
-        assert!(!configured_permission_set(&clip_one_way).clipboard_sync);
+        assert!(!configured_permissions(&clip_one_way).clipboard_sync);
 
         let recv = args_with(
             InputBackendChoice::Noop,
@@ -2912,7 +2996,7 @@ mod consent_scope_tests {
             Some(std::path::PathBuf::from("/tmp/inbox")),
             None,
         );
-        assert!(configured_permission_set(&recv).file_transfer);
+        assert!(configured_permissions(&recv).file_transfer);
     }
 
     #[test]
@@ -2923,7 +3007,7 @@ mod consent_scope_tests {
             Some(std::path::PathBuf::from("/tmp/inbox")),
             Some(std::path::PathBuf::from("/tmp/outbound")),
         );
-        let scope = m1_consent_scope(&args);
+        let scope = configured_scope(&args);
         assert_eq!(
             scope.input,
             xenia_operator_proto::ConsentInputScope::RemoteInputInjection
@@ -2943,7 +3027,7 @@ mod consent_scope_tests {
             None,
             Some(std::path::PathBuf::from("/tmp/outbound")),
         );
-        let scope = m1_consent_scope(&one_way);
+        let scope = configured_scope(&one_way);
         assert_eq!(
             scope.clipboard,
             xenia_operator_proto::ConsentClipboardScope::HostToViewer

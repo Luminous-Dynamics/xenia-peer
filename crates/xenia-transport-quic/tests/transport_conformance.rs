@@ -159,6 +159,7 @@ where
     viewer.install_key([0x88; 32]);
 
     let capabilities = RawCapabilities {
+        schema_version: xenia_peer_core::frame::CAPABILITIES_SCHEMA_VERSION,
         frame_id: host.next_frame_id(),
         timestamp_ms: 1_700_000_006_000,
         audio: Some(AudioAdvertisement {
@@ -169,9 +170,11 @@ where
             frame_duration_ms: vec![10, 20],
         }),
         video_format: PixelFormat::Passthrough,
-        telemetry_enabled: true,
-        input_control_enabled: false,
-        clipboard_enabled: false,
+        telemetry: xenia_peer_core::TelemetryCapability::BasicHostPerformance,
+        audio_source: xenia_peer_core::AudioSourceCapability::SyntheticTestSignal,
+        input_control: xenia_peer_core::InputControlCapability::Off,
+        clipboard: xenia_peer_core::ClipboardCapability::Off,
+        file_transfer: xenia_peer_core::FileTransferCapability::Off,
         lane_envelope_version: xenia_peer_core::frame::LANE_ENVELOPE_SCHEMA_VERSION,
         lane_envelope_magic: xenia_peer_core::frame::LANE_ENVELOPE_MAGIC,
     };

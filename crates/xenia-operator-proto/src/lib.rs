@@ -313,6 +313,9 @@ pub enum ConsentClipboardScope {
     HostToViewer,
     /// Clipboard contents may flow in both directions.
     Bidirectional,
+    /// Viewer clipboard contents may be applied to the host without exposing
+    /// host clipboard contents in the reverse direction.
+    ViewerToHost,
 }
 
 impl ConsentClipboardScope {
@@ -321,6 +324,9 @@ impl ConsentClipboardScope {
             Self::Off => 0,
             Self::HostToViewer => 1,
             Self::Bidirectional => 2,
+            // Appended after the published v1 tags so existing canonical
+            // Bidirectional commitments remain byte-for-byte stable.
+            Self::ViewerToHost => 3,
         }
     }
 
@@ -329,6 +335,7 @@ impl ConsentClipboardScope {
             Self::Off => "off",
             Self::HostToViewer => "host to viewer",
             Self::Bidirectional => "bidirectional",
+            Self::ViewerToHost => "viewer to host",
         }
     }
 }
@@ -1207,6 +1214,23 @@ mod tests {
             ConsentFileTransferScope::ViewerToHost,
         );
         assert_ne!(minimal.digest(), complete.digest());
+
+        let viewer_to_host = ConsentScopeV1::screen_with_capabilities(
+            ConsentTelemetryScope::Off,
+            ConsentAudioScope::Off,
+            ConsentInputScope::Off,
+            ConsentClipboardScope::ViewerToHost,
+            ConsentFileTransferScope::Off,
+        );
+        assert_eq!(
+            viewer_to_host.canonical_bytes()[CONSENT_SCOPE_DOMAIN.len() + 5],
+            3,
+            "new one-way clipboard tag must not renumber published v1 tags"
+        );
+        assert_eq!(
+            viewer_to_host.summary(),
+            "display: screen stream; telemetry: off; audio: off; input: off; clipboard: viewer to host; file transfer: off"
+        );
     }
 
     #[test]
