@@ -7,13 +7,13 @@
 //!
 //!   enroll -> `/auth/challenge` -> sign (Ed25519 + ML-DSA) -> `/auth/verify`
 //!   -> daemon-signed token -> authenticated `Approve` -> the daemon's own
-//!   `decode_consent_decision` (auth-on) -> authorize -> ledger attribution
+//!   `ConsentDecisionService::decode` (auth-on) -> authorize -> ledger attribution
 //!   -> hash-chain verifies.
 //!
 //! The HTTP hops go through the actual `operator_http::router` (via
 //! `tower::oneshot`, so the whole axum extractor/handler/JSON stack runs) and
 //! the consent decision goes through the binary's real
-//! `crate::decode_consent_decision`. This is an in-process integration test of
+//! `ConsentDecisionService::decode`. This is an in-process integration test of
 //! the full subsystem -- the strongest verification achievable without the
 //! browser console/viewer harness -- proving the pieces chain correctly (the
 //! token minted by `/auth/verify` really authorizes a consent action, and the
@@ -85,7 +85,7 @@ async fn operator_rbac_full_chain_smoke() {
     ));
     // A separate, throwaway ledger for the router's new `/v1/audit/*`
     // routes -- this test verifies ledger attribution via its own `chain`
-    // below (built from `crate::decode_consent_decision`'s real output),
+    // below (built from `ConsentDecisionService::decode`'s real output),
     // not via those routes.
     let router_ledger = Arc::new(tokio::sync::Mutex::new(Chain::new(SigningKey::generate(
         &mut rand::thread_rng(),
@@ -145,16 +145,23 @@ async fn operator_rbac_full_chain_smoke() {
     })
     .to_string();
 
-    // --- 4. run it through the daemon's OWN consent-decision path ---
+    // --- 4. run it through the daemon's transport-independent authority ---
     let no_revocations = crate::operator_revocations::OperatorRevocations::empty();
-    let decoded = crate::decode_consent_decision(
-        &consent_json,
+    let authority = crate::consent_authority::ConsentDecisionService::new(
         true,
-        &state,
-        &offer_digest,
-        &no_revocations,
-    )
-    .expect("authenticated Approve must be authorized");
+        state.clone(),
+        offer_digest,
+        no_revocations.clone(),
+        Uuid::from_u128(1),
+        Arc::new(tokio::sync::Mutex::new(Chain::new(SigningKey::generate(
+            &mut rand::thread_rng(),
+        )))),
+        Arc::new(std::env::temp_dir().join("xenia-operator-rbac-smoke.ledger")),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
+    let decoded = authority
+        .decode(&consent_json)
+        .expect("authenticated Approve must be authorized");
     assert_eq!(decoded.action, ConsentAction::Approve);
     let authorized = decoded
         .authorized
@@ -167,15 +174,20 @@ async fn operator_rbac_full_chain_smoke() {
     //         refused on the consent path (not just on the sealed channel) ---
     let revocations = crate::operator_revocations::OperatorRevocations::empty();
     revocations.revoke("alice");
+    let revoked_authority = crate::consent_authority::ConsentDecisionService::new(
+        true,
+        state.clone(),
+        offer_digest,
+        revocations,
+        Uuid::from_u128(1),
+        Arc::new(tokio::sync::Mutex::new(Chain::new(SigningKey::generate(
+            &mut rand::thread_rng(),
+        )))),
+        Arc::new(std::env::temp_dir().join("xenia-operator-rbac-smoke-revoked.ledger")),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
     assert!(
-        crate::decode_consent_decision(
-            &consent_json,
-            true,
-            &state,
-            &offer_digest,
-            &revocations
-        )
-        .is_none(),
+        revoked_authority.decode(&consent_json).is_none(),
         "a revoked operator's signed action must be refused on the consent path"
     );
 
@@ -197,13 +209,19 @@ async fn operator_rbac_full_chain_smoke() {
         u64::MAX,
     )
     .digest();
-    let bad = crate::decode_consent_decision(
-        &consent_json,
+    let other_authority = crate::consent_authority::ConsentDecisionService::new(
         true,
-        &state,
-        &other_offer_digest,
-        &no_revocations,
+        state,
+        other_offer_digest,
+        no_revocations,
+        Uuid::from_u128(1),
+        Arc::new(tokio::sync::Mutex::new(Chain::new(SigningKey::generate(
+            &mut rand::thread_rng(),
+        )))),
+        Arc::new(std::env::temp_dir().join("xenia-operator-rbac-smoke-other.ledger")),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
     );
+    let bad = other_authority.decode(&consent_json);
     assert!(
         bad.is_none(),
         "a decision signed for another session is refused"

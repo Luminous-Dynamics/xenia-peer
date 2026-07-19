@@ -55,6 +55,7 @@ use xenia_capture::ScapCapture;
 
 mod admin_ui;
 mod audit_ledger_store;
+mod consent_authority;
 mod consent_server;
 mod evidence_verifier;
 mod file_transfer;
@@ -1442,86 +1443,6 @@ fn configured_permission_set(args: &Args) -> M1PermissionSet {
     }
 }
 
-/// A decoded consent-socket decision: the action to apply, plus the operator
-/// attribution when it came in authenticated (drives the Phase 4 audit entry).
-struct DecodedConsent {
-    action: crate::operator_auth::ConsentAction,
-    authorized: Option<crate::operator_auth::AuthorizedConsentAction>,
-}
-
-/// Decode a consent-socket message into a decision. With operator auth off,
-/// this is the legacy plain-text `Approve`/`Deny`/`Revoke`. With it on, the
-/// message must be a signed `AuthenticatedConsentAction` from an enrolled
-/// operator whose role permits the action -- anything else is refused (logged
-/// and dropped), so an unauthenticated socket can no longer decide consent.
-fn decode_consent_decision(
-    text: &str,
-    require_operator_auth: bool,
-    auth_state: &crate::operator_http::OperatorAuthState,
-    offer_digest: &[u8; 32],
-    revocations: &crate::operator_revocations::OperatorRevocations,
-) -> Option<DecodedConsent> {
-    if !require_operator_auth {
-        let action = match text {
-            "Approve" => crate::operator_auth::ConsentAction::Approve,
-            "Deny" => crate::operator_auth::ConsentAction::Deny,
-            "Revoke" => crate::operator_auth::ConsentAction::Revoke,
-            other => {
-                info!(text = other, "ignoring unrecognized consent message");
-                return None;
-            }
-        };
-        return Some(DecodedConsent {
-            action,
-            authorized: None,
-        });
-    }
-
-    let request = match crate::operator_http::parse_authenticated_consent_action(text) {
-        Ok(request) => request,
-        Err(err) => {
-            warn!(error = %err, "malformed authenticated consent action; refused");
-            return None;
-        }
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    match crate::operator_auth::authorize_consent_action(
-        &auth_state.policy,
-        &auth_state.daemon_key.verifying_key(),
-        &auth_state.daemon_ml_dsa.public_key_bytes(),
-        now,
-        offer_digest,
-        &request,
-    ) {
-        Ok(authorized) => {
-            // A token is dead the moment its operator is revoked, even if the
-            // token itself is still unexpired and correctly signed. This closes
-            // the plaintext-consent path (the sealed channel already refuses a
-            // revoked operator at the handshake).
-            if revocations.is_revoked(&authorized.operator_id) {
-                warn!(operator = %authorized.operator_id, "consent action refused: operator revoked");
-                return None;
-            }
-            info!(
-                operator = %authorized.operator_id,
-                role = ?authorized.role,
-                action = ?authorized.action,
-                "authenticated consent action authorized"
-            );
-            Some(DecodedConsent {
-                action: authorized.action,
-                authorized: Some(authorized),
-            })
-        }
-        Err(err) => {
-            warn!(error = %err, "consent action refused by operator auth");
-            None
-        }
-    }
-}
 
 fn synthetic_audio_kind(mode: AudioMode) -> Option<SyntheticAudioKind> {
     match mode {
@@ -2100,17 +2021,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // then stops streaming -- so an operator can end a live session without
     // killing the process. See the send loop's revocation check below.
     let revoked = Arc::new(AtomicBool::new(false));
-    let revoked_for_consent = Arc::clone(&revoked);
 
     // When --require-operator-auth is set, consent decisions must be signed,
-    // role-authorized operator actions (see decode_consent_decision). The
+    // role-authorized operator actions. The
     // per-action signature binds to this session's host-attested typed offer,
     // and each authenticated decision is attributed in the ledger (Phase 4).
     let require_operator_auth = args.require_operator_auth;
-    let consent_auth_state = operator_auth_state.clone();
-    let consent_session_uuid = session_id;
-    let consent_ledger = shared_ledger.clone();
-    let consent_ledger_path = ledger_path.clone();
     // Computed here as a canonical typed value (a pure function of the
     // daemon's own CLI config, not handshake/runtime state) rather than down
     // at the `m1_scope` presentation binding
@@ -2145,6 +2061,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
     };
     let consent_offer_digest = consent_offer.digest();
+    let consent_service = Arc::new(crate::consent_authority::ConsentDecisionService::new(
+        require_operator_auth,
+        operator_auth_state.clone(),
+        consent_offer_digest,
+        revocations.clone(),
+        session_id,
+        shared_ledger.clone(),
+        ledger_path.clone(),
+        Arc::clone(&revoked),
+    ));
 
     // Consent server. With --operator-sealed the console talks over a
     // xenia-wire-sealed operator channel (PQC confidentiality + handshake
@@ -2171,14 +2097,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // admin /operator/revoke endpoint), so a live revoke reaches the
                 // sealed channel immediately.
                 let deps = crate::operator_sealed_channel::SealedConsentDeps {
-                    require_operator_auth,
-                    auth_state: consent_auth_state,
-                    offer_digest: consent_offer_digest,
-                    session_uuid: consent_session_uuid,
-                    ledger: consent_ledger,
-                    ledger_path: consent_ledger_path,
-                    revoked: revoked_for_consent,
-                    revocations: revocations.clone(),
+                    service: Arc::clone(&consent_service),
                     rekey_interval: (args.operator_rekey_interval_secs > 0)
                         .then(|| Duration::from_secs(args.operator_rekey_interval_secs)),
                 };
@@ -2207,15 +2126,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match TcpListener::bind(&consent_addr).await {
             Ok(listener) => {
                 let server = crate::consent_server::ConsentServer {
-                    require_operator_auth,
-                    auth_state: consent_auth_state,
-                    offer_digest: consent_offer_digest,
-                    session_uuid: consent_session_uuid,
-                    ledger: consent_ledger,
-                    ledger_path: consent_ledger_path,
+                    service: Arc::clone(&consent_service),
                     grant_tx: consent_decision_tx,
-                    revoked: revoked_for_consent,
-                    revocations: revocations.clone(),
                 };
                 tokio::spawn(server.run(listener));
             }

@@ -192,34 +192,19 @@ const OPERATOR_CHANNEL_SOURCE_ID: [u8; 8] = *b"xnaopch1";
 /// (which the endpoint owns and threads across reconnects). Passed by reference
 /// so it survives multiple connections.
 pub(crate) struct SealedConsentDeps {
-    pub(crate) require_operator_auth: bool,
-    pub(crate) auth_state: std::sync::Arc<crate::operator_http::OperatorAuthState>,
-    /// Digest of this session's daemon-attested consent offer, bound into each
-    /// per-action signature -- see `consent_server::ConsentServer`'s field of
-    /// the same name for the full rationale (this is the sealed-channel twin).
-    pub(crate) offer_digest: [u8; 32],
-    pub(crate) session_uuid: uuid::Uuid,
-    pub(crate) ledger: std::sync::Arc<tokio::sync::Mutex<xenia_ledger::Chain>>,
-    /// Durable path `ledger`'s entries are atomically persisted to on every
-    /// authenticated append -- see `consent_server::apply_consent_decision`.
-    pub(crate) ledger_path: std::sync::Arc<std::path::PathBuf>,
-    pub(crate) revoked: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// Live operator revocation list. Consulted after the handshake authenticates
-    /// the peer, so a compromised operator is refused without a daemon restart.
-    pub(crate) revocations: crate::operator_revocations::OperatorRevocations,
+    /// Shared transport-independent consent authority.
+    pub(crate) service: std::sync::Arc<crate::consent_authority::ConsentDecisionService>,
     /// Forward-secrecy key rotation interval for a connection that stays open
-    /// across multiple decisions. `None` (the default) never rekeys -- see
-    /// the module doc comment's "Forward secrecy" section.
+    /// across multiple decisions. `None` (the default) never rekeys.
     pub(crate) rekey_interval: Option<std::time::Duration>,
 }
 
 /// Serve one sealed operator channel over `transport`: establish the
 /// authenticated channel (handshake + policy), then read sealed consent
 /// envelopes. Each envelope opens (with the channel key) to the **same** message
-/// the plaintext consent port accepts, decoded via `decode_consent_decision` —
+/// the plaintext consent port accepts, decoded by the shared consent authority —
 /// so this adds PQC confidentiality + handshake channel-auth while auth,
 /// per-action non-repudiation, and ledger attribution are preserved unchanged.
-/// Drives the grant/revoke via the shared `apply_consent_decision`.
 ///
 /// Returns `Ok(true)` if a **terminal** decision (Deny/Revoke) ended the
 /// channel, `Ok(false)` if the connection simply closed (so the endpoint can
@@ -236,7 +221,7 @@ pub(crate) async fn serve_sealed_operator_channel<T: Transport>(
     let channel = establish_operator_channel(transport, identity, policy).await?;
     // The key is enrolled, but it may have been revoked at runtime — check the
     // live list before trusting the channel. Fail-closed.
-    if deps.revocations.is_revoked(&channel.operator_id) {
+    if deps.service.is_operator_revoked(&channel.operator_id) {
         return Err(OperatorChannelError::Revoked(channel.operator_id));
     }
     tracing::info!(
@@ -360,28 +345,13 @@ pub(crate) async fn serve_sealed_operator_channel<T: Transport>(
                 let Ok(text) = std::str::from_utf8(&plaintext) else {
                     continue;
                 };
-                let Some(decoded) = crate::decode_consent_decision(
-                    text,
-                    deps.require_operator_auth,
-                    &deps.auth_state,
-                    &deps.offer_digest,
-                    &deps.revocations,
-                ) else {
+                let Some(decoded) = deps.service.decode(text) else {
                     continue;
                 };
-                match crate::consent_server::apply_consent_decision(
-                    decoded,
-                    grant_tx,
-                    &deps.revoked,
-                    &deps.ledger,
-                    &deps.ledger_path,
-                    deps.session_uuid,
-                )
-                .await
-                {
-                    crate::consent_server::ConsentFollowup::KeepServing => {}
+                match deps.service.apply(decoded, grant_tx).await {
+                    crate::consent_authority::ConsentFollowup::KeepServing => {}
                     // Terminal (Deny/Revoke): the session is decided; stop for good.
-                    crate::consent_server::ConsentFollowup::Stop => return Ok(true),
+                    crate::consent_authority::ConsentFollowup::Stop => return Ok(true),
                 }
             }
         }
@@ -508,6 +478,25 @@ mod tests {
     // `Transport` (for `send_envelope`) comes in via `use super::*`.
     use xenia_peer_core::transport::TcpTransport;
 
+    fn test_service(
+        auth_state: Arc<OperatorAuthState>,
+        session_uuid: Uuid,
+        ledger: Arc<TokioMutex<Chain>>,
+        revoked: Arc<AtomicBool>,
+        revocations: crate::operator_revocations::OperatorRevocations,
+    ) -> Arc<crate::consent_authority::ConsentDecisionService> {
+        Arc::new(crate::consent_authority::ConsentDecisionService::new(
+            false,
+            auth_state,
+            [0u8; 32],
+            revocations,
+            session_uuid,
+            ledger,
+            Arc::new(std::env::temp_dir().join("xenia-sealed-channel-test.ledger")),
+            revoked,
+        ))
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sealed_channel_serves_a_consent_decision() {
         // An enrolled operator drives the whole path: establish the sealed
@@ -547,19 +536,15 @@ mod tests {
             ));
             let ledger = Arc::new(TokioMutex::new(Chain::new(daemon)));
             let deps = SealedConsentDeps {
-                // Auth off: the sealed payload is a plaintext action, so this
-                // exercises the sealed transport + serve wiring (the token/auth
-                // path is covered by operator_http/operator_live_smoke).
-                require_operator_auth: false,
-                auth_state,
-                offer_digest: [0u8; 32],
-                session_uuid: Uuid::from_u128(3),
-                ledger,
-                ledger_path: std::sync::Arc::new(
-                    std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+                // Auth off: this test exercises sealed delivery; authenticated
+                // action verification is covered by operator auth smoke tests.
+                service: test_service(
+                    auth_state,
+                    Uuid::from_u128(3),
+                    ledger,
+                    revoked_daemon,
+                    crate::operator_revocations::OperatorRevocations::empty(),
                 ),
-                revoked: revoked_daemon,
-                revocations: crate::operator_revocations::OperatorRevocations::empty(),
                 rekey_interval: None,
             };
             let mut grant_tx = Some(grant_tx);
@@ -637,16 +622,13 @@ mod tests {
             AUTH_RATE_WINDOW_SECS,
         ));
         let deps = SealedConsentDeps {
-            require_operator_auth: false,
-            auth_state,
-            offer_digest: [0u8; 32],
-            session_uuid: Uuid::from_u128(21),
-            ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
-            ledger_path: std::sync::Arc::new(
-                std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+            service: test_service(
+                auth_state,
+                Uuid::from_u128(21),
+                Arc::new(TokioMutex::new(Chain::new(daemon))),
+                revoked.clone(),
+                crate::operator_revocations::OperatorRevocations::empty(),
             ),
-            revoked: revoked.clone(),
-            revocations: crate::operator_revocations::OperatorRevocations::empty(),
             rekey_interval: None,
         };
         let identity = OperatorHostIdentity::Standard(Box::new(HandshakeManager::new()));
@@ -731,19 +713,15 @@ mod tests {
             AUTH_RATE_WINDOW_SECS,
         ));
         let deps = SealedConsentDeps {
-            require_operator_auth: false,
-            auth_state,
-            offer_digest: [0u8; 32],
-            session_uuid: Uuid::from_u128(41),
-            ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
-            ledger_path: std::sync::Arc::new(
-                std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+            service: test_service(
+                auth_state,
+                Uuid::from_u128(41),
+                Arc::new(TokioMutex::new(Chain::new(daemon))),
+                revoked.clone(),
+                crate::operator_revocations::OperatorRevocations::empty(),
             ),
-            revoked: revoked.clone(),
-            revocations: crate::operator_revocations::OperatorRevocations::empty(),
             // Short enough that the test doesn't need to wait long, long
-            // enough that the immediate first tick (consumed at connection
-            // start) doesn't race the handshake itself.
+            // enough that the immediate first tick doesn't race the handshake.
             rekey_interval: Some(std::time::Duration::from_millis(20)),
         };
         let identity = OperatorHostIdentity::Standard(Box::new(HandshakeManager::new()));
@@ -877,16 +855,13 @@ mod tests {
             AUTH_RATE_WINDOW_SECS,
         ));
         let deps = SealedConsentDeps {
-            require_operator_auth: false,
-            auth_state,
-            offer_digest: [0u8; 32],
-            session_uuid: Uuid::from_u128(51),
-            ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
-            ledger_path: std::sync::Arc::new(
-                std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+            service: test_service(
+                auth_state,
+                Uuid::from_u128(51),
+                Arc::new(TokioMutex::new(Chain::new(daemon))),
+                revoked.clone(),
+                crate::operator_revocations::OperatorRevocations::empty(),
             ),
-            revoked: revoked.clone(),
-            revocations: crate::operator_revocations::OperatorRevocations::empty(),
             rekey_interval: None,
         };
         let identity = OperatorHostIdentity::HighSecurity(Box::new(
@@ -988,16 +963,13 @@ mod tests {
             AUTH_RATE_WINDOW_SECS,
         ));
         let deps = SealedConsentDeps {
-            require_operator_auth: false,
-            auth_state,
-            offer_digest: [0u8; 32],
-            session_uuid: Uuid::from_u128(61),
-            ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
-            ledger_path: std::sync::Arc::new(
-                std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+            service: test_service(
+                auth_state,
+                Uuid::from_u128(61),
+                Arc::new(TokioMutex::new(Chain::new(daemon))),
+                Arc::new(AtomicBool::new(false)),
+                crate::operator_revocations::OperatorRevocations::empty(),
             ),
-            revoked: Arc::new(AtomicBool::new(false)),
-            revocations: crate::operator_revocations::OperatorRevocations::empty(),
             rekey_interval: None,
         };
         let identity = OperatorHostIdentity::HighSecurity(Box::new(
@@ -1094,16 +1066,13 @@ mod tests {
             AUTH_RATE_WINDOW_SECS,
         ));
         let deps = SealedConsentDeps {
-            require_operator_auth: false,
-            auth_state,
-            offer_digest: [0u8; 32],
-            session_uuid: Uuid::from_u128(71),
-            ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
-            ledger_path: std::sync::Arc::new(
-                std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+            service: test_service(
+                auth_state,
+                Uuid::from_u128(71),
+                Arc::new(TokioMutex::new(Chain::new(daemon))),
+                Arc::new(AtomicBool::new(false)),
+                crate::operator_revocations::OperatorRevocations::empty(),
             ),
-            revoked: Arc::new(AtomicBool::new(false)),
-            revocations: crate::operator_revocations::OperatorRevocations::empty(),
             rekey_interval: None,
         };
         let identity = OperatorHostIdentity::HighSecurity(Box::new(
@@ -1182,16 +1151,13 @@ mod tests {
                 AUTH_RATE_WINDOW_SECS,
             ));
             let deps = SealedConsentDeps {
-                require_operator_auth: false,
-                auth_state,
-                offer_digest: [0u8; 32],
-                session_uuid: Uuid::from_u128(31),
-                ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
-                ledger_path: std::sync::Arc::new(
-                    std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+                service: test_service(
+                    auth_state,
+                    Uuid::from_u128(31),
+                    Arc::new(TokioMutex::new(Chain::new(daemon))),
+                    Arc::new(AtomicBool::new(false)),
+                    revocations,
                 ),
-                revoked: Arc::new(AtomicBool::new(false)),
-                revocations,
                 rekey_interval: None,
             };
             let mut grant_tx = Some(grant_tx);

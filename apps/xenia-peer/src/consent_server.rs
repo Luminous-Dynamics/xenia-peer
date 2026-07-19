@@ -1,153 +1,34 @@
 // Copyright (c) 2024-2026 Tristan Stoltz / Luminous Dynamics
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The daemon's consent server, extracted from the 3000-line `main()` so its
-//! reconnect/revoke behavior is **independently testable** (P3 /
-//! `MASTER_ROADMAP` #10 — the first daemon-runtime extraction, and the pattern
-//! the sealed-channel `--operator-sealed` endpoint will follow).
+//! Plain WebSocket transport for one session's consent authority.
 //!
-//! It accepts operator consent connections for the life of one session over a
-//! pre-bound listener: the first `Approve`/`Deny` resolves the grant (via a
-//! oneshot), and a later `Revoke` — on the still-open socket **or a reconnected
-//! one** — flips the shared `revoked` flag. It loops on `accept()` so a dropped
-//! console can reconnect and still revoke (the "revocation always nearby"
-//! property; see the fix in commit `725741d`). With operator auth on, each
-//! decision is a signed, role-authorized action attributed in the ledger; with
-//! it off, legacy plaintext `Approve`/`Deny`/`Revoke`.
+//! This module owns only accept/reconnect behavior. Authorization, revocation,
+//! durable audit, and decision semantics live in
+//! [`crate::consent_authority::ConsentDecisionService`] and are shared with the
+//! sealed operator transport.
 
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use futures::StreamExt;
 use tokio::net::TcpListener;
-use tokio::sync::{oneshot, Mutex};
-use uuid::Uuid;
-use xenia_ledger::Chain;
+use tokio::sync::oneshot;
 
-use crate::operator_auth::ConsentAction;
-use crate::operator_http::OperatorAuthState;
+use crate::consent_authority::{ConsentDecisionService, ConsentFollowup};
 
-/// Whether the accept/serve loop should keep going after a decision.
-pub(crate) enum ConsentFollowup {
-    /// Non-terminal (an Approve): keep the socket open for a later Revoke.
-    KeepServing,
-    /// Terminal (Deny, Revoke, or a decision refused because its audit
-    /// entry could not be durably committed): stop.
-    Stop,
-}
-
-/// Apply one decoded consent decision, independent of the transport that
-/// delivered it: attribute an authenticated decision in the tamper-evident
-/// ledger, resolve the grant exactly once (Approve → true, Deny → false), or
-/// set the `revoked` flag. Shared by the plaintext [`ConsentServer`] and the
-/// sealed operator channel, so the decision semantics live in one tested place.
-///
-/// An authenticated decision's audit entry must be durably persisted
-/// (`ledger_path`) before the decision itself takes effect -- if persistence
-/// fails, the decision is refused (the grant is left unresolved, which the
-/// caller observes as a closed channel) rather than silently applying a
-/// privileged action with no durable record of who authorized it.
-pub(crate) async fn apply_consent_decision(
-    decoded: crate::DecodedConsent,
-    grant_tx: &mut Option<oneshot::Sender<bool>>,
-    revoked: &AtomicBool,
-    ledger: &Mutex<Chain>,
-    ledger_path: &Path,
-    session_uuid: Uuid,
-) -> ConsentFollowup {
-    // Attribute an authenticated decision in the tamper-evident ledger --
-    // durably, before the decision takes effect.
-    if let Some(authorized) = &decoded.authorized {
-        let event = crate::operator_audit::operator_consent_audit_event(
-            authorized,
-            session_uuid,
-            Uuid::new_v4(),
-        );
-        let mut chain = ledger.lock().await;
-        let committed = tokio::task::block_in_place(|| {
-            chain
-                .append_transactional(event, |entries| {
-                    crate::audit_ledger_store::persist_entries_atomic(ledger_path, entries)
-                })
-                .map(|_entry| ())
-        });
-        drop(chain);
-        if let Err(err) = committed {
-            tracing::error!(
-                error = %err,
-                "operator action refused: its audit entry could not be durably committed"
-            );
-            return ConsentFollowup::Stop;
-        }
-    }
-    match decoded.action {
-        ConsentAction::Approve => {
-            tracing::info!(approved = true, "consent decision received");
-            if let Some(tx) = grant_tx.take() {
-                let _ = tx.send(true);
-            }
-            ConsentFollowup::KeepServing
-        }
-        ConsentAction::Deny => {
-            tracing::info!(approved = false, "consent decision received");
-            if let Some(tx) = grant_tx.take() {
-                let _ = tx.send(false);
-            }
-            ConsentFollowup::Stop
-        }
-        ConsentAction::Revoke => {
-            tracing::info!("consent revocation received");
-            revoked.store(true, Ordering::SeqCst);
-            ConsentFollowup::Stop
-        }
-    }
-}
-
-/// The consent server for a single session.
+/// The plaintext consent transport for a single session.
 pub(crate) struct ConsentServer {
-    /// Require signed, role-authorized operator actions (vs legacy plaintext).
-    pub(crate) require_operator_auth: bool,
-    /// Operator auth surface (policy, daemon key) used to verify signed actions.
-    pub(crate) auth_state: Arc<OperatorAuthState>,
-    /// Digest of this session's daemon-attested
-    /// [`xenia_operator_proto::ConsentOfferV1`], bound into
-    /// each per-action signature so a signed decision cannot be replayed or
-    /// substituted for a different session, scope, or offer lifetime. It is
-    /// computed from daemon-authoritative typed data, never from anything
-    /// relayed back through the console/agent round-trip.
-    pub(crate) offer_digest: [u8; 32],
-    /// This session's uuid, used for ledger attribution.
-    pub(crate) session_uuid: Uuid,
-    /// The tamper-evident consent ledger.
-    pub(crate) ledger: Arc<Mutex<Chain>>,
-    /// Durable path `ledger`'s entries are atomically persisted to on every
-    /// authenticated append -- see [`apply_consent_decision`].
-    pub(crate) ledger_path: Arc<std::path::PathBuf>,
-    /// Resolves the initial grant exactly once (Approve → true, Deny → false).
+    /// Shared transport-independent consent authority.
+    pub(crate) service: Arc<ConsentDecisionService>,
+    /// Resolves the initial grant exactly once (Approve -> true, Deny -> false).
     pub(crate) grant_tx: oneshot::Sender<bool>,
-    /// Set true on a Revoke so the main send loop tears the session down.
-    pub(crate) revoked: Arc<AtomicBool>,
-    /// Live operator revocation list — a revoked operator's signed action is
-    /// refused here too (not just on the sealed channel).
-    pub(crate) revocations: crate::operator_revocations::OperatorRevocations,
 }
 
 impl ConsentServer {
     /// Run the accept loop over a pre-bound `listener`. Returns when the grant
     /// is denied, the session is revoked, or the listener fails.
     pub(crate) async fn run(self, listener: TcpListener) {
-        let ConsentServer {
-            require_operator_auth,
-            auth_state,
-            offer_digest,
-            session_uuid,
-            ledger,
-            ledger_path,
-            grant_tx,
-            revoked,
-            revocations,
-        } = self;
+        let ConsentServer { service, grant_tx } = self;
         let mut grant_tx = Some(grant_tx);
 
         'accept: loop {
@@ -176,33 +57,16 @@ impl ConsentServer {
                 let Ok(text) = msg.to_text() else {
                     continue;
                 };
-                let Some(decoded) = crate::decode_consent_decision(
-                    text,
-                    require_operator_auth,
-                    &auth_state,
-                    &offer_digest,
-                    &revocations,
-                ) else {
+                let Some(decoded) = service.decode(text) else {
                     continue;
                 };
-                match apply_consent_decision(
-                    decoded,
-                    &mut grant_tx,
-                    &revoked,
-                    &ledger,
-                    &ledger_path,
-                    session_uuid,
-                )
-                .await
-                {
-                    // Approve keeps the socket open for a later Revoke.
+                match service.apply(decoded, &mut grant_tx).await {
                     ConsentFollowup::KeepServing => {}
                     ConsentFollowup::Stop => break 'accept,
                 }
             }
-            // The connection ended without a terminal decision (Deny/Revoke):
-            // loop back to accept the next socket so a reconnecting operator can
-            // still approve a pending grant or revoke a live session.
+            // A dropped console can reconnect and still approve a pending
+            // request or revoke an already-approved session.
         }
     }
 }
@@ -210,38 +74,57 @@ impl ConsentServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use ed25519_dalek::SigningKey;
     use futures::SinkExt;
     use tokio::sync::Mutex as TokioMutex;
     use tokio_tungstenite::tungstenite::Message;
+    use uuid::Uuid;
+    use xenia_ledger::Chain;
 
-    fn test_server(grant_tx: oneshot::Sender<bool>, revoked: Arc<AtomicBool>) -> ConsentServer {
-        // Operator auth OFF: the legacy plaintext path, so the test drives it
-        // with bare "Approve"/"Deny"/"Revoke" text frames.
+    use crate::consent_authority::{DecodedConsent, ConsentDecisionService, ConsentFollowup};
+    use crate::operator_auth::ConsentAction;
+    use crate::operator_http::OperatorAuthState;
+
+    fn service(
+        revoked: Arc<AtomicBool>,
+        ledger: Arc<TokioMutex<Chain>>,
+        ledger_path: std::path::PathBuf,
+        session_uuid: Uuid,
+    ) -> Arc<ConsentDecisionService> {
         let daemon = SigningKey::generate(&mut rand::thread_rng());
         let auth_state = Arc::new(OperatorAuthState::new(
             crate::operator::OperatorPolicy::default(),
-            daemon.clone(),
+            daemon,
             xenia_handshake::MlDsaIdentity::from_seed([0xAAu8; 32]),
             xenia_handshake::HandshakeManager::new(),
             crate::operator_auth::AUTH_RATE_MAX,
             crate::operator_auth::AUTH_RATE_WINDOW_SECS,
         ));
+        Arc::new(ConsentDecisionService::new(
+            false,
+            auth_state,
+            [0u8; 32],
+            crate::operator_revocations::OperatorRevocations::empty(),
+            session_uuid,
+            ledger,
+            Arc::new(ledger_path),
+            revoked,
+        ))
+    }
+
+    fn test_server(grant_tx: oneshot::Sender<bool>, revoked: Arc<AtomicBool>) -> ConsentServer {
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
         let ledger = Arc::new(TokioMutex::new(Chain::new(daemon)));
         ConsentServer {
-            require_operator_auth: false,
-            auth_state,
-            offer_digest: [0u8; 32],
-            session_uuid: Uuid::from_u128(1),
-            ledger,
-            // Never actually written -- this test always runs
-            // `require_operator_auth: false`, the legacy plaintext path
-            // that never appends to the ledger (see
-            // `apply_consent_decision`'s doc comment).
-            ledger_path: Arc::new(std::env::temp_dir().join("xenia-consent-server-test.ledger")),
+            service: service(
+                revoked,
+                ledger,
+                std::env::temp_dir().join("xenia-consent-server-test.ledger"),
+                Uuid::from_u128(1),
+            ),
             grant_tx,
-            revoked,
-            revocations: crate::operator_revocations::OperatorRevocations::empty(),
         }
     }
 
@@ -255,73 +138,66 @@ mod tests {
         ws
     }
 
-    // The decision semantics, tested directly (no transport) via the shared
-    // helper the sealed operator channel will also use.
     #[tokio::test]
-    async fn apply_consent_decision_resolves_grant_and_terminates() {
+    async fn service_applies_approve_deny_and_revoke() {
         let daemon = SigningKey::generate(&mut rand::thread_rng());
-        let ledger = TokioMutex::new(Chain::new(daemon));
-        let uuid = Uuid::from_u128(2);
-        // Never actually written -- every decision below has
-        // `authorized: None` (the legacy plaintext path never appends).
-        let ledger_path = std::env::temp_dir().join("xenia-consent-server-test-decisions.ledger");
+        let ledger = Arc::new(TokioMutex::new(Chain::new(daemon)));
+        let revoked = Arc::new(AtomicBool::new(false));
+        let service = service(
+            revoked.clone(),
+            ledger,
+            std::env::temp_dir().join("xenia-consent-decisions-test.ledger"),
+            Uuid::from_u128(2),
+        );
 
-        // Approve -> grant true, keep serving, no revoke.
-        let (tx, rx) = oneshot::channel();
-        let mut tx = Some(tx);
-        let revoked = AtomicBool::new(false);
-        let f = apply_consent_decision(
-            crate::DecodedConsent {
-                action: ConsentAction::Approve,
-                authorized: None,
-            },
-            &mut tx,
-            &revoked,
-            &ledger,
-            &ledger_path,
-            uuid,
-        )
-        .await;
-        assert!(matches!(f, ConsentFollowup::KeepServing));
-        assert!(rx.await.unwrap());
-        assert!(!revoked.load(Ordering::SeqCst));
+        let (approve_tx, approve_rx) = oneshot::channel();
+        let mut approve_tx = Some(approve_tx);
+        let followup = service
+            .apply(
+                DecodedConsent {
+                    action: ConsentAction::Approve,
+                    authorized: None,
+                },
+                &mut approve_tx,
+            )
+            .await;
+        assert!(matches!(followup, ConsentFollowup::KeepServing));
+        assert!(approve_rx.await.unwrap());
 
-        // Revoke -> revoked flag set, terminal.
-        let (tx2, _rx2) = oneshot::channel();
-        let mut tx2 = Some(tx2);
-        let f2 = apply_consent_decision(
-            crate::DecodedConsent {
-                action: ConsentAction::Revoke,
-                authorized: None,
-            },
-            &mut tx2,
-            &revoked,
-            &ledger,
-            &ledger_path,
-            uuid,
-        )
-        .await;
-        assert!(matches!(f2, ConsentFollowup::Stop));
+        let (revoke_tx, _revoke_rx) = oneshot::channel();
+        let mut revoke_tx = Some(revoke_tx);
+        let followup = service
+            .apply(
+                DecodedConsent {
+                    action: ConsentAction::Revoke,
+                    authorized: None,
+                },
+                &mut revoke_tx,
+            )
+            .await;
+        assert!(matches!(followup, ConsentFollowup::Stop));
         assert!(revoked.load(Ordering::SeqCst));
 
-        // Deny -> grant false, terminal.
-        let (tx3, rx3) = oneshot::channel();
-        let mut tx3 = Some(tx3);
-        let revoked2 = AtomicBool::new(false);
-        let f3 = apply_consent_decision(
-            crate::DecodedConsent {
-                action: ConsentAction::Deny,
-                authorized: None,
-            },
-            &mut tx3,
-            &revoked2,
-            &ledger,
-            &ledger_path,
-            uuid,
-        )
-        .await;
-        assert!(matches!(f3, ConsentFollowup::Stop));
-        assert!(!rx3.await.unwrap());
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let deny_service = service(
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(TokioMutex::new(Chain::new(daemon))),
+            std::env::temp_dir().join("xenia-consent-deny-test.ledger"),
+            Uuid::from_u128(3),
+        );
+        let (deny_tx, deny_rx) = oneshot::channel();
+        let mut deny_tx = Some(deny_tx);
+        let followup = deny_service
+            .apply(
+                DecodedConsent {
+                    action: ConsentAction::Deny,
+                    authorized: None,
+                },
+                &mut deny_tx,
+            )
+            .await;
+        assert!(matches!(followup, ConsentFollowup::Stop));
+        assert!(!deny_rx.await.unwrap());
     }
 
     fn authorized_action(action: ConsentAction) -> crate::operator_auth::AuthorizedConsentAction {
@@ -333,96 +209,38 @@ mod tests {
         }
     }
 
-    fn test_ledger_dir(label: &str) -> std::path::PathBuf {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn authenticated_decision_is_persisted_before_grant() {
         let dir = std::env::temp_dir().join(format!(
-            "xenia-consent-server-durable-test-{label}-{}",
+            "xenia-consent-service-durable-test-{}",
             rand::random::<u64>()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_authenticated_decision_is_durably_persisted_before_the_grant_resolves() {
-        let daemon = SigningKey::generate(&mut rand::thread_rng());
-        let ledger = TokioMutex::new(Chain::new(daemon));
-        let dir = test_ledger_dir("committed");
         let ledger_path = dir.join("consent.ledger");
-        let uuid = Uuid::from_u128(9);
-
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let service = service(
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(TokioMutex::new(Chain::new(daemon))),
+            ledger_path.clone(),
+            Uuid::from_u128(9),
+        );
         let (tx, rx) = oneshot::channel();
         let mut tx = Some(tx);
-        let revoked = AtomicBool::new(false);
-        let outcome = apply_consent_decision(
-            crate::DecodedConsent {
-                action: ConsentAction::Approve,
-                authorized: Some(authorized_action(ConsentAction::Approve)),
-            },
-            &mut tx,
-            &revoked,
-            &ledger,
-            &ledger_path,
-            uuid,
-        )
-        .await;
-
-        assert!(matches!(outcome, ConsentFollowup::KeepServing));
-        assert!(rx.await.unwrap(), "the grant must still resolve true");
-
-        // The audit entry must actually be on disk, not just in memory.
-        let bytes = std::fs::read(&ledger_path).unwrap();
-        let entries: Vec<xenia_ledger::LedgerEntry> = bincode::deserialize(&bytes).unwrap();
-        assert_eq!(entries.len(), 1);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_decision_is_refused_when_its_audit_entry_cannot_be_durably_committed() {
-        let daemon = SigningKey::generate(&mut rand::thread_rng());
-        let ledger = TokioMutex::new(Chain::new(daemon));
-        let dir = test_ledger_dir("refused");
-        let ledger_path = dir.join("consent.ledger");
-        let uuid = Uuid::from_u128(10);
-
-        // Make the destination directory unwritable so persistence fails.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
-
-            let (tx, rx) = oneshot::channel();
-            let mut tx = Some(tx);
-            let revoked = AtomicBool::new(false);
-            let outcome = apply_consent_decision(
-                crate::DecodedConsent {
+        let outcome = service
+            .apply(
+                DecodedConsent {
                     action: ConsentAction::Approve,
                     authorized: Some(authorized_action(ConsentAction::Approve)),
                 },
                 &mut tx,
-                &revoked,
-                &ledger,
-                &ledger_path,
-                uuid,
             )
             .await;
-
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-
-            assert!(
-                matches!(outcome, ConsentFollowup::Stop),
-                "an uncommittable audit entry must refuse the decision, not silently apply it"
-            );
-            // The grant was never resolved -- dropping `tx` (still `Some`,
-            // never `.take()`n) closes the channel instead.
-            drop(tx);
-            assert!(rx.await.is_err());
-            assert_eq!(
-                ledger.lock().await.len(),
-                0,
-                "the failed append must be rolled back"
-            );
-        }
-        std::fs::remove_dir_all(&dir).ok();
+        assert!(matches!(outcome, ConsentFollowup::KeepServing));
+        assert!(rx.await.unwrap());
+        let bytes = std::fs::read(&ledger_path).unwrap();
+        let entries: Vec<xenia_ledger::LedgerEntry> = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(entries.len(), 1);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -435,41 +253,8 @@ mod tests {
 
         let mut ws = connect(&addr).await;
         ws.send(Message::Text("Approve".into())).await.unwrap();
-        assert!(rx.await.unwrap(), "Approve resolves the grant to true");
+        assert!(rx.await.unwrap());
         assert!(!revoked.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn revoke_after_reconnect_still_revokes() {
-        // The P2 property: Approve on one connection, drop it, reconnect, and a
-        // later Revoke still lands (the server loops on accept()).
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap().to_string();
-        let (tx, rx) = oneshot::channel();
-        let revoked = Arc::new(AtomicBool::new(false));
-        tokio::spawn(test_server(tx, revoked.clone()).run(listener));
-
-        // Approve, then drop the socket (end of scope closes the connection).
-        {
-            let mut ws = connect(&addr).await;
-            ws.send(Message::Text("Approve".into())).await.unwrap();
-            assert!(rx.await.unwrap());
-        }
-        // Reconnect and revoke.
-        let mut ws2 = connect(&addr).await;
-        ws2.send(Message::Text("Revoke".into())).await.unwrap();
-
-        // The revoke flag flips (poll briefly; the server sets it on receive).
-        for _ in 0..50 {
-            if revoked.load(Ordering::SeqCst) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        assert!(
-            revoked.load(Ordering::SeqCst),
-            "a Revoke after reconnect must still revoke the session"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -482,6 +267,31 @@ mod tests {
 
         let mut ws = connect(&addr).await;
         ws.send(Message::Text("Deny".into())).await.unwrap();
-        assert!(!rx.await.unwrap(), "Deny resolves the grant to false");
+        assert!(!rx.await.unwrap());
+        assert!(!revoked.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn revoke_after_reconnect_still_revokes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = oneshot::channel();
+        let revoked = Arc::new(AtomicBool::new(false));
+        tokio::spawn(test_server(tx, revoked.clone()).run(listener));
+
+        {
+            let mut ws = connect(&addr).await;
+            ws.send(Message::Text("Approve".into())).await.unwrap();
+            assert!(rx.await.unwrap());
+        }
+        let mut ws = connect(&addr).await;
+        ws.send(Message::Text("Revoke".into())).await.unwrap();
+        for _ in 0..50 {
+            if revoked.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(revoked.load(Ordering::SeqCst));
     }
 }
