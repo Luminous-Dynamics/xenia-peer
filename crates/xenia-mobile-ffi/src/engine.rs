@@ -359,6 +359,16 @@ impl ViewerEngine {
     }
 }
 
+impl Drop for ViewerEngine {
+    fn drop(&mut self) {
+        // Dropping a Tokio JoinHandle detaches its task. A disconnected mobile
+        // session must instead terminate its network/background work, otherwise
+        // a stale task can retain sockets and buffers after the registry id is
+        // gone.
+        self._task.abort();
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_session(
     host_port: String,

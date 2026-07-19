@@ -5,8 +5,8 @@ package io.luminousdynamics.xenia
  *
  * All functions map 1:1 to the `extern "C"` surface in
  * `xenia-mobile-ffi/src/lib.rs`. The session handle is an opaque
- * pointer (Long) -- callers must not interpret or fabricate handle
- * values.
+ * process-local registry id (Long), not a native pointer. Callers should still
+ * treat it as opaque; stale or fabricated ids are rejected by Rust.
  *
  * `pollFrame` returns the packed header+RGBA byte array described in
  * `xenia_jni.c`'s doc comment (width/height/pts_ms header, then RGBA
