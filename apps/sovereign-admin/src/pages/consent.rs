@@ -181,6 +181,7 @@ pub fn ConsentModal() -> impl IntoView {
                 None
             };
 
+            let scope = prompt.as_deref().map(display_scope).unwrap_or_default();
             let payload = match (&sess, session_id, &agent_session) {
                 (Some(s), Some(sid), Some(agent_session)) => {
                     match build_consent_request(
@@ -190,6 +191,7 @@ pub fn ConsentModal() -> impl IntoView {
                         s,
                         action,
                         &sid,
+                        &scope,
                     )
                     .await
                     {

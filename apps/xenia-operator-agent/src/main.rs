@@ -666,10 +666,10 @@ async fn sign_challenge(
 /// consent-action transcript. Per the confirmation policy, an ordinary
 /// approve/deny/consent-revoke against an already-pinned host needs no
 /// *additional* confirmation beyond the host-trust check itself -- it
-/// isn't on the design doc's mandatory-confirmation list (that list is
-/// enrollment, operator revocation, role/capability elevation, trust-root
-/// changes, and unusually broad *grants*, none of which this action shape
-/// can express).
+/// ordinary consent actions are not confirmed per signature. Schema v4
+/// carries the daemon scope as text and binds it into the signature, but the
+/// agent does not yet authenticate that scope independently or classify broad
+/// grants; those are addressed by the follow-on typed-offer hardening.
 async fn sign_consent_action(
     State(state): State<Arc<AgentState>>,
     Json(req): Json<SignConsentActionRequest>,
@@ -683,8 +683,18 @@ async fn sign_consent_action(
         (status_for(agent_err.code), Json(agent_err))
     })?;
 
-    let transcript =
-        xenia_operator_proto::consent_action_transcript(req.action, &session_id, &token_nonce);
+    let scope_digest = xenia_operator_proto::scope_digest(&req.scope);
+    tracing::info!(
+        action = ?req.action,
+        scope_digest = %hex::encode(scope_digest),
+        "signing consent action"
+    );
+    let transcript = xenia_operator_proto::consent_action_transcript(
+        req.action,
+        &session_id,
+        &token_nonce,
+        &scope_digest,
+    );
     let ed_signature = state.manager.sign(&transcript);
     let ml_dsa_signature = state.manager.sign_ml_dsa(&transcript);
 
@@ -2132,6 +2142,7 @@ mod tests {
             "request_id": "test-req-2",
             "action": "Approve",
             "session_id_hex": "dd".repeat(16),
+            "scope": "view screen",
             "token": token,
         });
         merge_overrides(&mut body, overrides);
@@ -2153,10 +2164,12 @@ mod tests {
         let resp: SignConsentActionResponse = serde_json::from_value(json).unwrap();
         let expected_manager = HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]);
         let session_id: [u8; 16] = decode_fixed_hex(&"dd".repeat(16)).unwrap();
+        let scope_digest = xenia_operator_proto::scope_digest("view screen");
         let transcript = xenia_operator_proto::consent_action_transcript(
             xenia_operator_proto::ConsentAction::Approve,
             &session_id,
             &token_nonce,
+            &scope_digest,
         );
         let ed_sig_bytes: [u8; 64] = decode_fixed_hex(&resp.ed_signature_hex).unwrap();
         let ed_sig = ed25519_dalek::Signature::from_bytes(&ed_sig_bytes);
@@ -2187,10 +2200,54 @@ mod tests {
 
         let expected_manager = HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]);
         let session_id: [u8; 16] = decode_fixed_hex(&"dd".repeat(16)).unwrap();
+        let scope_digest = xenia_operator_proto::scope_digest("view screen");
         let wrong_transcript = xenia_operator_proto::consent_action_transcript(
             xenia_operator_proto::ConsentAction::Approve,
             &session_id,
             &token_nonce,
+            &scope_digest,
+        );
+        let ed_sig_bytes: [u8; 64] = decode_fixed_hex(&resp.ed_signature_hex).unwrap();
+        let ed_sig = ed25519_dalek::Signature::from_bytes(&ed_sig_bytes);
+        assert!(HandshakeManager::verify(
+            &expected_manager.identity_public_key(),
+            &wrong_transcript,
+            &ed_sig,
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn sign_consent_action_binds_the_signature_to_the_exact_scope() {
+        // A signature produced for one scope string must not verify against
+        // a transcript built with a different scope -- the whole point of
+        // binding scope_digest into the transcript is that a signature for
+        // one daemon-authoritative grant cannot authorize a different one.
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token_nonce = [0xeeu8; 16];
+        let token = test_token(&http_auth, &http_auth_ml_dsa, token_nonce);
+        let body = consent_action_request_body(
+            &cert,
+            &token,
+            serde_json::json!({ "scope": "view screen, inject input" }),
+        );
+        let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
+        assert_eq!(status, StatusCode::OK, "body: {json}");
+        let resp: SignConsentActionResponse = serde_json::from_value(json).unwrap();
+
+        let expected_manager = HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]);
+        let session_id: [u8; 16] = decode_fixed_hex(&"dd".repeat(16)).unwrap();
+        // A verifier reconstructing with a different authoritative scope
+        // must reject.
+        let wrong_scope_digest = xenia_operator_proto::scope_digest("view screen");
+        let wrong_transcript = xenia_operator_proto::consent_action_transcript(
+            xenia_operator_proto::ConsentAction::Approve,
+            &session_id,
+            &token_nonce,
+            &wrong_scope_digest,
         );
         let ed_sig_bytes: [u8; 64] = decode_fixed_hex(&resp.ed_signature_hex).unwrap();
         let ed_sig = ed25519_dalek::Signature::from_bytes(&ed_sig_bytes);

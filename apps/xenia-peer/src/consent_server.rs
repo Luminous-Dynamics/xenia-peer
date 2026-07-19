@@ -16,12 +16,12 @@
 //! it off, legacy plaintext `Approve`/`Deny`/`Revoke`.
 
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use futures::StreamExt;
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 use xenia_ledger::Chain;
 
@@ -112,6 +112,13 @@ pub(crate) struct ConsentServer {
     pub(crate) auth_state: Arc<OperatorAuthState>,
     /// This session's id, bound into each per-action signature.
     pub(crate) session_id: [u8; 16],
+    /// Digest of this session's offered consent scope
+    /// (`xenia_operator_proto::scope_digest`), bound into each per-action
+    /// signature so a signed decision can't be replayed/substituted for a
+    /// different session's scope. Computed once from the daemon's own
+    /// authoritative `m1_scope`, never from anything relayed through the
+    /// console/agent round-trip.
+    pub(crate) scope_digest: [u8; 32],
     /// This session's uuid, used for ledger attribution.
     pub(crate) session_uuid: Uuid,
     /// The tamper-evident consent ledger.
@@ -136,6 +143,7 @@ impl ConsentServer {
             require_operator_auth,
             auth_state,
             session_id,
+            scope_digest,
             session_uuid,
             ledger,
             ledger_path,
@@ -176,6 +184,7 @@ impl ConsentServer {
                     require_operator_auth,
                     &auth_state,
                     &session_id,
+                    &scope_digest,
                     &revocations,
                 ) else {
                     continue;
