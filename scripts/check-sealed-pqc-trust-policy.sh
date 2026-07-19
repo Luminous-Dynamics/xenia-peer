@@ -3,17 +3,26 @@ set -euo pipefail
 
 root="${1:-.}"
 main="$root/apps/xenia-peer/src/main.rs"
+# The evidence-verification surface (incl. its CLI flag parsing/dispatch)
+# was extracted out of main.rs into its own module on 2026-07-12 -- see
+# evidence_verifier.rs's module doc comment. All the "$main" CLI-token
+# checks below concatenate both files so this guard still catches the
+# logic silently disappearing, wherever it currently lives. Every one of
+# this script's tokens was confirmed present only in evidence_verifier.rs,
+# not genuinely missing -- this was a stale checker, not a real gap.
+evidence_verifier="$root/apps/xenia-peer/src/evidence_verifier.rs"
 runtime="$root/apps/xenia-peer/src/m1_runtime.rs"
 policy_doc="$root/docs/crypto/SEALED_PQC_TRUST_POLICY.md"
 sealed_doc="$root/docs/crypto/FULL_PQC_SEALED_EVIDENCE_ARTIFACTS.md"
 verifier_doc="$root/docs/crypto/M1_EVIDENCE_BUNDLE_VERIFIER.md"
 
-for file in "$main" "$runtime" "$policy_doc" "$sealed_doc" "$verifier_doc"; do
+for file in "$main" "$evidence_verifier" "$runtime" "$policy_doc" "$sealed_doc" "$verifier_doc"; do
   if [[ ! -f "$file" ]]; then
     echo "missing sealed PQC trust policy file: $file" >&2
     exit 1
   fi
 done
+main_and_verifier="$(cat "$main" "$evidence_verifier")"
 
 for token in \
   "sealed_evidence_trust_policy" \
@@ -25,7 +34,7 @@ for token in \
   "resolve_sealed_evidence_trust_anchors" \
   "minimum_sealed_evidence_policy_epoch" \
   "conflicts_with_all"; do
-  if ! grep -Fq -- "$token" "$main"; then
+  if ! grep -Fq -- "$token" <<< "$main_and_verifier"; then
     echo "xenia-peer CLI missing sealed PQC trust policy token: $token" >&2
     exit 1
   fi

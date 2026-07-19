@@ -9,6 +9,16 @@ ledger_dir="$root/crates/xenia-ledger/src"
 sealed_doc="$root/docs/crypto/FULL_PQC_SEALED_EVIDENCE_ARTIFACTS.md"
 verifier_doc="$root/docs/crypto/M1_EVIDENCE_BUNDLE_VERIFIER.md"
 main="$root/apps/xenia-peer/src/main.rs"
+# The evidence-verification surface was extracted out of main.rs into its
+# own module on 2026-07-12 -- see evidence_verifier.rs's module doc comment.
+# CLI-token checks concatenate both files so this guard still catches the
+# logic silently disappearing, wherever it currently lives (this script's
+# own CLI-token check was stale against exactly this extraction: two of six
+# required tokens, parse_evidence_key_fingerprint_hex and
+# validate_sealed_evidence_verifier_suite, have lived only in
+# evidence_verifier.rs since that extraction -- confirmed a false-positive
+# "missing token" failure, not an actual implementation gap).
+evidence_verifier="$root/apps/xenia-peer/src/evidence_verifier.rs"
 runtime="$root/apps/xenia-peer/src/m1_runtime.rs"
 real_pqc_check="$root/scripts/check-real-pqc-signature-backend.sh"
 
@@ -18,7 +28,7 @@ if [[ ! -d "$ledger_dir" ]]; then
 fi
 ledger="$(cat "$ledger_dir"/*.rs)"
 
-for file in "$sealed_doc" "$verifier_doc" "$main" "$runtime" "$real_pqc_check"; do
+for file in "$sealed_doc" "$verifier_doc" "$main" "$evidence_verifier" "$runtime" "$real_pqc_check"; do
   if [[ ! -f "$file" ]]; then
     echo "missing full-PQC sealed evidence artifact contract file: $file" >&2
     exit 1
@@ -106,8 +116,9 @@ required_cli_tokens=(
   "validate_sealed_evidence_verifier_suite"
 )
 
+main_and_verifier="$(cat "$main" "$evidence_verifier")"
 for token in "${required_cli_tokens[@]}"; do
-  if ! grep -q -- "$token" "$main"; then
+  if ! grep -q -- "$token" <<< "$main_and_verifier"; then
     echo "xenia-peer CLI missing sealed full-PQC verifier token: $token" >&2
     exit 1
   fi
