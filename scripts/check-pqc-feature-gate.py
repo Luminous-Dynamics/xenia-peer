@@ -53,7 +53,10 @@ def require_cfg_gated(source: str, declaration: str) -> None:
 
 
 def require_cfg_gated_test(source: str, test_name: str) -> None:
-    required = f'#[cfg(feature = "pqc-signatures")]\n    #[test]\n    fn {test_name}('
+    # xenia-ledger/src/tests.rs (split out of lib.rs on 2026-07-19) is a
+    # top-level module file, so its items are unindented -- unlike the old
+    # nested `mod tests { ... }` block this replaced.
+    required = f'#[cfg(feature = "pqc-signatures")]\n#[test]\nfn {test_name}('
     require(
         required in source,
         f"feature test must stay cfg-gated and present: {test_name}",
@@ -63,7 +66,14 @@ def require_cfg_gated_test(source: str, test_name: str) -> None:
 def main(argv: list[str]) -> int:
     root = Path(argv[1]) if len(argv) > 1 else Path(".")
     cargo_toml = read(root / "crates/xenia-ledger/Cargo.toml")
-    ledger_src = read(root / "crates/xenia-ledger/src/lib.rs")
+    # xenia-ledger/src was split from one lib.rs into focused modules on
+    # 2026-07-19 -- concatenate every source file so this guard still
+    # catches the logic silently disappearing, wherever it currently lives.
+    ledger_dir = root / "crates/xenia-ledger/src"
+    ledger_rs_files = sorted(ledger_dir.glob("*.rs"))
+    if not ledger_rs_files:
+        raise CheckFailure(f"missing required PQC feature-gate file: {ledger_dir}/*.rs")
+    ledger_src = "\n".join(read(p) for p in ledger_rs_files)
     peer_cargo_toml = read(root / "apps/xenia-peer/Cargo.toml")
     # The evidence-verification surface was extracted out of main.rs into its
     # own module on 2026-07-12 -- see evidence_verifier.rs's module doc

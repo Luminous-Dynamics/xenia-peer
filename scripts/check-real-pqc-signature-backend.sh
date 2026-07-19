@@ -2,15 +2,22 @@
 set -euo pipefail
 
 root="${1:-.}"
-ledger="$root/crates/xenia-ledger/src/lib.rs"
+# xenia-ledger/src was split from one lib.rs into focused modules on
+# 2026-07-19 -- concatenate every source file so this guard still catches
+# the logic silently disappearing, wherever it currently lives.
+ledger_dir="$root/crates/xenia-ledger/src"
 cargo="$root/crates/xenia-ledger/Cargo.toml"
 
-for file in "$ledger" "$cargo"; do
-  if [[ ! -f "$file" ]]; then
-    echo "missing real PQC signature backend file: $file" >&2
-    exit 1
-  fi
-done
+if [[ ! -d "$ledger_dir" ]]; then
+  echo "missing xenia-ledger source dir: $ledger_dir" >&2
+  exit 1
+fi
+ledger="$(cat "$ledger_dir"/*.rs)"
+
+if [[ ! -f "$cargo" ]]; then
+  echo "missing real PQC signature backend file: $cargo" >&2
+  exit 1
+fi
 
 required_source=(
   "MlDsa65EvidenceSignatureBackend"
@@ -38,18 +45,13 @@ required_source=(
 )
 
 for token in "${required_source[@]}"; do
-  if ! grep -q -- "$token" "$ledger"; then
+  if ! grep -q -- "$token" <<< "$ledger"; then
     echo "missing real PQC signature backend source token: $token" >&2
     exit 1
   fi
 done
 
-if python3 - "$ledger" <<'PY'
-import pathlib
-import sys
-sys.exit(0 if b"\x00" in pathlib.Path(sys.argv[1]).read_bytes() else 1)
-PY
-then
+if grep -qaP '\x00' "$ledger_dir"/*.rs 2>/dev/null; then
   echo "ledger source must not contain raw NUL bytes" >&2
   exit 1
 fi
