@@ -1458,8 +1458,7 @@ fn decode_consent_decision(
     text: &str,
     require_operator_auth: bool,
     auth_state: &crate::operator_http::OperatorAuthState,
-    session_id: &[u8; 16],
-    scope_digest: &[u8; 32],
+    offer_digest: &[u8; 32],
     revocations: &crate::operator_revocations::OperatorRevocations,
 ) -> Option<DecodedConsent> {
     if !require_operator_auth {
@@ -1494,8 +1493,7 @@ fn decode_consent_decision(
         &auth_state.daemon_key.verifying_key(),
         &auth_state.daemon_ml_dsa.public_key_bytes(),
         now,
-        session_id,
-        scope_digest,
+        offer_digest,
         &request,
     ) {
         Ok(authorized) => {
@@ -2106,11 +2104,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // When --require-operator-auth is set, consent decisions must be signed,
     // role-authorized operator actions (see decode_consent_decision). The
-    // per-action signature binds to this session id, and each authenticated
-    // decision is attributed in the ledger (Phase 4).
+    // per-action signature binds to this session's host-attested typed offer,
+    // and each authenticated decision is attributed in the ledger (Phase 4).
     let require_operator_auth = args.require_operator_auth;
     let consent_auth_state = operator_auth_state.clone();
-    let consent_session_id = *session_id.as_bytes();
     let consent_session_uuid = session_id;
     let consent_ledger = shared_ledger.clone();
     let consent_ledger_path = ledger_path.clone();
@@ -2125,7 +2122,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // audit text, and the signature digest all share one source of truth.
     let consent_scope = m1_consent_scope(&args);
     let m1_scope = consent_scope.summary();
-    let consent_scope_digest = consent_scope.digest();
+    let offer_issued_at = now_ms() / 1_000;
+    let consent_offer = xenia_operator_proto::ConsentOfferV1::new(
+        *session_id.as_bytes(),
+        consent_scope,
+        offer_issued_at,
+        offer_issued_at.saturating_add(args.consent_timeout_secs.max(1)),
+    );
+    let consent_offer_bytes = consent_offer.canonical_bytes();
+    let attested_consent_offer = xenia_operator_proto::AttestedConsentOfferV1 {
+        offer: consent_offer,
+        host_ed_signature_hex: hex::encode(
+            operator_auth_state
+                .host_identity
+                .sign(&consent_offer_bytes)
+                .to_bytes(),
+        ),
+        host_ml_dsa_signature_hex: hex::encode(
+            operator_auth_state
+                .host_identity
+                .sign_ml_dsa(&consent_offer_bytes),
+        ),
+    };
+    let consent_offer_digest = consent_offer.digest();
 
     // Consent server. With --operator-sealed the console talks over a
     // xenia-wire-sealed operator channel (PQC confidentiality + handshake
@@ -2154,8 +2173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let deps = crate::operator_sealed_channel::SealedConsentDeps {
                     require_operator_auth,
                     auth_state: consent_auth_state,
-                    session_id: consent_session_id,
-                    scope_digest: consent_scope_digest,
+                    offer_digest: consent_offer_digest,
                     session_uuid: consent_session_uuid,
                     ledger: consent_ledger,
                     ledger_path: consent_ledger_path,
@@ -2191,8 +2209,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let server = crate::consent_server::ConsentServer {
                     require_operator_auth,
                     auth_state: consent_auth_state,
-                    session_id: consent_session_id,
-                    scope_digest: consent_scope_digest,
+                    offer_digest: consent_offer_digest,
                     session_uuid: consent_session_uuid,
                     ledger: consent_ledger,
                     ledger_path: consent_ledger_path,
@@ -2255,12 +2272,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.m1_preprod_auto_consent {
         grant_preprod_auto_consent(&mut m1_runtime)?;
     } else {
-        // Broadcast the consent request as JSON carrying the session_id, so an
-        // authenticated operator console can bind its per-action signature to
-        // this exact session (see the console's
-        // operator_session::build_consent_request + consent_action_transcript).
-        // `scope_v1` is the canonical machine-readable scope; `scope` is
-        // a derived human-readable compatibility field. A legacy
+        // Broadcast the host-attested typed offer that the native agent will
+        // independently verify before signing. `scope_v1` and `session_id`
+        // remain compatibility fields derived from the same offer; `scope` is
+        // derived human-readable text. A legacy
         // plaintext console just shows the text and still sends
         // "Approve"/"Deny", which a daemon without --require-operator-auth
         // accepts -- so this shape change is backward compatible.
@@ -2268,6 +2283,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "session_id": hex::encode(session_id.as_bytes()),
             "scope": m1_scope_for_log,
             "scope_v1": consent_scope,
+            "attested_offer": &attested_consent_offer,
         })
         .to_string();
         bridge.broadcast(&consent_prompt);

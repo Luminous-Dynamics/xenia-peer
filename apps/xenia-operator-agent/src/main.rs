@@ -651,50 +651,95 @@ async fn sign_challenge(
     }))
 }
 
-/// `POST /v1/sign/consent-action` -- sign a session-bound consent decision
-/// (Approve/Deny/Revoke -- see [`xenia_operator_proto::ConsentAction`];
-/// `Revoke` here means revoking a *consent grant*, e.g. ending an
-/// already-approved screen-share session, not revoking an operator's
-/// enrollment -- that's the separate, mandatory-confirmation
-/// `/v1/sign/revoke` from step 4). Step 3 of the design doc's PR sequence.
-///
-/// Same processing shape as [`sign_challenge`], except the evidence
-/// verified after host-trust is the relayed session token
-/// ([`daemon_evidence::verify_token`]) rather than a challenge attestation
-/// -- its signature must verify against the certificate's now-trusted
-/// delegated HTTP-auth key before its `token_nonce` is bound into the
-/// consent-action transcript. Per the confirmation policy, an ordinary
-/// approve/deny/consent-revoke against an already-pinned host needs no
-/// *additional* confirmation beyond the host-trust check itself -- it
-/// ordinary consent actions are not confirmed per signature. Schema v5
-/// carries a canonical typed daemon scope and binds it into the signature,
-/// but the agent does not yet authenticate that scope independently or
-/// classify broad grants; those are addressed by the follow-on offer and
-/// confirmation hardening.
+/// `POST /v1/sign/consent-action` -- sign a decision over a
+/// daemon-host-attested consent offer. The agent verifies the daemon
+/// certificate, native host trust, both offer-attestation signatures, the
+/// offer lifetime, and the operator token before signing. Approving unusually
+/// broad scopes additionally requires native confirmation; deny/revoke remain
+/// fail-safe actions and do not require that extra prompt.
 async fn sign_consent_action(
     State(state): State<Arc<AgentState>>,
     Json(req): Json<SignConsentActionRequest>,
 ) -> Result<Json<SignConsentActionResponse>, (StatusCode, Json<AgentErrorResponse>)> {
     validate_common(&req.common)?;
-    let session_id = decode_fixed_hex::<16>(&req.session_id_hex)
-        .ok_or_else(|| bad_request("session_id_hex must be 32 hex characters"))?;
     let identity = enforce_host_trust(&state, &req.common, "/v1/sign/consent-action").await?;
+    daemon_evidence::verify_consent_offer_attestation(&identity, &req.attested_offer).map_err(
+        |e| {
+            let agent_err = e.to_agent_error();
+            (status_for(agent_err.code), Json(agent_err))
+        },
+    )?;
+    let offer = req.attested_offer.offer;
+    // Daemon and operator workstations need not have perfectly synchronized
+    // wall clocks. A small bounded skew avoids false rejection without
+    // turning the approval window into an unbounded bearer grant.
+    const CONSENT_OFFER_CLOCK_SKEW_SECS: u64 = 60;
+    let now = unix_now_secs();
+    if !offer.is_issued_by(now, CONSENT_OFFER_CLOCK_SKEW_SECS) {
+        return Err(bad_request("consent offer has an invalid or future time interval"));
+    }
+    if req.action == xenia_operator_proto::ConsentAction::Approve
+        && !offer.can_approve_at(now, CONSENT_OFFER_CLOCK_SKEW_SECS)
+    {
+        return Err(bad_request("consent offer approval window has expired"));
+    }
     let token_nonce = daemon_evidence::verify_token(&identity, &req.token).map_err(|e| {
         let agent_err = e.to_agent_error();
         (status_for(agent_err.code), Json(agent_err))
     })?;
 
-    let scope_digest = req.scope.digest();
+    if req.action == xenia_operator_proto::ConsentAction::Approve
+        && offer.scope.requires_native_confirmation()
+    {
+        let confirm_state = state.clone();
+        let daemon_endpoint = normalize_daemon_endpoint(&req.common.daemon_endpoint);
+        let daemon_fingerprint_hex = hex::encode(identity.fingerprint);
+        let suite = req.common.suite.clone();
+        let scope = offer.scope.summary();
+        let session_id = hex::encode(offer.session_id);
+        let expires_at = offer.expires_at.to_string();
+        let confirmed = tokio::task::spawn_blocking(move || {
+            confirm_state
+                .host_trust
+                .lock()
+                .expect("host-trust mutex poisoned")
+                .confirm_action(
+                    "Approve broad consent scope?",
+                    &[
+                        ("scope", scope),
+                        ("session id", session_id),
+                        ("offer expires at", expires_at),
+                        ("daemon endpoint", daemon_endpoint),
+                        ("daemon fingerprint", daemon_fingerprint_hex),
+                        ("suite", suite),
+                    ],
+                )
+        })
+        .await
+        .map_err(|_| internal_error("consent confirmation task panicked"))?
+        .map_err(|e| {
+            let agent_err = e.to_agent_error();
+            (status_for(agent_err.code), Json(agent_err))
+        })?;
+        if !confirmed {
+            let agent_err = AgentErrorResponse {
+                code: AgentErrorCode::ConfirmationDeclined,
+                message: "operator declined the broad consent scope".to_string(),
+            };
+            return Err((status_for(agent_err.code), Json(agent_err)));
+        }
+    }
+
+    let offer_digest = offer.digest();
     tracing::info!(
         action = ?req.action,
-        scope_digest = %hex::encode(scope_digest),
+        offer_digest = %hex::encode(offer_digest),
         "signing consent action"
     );
     let transcript = xenia_operator_proto::consent_action_transcript(
         req.action,
-        &session_id,
         &token_nonce,
-        &scope_digest,
+        &offer_digest,
     );
     let ed_signature = state.manager.sign(&transcript);
     let ml_dsa_signature = state.manager.sign_ml_dsa(&transcript);
@@ -2128,11 +2173,46 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
-    /// Builds a valid `/v1/sign/consent-action` body carrying `cert` and
-    /// `token`, then applies `overrides` on top.
+    fn attested_test_offer_with_window(
+        host: &HandshakeManager,
+        scope: xenia_operator_proto::ConsentScopeV1,
+        issued_at: u64,
+        expires_at: u64,
+    ) -> xenia_operator_proto::AttestedConsentOfferV1 {
+        let offer = xenia_operator_proto::ConsentOfferV1::new(
+            [0xddu8; 16],
+            scope,
+            issued_at,
+            expires_at,
+        );
+        let bytes = offer.canonical_bytes();
+        xenia_operator_proto::AttestedConsentOfferV1 {
+            offer,
+            host_ed_signature_hex: hex::encode(host.sign(&bytes).to_bytes()),
+            host_ml_dsa_signature_hex: hex::encode(host.sign_ml_dsa(&bytes)),
+        }
+    }
+
+    fn attested_test_offer(
+        host: &HandshakeManager,
+        scope: xenia_operator_proto::ConsentScopeV1,
+    ) -> xenia_operator_proto::AttestedConsentOfferV1 {
+        let now = unix_now_secs();
+        attested_test_offer_with_window(
+            host,
+            scope,
+            now.saturating_sub(1),
+            now.saturating_add(600),
+        )
+    }
+
+    /// Builds a valid `/v1/sign/consent-action` body carrying `cert`, a
+    /// host-attested offer, and `token`, then applies top-level `overrides`.
     fn consent_action_request_body(
         cert: &DaemonIdentityCertificate,
+        host: &HandshakeManager,
         token: &SignedTokenDto,
+        scope: xenia_operator_proto::ConsentScopeV1,
         overrides: serde_json::Value,
     ) -> serde_json::Value {
         let mut body = serde_json::json!({
@@ -2142,8 +2222,7 @@ mod tests {
             "suite": "highsec",
             "request_id": "test-req-2",
             "action": "Approve",
-            "session_id_hex": "dd".repeat(16),
-            "scope": xenia_operator_proto::ConsentScopeV1::screen_only(),
+            "attested_offer": attested_test_offer(host, scope),
             "token": token,
         });
         merge_overrides(&mut body, overrides);
@@ -2158,19 +2237,25 @@ mod tests {
         let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
         let token_nonce = [0xeeu8; 16];
         let token = test_token(&http_auth, &http_auth_ml_dsa, token_nonce);
-        let body = consent_action_request_body(&cert, &token, serde_json::json!({}));
+        let body = consent_action_request_body(
+            &cert,
+            &host,
+            &token,
+            xenia_operator_proto::ConsentScopeV1::screen_only(),
+            serde_json::json!({}),
+        );
+        let attested: xenia_operator_proto::AttestedConsentOfferV1 =
+            serde_json::from_value(body["attested_offer"].clone()).unwrap();
+        let offer_digest = attested.offer.digest();
         let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
         assert_eq!(status, StatusCode::OK, "body: {json}");
 
         let resp: SignConsentActionResponse = serde_json::from_value(json).unwrap();
         let expected_manager = HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]);
-        let session_id: [u8; 16] = decode_fixed_hex(&"dd".repeat(16)).unwrap();
-        let scope_digest = xenia_operator_proto::ConsentScopeV1::screen_only().digest();
         let transcript = xenia_operator_proto::consent_action_transcript(
             xenia_operator_proto::ConsentAction::Approve,
-            &session_id,
             &token_nonce,
-            &scope_digest,
+            &offer_digest,
         );
         let ed_sig_bytes: [u8; 64] = decode_fixed_hex(&resp.ed_signature_hex).unwrap();
         let ed_sig = ed25519_dalek::Signature::from_bytes(&ed_sig_bytes);
@@ -2193,20 +2278,25 @@ mod tests {
         let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
         let token_nonce = [0xeeu8; 16];
         let token = test_token(&http_auth, &http_auth_ml_dsa, token_nonce);
-        let body =
-            consent_action_request_body(&cert, &token, serde_json::json!({ "action": "Deny" }));
+        let body = consent_action_request_body(
+            &cert,
+            &host,
+            &token,
+            xenia_operator_proto::ConsentScopeV1::screen_only(),
+            serde_json::json!({ "action": "Deny" }),
+        );
+        let attested: xenia_operator_proto::AttestedConsentOfferV1 =
+            serde_json::from_value(body["attested_offer"].clone()).unwrap();
+        let offer_digest = attested.offer.digest();
         let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
         assert_eq!(status, StatusCode::OK, "body: {json}");
         let resp: SignConsentActionResponse = serde_json::from_value(json).unwrap();
 
         let expected_manager = HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]);
-        let session_id: [u8; 16] = decode_fixed_hex(&"dd".repeat(16)).unwrap();
-        let scope_digest = xenia_operator_proto::ConsentScopeV1::screen_only().digest();
         let wrong_transcript = xenia_operator_proto::consent_action_transcript(
             xenia_operator_proto::ConsentAction::Approve,
-            &session_id,
             &token_nonce,
-            &scope_digest,
+            &offer_digest,
         );
         let ed_sig_bytes: [u8; 64] = decode_fixed_hex(&resp.ed_signature_hex).unwrap();
         let ed_sig = ed25519_dalek::Signature::from_bytes(&ed_sig_bytes);
@@ -2222,8 +2312,9 @@ mod tests {
     async fn sign_consent_action_binds_the_signature_to_the_exact_scope() {
         // A signature produced for one typed scope must not verify against
         // a transcript built with a different scope -- the whole point of
-        // binding scope_digest into the transcript is that a signature for
-        // one daemon-authoritative grant cannot authorize a different one.
+        // binding the host-attested offer digest into the transcript is that
+        // a signature for one daemon-authoritative grant cannot authorize a
+        // different one.
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
         let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
@@ -2232,28 +2323,34 @@ mod tests {
         let token = test_token(&http_auth, &http_auth_ml_dsa, token_nonce);
         let body = consent_action_request_body(
             &cert,
+            &host,
             &token,
-            serde_json::json!({
-                "scope": xenia_operator_proto::ConsentScopeV1::screen(
-                    xenia_operator_proto::ConsentTelemetryScope::SystemIdentityAndPerformance,
-                    xenia_operator_proto::ConsentAudioScope::HostDeviceCapture,
-                )
-            }),
+            xenia_operator_proto::ConsentScopeV1::screen(
+                xenia_operator_proto::ConsentTelemetryScope::SystemIdentityAndPerformance,
+                xenia_operator_proto::ConsentAudioScope::HostDeviceCapture,
+            ),
+            serde_json::json!({}),
         );
+        let attested: xenia_operator_proto::AttestedConsentOfferV1 =
+            serde_json::from_value(body["attested_offer"].clone()).unwrap();
         let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
         assert_eq!(status, StatusCode::OK, "body: {json}");
         let resp: SignConsentActionResponse = serde_json::from_value(json).unwrap();
 
         let expected_manager = HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]);
-        let session_id: [u8; 16] = decode_fixed_hex(&"dd".repeat(16)).unwrap();
-        // A verifier reconstructing with a different authoritative scope
-        // must reject.
-        let wrong_scope_digest = xenia_operator_proto::ConsentScopeV1::screen_only().digest();
+        // A verifier reconstructing an offer with a different authoritative
+        // scope must reject.
+        let wrong_offer_digest = xenia_operator_proto::ConsentOfferV1::new(
+            attested.offer.session_id,
+            xenia_operator_proto::ConsentScopeV1::screen_only(),
+            attested.offer.issued_at,
+            attested.offer.expires_at,
+        )
+        .digest();
         let wrong_transcript = xenia_operator_proto::consent_action_transcript(
             xenia_operator_proto::ConsentAction::Approve,
-            &session_id,
             &token_nonce,
-            &wrong_scope_digest,
+            &wrong_offer_digest,
         );
         let ed_sig_bytes: [u8; 64] = decode_fixed_hex(&resp.ed_signature_hex).unwrap();
         let ed_sig = ed25519_dalek::Signature::from_bytes(&ed_sig_bytes);
@@ -2274,7 +2371,9 @@ mod tests {
         let token = test_token(&http_auth, &http_auth_ml_dsa, [0xeeu8; 16]);
         let body = consent_action_request_body(
             &cert,
+            &host,
             &token,
+            xenia_operator_proto::ConsentScopeV1::screen_only(),
             serde_json::json!({ "schema_version": 999 }),
         );
         let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
@@ -2283,20 +2382,125 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sign_consent_action_rejects_malformed_hex_fields() {
+    async fn sign_consent_action_rejects_malformed_offer_signature() {
         let state = test_state("secret", &["http://localhost:8134"]);
         let app = build_router(state);
         let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
         let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
         let token = test_token(&http_auth, &http_auth_ml_dsa, [0xeeu8; 16]);
-        let body = consent_action_request_body(
+        let mut body = consent_action_request_body(
             &cert,
+            &host,
             &token,
-            serde_json::json!({ "session_id_hex": "nope" }),
+            xenia_operator_proto::ConsentScopeV1::screen_only(),
+            serde_json::json!({}),
         );
+        body["attested_offer"]["host_ed_signature_hex"] = serde_json::json!("nope");
         let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
         assert_eq!(json["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn sign_consent_action_rejects_a_cryptographically_tampered_offer() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0xeeu8; 16]);
+        let mut body = consent_action_request_body(
+            &cert,
+            &host,
+            &token,
+            xenia_operator_proto::ConsentScopeV1::screen_only(),
+            serde_json::json!({}),
+        );
+        // Keep the signature correctly shaped but alter the signed offer.
+        // This must exercise cryptographic verification, not just parsing.
+        body["attested_offer"]["offer"]["session_id"] =
+            serde_json::to_value([0xaau8; 16]).unwrap();
+        let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "body: {json}");
+        assert_eq!(json["code"], "host_not_trusted");
+    }
+
+    #[tokio::test]
+    async fn sign_consent_action_rejects_expired_approval_but_allows_revocation() {
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0xeeu8; 16]);
+        let now = unix_now_secs();
+        // More than the 60-second clock-skew allowance in the handler.
+        let expired = attested_test_offer_with_window(
+            &host,
+            xenia_operator_proto::ConsentScopeV1::screen_only(),
+            now.saturating_sub(600),
+            now.saturating_sub(120),
+        );
+
+        let approve_state = test_state("secret", &["http://localhost:8134"]);
+        let mut approve_body = consent_action_request_body(
+            &cert,
+            &host,
+            &token,
+            xenia_operator_proto::ConsentScopeV1::screen_only(),
+            serde_json::json!({}),
+        );
+        approve_body["attested_offer"] = serde_json::to_value(&expired).unwrap();
+        let (status, json) = post_signed_json(
+            build_router(approve_state),
+            "/v1/sign/consent-action",
+            "secret",
+            approve_body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {json}");
+
+        let revoke_state = test_state("secret", &["http://localhost:8134"]);
+        let mut revoke_body = consent_action_request_body(
+            &cert,
+            &host,
+            &token,
+            xenia_operator_proto::ConsentScopeV1::screen_only(),
+            serde_json::json!({ "action": "Revoke" }),
+        );
+        revoke_body["attested_offer"] = serde_json::to_value(&expired).unwrap();
+        let (status, json) = post_signed_json(
+            build_router(revoke_state),
+            "/v1/sign/consent-action",
+            "secret",
+            revoke_body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {json}");
+    }
+
+    #[tokio::test]
+    async fn sign_consent_action_requires_native_confirmation_for_a_broad_approval() {
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let state = test_state_with_pinned_host(
+            "secret",
+            &["http://localhost:8134"],
+            &host,
+            "highsec",
+            false,
+        );
+        let app = build_router(state);
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0xeeu8; 16]);
+        let body = consent_action_request_body(
+            &cert,
+            &host,
+            &token,
+            xenia_operator_proto::ConsentScopeV1::screen(
+                xenia_operator_proto::ConsentTelemetryScope::SystemIdentityAndPerformance,
+                xenia_operator_proto::ConsentAudioScope::HostDeviceCapture,
+            ),
+            serde_json::json!({}),
+        );
+        let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
+        assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "body: {json}");
+        assert_eq!(json["code"], "confirmation_required");
     }
 
     #[tokio::test]
@@ -2308,7 +2512,9 @@ mod tests {
         let token = test_token(&http_auth, &http_auth_ml_dsa, [0xeeu8; 16]);
         let body = consent_action_request_body(
             &cert,
+            &host,
             &token,
+            xenia_operator_proto::ConsentScopeV1::screen_only(),
             serde_json::json!({ "action": "Frobnicate" }),
         );
         let (status, _json) =
@@ -2328,7 +2534,13 @@ mod tests {
         let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
         let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
         let token = test_token(&http_auth, &http_auth_ml_dsa, [0xeeu8; 16]);
-        let body = consent_action_request_body(&cert, &token, serde_json::json!({}));
+        let body = consent_action_request_body(
+            &cert,
+            &host,
+            &token,
+            xenia_operator_proto::ConsentScopeV1::screen_only(),
+            serde_json::json!({}),
+        );
         let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
         assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "body: {json}");
         assert_eq!(json["code"], "confirmation_required");
@@ -2350,7 +2562,13 @@ mod tests {
             &attacker_http_auth_ml_dsa,
             [0xeeu8; 16],
         );
-        let body = consent_action_request_body(&cert, &token, serde_json::json!({}));
+        let body = consent_action_request_body(
+            &cert,
+            &host,
+            &token,
+            xenia_operator_proto::ConsentScopeV1::screen_only(),
+            serde_json::json!({}),
+        );
         let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "body: {json}");
         assert_eq!(json["code"], "host_not_trusted");

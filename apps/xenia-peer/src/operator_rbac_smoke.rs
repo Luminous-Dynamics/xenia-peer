@@ -128,13 +128,15 @@ async fn operator_rbac_full_chain_smoke() {
         .unwrap()
         .try_into()
         .unwrap();
-    let scope_digest = xenia_operator_proto::ConsentScopeV1::screen_only().digest();
-    let action_transcript = consent_action_transcript(
-        ConsentAction::Approve,
-        &session_id,
-        &token_nonce,
-        &scope_digest,
-    );
+    let offer_digest = xenia_operator_proto::ConsentOfferV1::new(
+        session_id,
+        xenia_operator_proto::ConsentScopeV1::screen_only(),
+        1,
+        u64::MAX,
+    )
+    .digest();
+    let action_transcript =
+        consent_action_transcript(ConsentAction::Approve, &token_nonce, &offer_digest);
     let consent_json = serde_json::json!({
         "token": token,
         "action": "Approve",
@@ -149,8 +151,7 @@ async fn operator_rbac_full_chain_smoke() {
         &consent_json,
         true,
         &state,
-        &session_id,
-        &scope_digest,
+        &offer_digest,
         &no_revocations,
     )
     .expect("authenticated Approve must be authorized");
@@ -171,8 +172,7 @@ async fn operator_rbac_full_chain_smoke() {
             &consent_json,
             true,
             &state,
-            &session_id,
-            &scope_digest,
+            &offer_digest,
             &revocations
         )
         .is_none(),
@@ -188,13 +188,20 @@ async fn operator_rbac_full_chain_smoke() {
     Verifier::verify_chain(&entries, &daemon_pk).expect("operator-action audit chain verifies");
 
     // --- 6. a tampered/replayed decision is refused by the same path ---
-    // Wrong session id: the per-action signature no longer binds.
+    // A different daemon-stored offer (here, another session id) produces a
+    // different digest, so the per-action signature no longer verifies.
+    let other_offer_digest = xenia_operator_proto::ConsentOfferV1::new(
+        [0u8; 16],
+        xenia_operator_proto::ConsentScopeV1::screen_only(),
+        1,
+        u64::MAX,
+    )
+    .digest();
     let bad = crate::decode_consent_decision(
         &consent_json,
         true,
         &state,
-        &[0u8; 16],
-        &scope_digest,
+        &other_offer_digest,
         &no_revocations,
     );
     assert!(

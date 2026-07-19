@@ -320,8 +320,9 @@ pub(crate) fn verify_token(
 }
 
 /// An operator's authenticated request to perform a consent action: their
-/// session token plus a per-action signature (over the action + session +
-/// token nonce) proving they, not just a token bearer, authorized it. Both
+/// session token plus a per-action signature (over the action + token nonce +
+/// daemon-attested offer digest) proving they, not just a token bearer,
+/// authorized it. Both
 /// algorithms are required, matching every other hybrid signature in this
 /// codebase (the daemon already has the operator's ML-DSA-65 public key on
 /// file from enrollment).
@@ -349,22 +350,17 @@ pub(crate) struct AuthorizedConsentAction {
 /// 3. the operator is *still* enrolled (a de-enrolled operator's token is
 ///    dead even if unexpired);
 /// 4. the per-action signature verifies -- both algorithms -- against that
-///    operator's enrolled keys over this exact action + session + token
-///    nonce + scope.
+///    operator's enrolled keys over this exact action + token nonce +
+///    daemon-attested consent offer.
 ///
-/// `scope_digest` MUST come from the daemon's own authoritative record of
-/// this session's scope (e.g. the `m1_scope` computed once at session
-/// start from the daemon's own CLI config), never from anything relayed
-/// through the console/agent round-trip -- otherwise this parameter adds
-/// no real binding, since the one hop that matters (a compromised console)
-/// is exactly the hop being distrusted.
+/// `offer_digest` MUST come from the daemon's own stored offer, never from
+/// anything relayed through the console/agent round-trip.
 pub(crate) fn authorize_consent_action(
     policy: &OperatorPolicy,
     daemon_pubkey: &VerifyingKey,
     daemon_ml_dsa_pubkey: &[u8; ML_DSA_65_PK_LEN],
     now: u64,
-    session_id: &[u8; 16],
-    scope_digest: &[u8; 32],
+    offer_digest: &[u8; 32],
     request: &AuthenticatedConsentAction,
 ) -> Result<AuthorizedConsentAction, AuthError> {
     let token = verify_token(daemon_pubkey, daemon_ml_dsa_pubkey, now, &request.token)?;
@@ -378,7 +374,7 @@ pub(crate) fn authorize_consent_action(
         .ok_or(AuthError::NotEnrolled)?;
 
     let transcript =
-        consent_action_transcript(request.action, session_id, &token.token_nonce, scope_digest);
+        consent_action_transcript(request.action, &token.token_nonce, offer_digest);
     let ed_vk = HandshakeManager::parse_peer_public_key(&operator.ed25519_pubkey)
         .map_err(|_| AuthError::MalformedKey)?;
     let sig = Signature::from_bytes(&request.action_signature);
@@ -848,17 +844,16 @@ mod tests {
     }
 
     /// Build an authenticated consent action: a token for `op` at `role`,
-    /// plus `op`'s Ed25519 + ML-DSA-65 signatures over the action + session
-    /// + token nonce.
+    /// plus `op`'s Ed25519 + ML-DSA-65 signatures over the action + token
+    /// nonce + daemon-attested offer digest.
     #[allow(clippy::too_many_arguments)]
     fn authed_action(
         op: &HandshakeManager,
         daemon: &SigningKey,
         daemon_ml_dsa: &MlDsaIdentity,
         role: OperatorRole,
-        session_id: &[u8; 16],
         action: ConsentAction,
-        scope_digest: &[u8; 32],
+        offer_digest: &[u8; 32],
         now: u64,
     ) -> AuthenticatedConsentAction {
         let authed = AuthenticatedOperator {
@@ -874,7 +869,7 @@ mod tests {
             [5u8; 16],
         );
         let transcript =
-            consent_action_transcript(action, session_id, &signed.token.token_nonce, scope_digest);
+            consent_action_transcript(action, &signed.token.token_nonce, offer_digest);
         let action_signature = op.sign(&transcript).to_bytes();
         let ml_dsa_action_signature = op.sign_ml_dsa(&transcript);
         AuthenticatedConsentAction {
@@ -1257,16 +1252,20 @@ mod tests {
         let op = HandshakeManager::new();
         let (daemon, daemon_ml_dsa) = test_daemon();
         let policy = policy_with(&op, OperatorRole::Approver);
-        let session = [7u8; 16];
-        let scope_digest = xenia_operator_proto::ConsentScopeV1::screen_only().digest();
+        let offer_digest = xenia_operator_proto::ConsentOfferV1::new(
+            [7u8; 16],
+            xenia_operator_proto::ConsentScopeV1::screen_only(),
+            1,
+            u64::MAX,
+        )
+        .digest();
         let req = authed_action(
             &op,
             &daemon,
             &daemon_ml_dsa,
             OperatorRole::Approver,
-            &session,
             ConsentAction::Approve,
-            &scope_digest,
+            &offer_digest,
             3000,
         );
         let authorized = authorize_consent_action(
@@ -1274,8 +1273,7 @@ mod tests {
             &daemon.verifying_key(),
             &daemon_ml_dsa.public_key_bytes(),
             3010,
-            &session,
-            &scope_digest,
+            &offer_digest,
             &req,
         )
         .unwrap();
@@ -1289,18 +1287,20 @@ mod tests {
         let op = HandshakeManager::new();
         let (daemon, daemon_ml_dsa) = test_daemon();
         let policy = policy_with(&op, OperatorRole::Viewer);
-        let session = [7u8; 16];
-        // A Viewer-role token can't approve. (The token is honestly issued at
-        // Viewer -- a forged Approver token would fail token verification.)
-        let scope_digest = xenia_operator_proto::ConsentScopeV1::screen_only().digest();
+        let offer_digest = xenia_operator_proto::ConsentOfferV1::new(
+            [7u8; 16],
+            xenia_operator_proto::ConsentScopeV1::screen_only(),
+            1,
+            u64::MAX,
+        )
+        .digest();
         let req = authed_action(
             &op,
             &daemon,
             &daemon_ml_dsa,
             OperatorRole::Viewer,
-            &session,
             ConsentAction::Approve,
-            &scope_digest,
+            &offer_digest,
             3000,
         );
         assert_eq!(
@@ -1309,30 +1309,39 @@ mod tests {
                 &daemon.verifying_key(),
                 &daemon_ml_dsa.public_key_bytes(),
                 3010,
-                &session,
-                &scope_digest,
-                &req
+                &offer_digest,
+                &req,
             ),
             Err(AuthError::RoleNotPermitted)
         );
     }
 
     #[test]
-    fn consent_action_signature_bound_to_session() {
+    fn consent_action_signature_bound_to_session_via_offer() {
         let op = HandshakeManager::new();
         let (daemon, daemon_ml_dsa) = test_daemon();
         let policy = policy_with(&op, OperatorRole::Admin);
-        // Signed for one session, presented against another: the per-action
-        // signature no longer verifies (replay across sessions is refused).
-        let scope_digest = xenia_operator_proto::ConsentScopeV1::screen_only().digest();
+        let signed_offer_digest = xenia_operator_proto::ConsentOfferV1::new(
+            [1u8; 16],
+            xenia_operator_proto::ConsentScopeV1::screen_only(),
+            1,
+            u64::MAX,
+        )
+        .digest();
+        let daemon_offer_digest = xenia_operator_proto::ConsentOfferV1::new(
+            [2u8; 16],
+            xenia_operator_proto::ConsentScopeV1::screen_only(),
+            1,
+            u64::MAX,
+        )
+        .digest();
         let req = authed_action(
             &op,
             &daemon,
             &daemon_ml_dsa,
             OperatorRole::Admin,
-            &[1u8; 16],
             ConsentAction::Revoke,
-            &scope_digest,
+            &signed_offer_digest,
             3000,
         );
         assert_eq!(
@@ -1341,9 +1350,8 @@ mod tests {
                 &daemon.verifying_key(),
                 &daemon_ml_dsa.public_key_bytes(),
                 3010,
-                &[2u8; 16],
-                &scope_digest,
-                &req
+                &daemon_offer_digest,
+                &req,
             ),
             Err(AuthError::Ed25519VerifyFailed)
         );
@@ -1353,18 +1361,21 @@ mod tests {
     fn consent_action_rejected_after_operator_de_enrolled() {
         let op = HandshakeManager::new();
         let (daemon, daemon_ml_dsa) = test_daemon();
-        // Empty policy: the operator was de-enrolled after the token was issued.
         let policy = OperatorPolicy::default();
-        let session = [7u8; 16];
-        let scope_digest = xenia_operator_proto::ConsentScopeV1::screen_only().digest();
+        let offer_digest = xenia_operator_proto::ConsentOfferV1::new(
+            [7u8; 16],
+            xenia_operator_proto::ConsentScopeV1::screen_only(),
+            1,
+            u64::MAX,
+        )
+        .digest();
         let req = authed_action(
             &op,
             &daemon,
             &daemon_ml_dsa,
             OperatorRole::Admin,
-            &session,
             ConsentAction::Revoke,
-            &scope_digest,
+            &offer_digest,
             3000,
         );
         assert_eq!(
@@ -1373,52 +1384,56 @@ mod tests {
                 &daemon.verifying_key(),
                 &daemon_ml_dsa.public_key_bytes(),
                 3010,
-                &session,
-                &scope_digest,
-                &req
+                &offer_digest,
+                &req,
             ),
             Err(AuthError::NotEnrolled)
         );
     }
 
     #[test]
-    fn consent_action_signature_bound_to_scope() {
-        // Signed for one scope, verified against a different scope's
-        // digest: the per-action signature no longer verifies -- a
-        // compromised console can't get a valid signature over a broader
-        // grant than what the daemon's own session state says was offered.
+    fn consent_action_signature_bound_to_scope_via_offer() {
         let op = HandshakeManager::new();
         let (daemon, daemon_ml_dsa) = test_daemon();
         let policy = policy_with(&op, OperatorRole::Admin);
         let session = [7u8; 16];
-        let signed_scope_digest = xenia_operator_proto::ConsentScopeV1::screen_only().digest();
+        let signed_offer_digest = xenia_operator_proto::ConsentOfferV1::new(
+            session,
+            xenia_operator_proto::ConsentScopeV1::screen_only(),
+            1,
+            u64::MAX,
+        )
+        .digest();
+        let daemon_offer_digest = xenia_operator_proto::ConsentOfferV1::new(
+            session,
+            xenia_operator_proto::ConsentScopeV1::screen(
+                xenia_operator_proto::ConsentTelemetryScope::SystemIdentityAndPerformance,
+                xenia_operator_proto::ConsentAudioScope::HostDeviceCapture,
+            ),
+            1,
+            u64::MAX,
+        )
+        .digest();
         let req = authed_action(
             &op,
             &daemon,
             &daemon_ml_dsa,
             OperatorRole::Admin,
-            &session,
             ConsentAction::Approve,
-            &signed_scope_digest,
+            &signed_offer_digest,
             3000,
         );
-        let daemon_scope_digest =
-            xenia_operator_proto::ConsentScopeV1::screen(
-                xenia_operator_proto::ConsentTelemetryScope::SystemIdentityAndPerformance,
-                xenia_operator_proto::ConsentAudioScope::HostDeviceCapture,
-            )
-            .digest();
         assert_eq!(
             authorize_consent_action(
                 &policy,
                 &daemon.verifying_key(),
                 &daemon_ml_dsa.public_key_bytes(),
                 3010,
-                &session,
-                &daemon_scope_digest,
-                &req
+                &daemon_offer_digest,
+                &req,
             ),
             Err(AuthError::Ed25519VerifyFailed)
         );
     }
+
 }

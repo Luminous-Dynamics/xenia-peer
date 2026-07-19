@@ -31,7 +31,9 @@ use ed25519_dalek::Signature;
 use xenia_handshake::{
     HandshakeManager, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN, MlDsaIdentity, host_identity_fingerprint,
 };
-use xenia_operator_agent_proto::{DaemonIdentityCertificate, SignedTokenDto};
+use xenia_operator_agent_proto::{
+    AttestedConsentOfferV1, DaemonIdentityCertificate, SignedTokenDto,
+};
 use xenia_operator_proto::{
     challenge_host_attestation_transcript, daemon_delegation_transcript,
     operator_token_canonical_bytes,
@@ -223,6 +225,48 @@ pub fn verify_challenge_attestation(
         },
     )?;
 
+    Ok(())
+}
+
+/// Verify the host identity's hybrid attestation over a typed consent offer.
+/// This prevents the browser from fabricating or modifying the session id,
+/// scope, or lifetime that the native agent is asked to authorize.
+pub fn verify_consent_offer_attestation(
+    identity: &VerifiedDaemonIdentity,
+    attested: &AttestedConsentOfferV1,
+) -> Result<(), EvidenceError> {
+    let host_ed_pk = HandshakeManager::parse_peer_public_key(&identity.host_ed25519_pubkey)
+        .map_err(|_| {
+            EvidenceError::Malformed("host_ed25519_pubkey is not a valid point".to_string())
+        })?;
+    let transcript = attested.offer.canonical_bytes();
+    let ed_sig = decode_fixed_hex::<64>(&attested.host_ed_signature_hex).ok_or_else(|| {
+        EvidenceError::Malformed(
+            "consent offer host_ed_signature_hex must be 128 hex characters".to_string(),
+        )
+    })?;
+    HandshakeManager::verify(&host_ed_pk, &transcript, &Signature::from_bytes(&ed_sig)).map_err(
+        |_| {
+            EvidenceError::SignatureInvalid(
+                "consent offer Ed25519 host signature does not verify".to_string(),
+            )
+        },
+    )?;
+
+    let ml_sig = decode_fixed_hex::<ML_DSA_65_SIG_LEN>(&attested.host_ml_dsa_signature_hex)
+        .ok_or_else(|| {
+            EvidenceError::Malformed(format!(
+                "consent offer host_ml_dsa_signature_hex must be {} hex bytes",
+                ML_DSA_65_SIG_LEN
+            ))
+        })?;
+    HandshakeManager::verify_ml_dsa(&identity.host_ml_dsa_pubkey, &transcript, &ml_sig).map_err(
+        |_| {
+            EvidenceError::SignatureInvalid(
+                "consent offer ML-DSA host signature does not verify".to_string(),
+            )
+        },
+    )?;
     Ok(())
 }
 

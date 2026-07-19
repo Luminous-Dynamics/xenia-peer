@@ -13,9 +13,10 @@
 //!     the certificate + attestation itself; the raw seeds never reach
 //!     this process
 //!   POST /auth/verify          -> daemon-signed, role-scoped token
-//!   ask the local agent to sign consent_action_transcript(action,
-//!     session_id, token_nonce) per action, relaying the full session
-//!     token so the agent can verify it
+//!   receive a daemon-host-attested typed consent offer
+//!   ask the local agent to verify that offer and sign
+//!     consent_action_transcript(action, token_nonce, offer_digest),
+//!     relaying the full session token so the agent can verify it
 //!   send  { token, action, action_signature }  on the consent socket
 //! ```
 //!
@@ -47,7 +48,8 @@ use xenia_operator_agent_proto::{
     SignRevokeRequest, SignedTokenDto,
 };
 use xenia_operator_proto::{
-    ConsentAction, ConsentScopeV1, DaemonIdentityCertificate, OperatorAction, OperatorRole,
+    AttestedConsentOfferV1, ConsentAction, DaemonIdentityCertificate, OperatorAction,
+    OperatorRole,
 };
 
 /// Track A (the plain-HTTP `/auth/*` ceremony -- challenge/consent-action/
@@ -267,9 +269,9 @@ pub async fn ensure_fresh_operator_session(
 /// Build the authenticated consent-action JSON the daemon parses on the
 /// consent socket: `{ token, action, action_signature,
 /// ml_dsa_action_signature }`. The per-action signatures -- both required
-/// -- bind the action to the exact session, token, and canonical typed
-/// `scope`, so a captured signature cannot be replayed for a different
-/// action/session/token/scope. Display text is derived from this same value.
+/// -- bind the action to the exact daemon-host-attested offer and token, so
+/// a captured signature cannot be replayed for another session, scope, offer
+/// lifetime, or token. Display text is derived from the offer's typed scope.
 /// The agent verifies `session`'s token before signing -- see
 /// [`OperatorSession::to_signed_token_dto`].
 pub async fn build_consent_request(
@@ -278,8 +280,7 @@ pub async fn build_consent_request(
     agent_session: &AgentSessionToken,
     session: &OperatorSession,
     action: ConsentAction,
-    session_id: &[u8; 16],
-    scope: ConsentScopeV1,
+    attested_offer: &AttestedConsentOfferV1,
 ) -> Result<String, String> {
     let base = endpoint.trim_end_matches('/');
     let cert = fetch_daemon_certificate(base).await?;
@@ -295,8 +296,7 @@ pub async fn build_consent_request(
                 request_id: request_id(),
             },
             action,
-            session_id_hex: hex::encode(session_id),
-            scope,
+            attested_offer: attested_offer.clone(),
             token: session.to_signed_token_dto(),
         },
     )

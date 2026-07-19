@@ -17,21 +17,12 @@ use gloo_net::websocket::{futures::WebSocket, Message};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
-use xenia_operator_proto::{ConsentAction, ConsentScopeV1};
+use xenia_operator_proto::{AttestedConsentOfferV1, ConsentAction, ConsentScopeV1};
 
 use crate::agent_client::AgentConfig;
 use crate::app::OperatorSessionCtx;
 use crate::context::{daemon_config_context, missing_context_view};
 use crate::operator_session::build_consent_request;
-
-/// Extract the `session_id` (hex, 16 bytes) a daemon may include in the consent
-/// prompt. Required to bind an *authenticated* decision to the exact session;
-/// when absent, only the legacy plaintext path is available.
-fn parse_session_id(prompt: &str) -> Option<[u8; 16]> {
-    let v: serde_json::Value = serde_json::from_str(prompt).ok()?;
-    let hex = v.get("session_id")?.as_str()?;
-    hex::decode(hex).ok()?.try_into().ok()
-}
 
 /// Parse the canonical typed scope from a modern consent prompt.
 fn parse_scope_v1(prompt: &str) -> Option<ConsentScopeV1> {
@@ -39,9 +30,17 @@ fn parse_scope_v1(prompt: &str) -> Option<ConsentScopeV1> {
     serde_json::from_value(v.get("scope_v1")?.clone()).ok()
 }
 
+fn parse_attested_offer(prompt: &str) -> Option<AttestedConsentOfferV1> {
+    let v: serde_json::Value = serde_json::from_str(prompt).ok()?;
+    serde_json::from_value(v.get("attested_offer")?.clone()).ok()
+}
+
 /// Human-readable scope derived from the canonical object when available;
 /// retain the legacy `scope` string only for unauthenticated old daemons.
 fn display_scope(prompt: &str) -> String {
+    if let Some(attested) = parse_attested_offer(prompt) {
+        return attested.offer.scope.summary();
+    }
     if let Some(scope) = parse_scope_v1(prompt) {
         return scope.summary();
     }
@@ -118,8 +117,7 @@ pub fn ConsentModal() -> impl IntoView {
     // all.
     let decide = move |action: ConsentAction| {
         let prompt = consent_req.get_untracked();
-        let session_id = prompt.as_deref().and_then(parse_session_id);
-        let scope_v1 = prompt.as_deref().and_then(parse_scope_v1);
+        let attested_offer = prompt.as_deref().and_then(parse_attested_offer);
         let sealed = config.use_sealed_channel.get_untracked();
 
         let endpoint = config.endpoint.get_untracked();
@@ -177,8 +175,7 @@ pub fn ConsentModal() -> impl IntoView {
             // handshake need a live agent session -- fetch (and
             // transparently renew, if it's close to expiry) it once up
             // front rather than separately for each.
-            let needs_agent =
-                (sess.is_some() && session_id.is_some() && scope_v1.is_some()) || sealed;
+            let needs_agent = (sess.is_some() && attested_offer.is_some()) || sealed;
             let agent_session = if needs_agent {
                 match crate::agent_client::ensure_fresh_session(&agent_url, &agent_config).await {
                     Ok(s) => Some(s),
@@ -191,16 +188,15 @@ pub fn ConsentModal() -> impl IntoView {
                 None
             };
 
-            let payload = match (&sess, session_id, scope_v1, &agent_session) {
-                (Some(s), Some(sid), Some(scope), Some(agent_session)) => {
+            let payload = match (&sess, attested_offer.as_ref(), &agent_session) {
+                (Some(s), Some(attested_offer), Some(agent_session)) => {
                     match build_consent_request(
                         &endpoint,
                         &agent_url,
                         agent_session,
                         s,
                         action,
-                        &sid,
-                        scope,
+                        attested_offer,
                     )
                     .await
                     {

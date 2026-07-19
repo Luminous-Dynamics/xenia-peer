@@ -25,14 +25,13 @@ use serde::{Deserialize, Serialize};
 /// possession. Bump the `-vN` suffix on any breaking transcript change.
 pub const CHALLENGE_DOMAIN: &[u8] = b"xenia-operator-auth-challenge-v1";
 
-/// Domain-separation tag for a per-consent-action signature. Bumped to v2
-/// (from v1) when the transcript grew a `scope_digest` binding -- see
-/// [`consent_action_transcript`]'s own doc comment for why. This is a
-/// deliberate breaking change to the signed bytes: an old signer paired
-/// with a new verifier (or vice versa) must fail closed (signature just
-/// won't verify), not silently interoperate over a transcript that omits
-/// the scope commitment.
-pub const CONSENT_ACTION_DOMAIN: &[u8] = b"xenia-operator-consent-action-v2";
+/// Domain-separation tag for a per-consent-action signature. Version 3
+/// binds the decision to a daemon-attested consent-offer digest rather than
+/// separately concatenating presentation-layer fields.
+pub const CONSENT_ACTION_DOMAIN: &[u8] = b"xenia-operator-consent-action-v3";
+
+/// Domain separator for a daemon-attested consent offer.
+pub const CONSENT_OFFER_DOMAIN: &[u8] = b"xenia-operator-consent-offer-v1";
 
 /// Domain-separation tag for an admin's signature authorizing the revocation of
 /// another operator (the `/operator/revoke` admin action).
@@ -464,6 +463,112 @@ impl ConsentScopeV1 {
             self.file_transfer.description()
         )
     }
+
+    /// Whether approving this scope requires an additional native
+    /// confirmation under the current risk policy. Basic screen streaming,
+    /// synthetic audio, and basic host-performance telemetry remain routine.
+    /// Host capture, system identity, remote control, clipboard access, and
+    /// file transfer are treated as unusually broad.
+    pub const fn requires_native_confirmation(self) -> bool {
+        matches!(
+            self.telemetry,
+            ConsentTelemetryScope::SystemIdentityAndPerformance
+        ) || matches!(self.audio, ConsentAudioScope::HostDeviceCapture)
+            || matches!(self.input, ConsentInputScope::RemoteInputInjection)
+            || !matches!(self.clipboard, ConsentClipboardScope::Off)
+            || !matches!(self.file_transfer, ConsentFileTransferScope::Off)
+    }
+}
+
+/// A daemon-authored consent offer. The host identity signs the canonical
+/// bytes of this structure before the browser sees it, allowing the native
+/// agent to reject fabricated or modified session/scope data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsentOfferV1 {
+    /// Session to which the offer applies.
+    pub session_id: [u8; 16],
+    /// Canonical access scope.
+    pub scope: ConsentScopeV1,
+    /// Offer creation time, Unix seconds.
+    pub issued_at: u64,
+    /// Last Unix second at which the offer may be approved. A later `Revoke`
+    /// remains valid for the live session: expiry closes the grant window, not
+    /// the operator's ability to withdraw an already-issued grant.
+    pub expires_at: u64,
+}
+
+impl ConsentOfferV1 {
+    /// Construct an offer. Callers should ensure `expires_at >= issued_at`.
+    pub const fn new(
+        session_id: [u8; 16],
+        scope: ConsentScopeV1,
+        issued_at: u64,
+        expires_at: u64,
+    ) -> Self {
+        Self {
+            session_id,
+            scope,
+            issued_at,
+            expires_at,
+        }
+    }
+
+    /// Stable canonical bytes signed by the daemon host identity.
+    ///
+    /// Layout: `CONSENT_OFFER_DOMAIN || session_id(16) || scope_digest(32) ||
+    /// issued_at(8, be) || expires_at(8, be)`.
+    pub fn canonical_bytes(self) -> Vec<u8> {
+        let scope_digest = self.scope.digest();
+        let mut out = Vec::with_capacity(CONSENT_OFFER_DOMAIN.len() + 16 + 32 + 8 + 8);
+        out.extend_from_slice(CONSENT_OFFER_DOMAIN);
+        out.extend_from_slice(&self.session_id);
+        out.extend_from_slice(&scope_digest);
+        out.extend_from_slice(&self.issued_at.to_be_bytes());
+        out.extend_from_slice(&self.expires_at.to_be_bytes());
+        out
+    }
+
+    /// Digest bound into an operator consent-action signature.
+    pub fn digest(self) -> [u8; 32] {
+        *blake3::hash(&self.canonical_bytes()).as_bytes()
+    }
+
+    /// Whether the offer's time interval is internally well formed.
+    pub const fn has_valid_interval(self) -> bool {
+        self.expires_at >= self.issued_at
+    }
+
+    /// Whether the offer's issuance time is plausible at `now`, allowing a
+    /// bounded positive clock skew between daemon and agent.
+    pub const fn is_issued_by(self, now: u64, clock_skew_secs: u64) -> bool {
+        self.has_valid_interval() && self.issued_at <= now.saturating_add(clock_skew_secs)
+    }
+
+    /// Validate the approval window using caller-supplied wall-clock time and
+    /// bounded clock skew. This check is intentionally approval-specific:
+    /// revocation must remain possible after the original grant window closes.
+    pub const fn can_approve_at(self, now: u64, clock_skew_secs: u64) -> bool {
+        self.is_issued_by(now, clock_skew_secs)
+            && now <= self.expires_at.saturating_add(clock_skew_secs)
+    }
+
+    /// Strict approval-window validation with no clock-skew allowance.
+    pub const fn is_valid_at(self, now: u64) -> bool {
+        self.can_approve_at(now, 0) && now >= self.issued_at
+    }
+}
+
+/// A consent offer plus the daemon host identity's hybrid signatures over its
+/// canonical bytes. The browser relays this envelope but cannot modify it
+/// without invalidating both signatures.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttestedConsentOfferV1 {
+    /// The typed offer.
+    pub offer: ConsentOfferV1,
+    /// Host Ed25519 signature over [`ConsentOfferV1::canonical_bytes`], hex.
+    pub host_ed_signature_hex: String,
+    /// Host ML-DSA-65 signature over the same bytes, hex.
+    pub host_ml_dsa_signature_hex: String,
 }
 
 /// The transcript an operator signs to prove possession of their key for a
@@ -484,31 +589,23 @@ pub fn challenge_transcript(
     t
 }
 
-/// The bytes an operator signs to authorize a specific consent action. Binds
-/// the action to the exact session and token, so a captured signature can't be
-/// replayed for a different action, session, or token. Also binds
-/// `scope_digest` (see [`ConsentScopeV1::digest`]) so the signature commits to *what*
-/// is being approved, not just that some approval happened for
-/// `session_id`. This prevents a signature for one daemon-authoritative scope
-/// from being accepted for another. It does not prove which text a
-/// potentially compromised presentation layer rendered to the operator.
-/// Verifiers must compute the digest from their own authoritative typed scope
-/// of the session's scope, never from a value relayed through the signer.
+/// The bytes an operator signs to authorize a specific consent action.
+/// The daemon-attested offer digest commits to the exact session, canonical
+/// scope, and offer lifetime; the token nonce prevents replay under another
+/// operator session token.
 ///
-/// Layout: `CONSENT_ACTION_DOMAIN || action.tag()(1) || session_id(16) ||
-/// token_nonce(16) || scope_digest(32)`.
+/// Layout: `CONSENT_ACTION_DOMAIN || action.tag()(1) || token_nonce(16) ||
+/// offer_digest(32)`.
 pub fn consent_action_transcript(
     action: ConsentAction,
-    session_id: &[u8; 16],
     token_nonce: &[u8; 16],
-    scope_digest: &[u8; 32],
+    offer_digest: &[u8; 32],
 ) -> Vec<u8> {
-    let mut t = Vec::with_capacity(CONSENT_ACTION_DOMAIN.len() + 1 + 16 + 16 + 32);
+    let mut t = Vec::with_capacity(CONSENT_ACTION_DOMAIN.len() + 1 + 16 + 32);
     t.extend_from_slice(CONSENT_ACTION_DOMAIN);
     t.push(action.tag());
-    t.extend_from_slice(session_id);
     t.extend_from_slice(token_nonce);
-    t.extend_from_slice(scope_digest);
+    t.extend_from_slice(offer_digest);
     t
 }
 
@@ -873,11 +970,16 @@ mod tests {
 
     #[test]
     fn consent_transcript_layout_is_exact_and_action_bound() {
-        let sid = [0x11u8; 16];
         let tn = [0x22u8; 16];
-        let scope = ConsentScopeV1::screen_only().digest();
-        let approve = consent_action_transcript(ConsentAction::Approve, &sid, &tn, &scope);
-        let revoke = consent_action_transcript(ConsentAction::Revoke, &sid, &tn, &scope);
+        let offer = ConsentOfferV1::new(
+            [0x11u8; 16],
+            ConsentScopeV1::screen_only(),
+            100,
+            200,
+        );
+        let offer_digest = offer.digest();
+        let approve = consent_action_transcript(ConsentAction::Approve, &tn, &offer_digest);
+        let revoke = consent_action_transcript(ConsentAction::Revoke, &tn, &offer_digest);
         // Same session/token, different action -> different bytes (can't replay).
         assert_ne!(approve, revoke);
         assert_eq!(
@@ -888,9 +990,9 @@ mod tests {
         assert_eq!(revoke[CONSENT_ACTION_DOMAIN.len()], 3);
         assert_eq!(
             approve.len(),
-            CONSENT_ACTION_DOMAIN.len() + 1 + 16 + 16 + 32
+            CONSENT_ACTION_DOMAIN.len() + 1 + 16 + 32
         );
-        assert_eq!(&approve[approve.len() - 32..], &scope);
+        assert_eq!(&approve[approve.len() - 32..], &offer_digest);
     }
 
     #[test]
@@ -916,6 +1018,42 @@ mod tests {
             ConsentFileTransferScope::ViewerToHost,
         );
         assert_ne!(minimal.digest(), complete.digest());
+    }
+
+    #[test]
+    fn consent_offer_is_scope_session_and_time_bound() {
+        let base = ConsentOfferV1::new([1u8; 16], ConsentScopeV1::screen_only(), 100, 200);
+        let other_session = ConsentOfferV1::new([2u8; 16], base.scope, 100, 200);
+        let other_scope = ConsentOfferV1::new(
+            [1u8; 16],
+            ConsentScopeV1::screen(
+                ConsentTelemetryScope::SystemIdentityAndPerformance,
+                ConsentAudioScope::Off,
+            ),
+            100,
+            200,
+        );
+        let other_expiry = ConsentOfferV1::new([1u8; 16], base.scope, 100, 201);
+        assert_ne!(base.digest(), other_session.digest());
+        assert_ne!(base.digest(), other_scope.digest());
+        assert_ne!(base.digest(), other_expiry.digest());
+        assert!(base.is_valid_at(150));
+        assert!(!base.is_valid_at(99));
+        assert!(!base.is_valid_at(201));
+        assert!(base.can_approve_at(99, 1));
+        assert!(base.can_approve_at(201, 1));
+        assert!(base.is_issued_by(250, 0));
+        assert!(other_scope.scope.requires_native_confirmation());
+        assert!(!base.scope.requires_native_confirmation());
+
+        let remote_control = ConsentScopeV1::screen_with_capabilities(
+            ConsentTelemetryScope::Off,
+            ConsentAudioScope::Off,
+            ConsentInputScope::RemoteInputInjection,
+            ConsentClipboardScope::Off,
+            ConsentFileTransferScope::Off,
+        );
+        assert!(remote_control.requires_native_confirmation());
     }
 
     #[test]

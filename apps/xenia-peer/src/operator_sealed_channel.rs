@@ -194,12 +194,10 @@ const OPERATOR_CHANNEL_SOURCE_ID: [u8; 8] = *b"xnaopch1";
 pub(crate) struct SealedConsentDeps {
     pub(crate) require_operator_auth: bool,
     pub(crate) auth_state: std::sync::Arc<crate::operator_http::OperatorAuthState>,
-    pub(crate) session_id: [u8; 16],
-    /// Digest of this session's offered consent scope
-    /// (`xenia_operator_proto::scope_digest`), bound into each per-action
-    /// signature -- see `consent_server::ConsentServer`'s field of the same
-    /// name for the full rationale (this is the sealed-channel twin).
-    pub(crate) scope_digest: [u8; 32],
+    /// Digest of this session's daemon-attested consent offer, bound into each
+    /// per-action signature -- see `consent_server::ConsentServer`'s field of
+    /// the same name for the full rationale (this is the sealed-channel twin).
+    pub(crate) offer_digest: [u8; 32],
     pub(crate) session_uuid: uuid::Uuid,
     pub(crate) ledger: std::sync::Arc<tokio::sync::Mutex<xenia_ledger::Chain>>,
     /// Durable path `ledger`'s entries are atomically persisted to on every
@@ -366,8 +364,7 @@ pub(crate) async fn serve_sealed_operator_channel<T: Transport>(
                     text,
                     deps.require_operator_auth,
                     &deps.auth_state,
-                    &deps.session_id,
-                    &deps.scope_digest,
+                    &deps.offer_digest,
                     &deps.revocations,
                 ) else {
                     continue;
@@ -555,8 +552,7 @@ mod tests {
                 // path is covered by operator_http/operator_live_smoke).
                 require_operator_auth: false,
                 auth_state,
-                session_id: [0x5a; 16],
-                scope_digest: [0u8; 32],
+                offer_digest: [0u8; 32],
                 session_uuid: Uuid::from_u128(3),
                 ledger,
                 ledger_path: std::sync::Arc::new(
@@ -643,8 +639,7 @@ mod tests {
         let deps = SealedConsentDeps {
             require_operator_auth: false,
             auth_state,
-            session_id: [0x33; 16],
-            scope_digest: [0u8; 32],
+            offer_digest: [0u8; 32],
             session_uuid: Uuid::from_u128(21),
             ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
             ledger_path: std::sync::Arc::new(
@@ -738,8 +733,7 @@ mod tests {
         let deps = SealedConsentDeps {
             require_operator_auth: false,
             auth_state,
-            session_id: [0x44; 16],
-            scope_digest: [0u8; 32],
+            offer_digest: [0u8; 32],
             session_uuid: Uuid::from_u128(41),
             ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
             ledger_path: std::sync::Arc::new(
@@ -885,8 +879,7 @@ mod tests {
         let deps = SealedConsentDeps {
             require_operator_auth: false,
             auth_state,
-            session_id: [0x55; 16],
-            scope_digest: [0u8; 32],
+            offer_digest: [0u8; 32],
             session_uuid: Uuid::from_u128(51),
             ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
             ledger_path: std::sync::Arc::new(
@@ -997,8 +990,7 @@ mod tests {
         let deps = SealedConsentDeps {
             require_operator_auth: false,
             auth_state,
-            session_id: [0x56; 16],
-            scope_digest: [0u8; 32],
+            offer_digest: [0u8; 32],
             session_uuid: Uuid::from_u128(61),
             ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
             ledger_path: std::sync::Arc::new(
@@ -1104,8 +1096,7 @@ mod tests {
         let deps = SealedConsentDeps {
             require_operator_auth: false,
             auth_state,
-            session_id: [0x71; 16],
-            scope_digest: [0u8; 32],
+            offer_digest: [0u8; 32],
             session_uuid: Uuid::from_u128(71),
             ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
             ledger_path: std::sync::Arc::new(
@@ -1193,8 +1184,7 @@ mod tests {
             let deps = SealedConsentDeps {
                 require_operator_auth: false,
                 auth_state,
-                session_id: [0x77; 16],
-                scope_digest: [0u8; 32],
+                offer_digest: [0u8; 32],
                 session_uuid: Uuid::from_u128(31),
                 ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
                 ledger_path: std::sync::Arc::new(
