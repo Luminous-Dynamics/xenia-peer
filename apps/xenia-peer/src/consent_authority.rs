@@ -5,7 +5,7 @@
 //!
 //! Plain WebSocket consent and the sealed operator channel are only delivery
 //! mechanisms. They both hand received text to [`ConsentDecisionService`],
-//! which owns the daemon-authoritative offer digest, operator authorization,
+//! which owns the complete daemon-authoritative offer, operator authorization,
 //! live operator-revocation checks, durable audit append, and the complete
 //! consent-session lifecycle. Keeping those invariants in one service prevents
 //! a future transport from accidentally implementing weaker state semantics.
@@ -41,6 +41,7 @@ pub(crate) struct DecodedConsent {
 /// - `Pending -> Approved -> Revoked`
 /// - `Pending -> Denied`
 /// - `Pending -> Failed`
+/// - `Pending -> Expired`
 ///
 /// A revoke received while still pending is treated as a fail-safe denial. A
 /// deny received after approval is not silently reinterpreted as revocation;
@@ -58,6 +59,8 @@ pub(crate) enum ConsentSessionState {
     Revoked = 3,
     /// The ceremony failed before an initial decision could be committed.
     Failed = 4,
+    /// The daemon-authored approval window elapsed before an initial decision.
+    Expired = 5,
 }
 
 impl ConsentSessionState {
@@ -67,12 +70,17 @@ impl ConsentSessionState {
             1 => Self::Approved,
             2 => Self::Denied,
             3 => Self::Revoked,
+            4 => Self::Failed,
+            5 => Self::Expired,
             _ => Self::Failed,
         }
     }
 
     fn is_terminal(self) -> bool {
-        matches!(self, Self::Denied | Self::Revoked | Self::Failed)
+        matches!(
+            self,
+            Self::Denied | Self::Revoked | Self::Failed | Self::Expired
+        )
     }
 }
 
@@ -88,10 +96,11 @@ pub(crate) enum ConsentFollowup {
 pub(crate) struct ConsentDecisionService {
     require_operator_auth: bool,
     auth_state: Arc<OperatorAuthState>,
-    /// Digest of the daemon-attested offer authored for this session.
-    offer_digest: [u8; 32],
+    /// Complete daemon-authored offer. Keeping the typed offer, rather than
+    /// only its digest, lets the authority independently enforce the approval
+    /// window and derive the audit session identity from the same signed data.
+    offer: xenia_operator_proto::ConsentOfferV2,
     revocations: OperatorRevocations,
-    session_uuid: Uuid,
     ledger: Arc<Mutex<Chain>>,
     ledger_path: Arc<PathBuf>,
     /// Serializes audit + lifecycle transitions across every transport.
@@ -99,7 +108,8 @@ pub(crate) struct ConsentDecisionService {
     /// Lock-free mirror for the runtime's hot-path revocation check.
     state: AtomicU8,
     /// Resolves exactly once when the initial ceremony reaches Approved or
-    /// Denied. It is dropped on Failed so the waiter receives channel closure.
+    /// Denied. It is dropped on Failed or Expired so the waiter receives
+    /// channel closure.
     grant_tx: Mutex<Option<oneshot::Sender<bool>>>,
     /// Authenticated action ids already durably committed for this ceremony.
     /// Kept behind the transition lock so check-and-insert is race-free across
@@ -110,13 +120,11 @@ pub(crate) struct ConsentDecisionService {
 
 impl ConsentDecisionService {
     /// Construct the single consent authority for a daemon session.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         require_operator_auth: bool,
         auth_state: Arc<OperatorAuthState>,
-        offer_digest: [u8; 32],
+        offer: xenia_operator_proto::ConsentOfferV2,
         revocations: OperatorRevocations,
-        session_uuid: Uuid,
         ledger: Arc<Mutex<Chain>>,
         ledger_path: Arc<PathBuf>,
         grant_tx: oneshot::Sender<bool>,
@@ -124,9 +132,8 @@ impl ConsentDecisionService {
         Self {
             require_operator_auth,
             auth_state,
-            offer_digest,
+            offer,
             revocations,
-            session_uuid,
             ledger,
             ledger_path,
             transition_lock: Mutex::new(()),
@@ -165,6 +172,19 @@ impl ConsentDecisionService {
         self.grant_tx.lock().await.take();
     }
 
+    /// Close a still-pending ceremony because its daemon-authored approval
+    /// window elapsed. This is distinct from transport failure for lifecycle
+    /// diagnostics, while remaining fail-closed to the grant waiter.
+    pub(crate) async fn expire_pending(&self) {
+        let _transition = self.transition_lock.lock().await;
+        if self.state() != ConsentSessionState::Pending {
+            return;
+        }
+        self.state
+            .store(ConsentSessionState::Expired as u8, Ordering::SeqCst);
+        self.grant_tx.lock().await.take();
+    }
+
     /// Whether an authenticated operator is currently revoked. Sealed
     /// transports use this immediately after channel authentication, before
     /// reading any action payloads.
@@ -176,6 +196,10 @@ impl ConsentDecisionService {
     /// deliberately absent from this API: plaintext and sealed callers receive
     /// exactly the same authorization behavior.
     pub(crate) fn decode(&self, text: &str) -> Option<DecodedConsent> {
+        self.decode_at(text, unix_now_secs())
+    }
+
+    fn decode_at(&self, text: &str, now: u64) -> Option<DecodedConsent> {
         if !self.require_operator_auth {
             let action = match text {
                 "Approve" => ConsentAction::Approve,
@@ -186,6 +210,10 @@ impl ConsentDecisionService {
                     return None;
                 }
             };
+            if action == ConsentAction::Approve && !self.offer.can_approve_at(now, 0) {
+                tracing::warn!("consent approval refused: daemon offer window has expired");
+                return None;
+            }
             return Some(DecodedConsent {
                 action,
                 authorized: None,
@@ -199,16 +227,17 @@ impl ConsentDecisionService {
                 return None;
             }
         };
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_secs())
-            .unwrap_or(0);
+        if request.action == ConsentAction::Approve && !self.offer.can_approve_at(now, 0) {
+            tracing::warn!("consent approval refused: daemon offer window has expired");
+            return None;
+        }
+        let offer_digest = self.offer.digest();
         match crate::operator_auth::authorize_consent_action(
             &self.auth_state.policy,
             &self.auth_state.daemon_key.verifying_key(),
             &self.auth_state.daemon_ml_dsa.public_key_bytes(),
             now,
-            &self.offer_digest,
+            &offer_digest,
             &request,
         ) {
             Ok(authorized) => {
@@ -242,8 +271,25 @@ impl ConsentDecisionService {
     /// fail-closed. The transition lock makes plaintext and sealed delivery
     /// race-safe and prevents duplicate audit entries for replayed decisions.
     pub(crate) async fn apply(&self, decoded: DecodedConsent) -> ConsentFollowup {
+        self.apply_at(decoded, unix_now_secs()).await
+    }
+
+    async fn apply_at(&self, decoded: DecodedConsent, now: u64) -> ConsentFollowup {
         let _transition = self.transition_lock.lock().await;
         let current = self.state();
+
+        // Recheck under the transition lock. A decision may have been decoded
+        // immediately before expiry and then delayed before durable commit.
+        if current == ConsentSessionState::Pending
+            && decoded.action == ConsentAction::Approve
+            && !self.offer.can_approve_at(now, 0)
+        {
+            tracing::warn!("consent approval refused at commit: daemon offer window expired");
+            self.state
+                .store(ConsentSessionState::Expired as u8, Ordering::SeqCst);
+            self.grant_tx.lock().await.take();
+            return ConsentFollowup::Stop;
+        }
 
         if let Some(authorized) = &decoded.authorized
             && self.seen_action_ids.lock().await.contains(&authorized.action_id)
@@ -307,7 +353,7 @@ impl ConsentDecisionService {
         if let Some(authorized) = &decoded.authorized {
             let event = crate::operator_audit::operator_consent_audit_event(
                 authorized,
-                self.session_uuid,
+                Uuid::from_bytes(self.offer.session_id),
             );
             let mut chain = self.ledger.lock().await;
             let committed = tokio::task::block_in_place(|| {
@@ -349,10 +395,19 @@ impl ConsentDecisionService {
                 tracing::info!(approved = false, "consent decision committed")
             }
             ConsentSessionState::Revoked => tracing::info!("consent revocation committed"),
-            ConsentSessionState::Pending | ConsentSessionState::Failed => {}
+            ConsentSessionState::Pending
+            | ConsentSessionState::Failed
+            | ConsentSessionState::Expired => {}
         }
         followup
     }
+}
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -361,11 +416,21 @@ mod tests {
 
     use ed25519_dalek::SigningKey;
 
+    fn test_offer(session_uuid: Uuid) -> xenia_operator_proto::ConsentOfferV2 {
+        xenia_operator_proto::ConsentOfferV2::new(
+            *session_uuid.as_bytes(),
+            [0x31; 32],
+            xenia_operator_proto::ConsentScopeV1::screen_only(),
+            1,
+            u64::MAX,
+        )
+    }
+
     fn authorized_approval() -> AuthorizedConsentAction {
         AuthorizedConsentAction {
             action: ConsentAction::Approve,
             action_id: [0x44; 16],
-            offer_digest: [0x55; 32],
+            offer_digest: test_offer(Uuid::from_u128(10)).digest(),
             operator_id: "alice".to_string(),
             role: crate::operator::OperatorRole::Admin,
             ed25519_pubkey: [0x11; 32],
@@ -397,9 +462,8 @@ mod tests {
         ConsentDecisionService::new(
             false,
             auth_state,
-            [0; 32],
+            test_offer(Uuid::from_u128(10)),
             OperatorRevocations::empty(),
-            Uuid::from_u128(10),
             ledger,
             Arc::new(std::env::temp_dir().join("unused-consent-ledger")),
             grant_tx,
@@ -491,6 +555,120 @@ mod tests {
         assert_eq!(service.state(), ConsentSessionState::Failed);
         assert!(grant_rx.await.is_err());
     }
+    #[tokio::test]
+    async fn expired_offer_rejects_approval_but_still_accepts_fail_safe_denial() {
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let ledger = Arc::new(Mutex::new(Chain::new(daemon)));
+        let (grant_tx, grant_rx) = oneshot::channel();
+        let mut service = service_with_sender(grant_tx, ledger);
+        service.offer = xenia_operator_proto::ConsentOfferV2::new(
+            *Uuid::from_u128(10).as_bytes(),
+            [0x31; 32],
+            xenia_operator_proto::ConsentScopeV1::screen_only(),
+            100,
+            200,
+        );
+
+        assert!(service.decode_at("Approve", 201).is_none());
+        let denial = service
+            .decode_at("Deny", 201)
+            .expect("denial must remain available after approval expiry");
+        assert!(matches!(
+            service.apply_at(denial, 201).await,
+            ConsentFollowup::Stop
+        ));
+        assert!(!grant_rx.await.unwrap());
+        assert_eq!(service.state(), ConsentSessionState::Denied);
+    }
+
+    #[tokio::test]
+    async fn approval_is_rechecked_under_transition_lock() {
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let ledger = Arc::new(Mutex::new(Chain::new(daemon)));
+        let (grant_tx, grant_rx) = oneshot::channel();
+        let mut service = service_with_sender(grant_tx, ledger);
+        service.offer = xenia_operator_proto::ConsentOfferV2::new(
+            *Uuid::from_u128(10).as_bytes(),
+            [0x31; 32],
+            xenia_operator_proto::ConsentScopeV1::screen_only(),
+            100,
+            200,
+        );
+        let decoded = service
+            .decode_at("Approve", 200)
+            .expect("approval is valid at the final offered second");
+
+        assert!(matches!(
+            service.apply_at(decoded, 201).await,
+            ConsentFollowup::Stop
+        ));
+        assert_eq!(service.state(), ConsentSessionState::Expired);
+        assert!(grant_rx.await.is_err(), "an expired grant must not resolve");
+    }
+
+    #[tokio::test]
+    async fn approved_session_can_still_be_revoked_after_offer_expiry() {
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let ledger = Arc::new(Mutex::new(Chain::new(daemon)));
+        let (grant_tx, grant_rx) = oneshot::channel();
+        let mut service = service_with_sender(grant_tx, ledger);
+        service.offer = xenia_operator_proto::ConsentOfferV2::new(
+            *Uuid::from_u128(10).as_bytes(),
+            [0x31; 32],
+            xenia_operator_proto::ConsentScopeV1::screen_only(),
+            100,
+            200,
+        );
+
+        assert!(matches!(
+            service
+                .apply_at(
+                    DecodedConsent {
+                        action: ConsentAction::Approve,
+                        authorized: None,
+                    },
+                    200,
+                )
+                .await,
+            ConsentFollowup::KeepServing
+        ));
+        assert!(grant_rx.await.unwrap());
+        assert!(matches!(
+            service
+                .apply_at(
+                    DecodedConsent {
+                        action: ConsentAction::Revoke,
+                        authorized: None,
+                    },
+                    201,
+                )
+                .await,
+            ConsentFollowup::Stop
+        ));
+        assert_eq!(service.state(), ConsentSessionState::Revoked);
+    }
+
+    #[tokio::test]
+    async fn explicit_timeout_marks_pending_ceremony_expired() {
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let ledger = Arc::new(Mutex::new(Chain::new(daemon)));
+        let (grant_tx, grant_rx) = oneshot::channel();
+        let service = service_with_sender(grant_tx, ledger);
+
+        service.expire_pending().await;
+        assert_eq!(service.state(), ConsentSessionState::Expired);
+        assert!(grant_rx.await.is_err());
+        assert!(matches!(
+            service
+                .apply(DecodedConsent {
+                    action: ConsentAction::Approve,
+                    authorized: None,
+                })
+                .await,
+            ConsentFollowup::Stop
+        ));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn authenticated_action_id_replay_is_not_reaudited() {
         let dir = std::env::temp_dir().join(format!(

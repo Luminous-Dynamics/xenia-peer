@@ -103,9 +103,14 @@ mod tests {
         Arc::new(ConsentDecisionService::new(
             false,
             auth_state,
-            [0u8; 32],
+            xenia_operator_proto::ConsentOfferV2::new(
+                *session_uuid.as_bytes(),
+                [0x31; 32],
+                xenia_operator_proto::ConsentScopeV1::screen_only(),
+                1,
+                u64::MAX,
+            ),
             crate::operator_revocations::OperatorRevocations::empty(),
-            session_uuid,
             ledger,
             Arc::new(ledger_path),
             grant_tx,

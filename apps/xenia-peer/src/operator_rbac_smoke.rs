@@ -132,14 +132,14 @@ async fn operator_rbac_full_chain_smoke() {
         .unwrap()
         .try_into()
         .unwrap();
-    let offer_digest = xenia_operator_proto::ConsentOfferV2::new(
+    let offer = xenia_operator_proto::ConsentOfferV2::new(
         session_id,
         [0x31u8; 32],
         xenia_operator_proto::ConsentScopeV1::screen_only(),
         1,
         u64::MAX,
-    )
-    .digest();
+    );
+    let offer_digest = offer.digest();
     let action_id = [0xA7u8; 16];
     let action_transcript = consent_action_transcript(
         ConsentAction::Approve,
@@ -161,9 +161,8 @@ async fn operator_rbac_full_chain_smoke() {
     let authority = crate::consent_authority::ConsentDecisionService::new(
         true,
         state.clone(),
-        offer_digest,
+        offer,
         no_revocations.clone(),
-        Uuid::from_u128(1),
         Arc::new(tokio::sync::Mutex::new(Chain::new(SigningKey::generate(
             &mut rand::thread_rng(),
         )))),
@@ -188,9 +187,8 @@ async fn operator_rbac_full_chain_smoke() {
     let revoked_authority = crate::consent_authority::ConsentDecisionService::new(
         true,
         state.clone(),
-        offer_digest,
+        offer,
         revocations,
-        Uuid::from_u128(1),
         Arc::new(tokio::sync::Mutex::new(Chain::new(SigningKey::generate(
             &mut rand::thread_rng(),
         )))),
@@ -213,20 +211,18 @@ async fn operator_rbac_full_chain_smoke() {
     // --- 6. a tampered/replayed decision is refused by the same path ---
     // A different daemon-stored offer (here, another session id) produces a
     // different digest, so the per-action signature no longer verifies.
-    let other_offer_digest = xenia_operator_proto::ConsentOfferV2::new(
+    let other_offer = xenia_operator_proto::ConsentOfferV2::new(
         [0u8; 16],
         [0x31u8; 32],
         xenia_operator_proto::ConsentScopeV1::screen_only(),
         1,
         u64::MAX,
-    )
-    .digest();
+    );
     let other_authority = crate::consent_authority::ConsentDecisionService::new(
         true,
         state,
-        other_offer_digest,
+        other_offer,
         no_revocations,
-        Uuid::from_u128(1),
         Arc::new(tokio::sync::Mutex::new(Chain::new(SigningKey::generate(
             &mut rand::thread_rng(),
         )))),

@@ -2119,13 +2119,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .sign_ml_dsa(&consent_offer_bytes),
         ),
     };
-    let consent_offer_digest = consent_offer.digest();
     let consent_service = Arc::new(crate::consent_authority::ConsentDecisionService::new(
         require_operator_auth,
         operator_auth_state.clone(),
-        consent_offer_digest,
+        consent_offer,
         revocations.clone(),
-        session_id,
         shared_ledger.clone(),
         ledger_path.clone(),
         consent_decision_tx,
@@ -2281,10 +2279,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             Ok(Err(_)) => {
+                consent_service.fail_pending().await;
                 warn!("consent channel closed before a decision arrived; exiting");
                 return Ok(());
             }
             Err(_) => {
+                consent_service.expire_pending().await;
                 warn!(
                     timeout_secs = args.consent_timeout_secs,
                     "M1 consent timed out waiting for a decision; exiting"
