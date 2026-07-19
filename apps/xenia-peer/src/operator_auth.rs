@@ -1265,8 +1265,9 @@ mod tests {
         let op = HandshakeManager::new();
         let (daemon, daemon_ml_dsa) = test_daemon();
         let policy = policy_with(&op, OperatorRole::Approver);
-        let offer_digest = xenia_operator_proto::ConsentOfferV1::new(
+        let offer_digest = xenia_operator_proto::ConsentOfferV2::new(
             [7u8; 16],
+            [0x39u8; 32],
             xenia_operator_proto::ConsentScopeV1::screen_only(),
             1,
             u64::MAX,
@@ -1300,8 +1301,9 @@ mod tests {
         let op = HandshakeManager::new();
         let (daemon, daemon_ml_dsa) = test_daemon();
         let policy = policy_with(&op, OperatorRole::Viewer);
-        let offer_digest = xenia_operator_proto::ConsentOfferV1::new(
+        let offer_digest = xenia_operator_proto::ConsentOfferV2::new(
             [7u8; 16],
+            [0x39u8; 32],
             xenia_operator_proto::ConsentScopeV1::screen_only(),
             1,
             u64::MAX,
@@ -1334,15 +1336,17 @@ mod tests {
         let op = HandshakeManager::new();
         let (daemon, daemon_ml_dsa) = test_daemon();
         let policy = policy_with(&op, OperatorRole::Admin);
-        let signed_offer_digest = xenia_operator_proto::ConsentOfferV1::new(
+        let signed_offer_digest = xenia_operator_proto::ConsentOfferV2::new(
             [1u8; 16],
+            [0x39u8; 32],
             xenia_operator_proto::ConsentScopeV1::screen_only(),
             1,
             u64::MAX,
         )
         .digest();
-        let daemon_offer_digest = xenia_operator_proto::ConsentOfferV1::new(
+        let daemon_offer_digest = xenia_operator_proto::ConsentOfferV2::new(
             [2u8; 16],
+            [0x39u8; 32],
             xenia_operator_proto::ConsentScopeV1::screen_only(),
             1,
             u64::MAX,
@@ -1375,8 +1379,9 @@ mod tests {
         let op = HandshakeManager::new();
         let (daemon, daemon_ml_dsa) = test_daemon();
         let policy = policy_with(&op, OperatorRole::Admin);
-        let offer_digest = xenia_operator_proto::ConsentOfferV1::new(
+        let offer_digest = xenia_operator_proto::ConsentOfferV2::new(
             [7u8; 16],
+            [0x39u8; 32],
             xenia_operator_proto::ConsentScopeV1::screen_only(),
             1,
             u64::MAX,
@@ -1411,8 +1416,9 @@ mod tests {
         let op = HandshakeManager::new();
         let (daemon, daemon_ml_dsa) = test_daemon();
         let policy = OperatorPolicy::default();
-        let offer_digest = xenia_operator_proto::ConsentOfferV1::new(
+        let offer_digest = xenia_operator_proto::ConsentOfferV2::new(
             [7u8; 16],
+            [0x39u8; 32],
             xenia_operator_proto::ConsentScopeV1::screen_only(),
             1,
             u64::MAX,
@@ -1446,15 +1452,17 @@ mod tests {
         let (daemon, daemon_ml_dsa) = test_daemon();
         let policy = policy_with(&op, OperatorRole::Admin);
         let session = [7u8; 16];
-        let signed_offer_digest = xenia_operator_proto::ConsentOfferV1::new(
+        let signed_offer_digest = xenia_operator_proto::ConsentOfferV2::new(
             session,
+            [0x39u8; 32],
             xenia_operator_proto::ConsentScopeV1::screen_only(),
             1,
             u64::MAX,
         )
         .digest();
-        let daemon_offer_digest = xenia_operator_proto::ConsentOfferV1::new(
+        let daemon_offer_digest = xenia_operator_proto::ConsentOfferV2::new(
             session,
+            [0x39u8; 32],
             xenia_operator_proto::ConsentScopeV1::screen(
                 xenia_operator_proto::ConsentTelemetryScope::SystemIdentityAndPerformance,
                 xenia_operator_proto::ConsentAudioScope::HostDeviceCapture,

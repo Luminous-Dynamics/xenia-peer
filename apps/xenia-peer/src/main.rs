@@ -2031,14 +2031,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let consent_scope = m1_consent_scope(&args);
     let m1_scope = consent_scope.summary();
     let offer_issued_at = now_ms() / 1_000;
-    let consent_offer = xenia_operator_proto::ConsentOfferV1::new(
+    let consent_offer = xenia_operator_proto::ConsentOfferV2::new(
         *session_id.as_bytes(),
+        handshake.transcript_hash,
         consent_scope,
         offer_issued_at,
         offer_issued_at.saturating_add(args.consent_timeout_secs.max(1)),
     );
     let consent_offer_bytes = consent_offer.canonical_bytes();
-    let attested_consent_offer = xenia_operator_proto::AttestedConsentOfferV1 {
+    let attested_consent_offer = xenia_operator_proto::AttestedConsentOfferV2 {
         offer: consent_offer,
         host_ed_signature_hex: hex::encode(
             operator_auth_state

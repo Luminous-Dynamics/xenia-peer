@@ -32,7 +32,7 @@ use xenia_handshake::{
     HandshakeManager, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN, MlDsaIdentity, host_identity_fingerprint,
 };
 use xenia_operator_agent_proto::{
-    AttestedConsentOfferV1, DaemonIdentityCertificate, SignedTokenDto,
+    AttestedConsentOfferV2, DaemonIdentityCertificate, SignedTokenDto,
 };
 use xenia_operator_proto::{
     challenge_host_attestation_transcript, daemon_delegation_transcript,
@@ -229,11 +229,11 @@ pub fn verify_challenge_attestation(
 }
 
 /// Verify the host identity's hybrid attestation over a typed consent offer.
-/// This prevents the browser from fabricating or modifying the session id,
+/// This prevents the browser from fabricating or modifying the session id, viewer-handshake transcript,
 /// scope, or lifetime that the native agent is asked to authorize.
 pub fn verify_consent_offer_attestation(
     identity: &VerifiedDaemonIdentity,
-    attested: &AttestedConsentOfferV1,
+    attested: &AttestedConsentOfferV2,
 ) -> Result<(), EvidenceError> {
     let host_ed_pk = HandshakeManager::parse_peer_public_key(&identity.host_ed25519_pubkey)
         .map_err(|_| {

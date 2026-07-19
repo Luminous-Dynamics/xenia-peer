@@ -14,7 +14,7 @@ The canonical flow is:
 ```text
 daemon configuration
   -> ConsentScopeV1
-  -> ConsentOfferV1(session, scope, issued_at, approval_expires_at)
+  -> ConsentOfferV2(session, viewer_transcript_hash, scope, issued_at, approval_expires_at)
   -> host Ed25519 + ML-DSA-65 attestation
   -> browser relay
   -> native-agent verification + risk policy + operator signature
@@ -40,15 +40,16 @@ scope rather than parsed back into authority.
 
 ## Offer attestation
 
-`ConsentOfferV1` commits to:
+`ConsentOfferV2` commits to:
 
-- a 128-bit session identifier;
+- a 128-bit application session identifier;
+- the canonical viewer-handshake transcript hash;
 - the digest of the complete canonical scope;
 - issuance time;
 - approval-window expiry.
 
 The daemon's pinned host identity signs the offer with both Ed25519 and
-ML-DSA-65. `AttestedConsentOfferV1` carries the offer and both signatures. The
+ML-DSA-65. `AttestedConsentOfferV2` carries the offer and both signatures. The
 native agent verifies the daemon identity certificate and both offer signatures
 before it considers signing an operator action.
 
@@ -73,7 +74,8 @@ The action id is a caller-generated 128-bit identifier for one semantic
 decision. It is signature-bound, becomes the durable audit request id, and is
 used by the consent authority to make authenticated retries idempotent. The
 token nonce binds the decision to the current daemon-issued operator token. The
-offer digest transitively binds session, full scope, and approval lifetime. Both
+offer digest transitively binds the application session, the authenticated viewer
+handshake, full scope, and approval lifetime. Both
 operator Ed25519 and ML-DSA-65 signatures are required and AND-verified.
 
 ## Time semantics

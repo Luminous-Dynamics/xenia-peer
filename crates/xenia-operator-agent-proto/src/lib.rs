@@ -44,7 +44,7 @@
 use serde::{Deserialize, Serialize};
 
 pub use xenia_operator_proto::{
-    AttestedConsentOfferV1, ConsentAction, ConsentScopeV1, DaemonIdentityCertificate,
+    AttestedConsentOfferV2, ConsentAction, ConsentScopeV1, DaemonIdentityCertificate,
     OperatorRole,
 };
 
@@ -52,7 +52,7 @@ pub use xenia_operator_proto::{
 /// Bump when a breaking change to any request/response shape ships; the
 /// agent should refuse a request whose `schema_version` it doesn't
 /// recognize rather than guessing at compatibility.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// Fields common to every `/v1/sign/*` request: who the caller believes
 /// they are, which daemon they're targeting, and enough to correlate a
@@ -203,8 +203,8 @@ pub struct SignConsentActionRequest {
     /// Daemon-host-attested consent offer. The agent verifies both host
     /// signatures before signing, then binds the operator decision to the
     /// offer digest. The browser may relay this envelope but cannot fabricate
-    /// or alter its session, scope, or lifetime.
-    pub attested_offer: AttestedConsentOfferV1,
+    /// or alter its session, viewer transcript, scope, or lifetime.
+    pub attested_offer: AttestedConsentOfferV2,
     /// The operator's current daemon-issued session token, verified by the
     /// agent before its `token_nonce_hex` is trusted (see
     /// [`SignedTokenDto`]).
@@ -622,9 +622,10 @@ mod tests {
             },
             action: ConsentAction::Approve,
             action_id_hex: "ab".repeat(16),
-            attested_offer: AttestedConsentOfferV1 {
-                offer: xenia_operator_proto::ConsentOfferV1::new(
+            attested_offer: AttestedConsentOfferV2 {
+                offer: xenia_operator_proto::ConsentOfferV2::new(
                     [0xddu8; 16],
+                    [0x77u8; 32],
                     ConsentScopeV1::screen_only(),
                     100,
                     200,
@@ -645,6 +646,7 @@ mod tests {
             parsed.attested_offer.offer.scope,
             ConsentScopeV1::screen_only()
         );
+        assert_eq!(parsed.attested_offer.offer.session_transcript_hash, [0x77; 32]);
         assert_eq!(parsed.token, req.token);
     }
 

@@ -31,7 +31,7 @@ pub const CHALLENGE_DOMAIN: &[u8] = b"xenia-operator-auth-challenge-v1";
 pub const CONSENT_ACTION_DOMAIN: &[u8] = b"xenia-operator-consent-action-v4";
 
 /// Domain separator for a daemon-attested consent offer.
-pub const CONSENT_OFFER_DOMAIN: &[u8] = b"xenia-operator-consent-offer-v1";
+pub const CONSENT_OFFER_DOMAIN: &[u8] = b"xenia-operator-consent-offer-v2";
 
 /// Domain-separation tag for an admin's signature authorizing the revocation of
 /// another operator (the `/operator/revoke` admin action).
@@ -529,11 +529,15 @@ pub const DEFAULT_CONSENT_RISK_POLICY: ConsentRiskPolicyV1 =
 
 /// A daemon-authored consent offer. The host identity signs the canonical
 /// bytes of this structure before the browser sees it, allowing the native
-/// agent to reject fabricated or modified session/scope data.
+/// agent to reject fabricated or modified session/transcript/scope data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConsentOfferV1 {
+pub struct ConsentOfferV2 {
     /// Session to which the offer applies.
     pub session_id: [u8; 16],
+    /// Canonical viewer-handshake transcript hash for the session being granted.
+    /// This commits the offer to the actual authenticated transport/session, not
+    /// only to an application-generated session identifier.
+    pub session_transcript_hash: [u8; 32],
     /// Canonical access scope.
     pub scope: ConsentScopeV1,
     /// Offer creation time, Unix seconds.
@@ -544,16 +548,18 @@ pub struct ConsentOfferV1 {
     pub expires_at: u64,
 }
 
-impl ConsentOfferV1 {
+impl ConsentOfferV2 {
     /// Construct an offer. Callers should ensure `expires_at >= issued_at`.
     pub const fn new(
         session_id: [u8; 16],
+        session_transcript_hash: [u8; 32],
         scope: ConsentScopeV1,
         issued_at: u64,
         expires_at: u64,
     ) -> Self {
         Self {
             session_id,
+            session_transcript_hash,
             scope,
             issued_at,
             expires_at,
@@ -562,13 +568,15 @@ impl ConsentOfferV1 {
 
     /// Stable canonical bytes signed by the daemon host identity.
     ///
-    /// Layout: `CONSENT_OFFER_DOMAIN || session_id(16) || scope_digest(32) ||
-    /// issued_at(8, be) || expires_at(8, be)`.
+    /// Layout: `CONSENT_OFFER_DOMAIN || session_id(16) ||
+    /// session_transcript_hash(32) || scope_digest(32) || issued_at(8, be) ||
+    /// expires_at(8, be)`.
     pub fn canonical_bytes(self) -> Vec<u8> {
         let scope_digest = self.scope.digest();
-        let mut out = Vec::with_capacity(CONSENT_OFFER_DOMAIN.len() + 16 + 32 + 8 + 8);
+        let mut out = Vec::with_capacity(CONSENT_OFFER_DOMAIN.len() + 16 + 32 + 32 + 8 + 8);
         out.extend_from_slice(CONSENT_OFFER_DOMAIN);
         out.extend_from_slice(&self.session_id);
+        out.extend_from_slice(&self.session_transcript_hash);
         out.extend_from_slice(&scope_digest);
         out.extend_from_slice(&self.issued_at.to_be_bytes());
         out.extend_from_slice(&self.expires_at.to_be_bytes());
@@ -609,10 +617,10 @@ impl ConsentOfferV1 {
 /// canonical bytes. The browser relays this envelope but cannot modify it
 /// without invalidating both signatures.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AttestedConsentOfferV1 {
+pub struct AttestedConsentOfferV2 {
     /// The typed offer.
-    pub offer: ConsentOfferV1,
-    /// Host Ed25519 signature over [`ConsentOfferV1::canonical_bytes`], hex.
+    pub offer: ConsentOfferV2,
+    /// Host Ed25519 signature over [`ConsentOfferV2::canonical_bytes`], hex.
     pub host_ed_signature_hex: String,
     /// Host ML-DSA-65 signature over the same bytes, hex.
     pub host_ml_dsa_signature_hex: String,
@@ -920,6 +928,7 @@ mod tests {
         name: String,
         scope: ConsentScopeV1,
         session_id_hex: String,
+        session_transcript_hash_hex: String,
         issued_at: u64,
         expires_at: u64,
         action: ConsentAction,
@@ -952,20 +961,23 @@ mod tests {
     }
 
     #[test]
-    fn consent_v2_conformance_vectors_are_stable() {
+    fn consent_v3_conformance_vectors_are_stable() {
         let fixture: ConsentConformanceFixture = serde_json::from_str(include_str!(
-            "../fixtures/consent-v2.json"
+            "../fixtures/consent-v3.json"
         ))
         .expect("consent conformance fixture parses");
-        assert_eq!(fixture.schema, "xenia-consent-conformance-v2");
+        assert_eq!(fixture.schema, "xenia-consent-conformance-v3");
         assert!(!fixture.vectors.is_empty());
 
         for vector in fixture.vectors {
             let session_id = decode_hex::<16>(&vector.session_id_hex);
+            let session_transcript_hash =
+                decode_hex::<32>(&vector.session_transcript_hash_hex);
             let action_id = decode_hex::<16>(&vector.action_id_hex);
             let token_nonce = decode_hex::<16>(&vector.token_nonce_hex);
-            let offer = ConsentOfferV1::new(
+            let offer = ConsentOfferV2::new(
                 session_id,
+                session_transcript_hash,
                 vector.scope,
                 vector.issued_at,
                 vector.expires_at,
@@ -1125,8 +1137,9 @@ mod tests {
     fn consent_transcript_layout_is_exact_and_action_bound() {
         let action_id = [0x33u8; 16];
         let tn = [0x22u8; 16];
-        let offer = ConsentOfferV1::new(
+        let offer = ConsentOfferV2::new(
             [0x11u8; 16],
+            [0x55u8; 32],
             ConsentScopeV1::screen_only(),
             100,
             200,
@@ -1198,10 +1211,31 @@ mod tests {
 
     #[test]
     fn consent_offer_is_scope_session_and_time_bound() {
-        let base = ConsentOfferV1::new([1u8; 16], ConsentScopeV1::screen_only(), 100, 200);
-        let other_session = ConsentOfferV1::new([2u8; 16], base.scope, 100, 200);
-        let other_scope = ConsentOfferV1::new(
+        let transcript_hash = [0x44u8; 32];
+        let base = ConsentOfferV2::new(
             [1u8; 16],
+            transcript_hash,
+            ConsentScopeV1::screen_only(),
+            100,
+            200,
+        );
+        let other_session = ConsentOfferV2::new(
+            [2u8; 16],
+            transcript_hash,
+            base.scope,
+            100,
+            200,
+        );
+        let other_transcript = ConsentOfferV2::new(
+            [1u8; 16],
+            [0x45u8; 32],
+            base.scope,
+            100,
+            200,
+        );
+        let other_scope = ConsentOfferV2::new(
+            [1u8; 16],
+            transcript_hash,
             ConsentScopeV1::screen(
                 ConsentTelemetryScope::SystemIdentityAndPerformance,
                 ConsentAudioScope::Off,
@@ -1209,8 +1243,15 @@ mod tests {
             100,
             200,
         );
-        let other_expiry = ConsentOfferV1::new([1u8; 16], base.scope, 100, 201);
+        let other_expiry = ConsentOfferV2::new(
+            [1u8; 16],
+            transcript_hash,
+            base.scope,
+            100,
+            201,
+        );
         assert_ne!(base.digest(), other_session.digest());
+        assert_ne!(base.digest(), other_transcript.digest());
         assert_ne!(base.digest(), other_scope.digest());
         assert_ne!(base.digest(), other_expiry.digest());
         assert!(base.is_valid_at(150));

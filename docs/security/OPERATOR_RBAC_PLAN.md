@@ -66,7 +66,7 @@ Design for closing review finding #17 (no server-side operator auth/RBAC).
     plaintext fallback otherwise).
   - **E2E wiring (DONE):** the daemon broadcasts a compatibility
     `{session_id, scope, scope_v1}` view plus a hybrid host-attested
-    `ConsentOfferV1`. The native agent verifies that offer before signing, and
+    `ConsentOfferV2`. The native agent verifies that offer before signing, and
     the daemon verifies the resulting action signature against its own stored
     offer digest, binding the exact session, complete capability set,
     directions, and approval lifetime. The `ConsentModal` derives its admin

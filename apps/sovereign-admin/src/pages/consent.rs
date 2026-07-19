@@ -17,7 +17,7 @@ use gloo_net::websocket::{futures::WebSocket, Message};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
-use xenia_operator_proto::{AttestedConsentOfferV1, ConsentAction, ConsentScopeV1};
+use xenia_operator_proto::{AttestedConsentOfferV2, ConsentAction, ConsentScopeV1};
 
 use crate::agent_client::AgentConfig;
 use crate::app::OperatorSessionCtx;
@@ -30,7 +30,7 @@ fn parse_scope_v1(prompt: &str) -> Option<ConsentScopeV1> {
     serde_json::from_value(v.get("scope_v1")?.clone()).ok()
 }
 
-fn parse_attested_offer(prompt: &str) -> Option<AttestedConsentOfferV1> {
+fn parse_attested_offer(prompt: &str) -> Option<AttestedConsentOfferV2> {
     let v: serde_json::Value = serde_json::from_str(prompt).ok()?;
     serde_json::from_value(v.get("attested_offer")?.clone()).ok()
 }

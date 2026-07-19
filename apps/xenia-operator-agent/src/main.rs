@@ -698,6 +698,7 @@ async fn sign_consent_action(
         let suite = req.common.suite.clone();
         let scope = offer.scope.summary();
         let session_id = hex::encode(offer.session_id);
+        let viewer_transcript_hash = hex::encode(offer.session_transcript_hash);
         let expires_at = offer.expires_at.to_string();
         let confirmed = tokio::task::spawn_blocking(move || {
             confirm_state
@@ -709,6 +710,7 @@ async fn sign_consent_action(
                     &[
                         ("scope", scope),
                         ("session id", session_id),
+                        ("viewer transcript hash", viewer_transcript_hash),
                         ("offer expires at", expires_at),
                         ("daemon endpoint", daemon_endpoint),
                         ("daemon fingerprint", daemon_fingerprint_hex),
@@ -2183,15 +2185,16 @@ mod tests {
         scope: xenia_operator_proto::ConsentScopeV1,
         issued_at: u64,
         expires_at: u64,
-    ) -> xenia_operator_proto::AttestedConsentOfferV1 {
-        let offer = xenia_operator_proto::ConsentOfferV1::new(
+    ) -> xenia_operator_proto::AttestedConsentOfferV2 {
+        let offer = xenia_operator_proto::ConsentOfferV2::new(
             [0xddu8; 16],
+            [0x77u8; 32],
             scope,
             issued_at,
             expires_at,
         );
         let bytes = offer.canonical_bytes();
-        xenia_operator_proto::AttestedConsentOfferV1 {
+        xenia_operator_proto::AttestedConsentOfferV2 {
             offer,
             host_ed_signature_hex: hex::encode(host.sign(&bytes).to_bytes()),
             host_ml_dsa_signature_hex: hex::encode(host.sign_ml_dsa(&bytes)),
@@ -2201,7 +2204,7 @@ mod tests {
     fn attested_test_offer(
         host: &HandshakeManager,
         scope: xenia_operator_proto::ConsentScopeV1,
-    ) -> xenia_operator_proto::AttestedConsentOfferV1 {
+    ) -> xenia_operator_proto::AttestedConsentOfferV2 {
         let now = unix_now_secs();
         attested_test_offer_with_window(
             host,
@@ -2251,7 +2254,7 @@ mod tests {
             xenia_operator_proto::ConsentScopeV1::screen_only(),
             serde_json::json!({}),
         );
-        let attested: xenia_operator_proto::AttestedConsentOfferV1 =
+        let attested: xenia_operator_proto::AttestedConsentOfferV2 =
             serde_json::from_value(body["attested_offer"].clone()).unwrap();
         let offer_digest = attested.offer.digest();
         let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
@@ -2294,7 +2297,7 @@ mod tests {
             xenia_operator_proto::ConsentScopeV1::screen_only(),
             serde_json::json!({ "action": "Deny" }),
         );
-        let attested: xenia_operator_proto::AttestedConsentOfferV1 =
+        let attested: xenia_operator_proto::AttestedConsentOfferV2 =
             serde_json::from_value(body["attested_offer"].clone()).unwrap();
         let offer_digest = attested.offer.digest();
         let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
@@ -2342,7 +2345,7 @@ mod tests {
             ),
             serde_json::json!({}),
         );
-        let attested: xenia_operator_proto::AttestedConsentOfferV1 =
+        let attested: xenia_operator_proto::AttestedConsentOfferV2 =
             serde_json::from_value(body["attested_offer"].clone()).unwrap();
         let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
         assert_eq!(status, StatusCode::OK, "body: {json}");
@@ -2351,8 +2354,9 @@ mod tests {
         let expected_manager = HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]);
         // A verifier reconstructing an offer with a different authoritative
         // scope must reject.
-        let wrong_offer_digest = xenia_operator_proto::ConsentOfferV1::new(
+        let wrong_offer_digest = xenia_operator_proto::ConsentOfferV2::new(
             attested.offer.session_id,
+            attested.offer.session_transcript_hash,
             xenia_operator_proto::ConsentScopeV1::screen_only(),
             attested.offer.issued_at,
             attested.offer.expires_at,
@@ -2429,8 +2433,8 @@ mod tests {
         );
         // Keep the signature correctly shaped but alter the signed offer.
         // This must exercise cryptographic verification, not just parsing.
-        body["attested_offer"]["offer"]["session_id"] =
-            serde_json::to_value([0xaau8; 16]).unwrap();
+        body["attested_offer"]["offer"]["session_transcript_hash"] =
+            serde_json::to_value([0xaau8; 32]).unwrap();
         let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "body: {json}");
         assert_eq!(json["code"], "host_not_trusted");

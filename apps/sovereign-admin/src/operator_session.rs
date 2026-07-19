@@ -48,7 +48,7 @@ use xenia_operator_agent_proto::{
     SignRevokeRequest, SignedTokenDto,
 };
 use xenia_operator_proto::{
-    AttestedConsentOfferV1, ConsentAction, DaemonIdentityCertificate, OperatorAction,
+    AttestedConsentOfferV2, ConsentAction, DaemonIdentityCertificate, OperatorAction,
     OperatorRole,
 };
 
@@ -280,7 +280,7 @@ pub async fn build_consent_request(
     agent_session: &AgentSessionToken,
     session: &OperatorSession,
     action: ConsentAction,
-    attested_offer: &AttestedConsentOfferV1,
+    attested_offer: &AttestedConsentOfferV2,
 ) -> Result<String, String> {
     let base = endpoint.trim_end_matches('/');
     let cert = fetch_daemon_certificate(base).await?;

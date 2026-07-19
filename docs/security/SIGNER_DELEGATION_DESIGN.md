@@ -183,7 +183,7 @@ Every request carries:
   `revoke_operator_transcript` need — nothing else — plus, per action, the
   daemon-signed evidence that binds those fields to a real daemon: a host
   attestation over the nonce for `/v1/sign/challenge`; a host-attested typed
-  `ConsentOfferV1` plus the full signed session token for
+  `ConsentOfferV2` plus the full signed session token for
   `/v1/sign/consent-action`; or the full signed session token for
   `/v1/sign/revoke`);
 - freshness/expiry information where the underlying protocol has it.

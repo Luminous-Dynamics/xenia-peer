@@ -132,8 +132,9 @@ async fn operator_rbac_full_chain_smoke() {
         .unwrap()
         .try_into()
         .unwrap();
-    let offer_digest = xenia_operator_proto::ConsentOfferV1::new(
+    let offer_digest = xenia_operator_proto::ConsentOfferV2::new(
         session_id,
+        [0x31u8; 32],
         xenia_operator_proto::ConsentScopeV1::screen_only(),
         1,
         u64::MAX,
@@ -212,8 +213,9 @@ async fn operator_rbac_full_chain_smoke() {
     // --- 6. a tampered/replayed decision is refused by the same path ---
     // A different daemon-stored offer (here, another session id) produces a
     // different digest, so the per-action signature no longer verifies.
-    let other_offer_digest = xenia_operator_proto::ConsentOfferV1::new(
+    let other_offer_digest = xenia_operator_proto::ConsentOfferV2::new(
         [0u8; 16],
+        [0x31u8; 32],
         xenia_operator_proto::ConsentScopeV1::screen_only(),
         1,
         u64::MAX,
