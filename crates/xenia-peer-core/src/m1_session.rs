@@ -34,12 +34,14 @@ pub enum M1Permission {
     StreamFrame,
     /// Permission to inject viewer input on the reverse path.
     InjectInput,
-    /// Permission to apply a viewer-originated clipboard update to the
-    /// real host clipboard (reverse path, bidirectional clipboard mode).
-    ClipboardSync,
-    /// Permission to write a received file-transfer chunk to disk, or to
-    /// read a local file's bytes for an outbound transfer.
-    FileTransfer,
+    /// Permission to read host clipboard contents for delivery to the viewer.
+    ReadHostClipboard,
+    /// Permission to apply viewer clipboard contents to the host clipboard.
+    WriteHostClipboard,
+    /// Permission to read a host file and send it to the viewer.
+    SendFileToViewer,
+    /// Permission to receive viewer file bytes and write them on the host.
+    ReceiveFileFromViewer,
 }
 
 /// The set of privileged operations a granted session actually authorizes.
@@ -55,10 +57,14 @@ pub struct M1PermissionSet {
     pub stream_frame: bool,
     /// Reverse-path input injection.
     pub inject_input: bool,
-    /// Reverse-path clipboard apply.
-    pub clipboard_sync: bool,
-    /// File-transfer read/write (either direction).
-    pub file_transfer: bool,
+    /// Host clipboard disclosure to the viewer.
+    pub read_host_clipboard: bool,
+    /// Viewer clipboard application to the host.
+    pub write_host_clipboard: bool,
+    /// Host file disclosure to the viewer.
+    pub send_file_to_viewer: bool,
+    /// Viewer file receipt and host write.
+    pub receive_file_from_viewer: bool,
 }
 
 impl M1PermissionSet {
@@ -69,8 +75,10 @@ impl M1PermissionSet {
         Self {
             stream_frame: true,
             inject_input: true,
-            clipboard_sync: true,
-            file_transfer: true,
+            read_host_clipboard: true,
+            write_host_clipboard: true,
+            send_file_to_viewer: true,
+            receive_file_from_viewer: true,
         }
     }
 
@@ -79,8 +87,10 @@ impl M1PermissionSet {
         match permission {
             M1Permission::StreamFrame => self.stream_frame,
             M1Permission::InjectInput => self.inject_input,
-            M1Permission::ClipboardSync => self.clipboard_sync,
-            M1Permission::FileTransfer => self.file_transfer,
+            M1Permission::ReadHostClipboard => self.read_host_clipboard,
+            M1Permission::WriteHostClipboard => self.write_host_clipboard,
+            M1Permission::SendFileToViewer => self.send_file_to_viewer,
+            M1Permission::ReceiveFileFromViewer => self.receive_file_from_viewer,
         }
     }
 }
@@ -98,10 +108,14 @@ pub enum M1AuditEvent {
     FrameStreamed,
     /// An input event was allowed through the active session.
     InputInjected,
-    /// A viewer-originated clipboard update was applied to the host clipboard.
-    ClipboardSynced,
-    /// A file-transfer chunk was allowed through (either direction).
-    FileTransferred,
+    /// Host clipboard contents were disclosed to the viewer.
+    HostClipboardRead,
+    /// Viewer clipboard contents were applied to the host.
+    HostClipboardWritten,
+    /// Host file bytes were sent to the viewer.
+    FileSentToViewer,
+    /// Viewer file bytes were accepted for host storage.
+    FileReceivedFromViewer,
     /// Consent was revoked.
     ConsentRevoked,
     /// The session ended normally.
@@ -300,20 +314,31 @@ impl M1SessionMachine {
         Ok(())
     }
 
-    /// Record that one viewer-originated clipboard update was applied to
-    /// the host clipboard on the reverse path.
-    pub fn sync_clipboard(&mut self) -> Result<(), M1SessionError> {
-        self.require_active(M1Permission::ClipboardSync)?;
-        self.audit.push(M1AuditEvent::ClipboardSynced);
+    /// Record that host clipboard contents were read for delivery to the viewer.
+    pub fn read_host_clipboard(&mut self) -> Result<(), M1SessionError> {
+        self.require_active(M1Permission::ReadHostClipboard)?;
+        self.audit.push(M1AuditEvent::HostClipboardRead);
         Ok(())
     }
 
-    /// Record that one file-transfer chunk was allowed through (either
-    /// direction: writing a received chunk to disk, or reading a local
-    /// chunk to send).
-    pub fn transfer_file(&mut self) -> Result<(), M1SessionError> {
-        self.require_active(M1Permission::FileTransfer)?;
-        self.audit.push(M1AuditEvent::FileTransferred);
+    /// Record that viewer clipboard contents were applied to the host.
+    pub fn write_host_clipboard(&mut self) -> Result<(), M1SessionError> {
+        self.require_active(M1Permission::WriteHostClipboard)?;
+        self.audit.push(M1AuditEvent::HostClipboardWritten);
+        Ok(())
+    }
+
+    /// Record that host file bytes were sent to the viewer.
+    pub fn send_file_to_viewer(&mut self) -> Result<(), M1SessionError> {
+        self.require_active(M1Permission::SendFileToViewer)?;
+        self.audit.push(M1AuditEvent::FileSentToViewer);
+        Ok(())
+    }
+
+    /// Record that viewer file bytes were accepted for host storage.
+    pub fn receive_file_from_viewer(&mut self) -> Result<(), M1SessionError> {
+        self.require_active(M1Permission::ReceiveFileFromViewer)?;
+        self.audit.push(M1AuditEvent::FileReceivedFromViewer);
         Ok(())
     }
 
@@ -376,12 +401,12 @@ mod tests {
             denied(M1Permission::InjectInput)
         );
         assert_eq!(
-            session.sync_clipboard().unwrap_err(),
-            denied(M1Permission::ClipboardSync)
+            session.write_host_clipboard().unwrap_err(),
+            denied(M1Permission::WriteHostClipboard)
         );
         assert_eq!(
-            session.transfer_file().unwrap_err(),
-            denied(M1Permission::FileTransfer)
+            session.receive_file_from_viewer().unwrap_err(),
+            denied(M1Permission::ReceiveFileFromViewer)
         );
     }
 
@@ -393,8 +418,10 @@ mod tests {
 
         session.stream_frame().unwrap();
         session.inject_input().unwrap();
-        session.sync_clipboard().unwrap();
-        session.transfer_file().unwrap();
+        session.read_host_clipboard().unwrap();
+        session.write_host_clipboard().unwrap();
+        session.send_file_to_viewer().unwrap();
+        session.receive_file_from_viewer().unwrap();
         assert_eq!(session.granted_permissions(), M1PermissionSet::all());
     }
 
@@ -492,71 +519,102 @@ mod tests {
     }
 
     #[test]
-    fn cannot_sync_clipboard_before_consent() {
+    fn cannot_write_host_clipboard_before_consent() {
         let mut session = M1SessionMachine::new();
         session.offer().unwrap();
 
-        let err = session.sync_clipboard().unwrap_err();
+        let err = session.write_host_clipboard().unwrap_err();
 
         assert_eq!(
             err,
             M1SessionError::PermissionDenied {
                 state: M1SessionState::Offered,
-                permission: M1Permission::ClipboardSync
+                permission: M1Permission::WriteHostClipboard
             }
         );
     }
 
     #[test]
-    fn active_session_allows_clipboard_sync() {
+    fn active_session_allows_host_clipboard_write() {
         let mut session = M1SessionMachine::new();
         session.offer().unwrap();
         session.grant_consent().unwrap();
 
-        session.sync_clipboard().unwrap();
+        session.write_host_clipboard().unwrap();
 
         assert_eq!(
             session.audit(),
             &[
                 M1AuditEvent::SessionOffered,
                 M1AuditEvent::ConsentGranted,
-                M1AuditEvent::ClipboardSynced
+                M1AuditEvent::HostClipboardWritten
             ]
         );
     }
 
     #[test]
-    fn cannot_transfer_file_before_consent() {
+    fn cannot_receive_file_before_consent() {
         let mut session = M1SessionMachine::new();
         session.offer().unwrap();
 
-        let err = session.transfer_file().unwrap_err();
+        let err = session.receive_file_from_viewer().unwrap_err();
 
         assert_eq!(
             err,
             M1SessionError::PermissionDenied {
                 state: M1SessionState::Offered,
-                permission: M1Permission::FileTransfer
+                permission: M1Permission::ReceiveFileFromViewer
             }
         );
     }
 
     #[test]
-    fn active_session_allows_file_transfer() {
+    fn active_session_allows_file_receive() {
         let mut session = M1SessionMachine::new();
         session.offer().unwrap();
         session.grant_consent().unwrap();
 
-        session.transfer_file().unwrap();
+        session.receive_file_from_viewer().unwrap();
 
         assert_eq!(
             session.audit(),
             &[
                 M1AuditEvent::SessionOffered,
                 M1AuditEvent::ConsentGranted,
-                M1AuditEvent::FileTransferred
+                M1AuditEvent::FileReceivedFromViewer
             ]
         );
+    }
+
+    #[test]
+    fn one_way_grants_do_not_authorize_the_opposite_direction() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+        session
+            .grant_consent_scoped(M1PermissionSet {
+                stream_frame: true,
+                read_host_clipboard: true,
+                send_file_to_viewer: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        session.read_host_clipboard().unwrap();
+        session.send_file_to_viewer().unwrap();
+        assert!(matches!(
+            session.write_host_clipboard(),
+            Err(M1SessionError::PermissionDenied {
+                permission: M1Permission::WriteHostClipboard,
+                ..
+            })
+        ));
+        assert!(matches!(
+            session.receive_file_from_viewer(),
+            Err(M1SessionError::PermissionDenied {
+                permission: M1Permission::ReceiveFileFromViewer,
+                ..
+            })
+        ));
     }
 
     #[test]

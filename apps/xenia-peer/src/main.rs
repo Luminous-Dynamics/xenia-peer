@@ -1479,14 +1479,11 @@ fn load_or_create_host_identity_highsec(
     )
 }
 
-/// Derive runtime consent tiers from the exact sealed capability object.
+/// Derive runtime consent permissions from the exact sealed capability object.
 ///
 /// The same `RawCapabilities` value is hashed into the viewer handshake, sent
 /// to the viewer, converted into the signed consent scope, and used here to
-/// derive the existing coarse M1 permission tiers. Direction-specific runtime
-/// handlers still enforce their immutable per-run configuration; in particular,
-/// `M1PermissionSet` currently represents file transfer as one tier rather than
-/// preserving its negotiated direction.
+/// preserve each clipboard and file-transfer direction in the M1 gate itself.
 fn configured_permission_set(capabilities: &xenia_peer_core::RawCapabilities) -> M1PermissionSet {
     use xenia_peer_core::{ClipboardCapability, FileTransferCapability, InputControlCapability};
 
@@ -1496,11 +1493,22 @@ fn configured_permission_set(capabilities: &xenia_peer_core::RawCapabilities) ->
             capabilities.input_control,
             InputControlCapability::RemoteInputInjection
         ),
-        clipboard_sync: matches!(
+        read_host_clipboard: matches!(
+            capabilities.clipboard,
+            ClipboardCapability::HostToViewer | ClipboardCapability::Bidirectional
+        ),
+        write_host_clipboard: matches!(
             capabilities.clipboard,
             ClipboardCapability::ViewerToHost | ClipboardCapability::Bidirectional
         ),
-        file_transfer: !matches!(capabilities.file_transfer, FileTransferCapability::Off),
+        send_file_to_viewer: matches!(
+            capabilities.file_transfer,
+            FileTransferCapability::HostToViewer | FileTransferCapability::Bidirectional
+        ),
+        receive_file_from_viewer: matches!(
+            capabilities.file_transfer,
+            FileTransferCapability::ViewerToHost | FileTransferCapability::Bidirectional
+        ),
     }
 }
 
@@ -2259,9 +2267,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 m1_runtime.grant_consent_scoped(granted)?;
                 info!(
                     inject_input = granted.inject_input,
-                    clipboard_sync = granted.clipboard_sync,
-                    file_transfer = granted.file_transfer,
-                    "M1 consent granted; only the operator-enabled tiers unlocked"
+                    read_host_clipboard = granted.read_host_clipboard,
+                    write_host_clipboard = granted.write_host_clipboard,
+                    send_file_to_viewer = granted.send_file_to_viewer,
+                    receive_file_from_viewer = granted.receive_file_from_viewer,
+                    "M1 consent granted; only the operator-enabled directions unlocked"
                 );
             }
             Ok(Ok(false)) => {
@@ -2318,7 +2328,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or("transfer")
             .to_string();
         let transfer_id = 1;
-        m1_runtime.lock().await.allow_file_transfer_flow()?;
+        m1_runtime.lock().await.allow_file_send_to_viewer()?;
         let offer = xenia_peer_core::FileTransferMessage::Offer {
             transfer_id,
             name: name.clone(),
@@ -2417,7 +2427,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     {
                         let mut m1_runtime = m1_runtime.lock().await;
-                        if let Err(err) = m1_runtime.allow_clipboard_flow() {
+                        if let Err(err) = m1_runtime.allow_host_clipboard_write() {
                             warn!(error = %err, "clipboard update rejected by M1 consent gate");
                             continue;
                         }
@@ -2602,6 +2612,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(text) = read_host_clipboard_text()
                 && Some(&text) != last_sent_clipboard_text.as_ref()
             {
+                m1_runtime.lock().await.allow_host_clipboard_read()?;
                 m1_runtime.lock().await.preflight_frame_flow()?;
                 let frame_id = session.lock().await.next_frame_id();
                 let seq = clipboard_seq;
@@ -2962,33 +2973,49 @@ mod consent_scope_tests {
         let granted = configured_permissions(&args);
         assert!(granted.stream_frame);
         assert!(!granted.inject_input);
-        assert!(!granted.clipboard_sync);
-        assert!(!granted.file_transfer);
+        assert!(!granted.read_host_clipboard);
+        assert!(!granted.write_host_clipboard);
+        assert!(!granted.send_file_to_viewer);
+        assert!(!granted.receive_file_from_viewer);
     }
 
     #[test]
-    fn each_enabled_capability_unlocks_exactly_its_own_tier() {
+    fn each_enabled_capability_unlocks_exactly_its_own_direction() {
         let input = args_with(InputBackendChoice::Log, ClipboardMode::Off, None, None);
-        assert!(configured_permissions(&input).inject_input);
-        assert!(!configured_permissions(&input).clipboard_sync);
+        let granted = configured_permissions(&input);
+        assert!(granted.inject_input);
+        assert!(!granted.read_host_clipboard);
+        assert!(!granted.write_host_clipboard);
 
-        let clip = args_with(
-            InputBackendChoice::Noop,
-            ClipboardMode::Bidirectional,
-            None,
-            None,
-        );
-        assert!(configured_permissions(&clip).clipboard_sync);
-        assert!(!configured_permissions(&clip).inject_input);
-
-        // Host-to-viewer clipboard is not a host-write grant.
-        let clip_one_way = args_with(
+        let host_clipboard = args_with(
             InputBackendChoice::Noop,
             ClipboardMode::HostToViewer,
             None,
             None,
         );
-        assert!(!configured_permissions(&clip_one_way).clipboard_sync);
+        let granted = configured_permissions(&host_clipboard);
+        assert!(granted.read_host_clipboard);
+        assert!(!granted.write_host_clipboard);
+
+        let bidirectional_clipboard = args_with(
+            InputBackendChoice::Noop,
+            ClipboardMode::Bidirectional,
+            None,
+            None,
+        );
+        let granted = configured_permissions(&bidirectional_clipboard);
+        assert!(granted.read_host_clipboard);
+        assert!(granted.write_host_clipboard);
+
+        let send = args_with(
+            InputBackendChoice::Noop,
+            ClipboardMode::Off,
+            None,
+            Some(std::path::PathBuf::from("/tmp/outbound")),
+        );
+        let granted = configured_permissions(&send);
+        assert!(granted.send_file_to_viewer);
+        assert!(!granted.receive_file_from_viewer);
 
         let recv = args_with(
             InputBackendChoice::Noop,
@@ -2996,7 +3023,9 @@ mod consent_scope_tests {
             Some(std::path::PathBuf::from("/tmp/inbox")),
             None,
         );
-        assert!(configured_permissions(&recv).file_transfer);
+        let granted = configured_permissions(&recv);
+        assert!(!granted.send_file_to_viewer);
+        assert!(granted.receive_file_from_viewer);
     }
 
     #[test]

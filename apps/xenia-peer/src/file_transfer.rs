@@ -146,7 +146,7 @@ pub(crate) async fn handle_envelope(
             let decision = state.evaluate_offer(config, &name, size);
             let reply = match decision {
                 OfferDecision::Accept { safe_name } => {
-                    if let Err(err) = m1_runtime.lock().await.allow_file_transfer_flow() {
+                    if let Err(err) = m1_runtime.lock().await.allow_file_receive_from_viewer() {
                         warn!(error = %err, "file transfer offer rejected by M1 consent gate");
                         return Ok(());
                     }
@@ -195,7 +195,7 @@ pub(crate) async fn handle_envelope(
                 "transfer accepted, sending chunks"
             );
             for (i, chunk) in transfer.data.chunks(FILE_TRANSFER_CHUNK_SIZE).enumerate() {
-                if let Err(err) = m1_runtime.lock().await.allow_file_transfer_flow() {
+                if let Err(err) = m1_runtime.lock().await.allow_file_send_to_viewer() {
                     warn!(error = %err, "outgoing file transfer halted by M1 consent gate");
                     return Ok(());
                 }
@@ -234,7 +234,7 @@ pub(crate) async fn handle_envelope(
             offset,
             data,
         } => {
-            if let Err(err) = m1_runtime.lock().await.allow_file_transfer_flow() {
+            if let Err(err) = m1_runtime.lock().await.allow_file_receive_from_viewer() {
                 warn!(error = %err, "incoming file chunk rejected by M1 consent gate; dropping transfer");
                 state.incoming.remove(&transfer_id);
                 return Ok(());
@@ -265,7 +265,7 @@ pub(crate) async fn handle_envelope(
             let actual_hash = *blake3::hash(&transfer.buffer).as_bytes();
             let ok = actual_hash == transfer.expected_hash;
             if ok {
-                if let Err(err) = m1_runtime.lock().await.allow_file_transfer_flow() {
+                if let Err(err) = m1_runtime.lock().await.allow_file_receive_from_viewer() {
                     warn!(error = %err, "completed file transfer rejected by M1 consent gate; not written");
                     return Ok(());
                 }
