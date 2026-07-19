@@ -80,8 +80,11 @@ def run_case(root: Path, case: dict[str, object]) -> dict[str, object]:
 
 
 def source_contains_all_names(root: Path) -> dict[str, object]:
-    paths = [
-        root / "crates/xenia-ledger/src/lib.rs",
+    # xenia-ledger/src was split from one lib.rs into focused modules on
+    # 2026-07-19 (ConsentKind's stable names now live in entry.rs) --
+    # search every source file so this guard still catches the names
+    # silently disappearing, wherever they currently live.
+    paths = sorted((root / "crates/xenia-ledger/src").glob("*.rs")) + [
         root / "docs/observability/EVENT_TAXONOMY.md",
         root / "apps/sovereign-admin/src/pages/sessions.rs",
     ]

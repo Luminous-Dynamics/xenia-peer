@@ -24,7 +24,10 @@ make_fixture() {
     "$fixture/.github/workflows" \
     "$fixture/scripts"
   cp "$root/crates/xenia-ledger/Cargo.toml" "$fixture/crates/xenia-ledger/Cargo.toml"
-  cp "$root/crates/xenia-ledger/src/lib.rs" "$fixture/crates/xenia-ledger/src/lib.rs"
+  # xenia-ledger/src was split from one lib.rs into focused modules on
+  # 2026-07-19 -- copy every source file so the checker (which now
+  # concatenates them all) sees the full crate, not just the re-export shell.
+  cp "$root/crates/xenia-ledger/src/"*.rs "$fixture/crates/xenia-ledger/src/"
   cp "$root/apps/xenia-peer/Cargo.toml" "$fixture/apps/xenia-peer/Cargo.toml"
   cp "$root/apps/xenia-peer/src/main.rs" "$fixture/apps/xenia-peer/src/main.rs"
   # The evidence-verification surface now lives here (extracted 2026-07-12);
@@ -95,7 +98,7 @@ expect_fail "$case3" "pqc-signatures enabled by default"
 
 case4="$tmp/missing-ml-dsa-cfg"
 make_fixture "$case4"
-python3 - "$case4/crates/xenia-ledger/src/lib.rs" <<'PY'
+python3 - "$case4/crates/xenia-ledger/src/signature.rs" <<'PY'
 import pathlib, sys
 path = pathlib.Path(sys.argv[1])
 text = path.read_text()

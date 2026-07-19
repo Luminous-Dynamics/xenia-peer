@@ -2,14 +2,23 @@
 set -euo pipefail
 
 root="${1:-.}"
-ledger="$root/crates/xenia-ledger/src/lib.rs"
+# xenia-ledger/src was split from one lib.rs into focused modules on
+# 2026-07-19 -- concatenate every source file so this guard still catches
+# the logic silently disappearing, wherever it currently lives.
+ledger_dir="$root/crates/xenia-ledger/src"
 sealed_doc="$root/docs/crypto/FULL_PQC_SEALED_EVIDENCE_ARTIFACTS.md"
 verifier_doc="$root/docs/crypto/M1_EVIDENCE_BUNDLE_VERIFIER.md"
 main="$root/apps/xenia-peer/src/main.rs"
 runtime="$root/apps/xenia-peer/src/m1_runtime.rs"
 real_pqc_check="$root/scripts/check-real-pqc-signature-backend.sh"
 
-for file in "$ledger" "$sealed_doc" "$verifier_doc" "$main" "$runtime" "$real_pqc_check"; do
+if [[ ! -d "$ledger_dir" ]]; then
+  echo "missing xenia-ledger source dir: $ledger_dir" >&2
+  exit 1
+fi
+ledger="$(cat "$ledger_dir"/*.rs)"
+
+for file in "$sealed_doc" "$verifier_doc" "$main" "$runtime" "$real_pqc_check"; do
   if [[ ! -f "$file" ]]; then
     echo "missing full-PQC sealed evidence artifact contract file: $file" >&2
     exit 1
@@ -28,7 +37,7 @@ required_ledger_tokens=(
 )
 
 for token in "${required_ledger_tokens[@]}"; do
-  if ! grep -q -- "$token" "$ledger"; then
+  if ! grep -q -- "$token" <<< "$ledger"; then
     echo "missing sealed full-PQC ledger/verifier token: $token" >&2
     exit 1
   fi

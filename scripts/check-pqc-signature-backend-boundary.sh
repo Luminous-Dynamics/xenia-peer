@@ -2,11 +2,20 @@
 set -euo pipefail
 
 root="${1:-.}"
-ledger="$root/crates/xenia-ledger/src/lib.rs"
+# xenia-ledger/src was split from one lib.rs into focused modules on
+# 2026-07-19 -- concatenate every source file so this guard still catches
+# the logic silently disappearing, wherever it currently lives.
+ledger_dir="$root/crates/xenia-ledger/src"
 cargo="$root/crates/xenia-ledger/Cargo.toml"
 doc="$root/docs/crypto/PQC_SIGNATURE_BACKEND_BOUNDARY.md"
 
-for file in "$ledger" "$cargo" "$doc"; do
+if [[ ! -d "$ledger_dir" ]]; then
+  echo "missing xenia-ledger source dir: $ledger_dir" >&2
+  exit 1
+fi
+ledger="$(cat "$ledger_dir"/*.rs)"
+
+for file in "$cargo" "$doc"; do
   if [[ ! -f "$file" ]]; then
     echo "missing PQC signature backend boundary file: $file" >&2
     exit 1
@@ -26,7 +35,7 @@ required_ledger=(
 )
 
 for token in "${required_ledger[@]}"; do
-  if ! grep -q -- "$token" "$ledger"; then
+  if ! grep -q -- "$token" <<< "$ledger"; then
     echo "missing PQC signature backend source token: $token" >&2
     exit 1
   fi
