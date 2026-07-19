@@ -7,21 +7,23 @@
 //! directly testable/usable on the host). This module is the thin,
 //! `unsafe`-necessary boundary that exposes it as `extern "C"`
 //! functions an Android JNI shim (or any other C-ABI caller) can call.
-//! Handles are opaque `u64`s (a boxed [`engine::ViewerEngine`] pointer
-//! cast to an integer) — never dereferenced except by the matching
-//! `xenia_*` function, and only for a handle this module itself
-//! allocated.
+//! Handles are opaque process-local `u64` registry ids. They are never raw
+//! addresses, so fabricated, stale, or double-disconnected handles are rejected
+//! without dereferencing freed memory. A lookup clones an `Arc`, allowing an
+//! in-flight call to finish safely while another thread disconnects the session.
 //!
 //! Deliberately does **not** opt into `[lints] workspace = true`
 //! (see `Cargo.toml`) — the workspace's `unsafe_code = "deny"` lint
-//! would otherwise reject the raw-pointer casts a C-ABI boundary
-//! inherently needs, matching the precedent already set in
+//! would otherwise reject the raw C-string and buffer operations a C-ABI
+//! boundary inherently needs, matching the precedent already set in
 //! `xenia-capture-scrcpy`.
 
 pub mod engine;
 
+use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use engine::{FileTransferEvent, MobileCodec, SessionState, ViewerEngine};
 
@@ -38,6 +40,44 @@ fn runtime() -> &'static tokio::runtime::Runtime {
             .build()
             .expect("failed to start xenia-mobile-ffi tokio runtime")
     })
+}
+
+/// Process-local registry for active viewer sessions. Registry ids are never
+/// reused during normal process lifetime, so a stale id cannot alias a later
+/// session. The `Arc` clone returned by [`engine_for`] also makes lookup vs.
+/// disconnect races memory-safe.
+fn engine_registry() -> &'static Mutex<HashMap<u64, Arc<ViewerEngine>>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<u64, Arc<ViewerEngine>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn register_engine(engine: ViewerEngine) -> u64 {
+    static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
+    let Ok(mut registry) = engine_registry().lock() else {
+        return 0;
+    };
+    loop {
+        let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+        if handle == 0 || registry.contains_key(&handle) {
+            continue;
+        }
+        registry.insert(handle, Arc::new(engine));
+        return handle;
+    }
+}
+
+fn engine_for(handle: u64) -> Option<Arc<ViewerEngine>> {
+    if handle == 0 {
+        return None;
+    }
+    engine_registry().lock().ok()?.get(&handle).cloned()
+}
+
+fn unregister_engine(handle: u64) -> Option<Arc<ViewerEngine>> {
+    if handle == 0 {
+        return None;
+    }
+    engine_registry().lock().ok()?.remove(&handle)
 }
 
 /// Session-state codes returned by [`xenia_session_state`]. Kept as
@@ -111,22 +151,19 @@ pub unsafe extern "C" fn xenia_connect(
         recv_dir,
         max_file_bytes,
     );
-    Box::into_raw(Box::new(engine)) as u64
+    register_engine(engine)
 }
 
 /// Current session state for `handle`. Returns
 /// [`XENIA_STATE_INVALID_HANDLE`] for `0`.
 ///
-/// # Safety
-/// `handle` must be a value previously returned by [`xenia_connect`]
-/// and not yet passed to [`xenia_disconnect`].
+/// Invalid, fabricated, or stale handles are rejected without accessing
+/// session memory.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn xenia_session_state(handle: u64) -> i32 {
-    if handle == 0 {
+pub extern "C" fn xenia_session_state(handle: u64) -> i32 {
+    let Some(engine) = engine_for(handle) else {
         return XENIA_STATE_INVALID_HANDLE;
-    }
-    // SAFETY: caller contract above.
-    let engine = unsafe { &*(handle as *const ViewerEngine) };
+    };
     match engine.state() {
         SessionState::Connecting => XENIA_STATE_CONNECTING,
         SessionState::Connected => XENIA_STATE_CONNECTED,
@@ -138,16 +175,13 @@ pub unsafe extern "C" fn xenia_session_state(handle: u64) -> i32 {
 /// Human-readable detail for the most recent error, or `NULL` if none.
 /// Caller must free the returned pointer with [`xenia_string_free`].
 ///
-/// # Safety
-/// `handle` must be a value previously returned by [`xenia_connect`]
-/// and not yet passed to [`xenia_disconnect`].
+/// Invalid, fabricated, or stale handles are rejected without accessing
+/// session memory.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn xenia_last_error(handle: u64) -> *mut c_char {
-    if handle == 0 {
+pub extern "C" fn xenia_last_error(handle: u64) -> *mut c_char {
+    let Some(engine) = engine_for(handle) else {
         return std::ptr::null_mut();
-    }
-    // SAFETY: caller contract above.
-    let engine = unsafe { &*(handle as *const ViewerEngine) };
+    };
     match engine.last_error() {
         Some(msg) => CString::new(msg)
             .map(CString::into_raw)
@@ -193,11 +227,10 @@ pub struct XeniaFrame {
 /// `XeniaFrame` with `rgba == NULL` / `rgba_len == 0` if none is
 /// available yet.
 ///
-/// # Safety
-/// `handle` must be a value previously returned by [`xenia_connect`]
-/// and not yet passed to [`xenia_disconnect`].
+/// Invalid, fabricated, or stale handles are rejected without accessing
+/// session memory.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn xenia_poll_frame(handle: u64) -> XeniaFrame {
+pub extern "C" fn xenia_poll_frame(handle: u64) -> XeniaFrame {
     let empty = XeniaFrame {
         width: 0,
         height: 0,
@@ -206,11 +239,9 @@ pub unsafe extern "C" fn xenia_poll_frame(handle: u64) -> XeniaFrame {
         rgba: std::ptr::null_mut(),
         rgba_len: 0,
     };
-    if handle == 0 {
+    let Some(engine) = engine_for(handle) else {
         return empty;
-    }
-    // SAFETY: caller contract above.
-    let engine = unsafe { &*(handle as *const ViewerEngine) };
+    };
     let Some(frame) = engine.poll_frame() else {
         return empty;
     };
@@ -253,33 +284,29 @@ pub unsafe extern "C" fn xenia_frame_free(frame: XeniaFrame) {
 /// Send a normalized pointer event (`x`/`y` in `[0.0, 1.0]` against the
 /// captured-screen frame, `button` 0=left/1=middle/2=right).
 ///
-/// # Safety
-/// `handle` must be a value previously returned by [`xenia_connect`]
-/// and not yet passed to [`xenia_disconnect`].
+/// Invalid, fabricated, or stale handles are rejected without accessing
+/// session memory.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn xenia_send_pointer(
+pub extern "C" fn xenia_send_pointer(
     handle: u64,
     x: f32,
     y: f32,
     button: u8,
     pressed: bool,
 ) {
-    if handle == 0 {
+    let Some(engine) = engine_for(handle) else {
         return;
-    }
-    // SAFETY: caller contract above.
-    let engine = unsafe { &*(handle as *const ViewerEngine) };
+    };
     engine.send_pointer(x, y, button, pressed);
 }
 
 /// Send a normalized touch event. `phase`: 0=Down, 1=Move, 2=Up,
 /// 3=Cancel.
 ///
-/// # Safety
-/// `handle` must be a value previously returned by [`xenia_connect`]
-/// and not yet passed to [`xenia_disconnect`].
+/// Invalid, fabricated, or stale handles are rejected without accessing
+/// session memory.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn xenia_send_touch(
+pub extern "C" fn xenia_send_touch(
     handle: u64,
     index: u8,
     x: f32,
@@ -287,11 +314,9 @@ pub unsafe extern "C" fn xenia_send_touch(
     phase: u8,
     pressure: f32,
 ) {
-    if handle == 0 {
+    let Some(engine) = engine_for(handle) else {
         return;
-    }
-    // SAFETY: caller contract above.
-    let engine = unsafe { &*(handle as *const ViewerEngine) };
+    };
     engine.send_touch(index, x, y, phase, pressure);
 }
 
@@ -299,16 +324,13 @@ pub unsafe extern "C" fn xenia_send_touch(
 /// `xenia_inject::InputEvent::Key`'s doc comment for the mapping
 /// convention; `modifiers` bit0=Shift, bit1=Ctrl, bit2=Alt, bit3=Meta).
 ///
-/// # Safety
-/// `handle` must be a value previously returned by [`xenia_connect`]
-/// and not yet passed to [`xenia_disconnect`].
+/// Invalid, fabricated, or stale handles are rejected without accessing
+/// session memory.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn xenia_send_key(handle: u64, code: u32, pressed: bool, modifiers: u8) {
-    if handle == 0 {
+pub extern "C" fn xenia_send_key(handle: u64, code: u32, pressed: bool, modifiers: u8) {
+    let Some(engine) = engine_for(handle) else {
         return;
-    }
-    // SAFETY: caller contract above.
-    let engine = unsafe { &*(handle as *const ViewerEngine) };
+    };
     engine.send_key(code, pressed, modifiers);
 }
 
@@ -321,16 +343,13 @@ pub unsafe extern "C" fn xenia_send_key(handle: u64, code: u32, pressed: bool, m
 /// clipboard is a real but marginal feature not worth the extra FFI
 /// surface for v1. Caller must free with [`xenia_string_free`].
 ///
-/// # Safety
-/// `handle` must be a value previously returned by [`xenia_connect`]
-/// and not yet passed to [`xenia_disconnect`].
+/// Invalid, fabricated, or stale handles are rejected without accessing
+/// session memory.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn xenia_poll_clipboard(handle: u64) -> *mut c_char {
-    if handle == 0 {
+pub extern "C" fn xenia_poll_clipboard(handle: u64) -> *mut c_char {
+    let Some(engine) = engine_for(handle) else {
         return std::ptr::null_mut();
-    }
-    // SAFETY: caller contract above.
-    let engine = unsafe { &*(handle as *const ViewerEngine) };
+    };
     match engine.poll_clipboard() {
         Some(Some(text)) => CString::new(text)
             .map(CString::into_raw)
@@ -345,17 +364,13 @@ pub unsafe extern "C" fn xenia_poll_clipboard(handle: u64) -> *mut c_char {
 /// it.
 ///
 /// # Safety
-/// `handle` must be a value previously returned by [`xenia_connect`]
-/// and not yet passed to [`xenia_disconnect`]. `text`, if non-null,
-/// must be a valid NUL-terminated C string pointer, live for the
-/// duration of this call (it is copied, not retained).
+/// `text`, if non-null, must be a valid NUL-terminated C string pointer,
+/// live for the duration of this call (it is copied, not retained).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn xenia_send_clipboard(handle: u64, text: *const c_char) {
-    if handle == 0 {
+    let Some(engine) = engine_for(handle) else {
         return;
-    }
-    // SAFETY: caller contract above.
-    let engine = unsafe { &*(handle as *const ViewerEngine) };
+    };
     if text.is_null() {
         engine.send_clipboard(None);
         return;
@@ -378,10 +393,8 @@ pub unsafe extern "C" fn xenia_send_clipboard(handle: u64, text: *const c_char) 
 /// second one.
 ///
 /// # Safety
-/// `handle` must be a value previously returned by [`xenia_connect`]
-/// and not yet passed to [`xenia_disconnect`]. `name` must be a valid
-/// NUL-terminated C string pointer, live for the duration of this
-/// call. `data` must be a valid pointer to `data_len` readable bytes,
+/// `name` must be a valid NUL-terminated C string pointer, live for the
+/// duration of this call. `data` must be a valid pointer to `data_len` readable bytes,
 /// live for the duration of this call (it is copied, not retained).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn xenia_send_file(
@@ -390,11 +403,12 @@ pub unsafe extern "C" fn xenia_send_file(
     data: *const u8,
     data_len: usize,
 ) {
-    if handle == 0 || name.is_null() || (data.is_null() && data_len > 0) {
+    if name.is_null() || (data.is_null() && data_len > 0) {
         return;
     }
-    // SAFETY: caller contract above.
-    let engine = unsafe { &*(handle as *const ViewerEngine) };
+    let Some(engine) = engine_for(handle) else {
+        return;
+    };
     // SAFETY: caller contract above guarantees a valid NUL-terminated
     // string for the duration of this call.
     let Ok(name) = (unsafe { CStr::from_ptr(name) }).to_str() else {
@@ -443,11 +457,10 @@ fn opt_cstring(s: String) -> *mut c_char {
 /// Pop the oldest queued file-transfer event for `handle`. Returns a
 /// event with `kind == XENIA_FT_EVENT_NONE` if none is available yet.
 ///
-/// # Safety
-/// `handle` must be a value previously returned by [`xenia_connect`]
-/// and not yet passed to [`xenia_disconnect`].
+/// Invalid, fabricated, or stale handles are rejected without accessing
+/// session memory.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn xenia_poll_file_transfer_event(handle: u64) -> XeniaFileTransferEvent {
+pub extern "C" fn xenia_poll_file_transfer_event(handle: u64) -> XeniaFileTransferEvent {
     let empty = XeniaFileTransferEvent {
         kind: XENIA_FT_EVENT_NONE,
         transfer_id: 0,
@@ -459,11 +472,9 @@ pub unsafe extern "C" fn xenia_poll_file_transfer_event(handle: u64) -> XeniaFil
         name: std::ptr::null_mut(),
         detail: std::ptr::null_mut(),
     };
-    if handle == 0 {
+    let Some(engine) = engine_for(handle) else {
         return empty;
-    }
-    // SAFETY: caller contract above.
-    let engine = unsafe { &*(handle as *const ViewerEngine) };
+    };
     match engine.poll_file_transfer_event() {
         None => empty,
         Some(FileTransferEvent::IncomingOffer {
@@ -538,21 +549,14 @@ pub unsafe extern "C" fn xenia_file_transfer_event_free(event: XeniaFileTransfer
     }
 }
 
-/// Disconnect and free the session. `handle` must not be used again
-/// after this call.
-///
-/// # Safety
-/// `handle` must be a value previously returned by [`xenia_connect`],
-/// not already passed to this function.
+/// Disconnect the session and remove its registry id. Unknown, stale, and
+/// already-disconnected ids are safe no-ops.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn xenia_disconnect(handle: u64) {
-    if handle == 0 {
-        return;
-    }
-    // SAFETY: caller contract above -- reconstructs exactly the Box
-    // `xenia_connect` produced via `Box::into_raw`, and the caller
-    // contract guarantees this runs at most once per handle.
-    drop(unsafe { Box::from_raw(handle as *mut ViewerEngine) });
+pub extern "C" fn xenia_disconnect(handle: u64) {
+    // Removing an unknown, stale, or already-removed id is a safe no-op.
+    // Any in-flight call holds its own `Arc` and may finish before the engine
+    // is dropped; the id is immediately unavailable to new lookups.
+    drop(unregister_engine(handle));
 }
 
 #[cfg(test)]
@@ -561,10 +565,12 @@ mod tests {
 
     #[test]
     fn invalid_handle_is_safe_on_every_entry_point() {
-        // handle == 0 must never dereference anything -- exercise every
-        // FFI function's null-handle path directly.
+        // Both the reserved zero id and a fabricated non-zero id must be
+        // rejected without touching session memory.
         unsafe {
             assert_eq!(xenia_session_state(0), XENIA_STATE_INVALID_HANDLE);
+            assert_eq!(xenia_session_state(u64::MAX), XENIA_STATE_INVALID_HANDLE);
+            assert!(xenia_last_error(u64::MAX).is_null());
             assert!(xenia_last_error(0).is_null());
             let empty = xenia_poll_frame(0);
             assert!(empty.rgba.is_null());
@@ -613,6 +619,11 @@ mod tests {
             // either way (matches how a Kotlin Activity's onDestroy
             // could race a just-started connection).
             xenia_disconnect(handle);
+            assert_eq!(xenia_session_state(handle), XENIA_STATE_INVALID_HANDLE);
+            // Double-disconnect and post-disconnect actions are intentionally
+            // harmless rather than a use-after-free contract violation.
+            xenia_disconnect(handle);
+            xenia_send_pointer(handle, 0.5, 0.5, 0, true);
         }
     }
 
@@ -628,6 +639,8 @@ mod tests {
                 100 * 1024 * 1024,
             );
             assert_ne!(handle, 0);
+            xenia_disconnect(handle);
+            assert_eq!(xenia_session_state(handle), XENIA_STATE_INVALID_HANDLE);
             xenia_disconnect(handle);
         }
     }

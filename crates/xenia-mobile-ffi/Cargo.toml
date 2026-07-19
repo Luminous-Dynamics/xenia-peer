@@ -34,7 +34,7 @@ name = "xenia_mobile_smoke"
 path = "src/bin/xenia_mobile_smoke.rs"
 
 # Deliberately does NOT opt into `[lints] workspace = true`: the JNI
-# C-ABI boundary in `lib.rs` requires raw-pointer `unsafe` blocks
+# C-ABI boundary in `lib.rs` requires raw C-string/buffer `unsafe` blocks
 # (matching the precedent already set in `xenia-capture-scrcpy` for
 # its `unsafe impl Send`), which the workspace's `unsafe_code = "deny"`
 # lint would otherwise reject.

@@ -3,7 +3,8 @@
  *
  * Maps Kotlin/Java calls from io.luminousdynamics.xenia.NativeBindings
  * to the Rust extern "C" FFI defined in xenia-mobile-ffi/src/lib.rs.
- * Session handles are passed as jlong (opaque u64 handle, widened).
+ * Session handles are passed as jlong (opaque process-local u64 registry ids,
+ * widened). They are not native addresses.
  *
  * Frame marshalling: JNI has no way to return an arbitrary C struct
  * (XeniaFrame) directly, so `pollFrame` packs a small fixed header +
