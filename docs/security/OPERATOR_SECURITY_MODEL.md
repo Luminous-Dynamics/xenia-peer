@@ -238,7 +238,8 @@ consulted fail-closed on every privileged path.
 |--------|---------|
 | Unenrolled key connects | Allow-listed `OperatorPolicy`; fail-closed lookup |
 | Forged/upgraded token | Daemon-signed token; role copied at mint; signature-verified |
-| Replay of a captured action signature | Per-action transcript bound to action/target + token_nonce |
+| Replay/substitution of a captured consent signature | Per-action transcript bound to action + token nonce + daemon-attested offer digest (session, complete typed scope, approval lifetime) |
+| Browser changes the capabilities shown to the agent | Agent verifies the daemon host identity's Ed25519 + ML-DSA-65 offer attestation and derives confirmation text/risk from the typed offer |
 | Replay of a challenge | Single-use, short-TTL, consumed before signature check |
 | Lower role attempts higher action | `role.permits(min_role)` on the token's own role |
 | Classical-crypto break | Hybrid PQC: **both** Ed25519 and ML-DSA must verify, **and** the presented ML-DSA key must match the one enrolled for that Ed25519 key (§2) |
@@ -280,9 +281,11 @@ consulted fail-closed on every privileged path.
   to Track A's stated no-confirmation-action window (see
   `SIGNER_DELEGATION_DESIGN.md`: an XSS bug active *during an authenticated
   operator session*, against an *already-trusted, already-confirmed* host,
-  can still trigger a no-confirmation-required action) -- the honest floor
-  for a browser-hosted operator console regardless of where keys live, since
-  the browser is still where decisions are displayed and clicked. The
+  can still trigger a routine no-extra-confirmation action). Consent scope is
+  no longer browser-authored: the daemon signs a complete typed offer, the
+  agent verifies and classifies it, and broad approvals require native
+  confirmation. The remaining gap is human click intent for routine actions,
+  not silent capability broadening. The
   agent's `Origin` check requires a match (a
   missing or unrecognized header is refused, not treated as trusted) and its
   identity/token files are created atomically with owner-only permissions set

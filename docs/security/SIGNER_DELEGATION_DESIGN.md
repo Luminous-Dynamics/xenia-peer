@@ -107,7 +107,8 @@ whole effort is trying to improve on. Split by risk:
 
 **No per-request confirmation required:**
 - a routine `/auth` challenge;
-- an ordinary consent approve/deny through an already-unlocked agent
+- deny or revoke of a daemon-attested consent offer;
+- approval of a routine, short-lived offer through an already-unlocked agent
   session against an already-pinned host;
 - a sealed-channel reconnection to an already-pinned host.
 
@@ -118,7 +119,9 @@ whole effort is trying to improve on. Split by risk:
 - operator revocation;
 - role or capability elevation;
 - recovery-key or trust-root changes;
-- any unusually durable or unusually broad consent grant.
+- any unusually durable or unusually broad consent grant. The current typed
+  policy classifies remote input injection, any clipboard access, any file
+  transfer, host-device audio capture, and system-identity telemetry as broad.
 
 The confirmation screen is generated **from the agent's own parsed typed
 fields** — never from browser-supplied descriptive text, which a
@@ -179,9 +182,10 @@ Every request carries:
   `challenge_transcript`/`consent_action_transcript`/
   `revoke_operator_transcript` need — nothing else — plus, per action, the
   daemon-signed evidence that binds those fields to a real daemon: a host
-  attestation over the nonce for `/v1/sign/challenge`, or the full signed
-  session token, verified against the certificate's delegated key, for
-  `/v1/sign/consent-action`/`/v1/sign/revoke`);
+  attestation over the nonce for `/v1/sign/challenge`; a host-attested typed
+  `ConsentOfferV1` plus the full signed session token for
+  `/v1/sign/consent-action`; or the full signed session token for
+  `/v1/sign/revoke`);
 - freshness/expiry information where the underlying protocol has it.
 
 Agent processing, in order:
@@ -193,9 +197,11 @@ Agent processing, in order:
    of the known shapes — no partial/duck-typed acceptance).
 4. Verify `daemon_certificate`'s own signatures, compute the fingerprint
    from it, and check *that* fingerprint against native trust policy.
-5. Verify the action's daemon-signed evidence (challenge attestation or
-   session token) against the now-trusted certificate.
-6. Enforce freshness and field limits.
+5. Verify the action's daemon-signed evidence against the now-trusted
+   certificate. For consent actions this includes both host signatures over
+   the canonical offer and both daemon signatures over the session token.
+6. Enforce freshness and field limits. Consent-offer expiry closes the
+   approval window but never disables a later revocation of a live grant.
 7. Construct the canonical transcript itself, through
    `xenia_operator_proto`'s existing `challenge_transcript`/
    `consent_action_transcript`/`revoke_operator_transcript` functions.
@@ -217,14 +223,14 @@ not a generic one.
 
 **Residual risk, stated plainly:** an XSS bug active *during an
 authenticated operator session*, against an *already-trusted, already-
-confirmed* host, can still trigger a no-confirmation-required action (an
-ordinary Approve/Deny) the operator never actually clicked. This is not a
-regression — that same XSS bug can already do this today via the browser's
-own local signing code — but it's also not eliminated by Track A alone.
-Closing it fully would mean confirming every signature, which the
-confirmation-policy section above deliberately rejects as unworkable UX.
-The floor this design settles on: forgery is bounded to low-risk actions
-against hosts the operator has already, at some point, explicitly trusted.
+confirmed* host, can still trigger a no-confirmation-required action the
+operator never actually clicked — for example, approving a routine typed
+offer or denying/revoking one. It cannot rewrite the session, capabilities,
+directions, or lifetime without invalidating the daemon's hybrid offer
+attestation, and broad approvals cross a separate native confirmation gate.
+Closing the remaining click-intent gap fully would mean confirming every
+signature, which the confirmation-policy section above deliberately rejects
+as unworkable UX.
 
 ## Track B: agent-driven sealed-channel handshake (the bigger piece)
 

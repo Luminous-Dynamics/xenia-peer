@@ -64,9 +64,13 @@ Design for closing review finding #17 (no server-side operator auth/RBAC).
     decisions render), grew a **Revoke** button, and sends the authenticated,
     token-bearing payload when a session + session-id are present (legacy
     plaintext fallback otherwise).
-  - **E2E wiring (DONE):** the daemon now broadcasts the consent prompt as JSON
-    `{session_id, scope}` so the console binds each decision to the exact
-    session; the `ConsentModal` derives its admin `/ws` + consent-port URLs from
+  - **E2E wiring (DONE):** the daemon broadcasts a compatibility
+    `{session_id, scope, scope_v1}` view plus a hybrid host-attested
+    `ConsentOfferV1`. The native agent verifies that offer before signing, and
+    the daemon verifies the resulting action signature against its own stored
+    offer digest, binding the exact session, complete capability set,
+    directions, and approval lifetime. The `ConsentModal` derives its admin
+    `/ws` + consent-port URLs from
     `DaemonConfig` (no more hardcoded `8081/8082`); the `OperatorAuthPanel`
     surfaces a paste-ready `--operators-file` enrollment record (both public
     keys), so an operator can actually be enrolled. A **live-socket smoke test**

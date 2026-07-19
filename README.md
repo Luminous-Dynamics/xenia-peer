@@ -252,13 +252,16 @@ decisions, both with their own consent ledger.
 - **`apps/sovereign-admin`** — a Leptos 0.8 CSR browser console. Runs the
   challenge/response auth ceremony against the daemon's `/auth/*` routes
   (both Ed25519 and ML-DSA-65 signatures required, no classical-only
-  fallback), holds a role-scoped session token, and signs each consent
-  decision / revocation with a per-action signature the daemon
-  independently re-verifies rather than trusting the socket.
+  fallback), holds a role-scoped session token, and asks the native operator
+  agent to sign each consent decision / revocation. The daemon independently
+  re-verifies every per-action signature rather than trusting the socket or
+  browser.
 - **Roles**: `Viewer < Approver < Operator < Admin`, strictly hierarchical
   (`docs/security/OPERATOR_RBAC_PLAN.md`). Enforced identically on daemon
-  and console via the shared, crypto-free `xenia-operator-proto` crate, so
-  a role the console greys out is exactly a role the daemon also refuses.
+  and console via the shared, signing-key-free and I/O-free
+  `xenia-operator-proto` crate, so a role the console greys out is exactly a
+  role the daemon also refuses and both sides construct identical canonical
+  transcripts.
 - **Sealed operator channel** (`--operator-sealed`) — consent decisions
   travel inside PQC-sealed envelopes over a handshake-authenticated
   channel instead of a plaintext socket. Two non-interoperable suites,
@@ -285,12 +288,17 @@ decisions, both with their own consent ledger.
   restart required.
 - **`apps/xenia-operator-agent`** — a small native process that holds the
   operator's Ed25519 + ML-DSA seeds in a `0600` file instead of browser
-  `localStorage`, serving them to the console over a token-authenticated,
-  `127.0.0.1`-only API. Run it once (`cargo run -p xenia-operator-agent`),
-  paste the printed pairing token into the console's Sessions page. The
-  console still signs locally with the fetched seeds for now (in-memory
-  only, never persisted) -- see `docs/security/OPERATOR_SECURITY_MODEL.md`
-  §9 for the scope and what's still deferred.
+  `localStorage`. It never serves those seeds to the browser: its
+  token-authenticated, `127.0.0.1`-only API verifies daemon identity evidence,
+  pins host identities, drives the sealed-channel handshake, verifies
+  daemon-attested typed consent offers, and signs canonical transcripts.
+  Broad grants such as remote input, clipboard access, file transfer, host
+  audio capture, or system-identity telemetry require a separate native
+  confirmation. Run it once (`cargo run -p xenia-operator-agent`) and paste
+  the printed pairing token into the console's Sessions page.
+
+The consent protocol and its exact threat-model boundary are documented in
+`docs/security/CONSENT_OFFER_PROTOCOL.md`.
 
 None of this is a finished security story yet. See
 `docs/security/OPERATOR_SECURITY_MODEL.md` for the current threat model
