@@ -227,7 +227,10 @@ consulted fail-closed on every privileged path.
 - **Non-repudiable audit**: an authenticated consent decision is attributed in
   the tamper-evident hash-chain ledger (`operator_consent_audit_event`, source_id
   = the operator's enrolled key). `LEDGER_VERIFICATION_BOUNDARY.md` states what
-  the chain does and does not prove.
+  the chain does and does not prove. The signed action id is checked against the
+  verified durable ledger as well as the current process cache: an id already
+  committed by an earlier daemon process cannot recreate authority after a
+  restart, while a failed durable write does not consume the id.
 - **Attack-signal telemetry** on the sealed endpoint (`operator_channel_metrics.rs`):
   lifetime counters for connections, handshake failures, **not-enrolled
   rejections**, **revoked rejections**, established channels, and terminal

@@ -363,19 +363,49 @@ impl ConsentDecisionService {
             return ConsentFollowup::Stop;
         }
 
-        if let Some(authorized) = &decoded.authorized
-            && self.seen_action_ids.lock().await.contains(&authorized.action_id)
-        {
-            tracing::warn!(
-                action_id = %hex::encode(authorized.action_id),
-                action = ?authorized.action,
-                "replayed authenticated consent action ignored"
-            );
-            return if current.is_terminal() {
-                ConsentFollowup::Stop
-            } else {
-                ConsentFollowup::KeepServing
-            };
+        if let Some(authorized) = &decoded.authorized {
+            if self
+                .seen_action_ids
+                .lock()
+                .await
+                .contains(&authorized.action_id)
+            {
+                tracing::warn!(
+                    action_id = %hex::encode(authorized.action_id),
+                    action = ?authorized.action,
+                    "replayed authenticated consent action ignored"
+                );
+                return if current.is_terminal() {
+                    ConsentFollowup::Stop
+                } else {
+                    ConsentFollowup::KeepServing
+                };
+            }
+
+            // The in-memory set provides idempotence during one daemon run.
+            // The verified durable ledger is the restart boundary: an action
+            // already present there but absent from this process-local set is a
+            // stale cross-restart replay, not a retry whose prior lifecycle
+            // state we can safely reconstruct.
+            let request_id = Uuid::from_bytes(authorized.action_id);
+            let already_persisted = self
+                .ledger
+                .lock()
+                .await
+                .iter()
+                .any(|entry| entry.event.request_id == request_id);
+            if already_persisted {
+                tracing::error!(
+                    action_id = %hex::encode(authorized.action_id),
+                    action = ?authorized.action,
+                    "durably committed consent action replayed after authority restart; refusing fail-closed"
+                );
+                if current == ConsentSessionState::Pending {
+                    self.publish_state(ConsentSessionState::Failed);
+                    self.grant_tx.lock().await.take();
+                }
+                return ConsentFollowup::Stop;
+            }
         }
 
         let (next, followup, initial_decision) = match (current, decoded.action) {
@@ -835,6 +865,37 @@ mod tests {
         states.changed().await.unwrap();
         assert_eq!(*states.borrow(), ConsentSessionState::Revoked);
         assert!(states.borrow().runtime_must_stop());
+    }
+
+    #[tokio::test]
+    async fn persisted_action_id_replay_after_restart_is_refused_fail_closed() {
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let ledger = Arc::new(Mutex::new(Chain::new(daemon)));
+        let authorized = authorized_approval();
+        ledger
+            .lock()
+            .await
+            .append(crate::operator_audit::operator_consent_audit_event(
+                &authorized,
+                Uuid::from_u128(10),
+            ))
+            .unwrap();
+        let original_len = ledger.lock().await.len();
+        let (grant_tx, grant_rx) = oneshot::channel();
+        let service = service_with_sender(grant_tx, ledger.clone());
+
+        assert!(matches!(
+            service
+                .apply(DecodedConsent {
+                    action: ConsentAction::Approve,
+                    authorized: Some(authorized),
+                })
+                .await,
+            ConsentFollowup::Stop
+        ));
+        assert_eq!(service.state(), ConsentSessionState::Failed);
+        assert!(grant_rx.await.is_err());
+        assert_eq!(ledger.lock().await.len(), original_len);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
