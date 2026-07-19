@@ -34,7 +34,24 @@ class Finding:
 
 
 def is_test_or_example(path: Path) -> bool:
-    return bool(set(path.parts) & TEST_PARTS) or path.name.endswith("_test.rs")
+    if set(path.parts) & TEST_PARTS or path.name.endswith("_test.rs"):
+        return True
+    # `tests.rs` is a module file loaded via `#[cfg(test)] mod tests;` in its
+    # parent -- e.g. crates/xenia-ledger/src/tests.rs, split out of lib.rs on
+    # 2026-07-19. Its own content has no in-file `#[cfg(test)]` marker (that
+    # attribute lives on the `mod` declaration one file up), so the
+    # first_cfg_test_line() heuristic below can't see it; the filename must
+    # be recognized directly.
+    if path.name == "tests.rs":
+        return True
+    # Smoke-test harnesses (manual, run-against-a-live-daemon binaries/
+    # modules, not `#[cfg(test)]`-gated unit tests) live directly under
+    # `src/` or `src/bin/`, not under any TEST_PARTS directory.
+    if path.name.endswith("_smoke.rs"):
+        return True
+    if "bin" in path.parts and "smoke" in path.name:
+        return True
+    return False
 
 
 def first_cfg_test_line(lines: list[str]) -> int | None:
