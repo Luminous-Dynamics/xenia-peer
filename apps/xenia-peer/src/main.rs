@@ -2128,6 +2128,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ledger_path.clone(),
         consent_decision_tx,
     ));
+    {
+        let consent_service = Arc::clone(&consent_service);
+        let mut revocation_changes = revocations.subscribe();
+        tokio::spawn(async move {
+            while revocation_changes.changed().await.is_ok() {
+                if consent_service.revoke_if_approver_revoked().await {
+                    break;
+                }
+            }
+        });
+    }
 
     // Consent server. With --operator-sealed the console talks over a
     // xenia-wire-sealed operator channel (PQC confidentiality + handshake

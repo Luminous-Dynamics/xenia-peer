@@ -12,7 +12,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -123,6 +123,9 @@ pub(crate) struct ConsentDecisionService {
     /// Denied. It is dropped on Failed or Expired so the waiter receives
     /// channel closure.
     grant_tx: Mutex<Option<oneshot::Sender<bool>>>,
+    /// Operator whose authenticated approval activated this session. The
+    /// approval remains valid only while this identity remains non-revoked.
+    approving_operator_id: RwLock<Option<String>>,
     /// Authenticated action ids already durably committed for this ceremony.
     /// Kept behind the transition lock so check-and-insert is race-free across
     /// plaintext and sealed transports.
@@ -153,6 +156,7 @@ impl ConsentDecisionService {
             state: AtomicU8::new(ConsentSessionState::Pending as u8),
             state_tx,
             grant_tx: Mutex::new(Some(grant_tx)),
+            approving_operator_id: RwLock::new(None),
             seen_action_ids: Mutex::new(HashSet::new()),
             persist_ledger: crate::audit_ledger_store::persist_entries_atomic,
         }
@@ -213,6 +217,34 @@ impl ConsentDecisionService {
     /// reading any action payloads.
     pub(crate) fn is_operator_revoked(&self, operator_id: &str) -> bool {
         self.revocations.is_revoked(operator_id)
+    }
+
+    /// Revoke an active session when the operator whose authenticated approval
+    /// created the grant has since been revoked. This couples live session
+    /// authority to live operator validity rather than treating approval
+    /// attribution as historical metadata only.
+    pub(crate) async fn revoke_if_approver_revoked(&self) -> bool {
+        let _transition = self.transition_lock.lock().await;
+        if self.state() != ConsentSessionState::Approved {
+            return false;
+        }
+        let approving_operator = match self.approving_operator_id.read() {
+            Ok(operator) => operator.clone(),
+            Err(_) => {
+                tracing::error!("approving-operator lock poisoned; revoking session fail-closed");
+                self.publish_state(ConsentSessionState::Revoked);
+                return true;
+            }
+        };
+        let Some(operator_id) = approving_operator else {
+            return false;
+        };
+        if !self.revocations.is_revoked(&operator_id) {
+            return false;
+        }
+        tracing::warn!(operator = %operator_id, "approving operator was revoked; terminating active session");
+        self.publish_state(ConsentSessionState::Revoked);
+        true
     }
 
     /// Decode and authorize a transport-delivered decision. The transport is
@@ -300,6 +332,24 @@ impl ConsentDecisionService {
     async fn apply_at(&self, decoded: DecodedConsent, now: u64) -> ConsentFollowup {
         let _transition = self.transition_lock.lock().await;
         let current = self.state();
+
+        // Authorization is checked again under the transition lock. A valid
+        // action can be decoded immediately before its operator is revoked;
+        // commit must never rely on the earlier snapshot.
+        if let Some(authorized) = &decoded.authorized
+            && self.revocations.is_revoked(&authorized.operator_id)
+        {
+            tracing::warn!(
+                operator = %authorized.operator_id,
+                action = ?authorized.action,
+                "consent action refused at commit: operator was revoked after decode"
+            );
+            return if current.is_terminal() {
+                ConsentFollowup::Stop
+            } else {
+                ConsentFollowup::KeepServing
+            };
+        }
 
         // Recheck under the transition lock. A decision may have been decoded
         // immediately before expiry and then delayed before durable commit.
@@ -401,6 +451,21 @@ impl ConsentDecisionService {
                 .insert(authorized.action_id);
         }
 
+        if next == ConsentSessionState::Approved {
+            let approving_operator = decoded
+                .authorized
+                .as_ref()
+                .map(|authorized| authorized.operator_id.clone());
+            match self.approving_operator_id.write() {
+                Ok(mut stored) => *stored = approving_operator,
+                Err(_) => {
+                    tracing::error!("approving-operator lock poisoned; refusing grant fail-closed");
+                    self.publish_state(ConsentSessionState::Failed);
+                    self.grant_tx.lock().await.take();
+                    return ConsentFollowup::Stop;
+                }
+            }
+        }
         self.publish_state(next);
         if let Some(decision) = initial_decision
             && let Some(tx) = self.grant_tx.lock().await.take()
@@ -688,6 +753,50 @@ mod tests {
                 .await,
             ConsentFollowup::Stop
         ));
+    }
+
+    #[tokio::test]
+    async fn operator_revoked_after_decode_cannot_commit_approval() {
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let ledger = Arc::new(Mutex::new(Chain::new(daemon)));
+        let (grant_tx, mut grant_rx) = oneshot::channel();
+        let service = service_with_sender(grant_tx, ledger.clone());
+        service.revocations.revoke("alice");
+
+        assert!(matches!(
+            service
+                .apply(DecodedConsent {
+                    action: ConsentAction::Approve,
+                    authorized: Some(authorized_approval()),
+                })
+                .await,
+            ConsentFollowup::KeepServing
+        ));
+        assert_eq!(service.state(), ConsentSessionState::Pending);
+        assert_eq!(ledger.lock().await.len(), 0);
+        assert!(grant_rx.try_recv().is_err(), "grant must remain unresolved");
+    }
+
+    #[tokio::test]
+    async fn revoking_the_approving_operator_revokes_the_active_session() {
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let ledger = Arc::new(Mutex::new(Chain::new(daemon)));
+        let (grant_tx, grant_rx) = oneshot::channel();
+        let service = service_with_sender(grant_tx, ledger);
+
+        assert!(matches!(
+            service
+                .apply(DecodedConsent {
+                    action: ConsentAction::Approve,
+                    authorized: Some(authorized_approval()),
+                })
+                .await,
+            ConsentFollowup::KeepServing
+        ));
+        assert!(grant_rx.await.unwrap());
+        service.revocations.revoke("alice");
+        assert!(service.revoke_if_approver_revoked().await);
+        assert_eq!(service.state(), ConsentSessionState::Revoked);
     }
 
     #[tokio::test]

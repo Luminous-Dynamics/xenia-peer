@@ -189,8 +189,9 @@ drop every live session). Revocation is by `operator_id`
 consulted fail-closed on every privileged path.
 
 - **Set it** three ways: (1) add the id to `--revoked-operators-file` and send
-  `SIGHUP` (atomic reload, existing sessions untouched); (2) the authenticated
-  admin `POST /operator/revoke` endpoint (Admin token + signature over
+  `SIGHUP` (atomic reload without dropping unrelated sessions; an active session
+  approved by an identity newly added to the set is terminated); (2) the
+  authenticated admin `POST /operator/revoke` endpoint (Admin token + signature over
   `revoke_operator_transcript`); (3) the console's role-gated "Revoke Operator"
   form, which builds and signs that same request.
 - **Enforced everywhere**: on the sealed channel it is checked right after the
@@ -209,7 +210,12 @@ consulted fail-closed on every privileged path.
   point of a live, no-restart kill switch for exactly the case (a compromised
   Admin) it exists to handle. See
   `docs/security/POST_DELEGATION_HARDENING_PLAN.md` item 8 for the audit
-  finding and fix detail.
+  finding and fix detail. The consent authority also records the approving
+  operator as live authorization provenance. A revocation-file reload or
+  authenticated revocation re-evaluates active approvals and broadcasts a
+  terminal lifecycle state to inbound input/clipboard/file handlers and outbound
+  media tasks. Approval is rechecked under the transition lock, closing the
+  decode-to-commit revocation race.
 - **Fail-closed**: a poisoned lock reports revoked; a failed revocation-file load
   is fatal (the daemon won't run a privileged surface without the list it was
   told to enforce).
@@ -248,7 +254,7 @@ consulted fail-closed on every privileged path.
 | Active MITM substitutes a different daemon identity | Host-fingerprint TOFU pinning, checked before any consent payload is sealed and sent |
 | Downgrade to plaintext | `--operator-sealed` closes the plaintext port (XOR) |
 | Downgrade to the weaker PQC suite | Suites are non-interoperable and out-of-band-selected, not wire-negotiated; a mismatched pairing fails to deserialize |
-| Compromised operator key | Live revocation (SIGHUP / endpoint / console), enforced on every path, no restart |
+| Compromised operator key | Live revocation (SIGHUP / endpoint / console), enforced on every path; active sessions approved by that identity are terminated without restarting unrelated sessions |
 | Brute-force / flood on auth | Rate-limited `/auth/verify` |
 | Recon / probing | Not-enrolled + handshake-failure counters + alertable warn logs |
 | Tamper with the audit record | Append-only BLAKE3 hash chain, independently verifiable |

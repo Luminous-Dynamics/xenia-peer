@@ -21,14 +21,29 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+use tokio::sync::watch;
+
 /// A shared, hot-reloadable set of revoked `operator_id`s. Cheap to clone
 /// (`Arc`), safe to share across the sealed endpoint and a SIGHUP reload task.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct OperatorRevocations {
     revoked: Arc<RwLock<HashSet<String>>>,
+    /// Monotonic change notification for active-session authorization checks.
+    changes: watch::Sender<u64>,
     /// The file the set is (re)loaded from, if any — kept so a SIGHUP handler
     /// can reload without re-plumbing the path.
     path: Option<PathBuf>,
+}
+
+impl Default for OperatorRevocations {
+    fn default() -> Self {
+        let (changes, _rx) = watch::channel(0);
+        Self {
+            revoked: Arc::new(RwLock::new(HashSet::new())),
+            changes,
+            path: None,
+        }
+    }
 }
 
 impl OperatorRevocations {
@@ -43,8 +58,10 @@ impl OperatorRevocations {
     /// path for later [`OperatorRevocations::reload`].
     pub(crate) fn from_file(path: &Path) -> std::io::Result<Self> {
         let set = read_revocations(path)?;
+        let (changes, _rx) = watch::channel(0);
         Ok(Self {
             revoked: Arc::new(RwLock::new(set)),
+            changes,
             path: Some(path.to_path_buf()),
         })
     }
@@ -64,8 +81,18 @@ impl OperatorRevocations {
     /// overwrite an in-process-only revocation; persist it to the file for
     /// durability across reloads.
     pub(crate) fn revoke(&self, operator_id: &str) {
-        if let Ok(mut s) = self.revoked.write() {
-            s.insert(operator_id.to_string());
+        match self.revoked.write() {
+            Ok(mut set) => {
+                if set.insert(operator_id.to_string()) {
+                    self.notify_changed();
+                }
+            }
+            Err(_) => {
+                // `is_revoked` treats a poisoned set as universally revoked;
+                // wake active-session watchers so that fail-closed state is
+                // propagated rather than remaining visible only to new calls.
+                self.notify_changed();
+            }
         }
     }
 
@@ -77,15 +104,34 @@ impl OperatorRevocations {
         };
         let fresh = read_revocations(path)?;
         let count = fresh.len();
-        if let Ok(mut s) = self.revoked.write() {
-            *s = fresh;
+        let changed = self
+            .revoked
+            .write()
+            .map(|mut set| {
+                let changed = *set != fresh;
+                *set = fresh;
+                changed
+            })
+            .unwrap_or(true);
+        if changed {
+            self.notify_changed();
         }
         Ok(count)
+    }
+
+    /// Subscribe to changes in the live revocation set.
+    pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
+        self.changes.subscribe()
     }
 
     /// The number of currently-revoked operators.
     pub(crate) fn len(&self) -> usize {
         self.revoked.read().map(|s| s.len()).unwrap_or(0)
+    }
+
+    fn notify_changed(&self) {
+        let next = (*self.changes.borrow()).wrapping_add(1);
+        self.changes.send_replace(next);
     }
 }
 
@@ -118,6 +164,23 @@ mod tests {
         assert!(r.is_revoked("alice"));
         assert!(!r.is_revoked("bob"));
         assert_eq!(r.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn subscribers_wake_only_when_the_set_changes() {
+        let r = OperatorRevocations::empty();
+        let mut changes = r.subscribe();
+        r.revoke("alice");
+        changes.changed().await.unwrap();
+        assert_eq!(*changes.borrow(), 1);
+
+        r.revoke("alice");
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            changes.changed()
+        )
+        .await
+        .is_err());
     }
 
     #[test]
