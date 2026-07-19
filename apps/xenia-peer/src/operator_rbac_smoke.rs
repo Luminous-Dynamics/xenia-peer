@@ -128,7 +128,7 @@ async fn operator_rbac_full_chain_smoke() {
         .unwrap()
         .try_into()
         .unwrap();
-    let scope_digest = xenia_operator_proto::scope_digest("view screen");
+    let scope_digest = xenia_operator_proto::ConsentScopeV1::screen_only().digest();
     let action_transcript = consent_action_transcript(
         ConsentAction::Approve,
         &session_id,

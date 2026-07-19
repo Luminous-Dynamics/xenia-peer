@@ -47,7 +47,7 @@ use xenia_operator_agent_proto::{
     SignRevokeRequest, SignedTokenDto,
 };
 use xenia_operator_proto::{
-    ConsentAction, DaemonIdentityCertificate, OperatorAction, OperatorRole,
+    ConsentAction, ConsentScopeV1, DaemonIdentityCertificate, OperatorAction, OperatorRole,
 };
 
 /// Track A (the plain-HTTP `/auth/*` ceremony -- challenge/consent-action/
@@ -267,9 +267,9 @@ pub async fn ensure_fresh_operator_session(
 /// Build the authenticated consent-action JSON the daemon parses on the
 /// consent socket: `{ token, action, action_signature,
 /// ml_dsa_action_signature }`. The per-action signatures -- both required
-/// -- bind the action to the exact session, token, and `scope` (the same
-/// text this console already displays for the decision), so a captured
-/// signature can't be replayed for a different action/session/token/scope.
+/// -- bind the action to the exact session, token, and canonical typed
+/// `scope`, so a captured signature cannot be replayed for a different
+/// action/session/token/scope. Display text is derived from this same value.
 /// The agent verifies `session`'s token before signing -- see
 /// [`OperatorSession::to_signed_token_dto`].
 pub async fn build_consent_request(
@@ -279,7 +279,7 @@ pub async fn build_consent_request(
     session: &OperatorSession,
     action: ConsentAction,
     session_id: &[u8; 16],
-    scope: &str,
+    scope: ConsentScopeV1,
 ) -> Result<String, String> {
     let base = endpoint.trim_end_matches('/');
     let cert = fetch_daemon_certificate(base).await?;
@@ -296,7 +296,7 @@ pub async fn build_consent_request(
             },
             action,
             session_id_hex: hex::encode(session_id),
-            scope: scope.to_string(),
+            scope,
             token: session.to_signed_token_dto(),
         },
     )

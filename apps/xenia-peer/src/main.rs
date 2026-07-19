@@ -1195,18 +1195,48 @@ fn telemetry_sample_allowed(
     }
 }
 
-fn m1_consent_scope(telemetry_level: TelemetryLevel, audio_mode: AudioMode) -> String {
-    let telemetry = match telemetry_level {
-        TelemetryLevel::Off => "telemetry: off",
-        TelemetryLevel::Basic => "telemetry: basic host performance",
-        TelemetryLevel::System => "telemetry: system identity and performance",
+fn m1_consent_scope(args: &Args) -> xenia_operator_proto::ConsentScopeV1 {
+    let telemetry = match args.telemetry_level {
+        TelemetryLevel::Off => xenia_operator_proto::ConsentTelemetryScope::Off,
+        TelemetryLevel::Basic => xenia_operator_proto::ConsentTelemetryScope::BasicHostPerformance,
+        TelemetryLevel::System => {
+            xenia_operator_proto::ConsentTelemetryScope::SystemIdentityAndPerformance
+        }
     };
-    let audio = match audio_mode {
-        AudioMode::Off => "audio: off",
-        AudioMode::Sine | AudioMode::Noise => "audio: synthetic test signal",
-        AudioMode::Capture => "audio: host device capture",
+    let audio = match args.audio {
+        AudioMode::Off => xenia_operator_proto::ConsentAudioScope::Off,
+        AudioMode::Sine | AudioMode::Noise => {
+            xenia_operator_proto::ConsentAudioScope::SyntheticTestSignal
+        }
+        AudioMode::Capture => xenia_operator_proto::ConsentAudioScope::HostDeviceCapture,
     };
-    format!("display: screen stream; {telemetry}; {audio}")
+    let input = if args.input_backend == InputBackendChoice::Noop {
+        xenia_operator_proto::ConsentInputScope::Off
+    } else {
+        xenia_operator_proto::ConsentInputScope::RemoteInputInjection
+    };
+    let clipboard = match args.clipboard {
+        ClipboardMode::Off => xenia_operator_proto::ConsentClipboardScope::Off,
+        ClipboardMode::HostToViewer => {
+            xenia_operator_proto::ConsentClipboardScope::HostToViewer
+        }
+        ClipboardMode::Bidirectional => {
+            xenia_operator_proto::ConsentClipboardScope::Bidirectional
+        }
+    };
+    let file_transfer = match (args.send_file.is_some(), args.recv_file_dir.is_some()) {
+        (false, false) => xenia_operator_proto::ConsentFileTransferScope::Off,
+        (true, false) => xenia_operator_proto::ConsentFileTransferScope::HostToViewer,
+        (false, true) => xenia_operator_proto::ConsentFileTransferScope::ViewerToHost,
+        (true, true) => xenia_operator_proto::ConsentFileTransferScope::Bidirectional,
+    };
+    xenia_operator_proto::ConsentScopeV1::screen_with_capabilities(
+        telemetry,
+        audio,
+        input,
+        clipboard,
+        file_transfer,
+    )
 }
 
 /// Atomically create `path` at 0600 and write `bytes` -- no separate
@@ -2084,16 +2114,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let consent_session_uuid = session_id;
     let consent_ledger = shared_ledger.clone();
     let consent_ledger_path = ledger_path.clone();
-    // Computed here (a pure function of the daemon's own CLI config, not
-    // handshake/runtime state) rather than down at the `m1_scope` binding
+    // Computed here as a canonical typed value (a pure function of the
+    // daemon's own CLI config, not handshake/runtime state) rather than down
+    // at the `m1_scope` presentation binding
     // below, so both consent-server branches immediately below can bind
     // their per-action signatures to this session's actual offered scope --
     // never trusting anything relayed back through the console/agent
     // round-trip for that binding. Reused verbatim (not recomputed) for the
-    // M1 consent-scope offer/broadcast below, so there's exactly one source
-    // of truth for what this session's scope string is.
-    let m1_scope = m1_consent_scope(args.telemetry_level, args.audio);
-    let consent_scope_digest = xenia_operator_proto::scope_digest(&m1_scope);
+    // M1 consent-scope offer/broadcast below, so semantics, display text,
+    // audit text, and the signature digest all share one source of truth.
+    let consent_scope = m1_consent_scope(&args);
+    let m1_scope = consent_scope.summary();
+    let consent_scope_digest = consent_scope.digest();
 
     // Consent server. With --operator-sealed the console talks over a
     // xenia-wire-sealed operator channel (PQC confidentiality + handshake
@@ -2227,13 +2259,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // authenticated operator console can bind its per-action signature to
         // this exact session (see the console's
         // operator_session::build_consent_request + consent_action_transcript).
-        // `scope` is the human-readable description for display. A legacy
+        // `scope_v1` is the canonical machine-readable scope; `scope` is
+        // a derived human-readable compatibility field. A legacy
         // plaintext console just shows the text and still sends
         // "Approve"/"Deny", which a daemon without --require-operator-auth
         // accepts -- so this shape change is backward compatible.
         let consent_prompt = serde_json::json!({
             "session_id": hex::encode(session_id.as_bytes()),
             "scope": m1_scope_for_log,
+            "scope_v1": consent_scope,
         })
         .to_string();
         bridge.broadcast(&consent_prompt);
@@ -2797,17 +2831,23 @@ mod audio_tests {
 
     #[test]
     fn m1_scope_names_audio_off_and_telemetry_policy() {
+        let mut args = Args::parse_from(["xenia-peer"]);
+        args.telemetry_level = TelemetryLevel::Basic;
+        args.audio = AudioMode::Off;
         assert_eq!(
-            m1_consent_scope(TelemetryLevel::Basic, AudioMode::Off),
-            "display: screen stream; telemetry: basic host performance; audio: off"
+            m1_consent_scope(&args).summary(),
+            "display: screen stream; telemetry: basic host performance; audio: off; input: off; clipboard: off; file transfer: off"
         );
     }
 
     #[test]
     fn m1_scope_names_real_audio_capture_explicitly() {
+        let mut args = Args::parse_from(["xenia-peer"]);
+        args.telemetry_level = TelemetryLevel::System;
+        args.audio = AudioMode::Capture;
         assert_eq!(
-            m1_consent_scope(TelemetryLevel::System, AudioMode::Capture),
-            "display: screen stream; telemetry: system identity and performance; audio: host device capture"
+            m1_consent_scope(&args).summary(),
+            "display: screen stream; telemetry: system identity and performance; audio: host device capture; input: off; clipboard: off; file transfer: off"
         );
     }
 
@@ -2954,5 +2994,44 @@ mod consent_scope_tests {
             None,
         );
         assert!(configured_permission_set(&recv).file_transfer);
+    }
+
+    #[test]
+    fn consent_scope_describes_every_configured_capability_and_direction() {
+        let args = args_with(
+            InputBackendChoice::Log,
+            ClipboardMode::Bidirectional,
+            Some(std::path::PathBuf::from("/tmp/inbox")),
+            Some(std::path::PathBuf::from("/tmp/outbound")),
+        );
+        let scope = m1_consent_scope(&args);
+        assert_eq!(
+            scope.input,
+            xenia_operator_proto::ConsentInputScope::RemoteInputInjection
+        );
+        assert_eq!(
+            scope.clipboard,
+            xenia_operator_proto::ConsentClipboardScope::Bidirectional
+        );
+        assert_eq!(
+            scope.file_transfer,
+            xenia_operator_proto::ConsentFileTransferScope::Bidirectional
+        );
+
+        let one_way = args_with(
+            InputBackendChoice::Noop,
+            ClipboardMode::HostToViewer,
+            None,
+            Some(std::path::PathBuf::from("/tmp/outbound")),
+        );
+        let scope = m1_consent_scope(&one_way);
+        assert_eq!(
+            scope.clipboard,
+            xenia_operator_proto::ConsentClipboardScope::HostToViewer
+        );
+        assert_eq!(
+            scope.file_transfer,
+            xenia_operator_proto::ConsentFileTransferScope::HostToViewer
+        );
     }
 }

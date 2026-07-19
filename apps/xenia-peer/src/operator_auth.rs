@@ -1258,7 +1258,7 @@ mod tests {
         let (daemon, daemon_ml_dsa) = test_daemon();
         let policy = policy_with(&op, OperatorRole::Approver);
         let session = [7u8; 16];
-        let scope_digest = xenia_operator_proto::scope_digest("view screen");
+        let scope_digest = xenia_operator_proto::ConsentScopeV1::screen_only().digest();
         let req = authed_action(
             &op,
             &daemon,
@@ -1292,7 +1292,7 @@ mod tests {
         let session = [7u8; 16];
         // A Viewer-role token can't approve. (The token is honestly issued at
         // Viewer -- a forged Approver token would fail token verification.)
-        let scope_digest = xenia_operator_proto::scope_digest("view screen");
+        let scope_digest = xenia_operator_proto::ConsentScopeV1::screen_only().digest();
         let req = authed_action(
             &op,
             &daemon,
@@ -1324,7 +1324,7 @@ mod tests {
         let policy = policy_with(&op, OperatorRole::Admin);
         // Signed for one session, presented against another: the per-action
         // signature no longer verifies (replay across sessions is refused).
-        let scope_digest = xenia_operator_proto::scope_digest("view screen");
+        let scope_digest = xenia_operator_proto::ConsentScopeV1::screen_only().digest();
         let req = authed_action(
             &op,
             &daemon,
@@ -1356,7 +1356,7 @@ mod tests {
         // Empty policy: the operator was de-enrolled after the token was issued.
         let policy = OperatorPolicy::default();
         let session = [7u8; 16];
-        let scope_digest = xenia_operator_proto::scope_digest("view screen");
+        let scope_digest = xenia_operator_proto::ConsentScopeV1::screen_only().digest();
         let req = authed_action(
             &op,
             &daemon,
@@ -1391,7 +1391,7 @@ mod tests {
         let (daemon, daemon_ml_dsa) = test_daemon();
         let policy = policy_with(&op, OperatorRole::Admin);
         let session = [7u8; 16];
-        let signed_scope_digest = xenia_operator_proto::scope_digest("view screen");
+        let signed_scope_digest = xenia_operator_proto::ConsentScopeV1::screen_only().digest();
         let req = authed_action(
             &op,
             &daemon,
@@ -1403,7 +1403,11 @@ mod tests {
             3000,
         );
         let daemon_scope_digest =
-            xenia_operator_proto::scope_digest("view screen, inject input, transfer files");
+            xenia_operator_proto::ConsentScopeV1::screen(
+                xenia_operator_proto::ConsentTelemetryScope::SystemIdentityAndPerformance,
+                xenia_operator_proto::ConsentAudioScope::HostDeviceCapture,
+            )
+            .digest();
         assert_eq!(
             authorize_consent_action(
                 &policy,

@@ -43,13 +43,15 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use xenia_operator_proto::{ConsentAction, DaemonIdentityCertificate, OperatorRole};
+pub use xenia_operator_proto::{
+    ConsentAction, ConsentScopeV1, DaemonIdentityCertificate, OperatorRole,
+};
 
 /// Current schema version for the `/v1/sign/*` request/response shapes.
 /// Bump when a breaking change to any request/response shape ships; the
 /// agent should refuse a request whose `schema_version` it doesn't
 /// recognize rather than guessing at compatibility.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Fields common to every `/v1/sign/*` request: who the caller believes
 /// they are, which daemon they're targeting, and enough to correlate a
@@ -198,15 +200,12 @@ pub struct SignConsentActionRequest {
     /// daemon state the daemon itself re-validates when the consent
     /// action is finally submitted over the sealed channel.
     pub session_id_hex: String,
-    /// The human-readable scope text relayed from the daemon's consent
-    /// prompt. The agent binds `xenia_operator_proto::scope_digest(scope)`
-    /// into the signed transcript, and the daemon independently recomputes
-    /// that digest from its authoritative session record. This prevents a
-    /// signature for one scope from authorizing another scope; it does not
-    /// prove which text a potentially compromised browser rendered to the
-    /// operator. Like `session_id_hex`, this is connection-scoped daemon
-    /// state that the agent cannot independently authenticate in schema v4.
-    pub scope: String,
+    /// Canonical machine-readable scope relayed from the daemon's consent
+    /// prompt. The agent commits to [`ConsentScopeV1::digest`], while the
+    /// daemon independently derives the same digest from its authoritative
+    /// session configuration. Human-facing wording is derived from this
+    /// structure and is not part of the cryptographic encoding.
+    pub scope: ConsentScopeV1,
     /// The operator's current daemon-issued session token, verified by the
     /// agent before its `token_nonce_hex` is trusted (see
     /// [`SignedTokenDto`]).
@@ -624,16 +623,16 @@ mod tests {
             },
             action: ConsentAction::Approve,
             session_id_hex: "dd".repeat(16),
-            scope: "view screen".to_string(),
+            scope: ConsentScopeV1::screen_only(),
             token: test_token(),
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"Approve\""));
         assert!(json.contains("\"token\""));
-        assert!(json.contains("\"scope\":\"view screen\""));
+        assert!(json.contains("\"ScreenStream\""));
         let parsed: SignConsentActionRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.action, ConsentAction::Approve);
-        assert_eq!(parsed.scope, "view screen");
+        assert_eq!(parsed.scope, ConsentScopeV1::screen_only());
         assert_eq!(parsed.token, req.token);
     }
 
