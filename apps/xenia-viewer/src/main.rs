@@ -37,7 +37,7 @@ use xenia_peer_core::frame::{
     RawTelemetry, audio_flags,
 };
 use xenia_peer_core::handshake::{
-    NegotiatedTransport, negotiated_session_context_hash, perform_viewer_handshake_with_transcript,
+    NegotiatedTransport, SessionCapabilityGuard, perform_viewer_handshake_with_transcript,
 };
 use xenia_peer_core::transport::{
     RecvEnvelope, SendEnvelope, TcpRecvHalf, TcpSendHalf, TcpTransport, Transport, TransportError,
@@ -1432,7 +1432,7 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut audio_sink = ViewerAudioSink::new(args.play_audio, args.audio_output_device.as_deref())
         .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
     let negotiated_transport = transport.negotiated_transport();
-    let mut capabilities_received = false;
+    let mut capability_guard = SessionCapabilityGuard::new(handshake.negotiated_context_hash);
     let mut epoch_state = SessionEpochState::new(handshake.transcript_hash, RekeyPolicy::smoke());
     loop {
         if frame_limit != 0 && received >= frame_limit {
@@ -1454,25 +1454,12 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
         };
-        if raw_frame.pixel_format == FramePixelFormat::Telemetry {
-            let _ = decode_telemetry_frame(&raw_frame);
-            continue;
-        }
         if raw_frame.pixel_format == FramePixelFormat::Capabilities {
             let capabilities = RawCapabilities::from_frame(&raw_frame)?;
             let negotiated_context_hash =
-                negotiated_session_context_hash(negotiated_transport, capabilities.clone())?;
-            if let Some(expected_hash) = handshake.negotiated_context_hash
-                && expected_hash != negotiated_context_hash
-            {
-                return Err("sealed capabilities do not match handshake context hash".into());
-            }
-            if !capabilities.supports_current_capability_contract() {
-                return Err("daemon advertised unsupported capability contract".into());
-            }
+                capability_guard.accept(negotiated_transport, &capabilities)?;
             let _negotiated_context_key =
                 derive_negotiated_context_key(&handshake.key_schedule, &negotiated_context_hash);
-            capabilities_received = true;
             info!(
                 transport = ?negotiated_transport,
                 context_hash = ?negotiated_context_hash,
@@ -1495,8 +1482,12 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             );
             continue;
         }
-        if !capabilities_received {
-            return Err("daemon sent media before sealed session capabilities".into());
+        if !capability_guard.is_accepted() {
+            return Err("daemon sent session payload before sealed capabilities".into());
+        }
+        if raw_frame.pixel_format == FramePixelFormat::Telemetry {
+            let _ = decode_telemetry_frame(&raw_frame);
+            continue;
         }
         if raw_frame.pixel_format == FramePixelFormat::Rekey {
             let RawRekey::Proposal {
@@ -1867,7 +1858,7 @@ async fn gui_receive_loop(
     );
     let mut audio_sink: Box<dyn AudioPlaybackSink + Send> =
         Box::new(ChannelAudioSink::new(audio_tx));
-    let mut capabilities_received = false;
+    let mut capability_guard = SessionCapabilityGuard::new(handshake.negotiated_context_hash);
     let mut epoch_state = SessionEpochState::new(handshake.transcript_hash, RekeyPolicy::smoke());
     loop {
         if frame_limit != 0 && received >= frame_limit {
@@ -1891,6 +1882,9 @@ async fn gui_receive_loop(
             Some(xenia_peer_core::PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST)
                 | Some(xenia_peer_core::PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER)
         ) {
+            if !capability_guard.is_accepted() {
+                return Err("daemon sent file-transfer payload before sealed capabilities".into());
+            }
             let message = match session.lock().await.open_file_transfer_message(&envelope) {
                 Ok(message) => message,
                 Err(err) => {
@@ -1918,32 +1912,15 @@ async fn gui_receive_loop(
                 continue;
             }
         };
-        if raw_frame.pixel_format == FramePixelFormat::Telemetry {
-            if let Some(telemetry) = decode_telemetry_frame(&raw_frame) {
-                slot.put_telemetry(telemetry);
-            }
-            continue;
-        }
         if raw_frame.pixel_format == FramePixelFormat::Capabilities {
             let capabilities = RawCapabilities::from_frame(&raw_frame).map_err(
                 |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
             )?;
-            let negotiated_context_hash =
-                negotiated_session_context_hash(negotiated_transport, capabilities.clone())
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                        e.to_string().into()
-                    })?;
-            if let Some(expected_hash) = handshake.negotiated_context_hash
-                && expected_hash != negotiated_context_hash
-            {
-                return Err("sealed capabilities do not match handshake context hash".into());
-            }
-            if !capabilities.supports_current_capability_contract() {
-                return Err("daemon advertised unsupported capability contract".into());
-            }
+            let negotiated_context_hash = capability_guard
+                .accept(negotiated_transport, &capabilities)
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
             let _negotiated_context_key =
                 derive_negotiated_context_key(&handshake.key_schedule, &negotiated_context_hash);
-            capabilities_received = true;
             info!(
                 transport = ?negotiated_transport,
                 context_hash = ?negotiated_context_hash,
@@ -1966,8 +1943,14 @@ async fn gui_receive_loop(
             );
             continue;
         }
-        if !capabilities_received {
-            return Err("daemon sent media before sealed session capabilities".into());
+        if !capability_guard.is_accepted() {
+            return Err("daemon sent session payload before sealed capabilities".into());
+        }
+        if raw_frame.pixel_format == FramePixelFormat::Telemetry {
+            if let Some(telemetry) = decode_telemetry_frame(&raw_frame) {
+                slot.put_telemetry(telemetry);
+            }
+            continue;
         }
         if raw_frame.pixel_format == FramePixelFormat::Rekey {
             let RawRekey::Proposal {

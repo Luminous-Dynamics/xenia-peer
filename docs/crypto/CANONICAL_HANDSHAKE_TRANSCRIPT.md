@@ -113,7 +113,11 @@ The negotiated context flow is:
   handshake;
 - the viewer recomputes the context hash from the sealed capabilities and
   rejects a mismatch;
-- the viewer rejects media before sealed capabilities are accepted.
+- the viewer accepts exactly one capability advertisement for the session;
+  identical, narrowed, or otherwise changed re-advertisements are rejected and
+  require a new authenticated handshake;
+- the viewer rejects every session payload before sealed capabilities are
+  accepted, including media, telemetry, clipboard, and file-transfer payloads.
 
 This keeps capability negotiation explicit without adding another round trip.
 Future protocol versions can replace the optional field with a required context
