@@ -195,6 +195,7 @@ mod tests {
         crate::operator_auth::AuthorizedConsentAction {
             action,
             action_id: [0x55; 16],
+            offer_digest: [0x66; 32],
             operator_id: "alice".to_string(),
             role: crate::operator::OperatorRole::Admin,
             ed25519_pubkey: [0x11; 32],

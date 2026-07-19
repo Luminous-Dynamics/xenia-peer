@@ -72,6 +72,17 @@ pub enum AgentAuditEvent {
         new_ed25519_pubkey_hex: String,
         daemon_endpoint: String,
     },
+    /// `POST /v1/sign/consent-action` succeeded: the agent verified the
+    /// daemon-attested offer and durably recorded the exact signed decision.
+    /// Kept as the final enum variant so bincode discriminants for every
+    /// previously-persisted event remain stable.
+    ConsentDecisionSigned {
+        action: String,
+        action_id_hex: String,
+        offer_digest_hex: String,
+        session_id_hex: String,
+        daemon_endpoint: String,
+    },
 }
 
 impl AgentAuditEvent {
@@ -83,6 +94,7 @@ impl AgentAuditEvent {
             Self::HostTrustRotation { .. } => "host_trust.rotation",
             Self::Paired => "session.paired",
             Self::SessionRefreshed => "session.refreshed",
+            Self::ConsentDecisionSigned { .. } => "consent.decision_signed",
             Self::RevocationSigned { .. } => "revocation.signed",
             Self::KeyReplacementSigned { .. } => "key_replacement.signed",
         }
@@ -623,6 +635,13 @@ mod tests {
             },
             AgentAuditEvent::Paired,
             AgentAuditEvent::SessionRefreshed,
+            AgentAuditEvent::ConsentDecisionSigned {
+                action: String::new(),
+                action_id_hex: String::new(),
+                offer_digest_hex: String::new(),
+                session_id_hex: String::new(),
+                daemon_endpoint: String::new(),
+            },
             AgentAuditEvent::RevocationSigned {
                 target_operator_id: String::new(),
                 daemon_endpoint: String::new(),

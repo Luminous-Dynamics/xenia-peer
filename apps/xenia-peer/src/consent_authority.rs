@@ -365,6 +365,7 @@ mod tests {
         AuthorizedConsentAction {
             action: ConsentAction::Approve,
             action_id: [0x44; 16],
+            offer_digest: [0x55; 32],
             operator_id: "alice".to_string(),
             role: crate::operator::OperatorRole::Admin,
             ed25519_pubkey: [0x11; 32],

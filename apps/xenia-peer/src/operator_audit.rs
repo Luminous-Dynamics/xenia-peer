@@ -37,8 +37,12 @@ pub(crate) fn operator_consent_audit_event(
         request_id: Uuid::from_bytes(authorized.action_id),
         kind,
         scope: format!(
-            "operator {:?} (role {:?}) authorized {:?}",
-            authorized.operator_id, authorized.role, authorized.action
+            "operator {:?} (role {:?}) authorized {:?}; action_id={}; offer_digest={}",
+            authorized.operator_id,
+            authorized.role,
+            authorized.action,
+            hex::encode(authorized.action_id),
+            hex::encode(authorized.offer_digest),
         ),
     }
 }
@@ -52,6 +56,7 @@ mod tests {
         AuthorizedConsentAction {
             action,
             action_id: [0x22; 16],
+            offer_digest: [0x33; 32],
             operator_id: "alice".to_string(),
             role: OperatorRole::Approver,
             ed25519_pubkey: [0x11; 32],
@@ -74,6 +79,8 @@ mod tests {
             assert_eq!(event.kind, kind, "maps {action:?} to the right ConsentKind");
             assert!(event.scope.contains("alice"));
             assert!(event.scope.contains("Approver"));
+            assert!(event.scope.contains(&hex::encode([0x22; 16])));
+            assert!(event.scope.contains(&hex::encode([0x33; 32])));
         }
     }
 }

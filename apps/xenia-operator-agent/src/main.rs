@@ -750,6 +750,17 @@ async fn sign_consent_action(
     );
     let ed_signature = state.manager.sign(&transcript);
     let ml_dsa_signature = state.manager.sign_ml_dsa(&transcript);
+    record_audit_event(
+        &state,
+        audit_log::AgentAuditEvent::ConsentDecisionSigned {
+            action: req.action.as_str().to_string(),
+            action_id_hex: req.action_id_hex.clone(),
+            offer_digest_hex: hex::encode(offer_digest),
+            session_id_hex: hex::encode(offer.session_id),
+            daemon_endpoint: normalize_daemon_endpoint(&req.common.daemon_endpoint),
+        },
+    )
+    .await?;
 
     Ok(Json(SignConsentActionResponse {
         ed_signature_hex: hex::encode(ed_signature.to_bytes()),
@@ -2241,6 +2252,7 @@ mod tests {
     #[tokio::test]
     async fn sign_consent_action_trusts_a_new_daemon_on_first_use_and_returns_a_valid_signature() {
         let state = test_state("secret", &["http://localhost:8134"]);
+        let audit_state = Arc::clone(&state);
         let app = build_router(state);
         let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
         let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
@@ -2276,6 +2288,26 @@ mod tests {
             &ed_sig,
         )
         .expect("agent's Ed25519 signature must verify over the consent-action transcript");
+
+        let audit = audit_state
+            .audit_log
+            .lock()
+            .expect("audit-log mutex poisoned");
+        let event = &audit
+            .entries()
+            .last()
+            .expect("successful signing must append an audit event")
+            .event;
+        assert_eq!(
+            event,
+            &audit_log::AgentAuditEvent::ConsentDecisionSigned {
+                action: "Approve".to_string(),
+                action_id_hex: hex::encode(action_id),
+                offer_digest_hex: hex::encode(offer_digest),
+                session_id_hex: hex::encode(attested.offer.session_id),
+                daemon_endpoint: TEST_DAEMON_ENDPOINT.to_string(),
+            }
+        );
     }
 
     #[tokio::test]

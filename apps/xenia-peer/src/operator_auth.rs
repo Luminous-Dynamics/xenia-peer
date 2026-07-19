@@ -339,6 +339,7 @@ pub(crate) struct AuthenticatedConsentAction {
 pub(crate) struct AuthorizedConsentAction {
     pub(crate) action: ConsentAction,
     pub(crate) action_id: [u8; 16],
+    pub(crate) offer_digest: [u8; 32],
     pub(crate) operator_id: String,
     pub(crate) role: OperatorRole,
     /// The operator's enrolled Ed25519 public key, for stable audit
@@ -401,6 +402,7 @@ pub(crate) fn authorize_consent_action(
     Ok(AuthorizedConsentAction {
         action: request.action,
         action_id: request.action_id,
+        offer_digest: *offer_digest,
         operator_id: token.operator_id,
         role: token.role,
         ed25519_pubkey: operator.ed25519_pubkey,
