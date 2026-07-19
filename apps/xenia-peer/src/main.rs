@@ -2094,6 +2094,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // M1 consent-scope offer/broadcast below, so semantics, display text,
     // audit text, and the signature digest all share one source of truth.
     let consent_scope = m1_consent_scope(&raw_capabilities);
+    let offered_permissions = configured_permission_set(&raw_capabilities);
     let m1_scope = consent_scope.summary();
     let offer_issued_at = now_ms() / 1_000;
     let consent_offer = xenia_operator_proto::ConsentOfferV2::new(
@@ -2222,16 +2223,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     let m1_signing_key = load_or_create_signing_key(&args.m1_consent_key_path)?;
-    // `m1_scope` was already computed above (before the consent-server
-    // branches, so their per-action signature binding could use it) -- reuse
-    // it here rather than recomputing, so there's one source of truth.
+    // The typed scope, persisted permission descriptor, and runtime gate all
+    // derive from the same `raw_capabilities` value computed before either
+    // consent transport starts.
     let m1_scope_for_log = m1_scope.clone();
     let mut m1_runtime = crate::m1_runtime::M1RuntimeSession::new(
         m1_signing_key,
         expand_source_id_for_m1(source_id),
         session_id,
         Uuid::new_v4(),
-        m1_scope,
+        offered_permissions,
     );
     m1_runtime.bind_session_transcript_hash(handshake.transcript_hash);
     m1_runtime.offer()?;
@@ -2263,7 +2264,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let timeout = Duration::from_secs(args.consent_timeout_secs.max(1));
         match tokio::time::timeout(timeout, consent_decision_rx).await {
             Ok(Ok(true)) => {
-                let granted = configured_permission_set(&raw_capabilities);
+                let granted = offered_permissions;
                 m1_runtime.grant_consent_scoped(granted)?;
                 info!(
                     inject_input = granted.inject_input,
@@ -2755,7 +2756,7 @@ fn run_m1_runtime_smoke(
         source_id,
         Uuid::from_bytes([0x11; 16]),
         Uuid::from_bytes([0x22; 16]),
-        "m1 runtime cli smoke",
+        M1PermissionSet::all(),
     );
     runtime.bind_session_transcript_hash([0x33; 32]);
 

@@ -167,9 +167,10 @@ pub struct ConsentEventRecord {
     pub request_id: Uuid,
     /// Kind of event.
     pub kind: ConsentKind,
-    /// Optional human-readable scope description (e.g.
-    /// `"view screen, inject input on /dev/tty1"`). Audit trails
-    /// benefit from this; verification does not depend on it.
+    /// Versioned scope descriptor or human-readable legacy description.
+    /// New authorization paths should prefer a machine-readable descriptor
+    /// whose exact bytes can be replayed fail-closed; the ledger hash and
+    /// signature cover this field either way.
     pub scope: String,
 }
 

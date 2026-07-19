@@ -53,6 +53,12 @@ pub(crate) enum M1RuntimeError {
         trusted: [u8; 32],
         bundle: [u8; 32],
     },
+    InvalidPersistedPermissionDescriptor(String),
+    PersistedConsentContextMismatch(&'static str),
+    GrantDoesNotMatchOffer {
+        offered: M1PermissionSet,
+        granted: M1PermissionSet,
+    },
     PersistIo(std::io::Error),
     PersistCodec(bincode::Error),
     PersistJson(serde_json::Error),
@@ -89,6 +95,18 @@ impl fmt::Display for M1RuntimeError {
                 "M1 sealed evidence {surface} key fingerprint did not match trust anchor: trusted={}, bundle={}",
                 hex::encode(trusted),
                 hex::encode(bundle)
+            ),
+            Self::InvalidPersistedPermissionDescriptor(scope) => write!(
+                f,
+                "M1 persisted consent permission descriptor is missing or invalid: {scope:?}"
+            ),
+            Self::PersistedConsentContextMismatch(field) => write!(
+                f,
+                "M1 persisted consent entry changed authoritative {field}"
+            ),
+            Self::GrantDoesNotMatchOffer { offered, granted } => write!(
+                f,
+                "M1 granted permissions {granted:?} do not match offered permissions {offered:?}"
             ),
             Self::PersistIo(err) => write!(f, "M1 ledger persistence I/O error: {err}"),
             Self::PersistCodec(err) => write!(f, "M1 ledger persistence codec error: {err}"),
@@ -748,6 +766,7 @@ pub(crate) struct M1RuntimeSession {
     source_id: [u8; 32],
     session_id: Uuid,
     request_id: Uuid,
+    configured_permissions: M1PermissionSet,
     scope: String,
     session_transcript_hash: Option<[u8; 32]>,
     next_audit_index: usize,
@@ -759,14 +778,14 @@ impl M1RuntimeSession {
         source_id: [u8; 32],
         session_id: Uuid,
         request_id: Uuid,
-        scope: impl Into<String>,
+        configured_permissions: M1PermissionSet,
     ) -> Self {
         Self::from_chain(
             Chain::new(signing_key),
             source_id,
             session_id,
             request_id,
-            scope,
+            configured_permissions,
         )
     }
 
@@ -775,7 +794,7 @@ impl M1RuntimeSession {
         source_id: [u8; 32],
         session_id: Uuid,
         request_id: Uuid,
-        scope: impl Into<String>,
+        configured_permissions: M1PermissionSet,
     ) -> Self {
         Self {
             session: M1SessionMachine::new(),
@@ -783,7 +802,8 @@ impl M1RuntimeSession {
             source_id,
             session_id,
             request_id,
-            scope: scope.into(),
+            configured_permissions,
+            scope: configured_permissions.scope_descriptor(),
             session_transcript_hash: None,
             next_audit_index: 0,
         }
@@ -795,14 +815,24 @@ impl M1RuntimeSession {
         source_id: [u8; 32],
         session_id: Uuid,
         request_id: Uuid,
-        scope: impl Into<String>,
     ) -> Result<Self, M1RuntimeError> {
+        Verifier::verify_chain(&entries, &signing_key.verifying_key())?;
+        let persisted_scope = entries
+            .first()
+            .map(|entry| entry.event.scope.clone())
+            .ok_or_else(|| {
+                M1RuntimeError::InvalidPersistedPermissionDescriptor("missing ledger entry".into())
+            })?;
+        let configured_permissions = M1PermissionSet::from_scope_descriptor(&persisted_scope)
+            .ok_or_else(|| {
+                M1RuntimeError::InvalidPersistedPermissionDescriptor(persisted_scope.clone())
+            })?;
         let mut runtime = Self::from_chain(
             Chain::from_entries(entries, signing_key),
             source_id,
             session_id,
             request_id,
-            scope,
+            configured_permissions,
         );
         runtime.replay_persisted_consent_state()?;
         Ok(runtime)
@@ -949,9 +979,23 @@ impl M1RuntimeSession {
         let entries = self.entries();
 
         for entry in entries {
+            if entry.event.source_id != self.source_id {
+                return Err(M1RuntimeError::PersistedConsentContextMismatch("source_id"));
+            }
+            if entry.event.session_id != self.session_id {
+                return Err(M1RuntimeError::PersistedConsentContextMismatch("session_id"));
+            }
+            if entry.event.request_id != self.request_id {
+                return Err(M1RuntimeError::PersistedConsentContextMismatch("request_id"));
+            }
+            if entry.event.scope != self.scope {
+                return Err(M1RuntimeError::PersistedConsentContextMismatch("permission scope"));
+            }
             match entry.event.kind {
                 ConsentKind::Request => self.session.offer()?,
-                ConsentKind::Approval => self.session.grant_consent()?,
+                ConsentKind::Approval => self
+                    .session
+                    .grant_consent_scoped(self.configured_permissions)?,
                 ConsentKind::Denial => self.session.deny_consent()?,
                 ConsentKind::Revocation => self.session.revoke()?,
                 ConsentKind::Violation => self.session.fail()?,
@@ -969,7 +1013,8 @@ impl M1RuntimeSession {
     }
 
     pub(crate) fn grant_consent(&mut self) -> Result<(), M1RuntimeError> {
-        self.session.grant_consent()?;
+        self.session
+            .grant_consent_scoped(self.configured_permissions)?;
         self.flush_new_audit_events()
     }
 
@@ -980,6 +1025,12 @@ impl M1RuntimeSession {
         &mut self,
         granted: M1PermissionSet,
     ) -> Result<(), M1RuntimeError> {
+        if granted != self.configured_permissions {
+            return Err(M1RuntimeError::GrantDoesNotMatchOffer {
+                offered: self.configured_permissions,
+                granted,
+            });
+        }
         self.session.grant_consent_scoped(granted)?;
         self.flush_new_audit_events()
     }
@@ -1867,7 +1918,7 @@ mod tests {
             [0xAB; 32],
             Uuid::from_bytes([1; 16]),
             Uuid::from_bytes([2; 16]),
-            "view screen",
+            M1PermissionSet::all(),
         );
 
         (runtime, verifying_key)
@@ -2613,6 +2664,99 @@ mod tests {
     }
 
     #[test]
+    fn grant_must_match_the_permission_set_recorded_at_offer_time() {
+        let signing_key = SigningKey::from_bytes(&[19; 32]);
+        let offered = M1PermissionSet {
+            stream_frame: true,
+            send_file_to_viewer: true,
+            ..M1PermissionSet::default()
+        };
+        let mut runtime = M1RuntimeSession::new(
+            signing_key,
+            [0xAB; 32],
+            Uuid::from_bytes([1; 16]),
+            Uuid::from_bytes([2; 16]),
+            offered,
+        );
+        runtime.offer().unwrap();
+
+        let err = runtime
+            .grant_consent_scoped(M1PermissionSet::all())
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            M1RuntimeError::GrantDoesNotMatchOffer {
+                offered: found,
+                granted
+            } if found == offered && granted == M1PermissionSet::all()
+        ));
+        assert_eq!(runtime.state(), M1SessionState::Offered);
+    }
+
+    #[test]
+    fn persisted_scope_and_context_are_replayed_fail_closed() {
+        let signing_key = SigningKey::from_bytes(&[20; 32]);
+        let source_id = [0xAB; 32];
+        let session_id = Uuid::from_bytes([1; 16]);
+        let request_id = Uuid::from_bytes([2; 16]);
+        let grant = M1PermissionSet {
+            stream_frame: true,
+            receive_file_from_viewer: true,
+            ..M1PermissionSet::default()
+        };
+        let mut runtime = M1RuntimeSession::new(
+            signing_key.clone(),
+            source_id,
+            session_id,
+            request_id,
+            grant,
+        );
+        runtime.offer().unwrap();
+        runtime.grant_consent().unwrap();
+
+        let mut inconsistent = Chain::new(signing_key.clone());
+        inconsistent
+            .append(xenia_ledger::ConsentEventRecord {
+                source_id,
+                session_id,
+                request_id,
+                kind: ConsentKind::Request,
+                scope: grant.scope_descriptor(),
+            })
+            .unwrap();
+        inconsistent
+            .append(xenia_ledger::ConsentEventRecord {
+                source_id,
+                session_id,
+                request_id,
+                kind: ConsentKind::Approval,
+                scope: M1PermissionSet::all().scope_descriptor(),
+            })
+            .unwrap();
+        assert!(matches!(
+            M1RuntimeSession::from_persisted_entries(
+                signing_key.clone(),
+                inconsistent.into_entries(),
+                source_id,
+                session_id,
+                request_id,
+            ),
+            Err(M1RuntimeError::PersistedConsentContextMismatch("permission scope"))
+        ));
+
+        assert!(matches!(
+            M1RuntimeSession::from_persisted_entries(
+                signing_key,
+                runtime.entries(),
+                source_id,
+                Uuid::from_bytes([9; 16]),
+                request_id,
+            ),
+            Err(M1RuntimeError::PersistedConsentContextMismatch("session_id"))
+        ));
+    }
+
+    #[test]
     fn rehydrated_runtime_continues_hash_chain() {
         let signing_key = SigningKey::from_bytes(&[18; 32]);
         let verifying_key = signing_key.verifying_key();
@@ -2620,12 +2764,17 @@ mod tests {
         let session_id = Uuid::from_bytes([1; 16]);
         let request_id = Uuid::from_bytes([2; 16]);
 
+        let persisted_grant = M1PermissionSet {
+            stream_frame: true,
+            send_file_to_viewer: true,
+            ..M1PermissionSet::default()
+        };
         let mut runtime = M1RuntimeSession::new(
             signing_key.clone(),
             source_id,
             session_id,
             request_id,
-            "view screen",
+            persisted_grant,
         );
         runtime.offer().unwrap();
         runtime.grant_consent().unwrap();
@@ -2637,9 +2786,17 @@ mod tests {
             source_id,
             session_id,
             request_id,
-            "view screen",
         )
         .unwrap();
+        assert_eq!(rehydrated.session.granted_permissions(), persisted_grant);
+        rehydrated.allow_file_send_to_viewer().unwrap();
+        assert!(matches!(
+            rehydrated.allow_file_receive_from_viewer(),
+            Err(M1RuntimeError::Session(M1SessionError::PermissionDenied {
+                permission: M1Permission::ReceiveFileFromViewer,
+                ..
+            }))
+        ));
         rehydrated.revoke().unwrap();
 
         let entries = rehydrated.entries();

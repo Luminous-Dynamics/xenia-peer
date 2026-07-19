@@ -68,6 +68,44 @@ pub struct M1PermissionSet {
 }
 
 impl M1PermissionSet {
+    /// Stable prefix for the machine-readable grant persisted in consent ledgers.
+    pub const SCOPE_DESCRIPTOR_PREFIX: &'static str = "xenia-m1-permissions-v1:";
+
+    /// Encode this grant as a stable, human-inspectable six-bit descriptor.
+    /// Field order is part of the persistence contract and must not be changed:
+    /// frame, input, host-clipboard-read, host-clipboard-write,
+    /// host-to-viewer-file, viewer-to-host-file.
+    pub fn scope_descriptor(self) -> String {
+        format!(
+            "{}{}{}{}{}{}{}",
+            Self::SCOPE_DESCRIPTOR_PREFIX,
+            u8::from(self.stream_frame),
+            u8::from(self.inject_input),
+            u8::from(self.read_host_clipboard),
+            u8::from(self.write_host_clipboard),
+            u8::from(self.send_file_to_viewer),
+            u8::from(self.receive_file_from_viewer),
+        )
+    }
+
+    /// Decode a grant persisted by [`Self::scope_descriptor`]. Unknown versions,
+    /// malformed lengths, and non-binary fields fail closed.
+    pub fn from_scope_descriptor(scope: &str) -> Option<Self> {
+        let bits = scope.strip_prefix(Self::SCOPE_DESCRIPTOR_PREFIX)?.as_bytes();
+        if bits.len() != 6 || bits.iter().any(|bit| !matches!(bit, b'0' | b'1')) {
+            return None;
+        }
+        let enabled = |index: usize| bits[index] == b'1';
+        Some(Self {
+            stream_frame: enabled(0),
+            inject_input: enabled(1),
+            read_host_clipboard: enabled(2),
+            write_host_clipboard: enabled(3),
+            send_file_to_viewer: enabled(4),
+            receive_file_from_viewer: enabled(5),
+        })
+    }
+
     /// Grant every privileged operation. Retained for the transcript-replay
     /// and test paths that reconstruct a session without a per-tier scope;
     /// live daemons should grant exactly what the operator enabled.
@@ -376,6 +414,30 @@ impl M1SessionMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_scope_descriptor_round_trips_and_rejects_unknown_shapes() {
+        let grant = M1PermissionSet {
+            stream_frame: true,
+            inject_input: false,
+            read_host_clipboard: true,
+            write_host_clipboard: false,
+            send_file_to_viewer: true,
+            receive_file_from_viewer: false,
+        };
+        let descriptor = grant.scope_descriptor();
+        assert_eq!(descriptor, "xenia-m1-permissions-v1:101010");
+        assert_eq!(M1PermissionSet::from_scope_descriptor(&descriptor), Some(grant));
+        assert_eq!(M1PermissionSet::from_scope_descriptor("view screen"), None);
+        assert_eq!(
+            M1PermissionSet::from_scope_descriptor("xenia-m1-permissions-v2:101010"),
+            None
+        );
+        assert_eq!(
+            M1PermissionSet::from_scope_descriptor("xenia-m1-permissions-v1:10101x"),
+            None
+        );
+    }
 
     #[test]
     fn scoped_grant_authorizes_only_the_requested_tiers() {
