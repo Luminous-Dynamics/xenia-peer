@@ -267,9 +267,10 @@ pub async fn ensure_fresh_operator_session(
 /// Build the authenticated consent-action JSON the daemon parses on the
 /// consent socket: `{ token, action, action_signature,
 /// ml_dsa_action_signature }`. The per-action signatures -- both required
-/// -- bind the action to the exact session and token, so a captured
-/// signature can't be replayed for a different action/session/token. The
-/// agent verifies `session`'s token before signing -- see
+/// -- bind the action to the exact session, token, and `scope` (the same
+/// text this console already displays for the decision), so a captured
+/// signature can't be replayed for a different action/session/token/scope.
+/// The agent verifies `session`'s token before signing -- see
 /// [`OperatorSession::to_signed_token_dto`].
 pub async fn build_consent_request(
     endpoint: &str,
@@ -278,6 +279,7 @@ pub async fn build_consent_request(
     session: &OperatorSession,
     action: ConsentAction,
     session_id: &[u8; 16],
+    scope: &str,
 ) -> Result<String, String> {
     let base = endpoint.trim_end_matches('/');
     let cert = fetch_daemon_certificate(base).await?;
@@ -294,6 +296,7 @@ pub async fn build_consent_request(
             },
             action,
             session_id_hex: hex::encode(session_id),
+            scope: scope.to_string(),
             token: session.to_signed_token_dto(),
         },
     )

@@ -128,8 +128,13 @@ async fn operator_rbac_full_chain_smoke() {
         .unwrap()
         .try_into()
         .unwrap();
-    let action_transcript =
-        consent_action_transcript(ConsentAction::Approve, &session_id, &token_nonce);
+    let scope_digest = xenia_operator_proto::scope_digest("view screen");
+    let action_transcript = consent_action_transcript(
+        ConsentAction::Approve,
+        &session_id,
+        &token_nonce,
+        &scope_digest,
+    );
     let consent_json = serde_json::json!({
         "token": token,
         "action": "Approve",
@@ -140,9 +145,15 @@ async fn operator_rbac_full_chain_smoke() {
 
     // --- 4. run it through the daemon's OWN consent-decision path ---
     let no_revocations = crate::operator_revocations::OperatorRevocations::empty();
-    let decoded =
-        crate::decode_consent_decision(&consent_json, true, &state, &session_id, &no_revocations)
-            .expect("authenticated Approve must be authorized");
+    let decoded = crate::decode_consent_decision(
+        &consent_json,
+        true,
+        &state,
+        &session_id,
+        &scope_digest,
+        &no_revocations,
+    )
+    .expect("authenticated Approve must be authorized");
     assert_eq!(decoded.action, ConsentAction::Approve);
     let authorized = decoded
         .authorized
@@ -156,8 +167,15 @@ async fn operator_rbac_full_chain_smoke() {
     let revocations = crate::operator_revocations::OperatorRevocations::empty();
     revocations.revoke("alice");
     assert!(
-        crate::decode_consent_decision(&consent_json, true, &state, &session_id, &revocations)
-            .is_none(),
+        crate::decode_consent_decision(
+            &consent_json,
+            true,
+            &state,
+            &session_id,
+            &scope_digest,
+            &revocations
+        )
+        .is_none(),
         "a revoked operator's signed action must be refused on the consent path"
     );
 
@@ -171,8 +189,14 @@ async fn operator_rbac_full_chain_smoke() {
 
     // --- 6. a tampered/replayed decision is refused by the same path ---
     // Wrong session id: the per-action signature no longer binds.
-    let bad =
-        crate::decode_consent_decision(&consent_json, true, &state, &[0u8; 16], &no_revocations);
+    let bad = crate::decode_consent_decision(
+        &consent_json,
+        true,
+        &state,
+        &[0u8; 16],
+        &scope_digest,
+        &no_revocations,
+    );
     assert!(
         bad.is_none(),
         "a decision signed for another session is refused"
