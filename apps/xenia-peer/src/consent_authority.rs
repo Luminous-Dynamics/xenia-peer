@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, oneshot, watch};
 use uuid::Uuid;
 use xenia_ledger::{Chain, LedgerEntry};
 
@@ -82,6 +82,14 @@ impl ConsentSessionState {
             Self::Denied | Self::Revoked | Self::Failed | Self::Expired
         )
     }
+
+    /// Whether a live M1 runtime must stop privileged work immediately.
+    /// Terminal ceremony states are fail-closed. `Pending` is retained only for
+    /// the explicitly pre-production auto-consent fixture, whose M1 state is
+    /// activated without a transport-delivered consent decision.
+    pub(crate) fn runtime_must_stop(self) -> bool {
+        self.is_terminal()
+    }
 }
 
 /// Whether a transport should remain available after applying a decision.
@@ -105,8 +113,12 @@ pub(crate) struct ConsentDecisionService {
     ledger_path: Arc<PathBuf>,
     /// Serializes audit + lifecycle transitions across every transport.
     transition_lock: Mutex<()>,
-    /// Lock-free mirror for the runtime's hot-path revocation check.
+    /// Lock-free mirror for synchronous state inspection.
     state: AtomicU8,
+    /// Broadcasts every lifecycle transition to live runtime tasks. This lets
+    /// input, file-transfer, and media loops stop immediately instead of
+    /// discovering revocation on their next polling interval.
+    state_tx: watch::Sender<ConsentSessionState>,
     /// Resolves exactly once when the initial ceremony reaches Approved or
     /// Denied. It is dropped on Failed or Expired so the waiter receives
     /// channel closure.
@@ -129,6 +141,7 @@ impl ConsentDecisionService {
         ledger_path: Arc<PathBuf>,
         grant_tx: oneshot::Sender<bool>,
     ) -> Self {
+        let (state_tx, _state_rx) = watch::channel(ConsentSessionState::Pending);
         Self {
             require_operator_auth,
             auth_state,
@@ -138,6 +151,7 @@ impl ConsentDecisionService {
             ledger_path,
             transition_lock: Mutex::new(()),
             state: AtomicU8::new(ConsentSessionState::Pending as u8),
+            state_tx,
             grant_tx: Mutex::new(Some(grant_tx)),
             seen_action_ids: Mutex::new(HashSet::new()),
             persist_ledger: crate::audit_ledger_store::persist_entries_atomic,
@@ -155,6 +169,17 @@ impl ConsentDecisionService {
         ConsentSessionState::from_u8(self.state.load(Ordering::SeqCst))
     }
 
+    /// Subscribe to authoritative lifecycle changes. The receiver immediately
+    /// exposes the current state and then wakes on every later transition.
+    pub(crate) fn subscribe_state(&self) -> watch::Receiver<ConsentSessionState> {
+        self.state_tx.subscribe()
+    }
+
+    fn publish_state(&self, next: ConsentSessionState) {
+        self.state.store(next as u8, Ordering::SeqCst);
+        self.state_tx.send_replace(next);
+    }
+
     /// Whether the live runtime must stop privileged frame flow.
     pub(crate) fn is_session_revoked(&self) -> bool {
         self.state() == ConsentSessionState::Revoked
@@ -167,8 +192,7 @@ impl ConsentDecisionService {
         if self.state() != ConsentSessionState::Pending {
             return;
         }
-        self.state
-            .store(ConsentSessionState::Failed as u8, Ordering::SeqCst);
+        self.publish_state(ConsentSessionState::Failed);
         self.grant_tx.lock().await.take();
     }
 
@@ -180,8 +204,7 @@ impl ConsentDecisionService {
         if self.state() != ConsentSessionState::Pending {
             return;
         }
-        self.state
-            .store(ConsentSessionState::Expired as u8, Ordering::SeqCst);
+        self.publish_state(ConsentSessionState::Expired);
         self.grant_tx.lock().await.take();
     }
 
@@ -285,8 +308,7 @@ impl ConsentDecisionService {
             && !self.offer.can_approve_at(now, 0)
         {
             tracing::warn!("consent approval refused at commit: daemon offer window expired");
-            self.state
-                .store(ConsentSessionState::Expired as u8, Ordering::SeqCst);
+            self.publish_state(ConsentSessionState::Expired);
             self.grant_tx.lock().await.take();
             return ConsentFollowup::Stop;
         }
@@ -369,8 +391,7 @@ impl ConsentDecisionService {
                     error = %err,
                     "operator action refused: its audit entry could not be durably committed"
                 );
-                self.state
-                    .store(ConsentSessionState::Failed as u8, Ordering::SeqCst);
+                self.publish_state(ConsentSessionState::Failed);
                 self.grant_tx.lock().await.take();
                 return ConsentFollowup::Stop;
             }
@@ -380,7 +401,7 @@ impl ConsentDecisionService {
                 .insert(authorized.action_id);
         }
 
-        self.state.store(next as u8, Ordering::SeqCst);
+        self.publish_state(next);
         if let Some(decision) = initial_decision
             && let Some(tx) = self.grant_tx.lock().await.take()
         {
@@ -667,6 +688,44 @@ mod tests {
                 .await,
             ConsentFollowup::Stop
         ));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_subscribers_observe_approval_and_revocation() {
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let ledger = Arc::new(Mutex::new(Chain::new(daemon)));
+        let (grant_tx, grant_rx) = oneshot::channel();
+        let service = service_with_sender(grant_tx, ledger);
+        let mut states = service.subscribe_state();
+
+        assert_eq!(*states.borrow(), ConsentSessionState::Pending);
+        assert!(!states.borrow().runtime_must_stop());
+        assert!(matches!(
+            service
+                .apply(DecodedConsent {
+                    action: ConsentAction::Approve,
+                    authorized: None,
+                })
+                .await,
+            ConsentFollowup::KeepServing
+        ));
+        assert!(grant_rx.await.unwrap());
+        states.changed().await.unwrap();
+        assert_eq!(*states.borrow(), ConsentSessionState::Approved);
+        assert!(!states.borrow().runtime_must_stop());
+
+        assert!(matches!(
+            service
+                .apply(DecodedConsent {
+                    action: ConsentAction::Revoke,
+                    authorized: None,
+                })
+                .await,
+            ConsentFollowup::Stop
+        ));
+        states.changed().await.unwrap();
+        assert_eq!(*states.borrow(), ConsentSessionState::Revoked);
+        assert!(states.borrow().runtime_must_stop());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

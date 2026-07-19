@@ -2303,6 +2303,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mut send_half, recv_half) = transport.split();
     let session = Arc::new(AsyncMutex::new(session));
     let m1_runtime = Arc::new(AsyncMutex::new(m1_runtime));
+    let mut runtime_consent_state = consent_service.subscribe_state();
+    if runtime_consent_state.borrow().runtime_must_stop() {
+        let state = *runtime_consent_state.borrow();
+        if let Err(err) = m1_runtime.lock().await.revoke() {
+            warn!(error = %err, ?state, "failed to record pre-runtime consent termination");
+        }
+        info!(?state, "consent terminated before privileged runtime startup");
+        return Ok(());
+    }
     let (rekey_ack_tx, mut rekey_ack_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
     // File-transfer envelopes are forwarded here rather than opened in the
     // recv task, because replying (Accept/Reject/Chunk/Verified) needs
@@ -2367,6 +2376,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let input_backend = args.input_backend;
         let clipboard_mode = args.clipboard;
         let ft_tx = ft_tx.clone();
+        let mut recv_consent_state = consent_service.subscribe_state();
         tokio::spawn(async move {
             let mut recv_half = recv_half;
             // Constructed lazily on the first real InputEvent, not at
@@ -2375,11 +2385,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // consent dialog because it's simply never built.
             let mut injector: Option<Box<dyn InputInjector>> = None;
             loop {
-                let envelope = match recv_half.recv_envelope().await {
-                    Ok(envelope) => envelope,
-                    Err(err) => {
-                        info!(error = %err, "input/rekey-ack receive loop ending");
-                        break;
+                let envelope = tokio::select! {
+                    changed = recv_consent_state.changed() => {
+                        if changed.is_err() || recv_consent_state.borrow().runtime_must_stop() {
+                            info!(state = ?*recv_consent_state.borrow(), "consent lifecycle stopped inbound privileged flow");
+                            break;
+                        }
+                        continue;
+                    }
+                    received = recv_half.recv_envelope() => match received {
+                        Ok(envelope) => envelope,
+                        Err(err) => {
+                            info!(error = %err, "input/rekey-ack receive loop ending");
+                            break;
+                        }
                     }
                 };
 
@@ -2517,18 +2536,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
 
-        ticker.tick().await;
-
-        // Mid-session revocation: if the operator sent "Revoke" on the
-        // consent socket, record it in the consent ledger (which flips the
-        // M1 state to Revoked so every frame/input/clipboard/file gate now
-        // fails closed) and stop streaming with a graceful close.
-        if consent_service.is_session_revoked() {
-            if let Err(err) = m1_runtime.lock().await.revoke() {
-                warn!(error = %err, "failed to record consent revocation");
+        tokio::select! {
+            _ = ticker.tick() => {}
+            changed = runtime_consent_state.changed() => {
+                if changed.is_err() || runtime_consent_state.borrow().runtime_must_stop() {
+                    let state = *runtime_consent_state.borrow();
+                    if let Err(err) = m1_runtime.lock().await.revoke() {
+                        warn!(error = %err, ?state, "failed to record consent termination");
+                    }
+                    info!(?state, "consent lifecycle stopped outbound privileged flow");
+                    break;
+                }
+                continue;
             }
-            info!("session revoked by operator; stopping frame flow");
-            break;
         }
 
         while let Ok(envelope) = ft_rx.try_recv() {
