@@ -1,0 +1,47 @@
+{
+  "schema": "xenia-consent-conformance-v1",
+  "vectors": [
+    {
+      "name": "minimal-screen",
+      "scope": {
+        "display": "ScreenStream",
+        "telemetry": "Off",
+        "audio": "Off",
+        "input": "Off",
+        "clipboard": "Off",
+        "file_transfer": "Off"
+      },
+      "session_id_hex": "000102030405060708090a0b0c0d0e0f",
+      "issued_at": 1700000000,
+      "expires_at": 1700000300,
+      "action": "Approve",
+      "token_nonce_hex": "101112131415161718191a1b1c1d1e1f",
+      "scope_canonical_hex": "78656e69612d6f70657261746f722d636f6e73656e742d73636f70652d763101010000000000",
+      "scope_digest_hex": "232f6cae1e9026fad7b89277db911a5fcc64e15ce9bbc656bd8d0cb33d639d8a",
+      "offer_canonical_hex": "78656e69612d6f70657261746f722d636f6e73656e742d6f666665722d7631000102030405060708090a0b0c0d0e0f232f6cae1e9026fad7b89277db911a5fcc64e15ce9bbc656bd8d0cb33d639d8a000000006553f100000000006553f22c",
+      "offer_digest_hex": "0059791aebb1be6c8f8aa0b1cb168e67f40f7bea8c8ae16ed888aaa215ca5387",
+      "action_transcript_hex": "78656e69612d6f70657261746f722d636f6e73656e742d616374696f6e2d763301101112131415161718191a1b1c1d1e1f0059791aebb1be6c8f8aa0b1cb168e67f40f7bea8c8ae16ed888aaa215ca5387"
+    },
+    {
+      "name": "broad-bidirectional",
+      "scope": {
+        "display": "ScreenStream",
+        "telemetry": "SystemIdentityAndPerformance",
+        "audio": "HostDeviceCapture",
+        "input": "RemoteInputInjection",
+        "clipboard": "Bidirectional",
+        "file_transfer": "Bidirectional"
+      },
+      "session_id_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+      "issued_at": 1800000000,
+      "expires_at": 1800000120,
+      "action": "Revoke",
+      "token_nonce_hex": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+      "scope_canonical_hex": "78656e69612d6f70657261746f722d636f6e73656e742d73636f70652d763101010202010203",
+      "scope_digest_hex": "50d1d895a8d8539ecdbf46043f71342b2f2781b0baf2df0f01131818b1ad69e0",
+      "offer_canonical_hex": "78656e69612d6f70657261746f722d636f6e73656e742d6f666665722d7631a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a550d1d895a8d8539ecdbf46043f71342b2f2781b0baf2df0f01131818b1ad69e0000000006b49d200000000006b49d278",
+      "offer_digest_hex": "80230600736e3adc486e156abd7e59e378d2d891fd50a7aa067315c3098942ec",
+      "action_transcript_hex": "78656e69612d6f70657261746f722d636f6e73656e742d616374696f6e2d7633035a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a80230600736e3adc486e156abd7e59e378d2d891fd50a7aa067315c3098942ec"
+    }
+  ]
+}

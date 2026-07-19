@@ -902,6 +902,103 @@ impl OperatorEnrollmentRecord {
 mod tests {
     use super::*;
 
+    #[derive(serde::Deserialize)]
+    struct ConsentConformanceFixture {
+        schema: String,
+        vectors: Vec<ConsentConformanceVector>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ConsentConformanceVector {
+        name: String,
+        scope: ConsentScopeV1,
+        session_id_hex: String,
+        issued_at: u64,
+        expires_at: u64,
+        action: ConsentAction,
+        token_nonce_hex: String,
+        scope_canonical_hex: String,
+        scope_digest_hex: String,
+        offer_canonical_hex: String,
+        offer_digest_hex: String,
+        action_transcript_hex: String,
+    }
+
+    fn decode_hex<const N: usize>(value: &str) -> [u8; N] {
+        assert_eq!(value.len(), N * 2, "unexpected hex length");
+        let mut out = [0u8; N];
+        for (index, byte) in out.iter_mut().enumerate() {
+            let pair = &value[index * 2..index * 2 + 2];
+            *byte = u8::from_str_radix(pair, 16).expect("fixture contains valid hex");
+        }
+        out
+    }
+
+    fn encode_hex(bytes: &[u8]) -> String {
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            use std::fmt::Write as _;
+            write!(&mut out, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        out
+    }
+
+    #[test]
+    fn consent_v1_conformance_vectors_are_stable() {
+        let fixture: ConsentConformanceFixture = serde_json::from_str(include_str!(
+            "../fixtures/consent-v1.json"
+        ))
+        .expect("consent conformance fixture parses");
+        assert_eq!(fixture.schema, "xenia-consent-conformance-v1");
+        assert!(!fixture.vectors.is_empty());
+
+        for vector in fixture.vectors {
+            let session_id = decode_hex::<16>(&vector.session_id_hex);
+            let token_nonce = decode_hex::<16>(&vector.token_nonce_hex);
+            let offer = ConsentOfferV1::new(
+                session_id,
+                vector.scope,
+                vector.issued_at,
+                vector.expires_at,
+            );
+            let scope_digest = vector.scope.digest();
+            let offer_digest = offer.digest();
+            let action_transcript =
+                consent_action_transcript(vector.action, &token_nonce, &offer_digest);
+
+            assert_eq!(
+                encode_hex(&vector.scope.canonical_bytes()),
+                vector.scope_canonical_hex,
+                "{} scope canonical bytes drifted",
+                vector.name
+            );
+            assert_eq!(
+                encode_hex(&scope_digest),
+                vector.scope_digest_hex,
+                "{} scope digest drifted",
+                vector.name
+            );
+            assert_eq!(
+                encode_hex(&offer.canonical_bytes()),
+                vector.offer_canonical_hex,
+                "{} offer canonical bytes drifted",
+                vector.name
+            );
+            assert_eq!(
+                encode_hex(&offer_digest),
+                vector.offer_digest_hex,
+                "{} offer digest drifted",
+                vector.name
+            );
+            assert_eq!(
+                encode_hex(&action_transcript),
+                vector.action_transcript_hex,
+                "{} action transcript drifted",
+                vector.name
+            );
+        }
+    }
+
     #[test]
     fn role_hierarchy_is_fail_closed() {
         use OperatorAction::*;
