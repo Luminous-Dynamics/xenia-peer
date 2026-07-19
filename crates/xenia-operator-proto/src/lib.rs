@@ -464,21 +464,68 @@ impl ConsentScopeV1 {
         )
     }
 
-    /// Whether approving this scope requires an additional native
-    /// confirmation under the current risk policy. Basic screen streaming,
-    /// synthetic audio, and basic host-performance telemetry remain routine.
-    /// Host capture, system identity, remote control, clipboard access, and
-    /// file transfer are treated as unusually broad.
-    pub const fn requires_native_confirmation(self) -> bool {
-        matches!(
-            self.telemetry,
-            ConsentTelemetryScope::SystemIdentityAndPerformance
-        ) || matches!(self.audio, ConsentAudioScope::HostDeviceCapture)
-            || matches!(self.input, ConsentInputScope::RemoteInputInjection)
-            || !matches!(self.clipboard, ConsentClipboardScope::Off)
-            || !matches!(self.file_transfer, ConsentFileTransferScope::Off)
+}
+
+/// Versioned local policy for classifying which factual consent scopes need an
+/// additional native confirmation. This is deliberately separate from
+/// [`ConsentScopeV1`]: the scope is stable protocol data, while organizations
+/// may tighten or relax confirmation policy without changing canonical bytes or
+/// invalidating existing signatures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsentRiskPolicyV1 {
+    /// Confirm before exposing system identity telemetry.
+    pub confirm_system_identity_telemetry: bool,
+    /// Confirm before capturing a host audio device.
+    pub confirm_host_device_audio: bool,
+    /// Confirm before enabling remote input injection.
+    pub confirm_remote_input: bool,
+    /// Confirm before granting any clipboard direction.
+    pub confirm_clipboard: bool,
+    /// Confirm before granting any file-transfer direction.
+    pub confirm_file_transfer: bool,
+}
+
+impl ConsentRiskPolicyV1 {
+    /// The native operator-agent policy used by default.
+    pub const fn operator_agent_default() -> Self {
+        Self {
+            confirm_system_identity_telemetry: true,
+            confirm_host_device_audio: true,
+            confirm_remote_input: true,
+            confirm_clipboard: true,
+            confirm_file_transfer: true,
+        }
+    }
+
+    /// Whether approving `scope` requires native confirmation under this
+    /// policy. Denial and revocation remain fail-safe actions handled by the
+    /// caller and should not be blocked by this classification.
+    pub const fn requires_native_confirmation(self, scope: ConsentScopeV1) -> bool {
+        (self.confirm_system_identity_telemetry
+            && matches!(
+                scope.telemetry,
+                ConsentTelemetryScope::SystemIdentityAndPerformance
+            ))
+            || (self.confirm_host_device_audio
+                && matches!(scope.audio, ConsentAudioScope::HostDeviceCapture))
+            || (self.confirm_remote_input
+                && matches!(scope.input, ConsentInputScope::RemoteInputInjection))
+            || (self.confirm_clipboard
+                && !matches!(scope.clipboard, ConsentClipboardScope::Off))
+            || (self.confirm_file_transfer
+                && !matches!(scope.file_transfer, ConsentFileTransferScope::Off))
     }
 }
+
+impl Default for ConsentRiskPolicyV1 {
+    fn default() -> Self {
+        Self::operator_agent_default()
+    }
+}
+
+/// Default policy used by the native operator signing agent.
+pub const DEFAULT_CONSENT_RISK_POLICY: ConsentRiskPolicyV1 =
+    ConsentRiskPolicyV1::operator_agent_default();
 
 /// A daemon-authored consent offer. The host identity signs the canonical
 /// bytes of this structure before the browser sees it, allowing the native
@@ -1043,8 +1090,8 @@ mod tests {
         assert!(base.can_approve_at(99, 1));
         assert!(base.can_approve_at(201, 1));
         assert!(base.is_issued_by(250, 0));
-        assert!(other_scope.scope.requires_native_confirmation());
-        assert!(!base.scope.requires_native_confirmation());
+        assert!(DEFAULT_CONSENT_RISK_POLICY.requires_native_confirmation(other_scope.scope));
+        assert!(!DEFAULT_CONSENT_RISK_POLICY.requires_native_confirmation(base.scope));
 
         let remote_control = ConsentScopeV1::screen_with_capabilities(
             ConsentTelemetryScope::Off,
@@ -1053,7 +1100,17 @@ mod tests {
             ConsentClipboardScope::Off,
             ConsentFileTransferScope::Off,
         );
-        assert!(remote_control.requires_native_confirmation());
+        assert!(DEFAULT_CONSENT_RISK_POLICY.requires_native_confirmation(remote_control));
+
+        let permissive = ConsentRiskPolicyV1 {
+            confirm_system_identity_telemetry: false,
+            confirm_host_device_audio: false,
+            confirm_remote_input: false,
+            confirm_clipboard: false,
+            confirm_file_transfer: false,
+        };
+        assert!(!permissive.requires_native_confirmation(other_scope.scope));
+        assert!(!permissive.requires_native_confirmation(remote_control));
     }
 
     #[test]

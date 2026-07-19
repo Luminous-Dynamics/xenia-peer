@@ -689,7 +689,8 @@ async fn sign_consent_action(
     })?;
 
     if req.action == xenia_operator_proto::ConsentAction::Approve
-        && offer.scope.requires_native_confirmation()
+        && xenia_operator_proto::DEFAULT_CONSENT_RISK_POLICY
+            .requires_native_confirmation(offer.scope)
     {
         let confirm_state = state.clone();
         let daemon_endpoint = normalize_daemon_endpoint(&req.common.daemon_endpoint);
