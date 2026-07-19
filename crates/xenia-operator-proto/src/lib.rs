@@ -25,10 +25,10 @@ use serde::{Deserialize, Serialize};
 /// possession. Bump the `-vN` suffix on any breaking transcript change.
 pub const CHALLENGE_DOMAIN: &[u8] = b"xenia-operator-auth-challenge-v1";
 
-/// Domain-separation tag for a per-consent-action signature. Version 3
-/// binds the decision to a daemon-attested consent-offer digest rather than
-/// separately concatenating presentation-layer fields.
-pub const CONSENT_ACTION_DOMAIN: &[u8] = b"xenia-operator-consent-action-v3";
+/// Domain-separation tag for a per-consent-action signature. Version 4
+/// adds an explicit action id to the daemon-attested-offer binding, making
+/// retries and replays independently attributable.
+pub const CONSENT_ACTION_DOMAIN: &[u8] = b"xenia-operator-consent-action-v4";
 
 /// Domain separator for a daemon-attested consent offer.
 pub const CONSENT_OFFER_DOMAIN: &[u8] = b"xenia-operator-consent-offer-v1";
@@ -638,19 +638,26 @@ pub fn challenge_transcript(
 
 /// The bytes an operator signs to authorize a specific consent action.
 /// The daemon-attested offer digest commits to the exact session, canonical
-/// scope, and offer lifetime; the token nonce prevents replay under another
-/// operator session token.
+/// scope, and offer lifetime; the token nonce prevents reuse under another
+/// operator session token, while the action id identifies this exact decision.
 ///
-/// Layout: `CONSENT_ACTION_DOMAIN || action.tag()(1) || token_nonce(16) ||
-/// offer_digest(32)`.
+/// Layout: `CONSENT_ACTION_DOMAIN || action.tag()(1) || action_id(16) ||
+/// token_nonce(16) || offer_digest(32)`.
+///
+/// `action_id` is a caller-generated UUID encoded as 16 raw bytes. Binding it
+/// makes every intentional decision independently attributable and lets the
+/// daemon distinguish a replay from a fresh operator action even when action,
+/// token, and offer are otherwise identical.
 pub fn consent_action_transcript(
     action: ConsentAction,
+    action_id: &[u8; 16],
     token_nonce: &[u8; 16],
     offer_digest: &[u8; 32],
 ) -> Vec<u8> {
-    let mut t = Vec::with_capacity(CONSENT_ACTION_DOMAIN.len() + 1 + 16 + 32);
+    let mut t = Vec::with_capacity(CONSENT_ACTION_DOMAIN.len() + 1 + 16 + 16 + 32);
     t.extend_from_slice(CONSENT_ACTION_DOMAIN);
     t.push(action.tag());
+    t.extend_from_slice(action_id);
     t.extend_from_slice(token_nonce);
     t.extend_from_slice(offer_digest);
     t
@@ -916,6 +923,7 @@ mod tests {
         issued_at: u64,
         expires_at: u64,
         action: ConsentAction,
+        action_id_hex: String,
         token_nonce_hex: String,
         scope_canonical_hex: String,
         scope_digest_hex: String,
@@ -944,16 +952,17 @@ mod tests {
     }
 
     #[test]
-    fn consent_v1_conformance_vectors_are_stable() {
+    fn consent_v2_conformance_vectors_are_stable() {
         let fixture: ConsentConformanceFixture = serde_json::from_str(include_str!(
-            "../fixtures/consent-v1.json"
+            "../fixtures/consent-v2.json"
         ))
         .expect("consent conformance fixture parses");
-        assert_eq!(fixture.schema, "xenia-consent-conformance-v1");
+        assert_eq!(fixture.schema, "xenia-consent-conformance-v2");
         assert!(!fixture.vectors.is_empty());
 
         for vector in fixture.vectors {
             let session_id = decode_hex::<16>(&vector.session_id_hex);
+            let action_id = decode_hex::<16>(&vector.action_id_hex);
             let token_nonce = decode_hex::<16>(&vector.token_nonce_hex);
             let offer = ConsentOfferV1::new(
                 session_id,
@@ -964,7 +973,7 @@ mod tests {
             let scope_digest = vector.scope.digest();
             let offer_digest = offer.digest();
             let action_transcript =
-                consent_action_transcript(vector.action, &token_nonce, &offer_digest);
+                consent_action_transcript(vector.action, &action_id, &token_nonce, &offer_digest);
 
             assert_eq!(
                 encode_hex(&vector.scope.canonical_bytes()),
@@ -1114,6 +1123,7 @@ mod tests {
 
     #[test]
     fn consent_transcript_layout_is_exact_and_action_bound() {
+        let action_id = [0x33u8; 16];
         let tn = [0x22u8; 16];
         let offer = ConsentOfferV1::new(
             [0x11u8; 16],
@@ -1122,8 +1132,18 @@ mod tests {
             200,
         );
         let offer_digest = offer.digest();
-        let approve = consent_action_transcript(ConsentAction::Approve, &tn, &offer_digest);
-        let revoke = consent_action_transcript(ConsentAction::Revoke, &tn, &offer_digest);
+        let approve = consent_action_transcript(
+            ConsentAction::Approve,
+            &action_id,
+            &tn,
+            &offer_digest,
+        );
+        let revoke = consent_action_transcript(
+            ConsentAction::Revoke,
+            &action_id,
+            &tn,
+            &offer_digest,
+        );
         // Same session/token, different action -> different bytes (can't replay).
         assert_ne!(approve, revoke);
         assert_eq!(
@@ -1132,11 +1152,23 @@ mod tests {
         );
         assert_eq!(approve[CONSENT_ACTION_DOMAIN.len()], 1);
         assert_eq!(revoke[CONSENT_ACTION_DOMAIN.len()], 3);
+        let action_id_start = CONSENT_ACTION_DOMAIN.len() + 1;
+        assert_eq!(&approve[action_id_start..action_id_start + 16], &action_id);
         assert_eq!(
             approve.len(),
-            CONSENT_ACTION_DOMAIN.len() + 1 + 16 + 32
+            CONSENT_ACTION_DOMAIN.len() + 1 + 16 + 16 + 32
         );
         assert_eq!(&approve[approve.len() - 32..], &offer_digest);
+        assert_ne!(
+            approve,
+            consent_action_transcript(
+                ConsentAction::Approve,
+                &[0x44u8; 16],
+                &tn,
+                &offer_digest,
+            ),
+            "action id must be signature-bound"
+        );
     }
 
     #[test]

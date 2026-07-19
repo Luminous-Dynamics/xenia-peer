@@ -238,7 +238,7 @@ consulted fail-closed on every privileged path.
 |--------|---------|
 | Unenrolled key connects | Allow-listed `OperatorPolicy`; fail-closed lookup |
 | Forged/upgraded token | Daemon-signed token; role copied at mint; signature-verified |
-| Replay/substitution of a captured consent signature | Per-action transcript bound to action + token nonce + daemon-attested offer digest (session, complete typed scope, approval lifetime) |
+| Replay/substitution of a captured consent signature | Per-action transcript bound to action + action id + token nonce + daemon-attested offer digest (session, complete typed scope, approval lifetime) |
 | Browser changes the capabilities shown to the agent | Agent verifies the daemon host identity's Ed25519 + ML-DSA-65 offer attestation and derives confirmation text/risk from the typed offer |
 | Replay of a challenge | Single-use, short-TTL, consumed before signature check |
 | Lower role attempts higher action | `role.permits(min_role)` on the token's own role |

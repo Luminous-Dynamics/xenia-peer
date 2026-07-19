@@ -15,9 +15,9 @@
 //!   POST /auth/verify          -> daemon-signed, role-scoped token
 //!   receive a daemon-host-attested typed consent offer
 //!   ask the local agent to verify that offer and sign
-//!     consent_action_transcript(action, token_nonce, offer_digest),
+//!     consent_action_transcript(action, action_id, token_nonce, offer_digest),
 //!     relaying the full session token so the agent can verify it
-//!   send  { token, action, action_signature }  on the consent socket
+//!   send  { token, action, action_id, action_signature }  on the consent socket
 //! ```
 //!
 //! **Scope note**: this is Track A only (the plain-HTTP `/auth/*`
@@ -284,6 +284,8 @@ pub async fn build_consent_request(
 ) -> Result<String, String> {
     let base = endpoint.trim_end_matches('/');
     let cert = fetch_daemon_certificate(base).await?;
+    let action_id = uuid::Uuid::new_v4();
+    let action_id_hex = hex::encode(action_id.as_bytes());
     let signed = crate::agent_client::sign_consent_action(
         agent_url,
         agent_session,
@@ -293,9 +295,10 @@ pub async fn build_consent_request(
                 daemon_certificate: cert,
                 daemon_endpoint: endpoint.to_string(),
                 suite: TRACK_A_SUITE.to_string(),
-                request_id: request_id(),
+                request_id: action_id.to_string(),
             },
             action,
+            action_id_hex: action_id_hex.clone(),
             attested_offer: attested_offer.clone(),
             token: session.to_signed_token_dto(),
         },
@@ -304,6 +307,7 @@ pub async fn build_consent_request(
     Ok(serde_json::json!({
         "token": session.token_json,
         "action": action.as_str(),
+        "action_id": action_id_hex,
         "action_signature": signed.ed_signature_hex,
         "ml_dsa_action_signature": signed.ml_dsa_signature_hex,
     })

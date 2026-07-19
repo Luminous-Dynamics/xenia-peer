@@ -194,6 +194,7 @@ mod tests {
     fn authorized_action(action: ConsentAction) -> crate::operator_auth::AuthorizedConsentAction {
         crate::operator_auth::AuthorizedConsentAction {
             action,
+            action_id: [0x55; 16],
             operator_id: "alice".to_string(),
             role: crate::operator::OperatorRole::Admin,
             ed25519_pubkey: [0x11; 32],

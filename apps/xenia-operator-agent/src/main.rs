@@ -731,14 +731,18 @@ async fn sign_consent_action(
         }
     }
 
+    let action_id = decode_fixed_hex::<16>(&req.action_id_hex)
+        .ok_or_else(|| bad_request("action_id_hex must be 32 hex characters"))?;
     let offer_digest = offer.digest();
     tracing::info!(
         action = ?req.action,
+        action_id = %req.action_id_hex,
         offer_digest = %hex::encode(offer_digest),
         "signing consent action"
     );
     let transcript = xenia_operator_proto::consent_action_transcript(
         req.action,
+        &action_id,
         &token_nonce,
         &offer_digest,
     );
@@ -2223,6 +2227,7 @@ mod tests {
             "suite": "highsec",
             "request_id": "test-req-2",
             "action": "Approve",
+            "action_id_hex": "a1".repeat(16),
             "attested_offer": attested_test_offer(host, scope),
             "token": token,
         });
@@ -2237,6 +2242,7 @@ mod tests {
         let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
         let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
         let token_nonce = [0xeeu8; 16];
+        let action_id = [0xa1u8; 16];
         let token = test_token(&http_auth, &http_auth_ml_dsa, token_nonce);
         let body = consent_action_request_body(
             &cert,
@@ -2255,6 +2261,7 @@ mod tests {
         let expected_manager = HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]);
         let transcript = xenia_operator_proto::consent_action_transcript(
             xenia_operator_proto::ConsentAction::Approve,
+            &action_id,
             &token_nonce,
             &offer_digest,
         );
@@ -2278,6 +2285,7 @@ mod tests {
         let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
         let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
         let token_nonce = [0xeeu8; 16];
+        let action_id = [0xa1u8; 16];
         let token = test_token(&http_auth, &http_auth_ml_dsa, token_nonce);
         let body = consent_action_request_body(
             &cert,
@@ -2296,6 +2304,7 @@ mod tests {
         let expected_manager = HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]);
         let wrong_transcript = xenia_operator_proto::consent_action_transcript(
             xenia_operator_proto::ConsentAction::Approve,
+            &action_id,
             &token_nonce,
             &offer_digest,
         );
@@ -2321,6 +2330,7 @@ mod tests {
         let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
         let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
         let token_nonce = [0xeeu8; 16];
+        let action_id = [0xa1u8; 16];
         let token = test_token(&http_auth, &http_auth_ml_dsa, token_nonce);
         let body = consent_action_request_body(
             &cert,
@@ -2350,6 +2360,7 @@ mod tests {
         .digest();
         let wrong_transcript = xenia_operator_proto::consent_action_transcript(
             xenia_operator_proto::ConsentAction::Approve,
+            &action_id,
             &token_nonce,
             &wrong_offer_digest,
         );

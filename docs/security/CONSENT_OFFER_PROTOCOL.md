@@ -64,13 +64,17 @@ The operator signs:
 ```text
 CONSENT_ACTION_DOMAIN
 || action_tag
+|| action_id
 || token_nonce
 || offer_digest
 ```
 
-The token nonce binds the decision to the current daemon-issued operator token.
-The offer digest transitively binds session, full scope, and approval lifetime.
-Both operator Ed25519 and ML-DSA-65 signatures are required and AND-verified.
+The action id is a caller-generated 128-bit identifier for one semantic
+decision. It is signature-bound, becomes the durable audit request id, and is
+used by the consent authority to make authenticated retries idempotent. The
+token nonce binds the decision to the current daemon-issued operator token. The
+offer digest transitively binds session, full scope, and approval lifetime. Both
+operator Ed25519 and ML-DSA-65 signatures are required and AND-verified.
 
 ## Time semantics
 

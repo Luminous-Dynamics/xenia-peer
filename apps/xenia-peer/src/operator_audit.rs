@@ -25,7 +25,6 @@ use crate::operator_auth::{AuthorizedConsentAction, ConsentAction};
 pub(crate) fn operator_consent_audit_event(
     authorized: &AuthorizedConsentAction,
     session_id: Uuid,
-    request_id: Uuid,
 ) -> ConsentEventRecord {
     let kind = match authorized.action {
         ConsentAction::Approve => ConsentKind::Approval,
@@ -35,7 +34,7 @@ pub(crate) fn operator_consent_audit_event(
     ConsentEventRecord {
         source_id: authorized.ed25519_pubkey,
         session_id,
-        request_id,
+        request_id: Uuid::from_bytes(authorized.action_id),
         kind,
         scope: format!(
             "operator {:?} (role {:?}) authorized {:?}",
@@ -52,6 +51,7 @@ mod tests {
     fn authorized(action: ConsentAction) -> AuthorizedConsentAction {
         AuthorizedConsentAction {
             action,
+            action_id: [0x22; 16],
             operator_id: "alice".to_string(),
             role: OperatorRole::Approver,
             ed25519_pubkey: [0x11; 32],
@@ -61,17 +61,16 @@ mod tests {
     #[test]
     fn audit_event_attributes_operator_and_maps_action() {
         let session = Uuid::from_u128(1);
-        let request = Uuid::from_u128(2);
 
         for (action, kind) in [
             (ConsentAction::Approve, ConsentKind::Approval),
             (ConsentAction::Deny, ConsentKind::Denial),
             (ConsentAction::Revoke, ConsentKind::Revocation),
         ] {
-            let event = operator_consent_audit_event(&authorized(action), session, request);
+            let event = operator_consent_audit_event(&authorized(action), session);
             assert_eq!(event.source_id, [0x11; 32], "attributes the operator key");
             assert_eq!(event.session_id, session);
-            assert_eq!(event.request_id, request);
+            assert_eq!(event.request_id, Uuid::from_bytes([0x22; 16]));
             assert_eq!(event.kind, kind, "maps {action:?} to the right ConsentKind");
             assert!(event.scope.contains("alice"));
             assert!(event.scope.contains("Approver"));

@@ -52,7 +52,7 @@ pub use xenia_operator_proto::{
 /// Bump when a breaking change to any request/response shape ships; the
 /// agent should refuse a request whose `schema_version` it doesn't
 /// recognize rather than guessing at compatibility.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// Fields common to every `/v1/sign/*` request: who the caller believes
 /// they are, which daemon they're targeting, and enough to correlate a
@@ -196,6 +196,10 @@ pub struct SignConsentActionRequest {
     pub common: SignRequestCommon,
     /// Which decision is being authorized.
     pub action: ConsentAction,
+    /// Caller-generated UUID for this exact decision, encoded as 32 hex
+    /// characters. The agent binds it into the signature and the daemon stores
+    /// it as the audit event request id, making retries and replays explicit.
+    pub action_id_hex: String,
     /// Daemon-host-attested consent offer. The agent verifies both host
     /// signatures before signing, then binds the operator decision to the
     /// offer digest. The browser may relay this envelope but cannot fabricate
@@ -617,6 +621,7 @@ mod tests {
                 request_id: "req-2".to_string(),
             },
             action: ConsentAction::Approve,
+            action_id_hex: "ab".repeat(16),
             attested_offer: AttestedConsentOfferV1 {
                 offer: xenia_operator_proto::ConsentOfferV1::new(
                     [0xddu8; 16],

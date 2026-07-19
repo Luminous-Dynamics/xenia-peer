@@ -139,11 +139,17 @@ async fn operator_rbac_full_chain_smoke() {
         u64::MAX,
     )
     .digest();
-    let action_transcript =
-        consent_action_transcript(ConsentAction::Approve, &token_nonce, &offer_digest);
+    let action_id = [0xA7u8; 16];
+    let action_transcript = consent_action_transcript(
+        ConsentAction::Approve,
+        &action_id,
+        &token_nonce,
+        &offer_digest,
+    );
     let consent_json = serde_json::json!({
         "token": token,
         "action": "Approve",
+        "action_id": hex::encode(action_id),
         "action_signature": hex::encode(op.sign(&action_transcript).to_bytes()),
         "ml_dsa_action_signature": hex::encode(op.sign_ml_dsa(&action_transcript)),
     })
@@ -196,7 +202,7 @@ async fn operator_rbac_full_chain_smoke() {
     );
 
     // --- 5. attribute it in the ledger and verify the hash chain ---
-    let event = operator_consent_audit_event(&authorized, Uuid::from_u128(1), Uuid::from_u128(2));
+    let event = operator_consent_audit_event(&authorized, Uuid::from_u128(1));
     let mut chain = Chain::new(daemon);
     chain.append(event).expect("audit entry appends");
     assert_eq!(chain.len(), 1);

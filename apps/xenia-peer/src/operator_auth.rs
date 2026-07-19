@@ -329,6 +329,7 @@ pub(crate) fn verify_token(
 pub(crate) struct AuthenticatedConsentAction {
     pub(crate) token: SignedOperatorToken,
     pub(crate) action: ConsentAction,
+    pub(crate) action_id: [u8; 16],
     pub(crate) action_signature: [u8; 64],
     pub(crate) ml_dsa_action_signature: [u8; ML_DSA_65_SIG_LEN],
 }
@@ -337,6 +338,7 @@ pub(crate) struct AuthenticatedConsentAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AuthorizedConsentAction {
     pub(crate) action: ConsentAction,
+    pub(crate) action_id: [u8; 16],
     pub(crate) operator_id: String,
     pub(crate) role: OperatorRole,
     /// The operator's enrolled Ed25519 public key, for stable audit
@@ -350,7 +352,7 @@ pub(crate) struct AuthorizedConsentAction {
 /// 3. the operator is *still* enrolled (a de-enrolled operator's token is
 ///    dead even if unexpired);
 /// 4. the per-action signature verifies -- both algorithms -- against that
-///    operator's enrolled keys over this exact action + token nonce +
+///    operator's enrolled keys over this exact action + action id + token nonce +
 ///    daemon-attested consent offer.
 ///
 /// `offer_digest` MUST come from the daemon's own stored offer, never from
@@ -373,8 +375,12 @@ pub(crate) fn authorize_consent_action(
         .lookup_by_id(&token.operator_id)
         .ok_or(AuthError::NotEnrolled)?;
 
-    let transcript =
-        consent_action_transcript(request.action, &token.token_nonce, offer_digest);
+    let transcript = consent_action_transcript(
+        request.action,
+        &request.action_id,
+        &token.token_nonce,
+        offer_digest,
+    );
     let ed_vk = HandshakeManager::parse_peer_public_key(&operator.ed25519_pubkey)
         .map_err(|_| AuthError::MalformedKey)?;
     let sig = Signature::from_bytes(&request.action_signature);
@@ -394,6 +400,7 @@ pub(crate) fn authorize_consent_action(
 
     Ok(AuthorizedConsentAction {
         action: request.action,
+        action_id: request.action_id,
         operator_id: token.operator_id,
         role: token.role,
         ed25519_pubkey: operator.ed25519_pubkey,
@@ -844,7 +851,7 @@ mod tests {
     }
 
     /// Build an authenticated consent action: a token for `op` at `role`,
-    /// plus `op`'s Ed25519 + ML-DSA-65 signatures over the action + token
+    /// plus `op`'s Ed25519 + ML-DSA-65 signatures over the action + action id + token
     /// nonce + daemon-attested offer digest.
     #[allow(clippy::too_many_arguments)]
     fn authed_action(
@@ -868,13 +875,19 @@ mod tests {
             TOKEN_TTL_SECS,
             [5u8; 16],
         );
-        let transcript =
-            consent_action_transcript(action, &signed.token.token_nonce, offer_digest);
+        let action_id = [0xA5u8; 16];
+        let transcript = consent_action_transcript(
+            action,
+            &action_id,
+            &signed.token.token_nonce,
+            offer_digest,
+        );
         let action_signature = op.sign(&transcript).to_bytes();
         let ml_dsa_action_signature = op.sign_ml_dsa(&transcript);
         AuthenticatedConsentAction {
             token: signed,
             action,
+            action_id,
             action_signature,
             ml_dsa_action_signature,
         }
@@ -1351,6 +1364,42 @@ mod tests {
                 &daemon_ml_dsa.public_key_bytes(),
                 3010,
                 &daemon_offer_digest,
+                &req,
+            ),
+            Err(AuthError::Ed25519VerifyFailed)
+        );
+    }
+
+    #[test]
+    fn consent_action_signature_binds_action_id() {
+        let op = HandshakeManager::new();
+        let (daemon, daemon_ml_dsa) = test_daemon();
+        let policy = policy_with(&op, OperatorRole::Admin);
+        let offer_digest = xenia_operator_proto::ConsentOfferV1::new(
+            [7u8; 16],
+            xenia_operator_proto::ConsentScopeV1::screen_only(),
+            1,
+            u64::MAX,
+        )
+        .digest();
+        let mut req = authed_action(
+            &op,
+            &daemon,
+            &daemon_ml_dsa,
+            OperatorRole::Admin,
+            ConsentAction::Approve,
+            &offer_digest,
+            3000,
+        );
+        req.action_id[0] ^= 1;
+
+        assert_eq!(
+            authorize_consent_action(
+                &policy,
+                &daemon.verifying_key(),
+                &daemon_ml_dsa.public_key_bytes(),
+                3010,
+                &offer_digest,
                 &req,
             ),
             Err(AuthError::Ed25519VerifyFailed)

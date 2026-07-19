@@ -10,6 +10,7 @@
 //! consent-session lifecycle. Keeping those invariants in one service prevents
 //! a future transport from accidentally implementing weaker state semantics.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -100,6 +101,10 @@ pub(crate) struct ConsentDecisionService {
     /// Resolves exactly once when the initial ceremony reaches Approved or
     /// Denied. It is dropped on Failed so the waiter receives channel closure.
     grant_tx: Mutex<Option<oneshot::Sender<bool>>>,
+    /// Authenticated action ids already durably committed for this ceremony.
+    /// Kept behind the transition lock so check-and-insert is race-free across
+    /// plaintext and sealed transports.
+    seen_action_ids: Mutex<HashSet<[u8; 16]>>,
     persist_ledger: PersistLedger,
 }
 
@@ -127,6 +132,7 @@ impl ConsentDecisionService {
             transition_lock: Mutex::new(()),
             state: AtomicU8::new(ConsentSessionState::Pending as u8),
             grant_tx: Mutex::new(Some(grant_tx)),
+            seen_action_ids: Mutex::new(HashSet::new()),
             persist_ledger: crate::audit_ledger_store::persist_entries_atomic,
         }
     }
@@ -239,6 +245,21 @@ impl ConsentDecisionService {
         let _transition = self.transition_lock.lock().await;
         let current = self.state();
 
+        if let Some(authorized) = &decoded.authorized
+            && self.seen_action_ids.lock().await.contains(&authorized.action_id)
+        {
+            tracing::warn!(
+                action_id = %hex::encode(authorized.action_id),
+                action = ?authorized.action,
+                "replayed authenticated consent action ignored"
+            );
+            return if current.is_terminal() {
+                ConsentFollowup::Stop
+            } else {
+                ConsentFollowup::KeepServing
+            };
+        }
+
         let (next, followup, initial_decision) = match (current, decoded.action) {
             (ConsentSessionState::Pending, ConsentAction::Approve) => (
                 ConsentSessionState::Approved,
@@ -287,7 +308,6 @@ impl ConsentDecisionService {
             let event = crate::operator_audit::operator_consent_audit_event(
                 authorized,
                 self.session_uuid,
-                Uuid::new_v4(),
             );
             let mut chain = self.ledger.lock().await;
             let committed = tokio::task::block_in_place(|| {
@@ -308,6 +328,10 @@ impl ConsentDecisionService {
                 self.grant_tx.lock().await.take();
                 return ConsentFollowup::Stop;
             }
+            self.seen_action_ids
+                .lock()
+                .await
+                .insert(authorized.action_id);
         }
 
         self.state.store(next as u8, Ordering::SeqCst);
@@ -340,6 +364,7 @@ mod tests {
     fn authorized_approval() -> AuthorizedConsentAction {
         AuthorizedConsentAction {
             action: ConsentAction::Approve,
+            action_id: [0x44; 16],
             operator_id: "alice".to_string(),
             role: crate::operator::OperatorRole::Admin,
             ed25519_pubkey: [0x11; 32],
@@ -465,4 +490,38 @@ mod tests {
         assert_eq!(service.state(), ConsentSessionState::Failed);
         assert!(grant_rx.await.is_err());
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn authenticated_action_id_replay_is_not_reaudited() {
+        let dir = std::env::temp_dir().join(format!(
+            "xenia-consent-replay-test-{}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let ledger = Arc::new(Mutex::new(Chain::new(daemon)));
+        let (grant_tx, grant_rx) = oneshot::channel();
+        let mut service = service_with_sender(grant_tx, ledger.clone());
+        service.ledger_path = Arc::new(dir.join("consent.ledger"));
+
+        let first = service
+            .apply(DecodedConsent {
+                action: ConsentAction::Approve,
+                authorized: Some(authorized_approval()),
+            })
+            .await;
+        assert!(matches!(first, ConsentFollowup::KeepServing));
+        assert!(grant_rx.await.unwrap());
+        assert_eq!(ledger.lock().await.len(), 1);
+
+        let replay = service
+            .apply(DecodedConsent {
+                action: ConsentAction::Approve,
+                authorized: Some(authorized_approval()),
+            })
+            .await;
+        assert!(matches!(replay, ConsentFollowup::KeepServing));
+        assert_eq!(ledger.lock().await.len(), 1, "replay must not append");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
 }

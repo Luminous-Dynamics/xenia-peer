@@ -326,6 +326,8 @@ struct AuthenticatedConsentActionDto {
     token: TokenDto,
     /// `"Approve"`, `"Deny"`, or `"Revoke"`.
     action: String,
+    /// Caller-generated UUID bytes, hex encoded.
+    action_id: String,
     action_signature: String,
     /// Hex ML-DSA-65 signature over the same transcript `action_signature`
     /// covers -- both required.
@@ -346,12 +348,14 @@ pub(crate) fn parse_authenticated_consent_action(
         "Revoke" => ConsentAction::Revoke,
         other => return Err(format!("unknown consent action: {other:?}")),
     };
+    let action_id = decode_fixed::<16>(&dto.action_id).map_err(|(_, m)| m)?;
     let action_signature = decode_fixed::<64>(&dto.action_signature).map_err(|(_, m)| m)?;
     let ml_dsa_action_signature =
         decode_fixed::<ML_DSA_65_SIG_LEN>(&dto.ml_dsa_action_signature).map_err(|(_, m)| m)?;
     Ok(AuthenticatedConsentAction {
         token: dto.token.into_signed()?,
         action,
+        action_id,
         action_signature,
         ml_dsa_action_signature,
     })
