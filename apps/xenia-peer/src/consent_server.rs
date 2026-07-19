@@ -12,7 +12,6 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
 
 use crate::consent_authority::{ConsentDecisionService, ConsentFollowup};
 
@@ -20,16 +19,13 @@ use crate::consent_authority::{ConsentDecisionService, ConsentFollowup};
 pub(crate) struct ConsentServer {
     /// Shared transport-independent consent authority.
     pub(crate) service: Arc<ConsentDecisionService>,
-    /// Resolves the initial grant exactly once (Approve -> true, Deny -> false).
-    pub(crate) grant_tx: oneshot::Sender<bool>,
 }
 
 impl ConsentServer {
     /// Run the accept loop over a pre-bound `listener`. Returns when the grant
     /// is denied, the session is revoked, or the listener fails.
     pub(crate) async fn run(self, listener: TcpListener) {
-        let ConsentServer { service, grant_tx } = self;
-        let mut grant_tx = Some(grant_tx);
+        let ConsentServer { service } = self;
 
         'accept: loop {
             let (stream, _) = match listener.accept().await {
@@ -60,7 +56,7 @@ impl ConsentServer {
                 let Some(decoded) = service.decode(text) else {
                     continue;
                 };
-                match service.apply(decoded, &mut grant_tx).await {
+                match service.apply(decoded).await {
                     ConsentFollowup::KeepServing => {}
                     ConsentFollowup::Stop => break 'accept,
                 }
@@ -68,27 +64,29 @@ impl ConsentServer {
             // A dropped console can reconnect and still approve a pending
             // request or revoke an already-approved session.
         }
+        service.fail_pending().await;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
 
     use ed25519_dalek::SigningKey;
     use futures::SinkExt;
-    use tokio::sync::Mutex as TokioMutex;
+    use tokio::sync::{Mutex as TokioMutex, oneshot};
     use tokio_tungstenite::tungstenite::Message;
     use uuid::Uuid;
     use xenia_ledger::Chain;
 
-    use crate::consent_authority::{DecodedConsent, ConsentDecisionService, ConsentFollowup};
+    use crate::consent_authority::{
+        ConsentDecisionService, ConsentFollowup, ConsentSessionState, DecodedConsent,
+    };
     use crate::operator_auth::ConsentAction;
     use crate::operator_http::OperatorAuthState;
 
     fn service(
-        revoked: Arc<AtomicBool>,
+        grant_tx: oneshot::Sender<bool>,
         ledger: Arc<TokioMutex<Chain>>,
         ledger_path: std::path::PathBuf,
         session_uuid: Uuid,
@@ -110,22 +108,27 @@ mod tests {
             session_uuid,
             ledger,
             Arc::new(ledger_path),
-            revoked,
+            grant_tx,
         ))
     }
 
-    fn test_server(grant_tx: oneshot::Sender<bool>, revoked: Arc<AtomicBool>) -> ConsentServer {
+    fn test_server(
+        grant_tx: oneshot::Sender<bool>,
+    ) -> (ConsentServer, Arc<ConsentDecisionService>) {
         let daemon = SigningKey::generate(&mut rand::thread_rng());
         let ledger = Arc::new(TokioMutex::new(Chain::new(daemon)));
-        ConsentServer {
-            service: service(
-                revoked,
-                ledger,
-                std::env::temp_dir().join("xenia-consent-server-test.ledger"),
-                Uuid::from_u128(1),
-            ),
+        let service = service(
             grant_tx,
-        }
+            ledger,
+            std::env::temp_dir().join("xenia-consent-server-test.ledger"),
+            Uuid::from_u128(1),
+        );
+        (
+            ConsentServer {
+                service: Arc::clone(&service),
+            },
+            service,
+        )
     }
 
     async fn connect(
@@ -142,62 +145,50 @@ mod tests {
     async fn service_applies_approve_deny_and_revoke() {
         let daemon = SigningKey::generate(&mut rand::thread_rng());
         let ledger = Arc::new(TokioMutex::new(Chain::new(daemon)));
-        let revoked = Arc::new(AtomicBool::new(false));
+        let (approve_tx, approve_rx) = oneshot::channel();
         let service = service(
-            revoked.clone(),
+            approve_tx,
             ledger,
             std::env::temp_dir().join("xenia-consent-decisions-test.ledger"),
             Uuid::from_u128(2),
         );
 
-        let (approve_tx, approve_rx) = oneshot::channel();
-        let mut approve_tx = Some(approve_tx);
         let followup = service
-            .apply(
-                DecodedConsent {
-                    action: ConsentAction::Approve,
-                    authorized: None,
-                },
-                &mut approve_tx,
-            )
+            .apply(DecodedConsent {
+                action: ConsentAction::Approve,
+                authorized: None,
+            })
             .await;
         assert!(matches!(followup, ConsentFollowup::KeepServing));
         assert!(approve_rx.await.unwrap());
+        assert_eq!(service.state(), ConsentSessionState::Approved);
 
-        let (revoke_tx, _revoke_rx) = oneshot::channel();
-        let mut revoke_tx = Some(revoke_tx);
         let followup = service
-            .apply(
-                DecodedConsent {
-                    action: ConsentAction::Revoke,
-                    authorized: None,
-                },
-                &mut revoke_tx,
-            )
+            .apply(DecodedConsent {
+                action: ConsentAction::Revoke,
+                authorized: None,
+            })
             .await;
         assert!(matches!(followup, ConsentFollowup::Stop));
-        assert!(revoked.load(Ordering::SeqCst));
+        assert!(service.is_session_revoked());
 
         let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let (deny_tx, deny_rx) = oneshot::channel();
         let deny_service = service(
-            Arc::new(AtomicBool::new(false)),
+            deny_tx,
             Arc::new(TokioMutex::new(Chain::new(daemon))),
             std::env::temp_dir().join("xenia-consent-deny-test.ledger"),
             Uuid::from_u128(3),
         );
-        let (deny_tx, deny_rx) = oneshot::channel();
-        let mut deny_tx = Some(deny_tx);
         let followup = deny_service
-            .apply(
-                DecodedConsent {
-                    action: ConsentAction::Deny,
-                    authorized: None,
-                },
-                &mut deny_tx,
-            )
+            .apply(DecodedConsent {
+                action: ConsentAction::Deny,
+                authorized: None,
+            })
             .await;
         assert!(matches!(followup, ConsentFollowup::Stop));
         assert!(!deny_rx.await.unwrap());
+        assert_eq!(deny_service.state(), ConsentSessionState::Denied);
     }
 
     fn authorized_action(action: ConsentAction) -> crate::operator_auth::AuthorizedConsentAction {
@@ -218,22 +209,18 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let ledger_path = dir.join("consent.ledger");
         let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let (tx, rx) = oneshot::channel();
         let service = service(
-            Arc::new(AtomicBool::new(false)),
+            tx,
             Arc::new(TokioMutex::new(Chain::new(daemon))),
             ledger_path.clone(),
             Uuid::from_u128(9),
         );
-        let (tx, rx) = oneshot::channel();
-        let mut tx = Some(tx);
         let outcome = service
-            .apply(
-                DecodedConsent {
-                    action: ConsentAction::Approve,
-                    authorized: Some(authorized_action(ConsentAction::Approve)),
-                },
-                &mut tx,
-            )
+            .apply(DecodedConsent {
+                action: ConsentAction::Approve,
+                authorized: Some(authorized_action(ConsentAction::Approve)),
+            })
             .await;
         assert!(matches!(outcome, ConsentFollowup::KeepServing));
         assert!(rx.await.unwrap());
@@ -248,13 +235,13 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let (tx, rx) = oneshot::channel();
-        let revoked = Arc::new(AtomicBool::new(false));
-        tokio::spawn(test_server(tx, revoked.clone()).run(listener));
+        let (server, service) = test_server(tx);
+        tokio::spawn(server.run(listener));
 
         let mut ws = connect(&addr).await;
         ws.send(Message::Text("Approve".into())).await.unwrap();
         assert!(rx.await.unwrap());
-        assert!(!revoked.load(Ordering::SeqCst));
+        assert_eq!(service.state(), ConsentSessionState::Approved);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -262,13 +249,13 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let (tx, rx) = oneshot::channel();
-        let revoked = Arc::new(AtomicBool::new(false));
-        tokio::spawn(test_server(tx, revoked.clone()).run(listener));
+        let (server, service) = test_server(tx);
+        tokio::spawn(server.run(listener));
 
         let mut ws = connect(&addr).await;
         ws.send(Message::Text("Deny".into())).await.unwrap();
         assert!(!rx.await.unwrap());
-        assert!(!revoked.load(Ordering::SeqCst));
+        assert_eq!(service.state(), ConsentSessionState::Denied);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -276,8 +263,8 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let (tx, rx) = oneshot::channel();
-        let revoked = Arc::new(AtomicBool::new(false));
-        tokio::spawn(test_server(tx, revoked.clone()).run(listener));
+        let (server, service) = test_server(tx);
+        tokio::spawn(server.run(listener));
 
         {
             let mut ws = connect(&addr).await;
@@ -287,11 +274,11 @@ mod tests {
         let mut ws = connect(&addr).await;
         ws.send(Message::Text("Revoke".into())).await.unwrap();
         for _ in 0..50 {
-            if revoked.load(Ordering::SeqCst) {
+            if service.is_session_revoked() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        assert!(revoked.load(Ordering::SeqCst));
+        assert!(service.is_session_revoked());
     }
 }

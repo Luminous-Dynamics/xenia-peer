@@ -4,7 +4,7 @@
 /// `xenia-peer` — headless daemon that hosts a Xenia session.
 use clap::{Parser, ValueEnum};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex as AsyncMutex;
@@ -2014,14 +2014,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (consent_decision_tx, consent_decision_rx) = tokio::sync::oneshot::channel::<bool>();
 
-    // Set by the consent socket when the operator sends a later "Revoke" on
-    // the still-open connection (after an initial "Approve"). The main send
-    // loop polls this each tick, calls `M1RuntimeSession::revoke()` to record
-    // the boundary in the consent ledger and flip every gate fail-closed,
-    // then stops streaming -- so an operator can end a live session without
-    // killing the process. See the send loop's revocation check below.
-    let revoked = Arc::new(AtomicBool::new(false));
-
     // When --require-operator-auth is set, consent decisions must be signed,
     // role-authorized operator actions. The
     // per-action signature binds to this session's host-attested typed offer,
@@ -2069,7 +2061,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         session_id,
         shared_ledger.clone(),
         ledger_path.clone(),
-        Arc::clone(&revoked),
+        consent_decision_tx,
     ));
 
     // Consent server. With --operator-sealed the console talks over a
@@ -2112,7 +2104,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         identity,
                         policy,
                         deps,
-                        consent_decision_tx,
                         sealed_metrics,
                     ),
                 );
@@ -2127,7 +2118,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(listener) => {
                 let server = crate::consent_server::ConsentServer {
                     service: Arc::clone(&consent_service),
-                    grant_tx: consent_decision_tx,
                 };
                 tokio::spawn(server.run(listener));
             }
@@ -2464,7 +2454,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // consent socket, record it in the consent ledger (which flips the
         // M1 state to Revoked so every frame/input/clipboard/file gate now
         // fails closed) and stop streaming with a graceful close.
-        if revoked.load(Ordering::SeqCst) {
+        if consent_service.is_session_revoked() {
             if let Err(err) = m1_runtime.lock().await.revoke() {
                 warn!(error = %err, "failed to record consent revocation");
             }

@@ -208,15 +208,13 @@ pub(crate) struct SealedConsentDeps {
 ///
 /// Returns `Ok(true)` if a **terminal** decision (Deny/Revoke) ended the
 /// channel, `Ok(false)` if the connection simply closed (so the endpoint can
-/// accept a reconnect and still take a later Revoke). `grant_tx` is threaded by
-/// `&mut Option` so a dropped-then-reconnected console keeps the same session
-/// grant.
+/// accept a reconnect and still take a later Revoke). The shared consent
+/// authority owns the single initial-decision sender across reconnects.
 pub(crate) async fn serve_sealed_operator_channel<T: Transport>(
     transport: &mut T,
     identity: &mut OperatorHostIdentity,
     policy: &OperatorPolicy,
     deps: &SealedConsentDeps,
-    grant_tx: &mut Option<tokio::sync::oneshot::Sender<bool>>,
 ) -> Result<bool, OperatorChannelError> {
     let channel = establish_operator_channel(transport, identity, policy).await?;
     // The key is enrolled, but it may have been revoked at runtime — check the
@@ -348,7 +346,7 @@ pub(crate) async fn serve_sealed_operator_channel<T: Transport>(
                 let Some(decoded) = deps.service.decode(text) else {
                     continue;
                 };
-                match deps.service.apply(decoded, grant_tx).await {
+                match deps.service.apply(decoded).await {
                     crate::consent_authority::ConsentFollowup::KeepServing => {}
                     // Terminal (Deny/Revoke): the session is decided; stop for good.
                     crate::consent_authority::ConsentFollowup::Stop => return Ok(true),
@@ -368,8 +366,8 @@ pub(crate) async fn serve_sealed_operator_channel<T: Transport>(
 ///   revoke, and a rejected first connection yields to a later legitimate one.
 ///
 /// Fail-closed throughout: only a policy-authorized operator's handshake
-/// establishes a channel, and `grant_tx` is threaded across reconnects so the
-/// single per-session grant is resolved at most once.
+/// establishes a channel, and the shared authority resolves the single
+/// per-session grant at most once.
 ///
 /// [`ConsentServer`]: crate::consent_server::ConsentServer
 pub(crate) async fn run_sealed_operator_endpoint(
@@ -377,10 +375,8 @@ pub(crate) async fn run_sealed_operator_endpoint(
     mut identity: OperatorHostIdentity,
     policy: OperatorPolicy,
     deps: SealedConsentDeps,
-    grant_tx: tokio::sync::oneshot::Sender<bool>,
     metrics: std::sync::Arc<crate::operator_channel_metrics::OperatorChannelMetrics>,
 ) {
-    let mut grant_tx = Some(grant_tx);
     'accept: loop {
         let (stream, peer) = match listener.accept().await {
             Ok(conn) => conn,
@@ -407,7 +403,6 @@ pub(crate) async fn run_sealed_operator_endpoint(
             &mut identity,
             &policy,
             &deps,
-            &mut grant_tx,
         )
         .await
         {
@@ -446,6 +441,8 @@ pub(crate) async fn run_sealed_operator_endpoint(
             }
         }
     }
+    deps.service.fail_pending().await;
+
     // Session summary once the endpoint stops (terminal decision or accept
     // error) — a single line carrying the whole probe picture for this run.
     let s = metrics.snapshot();
@@ -467,7 +464,6 @@ mod tests {
     use crate::operator_auth::{AUTH_RATE_MAX, AUTH_RATE_WINDOW_SECS};
     use crate::operator_http::OperatorAuthState;
     use ed25519_dalek::SigningKey;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::{oneshot, Mutex as TokioMutex};
@@ -482,7 +478,7 @@ mod tests {
         auth_state: Arc<OperatorAuthState>,
         session_uuid: Uuid,
         ledger: Arc<TokioMutex<Chain>>,
-        revoked: Arc<AtomicBool>,
+        grant_tx: oneshot::Sender<bool>,
         revocations: crate::operator_revocations::OperatorRevocations,
     ) -> Arc<crate::consent_authority::ConsentDecisionService> {
         Arc::new(crate::consent_authority::ConsentDecisionService::new(
@@ -493,7 +489,7 @@ mod tests {
             session_uuid,
             ledger,
             Arc::new(std::env::temp_dir().join("xenia-sealed-channel-test.ledger")),
-            revoked,
+            grant_tx,
         ))
     }
 
@@ -516,8 +512,6 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (grant_tx, grant_rx) = oneshot::channel();
-        let revoked = Arc::new(AtomicBool::new(false));
-        let revoked_daemon = revoked.clone();
 
         // Daemon: establish the channel, then serve sealed consent.
         let host = tokio::spawn(async move {
@@ -542,13 +536,12 @@ mod tests {
                     auth_state,
                     Uuid::from_u128(3),
                     ledger,
-                    revoked_daemon,
+                    grant_tx,
                     crate::operator_revocations::OperatorRevocations::empty(),
                 ),
                 rekey_interval: None,
             };
-            let mut grant_tx = Some(grant_tx);
-            serve_sealed_operator_channel(&mut t, &mut identity, &policy, &deps, &mut grant_tx)
+            serve_sealed_operator_channel(&mut t, &mut identity, &policy, &deps)
                 .await
         });
 
@@ -576,7 +569,6 @@ mod tests {
             grant_rx.await.unwrap(),
             "a sealed Approve resolves the grant to true"
         );
-        assert!(!revoked.load(Ordering::SeqCst));
         let _ = viewer.await;
         let _ = host.await;
     }
@@ -610,7 +602,6 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (grant_tx, grant_rx) = oneshot::channel();
-        let revoked = Arc::new(AtomicBool::new(false));
 
         let daemon = SigningKey::generate(&mut rand::thread_rng());
         let auth_state = Arc::new(OperatorAuthState::new(
@@ -626,7 +617,7 @@ mod tests {
                 auth_state,
                 Uuid::from_u128(21),
                 Arc::new(TokioMutex::new(Chain::new(daemon))),
-                revoked.clone(),
+                grant_tx,
                 crate::operator_revocations::OperatorRevocations::empty(),
             ),
             rekey_interval: None,
@@ -640,7 +631,6 @@ mod tests {
             identity,
             policy,
             deps,
-            grant_tx,
             metrics.clone(),
         ));
 
@@ -668,7 +658,6 @@ mod tests {
             grant_rx.await.unwrap(),
             "a sealed Approve from the browser's ViewerHandshake over the live WS endpoint resolves the grant"
         );
-        assert!(!revoked.load(Ordering::SeqCst));
         // The endpoint records the connection before the handshake begins, so by
         // the time the grant resolved it must be counted — proves the metrics are
         // wired live on the endpoint path.
@@ -701,7 +690,6 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (grant_tx, grant_rx) = oneshot::channel();
-        let revoked = Arc::new(AtomicBool::new(false));
 
         let daemon = SigningKey::generate(&mut rand::thread_rng());
         let auth_state = Arc::new(OperatorAuthState::new(
@@ -717,7 +705,7 @@ mod tests {
                 auth_state,
                 Uuid::from_u128(41),
                 Arc::new(TokioMutex::new(Chain::new(daemon))),
-                revoked.clone(),
+                grant_tx,
                 crate::operator_revocations::OperatorRevocations::empty(),
             ),
             // Short enough that the test doesn't need to wait long, long
@@ -732,7 +720,6 @@ mod tests {
             identity,
             policy,
             deps,
-            grant_tx,
             metrics.clone(),
         ));
 
@@ -805,7 +792,6 @@ mod tests {
             grant_rx.await.unwrap(),
             "an Approve sealed under the post-rekey key resolves the grant"
         );
-        assert!(!revoked.load(Ordering::SeqCst));
     }
 
     /// High-security suite (native E2E, mirrors
@@ -843,7 +829,6 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (grant_tx, grant_rx) = oneshot::channel();
-        let revoked = Arc::new(AtomicBool::new(false));
 
         let daemon = SigningKey::generate(&mut rand::thread_rng());
         let auth_state = Arc::new(OperatorAuthState::new(
@@ -859,7 +844,7 @@ mod tests {
                 auth_state,
                 Uuid::from_u128(51),
                 Arc::new(TokioMutex::new(Chain::new(daemon))),
-                revoked.clone(),
+                grant_tx,
                 crate::operator_revocations::OperatorRevocations::empty(),
             ),
             rekey_interval: None,
@@ -874,7 +859,6 @@ mod tests {
             identity,
             policy,
             deps,
-            grant_tx,
             metrics.clone(),
         ));
 
@@ -901,7 +885,6 @@ mod tests {
             grant_rx.await.unwrap(),
             "a sealed Approve from the browser's ViewerHandshakeHighSec over the live WS endpoint resolves the grant"
         );
-        assert!(!revoked.load(Ordering::SeqCst));
         assert_eq!(metrics.snapshot().connections_accepted, 1);
     }
 
@@ -967,7 +950,7 @@ mod tests {
                 auth_state,
                 Uuid::from_u128(61),
                 Arc::new(TokioMutex::new(Chain::new(daemon))),
-                Arc::new(AtomicBool::new(false)),
+                grant_tx,
                 crate::operator_revocations::OperatorRevocations::empty(),
             ),
             rekey_interval: None,
@@ -982,7 +965,6 @@ mod tests {
             identity,
             policy,
             deps,
-            grant_tx,
             metrics.clone(),
         ));
 
@@ -1070,7 +1052,7 @@ mod tests {
                 auth_state,
                 Uuid::from_u128(71),
                 Arc::new(TokioMutex::new(Chain::new(daemon))),
-                Arc::new(AtomicBool::new(false)),
+                grant_tx,
                 crate::operator_revocations::OperatorRevocations::empty(),
             ),
             rekey_interval: None,
@@ -1084,7 +1066,6 @@ mod tests {
             identity,
             policy,
             deps,
-            grant_tx,
             metrics.clone(),
         ));
 
@@ -1155,13 +1136,12 @@ mod tests {
                     auth_state,
                     Uuid::from_u128(31),
                     Arc::new(TokioMutex::new(Chain::new(daemon))),
-                    Arc::new(AtomicBool::new(false)),
+                    grant_tx,
                     revocations,
                 ),
                 rekey_interval: None,
             };
-            let mut grant_tx = Some(grant_tx);
-            serve_sealed_operator_channel(&mut t, &mut identity, &policy, &deps, &mut grant_tx)
+            serve_sealed_operator_channel(&mut t, &mut identity, &policy, &deps)
                 .await
         });
 

@@ -59,6 +59,10 @@ async fn post(router: &axum::Router, path: &str, body: String) -> (u16, String) 
     (status, String::from_utf8(bytes.to_vec()).unwrap())
 }
 
+fn grant_sender() -> tokio::sync::oneshot::Sender<bool> {
+    tokio::sync::oneshot::channel().0
+}
+
 #[tokio::test]
 async fn operator_rbac_full_chain_smoke() {
     // --- enroll an operator + stand up the real auth surface ---
@@ -157,7 +161,7 @@ async fn operator_rbac_full_chain_smoke() {
             &mut rand::thread_rng(),
         )))),
         Arc::new(std::env::temp_dir().join("xenia-operator-rbac-smoke.ledger")),
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        grant_sender(),
     );
     let decoded = authority
         .decode(&consent_json)
@@ -184,7 +188,7 @@ async fn operator_rbac_full_chain_smoke() {
             &mut rand::thread_rng(),
         )))),
         Arc::new(std::env::temp_dir().join("xenia-operator-rbac-smoke-revoked.ledger")),
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        grant_sender(),
     );
     assert!(
         revoked_authority.decode(&consent_json).is_none(),
@@ -219,7 +223,7 @@ async fn operator_rbac_full_chain_smoke() {
             &mut rand::thread_rng(),
         )))),
         Arc::new(std::env::temp_dir().join("xenia-operator-rbac-smoke-other.ledger")),
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        grant_sender(),
     );
     let bad = other_authority.decode(&consent_json);
     assert!(
