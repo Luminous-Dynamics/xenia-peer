@@ -92,7 +92,8 @@ pub use binding::{
 pub use chain::Chain;
 
 pub use checkpoint::{
-    CheckpointError, LEDGER_CHECKPOINT_SCHEMA, LedgerCheckpoint, checkpoint_message,
+    checkpoint_message, CheckpointContinuityError, CheckpointError, LedgerCheckpoint,
+    LEDGER_CHECKPOINT_SCHEMA,
 };
 
 pub use entry::{

@@ -1547,3 +1547,85 @@ fn full_pqc_sealed_bundle_can_verify_with_ml_dsa() {
     )
     .unwrap();
 }
+
+#[test]
+fn checkpoint_monotonicity_detects_rollback_and_same_height_fork() {
+    let signing_key = SigningKey::from_bytes(&[31u8; 32]);
+    let mut chain = Chain::new(signing_key);
+    chain.append(sample_event(ConsentKind::Request)).unwrap();
+    let first = chain.sign_checkpoint(100);
+    chain.append(sample_event(ConsentKind::Approval)).unwrap();
+    let second = chain.sign_checkpoint(101);
+
+    Verifier::verify_checkpoint_monotonic(&first, &second).unwrap();
+
+    let mut rollback = first.clone();
+    rollback.timestamp_unix_secs = 102;
+    let message = checkpoint_message(
+        rollback.entry_count,
+        &rollback.head_hash,
+        &rollback.ledger_public_key,
+        rollback.timestamp_unix_secs,
+    );
+    rollback.signature = SigningKey::from_bytes(&[31u8; 32]).sign(&message).to_bytes();
+    assert!(matches!(
+        Verifier::verify_checkpoint_monotonic(&second, &rollback),
+        Err(CheckpointContinuityError::EntryCountRegressed { .. })
+    ));
+
+    let mut fork_chain = Chain::new(SigningKey::from_bytes(&[31u8; 32]));
+    fork_chain
+        .append(sample_event(ConsentKind::Denial))
+        .unwrap();
+    let fork = fork_chain.sign_checkpoint(101);
+    assert!(matches!(
+        Verifier::verify_checkpoint_monotonic(&first, &fork),
+        Err(CheckpointContinuityError::ForkAtSameHeight { entry_count: 1 })
+    ));
+}
+
+#[test]
+fn retained_checkpoint_must_be_an_exact_prefix_of_the_ledger() {
+    let signing_key = SigningKey::from_bytes(&[32u8; 32]);
+    let verifying_key = signing_key.verifying_key();
+    let mut chain = Chain::new(signing_key);
+    chain.append(sample_event(ConsentKind::Request)).unwrap();
+    let retained = chain.sign_checkpoint(100);
+    chain.append(sample_event(ConsentKind::Approval)).unwrap();
+    let entries = chain.into_entries();
+
+    Verifier::verify_checkpoint_prefix(&retained, &entries, &verifying_key).unwrap();
+
+    let older_entries = entries[..0].to_vec();
+    assert!(matches!(
+        Verifier::verify_checkpoint_prefix(&retained, &older_entries, &verifying_key),
+        Err(CheckpointContinuityError::CheckpointAheadOfLedger { .. })
+            | Err(CheckpointContinuityError::Ledger(_))
+    ));
+}
+
+#[test]
+fn checkpoint_extension_requires_every_intervening_signed_entry() {
+    let signing_key = SigningKey::from_bytes(&[33u8; 32]);
+    let mut chain = Chain::new(signing_key);
+    chain.append(sample_event(ConsentKind::Request)).unwrap();
+    let retained = chain.sign_checkpoint(100);
+    chain.append(sample_event(ConsentKind::Approval)).unwrap();
+    chain.append(sample_event(ConsentKind::Revocation)).unwrap();
+    let candidate = chain.sign_checkpoint(101);
+    let entries = chain.into_entries();
+    let suffix = &entries[retained.entry_count as usize..];
+
+    Verifier::verify_checkpoint_extension(&retained, &candidate, suffix).unwrap();
+    assert!(matches!(
+        Verifier::verify_checkpoint_extension(&retained, &candidate, &suffix[..1]),
+        Err(CheckpointContinuityError::ExtensionLengthMismatch { .. })
+    ));
+
+    let mut tampered = suffix.to_vec();
+    tampered[0].event.scope.push_str(" tampered");
+    assert!(matches!(
+        Verifier::verify_checkpoint_extension(&retained, &candidate, &tampered),
+        Err(CheckpointContinuityError::SuffixEntryHashMismatch { .. })
+    ));
+}
