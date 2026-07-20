@@ -74,7 +74,7 @@ impl Chain {
         }
     }
 
-    /// Return the number of entries in the chain.
+    /// Return the total authenticated entry count, including a compacted prefix.
     pub fn len(&self) -> usize {
         usize::try_from(self.entry_count()).unwrap_or(usize::MAX)
     }
@@ -117,7 +117,8 @@ impl Chain {
         self.entries.iter()
     }
 
-    /// Return entries converted to the export-safe signature-envelope shape.
+    /// Return resident entries converted to the export-safe signature-envelope
+    /// shape. A compacted prefix remains represented by [`Chain::base_checkpoint`].
     pub fn export_entries(&self) -> Vec<LedgerEntryExport> {
         self.entries
             .iter()
@@ -152,7 +153,7 @@ impl Chain {
     }
 
     /// Append a new consent event, but only keep it if `persist` -- given
-    /// the full, now-including-this-entry list -- succeeds. On a `persist`
+    /// the resident, now-including-this-entry list -- succeeds. On a `persist`
     /// failure the just-added entry is removed before returning, so a
     /// caller never observes a successful append that wasn't durably
     /// committed. This crate doesn't know or care *how* persistence
@@ -198,7 +199,9 @@ impl Chain {
             .expect("append_transactional_chain: entry was just pushed and persist succeeded"))
     }
 
-    /// Consume the chain and return its entries. Useful for persistence.
+    /// Consume the chain and return its resident entries. An anchored prefix,
+    /// when present, is not included; persistence layers supporting compaction
+    /// must retain [`Chain::base_checkpoint`] separately.
     pub fn into_entries(self) -> Vec<LedgerEntry> {
         self.entries
     }

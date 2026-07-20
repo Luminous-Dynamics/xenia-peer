@@ -150,8 +150,9 @@ sequence, replay index, session summaries, signed manifest, archived prefix, and
 current full-ledger checkpoint. It also rejects any live-suffix reuse of an
 archived decision action ID or terminal session ID.
 
-This is intentionally a pruning **precondition**, not pruning itself. Safe live
-truncation still requires an anchored-suffix persistence format and startup
+This is intentionally a pruning **precondition**, not pruning itself. The
+ledger library now has an appendable checkpoint-anchored suffix frontier, but
+safe live truncation still requires a versioned durable suffix store and startup
 integration that loads the authenticated replay index before accepting any new
 action. Until those pieces exist, the daemon must retain the full live ledger
 and continue to fail closed at its hard storage bounds.
@@ -166,3 +167,48 @@ These artifacts improve evidence continuity, but they do not provide:
 - Recovery of an old private signing key.
 - Protection when all witness keys and retained artifacts are compromised
   together.
+
+## Compacted restore snapshots
+
+After a compaction preflight bundle verifies against the complete live ledger,
+Xenia can derive a smaller, still non-destructive restore snapshot. The snapshot
+contains:
+
+- the authenticated `ConsentRecoverySummaryV1` replay and terminal-session
+  indexes;
+- the ledger-signed `LedgerCompactionManifest`;
+- only the signed live suffix after the archived checkpoint; and
+- a BLAKE3 envelope commitment over those exact artifacts.
+
+Export the snapshot while the complete live ledger is still available:
+
+```bash
+xenia-peer \
+  --operator-key-path /srv/xenia-peer-state/operator.key \
+  --consent-ledger-path /srv/xenia-peer-state/consent.ledger \
+  --consent-ledger-compaction-bundle-input /retention/compaction-preflight.json \
+  --export-consent-ledger-compacted-snapshot /retention/compacted-restore.json
+```
+
+Verify and materialize its restore frontier using the independently retained
+archive sequence:
+
+```bash
+xenia-peer \
+  --operator-key-path /srv/xenia-peer-state/operator.key \
+  --verify-consent-ledger-compacted-snapshot /retention/compacted-restore.json \
+  --consent-ledger-compacted-snapshot-archive-segment /archive/segment-0001.json \
+  --consent-ledger-compacted-snapshot-archive-segment /archive/segment-0002.json
+```
+
+Verification reconstructs an appendable checkpoint-anchored `Chain`, checks its
+absolute sequence frontier, and materializes the archived action-ID and terminal
+session indexes that a future activation path must consult before accepting any
+operator action. The signing key must match the ledger identity committed by the
+snapshot.
+
+The operation remains deliberately non-destructive. It does not replace the
+configured live ledger, delete archived entries, or enable daemon startup from a
+compacted file. Safe activation still requires a versioned durable suffix store
+that atomically preserves the recovery summary and loads its replay/session
+indexes before any HTTP or consent transport begins serving.

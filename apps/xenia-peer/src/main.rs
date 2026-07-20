@@ -2519,11 +2519,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             archive_segments.push(segment);
         }
-        snapshot
-            .verify(&archive_segments, &signing_key.verifying_key())
+        let restored = snapshot
+            .restore_state(&archive_segments, &signing_key)
             .map_err(|err| -> Box<dyn std::error::Error> {
                 format!(
-                    "consent compacted snapshot {} failed verification: {err}",
+                    "consent compacted snapshot {} failed restore verification: {err}",
                     snapshot_path.display()
                 )
                 .into()
@@ -2540,6 +2540,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             snapshot.manifest.current_checkpoint.entry_count
         );
         println!("snapshot blake3: {}", hex::encode(snapshot.snapshot_digest));
+        println!("restored total entries: {}", restored.chain.entry_count());
+        println!("restored resident entries: {}", restored.chain.resident_len());
+        println!(
+            "restored archived replay action ids: {}",
+            restored.archived_replay_action_count()
+        );
+        println!(
+            "restored archived terminal sessions: {}",
+            restored.archived_terminal_session_count()
+        );
         return Ok(());
     }
 

@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::{SigningKey as LedgerSigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use xenia_ledger::{
@@ -84,6 +84,28 @@ pub(crate) struct ConsentCompactedSnapshotV1 {
     pub(crate) snapshot_digest: [u8; 32],
 }
 
+/// Fully verified in-memory restore frontier for a compacted consent ledger.
+///
+/// The chain contains only the resident suffix but retains the signed archive
+/// boundary as its append anchor. Replay and terminal-session indexes are
+/// derived from the authenticated recovery summary and must be consulted before
+/// accepting any new operator action in a future activation path.
+pub(crate) struct RestoredConsentStateV1 {
+    pub(crate) chain: Chain,
+    archived_replay_action_ids: BTreeSet<[u8; 16]>,
+    archived_terminal_sessions: BTreeSet<[u8; 16]>,
+}
+
+impl RestoredConsentStateV1 {
+    pub(crate) fn archived_replay_action_count(&self) -> usize {
+        self.archived_replay_action_ids.len()
+    }
+
+    pub(crate) fn archived_terminal_session_count(&self) -> usize {
+        self.archived_terminal_sessions.len()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionPhase {
     Pending,
@@ -151,6 +173,8 @@ pub(crate) enum ConsentRecoveryError {
     UnsupportedSnapshotSchema { schema: String },
     #[error("consent compacted snapshot digest mismatch")]
     SnapshotDigestMismatch,
+    #[error("consent compacted restore signing key does not match the authenticated ledger key")]
+    RestoreSigningKeyMismatch,
     #[error("signed decision action id {action_id} reappears at sequence {seq}")]
     SignedDecisionReplay { action_id: String, seq: u64 },
     #[error("terminal archived session {session_id} reappears at sequence {seq}")]
@@ -472,6 +496,42 @@ impl ConsentCompactedSnapshotV1 {
             &self.suffix_entries,
         )?;
         verify_recovery_suffix_compatibility(&self.recovery_summary, &self.suffix_entries)
+    }
+
+    /// Verify and materialize the exact append frontier and archived recovery
+    /// indexes needed by a future compacted-ledger activation path.
+    pub(crate) fn restore_state(
+        &self,
+        archive_segments: &[LedgerArchiveSegment],
+        signing_key: &LedgerSigningKey,
+    ) -> Result<RestoredConsentStateV1, ConsentRecoveryError> {
+        let public_key = signing_key.verifying_key();
+        if self.manifest.current_checkpoint.ledger_public_key != public_key.to_bytes() {
+            return Err(ConsentRecoveryError::RestoreSigningKeyMismatch);
+        }
+        self.verify(archive_segments, &public_key)?;
+        let archived_replay_action_ids = self
+            .recovery_summary
+            .replay_action_ids
+            .iter()
+            .copied()
+            .collect();
+        let archived_terminal_sessions = self
+            .recovery_summary
+            .sessions
+            .iter()
+            .map(|session| session.session_id)
+            .collect();
+        let chain = Chain::from_checkpoint_suffix(
+            self.recovery_summary.through_checkpoint.clone(),
+            self.suffix_entries.clone(),
+            signing_key.clone(),
+        );
+        Ok(RestoredConsentStateV1 {
+            chain,
+            archived_replay_action_ids,
+            archived_terminal_sessions,
+        })
     }
 }
 
@@ -811,6 +871,57 @@ mod tests {
             snapshot.verify(&segments, &public_key),
             Err(ConsentRecoveryError::Continuity(_))
         ));
+    }
+
+    #[test]
+    fn compacted_restore_materializes_replay_and_terminal_indexes_before_append() {
+        let segments = complete_archive();
+        let key = SigningKey::from_bytes(&[0x44; 32]);
+        let mut chain = Chain::from_entries(segments[0].entries.clone(), key.clone());
+        chain
+            .append(event(2, 4, ConsentKind::Denial, [0x30; 32]))
+            .unwrap();
+        let bundle = ConsentCompactionBundleV1::build(&chain, segments.clone(), 102).unwrap();
+        let entries = chain.iter().cloned().collect::<Vec<_>>();
+        let snapshot = ConsentCompactedSnapshotV1::build(
+            &bundle,
+            &entries,
+            &key.verifying_key(),
+        )
+        .unwrap();
+
+        let mut restored = snapshot.restore_state(&segments, &key).unwrap();
+        assert!(restored.archived_replay_action_ids.contains(&[2u8; 16]));
+        assert!(restored.archived_replay_action_ids.contains(&[3u8; 16]));
+        assert!(restored.archived_terminal_sessions.contains(&[1u8; 16]));
+        assert_eq!(restored.chain.entry_count(), 4);
+        assert_eq!(restored.chain.resident_len(), 1);
+        let appended = restored
+            .chain
+            .append(event(3, 5, ConsentKind::Denial, [0x31; 32]))
+            .unwrap();
+        assert_eq!(appended.seq, 4);
+    }
+
+    #[test]
+    fn compacted_restore_refuses_a_different_local_signing_key() {
+        let segments = complete_archive();
+        let key = SigningKey::from_bytes(&[0x44; 32]);
+        let chain = Chain::from_entries(segments[0].entries.clone(), key.clone());
+        let bundle = ConsentCompactionBundleV1::build(&chain, segments.clone(), 102).unwrap();
+        let entries = chain.iter().cloned().collect::<Vec<_>>();
+        let snapshot = ConsentCompactedSnapshotV1::build(
+            &bundle,
+            &entries,
+            &key.verifying_key(),
+        )
+        .unwrap();
+        let wrong_key = SigningKey::from_bytes(&[0x99; 32]);
+
+        assert_eq!(
+            snapshot.restore_state(&segments, &wrong_key).err(),
+            Some(ConsentRecoveryError::RestoreSigningKeyMismatch)
+        );
     }
 
     #[test]
