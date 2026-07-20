@@ -37,6 +37,9 @@ pub(crate) const CONSENT_RETIREMENT_PLAN_SCHEMA: &str =
 pub(crate) const MAX_RETIREMENT_CANDIDATES: usize = 32;
 pub(crate) const MAX_RETIREMENT_PLAN_LIFETIME_SECS: u64 = 24 * 60 * 60;
 pub(crate) const MAX_RETIREMENT_PATH_BYTES: usize = 4096;
+pub(crate) const CONSENT_RETIREMENT_APPROVAL_BUNDLE_SCHEMA: &str =
+    "xenia-consent-retirement-approval-bundle-v1";
+pub(crate) const MAX_RETIREMENT_APPROVALS: usize = 64;
 
 /// Artifact classes that may be moved out of active use after compacted-state
 /// activation. Cold archives, active state, retained pins, signing keys, and
@@ -67,6 +70,22 @@ pub(crate) struct ConsentRetirementArtifactV1 {
     pub(crate) canonical_path: String,
     pub(crate) byte_length: u64,
     pub(crate) blake3_digest: [u8; 32],
+}
+
+/// One independently controlled retention key's approval of an exact plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConsentRetirementApprovalV1 {
+    pub(crate) witness_public_key: [u8; 32],
+    pub(crate) approved_at_unix_secs: u64,
+    pub(crate) signature: [u8; 64],
+}
+
+/// Independent approvals over one ledger-authority retirement plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConsentRetirementApprovalBundleV1 {
+    pub(crate) schema: String,
+    pub(crate) plan_fingerprint: [u8; 32],
+    pub(crate) approvals: Vec<ConsentRetirementApprovalV1>,
 }
 
 /// Ledger-authority authorization for one exact, bounded retirement attempt.
@@ -121,6 +140,26 @@ pub(crate) enum ConsentRetirementError {
     PlanExpired,
     #[error("consent retirement plan encoding length overflow")]
     EncodingLengthOverflow,
+    #[error("unsupported consent retirement approval bundle schema: {schema}")]
+    UnsupportedApprovalBundleSchema { schema: String },
+    #[error("consent retirement approval bundle targets a different plan")]
+    ApprovalPlanMismatch,
+    #[error("consent retirement approval timestamp falls outside the plan window")]
+    ApprovalOutsidePlanWindow,
+    #[error("consent retirement approval public key is malformed")]
+    BadApprovalPublicKey,
+    #[error("consent retirement approval signature is invalid")]
+    BadApprovalSignature,
+    #[error("consent retirement approval key appears more than once")]
+    DuplicateApprovalKey,
+    #[error("consent retirement approval key is not trusted")]
+    UntrustedApprovalKey,
+    #[error("consent retirement approval bundle has {count} signatures; maximum is {maximum}")]
+    TooManyApprovals { count: usize, maximum: usize },
+    #[error("consent retirement approval quorum must be greater than zero")]
+    ZeroApprovalQuorum,
+    #[error("consent retirement approval quorum not met: verified={verified}, required={required}")]
+    ApprovalQuorumNotMet { verified: usize, required: usize },
     #[error("consent retirement prerequisite verification failed: {0}")]
     Recovery(#[from] ConsentRecoveryError),
 }
@@ -271,6 +310,160 @@ impl ConsentRetirementPlanV1 {
         }
         Ok(())
     }
+}
+
+impl ConsentRetirementApprovalBundleV1 {
+    pub(crate) fn new(
+        plan: &ConsentRetirementPlanV1,
+    ) -> Result<Self, ConsentRetirementError> {
+        Ok(Self {
+            schema: CONSENT_RETIREMENT_APPROVAL_BUNDLE_SCHEMA.to_string(),
+            plan_fingerprint: consent_retirement_plan_fingerprint(plan)?,
+            approvals: Vec::new(),
+        })
+    }
+
+    pub(crate) fn sign_with(
+        &mut self,
+        plan: &ConsentRetirementPlanV1,
+        witness_signing_key: &LedgerSigningKey,
+        approved_at_unix_secs: u64,
+    ) -> Result<(), ConsentRetirementError> {
+        if self.schema != CONSENT_RETIREMENT_APPROVAL_BUNDLE_SCHEMA {
+            return Err(ConsentRetirementError::UnsupportedApprovalBundleSchema {
+                schema: self.schema.clone(),
+            });
+        }
+        let expected_plan = consent_retirement_plan_fingerprint(plan)?;
+        if self.plan_fingerprint != expected_plan {
+            return Err(ConsentRetirementError::ApprovalPlanMismatch);
+        }
+        if approved_at_unix_secs < plan.issued_at_unix_secs
+            || approved_at_unix_secs >= plan.expires_at_unix_secs
+        {
+            return Err(ConsentRetirementError::ApprovalOutsidePlanWindow);
+        }
+        if self.approvals.len() >= MAX_RETIREMENT_APPROVALS {
+            return Err(ConsentRetirementError::TooManyApprovals {
+                count: self.approvals.len() + 1,
+                maximum: MAX_RETIREMENT_APPROVALS,
+            });
+        }
+        let witness_public_key = witness_signing_key.verifying_key().to_bytes();
+        if self
+            .approvals
+            .iter()
+            .any(|approval| approval.witness_public_key == witness_public_key)
+        {
+            return Err(ConsentRetirementError::DuplicateApprovalKey);
+        }
+        let message = consent_retirement_approval_message(
+            &self.plan_fingerprint,
+            &witness_public_key,
+            approved_at_unix_secs,
+        );
+        self.approvals.push(ConsentRetirementApprovalV1 {
+            witness_public_key,
+            approved_at_unix_secs,
+            signature: witness_signing_key.sign(&message).to_bytes(),
+        });
+        Ok(())
+    }
+
+    pub(crate) fn verify_quorum(
+        &self,
+        plan: &ConsentRetirementPlanV1,
+        trusted_witness_keys: &[[u8; 32]],
+        minimum_quorum: usize,
+    ) -> Result<(), ConsentRetirementError> {
+        if self.schema != CONSENT_RETIREMENT_APPROVAL_BUNDLE_SCHEMA {
+            return Err(ConsentRetirementError::UnsupportedApprovalBundleSchema {
+                schema: self.schema.clone(),
+            });
+        }
+        if minimum_quorum == 0 {
+            return Err(ConsentRetirementError::ZeroApprovalQuorum);
+        }
+        if self.approvals.len() > MAX_RETIREMENT_APPROVALS {
+            return Err(ConsentRetirementError::TooManyApprovals {
+                count: self.approvals.len(),
+                maximum: MAX_RETIREMENT_APPROVALS,
+            });
+        }
+        let expected_plan = consent_retirement_plan_fingerprint(plan)?;
+        if self.plan_fingerprint != expected_plan {
+            return Err(ConsentRetirementError::ApprovalPlanMismatch);
+        }
+        let trusted = trusted_witness_keys.iter().copied().collect::<BTreeSet<_>>();
+        let mut observed = BTreeSet::new();
+        for approval in &self.approvals {
+            if approval.approved_at_unix_secs < plan.issued_at_unix_secs
+                || approval.approved_at_unix_secs >= plan.expires_at_unix_secs
+            {
+                return Err(ConsentRetirementError::ApprovalOutsidePlanWindow);
+            }
+            if !observed.insert(approval.witness_public_key) {
+                return Err(ConsentRetirementError::DuplicateApprovalKey);
+            }
+            if !trusted.contains(&approval.witness_public_key) {
+                return Err(ConsentRetirementError::UntrustedApprovalKey);
+            }
+            let public_key = VerifyingKey::from_bytes(&approval.witness_public_key)
+                .map_err(|_| ConsentRetirementError::BadApprovalPublicKey)?;
+            let message = consent_retirement_approval_message(
+                &self.plan_fingerprint,
+                &approval.witness_public_key,
+                approval.approved_at_unix_secs,
+            );
+            public_key
+                .verify(&message, &Signature::from_bytes(&approval.signature))
+                .map_err(|_| ConsentRetirementError::BadApprovalSignature)?;
+        }
+        if observed.len() < minimum_quorum {
+            return Err(ConsentRetirementError::ApprovalQuorumNotMet {
+                verified: observed.len(),
+                required: minimum_quorum,
+            });
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn consent_retirement_approval_bundle_fingerprint(
+    bundle: &ConsentRetirementApprovalBundleV1,
+) -> Result<[u8; 32], ConsentRetirementError> {
+    if bundle.schema != CONSENT_RETIREMENT_APPROVAL_BUNDLE_SCHEMA {
+        return Err(ConsentRetirementError::UnsupportedApprovalBundleSchema {
+            schema: bundle.schema.clone(),
+        });
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"xenia:consent-retirement-approval-bundle-fingerprint:v1");
+    hasher.update(&bundle.plan_fingerprint);
+    let count = u32::try_from(bundle.approvals.len())
+        .map_err(|_| ConsentRetirementError::EncodingLengthOverflow)?;
+    hasher.update(&count.to_be_bytes());
+    for approval in &bundle.approvals {
+        hasher.update(&approval.witness_public_key);
+        hasher.update(&approval.approved_at_unix_secs.to_be_bytes());
+        hasher.update(&approval.signature);
+    }
+    Ok(*hasher.finalize().as_bytes())
+}
+
+fn consent_retirement_approval_message(
+    plan_fingerprint: &[u8; 32],
+    witness_public_key: &[u8; 32],
+    approved_at_unix_secs: u64,
+) -> Vec<u8> {
+    let mut message = Vec::with_capacity(128);
+    message.extend_from_slice(b"xenia:consent-retirement-approval:v1");
+    message.extend_from_slice(CONSENT_RETIREMENT_APPROVAL_BUNDLE_SCHEMA.as_bytes());
+    message.push(0);
+    message.extend_from_slice(plan_fingerprint);
+    message.extend_from_slice(witness_public_key);
+    message.extend_from_slice(&approved_at_unix_secs.to_be_bytes());
+    message
 }
 
 pub(crate) fn consent_retirement_plan_fingerprint(
@@ -473,6 +666,75 @@ mod tests {
                 201,
             ),
             Err(ConsentRetirementError::PlanExpired)
+        );
+    }
+
+    #[test]
+    fn independent_approval_quorum_binds_the_exact_plan() {
+        let (key, active, pin, certificate, archive) = prerequisites();
+        let plan = ConsentRetirementPlanV1::sign(
+            &active,
+            &pin,
+            &certificate,
+            &archive,
+            "/var/lib/xenia/retired".into(),
+            candidates(),
+            &key,
+            106,
+            200,
+        )
+        .unwrap();
+        let witness_one = LedgerSigningKey::from_bytes(&[0x61; 32]);
+        let witness_two = LedgerSigningKey::from_bytes(&[0x62; 32]);
+        let mut approvals = ConsentRetirementApprovalBundleV1::new(&plan).unwrap();
+        approvals.sign_with(&plan, &witness_one, 107).unwrap();
+        approvals.sign_with(&plan, &witness_two, 108).unwrap();
+        approvals
+            .verify_quorum(
+                &plan,
+                &[
+                    witness_one.verifying_key().to_bytes(),
+                    witness_two.verifying_key().to_bytes(),
+                ],
+                2,
+            )
+            .unwrap();
+        assert_ne!(
+            consent_retirement_approval_bundle_fingerprint(&approvals).unwrap(),
+            [0u8; 32]
+        );
+    }
+
+    #[test]
+    fn approval_quorum_refuses_untrusted_duplicate_or_substituted_signers() {
+        let (key, active, pin, certificate, archive) = prerequisites();
+        let plan = ConsentRetirementPlanV1::sign(
+            &active,
+            &pin,
+            &certificate,
+            &archive,
+            "/var/lib/xenia/retired".into(),
+            candidates(),
+            &key,
+            106,
+            200,
+        )
+        .unwrap();
+        let witness = LedgerSigningKey::from_bytes(&[0x63; 32]);
+        let mut approvals = ConsentRetirementApprovalBundleV1::new(&plan).unwrap();
+        approvals.sign_with(&plan, &witness, 107).unwrap();
+        assert_eq!(
+            approvals.verify_quorum(&plan, &[[0x99; 32]], 1),
+            Err(ConsentRetirementError::UntrustedApprovalKey)
+        );
+        approvals.approvals.push(approvals.approvals[0].clone());
+        assert_eq!(
+            approvals.verify_quorum(
+                &plan,
+                &[witness.verifying_key().to_bytes()],
+                1,
+            ),
+            Err(ConsentRetirementError::DuplicateApprovalKey)
         );
     }
 
