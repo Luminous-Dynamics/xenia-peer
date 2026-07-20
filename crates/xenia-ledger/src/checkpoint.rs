@@ -76,6 +76,27 @@ pub fn checkpoint_message(
     message
 }
 
+
+/// Compute a stable BLAKE3 fingerprint over every signed field of a checkpoint.
+///
+/// This is used by higher-level continuity artifacts such as key-transition
+/// certificates and witness countersignatures. Including the checkpoint
+/// signature binds the exact signed object, not merely an equivalent set of
+/// unsigned fields.
+pub fn checkpoint_fingerprint(
+    checkpoint: &LedgerCheckpoint,
+) -> Result<[u8; 32], CheckpointError> {
+    Verifier::verify_checkpoint(checkpoint)?;
+    let mut bytes = checkpoint_message(
+        checkpoint.entry_count,
+        &checkpoint.head_hash,
+        &checkpoint.ledger_public_key,
+        checkpoint.timestamp_unix_secs,
+    );
+    bytes.extend_from_slice(&checkpoint.signature);
+    Ok(*blake3::hash(&bytes).as_bytes())
+}
+
 /// Why a [`LedgerCheckpoint`] failed to verify.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CheckpointError {

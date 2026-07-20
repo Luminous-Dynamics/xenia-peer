@@ -69,6 +69,7 @@ mod checkpoint;
 mod entry;
 mod errors;
 mod hash;
+mod key_transition;
 mod policy;
 mod seal;
 mod signature;
@@ -92,8 +93,8 @@ pub use binding::{
 pub use chain::Chain;
 
 pub use checkpoint::{
-    checkpoint_message, CheckpointContinuityError, CheckpointError, LedgerCheckpoint,
-    LEDGER_CHECKPOINT_SCHEMA,
+    checkpoint_fingerprint, checkpoint_message, CheckpointContinuityError, CheckpointError,
+    LedgerCheckpoint, LEDGER_CHECKPOINT_SCHEMA,
 };
 
 pub use entry::{
@@ -104,6 +105,11 @@ pub use entry::{
 pub use entry::{
     MlDsa65EvidenceChain, MlDsa87EvidenceChain, MlDsaEvidenceChain, new_ml_dsa_65_evidence_chain,
     new_ml_dsa_87_evidence_chain,
+};
+
+pub use key_transition::{
+    ledger_key_transition_message, LedgerKeyTransition, LedgerKeyTransitionError,
+    LEDGER_KEY_TRANSITION_SCHEMA,
 };
 
 pub use errors::{EvidenceBundleVerifyError, LedgerError, TransactionalAppendError, VerifyError};

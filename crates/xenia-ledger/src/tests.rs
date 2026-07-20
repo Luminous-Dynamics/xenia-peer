@@ -1629,3 +1629,42 @@ fn checkpoint_extension_requires_every_intervening_signed_entry() {
         Err(CheckpointContinuityError::SuffixEntryHashMismatch { .. })
     ));
 }
+
+#[test]
+fn ledger_key_transition_requires_both_epoch_keys() {
+    use crate::{LedgerKeyTransition, Verifier};
+    use ed25519_dalek::SigningKey;
+
+    let old = SigningKey::from_bytes(&[41u8; 32]);
+    let new = SigningKey::from_bytes(&[42u8; 32]);
+    let mut old_chain = crate::Chain::new(old.clone());
+    old_chain.append(sample_event(ConsentKind::Request)).unwrap();
+    let previous = old_chain.sign_checkpoint(100);
+    let transition = LedgerKeyTransition::sign(previous.clone(), &old, &new, 101).unwrap();
+
+    Verifier::verify_ledger_key_transition(&transition).unwrap();
+
+    let mut tampered = transition.clone();
+    tampered.new_key_signature[0] ^= 0x80;
+    assert!(Verifier::verify_ledger_key_transition(&tampered).is_err());
+}
+
+#[test]
+fn ledger_key_transition_authorizes_a_fresh_successor_epoch() {
+    use crate::{LedgerKeyTransition, Verifier};
+    use ed25519_dalek::SigningKey;
+
+    let old = SigningKey::from_bytes(&[43u8; 32]);
+    let new = SigningKey::from_bytes(&[44u8; 32]);
+    let mut old_chain = crate::Chain::new(old.clone());
+    old_chain.append(sample_event(ConsentKind::Request)).unwrap();
+    let previous = old_chain.sign_checkpoint(100);
+    let transition = LedgerKeyTransition::sign(previous.clone(), &old, &new, 101).unwrap();
+
+    let mut successor = crate::Chain::new(new);
+    successor.append(sample_event(ConsentKind::Request)).unwrap();
+    let candidate = successor.sign_checkpoint(102);
+    let entries = successor.iter().cloned().collect::<Vec<_>>();
+
+    Verifier::verify_ledger_key_successor(&previous, &transition, &candidate, &entries).unwrap();
+}
