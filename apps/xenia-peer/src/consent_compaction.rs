@@ -13,7 +13,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use ed25519_dalek::{SigningKey as LedgerSigningKey, VerifyingKey};
+use ed25519_dalek::{
+    Signature, Signer, SigningKey as LedgerSigningKey, Verifier as DalekVerifier, VerifyingKey,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use xenia_ledger::{
@@ -33,7 +35,9 @@ pub(crate) const CONSENT_COMPACTED_SNAPSHOT_SCHEMA: &str =
 pub(crate) const MAX_CONSENT_COMPACTION_BUNDLE_BYTES: u64 = 256 * 1024 * 1024;
 pub(crate) const MAX_CONSENT_COMPACTED_SUFFIX_ENTRIES: usize = 100_000;
 pub(crate) const CONSENT_COMPACTED_ACTIVE_STATE_SCHEMA: &str =
-    "xenia-consent-compacted-active-state-v1";
+    "xenia-consent-compacted-active-state-v2";
+const CONSENT_COMPACTED_CUTOVER_RECEIPT_SCHEMA: &str =
+    "xenia-consent-compacted-cutover-receipt-v1";
 
 /// One completed consent ceremony retained after its detailed entries move to
 /// verified cold storage.
@@ -86,14 +90,32 @@ pub(crate) struct ConsentCompactedSnapshotV1 {
     pub(crate) snapshot_digest: [u8; 32],
 }
 
+/// Ledger-signed statement that one compacted activation preserved the exact
+/// complete-ledger head used to build its snapshot. This makes the cutover
+/// identity explicit and refuses cross-key epoch substitution before the
+/// active-state envelope can be trusted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConsentCompactedCutoverReceiptV1 {
+    pub(crate) schema: String,
+    pub(crate) ledger_epoch_id: [u8; 32],
+    pub(crate) activation_snapshot_digest: [u8; 32],
+    pub(crate) archive_sequence_digest: [u8; 32],
+    pub(crate) recovery_summary_digest: [u8; 32],
+    pub(crate) source_complete_checkpoint: LedgerCheckpoint,
+    pub(crate) activated_checkpoint: LedgerCheckpoint,
+    pub(crate) activated_at_unix_secs: u64,
+    pub(crate) signature: [u8; 64],
+}
+
 /// Durable, appendable consent-ledger state after a verified compaction
-/// activation. The original snapshot remains immutable as the signed cutover
-/// statement, while `resident_entries` and `current_checkpoint` advance
+/// activation. The original snapshot and signed cutover receipt remain
+/// immutable, while `resident_entries` and `current_checkpoint` advance
 /// together on each later transactional append.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ConsentCompactedActiveStateV1 {
     pub(crate) schema: String,
     pub(crate) activation_snapshot: ConsentCompactedSnapshotV1,
+    pub(crate) cutover_receipt: ConsentCompactedCutoverReceiptV1,
     pub(crate) current_checkpoint: LedgerCheckpoint,
     pub(crate) resident_entries: Vec<LedgerEntry>,
     pub(crate) archived_replay_action_ids: Vec<[u8; 16]>,
@@ -220,6 +242,18 @@ pub(crate) enum ConsentRecoveryError {
     ActivationSuffixMismatch,
     #[error("consent compacted active-state chain anchor does not match the recovery summary")]
     ActiveAnchorMismatch,
+    #[error("unsupported consent compacted cutover receipt schema: {schema}")]
+    UnsupportedCutoverReceiptSchema { schema: String },
+    #[error("consent compacted cutover receipt signature is invalid")]
+    InvalidCutoverReceiptSignature,
+    #[error("consent compacted cutover receipt does not preserve the source complete-ledger head")]
+    CutoverHeadMismatch,
+    #[error("consent compacted cutover receipt crosses ledger signing-key epochs")]
+    CrossEpochCutover,
+    #[error("consent compacted cutover receipt predates the source complete-ledger checkpoint")]
+    CutoverTimestampRegressed,
+    #[error("consent compacted cutover receipt does not bind the activation snapshot")]
+    CutoverSnapshotMismatch,
     #[error("consent compaction manifest verification failed: {0}")]
     Manifest(#[from] LedgerCompactionError),
     #[error("consent recovery checkpoint fingerprint failed: {0}")]
@@ -662,6 +696,81 @@ impl ConsentCompactedSnapshotV1 {
     }
 }
 
+impl ConsentCompactedCutoverReceiptV1 {
+    fn sign(
+        snapshot: &ConsentCompactedSnapshotV1,
+        activated_checkpoint: LedgerCheckpoint,
+        signing_key: &LedgerSigningKey,
+        activated_at_unix_secs: u64,
+    ) -> Result<Self, ConsentRecoveryError> {
+        let source_complete_checkpoint = snapshot.manifest.current_checkpoint.clone();
+        let ledger_epoch_id = consent_ledger_epoch_id(&source_complete_checkpoint.ledger_public_key);
+        let mut receipt = Self {
+            schema: CONSENT_COMPACTED_CUTOVER_RECEIPT_SCHEMA.to_string(),
+            ledger_epoch_id,
+            activation_snapshot_digest: snapshot.snapshot_digest,
+            archive_sequence_digest: snapshot.recovery_summary.archive_sequence_digest,
+            recovery_summary_digest: snapshot.recovery_summary.summary_digest,
+            source_complete_checkpoint,
+            activated_checkpoint,
+            activated_at_unix_secs,
+            signature: [0u8; 64],
+        };
+        let message = consent_compacted_cutover_receipt_message(&receipt)?;
+        receipt.signature = signing_key.sign(&message).to_bytes();
+        receipt.verify(&signing_key.verifying_key(), snapshot)?;
+        Ok(receipt)
+    }
+
+    fn verify(
+        &self,
+        public_key: &VerifyingKey,
+        snapshot: &ConsentCompactedSnapshotV1,
+    ) -> Result<(), ConsentRecoveryError> {
+        if self.schema != CONSENT_COMPACTED_CUTOVER_RECEIPT_SCHEMA {
+            return Err(ConsentRecoveryError::UnsupportedCutoverReceiptSchema {
+                schema: self.schema.clone(),
+            });
+        }
+        Verifier::verify_checkpoint(&self.source_complete_checkpoint)?;
+        Verifier::verify_checkpoint(&self.activated_checkpoint)?;
+        if self.source_complete_checkpoint.ledger_public_key != public_key.to_bytes()
+            || self.activated_checkpoint.ledger_public_key != public_key.to_bytes()
+            || self.source_complete_checkpoint.ledger_public_key
+                != self.activated_checkpoint.ledger_public_key
+        {
+            return Err(ConsentRecoveryError::CrossEpochCutover);
+        }
+        if self.ledger_epoch_id != consent_ledger_epoch_id(&public_key.to_bytes()) {
+            return Err(ConsentRecoveryError::CrossEpochCutover);
+        }
+        if self.source_complete_checkpoint.entry_count != self.activated_checkpoint.entry_count
+            || self.source_complete_checkpoint.head_hash != self.activated_checkpoint.head_hash
+        {
+            return Err(ConsentRecoveryError::CutoverHeadMismatch);
+        }
+        if self.activated_at_unix_secs
+            < self.source_complete_checkpoint.timestamp_unix_secs
+            || self.activated_checkpoint.timestamp_unix_secs
+                < self.source_complete_checkpoint.timestamp_unix_secs
+        {
+            return Err(ConsentRecoveryError::CutoverTimestampRegressed);
+        }
+        if self.activation_snapshot_digest != snapshot.snapshot_digest
+            || self.archive_sequence_digest
+                != snapshot.recovery_summary.archive_sequence_digest
+            || self.recovery_summary_digest != snapshot.recovery_summary.summary_digest
+            || self.source_complete_checkpoint != snapshot.manifest.current_checkpoint
+        {
+            return Err(ConsentRecoveryError::CutoverSnapshotMismatch);
+        }
+        let message = consent_compacted_cutover_receipt_message(self)?;
+        public_key
+            .verify(&message, &Signature::from_bytes(&self.signature))
+            .map_err(|_| ConsentRecoveryError::InvalidCutoverReceiptSignature)
+    }
+}
+
 impl ConsentCompactedActiveStateV1 {
     /// Activate a verified compacted snapshot. Cold archive segments are
     /// required here; later startup can verify the signed active state without
@@ -684,10 +793,17 @@ impl ConsentCompactedActiveStateV1 {
             .copied()
             .collect::<Vec<_>>();
         let current_checkpoint = restored.chain.sign_checkpoint(timestamp_unix_secs);
+        let cutover_receipt = ConsentCompactedCutoverReceiptV1::sign(
+            &snapshot,
+            current_checkpoint.clone(),
+            signing_key,
+            timestamp_unix_secs,
+        )?;
         let resident_entries = restored.chain.iter().cloned().collect();
         let mut state = Self {
             schema: CONSENT_COMPACTED_ACTIVE_STATE_SCHEMA.to_string(),
             activation_snapshot: snapshot,
+            cutover_receipt,
             current_checkpoint,
             resident_entries,
             archived_replay_action_ids,
@@ -722,6 +838,8 @@ impl ConsentCompactedActiveStateV1 {
             return Err(ConsentRecoveryError::ActiveStateDigestMismatch);
         }
         self.activation_snapshot.verify_signed_frontier(public_key)?;
+        self.cutover_receipt
+            .verify(public_key, &self.activation_snapshot)?;
         if self.current_checkpoint.ledger_public_key != public_key.to_bytes() {
             return Err(ConsentRecoveryError::RestoreSigningKeyMismatch);
         }
@@ -781,6 +899,7 @@ impl ConsentCompactedActiveStateV1 {
         let mut next = Self {
             schema: CONSENT_COMPACTED_ACTIVE_STATE_SCHEMA.to_string(),
             activation_snapshot: self.activation_snapshot.clone(),
+            cutover_receipt: self.cutover_receipt.clone(),
             current_checkpoint: chain.sign_checkpoint(timestamp_unix_secs),
             resident_entries: chain.iter().cloned().collect(),
             archived_replay_action_ids: self.archived_replay_action_ids.clone(),
@@ -948,6 +1067,47 @@ fn consent_compacted_snapshot_digest(
     Ok(*hasher.finalize().as_bytes())
 }
 
+fn consent_ledger_epoch_id(ledger_public_key: &[u8; 32]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"xenia:consent-ledger-epoch:v1");
+    hasher.update(&[0]);
+    hasher.update(ledger_public_key);
+    *hasher.finalize().as_bytes()
+}
+
+fn consent_compacted_cutover_receipt_message(
+    receipt: &ConsentCompactedCutoverReceiptV1,
+) -> Result<Vec<u8>, ConsentRecoveryError> {
+    if receipt.schema != CONSENT_COMPACTED_CUTOVER_RECEIPT_SCHEMA {
+        return Err(ConsentRecoveryError::UnsupportedCutoverReceiptSchema {
+            schema: receipt.schema.clone(),
+        });
+    }
+    let source = checkpoint_fingerprint(&receipt.source_complete_checkpoint)?;
+    let activated = checkpoint_fingerprint(&receipt.activated_checkpoint)?;
+    let mut message = Vec::with_capacity(256);
+    message.extend_from_slice(b"xenia:consent-compacted-cutover-receipt:v1");
+    message.push(0);
+    message.extend_from_slice(receipt.schema.as_bytes());
+    message.push(0);
+    message.extend_from_slice(&receipt.ledger_epoch_id);
+    message.extend_from_slice(&receipt.activation_snapshot_digest);
+    message.extend_from_slice(&receipt.archive_sequence_digest);
+    message.extend_from_slice(&receipt.recovery_summary_digest);
+    message.extend_from_slice(&source);
+    message.extend_from_slice(&activated);
+    message.extend_from_slice(&receipt.activated_at_unix_secs.to_be_bytes());
+    Ok(message)
+}
+
+fn consent_compacted_cutover_receipt_fingerprint(
+    receipt: &ConsentCompactedCutoverReceiptV1,
+) -> Result<[u8; 32], ConsentRecoveryError> {
+    let mut message = consent_compacted_cutover_receipt_message(receipt)?;
+    message.extend_from_slice(&receipt.signature);
+    Ok(*blake3::hash(&message).as_bytes())
+}
+
 fn consent_compacted_active_state_digest(
     state: &ConsentCompactedActiveStateV1,
 ) -> Result<[u8; 32], ConsentRecoveryError> {
@@ -964,6 +1124,9 @@ fn consent_compacted_active_state_digest(
     hasher.update(state.schema.as_bytes());
     hasher.update(&[0]);
     hasher.update(&state.activation_snapshot.snapshot_digest);
+    hasher.update(&consent_compacted_cutover_receipt_fingerprint(
+        &state.cutover_receipt,
+    )?);
     hasher.update(&activation);
     hasher.update(&current);
     hasher.update(&(state.resident_entries.len() as u64).to_be_bytes());
@@ -1367,6 +1530,41 @@ mod tests {
             Err(ConsentRecoveryError::Continuity(_))
                 | Err(ConsentRecoveryError::ActivationSuffixMismatch)
         ));
+    }
+
+    #[test]
+    fn compacted_cutover_receipt_binds_the_source_head_and_epoch() {
+        let segments = complete_archive();
+        let key = SigningKey::from_bytes(&[0x44; 32]);
+        let chain = Chain::from_entries(segments[0].entries.clone(), key.clone());
+        let bundle = ConsentCompactionBundleV1::build(&chain, segments.clone(), 102).unwrap();
+        let entries = chain.iter().cloned().collect::<Vec<_>>();
+        let snapshot = ConsentCompactedSnapshotV1::build(
+            &bundle,
+            &entries,
+            &key.verifying_key(),
+        )
+        .unwrap();
+        let mut active = ConsentCompactedActiveStateV1::activate(
+            snapshot,
+            &segments,
+            &key,
+            103,
+        )
+        .unwrap();
+
+        active.cutover_receipt.source_complete_checkpoint.head_hash[0] ^= 1;
+        active.state_digest = consent_compacted_active_state_digest(&active).unwrap();
+        assert!(active.verify(&key.verifying_key()).is_err());
+
+        let wrong_key = SigningKey::from_bytes(&[0x99; 32]);
+        assert_eq!(
+            active.cutover_receipt.verify(
+                &wrong_key.verifying_key(),
+                &active.activation_snapshot,
+            ),
+            Err(ConsentRecoveryError::CrossEpochCutover)
+        );
     }
 
 }
