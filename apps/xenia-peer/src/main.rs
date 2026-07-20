@@ -402,6 +402,13 @@ struct Args {
     #[arg(long, default_value = "xenia-peer-state/consent.ledger")]
     consent_ledger_path: std::path::PathBuf,
 
+    /// Independently retained signed checkpoint that the current consent
+    /// ledger must contain as an exact prefix. Store this outside the daemon
+    /// state directory or backup set being restored; otherwise an attacker can
+    /// roll back the ledger and its local checkpoint together.
+    #[arg(long, value_name = "FILE")]
+    trusted_consent_ledger_checkpoint: Option<std::path::PathBuf>,
+
     /// M1 consent-ledger signing key path. Signs the consent grant/deny/revoke
     /// boundary events; generated on first run with owner-only (0600)
     /// permissions. Must be a real per-host secret -- a shared or well-known
@@ -1846,6 +1853,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         entries = ledger.len(),
         "consent ledger loaded and verified"
     );
+
+    if let Some(checkpoint_path) = args.trusted_consent_ledger_checkpoint.as_deref() {
+        let checkpoint = audit_ledger_store::verify_retained_checkpoint(
+            checkpoint_path,
+            &ledger,
+            &signing_key.verifying_key(),
+        )
+        .map_err(|err| -> Box<dyn std::error::Error> {
+            format!(
+                "current consent ledger does not extend --trusted-consent-ledger-checkpoint {}: {err}",
+                checkpoint_path.display()
+            )
+            .into()
+        })?;
+        info!(
+            checkpoint = %checkpoint_path.display(),
+            retained_entries = checkpoint.entry_count,
+            current_entries = ledger.len(),
+            "retained consent-ledger checkpoint verified as an exact prefix"
+        );
+    }
     let shared_ledger = std::sync::Arc::new(tokio::sync::Mutex::new(ledger));
 
     let policy_path = std::path::Path::new("policy.json");

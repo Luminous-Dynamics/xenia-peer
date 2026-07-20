@@ -35,7 +35,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use xenia_ledger::{Chain, LedgerEntry, Verifier, VerifyError};
+use xenia_ledger::{
+    Chain, CheckpointContinuityError, LedgerCheckpoint, LedgerEntry, Verifier, VerifyError,
+};
 
 /// Errors surfaced while loading or persisting the live audit ledger.
 #[derive(Debug, thiserror::Error)]
@@ -61,6 +63,13 @@ pub(crate) enum AuditLedgerStoreError {
     /// not trust it.
     #[error("persisted audit ledger failed verification: {0}")]
     Verify(#[from] VerifyError),
+    /// A retained public checkpoint could not be decoded.
+    #[error("retained audit checkpoint JSON error: {0}")]
+    CheckpointJson(#[from] serde_json::Error),
+    /// The current ledger failed to contain the independently retained
+    /// checkpoint as an exact authenticated prefix.
+    #[error("retained audit checkpoint continuity failure: {0}")]
+    CheckpointContinuity(#[from] CheckpointContinuityError),
 }
 
 const PERSISTED_AUDIT_LEDGER_MAGIC: &[u8] = b"XENIA-AUDIT-LEDGER\0";
@@ -69,6 +78,7 @@ const PERSISTED_AUDIT_LEDGER_HEADER_LEN: usize =
     PERSISTED_AUDIT_LEDGER_MAGIC.len() + 2 + 8 + 32;
 pub(crate) const MAX_AUDIT_LEDGER_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const MAX_AUDIT_LEDGER_ENTRIES: usize = 100_000;
+pub(crate) const MAX_RETAINED_CHECKPOINT_BYTES: u64 = 64 * 1024;
 
 fn head_hash(entries: &[LedgerEntry]) -> [u8; 32] {
     entries
@@ -180,6 +190,32 @@ pub(crate) fn load_verified(
     };
     Verifier::verify_chain(&entries, &signing_key.verifying_key())?;
     Ok(Chain::from_entries(entries, signing_key.clone()))
+}
+
+
+
+/// Load an independently retained public checkpoint and prove that the current
+/// verified ledger contains it as an exact prefix.
+///
+/// The checkpoint should live outside the state directory being restored. If a
+/// complete older state snapshot rolls back the ledger, this comparison fails
+/// even though that older ledger remains internally well-signed.
+pub(crate) fn verify_retained_checkpoint(
+    checkpoint_path: &Path,
+    chain: &Chain,
+    public_key: &ed25519_dalek::VerifyingKey,
+) -> Result<LedgerCheckpoint, AuditLedgerStoreError> {
+    let file_len = std::fs::metadata(checkpoint_path)?.len();
+    if file_len > MAX_RETAINED_CHECKPOINT_BYTES {
+        return Err(AuditLedgerStoreError::LimitExceeded(format!(
+            "retained checkpoint is {file_len} bytes; maximum is {MAX_RETAINED_CHECKPOINT_BYTES}"
+        )));
+    }
+    let bytes = std::fs::read(checkpoint_path)?;
+    let checkpoint: LedgerCheckpoint = serde_json::from_slice(&bytes)?;
+    let entries = chain.iter().cloned().collect::<Vec<_>>();
+    Verifier::verify_checkpoint_prefix(&checkpoint, &entries, public_key)?;
+    Ok(checkpoint)
 }
 
 /// Serialize and atomically replace `path` with `entries`: write a temp
@@ -511,4 +547,52 @@ mod tests {
         assert_eq!(mode, 0o600);
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn retained_checkpoint_accepts_a_later_ledger_with_the_same_prefix() {
+        let dir = temp_dir("retained-checkpoint-prefix");
+        let checkpoint_path = dir.join("retained-checkpoint.json");
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[71u8; 32]);
+        let mut chain = Chain::new(sk.clone());
+        chain.append(event()).unwrap();
+        let retained = chain.sign_checkpoint(100);
+        std::fs::write(&checkpoint_path, serde_json::to_vec(&retained).unwrap()).unwrap();
+        chain.append(event()).unwrap();
+
+        let loaded = verify_retained_checkpoint(
+            &checkpoint_path,
+            &chain,
+            &sk.verifying_key(),
+        )
+        .unwrap();
+        assert_eq!(loaded, retained);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn retained_checkpoint_refuses_a_rolled_back_ledger() {
+        let dir = temp_dir("retained-checkpoint-rollback");
+        let checkpoint_path = dir.join("retained-checkpoint.json");
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[72u8; 32]);
+        let mut newer = Chain::new(sk.clone());
+        newer.append(event()).unwrap();
+        newer.append(event()).unwrap();
+        let retained = newer.sign_checkpoint(100);
+        std::fs::write(&checkpoint_path, serde_json::to_vec(&retained).unwrap()).unwrap();
+
+        let mut rolled_back = Chain::new(sk.clone());
+        rolled_back.append(event()).unwrap();
+        assert!(matches!(
+            verify_retained_checkpoint(
+                &checkpoint_path,
+                &rolled_back,
+                &sk.verifying_key(),
+            ),
+            Err(AuditLedgerStoreError::CheckpointContinuity(
+                CheckpointContinuityError::CheckpointAheadOfLedger { .. }
+            ))
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
 }
