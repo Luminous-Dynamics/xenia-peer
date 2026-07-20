@@ -32,6 +32,8 @@ pub(crate) const CONSENT_COMPACTED_SNAPSHOT_SCHEMA: &str =
     "xenia-consent-compacted-snapshot-v1";
 pub(crate) const MAX_CONSENT_COMPACTION_BUNDLE_BYTES: u64 = 256 * 1024 * 1024;
 pub(crate) const MAX_CONSENT_COMPACTED_SUFFIX_ENTRIES: usize = 100_000;
+pub(crate) const CONSENT_COMPACTED_ACTIVE_STATE_SCHEMA: &str =
+    "xenia-consent-compacted-active-state-v1";
 
 /// One completed consent ceremony retained after its detailed entries move to
 /// verified cold storage.
@@ -82,6 +84,21 @@ pub(crate) struct ConsentCompactedSnapshotV1 {
     pub(crate) manifest: LedgerCompactionManifest,
     pub(crate) suffix_entries: Vec<LedgerEntry>,
     pub(crate) snapshot_digest: [u8; 32],
+}
+
+/// Durable, appendable consent-ledger state after a verified compaction
+/// activation. The original snapshot remains immutable as the signed cutover
+/// statement, while `resident_entries` and `current_checkpoint` advance
+/// together on each later transactional append.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConsentCompactedActiveStateV1 {
+    pub(crate) schema: String,
+    pub(crate) activation_snapshot: ConsentCompactedSnapshotV1,
+    pub(crate) current_checkpoint: LedgerCheckpoint,
+    pub(crate) resident_entries: Vec<LedgerEntry>,
+    pub(crate) archived_replay_action_ids: Vec<[u8; 16]>,
+    pub(crate) archived_terminal_sessions: Vec<[u8; 16]>,
+    pub(crate) state_digest: [u8; 32],
 }
 
 /// Fully verified in-memory restore frontier for a compacted consent ledger.
@@ -179,6 +196,18 @@ pub(crate) enum ConsentRecoveryError {
     SignedDecisionReplay { action_id: String, seq: u64 },
     #[error("terminal archived session {session_id} reappears at sequence {seq}")]
     ArchivedSessionReused { session_id: String, seq: u64 },
+    #[error("unsupported consent compacted active-state schema: {schema}")]
+    UnsupportedActiveStateSchema { schema: String },
+    #[error("consent compacted active-state digest mismatch")]
+    ActiveStateDigestMismatch,
+    #[error("consent compacted active-state archived replay index mismatch")]
+    ActiveReplayIndexMismatch,
+    #[error("consent compacted active-state archived terminal-session index mismatch")]
+    ActiveTerminalIndexMismatch,
+    #[error("consent compacted active-state does not preserve the activation suffix")]
+    ActivationSuffixMismatch,
+    #[error("consent compacted active-state chain anchor does not match the recovery summary")]
+    ActiveAnchorMismatch,
     #[error("consent compaction manifest verification failed: {0}")]
     Manifest(#[from] LedgerCompactionError),
     #[error("consent recovery checkpoint fingerprint failed: {0}")]
@@ -340,6 +369,42 @@ impl ConsentRecoverySummaryV1 {
         }
         Ok(())
     }
+
+    /// Verify the self-contained, signed-summary representation without
+    /// reopening cold archive files. The compaction manifest authenticates the
+    /// resulting digest; activation must still have performed the stronger
+    /// archive-backed verification first.
+    pub(crate) fn verify_self(&self) -> Result<(), ConsentRecoveryError> {
+        if self.schema != CONSENT_RECOVERY_SUMMARY_SCHEMA {
+            return Err(ConsentRecoveryError::SummaryMismatch);
+        }
+        if self.replay_action_ids.len() > MAX_RECOVERY_ACTION_IDS {
+            return Err(ConsentRecoveryError::TooManyActionIds {
+                count: self.replay_action_ids.len(),
+                maximum: MAX_RECOVERY_ACTION_IDS,
+            });
+        }
+        if self.sessions.len() > MAX_RECOVERY_SESSIONS {
+            return Err(ConsentRecoveryError::TooManySessions {
+                count: self.sessions.len(),
+                maximum: MAX_RECOVERY_SESSIONS,
+            });
+        }
+        if !self.replay_action_ids.windows(2).all(|pair| pair[0] < pair[1]) {
+            return Err(ConsentRecoveryError::SummaryMismatch);
+        }
+        if !self.sessions.windows(2).all(|pair| pair[0].session_id < pair[1].session_id) {
+            return Err(ConsentRecoveryError::SummaryMismatch);
+        }
+        if self.archived_entry_count != self.through_checkpoint.entry_count {
+            return Err(ConsentRecoveryError::SummaryMismatch);
+        }
+        let observed_digest = consent_recovery_summary_digest(self)?;
+        if observed_digest != self.summary_digest {
+            return Err(ConsentRecoveryError::DigestMismatch);
+        }
+        Ok(())
+    }
 }
 
 impl ConsentCompactionBundleV1 {
@@ -498,6 +563,56 @@ impl ConsentCompactedSnapshotV1 {
         verify_recovery_suffix_compatibility(&self.recovery_summary, &self.suffix_entries)
     }
 
+    /// Verify the immutable signed activation frontier without reopening the
+    /// detailed cold archive. This is safe only after an archive-backed
+    /// activation step has produced the durable state: the recovery-summary
+    /// digest is signed by the compaction manifest, the activation suffix is
+    /// fully signature-checked, and the manifest checkpoint must terminate at
+    /// that suffix.
+    pub(crate) fn verify_signed_frontier(
+        &self,
+        public_key: &VerifyingKey,
+    ) -> Result<(), ConsentRecoveryError> {
+        if self.schema != CONSENT_COMPACTED_SNAPSHOT_SCHEMA {
+            return Err(ConsentRecoveryError::UnsupportedSnapshotSchema {
+                schema: self.schema.clone(),
+            });
+        }
+        if self.suffix_entries.len() > MAX_CONSENT_COMPACTED_SUFFIX_ENTRIES {
+            return Err(ConsentRecoveryError::TooManySuffixEntries {
+                count: self.suffix_entries.len(),
+                maximum: MAX_CONSENT_COMPACTED_SUFFIX_ENTRIES,
+            });
+        }
+        if consent_compacted_snapshot_digest(self)? != self.snapshot_digest {
+            return Err(ConsentRecoveryError::SnapshotDigestMismatch);
+        }
+        self.recovery_summary.verify_self()?;
+        if self.manifest.archive_sequence_digest
+            != self.recovery_summary.archive_sequence_digest
+        {
+            return Err(ConsentRecoveryError::ManifestArchiveMismatch);
+        }
+        if self.manifest.recovery_summary_digest != self.recovery_summary.summary_digest {
+            return Err(ConsentRecoveryError::ManifestRecoveryMismatch);
+        }
+        if self.manifest.archived_through_checkpoint
+            != self.recovery_summary.through_checkpoint
+        {
+            return Err(ConsentRecoveryError::ManifestBoundaryMismatch);
+        }
+        Verifier::verify_ledger_compaction_manifest(&self.manifest)?;
+        if self.manifest.current_checkpoint.ledger_public_key != public_key.to_bytes() {
+            return Err(ConsentRecoveryError::SummaryMismatch);
+        }
+        Verifier::verify_checkpoint_extension(
+            &self.recovery_summary.through_checkpoint,
+            &self.manifest.current_checkpoint,
+            &self.suffix_entries,
+        )?;
+        verify_recovery_suffix_compatibility(&self.recovery_summary, &self.suffix_entries)
+    }
+
     /// Verify and materialize the exact append frontier and archived recovery
     /// indexes needed by a future compacted-ledger activation path.
     pub(crate) fn restore_state(
@@ -531,6 +646,170 @@ impl ConsentCompactedSnapshotV1 {
             chain,
             archived_replay_action_ids,
             archived_terminal_sessions,
+        })
+    }
+}
+
+impl ConsentCompactedActiveStateV1 {
+    /// Activate a verified compacted snapshot. Cold archive segments are
+    /// required here; later startup can verify the signed active state without
+    /// repeatedly opening those archive files.
+    pub(crate) fn activate(
+        snapshot: ConsentCompactedSnapshotV1,
+        archive_segments: &[LedgerArchiveSegment],
+        signing_key: &LedgerSigningKey,
+        timestamp_unix_secs: u64,
+    ) -> Result<Self, ConsentRecoveryError> {
+        let restored = snapshot.restore_state(archive_segments, signing_key)?;
+        let archived_replay_action_ids = restored
+            .archived_replay_action_ids
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        let archived_terminal_sessions = restored
+            .archived_terminal_sessions
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        let current_checkpoint = restored.chain.sign_checkpoint(timestamp_unix_secs);
+        let resident_entries = restored.chain.iter().cloned().collect();
+        let mut state = Self {
+            schema: CONSENT_COMPACTED_ACTIVE_STATE_SCHEMA.to_string(),
+            activation_snapshot: snapshot,
+            current_checkpoint,
+            resident_entries,
+            archived_replay_action_ids,
+            archived_terminal_sessions,
+            state_digest: [0u8; 32],
+        };
+        state.state_digest = consent_compacted_active_state_digest(&state)?;
+        state.verify(&signing_key.verifying_key())?;
+        Ok(state)
+    }
+
+    /// Verify a durable active state using only its signed activation frontier
+    /// and current resident suffix. Rollback protection still requires an
+    /// independently retained checkpoint or witness, as with an ordinary live
+    /// ledger file.
+    pub(crate) fn verify(
+        &self,
+        public_key: &VerifyingKey,
+    ) -> Result<(), ConsentRecoveryError> {
+        if self.schema != CONSENT_COMPACTED_ACTIVE_STATE_SCHEMA {
+            return Err(ConsentRecoveryError::UnsupportedActiveStateSchema {
+                schema: self.schema.clone(),
+            });
+        }
+        if self.resident_entries.len() > MAX_CONSENT_COMPACTED_SUFFIX_ENTRIES {
+            return Err(ConsentRecoveryError::TooManySuffixEntries {
+                count: self.resident_entries.len(),
+                maximum: MAX_CONSENT_COMPACTED_SUFFIX_ENTRIES,
+            });
+        }
+        if consent_compacted_active_state_digest(self)? != self.state_digest {
+            return Err(ConsentRecoveryError::ActiveStateDigestMismatch);
+        }
+        self.activation_snapshot.verify_signed_frontier(public_key)?;
+        if self.current_checkpoint.ledger_public_key != public_key.to_bytes() {
+            return Err(ConsentRecoveryError::RestoreSigningKeyMismatch);
+        }
+        let expected_replay = self
+            .activation_snapshot
+            .recovery_summary
+            .replay_action_ids
+            .clone();
+        if self.archived_replay_action_ids != expected_replay {
+            return Err(ConsentRecoveryError::ActiveReplayIndexMismatch);
+        }
+        let expected_terminal = self
+            .activation_snapshot
+            .recovery_summary
+            .sessions
+            .iter()
+            .map(|session| session.session_id)
+            .collect::<Vec<_>>();
+        if self.archived_terminal_sessions != expected_terminal {
+            return Err(ConsentRecoveryError::ActiveTerminalIndexMismatch);
+        }
+        let base = &self.activation_snapshot.recovery_summary.through_checkpoint;
+        if self.current_checkpoint.entry_count < base.entry_count {
+            return Err(ConsentRecoveryError::ActiveAnchorMismatch);
+        }
+        Verifier::verify_checkpoint_extension(
+            base,
+            &self.current_checkpoint,
+            &self.resident_entries,
+        )?;
+        let activation_len = self.activation_snapshot.suffix_entries.len();
+        let activation_prefix = self
+            .resident_entries
+            .get(..activation_len)
+            .ok_or(ConsentRecoveryError::ActivationSuffixMismatch)?;
+        if activation_prefix != self.activation_snapshot.suffix_entries.as_slice() {
+            return Err(ConsentRecoveryError::ActivationSuffixMismatch);
+        }
+        verify_recovery_suffix_compatibility(
+            &self.activation_snapshot.recovery_summary,
+            &self.resident_entries,
+        )
+    }
+
+    /// Rebuild the durable envelope after a successful append to the anchored
+    /// chain. The immutable activation snapshot and archived indexes must never
+    /// change after cutover.
+    pub(crate) fn advance_from_chain(
+        &self,
+        chain: &Chain,
+        timestamp_unix_secs: u64,
+    ) -> Result<Self, ConsentRecoveryError> {
+        let expected_anchor = &self.activation_snapshot.recovery_summary.through_checkpoint;
+        if chain.base_checkpoint() != Some(expected_anchor) {
+            return Err(ConsentRecoveryError::ActiveAnchorMismatch);
+        }
+        let mut next = Self {
+            schema: CONSENT_COMPACTED_ACTIVE_STATE_SCHEMA.to_string(),
+            activation_snapshot: self.activation_snapshot.clone(),
+            current_checkpoint: chain.sign_checkpoint(timestamp_unix_secs),
+            resident_entries: chain.iter().cloned().collect(),
+            archived_replay_action_ids: self.archived_replay_action_ids.clone(),
+            archived_terminal_sessions: self.archived_terminal_sessions.clone(),
+            state_digest: [0u8; 32],
+        };
+        next.state_digest = consent_compacted_active_state_digest(&next)?;
+        let public_key = VerifyingKey::from_bytes(&next.current_checkpoint.ledger_public_key)
+            .map_err(|_| ConsentRecoveryError::SummaryMismatch)?;
+        next.verify(&public_key)?;
+        Ok(next)
+    }
+
+    /// Materialize the verified append frontier and historical indexes before
+    /// any consent transport is allowed to accept an action.
+    pub(crate) fn restore_state(
+        &self,
+        signing_key: &LedgerSigningKey,
+    ) -> Result<RestoredConsentStateV1, ConsentRecoveryError> {
+        let public_key = signing_key.verifying_key();
+        self.verify(&public_key)?;
+        let chain = Chain::from_checkpoint_suffix(
+            self.activation_snapshot
+                .recovery_summary
+                .through_checkpoint
+                .clone(),
+            self.resident_entries.clone(),
+            signing_key.clone(),
+        );
+        Ok(RestoredConsentStateV1 {
+            chain,
+            archived_replay_action_ids: self
+                .archived_replay_action_ids
+                .iter()
+                .copied()
+                .collect(),
+            archived_terminal_sessions: self
+                .archived_terminal_sessions
+                .iter()
+                .copied()
+                .collect(),
         })
     }
 }
@@ -653,6 +932,41 @@ fn consent_compacted_snapshot_digest(
         hasher.update(&entry.seq.to_be_bytes());
         hasher.update(&entry.entry_hash);
         hasher.update(&entry.signature);
+    }
+    Ok(*hasher.finalize().as_bytes())
+}
+
+fn consent_compacted_active_state_digest(
+    state: &ConsentCompactedActiveStateV1,
+) -> Result<[u8; 32], ConsentRecoveryError> {
+    if state.schema != CONSENT_COMPACTED_ACTIVE_STATE_SCHEMA {
+        return Err(ConsentRecoveryError::UnsupportedActiveStateSchema {
+            schema: state.schema.clone(),
+        });
+    }
+    let activation = checkpoint_fingerprint(&state.activation_snapshot.manifest.current_checkpoint)?;
+    let current = checkpoint_fingerprint(&state.current_checkpoint)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"xenia:consent-compacted-active-state:v1");
+    hasher.update(&[0]);
+    hasher.update(state.schema.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(&state.activation_snapshot.snapshot_digest);
+    hasher.update(&activation);
+    hasher.update(&current);
+    hasher.update(&(state.resident_entries.len() as u64).to_be_bytes());
+    for entry in &state.resident_entries {
+        hasher.update(&entry.seq.to_be_bytes());
+        hasher.update(&entry.entry_hash);
+        hasher.update(&entry.signature);
+    }
+    hasher.update(&(state.archived_replay_action_ids.len() as u64).to_be_bytes());
+    for action_id in &state.archived_replay_action_ids {
+        hasher.update(action_id);
+    }
+    hasher.update(&(state.archived_terminal_sessions.len() as u64).to_be_bytes());
+    for session_id in &state.archived_terminal_sessions {
+        hasher.update(session_id);
     }
     Ok(*hasher.finalize().as_bytes())
 }
@@ -942,6 +1256,104 @@ mod tests {
             Err(ConsentRecoveryError::DigestMismatch)
                 | Err(ConsentRecoveryError::SummaryMismatch)
                 | Err(ConsentRecoveryError::ManifestRecoveryMismatch)
+        ));
+    }
+
+    #[test]
+    fn compacted_active_state_advances_and_restores_without_cold_archive_reads() {
+        let segments = complete_archive();
+        let key = SigningKey::from_bytes(&[0x44; 32]);
+        let mut chain = Chain::from_entries(segments[0].entries.clone(), key.clone());
+        chain
+            .append(event(2, 4, ConsentKind::Denial, [0x30; 32]))
+            .unwrap();
+        let bundle = ConsentCompactionBundleV1::build(&chain, segments.clone(), 102).unwrap();
+        let entries = chain.iter().cloned().collect::<Vec<_>>();
+        let snapshot = ConsentCompactedSnapshotV1::build(
+            &bundle,
+            &entries,
+            &key.verifying_key(),
+        )
+        .unwrap();
+        let active = ConsentCompactedActiveStateV1::activate(
+            snapshot,
+            &segments,
+            &key,
+            103,
+        )
+        .unwrap();
+        active.verify(&key.verifying_key()).unwrap();
+
+        let mut restored = active.restore_state(&key).unwrap();
+        restored
+            .chain
+            .append(event(3, 5, ConsentKind::Denial, [0x31; 32]))
+            .unwrap();
+        let advanced = active.advance_from_chain(&restored.chain, 104).unwrap();
+        let reloaded = advanced.restore_state(&key).unwrap();
+        assert_eq!(reloaded.chain.entry_count(), 5);
+        assert_eq!(reloaded.chain.resident_len(), 2);
+        assert_eq!(reloaded.archived_replay_action_count(), 2);
+        assert_eq!(reloaded.archived_terminal_session_count(), 1);
+    }
+
+    #[test]
+    fn compacted_active_state_refuses_index_substitution() {
+        let segments = complete_archive();
+        let key = SigningKey::from_bytes(&[0x44; 32]);
+        let chain = Chain::from_entries(segments[0].entries.clone(), key.clone());
+        let bundle = ConsentCompactionBundleV1::build(&chain, segments.clone(), 102).unwrap();
+        let entries = chain.iter().cloned().collect::<Vec<_>>();
+        let snapshot = ConsentCompactedSnapshotV1::build(
+            &bundle,
+            &entries,
+            &key.verifying_key(),
+        )
+        .unwrap();
+        let mut active = ConsentCompactedActiveStateV1::activate(
+            snapshot,
+            &segments,
+            &key,
+            103,
+        )
+        .unwrap();
+        active.archived_replay_action_ids.push([0xEE; 16]);
+        active.state_digest = consent_compacted_active_state_digest(&active).unwrap();
+        assert_eq!(
+            active.verify(&key.verifying_key()),
+            Err(ConsentRecoveryError::ActiveReplayIndexMismatch)
+        );
+    }
+
+    #[test]
+    fn compacted_active_state_refuses_replaced_activation_suffix() {
+        let segments = complete_archive();
+        let key = SigningKey::from_bytes(&[0x44; 32]);
+        let mut chain = Chain::from_entries(segments[0].entries.clone(), key.clone());
+        chain
+            .append(event(2, 4, ConsentKind::Denial, [0x30; 32]))
+            .unwrap();
+        let bundle = ConsentCompactionBundleV1::build(&chain, segments.clone(), 102).unwrap();
+        let entries = chain.iter().cloned().collect::<Vec<_>>();
+        let snapshot = ConsentCompactedSnapshotV1::build(
+            &bundle,
+            &entries,
+            &key.verifying_key(),
+        )
+        .unwrap();
+        let mut active = ConsentCompactedActiveStateV1::activate(
+            snapshot,
+            &segments,
+            &key,
+            103,
+        )
+        .unwrap();
+        active.resident_entries[0].entry_hash[0] ^= 1;
+        active.state_digest = consent_compacted_active_state_digest(&active).unwrap();
+        assert!(matches!(
+            active.verify(&key.verifying_key()),
+            Err(ConsentRecoveryError::Continuity(_))
+                | Err(ConsentRecoveryError::ActivationSuffixMismatch)
         ));
     }
 
