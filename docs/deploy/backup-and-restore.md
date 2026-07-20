@@ -135,3 +135,43 @@ systemctl --user enable --now xenia-backup.timer
 Replace `age1YOUR_RECIPIENT_HERE` with a real recipient (`age-keygen` to
 generate one) -- **never schedule unencrypted backups to a location you
 don't fully control.**
+
+
+## Rollback-resistant consent-ledger restore
+
+A consent ledger can be internally valid and still be an older, fully signed
+snapshot. Keep a signed checkpoint outside the daemon state directory or backup
+set and require it during restore:
+
+```bash
+xenia-peer \
+  --consent-ledger-path /restore/xenia-peer-state/consent.ledger \
+  --operator-key-path /restore/xenia-peer-state/operator.key \
+  --trusted-consent-ledger-checkpoint /independent-retention/xenia-checkpoint.json \
+  ...
+```
+
+The daemon verifies the checkpoint signature, ledger key, complete ledger
+chain, and exact prefix head. A restored ledger shorter than the retained
+checkpoint, or one that forks before that height, is refused.
+
+Advance the independently stored pin only after the current ledger has been
+verified:
+
+```bash
+xenia-peer \
+  --consent-ledger-path /srv/xenia-peer-state/consent.ledger \
+  --operator-key-path /srv/xenia-peer-state/operator.key \
+  --advance-consent-ledger-checkpoint /independent-retention/xenia-checkpoint.json
+```
+
+An existing pin is replaced atomically only when the current ledger contains it
+as an exact prefix. Do not store the checkpoint beside the state it is intended
+to protect; rolling both back together defeats the anchor.
+
+For frequent remote auditing, an authenticated operator can request
+`GET /v1/audit/witness?after_entry_count=N`. The response includes every signed
+entry after height `N` and a current signed checkpoint, allowing an auditor to
+prove extension with `Verifier::verify_checkpoint_extension` without fetching
+the complete ledger. Responses are capped at 4,096 entries; an auditor that
+falls further behind must fetch the full authenticated ledger.

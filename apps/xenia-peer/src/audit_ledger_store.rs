@@ -192,8 +192,6 @@ pub(crate) fn load_verified(
     Ok(Chain::from_entries(entries, signing_key.clone()))
 }
 
-
-
 /// Load an independently retained public checkpoint and prove that the current
 /// verified ledger contains it as an exact prefix.
 ///
@@ -216,6 +214,73 @@ pub(crate) fn verify_retained_checkpoint(
     let entries = chain.iter().cloned().collect::<Vec<_>>();
     Verifier::verify_checkpoint_prefix(&checkpoint, &entries, public_key)?;
     Ok(checkpoint)
+}
+
+/// Atomically advance an externally retained checkpoint, refusing to overwrite
+/// an existing pin unless the current ledger contains it as an exact prefix.
+///
+/// This is intentionally a one-shot maintenance operation rather than a file
+/// stored inside the ordinary daemon state directory. Keeping the pin on
+/// independent storage is what makes complete state-directory rollback
+/// detectable.
+pub(crate) fn advance_retained_checkpoint(
+    checkpoint_path: &Path,
+    chain: &Chain,
+    public_key: &ed25519_dalek::VerifyingKey,
+    timestamp_unix_secs: u64,
+) -> Result<LedgerCheckpoint, AuditLedgerStoreError> {
+    let previous = if checkpoint_path.exists() {
+        Some(verify_retained_checkpoint(
+            checkpoint_path,
+            chain,
+            public_key,
+        )?)
+    } else {
+        None
+    };
+    let candidate = chain.sign_checkpoint(timestamp_unix_secs);
+    if let Some(previous) = previous.as_ref() {
+        Verifier::verify_checkpoint_monotonic(previous, &candidate)?;
+    }
+    let mut bytes = serde_json::to_vec_pretty(&candidate)?;
+    bytes.push(b'\n');
+    if bytes.len() as u64 > MAX_RETAINED_CHECKPOINT_BYTES {
+        return Err(AuditLedgerStoreError::LimitExceeded(format!(
+            "serialized retained checkpoint is {} bytes; maximum is {}",
+            bytes.len(),
+            MAX_RETAINED_CHECKPOINT_BYTES
+        )));
+    }
+    persist_owner_only_atomic(checkpoint_path, &bytes)?;
+    Ok(candidate)
+}
+
+fn persist_owner_only_atomic(path: &Path, bytes: &[u8]) -> Result<(), AuditLedgerStoreError> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let temp_path = temporary_path(path);
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let write_result: Result<(), AuditLedgerStoreError> = (|| {
+        let mut file = options.open(&temp_path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temp_path, path)?;
+        sync_directory(parent)?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    write_result
 }
 
 /// Serialize and atomically replace `path` with `entries`: write a temp
@@ -592,6 +657,89 @@ mod tests {
                 CheckpointContinuityError::CheckpointAheadOfLedger { .. }
             ))
         ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn retained_checkpoint_advances_atomically_after_prefix_verification() {
+        let dir = temp_dir("retained-checkpoint-advance");
+        let checkpoint_path = dir.join("external/checkpoint.json");
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[73u8; 32]);
+        let mut chain = Chain::new(sk.clone());
+        chain.append(event()).unwrap();
+        let first = advance_retained_checkpoint(
+            &checkpoint_path,
+            &chain,
+            &sk.verifying_key(),
+            100,
+        )
+        .unwrap();
+        chain.append(event()).unwrap();
+        let second = advance_retained_checkpoint(
+            &checkpoint_path,
+            &chain,
+            &sk.verifying_key(),
+            101,
+        )
+        .unwrap();
+        assert!(second.entry_count > first.entry_count);
+        let stored: LedgerCheckpoint =
+            serde_json::from_slice(&std::fs::read(&checkpoint_path).unwrap()).unwrap();
+        assert_eq!(stored, second);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn checkpoint_advance_refuses_rollback_without_overwriting_the_pin() {
+        let dir = temp_dir("retained-checkpoint-no-rollback");
+        let checkpoint_path = dir.join("checkpoint.json");
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[74u8; 32]);
+        let mut newer = Chain::new(sk.clone());
+        newer.append(event()).unwrap();
+        newer.append(event()).unwrap();
+        advance_retained_checkpoint(
+            &checkpoint_path,
+            &newer,
+            &sk.verifying_key(),
+            100,
+        )
+        .unwrap();
+        let original = std::fs::read(&checkpoint_path).unwrap();
+
+        let mut rolled_back = Chain::new(sk.clone());
+        rolled_back.append(event()).unwrap();
+        assert!(advance_retained_checkpoint(
+            &checkpoint_path,
+            &rolled_back,
+            &sk.verifying_key(),
+            101,
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&checkpoint_path).unwrap(), original);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn retained_checkpoint_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("retained-checkpoint-permissions");
+        let checkpoint_path = dir.join("checkpoint.json");
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[75u8; 32]);
+        let chain = Chain::new(sk.clone());
+        advance_retained_checkpoint(
+            &checkpoint_path,
+            &chain,
+            &sk.verifying_key(),
+            100,
+        )
+        .unwrap();
+        let mode = std::fs::metadata(&checkpoint_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
         std::fs::remove_dir_all(&dir).ok();
     }
 

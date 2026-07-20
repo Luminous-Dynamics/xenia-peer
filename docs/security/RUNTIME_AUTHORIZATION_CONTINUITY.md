@@ -80,3 +80,22 @@ independently retained signed ledger checkpoint, as described by
   never signed into them.
 - A termination record proves what the daemon recorded, not that every external
   device immediately erased already received plaintext or media.
+
+
+## External checkpoint continuity
+
+Signed checkpoints are rollback anchors only when retained independently from
+the state being restored. Xenia now distinguishes three claims:
+
+1. `Verifier::verify_checkpoint_monotonic` detects key changes, count or time
+   regression, and conflicting heads at the same height. A higher count alone
+   is not proof of extension.
+2. `Verifier::verify_checkpoint_prefix` proves that a complete supplied ledger
+   contains a retained checkpoint as an exact authenticated prefix.
+3. `Verifier::verify_checkpoint_extension` proves remote append-only extension
+   from a retained checkpoint using every intervening signed entry.
+
+The daemon startup gate `--trusted-consent-ledger-checkpoint` implements claim
+2. `GET /v1/audit/witness` supplies the bounded suffix needed for claim 3.
+`--advance-consent-ledger-checkpoint` atomically advances an independent pin
+only after claim 2 succeeds.

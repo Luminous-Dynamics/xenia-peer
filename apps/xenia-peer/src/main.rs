@@ -409,6 +409,12 @@ struct Args {
     #[arg(long, value_name = "FILE")]
     trusted_consent_ledger_checkpoint: Option<std::path::PathBuf>,
 
+    /// Atomically create or advance an independently stored consent-ledger
+    /// checkpoint and exit. An existing checkpoint is overwritten only when
+    /// the current verified ledger contains it as an exact prefix.
+    #[arg(long, value_name = "FILE")]
+    advance_consent_ledger_checkpoint: Option<std::path::PathBuf>,
+
     /// M1 consent-ledger signing key path. Signs the consent grant/deny/revoke
     /// boundary events; generated on first run with owner-only (0600)
     /// permissions. Must be a real per-host secret -- a shared or well-known
@@ -1873,6 +1879,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             current_entries = ledger.len(),
             "retained consent-ledger checkpoint verified as an exact prefix"
         );
+    }
+
+    if let Some(checkpoint_path) = args.advance_consent_ledger_checkpoint.as_deref() {
+        let checkpoint = audit_ledger_store::advance_retained_checkpoint(
+            checkpoint_path,
+            &ledger,
+            &signing_key.verifying_key(),
+            unix_now_secs(),
+        )
+        .map_err(|err| -> Box<dyn std::error::Error> {
+            format!(
+                "failed to advance --advance-consent-ledger-checkpoint {}: {err}",
+                checkpoint_path.display()
+            )
+            .into()
+        })?;
+        println!("consent-ledger checkpoint advanced");
+        println!("path: {}", checkpoint_path.display());
+        println!("entries: {}", checkpoint.entry_count);
+        println!("head blake3: {}", hex::encode(checkpoint.head_hash));
+        return Ok(());
     }
     let shared_ledger = std::sync::Arc::new(tokio::sync::Mutex::new(ledger));
 
