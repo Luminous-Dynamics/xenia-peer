@@ -1927,7 +1927,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // enforce (fail-closed).
     let revocations = match &args.revoked_operators_file {
         Some(path) => {
-            let r = crate::operator_revocations::OperatorRevocations::from_file(path).map_err(
+            let r = crate::operator_revocations::OperatorRevocations::from_required_file(path).map_err(
                 |err| -> Box<dyn std::error::Error> {
                     format!(
                         "failed to load --revoked-operators-file {}: {err}",

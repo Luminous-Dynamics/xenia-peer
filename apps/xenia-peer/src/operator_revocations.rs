@@ -21,6 +21,7 @@ use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -31,6 +32,10 @@ use tokio::sync::watch;
 #[derive(Clone)]
 pub(crate) struct OperatorRevocations {
     revoked: Arc<RwLock<HashSet<String>>>,
+    /// Whether the configured revocation source is currently trustworthy. A
+    /// reload I/O failure flips this false and makes every authorization check
+    /// fail closed until a later successful reload restores health.
+    healthy: Arc<AtomicBool>,
     /// Monotonic change notification for active-session authorization checks.
     changes: watch::Sender<u64>,
     /// The file the set is (re)loaded from, if any — kept so a SIGHUP handler
@@ -43,6 +48,7 @@ impl Default for OperatorRevocations {
         let (changes, _rx) = watch::channel(0);
         Self {
             revoked: Arc::new(RwLock::new(HashSet::new())),
+            healthy: Arc::new(AtomicBool::new(true)),
             changes,
             path: None,
         }
@@ -64,6 +70,22 @@ impl OperatorRevocations {
         let (changes, _rx) = watch::channel(0);
         Ok(Self {
             revoked: Arc::new(RwLock::new(set)),
+            healthy: Arc::new(AtomicBool::new(true)),
+            changes,
+            path: Some(path.to_path_buf()),
+        })
+    }
+
+    /// Load an explicitly configured revocation source and require it to be
+    /// present and readable. Privileged daemon surfaces use this constructor so
+    /// a missing configured trust source cannot silently mean "nothing
+    /// revoked" at startup.
+    pub(crate) fn from_required_file(path: &Path) -> std::io::Result<Self> {
+        let set = read_revocations_required(path)?;
+        let (changes, _rx) = watch::channel(0);
+        Ok(Self {
+            revoked: Arc::new(RwLock::new(set)),
+            healthy: Arc::new(AtomicBool::new(true)),
             changes,
             path: Some(path.to_path_buf()),
         })
@@ -72,10 +94,20 @@ impl OperatorRevocations {
     /// Whether `operator_id` is currently revoked. Cheap read-lock; the lock is
     /// never held across an `.await`.
     pub(crate) fn is_revoked(&self, operator_id: &str) -> bool {
+        if !self.healthy.load(Ordering::SeqCst) {
+            return true;
+        }
         self.revoked
             .read()
             .map(|s| s.contains(operator_id))
             .unwrap_or(true) // poisoned lock -> fail closed (treat as revoked)
+    }
+
+    /// Whether the configured revocation source is currently trustworthy.
+    /// Primarily surfaced for diagnostics and focused fail-closed tests.
+    #[cfg(test)]
+    pub(crate) fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::SeqCst)
     }
 
     /// Revoke `operator_id` in-process. This is intentionally monotonic: there
@@ -131,17 +163,36 @@ impl OperatorRevocations {
         let Some(path) = &self.path else {
             return Ok(self.revoked.read().map(|s| s.len()).unwrap_or(0));
         };
-        let fresh = read_revocations(path)?;
-        let (count, changed) = self
-            .revoked
-            .write()
-            .map(|mut set| {
+        let fresh = match read_revocations_required(path) {
+            Ok(fresh) => fresh,
+            Err(err) => {
+                // Loss of the revocation source is an authorization failure,
+                // not merely a logging problem. Wake every live approver-bound
+                // session and make all subsequent checks fail closed until an
+                // operator repairs the source and a reload succeeds.
+                let was_healthy = self.healthy.swap(false, Ordering::SeqCst);
+                if was_healthy {
+                    self.notify_changed();
+                }
+                return Err(err);
+            }
+        };
+        let (count, changed) = match self.revoked.write() {
+            Ok(mut set) => {
                 let before = set.len();
                 set.extend(fresh);
                 (set.len(), set.len() != before)
-            })
-            .unwrap_or((0, true));
-        if changed {
+            }
+            Err(_) => {
+                self.healthy.store(false, Ordering::SeqCst);
+                self.notify_changed();
+                return Err(std::io::Error::other(
+                    "operator revocation lock poisoned",
+                ));
+            }
+        };
+        let recovered = !self.healthy.swap(true, Ordering::SeqCst);
+        if changed || recovered {
             self.notify_changed();
         }
         Ok(count)
@@ -234,16 +285,26 @@ fn sync_directory(path: &Path) -> std::io::Result<()> {
 /// set. Blank lines and `#` comments are ignored; ids are trimmed.
 fn read_revocations(path: &Path) -> std::io::Result<HashSet<String>> {
     let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
-        Err(e) => return Err(e),
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err),
     };
-    Ok(text
-        .lines()
+    Ok(parse_revocations(&text))
+}
+
+/// Reloads are strict: once a path is configured, disappearance of that source
+/// is an authorization-health failure rather than an implicit empty list.
+fn read_revocations_required(path: &Path) -> std::io::Result<HashSet<String>> {
+    let text = std::fs::read_to_string(path)?;
+    Ok(parse_revocations(&text))
+}
+
+fn parse_revocations(text: &str) -> HashSet<String> {
+    text.lines()
         .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(str::to_string)
-        .collect())
+        .collect()
 }
 
 #[cfg(test)]
@@ -264,7 +325,7 @@ mod tests {
     #[tokio::test]
     async fn subscribers_wake_only_when_the_set_changes() {
         let r = OperatorRevocations::empty();
-        let mut changes = r.subscribe();
+        let changes = r.subscribe();
         r.revoke("alice");
         changes.changed().await.unwrap();
         assert_eq!(*changes.borrow(), 1);
@@ -348,5 +409,37 @@ mod tests {
         let r = OperatorRevocations::from_file(Path::new("/nonexistent/xenia/revoked")).unwrap();
         assert_eq!(r.len(), 0);
         assert!(!r.is_revoked("anyone"));
+    }
+
+    #[test]
+    fn explicitly_required_source_must_exist_at_startup() {
+        let path = std::env::temp_dir().join(format!(
+            "xenia-required-revocations-missing-{}",
+            rand::random::<u64>()
+        ));
+        assert!(OperatorRevocations::from_required_file(&path).is_err());
+    }
+    #[test]
+    fn reload_failure_revokes_every_operator_until_source_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("revoked.txt");
+        std::fs::write(&path, "alice\n").unwrap();
+        let r = OperatorRevocations::from_file(&path).unwrap();
+        let changes = r.subscribe();
+
+        assert!(r.is_healthy());
+        assert!(r.is_revoked("alice"));
+        assert!(!r.is_revoked("bob"));
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(r.reload().is_err());
+        assert!(!r.is_healthy());
+        assert!(r.is_revoked("bob"), "source loss must fail closed");
+        assert!(changes.has_changed().unwrap());
+
+        std::fs::write(&path, "alice\n").unwrap();
+        r.reload().unwrap();
+        assert!(r.is_healthy());
+        assert!(!r.is_revoked("bob"), "successful reload restores health");
     }
 }
