@@ -1962,3 +1962,66 @@ fn checkpoint_freshness_rejects_stale_and_future_anchors() {
     let future = chain.sign_checkpoint(126);
     assert!(Verifier::verify_checkpoint_freshness(&future, 120, policy).is_err());
 }
+
+#[test]
+fn checkpoint_suffix_chain_preserves_absolute_sequence_frontier() {
+    let key = SigningKey::from_bytes(&[68u8; 32]);
+    let public_key = key.verifying_key();
+    let mut complete = crate::Chain::new(key.clone());
+    complete
+        .append(sample_event(ConsentKind::Request))
+        .unwrap();
+    let base = complete.sign_checkpoint(100);
+    complete
+        .append(sample_event(ConsentKind::Approval))
+        .unwrap();
+    let terminal = complete.sign_checkpoint(101);
+    let suffix = complete.iter().skip(1).cloned().collect::<Vec<_>>();
+
+    Verifier::verify_checkpoint_extension(&base, &terminal, &suffix).unwrap();
+    let mut compacted = crate::Chain::from_checkpoint_suffix(base.clone(), suffix, key);
+    assert_eq!(compacted.entry_count(), 2);
+    assert_eq!(compacted.resident_len(), 1);
+    assert_eq!(compacted.base_checkpoint(), Some(&base));
+    assert_eq!(compacted.last_hash(), terminal.head_hash);
+
+    let appended = compacted
+        .append(sample_event(ConsentKind::Revocation))
+        .unwrap();
+    assert_eq!(appended.seq, 2);
+    assert_eq!(appended.prev_hash, terminal.head_hash);
+    assert_eq!(compacted.entry_count(), 3);
+    assert_eq!(compacted.resident_len(), 2);
+    Verifier::verify_checkpoint_extension(
+        compacted.base_checkpoint().unwrap(),
+        &compacted.sign_checkpoint(102),
+        &compacted.iter().cloned().collect::<Vec<_>>(),
+    )
+    .unwrap();
+    assert_eq!(compacted.sign_checkpoint(102).ledger_public_key, public_key.to_bytes());
+}
+
+#[test]
+fn transactional_chain_callback_observes_compacted_anchor_and_rolls_back() {
+    let key = SigningKey::from_bytes(&[69u8; 32]);
+    let complete = crate::Chain::new(key.clone());
+    let base = complete.sign_checkpoint(100);
+    let mut compacted = crate::Chain::from_checkpoint_suffix(base, Vec::new(), key);
+
+    let result = compacted.append_transactional_chain(
+        sample_event(ConsentKind::Request),
+        |candidate| {
+            assert_eq!(candidate.entry_count(), 1);
+            assert_eq!(candidate.resident_len(), 1);
+            assert!(candidate.base_checkpoint().is_some());
+            Err("disk full")
+        },
+    );
+    assert!(matches!(
+        result,
+        Err(crate::TransactionalAppendError::Persist("disk full"))
+    ));
+    assert_eq!(compacted.entry_count(), 0);
+    assert_eq!(compacted.resident_len(), 0);
+    assert!(compacted.base_checkpoint().is_some());
+}
