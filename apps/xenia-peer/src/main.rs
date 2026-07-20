@@ -56,6 +56,8 @@ use xenia_capture::ScapCapture;
 mod admin_ui;
 mod audit_ledger_store;
 mod consent_authority;
+#[cfg(test)]
+mod consent_compaction;
 mod consent_server;
 mod evidence_verifier;
 mod file_transfer;
