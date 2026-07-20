@@ -9,6 +9,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Added ledger-signed purge rollback-retention certificates, independent witness
+  bundles, externally retainable anchors, and exact protected-file inventory
+  checks before any future final-destruction ceremony.
+
 - A separate aged-quarantine purge ceremony with one-hour ledger-signed plans,
   purge-witness keys distinct from retirement witnesses, a complete owner-only
   rollback package persisted before the first unlink, per-file deletion

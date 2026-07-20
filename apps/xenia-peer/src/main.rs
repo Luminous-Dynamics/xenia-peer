@@ -674,6 +674,66 @@ struct Args {
     #[arg(long, value_name = "FILE")]
     verify_consent_purge_receipt: Option<std::path::PathBuf>,
 
+    /// Export a ledger-signed obligation to retain the exact purge rollback
+    /// package and its recovery metadata through a fixed deadline.
+    #[arg(long, value_name = "FILE")]
+    export_consent_purge_retention_certificate: Option<std::path::PathBuf>,
+
+    /// Retention period beginning at purge completion. The protocol minimum is
+    /// 24 hours; the operational default is 30 days.
+    #[arg(long, default_value_t = 30 * 24 * 60 * 60)]
+    consent_purge_retention_secs: u64,
+
+    /// Signed purge receipt used to create the retention certificate.
+    #[arg(long, value_name = "FILE")]
+    consent_purge_receipt_input: Option<std::path::PathBuf>,
+
+    /// Ledger-signed purge-retention certificate input.
+    #[arg(long, value_name = "FILE")]
+    consent_purge_retention_certificate_input: Option<std::path::PathBuf>,
+
+    /// Add one independent observation to the retention-witness bundle.
+    #[arg(long)]
+    sign_consent_purge_retention_certificate: bool,
+
+    /// Existing 32-byte Ed25519 seed used only to witness a retention
+    /// certificate. The key must be distinct from ledger and purge witnesses.
+    #[arg(long, value_name = "FILE")]
+    consent_purge_retention_witness_key: Option<std::path::PathBuf>,
+
+    /// Retention-witness bundle input/output.
+    #[arg(long, value_name = "FILE")]
+    consent_purge_retention_witness_bundle: Option<std::path::PathBuf>,
+
+    /// Trusted independent retention-witness public key. Repeat to configure
+    /// the accepted trust set.
+    #[arg(long, value_name = "HEX")]
+    trusted_consent_purge_retention_witness_key_hex: Vec<String>,
+
+    /// Minimum number of distinct trusted retention witnesses required.
+    #[arg(long)]
+    trusted_consent_purge_retention_witness_quorum: Option<usize>,
+
+    /// Export one compact ledger-signed anchor joining the retention
+    /// certificate, witness quorum, and exact protected-file inventory.
+    #[arg(long, value_name = "FILE")]
+    export_consent_purge_retention_anchor: Option<std::path::PathBuf>,
+
+    /// Verify an externally retained purge-retention anchor and rehash every
+    /// protected rollback-package file.
+    #[arg(long, value_name = "FILE")]
+    verify_consent_purge_retention_anchor: Option<std::path::PathBuf>,
+
+    /// Existing path that a future cleanup proposal wants to select. Repeat
+    /// during anchor verification to prove every candidate is disjoint from
+    /// the protected rollback package and all of its parent aliases.
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "verify_consent_purge_retention_anchor"
+    )]
+    consent_purge_retention_candidate_check: Vec<std::path::PathBuf>,
+
     /// Independently retained signed checkpoint that the current consent
     /// ledger must contain as an exact prefix. Store this outside the daemon
     /// state directory or backup set being restored; otherwise an attacker can
@@ -1718,6 +1778,137 @@ fn read_purge_approvals(
     )?)
 }
 
+fn read_purge_receipt(
+    path: &std::path::Path,
+) -> Result<consent_purge::ConsentPurgeReceiptV1, Box<dyn std::error::Error>> {
+    Ok(audit_ledger_store::read_bounded_json(
+        path,
+        consent_purge::MAX_PURGE_TRANSACTION_BYTES,
+        "consent purge receipt",
+    )?)
+}
+
+fn read_purge_rollback_package(
+    plan: &consent_purge::ConsentPurgePlanV1,
+) -> Result<consent_purge::ConsentPurgeRollbackPackageV1, Box<dyn std::error::Error>> {
+    let path = consent_purge::purge_transaction_directory(plan).join("rollback-package.json");
+    Ok(audit_ledger_store::read_bounded_json(
+        &path,
+        consent_purge::MAX_PURGE_TRANSACTION_BYTES,
+        "consent purge rollback package",
+    )?)
+}
+
+fn read_purge_retention_certificate(
+    path: &std::path::Path,
+) -> Result<
+    consent_purge_retention::ConsentPurgeRetentionCertificateV1,
+    Box<dyn std::error::Error>,
+> {
+    Ok(audit_ledger_store::read_bounded_json(
+        path,
+        consent_purge_retention::MAX_PURGE_RETENTION_BYTES,
+        "consent purge retention certificate",
+    )?)
+}
+
+fn read_purge_retention_witnesses(
+    path: &std::path::Path,
+) -> Result<
+    consent_purge_retention::ConsentPurgeRetentionWitnessBundleV1,
+    Box<dyn std::error::Error>,
+> {
+    Ok(audit_ledger_store::read_bounded_json(
+        path,
+        consent_purge_retention::MAX_PURGE_RETENTION_BYTES,
+        "consent purge retention witness bundle",
+    )?)
+}
+
+fn read_purge_retention_anchor(
+    path: &std::path::Path,
+) -> Result<
+    consent_purge_retention::ConsentPurgeRetentionAnchorV1,
+    Box<dyn std::error::Error>,
+> {
+    Ok(audit_ledger_store::read_bounded_json(
+        path,
+        consent_purge_retention::MAX_PURGE_RETENTION_BYTES,
+        "consent purge retention anchor",
+    )?)
+}
+
+fn parse_purge_retention_witness_policy(
+    args: &Args,
+) -> Result<(Vec<[u8; 32]>, usize), Box<dyn std::error::Error>> {
+    if args
+        .trusted_consent_purge_retention_witness_key_hex
+        .is_empty()
+    {
+        return Err("retention operation requires at least one --trusted-consent-purge-retention-witness-key-hex".into());
+    }
+    let keys = args
+        .trusted_consent_purge_retention_witness_key_hex
+        .iter()
+        .map(|value| parse_ed25519_public_key_hex(value))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| -> Box<dyn std::error::Error> {
+            format!("invalid trusted purge-retention witness key: {err}").into()
+        })?;
+    for key in &keys {
+        ed25519_dalek::VerifyingKey::from_bytes(key).map_err(
+            |_| -> Box<dyn std::error::Error> {
+                "trusted purge-retention witness key is not a valid Ed25519 key".into()
+            },
+        )?;
+    }
+    if keys.len() > consent_purge_retention::MAX_PURGE_RETENTION_WITNESSES {
+        return Err(format!(
+            "purge-retention witness trust set has {} keys; maximum is {}",
+            keys.len(),
+            consent_purge_retention::MAX_PURGE_RETENTION_WITNESSES
+        )
+        .into());
+    }
+    let distinct = keys
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    if distinct.len() != keys.len() {
+        return Err("purge-retention witness trust set contains a duplicate key".into());
+    }
+    let quorum = args
+        .trusted_consent_purge_retention_witness_quorum
+        .unwrap_or(1);
+    if quorum == 0 || quorum > keys.len() {
+        return Err(format!(
+            "purge-retention witness quorum {quorum} must be between 1 and {}",
+            keys.len()
+        )
+        .into());
+    }
+    Ok((keys, quorum))
+}
+
+fn ensure_purge_retention_witness_separation(
+    retention_keys: &[[u8; 32]],
+    ledger_key: &[u8; 32],
+    purge_approvals: &consent_purge::ConsentPurgeApprovalBundleV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let purge_keys = purge_approvals
+        .approvals
+        .iter()
+        .map(|approval| approval.witness_public_key)
+        .collect::<std::collections::BTreeSet<_>>();
+    if retention_keys.iter().any(|key| key == ledger_key) {
+        return Err("trusted purge-retention witness keys must be distinct from the ledger key".into());
+    }
+    if retention_keys.iter().any(|key| purge_keys.contains(key)) {
+        return Err("trusted purge-retention witness keys must be distinct from purge approval keys".into());
+    }
+    Ok(())
+}
+
 fn parse_purge_witness_policy(
     args: &Args,
 ) -> Result<(Vec<[u8; 32]>, usize), Box<dyn std::error::Error>> {
@@ -2509,10 +2700,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("select only one consent-purge operation per invocation".into());
     }
     let purge_operation_requested = purge_operation_count == 1;
-    if retirement_operation_requested && purge_operation_requested {
-        return Err("consent retirement and purge operations cannot share one invocation".into());
+    let purge_retention_operation_count = args
+        .export_consent_purge_retention_certificate
+        .is_some() as usize
+        + args.sign_consent_purge_retention_certificate as usize
+        + args.export_consent_purge_retention_anchor.is_some() as usize
+        + args.verify_consent_purge_retention_anchor.is_some() as usize;
+    if purge_retention_operation_count > 1 {
+        return Err("select only one consent-purge-retention operation per invocation".into());
     }
-    if (retirement_operation_requested || purge_operation_requested)
+    let purge_retention_operation_requested = purge_retention_operation_count == 1;
+    if retirement_operation_requested as usize
+        + purge_operation_requested as usize
+        + purge_retention_operation_requested as usize
+        > 1
+    {
+        return Err("consent retirement, purge, and purge-retention operations cannot share one invocation".into());
+    }
+    if (retirement_operation_requested
+        || purge_operation_requested
+        || purge_retention_operation_requested)
         && (args.m1_runtime_smoke
             || args.verify_evidence_bundle.is_some()
             || args.verify_sealed_evidence_bundle.is_some()
@@ -2523,7 +2730,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             || args.export_consent_ledger_compaction_gc_certificate.is_some()
             || args.verify_consent_ledger_compaction_gc_certificate.is_some())
     {
-        return Err("consent-retirement or purge operations cannot be combined with another one-shot verification, activation, pin, or GC-certificate operation".into());
+        return Err("consent-retirement, purge, or purge-retention operations cannot be combined with another one-shot verification, activation, pin, or GC-certificate operation".into());
     }
 
     // Fail closed before doing any work: never expose the operator surface to
@@ -3031,12 +3238,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         purge_approvals.verify_quorum(&purge_plan, &trusted_purge_keys, purge_quorum)?;
         let rollback_package_path =
             consent_purge::purge_transaction_directory(&purge_plan).join("rollback-package.json");
-        let rollback_package: consent_purge::ConsentPurgeRollbackPackageV1 =
-            audit_ledger_store::read_bounded_json(
-                &rollback_package_path,
-                consent_purge::MAX_PURGE_TRANSACTION_BYTES,
-                "consent purge rollback package",
-            )?;
+        let rollback_package = read_purge_rollback_package(&purge_plan)?;
         rollback_package.verify(&purge_plan, &purge_approvals, &ledger_public_key)?;
         let receipt: consent_purge::ConsentPurgeReceiptV1 =
             audit_ledger_store::read_bounded_json(
@@ -3059,9 +3261,164 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if args.sign_consent_purge_retention_certificate {
+        let ledger_public_key = retirement_ledger_verifying_key(&args)?;
+        let certificate_path = args
+            .consent_purge_retention_certificate_input
+            .as_deref()
+            .ok_or("--sign-consent-purge-retention-certificate requires --consent-purge-retention-certificate-input")?;
+        let witness_key_path = args
+            .consent_purge_retention_witness_key
+            .as_deref()
+            .ok_or("--sign-consent-purge-retention-certificate requires --consent-purge-retention-witness-key")?;
+        let witness_bundle_path = args
+            .consent_purge_retention_witness_bundle
+            .as_deref()
+            .ok_or("--sign-consent-purge-retention-certificate requires --consent-purge-retention-witness-bundle")?;
+        let purge_plan_path = args
+            .consent_purge_plan_input
+            .as_deref()
+            .ok_or("--sign-consent-purge-retention-certificate requires --consent-purge-plan-input")?;
+        let purge_approval_path = args
+            .consent_purge_approval_bundle
+            .as_deref()
+            .ok_or("--sign-consent-purge-retention-certificate requires --consent-purge-approval-bundle")?;
+        let purge_receipt_path = args
+            .consent_purge_receipt_input
+            .as_deref()
+            .ok_or("--sign-consent-purge-retention-certificate requires --consent-purge-receipt-input")?;
+        let certificate = read_purge_retention_certificate(certificate_path)?;
+        let purge_plan = read_purge_plan(purge_plan_path)?;
+        let purge_approvals = read_purge_approvals(purge_approval_path)?;
+        let rollback_package = read_purge_rollback_package(&purge_plan)?;
+        let purge_receipt = read_purge_receipt(purge_receipt_path)?;
+        certificate.verify(
+            &purge_plan,
+            &purge_approvals,
+            &rollback_package,
+            &purge_receipt,
+            &ledger_public_key,
+        )?;
+        let witness_key = load_existing_signing_key(witness_key_path)?;
+        let witness_public = witness_key.verifying_key().to_bytes();
+        ensure_purge_retention_witness_separation(
+            &[witness_public],
+            &ledger_public_key.to_bytes(),
+            &purge_approvals,
+        )?;
+        let mut bundle = if witness_bundle_path.exists() {
+            let existing = read_purge_retention_witnesses(witness_bundle_path)?;
+            if !existing.witnesses.is_empty() {
+                let observed = existing
+                    .witnesses
+                    .iter()
+                    .map(|witness| witness.witness_public_key)
+                    .collect::<Vec<_>>();
+                existing.verify_quorum(
+                    &certificate,
+                    &observed,
+                    observed.len(),
+                    unix_now_secs(),
+                    consent_purge_retention::MAX_PURGE_RETENTION_WITNESS_FUTURE_SKEW_SECS,
+                )?;
+            }
+            existing
+        } else {
+            consent_purge_retention::ConsentPurgeRetentionWitnessBundleV1::new(&certificate)?
+        };
+        bundle.sign_with(&certificate, &witness_key, unix_now_secs())?;
+        let output = normalized_output_path(witness_bundle_path)?;
+        if output == normalized_output_path(certificate_path)?
+            || output == normalized_output_path(purge_plan_path)?
+            || output == normalized_output_path(purge_approval_path)?
+            || output == normalized_output_path(purge_receipt_path)?
+            || output == std::fs::canonicalize(witness_key_path)?
+            || output.starts_with(std::path::Path::new(&certificate.package_directory))
+        {
+            return Err("retention-witness output aliases protected evidence or key material".into());
+        }
+        persist_json_owner_only(
+            witness_bundle_path,
+            &bundle,
+            consent_purge_retention::MAX_PURGE_RETENTION_BYTES,
+            "consent purge retention witness bundle",
+        )?;
+        println!("consent purge retention witness added");
+        println!("path: {}", witness_bundle_path.display());
+        println!("witness public key: {}", hex::encode(witness_public));
+        println!("witness count: {}", bundle.witnesses.len());
+        println!("the ledger private key was not accessed");
+        return Ok(());
+    }
+
+    if let Some(anchor_path) = args.verify_consent_purge_retention_anchor.as_deref() {
+        let ledger_public_key = retirement_ledger_verifying_key(&args)?;
+        let certificate_path = args
+            .consent_purge_retention_certificate_input
+            .as_deref()
+            .ok_or("--verify-consent-purge-retention-anchor requires --consent-purge-retention-certificate-input")?;
+        let witness_bundle_path = args
+            .consent_purge_retention_witness_bundle
+            .as_deref()
+            .ok_or("--verify-consent-purge-retention-anchor requires --consent-purge-retention-witness-bundle")?;
+        let purge_plan_path = args
+            .consent_purge_plan_input
+            .as_deref()
+            .ok_or("--verify-consent-purge-retention-anchor requires --consent-purge-plan-input")?;
+        let purge_approval_path = args
+            .consent_purge_approval_bundle
+            .as_deref()
+            .ok_or("--verify-consent-purge-retention-anchor requires --consent-purge-approval-bundle")?;
+        let purge_receipt_path = args
+            .consent_purge_receipt_input
+            .as_deref()
+            .ok_or("--verify-consent-purge-retention-anchor requires --consent-purge-receipt-input")?;
+        let certificate = read_purge_retention_certificate(certificate_path)?;
+        let witnesses = read_purge_retention_witnesses(witness_bundle_path)?;
+        let anchor = read_purge_retention_anchor(anchor_path)?;
+        let purge_plan = read_purge_plan(purge_plan_path)?;
+        let purge_approvals = read_purge_approvals(purge_approval_path)?;
+        let rollback_package = read_purge_rollback_package(&purge_plan)?;
+        let purge_receipt = read_purge_receipt(purge_receipt_path)?;
+        certificate.verify(
+            &purge_plan,
+            &purge_approvals,
+            &rollback_package,
+            &purge_receipt,
+            &ledger_public_key,
+        )?;
+        let (trusted_keys, quorum) = parse_purge_retention_witness_policy(&args)?;
+        ensure_purge_retention_witness_separation(
+            &trusted_keys,
+            &ledger_public_key.to_bytes(),
+            &purge_approvals,
+        )?;
+        anchor.verify(
+            &certificate,
+            &witnesses,
+            &trusted_keys,
+            quorum,
+            &ledger_public_key,
+            unix_now_secs(),
+            consent_purge_retention::MAX_PURGE_RETENTION_WITNESS_FUTURE_SKEW_SECS,
+        )?;
+        consent_purge_retention::verify_candidate_paths_disjoint(
+            &certificate,
+            &args.consent_purge_retention_candidate_check,
+        )?;
+        println!("consent purge retention anchor verified");
+        println!("path: {}", anchor_path.display());
+        println!("protected artifacts: {}", certificate.protected_artifacts.len());
+        println!("retain until unix seconds: {}", certificate.retain_until_unix_secs);
+        println!("the ledger private key was not accessed");
+        return Ok(());
+    }
+
     let signing_key = if retirement_operation_requested
         || args.export_consent_purge_plan.is_some()
         || args.execute_consent_purge
+        || args.export_consent_purge_retention_certificate.is_some()
+        || args.export_consent_purge_retention_anchor.is_some()
     {
         load_existing_signing_key(&args.operator_key_path)?
     } else {
@@ -3461,6 +3818,149 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if let Some(output_path) = args
+        .export_consent_purge_retention_certificate
+        .as_deref()
+    {
+        let purge_plan_path = args
+            .consent_purge_plan_input
+            .as_deref()
+            .ok_or("--export-consent-purge-retention-certificate requires --consent-purge-plan-input")?;
+        let purge_approval_path = args
+            .consent_purge_approval_bundle
+            .as_deref()
+            .ok_or("--export-consent-purge-retention-certificate requires --consent-purge-approval-bundle")?;
+        let purge_receipt_path = args
+            .consent_purge_receipt_input
+            .as_deref()
+            .ok_or("--export-consent-purge-retention-certificate requires --consent-purge-receipt-input")?;
+        let purge_plan = read_purge_plan(purge_plan_path)?;
+        let purge_approvals = read_purge_approvals(purge_approval_path)?;
+        let rollback_package_path =
+            consent_purge::purge_transaction_directory(&purge_plan).join("rollback-package.json");
+        let rollback_package: consent_purge::ConsentPurgeRollbackPackageV1 =
+            audit_ledger_store::read_bounded_json(
+                &rollback_package_path,
+                consent_purge::MAX_PURGE_TRANSACTION_BYTES,
+                "consent purge rollback package",
+            )?;
+        let purge_receipt = read_purge_receipt(purge_receipt_path)?;
+        let retain_until = purge_receipt
+            .completed_at_unix_secs
+            .checked_add(args.consent_purge_retention_secs)
+            .ok_or("consent purge retention deadline overflow")?;
+        let certificate = consent_purge_retention::ConsentPurgeRetentionCertificateV1::sign(
+            &purge_plan,
+            &purge_approvals,
+            &rollback_package,
+            &purge_receipt,
+            &signing_key,
+            unix_now_secs(),
+            retain_until,
+        )?;
+        let normalized_output = normalized_output_path(output_path)?;
+        if normalized_output == normalized_output_path(purge_plan_path)?
+            || normalized_output == normalized_output_path(purge_approval_path)?
+            || normalized_output == normalized_output_path(purge_receipt_path)?
+            || normalized_output == normalized_output_path(&rollback_package_path)?
+            || normalized_output == std::fs::canonicalize(&args.operator_key_path)?
+            || normalized_output.starts_with(std::path::Path::new(&certificate.package_directory))
+        {
+            return Err("retention-certificate output aliases protected evidence or key material".into());
+        }
+        persist_json_owner_only(
+            output_path,
+            &certificate,
+            consent_purge_retention::MAX_PURGE_RETENTION_BYTES,
+            "consent purge retention certificate",
+        )?;
+        println!("consent purge retention certificate exported");
+        println!("path: {}", output_path.display());
+        println!("protected artifacts: {}", certificate.protected_artifacts.len());
+        println!("retain until unix seconds: {}", certificate.retain_until_unix_secs);
+        println!("no artifact was removed");
+        return Ok(());
+    }
+
+    if let Some(output_path) = args.export_consent_purge_retention_anchor.as_deref() {
+        let certificate_path = args
+            .consent_purge_retention_certificate_input
+            .as_deref()
+            .ok_or("--export-consent-purge-retention-anchor requires --consent-purge-retention-certificate-input")?;
+        let witness_bundle_path = args
+            .consent_purge_retention_witness_bundle
+            .as_deref()
+            .ok_or("--export-consent-purge-retention-anchor requires --consent-purge-retention-witness-bundle")?;
+        let purge_plan_path = args
+            .consent_purge_plan_input
+            .as_deref()
+            .ok_or("--export-consent-purge-retention-anchor requires --consent-purge-plan-input")?;
+        let purge_approval_path = args
+            .consent_purge_approval_bundle
+            .as_deref()
+            .ok_or("--export-consent-purge-retention-anchor requires --consent-purge-approval-bundle")?;
+        let purge_receipt_path = args
+            .consent_purge_receipt_input
+            .as_deref()
+            .ok_or("--export-consent-purge-retention-anchor requires --consent-purge-receipt-input")?;
+        let certificate = read_purge_retention_certificate(certificate_path)?;
+        let witnesses = read_purge_retention_witnesses(witness_bundle_path)?;
+        let purge_plan = read_purge_plan(purge_plan_path)?;
+        let purge_approvals = read_purge_approvals(purge_approval_path)?;
+        let rollback_package = read_purge_rollback_package(&purge_plan)?;
+        let purge_receipt = read_purge_receipt(purge_receipt_path)?;
+        certificate.verify(
+            &purge_plan,
+            &purge_approvals,
+            &rollback_package,
+            &purge_receipt,
+            &signing_key.verifying_key(),
+        )?;
+        let (trusted_keys, quorum) = parse_purge_retention_witness_policy(&args)?;
+        ensure_purge_retention_witness_separation(
+            &trusted_keys,
+            &signing_key.verifying_key().to_bytes(),
+            &purge_approvals,
+        )?;
+        let anchor = consent_purge_retention::ConsentPurgeRetentionAnchorV1::sign(
+            &certificate,
+            &witnesses,
+            &trusted_keys,
+            quorum,
+            &signing_key,
+            unix_now_secs(),
+            consent_purge_retention::MAX_PURGE_RETENTION_WITNESS_FUTURE_SKEW_SECS,
+        )?;
+        let normalized_output = normalized_output_path(output_path)?;
+        if normalized_output == normalized_output_path(certificate_path)?
+            || normalized_output == normalized_output_path(witness_bundle_path)?
+            || normalized_output == normalized_output_path(purge_plan_path)?
+            || normalized_output == normalized_output_path(purge_approval_path)?
+            || normalized_output == normalized_output_path(purge_receipt_path)?
+            || normalized_output == std::fs::canonicalize(&args.operator_key_path)?
+            || normalized_output.starts_with(std::path::Path::new(&certificate.package_directory))
+        {
+            return Err("retention-anchor output aliases protected evidence or key material".into());
+        }
+        persist_json_owner_only(
+            output_path,
+            &anchor,
+            consent_purge_retention::MAX_PURGE_RETENTION_BYTES,
+            "consent purge retention anchor",
+        )?;
+        println!("consent purge retention anchor exported");
+        println!("path: {}", output_path.display());
+        println!(
+            "anchor blake3: {}",
+            hex::encode(consent_purge_retention::consent_purge_retention_anchor_fingerprint(
+                &anchor
+            )?)
+        );
+        println!("retain until unix seconds: {}", anchor.retain_until_unix_secs);
+        println!("no artifact was removed");
+        return Ok(());
+    }
+
     if let Some(output_path) = args.export_consent_purge_plan.as_deref() {
         let retirement_plan_path = args
             .consent_purge_retirement_plan_input
@@ -3589,7 +4089,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         || args.consent_retirement_approval_bundle.is_some()
         || !args.trusted_consent_retirement_witness_key_hex.is_empty()
         || args.trusted_consent_retirement_witness_quorum.is_some();
-    if !retirement_operation_requested && !purge_operation_requested && retirement_auxiliary_args_present {
+    if !retirement_operation_requested
+        && !purge_operation_requested
+        && !purge_retention_operation_requested
+        && retirement_auxiliary_args_present
+    {
         return Err("consent-retirement arguments require an explicit retirement operation".into());
     }
 
@@ -3602,8 +4106,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         || args.consent_purge_approval_bundle.is_some()
         || !args.trusted_consent_purge_witness_key_hex.is_empty()
         || args.trusted_consent_purge_witness_quorum.is_some();
-    if !purge_operation_requested && purge_auxiliary_args_present {
+    if !purge_operation_requested
+        && !purge_retention_operation_requested
+        && purge_auxiliary_args_present
+    {
         return Err("consent-purge arguments require an explicit purge operation".into());
+    }
+
+    let purge_retention_auxiliary_args_present = args.consent_purge_receipt_input.is_some()
+        || args.consent_purge_retention_certificate_input.is_some()
+        || args.consent_purge_retention_witness_key.is_some()
+        || args.consent_purge_retention_witness_bundle.is_some()
+        || !args
+            .trusted_consent_purge_retention_witness_key_hex
+            .is_empty()
+        || args
+            .trusted_consent_purge_retention_witness_quorum
+            .is_some()
+        || !args.consent_purge_retention_candidate_check.is_empty();
+    if !purge_retention_operation_requested && purge_retention_auxiliary_args_present {
+        return Err(
+            "consent-purge-retention arguments require an explicit retention operation".into(),
+        );
     }
 
     let (ledger, ledger_persister, historical_indexes, compacted_state_loaded): (

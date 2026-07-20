@@ -306,26 +306,6 @@ impl ConsentPurgeRetentionCertificateV1 {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn verify_active(
-        &self,
-        plan: &ConsentPurgePlanV1,
-        approvals: &ConsentPurgeApprovalBundleV1,
-        rollback_package: &ConsentPurgeRollbackPackageV1,
-        purge_receipt: &ConsentPurgeReceiptV1,
-        public_key: &VerifyingKey,
-        now_unix_secs: u64,
-    ) -> Result<(), ConsentPurgeRetentionError> {
-        self.verify(plan, approvals, rollback_package, purge_receipt, public_key)?;
-        if now_unix_secs < self.issued_at_unix_secs {
-            return Err(ConsentPurgeRetentionError::CertificateFromFuture);
-        }
-        if now_unix_secs >= self.retain_until_unix_secs {
-            return Err(ConsentPurgeRetentionError::RetentionExpired);
-        }
-        Ok(())
-    }
-
     fn validate_shape(&self) -> Result<(), ConsentPurgeRetentionError> {
         if self.schema != CONSENT_PURGE_RETENTION_CERTIFICATE_SCHEMA {
             return Err(ConsentPurgeRetentionError::UnsupportedCertificateSchema {

@@ -338,7 +338,9 @@ quarantine workflow, see
 and
 [`docs/security/CONSENT_ARTIFACT_RETIREMENT.md`](docs/security/CONSENT_ARTIFACT_RETIREMENT.md),
 followed by the separately approved rollback-package purge ceremony in
-[`docs/security/CONSENT_ARTIFACT_PURGE.md`](docs/security/CONSENT_ARTIFACT_PURGE.md).
+[`docs/security/CONSENT_ARTIFACT_PURGE.md`](docs/security/CONSENT_ARTIFACT_PURGE.md),
+with the retained rollback-package evidence anchored as described in
+[`docs/security/CONSENT_PURGE_ROLLBACK_RETENTION.md`](docs/security/CONSENT_PURGE_ROLLBACK_RETENTION.md).
 
 ## Relationship to Track A
 
