@@ -439,11 +439,25 @@ async fn revoke_operator_handler(
                 );
                 return Err((StatusCode::FORBIDDEN, "revocation refused".to_string()));
             }
-            state.revocations.revoke(&authorized.target_operator_id);
+            if let Err(err) = state
+                .revocations
+                .revoke_durable(&authorized.target_operator_id)
+            {
+                tracing::error!(
+                    target = %authorized.target_operator_id,
+                    by = %authorized.operator_id,
+                    error = %err,
+                    "operator revoked in memory but durable persistence failed"
+                );
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "operator revoked for this daemon run, but persistence failed".to_string(),
+                ));
+            }
             tracing::warn!(
                 target = %authorized.target_operator_id,
                 by = %authorized.operator_id,
-                "operator revoked via admin endpoint"
+                "operator revoked via admin endpoint and persisted when configured"
             );
             Ok(StatusCode::NO_CONTENT)
         }

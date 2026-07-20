@@ -18,8 +18,11 @@
 //! regardless of how many keys it enrolled.
 
 use std::collections::HashSet;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::watch;
 
@@ -75,44 +78,69 @@ impl OperatorRevocations {
             .unwrap_or(true) // poisoned lock -> fail closed (treat as revoked)
     }
 
-    /// Revoke `operator_id` in-process — the entry point for the authenticated
-    /// admin `POST /operator/revoke` endpoint (and used by tests). The backing
-    /// file is not written, so a subsequent SIGHUP reload from the file would
-    /// overwrite an in-process-only revocation; persist it to the file for
-    /// durability across reloads.
+    /// Revoke `operator_id` in-process. This is intentionally monotonic: there
+    /// is no implicit "un-revoke" when the backing file is reloaded. Tests and
+    /// deployments without a backing file use this path directly.
     pub(crate) fn revoke(&self, operator_id: &str) {
+        if self.insert(operator_id) {
+            self.notify_changed();
+        }
+    }
+
+    /// Revoke `operator_id` and atomically persist the complete monotonic set
+    /// when a backing file is configured. The live set is updated first so a
+    /// disk failure never leaves a compromised operator active in the current
+    /// daemon process; the error tells the admin endpoint that durability was
+    /// not achieved and must be repaired before restart.
+    pub(crate) fn revoke_durable(&self, operator_id: &str) -> std::io::Result<bool> {
+        let changed = self.insert(operator_id);
+        if changed {
+            self.notify_changed();
+        }
+        let Some(path) = &self.path else {
+            return Ok(changed);
+        };
+        let snapshot = self.snapshot()?;
+        persist_revocations_atomic(path, &snapshot)?;
+        Ok(changed)
+    }
+
+    fn insert(&self, operator_id: &str) -> bool {
         match self.revoked.write() {
-            Ok(mut set) => {
-                if set.insert(operator_id.to_string()) {
-                    self.notify_changed();
-                }
-            }
+            Ok(mut set) => set.insert(operator_id.to_string()),
             Err(_) => {
                 // `is_revoked` treats a poisoned set as universally revoked;
                 // wake active-session watchers so that fail-closed state is
                 // propagated rather than remaining visible only to new calls.
                 self.notify_changed();
+                false
             }
         }
     }
 
-    /// Re-read the backing file and replace the set atomically. Returns the new
+    fn snapshot(&self) -> std::io::Result<HashSet<String>> {
+        self.revoked
+            .read()
+            .map(|set| set.clone())
+            .map_err(|_| std::io::Error::other("operator revocation lock poisoned"))
+    }
+
+    /// Re-read the backing file and monotonically union it into live state. Returns the new
     /// revoked count. No-op (Ok(current count)) if there is no backing file.
     pub(crate) fn reload(&self) -> std::io::Result<usize> {
         let Some(path) = &self.path else {
             return Ok(self.revoked.read().map(|s| s.len()).unwrap_or(0));
         };
         let fresh = read_revocations(path)?;
-        let count = fresh.len();
-        let changed = self
+        let (count, changed) = self
             .revoked
             .write()
             .map(|mut set| {
-                let changed = *set != fresh;
-                *set = fresh;
-                changed
+                let before = set.len();
+                set.extend(fresh);
+                (set.len(), set.len() != before)
             })
-            .unwrap_or(true);
+            .unwrap_or((0, true));
         if changed {
             self.notify_changed();
         }
@@ -132,6 +160,73 @@ impl OperatorRevocations {
     fn notify_changed(&self) {
         let next = (*self.changes.borrow()).wrapping_add(1);
         self.changes.send_replace(next);
+    }
+}
+
+/// Atomically persist the complete revocation set. The sorted newline format
+/// remains operator-editable while temp-file + data fsync + rename + directory
+/// fsync makes the update crash-consistent on POSIX filesystems.
+fn persist_revocations_atomic(path: &Path, revoked: &HashSet<String>) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+
+    let mut ids: Vec<&str> = revoked.iter().map(String::as_str).collect();
+    ids.sort_unstable();
+    let mut bytes = ids.join("\n").into_bytes();
+    if !bytes.is_empty() {
+        bytes.push(b'\n');
+    }
+
+    let temp_path = temporary_path(path);
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let result = (|| {
+        let mut file = options.open(&temp_path)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temp_path, path)?;
+        sync_directory(parent)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    result
+}
+
+fn temporary_path(path: &Path) -> PathBuf {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("revoked-operators");
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    parent.join(format!(".{name}.tmp-{}-{nanos}", std::process::id()))
+}
+
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        File::open(path)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
     }
 }
 
@@ -210,6 +305,42 @@ mod tests {
         assert_eq!(count, 2);
         assert!(r.is_revoked("bob"));
         assert!(r.is_revoked("alice"));
+    }
+
+    #[test]
+    fn durable_revoke_survives_reload_and_restart() {
+        let dir = std::env::temp_dir().join(format!(
+            "xenia-operator-revocations-durable-{}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("revoked.txt");
+        let r = OperatorRevocations::from_file(&path).unwrap();
+        assert!(r.revoke_durable("alice").unwrap());
+        assert!(r.is_revoked("alice"));
+
+        let restarted = OperatorRevocations::from_file(&path).unwrap();
+        assert!(restarted.is_revoked("alice"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "alice\n");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn reload_is_monotonic_and_cannot_unrevoke_live_state() {
+        let dir = std::env::temp_dir().join(format!(
+            "xenia-operator-revocations-monotonic-{}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("revoked.txt");
+        std::fs::write(&path, "alice\n").unwrap();
+        let r = OperatorRevocations::from_file(&path).unwrap();
+        r.revoke("bob");
+        std::fs::write(&path, "alice\n").unwrap();
+        r.reload().unwrap();
+        assert!(r.is_revoked("alice"));
+        assert!(r.is_revoked("bob"));
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
