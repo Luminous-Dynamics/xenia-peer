@@ -58,6 +58,7 @@ pub(crate) enum M1RuntimeError {
     PersistedConsentContextMismatch(&'static str),
     InvalidAuthorizationBinding(String),
     DuplicateAuthorizationBinding,
+    MissingRequiredAuthorizationBinding,
     GrantDoesNotMatchOffer {
         offered: M1PermissionSet,
         granted: M1PermissionSet,
@@ -113,6 +114,10 @@ impl fmt::Display for M1RuntimeError {
             Self::DuplicateAuthorizationBinding => {
                 write!(f, "M1 operator authorization binding was recorded more than once")
             }
+            Self::MissingRequiredAuthorizationBinding => write!(
+                f,
+                "M1 privileged flow requires an authenticated operator authorization binding"
+            ),
             Self::GrantDoesNotMatchOffer { offered, granted } => write!(
                 f,
                 "M1 granted permissions {granted:?} do not match offered permissions {offered:?}"
@@ -772,6 +777,12 @@ pub(crate) fn verify_sealed_transcript_bound_evidence_bundle_dir_with_backend(
 const AUTHORIZATION_BINDING_SCOPE_PREFIX: &str =
     "xenia-runtime-authorization-binding-v1:";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeAuthorizationPolicy {
+    Compatibility,
+    AuthenticatedOperatorBindingRequired,
+}
+
 fn authorization_binding_scope(
     permissions: &str,
     offer_digest: &[u8; 32],
@@ -873,6 +884,7 @@ pub(crate) struct M1RuntimeSession {
     scope: String,
     session_transcript_hash: Option<[u8; 32]>,
     authorization_binding_action_id: Option<Uuid>,
+    authorization_policy: RuntimeAuthorizationPolicy,
     next_audit_index: usize,
 }
 
@@ -910,6 +922,7 @@ impl M1RuntimeSession {
             scope: configured_permissions.scope_descriptor(),
             session_transcript_hash: None,
             authorization_binding_action_id: None,
+            authorization_policy: RuntimeAuthorizationPolicy::Compatibility,
             next_audit_index: 0,
         }
     }
@@ -978,6 +991,25 @@ impl M1RuntimeSession {
         self.authorization_binding_action_id
     }
 
+    /// Require a signed operator-authorization binding before any privileged
+    /// runtime operation or transcript-bound evidence export. The grant may be
+    /// activated first so the authority can append its receipt immediately
+    /// afterward, but no frame/input/clipboard/file flow can occur in between.
+    pub(crate) fn require_authenticated_operator_binding(&mut self) {
+        self.authorization_policy =
+            RuntimeAuthorizationPolicy::AuthenticatedOperatorBindingRequired;
+    }
+
+    fn ensure_authorization_binding(&self) -> Result<(), M1RuntimeError> {
+        if self.authorization_policy
+            == RuntimeAuthorizationPolicy::AuthenticatedOperatorBindingRequired
+            && self.authorization_binding_action_id.is_none()
+        {
+            return Err(M1RuntimeError::MissingRequiredAuthorizationBinding);
+        }
+        Ok(())
+    }
+
     /// Append a runtime-evidence record joining the M1 grant to the exact
     /// authenticated operator action and daemon-attested offer that authorized
     /// it. This must occur after the scoped grant becomes active and at most
@@ -1019,6 +1051,7 @@ impl M1RuntimeSession {
         &self,
         public_key: &VerifyingKey,
     ) -> Result<(), M1RuntimeError> {
+        self.ensure_authorization_binding()?;
         let Some(binding) = self.session_transcript_binding() else {
             return Err(M1RuntimeError::MissingTranscriptBinding);
         };
@@ -1050,6 +1083,7 @@ impl M1RuntimeSession {
         dir: impl AsRef<Path>,
         requested_profile: &str,
     ) -> Result<M1EvidenceBundlePaths, M1RuntimeError> {
+        self.ensure_authorization_binding()?;
         let manifest = EvidenceCryptoManifestExport::current();
         ensure_runtime_can_emit_profile(requested_profile, &manifest)?;
 
@@ -1210,31 +1244,37 @@ impl M1RuntimeSession {
     }
 
     pub(crate) fn stream_frame(&mut self) -> Result<(), M1RuntimeError> {
+        self.ensure_authorization_binding()?;
         self.session.stream_frame()?;
         self.flush_new_audit_events()
     }
 
     pub(crate) fn inject_input(&mut self) -> Result<(), M1RuntimeError> {
+        self.ensure_authorization_binding()?;
         self.session.inject_input()?;
         self.flush_new_audit_events()
     }
 
     pub(crate) fn read_host_clipboard(&mut self) -> Result<(), M1RuntimeError> {
+        self.ensure_authorization_binding()?;
         self.session.read_host_clipboard()?;
         self.flush_new_audit_events()
     }
 
     pub(crate) fn write_host_clipboard(&mut self) -> Result<(), M1RuntimeError> {
+        self.ensure_authorization_binding()?;
         self.session.write_host_clipboard()?;
         self.flush_new_audit_events()
     }
 
     pub(crate) fn send_file_to_viewer(&mut self) -> Result<(), M1RuntimeError> {
+        self.ensure_authorization_binding()?;
         self.session.send_file_to_viewer()?;
         self.flush_new_audit_events()
     }
 
     pub(crate) fn receive_file_from_viewer(&mut self) -> Result<(), M1RuntimeError> {
+        self.ensure_authorization_binding()?;
         self.session.receive_file_from_viewer()?;
         self.flush_new_audit_events()
     }
@@ -1244,6 +1284,7 @@ impl M1RuntimeSession {
     }
 
     pub(crate) fn preflight_frame_flow(&self) -> Result<(), M1RuntimeError> {
+        self.ensure_authorization_binding()?;
         if self.session.state() == M1SessionState::Active {
             Ok(())
         } else {
@@ -2923,6 +2964,37 @@ mod tests {
             ),
             Err(M1RuntimeError::PersistedConsentContextMismatch("session_id"))
         ));
+    }
+
+    #[test]
+    fn authenticated_policy_blocks_privileged_flow_until_binding_exists() {
+        let signing_key = SigningKey::from_bytes(&[22; 32]);
+        let mut runtime = M1RuntimeSession::new(
+            signing_key,
+            [0xAB; 32],
+            Uuid::from_bytes([1; 16]),
+            Uuid::from_bytes([2; 16]),
+            M1PermissionSet {
+                stream_frame: true,
+                ..M1PermissionSet::default()
+            },
+        );
+        runtime.require_authenticated_operator_binding();
+        runtime.offer().unwrap();
+        runtime.grant_consent().unwrap();
+        assert!(matches!(
+            runtime.stream_frame(),
+            Err(M1RuntimeError::MissingRequiredAuthorizationBinding)
+        ));
+        runtime
+            .bind_operator_authorization(
+                [0x44; 16],
+                [0x33; 32],
+                "alice",
+                [0x11; 32],
+            )
+            .unwrap();
+        runtime.stream_frame().unwrap();
     }
 
     #[test]

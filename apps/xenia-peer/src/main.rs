@@ -1659,6 +1659,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &args.operator_bind,
         args.require_operator_auth,
     )?;
+    if args.m1_preprod_auto_consent && args.require_operator_auth {
+        return Err(
+            "--m1-preprod-auto-consent cannot be combined with --require-operator-auth"
+                .into(),
+        );
+    }
     if !crate::operator_exposure::is_loopback_bind(&args.operator_bind) {
         tracing::warn!(
             bind = %args.operator_bind,
@@ -2243,6 +2249,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Uuid::new_v4(),
         offered_permissions,
     );
+    if require_operator_auth {
+        m1_runtime.require_authenticated_operator_binding();
+    }
     m1_runtime.bind_session_transcript_hash(handshake.transcript_hash);
     m1_runtime.offer()?;
     info!(scope = %m1_scope_for_log, "M1 consent scope offered");
