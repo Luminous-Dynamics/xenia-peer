@@ -1846,6 +1846,62 @@ fn archive_sequence_verifier_enforces_segment_bound_before_walking() {
 }
 
 #[test]
+fn compaction_manifest_binds_archive_recovery_and_live_head() {
+    let key = SigningKey::from_bytes(&[65u8; 32]);
+    let mut chain = crate::Chain::new(key);
+    chain.append(sample_event(ConsentKind::Request)).unwrap();
+    let archived = chain.sign_checkpoint(101);
+    chain.append(sample_event(ConsentKind::Approval)).unwrap();
+
+    let manifest = chain
+        .sign_compaction_manifest(archived, [0xA1; 32], [0xB2; 32], 102)
+        .unwrap();
+    let entries = chain.iter().cloned().collect::<Vec<_>>();
+    Verifier::verify_ledger_compaction_manifest_against_entries(
+        &manifest,
+        &entries,
+        &SigningKey::from_bytes(&[65u8; 32]).verifying_key(),
+    )
+    .unwrap();
+
+    let mut tampered = manifest;
+    tampered.recovery_summary_digest[0] ^= 0x01;
+    assert_eq!(
+        Verifier::verify_ledger_compaction_manifest(&tampered),
+        Err(LedgerCompactionError::BadSignature)
+    );
+}
+
+#[test]
+fn compaction_manifest_refuses_placeholders_and_unrelated_boundaries() {
+    let key = SigningKey::from_bytes(&[66u8; 32]);
+    let mut chain = crate::Chain::new(key);
+    chain.append(sample_event(ConsentKind::Request)).unwrap();
+
+    assert_eq!(
+        chain.sign_compaction_manifest(
+            chain.sign_checkpoint(100),
+            [0u8; 32],
+            [0xB2; 32],
+            101,
+        ),
+        Err(LedgerCompactionError::EmptyDigest {
+            field: "archive_sequence",
+        })
+    );
+
+    let other = crate::Chain::new(SigningKey::from_bytes(&[67u8; 32]));
+    assert!(chain
+        .sign_compaction_manifest(
+            other.sign_checkpoint(100),
+            [0xA1; 32],
+            [0xB2; 32],
+            101,
+        )
+        .is_err());
+}
+
+#[test]
 fn checkpoint_freshness_rejects_stale_and_future_anchors() {
     use crate::{CheckpointFreshnessPolicy, Verifier};
     use ed25519_dalek::SigningKey;

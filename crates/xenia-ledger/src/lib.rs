@@ -67,6 +67,7 @@ mod archive;
 mod binding;
 mod chain;
 mod checkpoint;
+mod compaction;
 mod entry;
 mod errors;
 mod hash;
@@ -103,6 +104,11 @@ pub use chain::Chain;
 pub use checkpoint::{
     checkpoint_fingerprint, checkpoint_message, CheckpointContinuityError, CheckpointError,
     CheckpointFreshnessPolicy, LedgerCheckpoint, LEDGER_CHECKPOINT_SCHEMA,
+};
+
+pub use compaction::{
+    ledger_compaction_manifest_message, LedgerCompactionError, LedgerCompactionManifest,
+    LEDGER_COMPACTION_MANIFEST_SCHEMA,
 };
 
 pub use entry::{

@@ -14,7 +14,7 @@ use crate::hash::compute_entry_hash;
 /// signing key. See the crate-level docs for the semantics.
 pub struct Chain {
     entries: Vec<LedgerEntry>,
-    signing_key: SigningKey,
+    pub(crate) signing_key: SigningKey,
 }
 
 impl Chain {
