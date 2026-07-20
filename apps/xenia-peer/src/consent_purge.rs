@@ -33,6 +33,9 @@ pub(crate) const MAX_PURGE_QUARANTINE_AGE_SECS: u64 = 365 * 24 * 60 * 60;
 pub(crate) const MAX_PURGE_PLAN_LIFETIME_SECS: u64 = 60 * 60;
 pub(crate) const MAX_PURGE_PATH_BYTES: usize = 4096;
 pub(crate) const MAX_PURGE_TRANSACTION_BYTES: u64 = 1024 * 1024;
+pub(crate) const CONSENT_PURGE_APPROVAL_BUNDLE_SCHEMA: &str =
+    "xenia-consent-purge-approval-bundle-v1";
+pub(crate) const MAX_PURGE_APPROVALS: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ConsentPurgeArtifactV1 {
@@ -41,6 +44,21 @@ pub(crate) struct ConsentPurgeArtifactV1 {
     pub(crate) rollback_path: String,
     pub(crate) byte_length: u64,
     pub(crate) blake3_digest: [u8; 32],
+}
+
+/// One independently controlled purge key's approval of an exact signed plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConsentPurgeApprovalV1 {
+    pub(crate) witness_public_key: [u8; 32],
+    pub(crate) approved_at_unix_secs: u64,
+    pub(crate) signature: [u8; 64],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConsentPurgeApprovalBundleV1 {
+    pub(crate) schema: String,
+    pub(crate) plan_fingerprint: [u8; 32],
+    pub(crate) approvals: Vec<ConsentPurgeApprovalV1>,
 }
 
 /// Ledger-authority authorization for one exact purge attempt. The plan cannot
@@ -104,6 +122,26 @@ pub(crate) enum ConsentPurgeError {
     QuarantineReceiptMismatch,
     #[error("consent purge plan encoding length overflow")]
     EncodingLengthOverflow,
+    #[error("consent purge approval bundle has unsupported schema: {schema}")]
+    UnsupportedApprovalBundleSchema { schema: String },
+    #[error("consent purge approval bundle refers to another plan")]
+    ApprovalPlanMismatch,
+    #[error("consent purge approval timestamp is outside the plan window")]
+    ApprovalOutsidePlanWindow,
+    #[error("consent purge approval key appears more than once")]
+    DuplicateApprovalKey,
+    #[error("consent purge approval key is not trusted")]
+    UntrustedApprovalKey,
+    #[error("consent purge approval public key is malformed")]
+    BadApprovalPublicKey,
+    #[error("consent purge approval signature is invalid")]
+    InvalidApprovalSignature,
+    #[error("consent purge approval quorum cannot be zero")]
+    ZeroApprovalQuorum,
+    #[error("consent purge approval quorum was not met: observed={observed}, required={required}")]
+    ApprovalQuorumNotMet { observed: usize, required: usize },
+    #[error("consent purge approval bundle exceeds {maximum} approvals: {count}")]
+    TooManyApprovals { count: usize, maximum: usize },
     #[error("consent purge prerequisite failed: {0}")]
     Retirement(String),
 }
@@ -380,6 +418,155 @@ impl ConsentPurgePlanV1 {
     }
 }
 
+impl ConsentPurgeApprovalBundleV1 {
+    pub(crate) fn new(plan: &ConsentPurgePlanV1) -> Result<Self, ConsentPurgeError> {
+        Ok(Self {
+            schema: CONSENT_PURGE_APPROVAL_BUNDLE_SCHEMA.to_string(),
+            plan_fingerprint: consent_purge_plan_fingerprint(plan)?,
+            approvals: Vec::new(),
+        })
+    }
+
+    pub(crate) fn sign_with(
+        &mut self,
+        plan: &ConsentPurgePlanV1,
+        witness_signing_key: &LedgerSigningKey,
+        approved_at_unix_secs: u64,
+    ) -> Result<(), ConsentPurgeError> {
+        if self.schema != CONSENT_PURGE_APPROVAL_BUNDLE_SCHEMA {
+            return Err(ConsentPurgeError::UnsupportedApprovalBundleSchema {
+                schema: self.schema.clone(),
+            });
+        }
+        if self.plan_fingerprint != consent_purge_plan_fingerprint(plan)? {
+            return Err(ConsentPurgeError::ApprovalPlanMismatch);
+        }
+        if approved_at_unix_secs < plan.issued_at_unix_secs
+            || approved_at_unix_secs >= plan.expires_at_unix_secs
+        {
+            return Err(ConsentPurgeError::ApprovalOutsidePlanWindow);
+        }
+        if self.approvals.len() >= MAX_PURGE_APPROVALS {
+            return Err(ConsentPurgeError::TooManyApprovals {
+                count: self.approvals.len() + 1,
+                maximum: MAX_PURGE_APPROVALS,
+            });
+        }
+        let witness_public_key = witness_signing_key.verifying_key().to_bytes();
+        if self
+            .approvals
+            .iter()
+            .any(|approval| approval.witness_public_key == witness_public_key)
+        {
+            return Err(ConsentPurgeError::DuplicateApprovalKey);
+        }
+        let message = consent_purge_approval_message(
+            &self.plan_fingerprint,
+            &witness_public_key,
+            approved_at_unix_secs,
+        );
+        self.approvals.push(ConsentPurgeApprovalV1 {
+            witness_public_key,
+            approved_at_unix_secs,
+            signature: witness_signing_key.sign(&message).to_bytes(),
+        });
+        Ok(())
+    }
+
+    pub(crate) fn verify_quorum(
+        &self,
+        plan: &ConsentPurgePlanV1,
+        trusted_witness_keys: &[[u8; 32]],
+        minimum_quorum: usize,
+    ) -> Result<(), ConsentPurgeError> {
+        if self.schema != CONSENT_PURGE_APPROVAL_BUNDLE_SCHEMA {
+            return Err(ConsentPurgeError::UnsupportedApprovalBundleSchema {
+                schema: self.schema.clone(),
+            });
+        }
+        if minimum_quorum == 0 {
+            return Err(ConsentPurgeError::ZeroApprovalQuorum);
+        }
+        if self.approvals.len() > MAX_PURGE_APPROVALS {
+            return Err(ConsentPurgeError::TooManyApprovals {
+                count: self.approvals.len(),
+                maximum: MAX_PURGE_APPROVALS,
+            });
+        }
+        if self.plan_fingerprint != consent_purge_plan_fingerprint(plan)? {
+            return Err(ConsentPurgeError::ApprovalPlanMismatch);
+        }
+        let trusted = trusted_witness_keys.iter().copied().collect::<BTreeSet<_>>();
+        let mut observed = BTreeSet::new();
+        for approval in &self.approvals {
+            if approval.approved_at_unix_secs < plan.issued_at_unix_secs
+                || approval.approved_at_unix_secs >= plan.expires_at_unix_secs
+            {
+                return Err(ConsentPurgeError::ApprovalOutsidePlanWindow);
+            }
+            if !observed.insert(approval.witness_public_key) {
+                return Err(ConsentPurgeError::DuplicateApprovalKey);
+            }
+            if !trusted.contains(&approval.witness_public_key) {
+                return Err(ConsentPurgeError::UntrustedApprovalKey);
+            }
+            let public_key = VerifyingKey::from_bytes(&approval.witness_public_key)
+                .map_err(|_| ConsentPurgeError::BadApprovalPublicKey)?;
+            public_key
+                .verify(
+                    &consent_purge_approval_message(
+                        &self.plan_fingerprint,
+                        &approval.witness_public_key,
+                        approval.approved_at_unix_secs,
+                    ),
+                    &Signature::from_bytes(&approval.signature),
+                )
+                .map_err(|_| ConsentPurgeError::InvalidApprovalSignature)?;
+        }
+        if observed.len() < minimum_quorum {
+            return Err(ConsentPurgeError::ApprovalQuorumNotMet {
+                observed: observed.len(),
+                required: minimum_quorum,
+            });
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn consent_purge_approval_bundle_fingerprint(
+    approvals: &ConsentPurgeApprovalBundleV1,
+) -> Result<[u8; 32], ConsentPurgeError> {
+    if approvals.schema != CONSENT_PURGE_APPROVAL_BUNDLE_SCHEMA {
+        return Err(ConsentPurgeError::UnsupportedApprovalBundleSchema {
+            schema: approvals.schema.clone(),
+        });
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"xenia:consent-purge-approval-bundle-fingerprint:v1");
+    hasher.update(approvals.schema.as_bytes());
+    hasher.update(&approvals.plan_fingerprint);
+    hasher.update(&(approvals.approvals.len() as u64).to_be_bytes());
+    for approval in &approvals.approvals {
+        hasher.update(&approval.witness_public_key);
+        hasher.update(&approval.approved_at_unix_secs.to_be_bytes());
+        hasher.update(&approval.signature);
+    }
+    Ok(*hasher.finalize().as_bytes())
+}
+
+fn consent_purge_approval_message(
+    plan_fingerprint: &[u8; 32],
+    witness_public_key: &[u8; 32],
+    approved_at_unix_secs: u64,
+) -> Vec<u8> {
+    let mut message = Vec::new();
+    message.extend_from_slice(b"xenia:consent-purge-approval:v1");
+    message.extend_from_slice(plan_fingerprint);
+    message.extend_from_slice(witness_public_key);
+    message.extend_from_slice(&approved_at_unix_secs.to_be_bytes());
+    message
+}
+
 pub(crate) fn consent_purge_plan_fingerprint(
     plan: &ConsentPurgePlanV1,
 ) -> Result<[u8; 32], ConsentPurgeError> {
@@ -624,4 +811,61 @@ mod tests {
             })
         );
     }
+    #[test]
+    fn purge_approval_quorum_requires_distinct_trusted_keys() {
+        let (_key, retirement_plan, _approvals, receipt) = fixture();
+        let purge_id = [5; 16];
+        let plan = ConsentPurgePlanV1 {
+            schema: CONSENT_PURGE_PLAN_SCHEMA.into(),
+            purge_id,
+            ledger_epoch_id: retirement_plan.ledger_epoch_id,
+            retirement_plan_fingerprint: [1; 32],
+            retirement_approval_bundle_fingerprint: [2; 32],
+            quarantine_receipt_fingerprint: [3; 32],
+            quarantine_transaction_directory: receipt.transaction_directory,
+            rollback_root: "/mnt/xenia-rollback".into(),
+            candidates: vec![ConsentPurgeArtifactV1 {
+                role: ConsentRetirementArtifactRoleV1::SupersededCompleteLedger,
+                quarantine_path: "/var/lib/xenia/quarantine/tx/0000-artifact.bin".into(),
+                rollback_path: format!("/mnt/xenia-rollback/{}/0000-artifact.bin", hex::encode(purge_id)),
+                byte_length: 4,
+                blake3_digest: *blake3::hash(b"data").as_bytes(),
+            }],
+            quarantine_completed_at_unix_secs: 20,
+            minimum_quarantine_age_secs: MIN_PURGE_QUARANTINE_AGE_SECS,
+            issued_at_unix_secs: 20 + MIN_PURGE_QUARANTINE_AGE_SECS,
+            expires_at_unix_secs: 20 + MIN_PURGE_QUARANTINE_AGE_SECS + 60,
+            signature: [7; 64],
+        };
+        let first = LedgerSigningKey::from_bytes(&[0x72; 32]);
+        let second = LedgerSigningKey::from_bytes(&[0x73; 32]);
+        let mut bundle = ConsentPurgeApprovalBundleV1::new(&plan).unwrap();
+        bundle.sign_with(&plan, &first, plan.issued_at_unix_secs).unwrap();
+        assert_eq!(
+            bundle.verify_quorum(
+                &plan,
+                &[first.verifying_key().to_bytes(), second.verifying_key().to_bytes()],
+                2,
+            ),
+            Err(ConsentPurgeError::ApprovalQuorumNotMet {
+                observed: 1,
+                required: 2,
+            })
+        );
+        bundle
+            .sign_with(&plan, &second, plan.issued_at_unix_secs + 1)
+            .unwrap();
+        bundle
+            .verify_quorum(
+                &plan,
+                &[first.verifying_key().to_bytes(), second.verifying_key().to_bytes()],
+                2,
+            )
+            .unwrap();
+        assert_eq!(
+            bundle.sign_with(&plan, &first, plan.issued_at_unix_secs + 2),
+            Err(ConsentPurgeError::DuplicateApprovalKey)
+        );
+    }
+
 }
