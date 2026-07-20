@@ -16,6 +16,8 @@
 
 use std::error::Error;
 use std::fmt;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -49,6 +51,7 @@ pub(crate) enum M1RuntimeError {
     },
     UnsupportedEvidenceExportProfile(String),
     EvidenceManifest(String),
+    IncompleteEvidenceBundle(String),
     TrustedKeyFingerprintMismatch {
         surface: &'static str,
         trusted: [u8; 32],
@@ -90,6 +93,9 @@ impl fmt::Display for M1RuntimeError {
                 write!(f, "unsupported evidence export profile: {profile}")
             }
             Self::EvidenceManifest(err) => write!(f, "M1 evidence manifest error: {err}"),
+            Self::IncompleteEvidenceBundle(err) => {
+                write!(f, "M1 evidence bundle is incomplete or mixed: {err}")
+            }
             Self::TrustedKeyFingerprintMismatch {
                 surface,
                 trusted,
@@ -269,6 +275,25 @@ pub(crate) struct EvidenceArtifactDigests {
     pub artifact_set_blake3: String,
 }
 
+/// Written last after every core evidence artifact and the local verification
+/// report have been atomically replaced. Verifiers recompute the core artifact
+/// set and require this marker, so a crash or concurrent export cannot be
+/// mistaken for a complete bundle assembled from one coherent generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct EvidenceBundleCompletion {
+    pub schema: String,
+    pub artifact_set_blake3: String,
+    pub ledger_entries: usize,
+    pub session_id: Uuid,
+}
+
+struct EvidenceCoreSnapshot {
+    manifest: EvidenceCryptoManifestExport,
+    binding: SessionTranscriptBinding,
+    entries: Vec<LedgerEntryExport>,
+    artifacts: EvidenceArtifactDigests,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SealedEvidenceArtifactDigests {
     pub schema: String,
@@ -443,6 +468,7 @@ pub(crate) struct M1EvidenceBundlePaths {
     pub ledger_entries: PathBuf,
     pub session_transcript_binding: PathBuf,
     pub verification_report: PathBuf,
+    pub completion_marker: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -652,12 +678,17 @@ pub(crate) fn audit_evidence_verification_report_artifacts_dir(
     let report = read_evidence_verification_report_dir(dir)?;
     require_evidence_verification_report_schema(&report)?;
 
-    let actual_artifacts = evidence_artifact_digests(
-        &paths.manifest,
-        &paths.ledger_entries,
-        &paths.session_transcript_binding,
+    let snapshot = read_evidence_core_snapshot(&paths)?;
+    require_evidence_report_artifacts_match_current_bundle(
+        &report.artifacts,
+        &snapshot.artifacts,
     )?;
-    require_evidence_report_artifacts_match_current_bundle(&report.artifacts, &actual_artifacts)?;
+    require_evidence_bundle_completion(
+        &paths,
+        &snapshot.binding,
+        snapshot.entries.len(),
+        &snapshot.artifacts,
+    )?;
 
     Ok(report)
 }
@@ -686,28 +717,31 @@ pub(crate) fn verify_transcript_bound_evidence_bundle_dir_with_backend(
 ) -> Result<EvidenceVerificationReport, M1RuntimeError> {
     let dir = dir.as_ref();
     let paths = evidence_bundle_paths(dir);
-    let manifest_export = read_evidence_crypto_manifest_export_dir(dir)?;
-    let manifest = manifest_export.to_manifest()?;
-    let binding: SessionTranscriptBinding = read_json(&paths.session_transcript_binding)?;
-    let entries: Vec<LedgerEntryExport> = read_json(&paths.ledger_entries)?;
+    let snapshot = read_evidence_core_snapshot(&paths)?;
+    let manifest = snapshot.manifest.to_manifest()?;
 
     Verifier::verify_transcript_bound_evidence_bundle_with_backend(
-        manifest, &binding, &entries, public_key, backend,
+        manifest,
+        &snapshot.binding,
+        &snapshot.entries,
+        public_key,
+        backend,
     )?;
 
-    let artifacts = evidence_artifact_digests(
-        &paths.manifest,
-        &paths.ledger_entries,
-        &paths.session_transcript_binding,
+    require_evidence_bundle_completion(
+        &paths,
+        &snapshot.binding,
+        snapshot.entries.len(),
+        &snapshot.artifacts,
     )?;
 
     Ok(evidence_verification_report(
-        &manifest_export,
-        &binding,
-        entries.len(),
+        &snapshot.manifest,
+        &snapshot.binding,
+        snapshot.entries.len(),
         "xenia-ledger::Verifier::verify_transcript_bound_evidence_bundle_with_backend",
         hex::encode(public_key),
-        artifacts,
+        snapshot.artifacts,
     ))
 }
 
@@ -1121,6 +1155,15 @@ impl M1RuntimeSession {
             artifacts,
         );
         write_json(&paths.verification_report, &report)?;
+        let completion = EvidenceBundleCompletion {
+            schema: "xenia-evidence-bundle-completion-v1".to_string(),
+            artifact_set_blake3: report.artifacts.artifact_set_blake3.clone(),
+            ledger_entries: entries.len(),
+            session_id: binding.session_id,
+        };
+        // This marker is deliberately written last. A missing or mismatched
+        // marker makes verification fail before the bundle is accepted.
+        write_json(&paths.completion_marker, &completion)?;
 
         Ok(paths)
     }
@@ -1363,6 +1406,7 @@ fn evidence_bundle_paths(dir: &Path) -> M1EvidenceBundlePaths {
         ledger_entries: dir.join("ledger_entries.json"),
         session_transcript_binding: dir.join("session_transcript_binding.json"),
         verification_report: dir.join("verification_report.json"),
+        completion_marker: dir.join("bundle_complete.json"),
     }
 }
 
@@ -1383,7 +1427,115 @@ fn sealed_evidence_bundle_paths(dir: &Path) -> M1SealedEvidenceBundlePaths {
 fn write_json(path: &Path, value: &impl Serialize) -> Result<(), M1RuntimeError> {
     let mut bytes = serde_json::to_vec_pretty(value)?;
     bytes.push(b'\n');
-    std::fs::write(path, bytes)?;
+    write_bytes_atomic(path, &bytes)
+}
+
+fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), M1RuntimeError> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("evidence.json");
+    let temp_path = parent.join(format!(
+        ".{file_name}.tmp-{}-{}",
+        std::process::id(),
+        Uuid::new_v4(),
+    ));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let result = (|| -> Result<(), std::io::Error> {
+        let mut file = options.open(&temp_path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temp_path, path)?;
+        sync_evidence_directory(parent)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    result.map_err(M1RuntimeError::PersistIo)
+}
+
+fn sync_evidence_directory(path: &Path) -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    {
+        std::fs::File::open(path)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+fn read_evidence_core_snapshot(
+    paths: &M1EvidenceBundlePaths,
+) -> Result<EvidenceCoreSnapshot, M1RuntimeError> {
+    // Each core file is read exactly once. Parsing, signature verification,
+    // digest calculation, and completion-marker validation all refer to these
+    // same bytes, closing the re-read TOCTOU window during concurrent export.
+    let manifest_bytes = std::fs::read(&paths.manifest)?;
+    let ledger_bytes = std::fs::read(&paths.ledger_entries)?;
+    let binding_bytes = std::fs::read(&paths.session_transcript_binding)?;
+    let manifest = serde_json::from_slice(&manifest_bytes)?;
+    let entries = serde_json::from_slice(&ledger_bytes)?;
+    let binding = serde_json::from_slice(&binding_bytes)?;
+    let artifacts = evidence_artifact_digests_from_bytes(
+        &manifest_bytes,
+        &ledger_bytes,
+        &binding_bytes,
+    );
+    Ok(EvidenceCoreSnapshot {
+        manifest,
+        binding,
+        entries,
+        artifacts,
+    })
+}
+
+fn require_evidence_bundle_completion(
+    paths: &M1EvidenceBundlePaths,
+    binding: &SessionTranscriptBinding,
+    ledger_entries: usize,
+    artifacts: &EvidenceArtifactDigests,
+) -> Result<(), M1RuntimeError> {
+    let completion: EvidenceBundleCompletion = read_json(&paths.completion_marker).map_err(|err| {
+        M1RuntimeError::IncompleteEvidenceBundle(format!(
+            "missing or unreadable bundle_complete.json: {err}"
+        ))
+    })?;
+    if completion.schema != "xenia-evidence-bundle-completion-v1" {
+        return Err(M1RuntimeError::IncompleteEvidenceBundle(format!(
+            "unsupported completion schema {:?}",
+            completion.schema
+        )));
+    }
+    if completion.artifact_set_blake3 != artifacts.artifact_set_blake3 {
+        return Err(M1RuntimeError::IncompleteEvidenceBundle(
+            "completion marker does not match the current artifact set".to_string(),
+        ));
+    }
+    if completion.ledger_entries != ledger_entries {
+        return Err(M1RuntimeError::IncompleteEvidenceBundle(format!(
+            "completion marker ledger count {} does not match {}",
+            completion.ledger_entries, ledger_entries
+        )));
+    }
+    if completion.session_id != binding.session_id {
+        return Err(M1RuntimeError::IncompleteEvidenceBundle(
+            "completion marker session id does not match transcript binding".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -1397,23 +1549,39 @@ fn evidence_artifact_digests(
     ledger_entries_path: &Path,
     session_transcript_binding_path: &Path,
 ) -> Result<EvidenceArtifactDigests, M1RuntimeError> {
-    let evidence_manifest_blake3 = blake3_file_hex(manifest_path)?;
-    let ledger_entries_blake3 = blake3_file_hex(ledger_entries_path)?;
-    let session_transcript_binding_blake3 = blake3_file_hex(session_transcript_binding_path)?;
+    let manifest = std::fs::read(manifest_path)?;
+    let ledger_entries = std::fs::read(ledger_entries_path)?;
+    let session_transcript_binding = std::fs::read(session_transcript_binding_path)?;
+    Ok(evidence_artifact_digests_from_bytes(
+        &manifest,
+        &ledger_entries,
+        &session_transcript_binding,
+    ))
+}
+
+fn evidence_artifact_digests_from_bytes(
+    manifest: &[u8],
+    ledger_entries: &[u8],
+    session_transcript_binding: &[u8],
+) -> EvidenceArtifactDigests {
+    let evidence_manifest_blake3 = blake3::hash(manifest).to_hex().to_string();
+    let ledger_entries_blake3 = blake3::hash(ledger_entries).to_hex().to_string();
+    let session_transcript_binding_blake3 =
+        blake3::hash(session_transcript_binding).to_hex().to_string();
     let artifact_set_blake3 = evidence_artifact_set_digest(
         &evidence_manifest_blake3,
         &ledger_entries_blake3,
         &session_transcript_binding_blake3,
     );
 
-    Ok(EvidenceArtifactDigests {
+    EvidenceArtifactDigests {
         schema: "xenia-evidence-artifact-digests-v1".to_string(),
         hash_algorithm: "blake3-256".to_string(),
         evidence_manifest_blake3,
         ledger_entries_blake3,
         session_transcript_binding_blake3,
         artifact_set_blake3,
-    })
+    }
 }
 
 fn blake3_file_hex(path: &Path) -> Result<String, M1RuntimeError> {
@@ -2198,6 +2366,7 @@ mod tests {
         assert!(paths.ledger_entries.exists());
         assert!(paths.session_transcript_binding.exists());
         assert!(paths.verification_report.exists());
+        assert!(paths.completion_marker.exists());
 
         let manifest = std::fs::read_to_string(&paths.manifest).unwrap();
         assert!(manifest.contains("hybrid-pre-pqc-v1"));
@@ -2247,6 +2416,30 @@ mod tests {
             blake3_file_hex(&paths.manifest).unwrap()
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verifier_refuses_a_bundle_without_the_last_written_completion_marker() {
+        let (mut runtime, verifying_key) = runtime(25);
+        runtime.bind_session_transcript_hash([0x8D; 32]);
+        runtime.offer().unwrap();
+        runtime.grant_consent().unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "xenia-m1-evidence-incomplete-{}-{}",
+            std::process::id(),
+            25
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let paths = runtime
+            .write_transcript_bound_evidence_bundle(&verifying_key, &dir)
+            .unwrap();
+        std::fs::remove_file(&paths.completion_marker).unwrap();
+
+        let err = verify_transcript_bound_evidence_bundle_dir(&dir, &verifying_key)
+            .expect_err("a partial bundle must not verify");
+        assert!(err.to_string().contains("bundle is incomplete or mixed"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
