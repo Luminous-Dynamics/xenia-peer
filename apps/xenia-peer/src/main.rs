@@ -58,6 +58,7 @@ mod audit_ledger_store;
 mod consent_authority;
 mod consent_compaction;
 mod consent_purge;
+mod consent_purge_retention;
 mod consent_retirement;
 mod consent_ledger_persistence;
 mod consent_server;

@@ -1,0 +1,547 @@
+// Copyright (c) 2024-2026 Tristan Stoltz / Luminous Dynamics
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+//! Long-lived retention evidence for rollback packages created by consent purge.
+//!
+//! Purge deliberately keeps a complete rollback package. This module makes the
+//! retention obligation explicit and cryptographically reviewable: the ledger
+//! authority signs the exact rollback files and metadata that must remain
+//! available until a fixed deadline. The certificate does not authorize any
+//! later destruction operation.
+
+use std::collections::BTreeSet;
+use std::fs::{self, File};
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+use ed25519_dalek::{
+    Signature, Signer, SigningKey as LedgerSigningKey, Verifier as DalekVerifier, VerifyingKey,
+};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use crate::consent_purge::{
+    consent_purge_approval_bundle_fingerprint, consent_purge_plan_fingerprint,
+    consent_purge_receipt_fingerprint, consent_purge_rollback_package_fingerprint,
+    verify_purge_receipt_files, verify_rollback_package_files, ConsentPurgeApprovalBundleV1,
+    ConsentPurgePlanV1, ConsentPurgeReceiptV1, ConsentPurgeRollbackPackageV1,
+    MAX_PURGE_ARTIFACT_BYTES,
+};
+
+pub(crate) const CONSENT_PURGE_RETENTION_CERTIFICATE_SCHEMA: &str =
+    "xenia-consent-purge-retention-certificate-v1";
+pub(crate) const MIN_PURGE_ROLLBACK_RETENTION_SECS: u64 = 24 * 60 * 60;
+pub(crate) const MAX_PURGE_ROLLBACK_RETENTION_SECS: u64 = 10 * 365 * 24 * 60 * 60;
+pub(crate) const MAX_PURGE_RETENTION_ARTIFACTS: usize = 64;
+pub(crate) const MAX_PURGE_RETENTION_BYTES: u64 = 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ConsentPurgeProtectedArtifactRoleV1 {
+    RollbackArtifact,
+    RollbackPackageManifest,
+    RecoveryJournal,
+    PurgeReceipt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConsentPurgeProtectedArtifactV1 {
+    pub(crate) role: ConsentPurgeProtectedArtifactRoleV1,
+    pub(crate) path: String,
+    pub(crate) byte_length: u64,
+    pub(crate) blake3_digest: [u8; 32],
+}
+
+/// Ledger-signed obligation to retain one exact purge rollback package.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConsentPurgeRetentionCertificateV1 {
+    pub(crate) schema: String,
+    pub(crate) ledger_epoch_id: [u8; 32],
+    pub(crate) purge_plan_fingerprint: [u8; 32],
+    pub(crate) purge_approval_bundle_fingerprint: [u8; 32],
+    pub(crate) rollback_package_fingerprint: [u8; 32],
+    pub(crate) purge_receipt_fingerprint: [u8; 32],
+    pub(crate) package_directory: String,
+    pub(crate) protected_artifacts: Vec<ConsentPurgeProtectedArtifactV1>,
+    pub(crate) retained_from_unix_secs: u64,
+    pub(crate) retain_until_unix_secs: u64,
+    pub(crate) issued_at_unix_secs: u64,
+    pub(crate) signature: [u8; 64],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub(crate) enum ConsentPurgeRetentionError {
+    #[error("consent purge retention certificate has unsupported schema: {schema}")]
+    UnsupportedCertificateSchema { schema: String },
+    #[error("consent purge retention period must be between {minimum} and {maximum} seconds")]
+    InvalidRetentionPeriod { minimum: u64, maximum: u64 },
+    #[error("consent purge retention certificate was issued before purge completion")]
+    IssuedBeforePurgeCompletion,
+    #[error("consent purge retention deadline must be after certificate issuance")]
+    RetentionDeadlineBeforeIssuance,
+    #[error("consent purge retention certificate is not yet valid")]
+    CertificateFromFuture,
+    #[error("consent purge rollback retention period has elapsed")]
+    RetentionExpired,
+    #[error("consent purge retention certificate signature is invalid")]
+    InvalidCertificateSignature,
+    #[error("consent purge retention certificate identity does not match its signed evidence")]
+    CertificateIdentityMismatch,
+    #[error("consent purge retention inventory must contain between 1 and {maximum} artifacts")]
+    InvalidInventoryCount { maximum: usize },
+    #[error("consent purge retention inventory contains a duplicate path: {path}")]
+    DuplicateInventoryPath { path: String },
+    #[error("consent purge retention inventory is not in canonical order")]
+    InventoryOrderMismatch,
+    #[error("consent purge retention inventory contains an all-zero digest: {path}")]
+    ZeroInventoryDigest { path: String },
+    #[error("consent purge retention artifact is missing, changed, or not a regular file: {path}")]
+    ProtectedArtifactMismatch { path: String },
+    #[error("consent purge retention artifact exceeds {maximum} bytes: {path}")]
+    ProtectedArtifactTooLarge { path: String, maximum: u64 },
+    #[error("consent purge retention path is not inside the rollback package: {path}")]
+    ProtectedArtifactOutsidePackage { path: String },
+    #[error("consent purge retention encoding length overflow")]
+    EncodingLengthOverflow,
+    #[error("consent purge retention prerequisite failed: {0}")]
+    Purge(String),
+    #[error("consent purge retention I/O failed: {0}")]
+    Io(String),
+}
+
+impl From<std::io::Error> for ConsentPurgeRetentionError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error.to_string())
+    }
+}
+
+impl ConsentPurgeRetentionCertificateV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn sign(
+        plan: &ConsentPurgePlanV1,
+        approvals: &ConsentPurgeApprovalBundleV1,
+        rollback_package: &ConsentPurgeRollbackPackageV1,
+        purge_receipt: &ConsentPurgeReceiptV1,
+        signing_key: &LedgerSigningKey,
+        issued_at_unix_secs: u64,
+        retain_until_unix_secs: u64,
+    ) -> Result<Self, ConsentPurgeRetentionError> {
+        let public_key = signing_key.verifying_key();
+        plan.verify_authority_signature(&public_key)
+            .map_err(|err| ConsentPurgeRetentionError::Purge(err.to_string()))?;
+        rollback_package
+            .verify(plan, approvals, &public_key)
+            .map_err(|err| ConsentPurgeRetentionError::Purge(err.to_string()))?;
+        purge_receipt
+            .verify(plan, approvals, rollback_package, &public_key)
+            .map_err(|err| ConsentPurgeRetentionError::Purge(err.to_string()))?;
+        verify_purge_receipt_files(purge_receipt)
+            .map_err(|err| ConsentPurgeRetentionError::Purge(err.to_string()))?;
+        verify_rollback_package_files(rollback_package)
+            .map_err(|err| ConsentPurgeRetentionError::Purge(err.to_string()))?;
+
+        let protected_artifacts = build_protected_inventory(rollback_package)?;
+        let mut certificate = Self {
+            schema: CONSENT_PURGE_RETENTION_CERTIFICATE_SCHEMA.to_string(),
+            ledger_epoch_id: plan.ledger_epoch_id,
+            purge_plan_fingerprint: consent_purge_plan_fingerprint(plan)
+                .map_err(|err| ConsentPurgeRetentionError::Purge(err.to_string()))?,
+            purge_approval_bundle_fingerprint: consent_purge_approval_bundle_fingerprint(approvals)
+                .map_err(|err| ConsentPurgeRetentionError::Purge(err.to_string()))?,
+            rollback_package_fingerprint: consent_purge_rollback_package_fingerprint(
+                rollback_package,
+            )
+            .map_err(|err| ConsentPurgeRetentionError::Purge(err.to_string()))?,
+            purge_receipt_fingerprint: consent_purge_receipt_fingerprint(purge_receipt)
+                .map_err(|err| ConsentPurgeRetentionError::Purge(err.to_string()))?,
+            package_directory: rollback_package.package_directory.clone(),
+            protected_artifacts,
+            retained_from_unix_secs: purge_receipt.completed_at_unix_secs,
+            retain_until_unix_secs,
+            issued_at_unix_secs,
+            signature: [0u8; 64],
+        };
+        certificate.validate_shape()?;
+        certificate.signature = signing_key
+            .sign(&consent_purge_retention_certificate_message(&certificate)?)
+            .to_bytes();
+        certificate.verify(
+            plan,
+            approvals,
+            rollback_package,
+            purge_receipt,
+            &public_key,
+        )?;
+        Ok(certificate)
+    }
+
+    pub(crate) fn verify_authority_signature(
+        &self,
+        public_key: &VerifyingKey,
+    ) -> Result<(), ConsentPurgeRetentionError> {
+        self.validate_shape()?;
+        public_key
+            .verify(
+                &consent_purge_retention_certificate_message(self)?,
+                &Signature::from_bytes(&self.signature),
+            )
+            .map_err(|_| ConsentPurgeRetentionError::InvalidCertificateSignature)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn verify(
+        &self,
+        plan: &ConsentPurgePlanV1,
+        approvals: &ConsentPurgeApprovalBundleV1,
+        rollback_package: &ConsentPurgeRollbackPackageV1,
+        purge_receipt: &ConsentPurgeReceiptV1,
+        public_key: &VerifyingKey,
+    ) -> Result<(), ConsentPurgeRetentionError> {
+        self.verify_authority_signature(public_key)?;
+        plan.verify_authority_signature(public_key)
+            .map_err(|err| ConsentPurgeRetentionError::Purge(err.to_string()))?;
+        rollback_package
+            .verify(plan, approvals, public_key)
+            .map_err(|err| ConsentPurgeRetentionError::Purge(err.to_string()))?;
+        purge_receipt
+            .verify(plan, approvals, rollback_package, public_key)
+            .map_err(|err| ConsentPurgeRetentionError::Purge(err.to_string()))?;
+        verify_purge_receipt_files(purge_receipt)
+            .map_err(|err| ConsentPurgeRetentionError::Purge(err.to_string()))?;
+        verify_rollback_package_files(rollback_package)
+            .map_err(|err| ConsentPurgeRetentionError::Purge(err.to_string()))?;
+
+        let expected_inventory = build_protected_inventory(rollback_package)?;
+        if self.ledger_epoch_id != plan.ledger_epoch_id
+            || self.purge_plan_fingerprint
+                != consent_purge_plan_fingerprint(plan)
+                    .map_err(|err| ConsentPurgeRetentionError::Purge(err.to_string()))?
+            || self.purge_approval_bundle_fingerprint
+                != consent_purge_approval_bundle_fingerprint(approvals)
+                    .map_err(|err| ConsentPurgeRetentionError::Purge(err.to_string()))?
+            || self.rollback_package_fingerprint
+                != consent_purge_rollback_package_fingerprint(rollback_package)
+                    .map_err(|err| ConsentPurgeRetentionError::Purge(err.to_string()))?
+            || self.purge_receipt_fingerprint
+                != consent_purge_receipt_fingerprint(purge_receipt)
+                    .map_err(|err| ConsentPurgeRetentionError::Purge(err.to_string()))?
+            || self.package_directory != rollback_package.package_directory
+            || self.protected_artifacts != expected_inventory
+            || self.retained_from_unix_secs != purge_receipt.completed_at_unix_secs
+        {
+            return Err(ConsentPurgeRetentionError::CertificateIdentityMismatch);
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn verify_active(
+        &self,
+        plan: &ConsentPurgePlanV1,
+        approvals: &ConsentPurgeApprovalBundleV1,
+        rollback_package: &ConsentPurgeRollbackPackageV1,
+        purge_receipt: &ConsentPurgeReceiptV1,
+        public_key: &VerifyingKey,
+        now_unix_secs: u64,
+    ) -> Result<(), ConsentPurgeRetentionError> {
+        self.verify(plan, approvals, rollback_package, purge_receipt, public_key)?;
+        if now_unix_secs < self.issued_at_unix_secs {
+            return Err(ConsentPurgeRetentionError::CertificateFromFuture);
+        }
+        if now_unix_secs >= self.retain_until_unix_secs {
+            return Err(ConsentPurgeRetentionError::RetentionExpired);
+        }
+        Ok(())
+    }
+
+    fn validate_shape(&self) -> Result<(), ConsentPurgeRetentionError> {
+        if self.schema != CONSENT_PURGE_RETENTION_CERTIFICATE_SCHEMA {
+            return Err(ConsentPurgeRetentionError::UnsupportedCertificateSchema {
+                schema: self.schema.clone(),
+            });
+        }
+        if self.protected_artifacts.is_empty()
+            || self.protected_artifacts.len() > MAX_PURGE_RETENTION_ARTIFACTS
+        {
+            return Err(ConsentPurgeRetentionError::InvalidInventoryCount {
+                maximum: MAX_PURGE_RETENTION_ARTIFACTS,
+            });
+        }
+        if self.issued_at_unix_secs < self.retained_from_unix_secs {
+            return Err(ConsentPurgeRetentionError::IssuedBeforePurgeCompletion);
+        }
+        if self.retain_until_unix_secs <= self.issued_at_unix_secs {
+            return Err(ConsentPurgeRetentionError::RetentionDeadlineBeforeIssuance);
+        }
+        let retention_secs = self
+            .retain_until_unix_secs
+            .checked_sub(self.retained_from_unix_secs)
+            .ok_or(ConsentPurgeRetentionError::RetentionDeadlineBeforeIssuance)?;
+        if !(MIN_PURGE_ROLLBACK_RETENTION_SECS..=MAX_PURGE_ROLLBACK_RETENTION_SECS)
+            .contains(&retention_secs)
+        {
+            return Err(ConsentPurgeRetentionError::InvalidRetentionPeriod {
+                minimum: MIN_PURGE_ROLLBACK_RETENTION_SECS,
+                maximum: MAX_PURGE_ROLLBACK_RETENTION_SECS,
+            });
+        }
+        let package_directory = Path::new(&self.package_directory);
+        let mut seen = BTreeSet::new();
+        let mut previous: Option<(&str, ConsentPurgeProtectedArtifactRoleV1)> = None;
+        for artifact in &self.protected_artifacts {
+            if artifact.blake3_digest == [0u8; 32] {
+                return Err(ConsentPurgeRetentionError::ZeroInventoryDigest {
+                    path: artifact.path.clone(),
+                });
+            }
+            if !seen.insert(artifact.path.clone()) {
+                return Err(ConsentPurgeRetentionError::DuplicateInventoryPath {
+                    path: artifact.path.clone(),
+                });
+            }
+            if !Path::new(&artifact.path).starts_with(package_directory) {
+                return Err(ConsentPurgeRetentionError::ProtectedArtifactOutsidePackage {
+                    path: artifact.path.clone(),
+                });
+            }
+            let current = (artifact.path.as_str(), artifact.role);
+            if previous.is_some_and(|prior| prior >= current) {
+                return Err(ConsentPurgeRetentionError::InventoryOrderMismatch);
+            }
+            previous = Some(current);
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn consent_purge_retention_certificate_fingerprint(
+    certificate: &ConsentPurgeRetentionCertificateV1,
+) -> Result<[u8; 32], ConsentPurgeRetentionError> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"xenia:consent-purge-retention-certificate-fingerprint:v1");
+    hasher.update(&consent_purge_retention_certificate_message(certificate)?);
+    hasher.update(&certificate.signature);
+    Ok(*hasher.finalize().as_bytes())
+}
+
+fn consent_purge_retention_certificate_message(
+    certificate: &ConsentPurgeRetentionCertificateV1,
+) -> Result<Vec<u8>, ConsentPurgeRetentionError> {
+    if certificate.schema != CONSENT_PURGE_RETENTION_CERTIFICATE_SCHEMA {
+        return Err(ConsentPurgeRetentionError::UnsupportedCertificateSchema {
+            schema: certificate.schema.clone(),
+        });
+    }
+    let mut message = Vec::new();
+    message.extend_from_slice(b"xenia:consent-purge-retention-certificate:v1");
+    append_bytes(&mut message, certificate.schema.as_bytes())?;
+    message.extend_from_slice(&certificate.ledger_epoch_id);
+    message.extend_from_slice(&certificate.purge_plan_fingerprint);
+    message.extend_from_slice(&certificate.purge_approval_bundle_fingerprint);
+    message.extend_from_slice(&certificate.rollback_package_fingerprint);
+    message.extend_from_slice(&certificate.purge_receipt_fingerprint);
+    append_bytes(&mut message, certificate.package_directory.as_bytes())?;
+    let count = u32::try_from(certificate.protected_artifacts.len())
+        .map_err(|_| ConsentPurgeRetentionError::EncodingLengthOverflow)?;
+    message.extend_from_slice(&count.to_be_bytes());
+    for artifact in &certificate.protected_artifacts {
+        message.push(protected_role_tag(artifact.role));
+        append_bytes(&mut message, artifact.path.as_bytes())?;
+        message.extend_from_slice(&artifact.byte_length.to_be_bytes());
+        message.extend_from_slice(&artifact.blake3_digest);
+    }
+    message.extend_from_slice(&certificate.retained_from_unix_secs.to_be_bytes());
+    message.extend_from_slice(&certificate.retain_until_unix_secs.to_be_bytes());
+    message.extend_from_slice(&certificate.issued_at_unix_secs.to_be_bytes());
+    Ok(message)
+}
+
+fn protected_role_tag(role: ConsentPurgeProtectedArtifactRoleV1) -> u8 {
+    match role {
+        ConsentPurgeProtectedArtifactRoleV1::RollbackArtifact => 1,
+        ConsentPurgeProtectedArtifactRoleV1::RollbackPackageManifest => 2,
+        ConsentPurgeProtectedArtifactRoleV1::RecoveryJournal => 3,
+        ConsentPurgeProtectedArtifactRoleV1::PurgeReceipt => 4,
+    }
+}
+
+fn build_protected_inventory(
+    rollback_package: &ConsentPurgeRollbackPackageV1,
+) -> Result<Vec<ConsentPurgeProtectedArtifactV1>, ConsentPurgeRetentionError> {
+    let package_directory = PathBuf::from(&rollback_package.package_directory);
+    let mut inventory = Vec::with_capacity(rollback_package.entries.len() + 3);
+    for entry in &rollback_package.entries {
+        let path = PathBuf::from(&entry.rollback_path);
+        let (byte_length, blake3_digest) = hash_regular_file(&path)?;
+        inventory.push(ConsentPurgeProtectedArtifactV1 {
+            role: ConsentPurgeProtectedArtifactRoleV1::RollbackArtifact,
+            path: path.to_string_lossy().into_owned(),
+            byte_length,
+            blake3_digest,
+        });
+    }
+    for (role, filename) in [
+        (
+            ConsentPurgeProtectedArtifactRoleV1::RollbackPackageManifest,
+            "rollback-package.json",
+        ),
+        (
+            ConsentPurgeProtectedArtifactRoleV1::RecoveryJournal,
+            "journal.json",
+        ),
+        (
+            ConsentPurgeProtectedArtifactRoleV1::PurgeReceipt,
+            "purge-receipt.json",
+        ),
+    ] {
+        let path = package_directory.join(filename);
+        let (byte_length, blake3_digest) = hash_regular_file(&path)?;
+        inventory.push(ConsentPurgeProtectedArtifactV1 {
+            role,
+            path: path.to_string_lossy().into_owned(),
+            byte_length,
+            blake3_digest,
+        });
+    }
+    inventory.sort_by(|left, right| left.path.cmp(&right.path).then(left.role.cmp(&right.role)));
+    Ok(inventory)
+}
+
+pub(crate) fn verify_protected_inventory_files(
+    certificate: &ConsentPurgeRetentionCertificateV1,
+) -> Result<(), ConsentPurgeRetentionError> {
+    certificate.validate_shape()?;
+    for artifact in &certificate.protected_artifacts {
+        let (byte_length, blake3_digest) = hash_regular_file(Path::new(&artifact.path))?;
+        if byte_length != artifact.byte_length || blake3_digest != artifact.blake3_digest {
+            return Err(ConsentPurgeRetentionError::ProtectedArtifactMismatch {
+                path: artifact.path.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn hash_regular_file(path: &Path) -> Result<(u64, [u8; 32]), ConsentPurgeRetentionError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| {
+        ConsentPurgeRetentionError::ProtectedArtifactMismatch {
+            path: path.display().to_string(),
+        }
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ConsentPurgeRetentionError::ProtectedArtifactMismatch {
+            path: path.display().to_string(),
+        });
+    }
+    if metadata.len() > MAX_PURGE_ARTIFACT_BYTES {
+        return Err(ConsentPurgeRetentionError::ProtectedArtifactTooLarge {
+            path: path.display().to_string(),
+            maximum: MAX_PURGE_ARTIFACT_BYTES,
+        });
+    }
+    let mut file = File::open(path)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        total = total.checked_add(read as u64).ok_or_else(|| {
+            ConsentPurgeRetentionError::ProtectedArtifactTooLarge {
+                path: path.display().to_string(),
+                maximum: MAX_PURGE_ARTIFACT_BYTES,
+            }
+        })?;
+        if total > MAX_PURGE_ARTIFACT_BYTES {
+            return Err(ConsentPurgeRetentionError::ProtectedArtifactTooLarge {
+                path: path.display().to_string(),
+                maximum: MAX_PURGE_ARTIFACT_BYTES,
+            });
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok((total, *hasher.finalize().as_bytes()))
+}
+
+fn append_bytes(
+    output: &mut Vec<u8>,
+    bytes: &[u8],
+) -> Result<(), ConsentPurgeRetentionError> {
+    let length = u32::try_from(bytes.len())
+        .map_err(|_| ConsentPurgeRetentionError::EncodingLengthOverflow)?;
+    output.extend_from_slice(&length.to_be_bytes());
+    output.extend_from_slice(bytes);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn signed_fixture() -> (LedgerSigningKey, ConsentPurgeRetentionCertificateV1) {
+        let key = LedgerSigningKey::from_bytes(&[41u8; 32]);
+        let mut certificate = ConsentPurgeRetentionCertificateV1 {
+            schema: CONSENT_PURGE_RETENTION_CERTIFICATE_SCHEMA.to_string(),
+            ledger_epoch_id: [1u8; 32],
+            purge_plan_fingerprint: [2u8; 32],
+            purge_approval_bundle_fingerprint: [3u8; 32],
+            rollback_package_fingerprint: [4u8; 32],
+            purge_receipt_fingerprint: [5u8; 32],
+            package_directory: "/var/lib/xenia/rollback/abc".to_string(),
+            protected_artifacts: vec![ConsentPurgeProtectedArtifactV1 {
+                role: ConsentPurgeProtectedArtifactRoleV1::RollbackArtifact,
+                path: "/var/lib/xenia/rollback/abc/0000-artifact.bin".to_string(),
+                byte_length: 4,
+                blake3_digest: [6u8; 32],
+            }],
+            retained_from_unix_secs: 1_000,
+            retain_until_unix_secs: 1_000 + MIN_PURGE_ROLLBACK_RETENTION_SECS,
+            issued_at_unix_secs: 1_001,
+            signature: [0u8; 64],
+        };
+        certificate.signature = key
+            .sign(&consent_purge_retention_certificate_message(&certificate).unwrap())
+            .to_bytes();
+        (key, certificate)
+    }
+
+    #[test]
+    fn retention_certificate_binds_inventory_and_deadline() {
+        let (key, certificate) = signed_fixture();
+        certificate
+            .verify_authority_signature(&key.verifying_key())
+            .unwrap();
+        let original_fingerprint =
+            consent_purge_retention_certificate_fingerprint(&certificate).unwrap();
+
+        let mut changed = certificate.clone();
+        changed.protected_artifacts[0].byte_length += 1;
+        assert!(changed
+            .verify_authority_signature(&key.verifying_key())
+            .is_err());
+        changed = certificate.clone();
+        changed.retain_until_unix_secs += 1;
+        assert!(changed
+            .verify_authority_signature(&key.verifying_key())
+            .is_err());
+        assert_ne!(
+            original_fingerprint,
+            consent_purge_retention_certificate_fingerprint(&changed).unwrap()
+        );
+    }
+
+    #[test]
+    fn retention_certificate_rejects_short_or_expired_policy() {
+        let (key, mut certificate) = signed_fixture();
+        certificate.retain_until_unix_secs = certificate.retained_from_unix_secs + 60;
+        assert!(matches!(
+            certificate.verify_authority_signature(&key.verifying_key()),
+            Err(ConsentPurgeRetentionError::InvalidRetentionPeriod { .. })
+        ));
+
+        let (_, certificate) = signed_fixture();
+        assert!(certificate.retain_until_unix_secs > certificate.issued_at_unix_secs);
+    }
+}

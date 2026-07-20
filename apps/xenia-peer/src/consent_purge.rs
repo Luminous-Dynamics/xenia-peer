@@ -1267,7 +1267,7 @@ fn verify_purge_journal_identity(
     Ok(())
 }
 
-fn verify_rollback_package_files(
+pub(crate) fn verify_rollback_package_files(
     package: &ConsentPurgeRollbackPackageV1,
 ) -> Result<(), ConsentPurgeError> {
     for artifact in &package.entries {
@@ -1375,7 +1375,7 @@ fn hash_file(path: &Path) -> Result<(u64, [u8; 32]), ConsentPurgeError> {
     Ok((total, *hasher.finalize().as_bytes()))
 }
 
-fn consent_purge_rollback_package_fingerprint(
+pub(crate) fn consent_purge_rollback_package_fingerprint(
     package: &ConsentPurgeRollbackPackageV1,
 ) -> Result<[u8; 32], ConsentPurgeError> {
     let mut hasher = blake3::Hasher::new();
@@ -1402,6 +1402,16 @@ fn consent_purge_rollback_package_message(
     message.extend_from_slice(&package.created_at_unix_secs.to_be_bytes());
     append_purge_artifacts(&mut message, &package.entries)?;
     Ok(message)
+}
+
+pub(crate) fn consent_purge_receipt_fingerprint(
+    receipt: &ConsentPurgeReceiptV1,
+) -> Result<[u8; 32], ConsentPurgeError> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"xenia:consent-purge-receipt-fingerprint:v1");
+    hasher.update(&consent_purge_receipt_message(receipt)?);
+    hasher.update(&receipt.signature);
+    Ok(*hasher.finalize().as_bytes())
 }
 
 fn consent_purge_receipt_message(
