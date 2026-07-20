@@ -27,6 +27,10 @@ use crate::operator_revocations::OperatorRevocations;
 
 type PersistLedger = fn(&std::path::Path, &[LedgerEntry]) -> Result<(), AuditLedgerStoreError>;
 
+/// Maximum decoded consent-action payload accepted by either operator transport.
+/// Authenticated requests are only a few kilobytes even with ML-DSA signatures.
+pub(crate) const MAX_CONSENT_ACTION_BYTES: usize = 32 * 1024;
+
 /// A decoded consent decision plus authenticated operator attribution, when
 /// operator authorization is enabled.
 pub(crate) struct DecodedConsent {

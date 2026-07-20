@@ -20,7 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     response::Response,
     routing::{get, post},
@@ -37,10 +37,13 @@ use xenia_wire::handshake_highsec::ML_DSA_87_PK_LEN;
 use crate::operator::{OperatorPolicy, OperatorRole};
 use crate::operator_auth::{
     AuthenticatedConsentAction, AuthenticatedKeyReplacement, AuthenticatedRevocation,
-    CHALLENGE_TTL_SECS, ChallengeResponse, ChallengeStore, ConsentAction, OperatorToken,
-    RateLimiter, SignedOperatorToken, TOKEN_TTL_SECS, issue_token, verify_challenge_response,
+    CHALLENGE_TTL_SECS, ChallengeResponse, ChallengeStore, ConsentAction,
+    MAX_OUTSTANDING_CHALLENGES, OperatorToken, RateLimiter, SignedOperatorToken, TOKEN_TTL_SECS,
+    issue_token, verify_challenge_response,
 };
 use crate::operator_revocations::OperatorRevocations;
+
+const MAX_OPERATOR_HTTP_BODY_BYTES: usize = 64 * 1024;
 
 /// Shared state for the operator-auth routes.
 pub(crate) struct OperatorAuthState {
@@ -182,16 +185,25 @@ impl TokenDto {
 /// this exact nonce was really issued by an attested host identity.
 async fn challenge_handler(
     State(state): State<Arc<OperatorAuthState>>,
-) -> Json<ChallengeResponseDto> {
+) -> Result<Json<ChallengeResponseDto>, (StatusCode, String)> {
     let now = unix_now_secs();
     let nonce: [u8; 32] = rand::random();
     {
         let mut challenges = state.challenges.lock().await;
         challenges.gc(now);
-        challenges.issue(nonce, now, CHALLENGE_TTL_SECS);
+        if !challenges.issue(nonce, now, CHALLENGE_TTL_SECS) {
+            tracing::warn!(
+                outstanding = MAX_OUTSTANDING_CHALLENGES,
+                "operator challenge store is full"
+            );
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many outstanding authentication challenges".to_string(),
+            ));
+        }
     }
     let attestation_transcript = challenge_host_attestation_transcript(&nonce);
-    Json(ChallengeResponseDto {
+    Ok(Json(ChallengeResponseDto {
         nonce: hex::encode(nonce),
         expires_at: now + CHALLENGE_TTL_SECS,
         host_ed_attestation_hex: hex::encode(
@@ -200,7 +212,7 @@ async fn challenge_handler(
         host_ml_dsa_attestation_hex: hex::encode(
             state.host_identity.sign_ml_dsa(&attestation_transcript),
         ),
-    })
+    }))
 }
 
 /// `GET /auth/daemon-identity` -- the daemon's host-identity delegation of
@@ -806,6 +818,7 @@ pub(crate) fn router(
                 .route("/health", get(health_handler))
                 .with_state(health),
         )
+        .layer(DefaultBodyLimit::max(MAX_OPERATOR_HTTP_BODY_BYTES))
         .layer(axum::middleware::from_fn_with_state(
             allowed_origins,
             cors_middleware,

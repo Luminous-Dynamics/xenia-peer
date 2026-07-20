@@ -13,7 +13,9 @@ use std::sync::Arc;
 use futures::StreamExt;
 use tokio::net::TcpListener;
 
-use crate::consent_authority::{ConsentDecisionService, ConsentFollowup};
+use crate::consent_authority::{
+    ConsentDecisionService, ConsentFollowup, MAX_CONSENT_ACTION_BYTES,
+};
 
 /// The plaintext consent transport for a single session.
 pub(crate) struct ConsentServer {
@@ -53,6 +55,14 @@ impl ConsentServer {
                 let Ok(text) = msg.to_text() else {
                     continue;
                 };
+                if text.len() > MAX_CONSENT_ACTION_BYTES {
+                    tracing::warn!(
+                        bytes = text.len(),
+                        limit = MAX_CONSENT_ACTION_BYTES,
+                        "oversized consent action; closing this operator connection"
+                    );
+                    break;
+                }
                 let Some(decoded) = service.decode(text) else {
                     continue;
                 };
@@ -235,6 +245,30 @@ mod tests {
         let entries: Vec<xenia_ledger::LedgerEntry> = bincode::deserialize(&bytes).unwrap();
         assert_eq!(entries.len(), 1);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn oversized_action_closes_only_the_offending_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = oneshot::channel();
+        let (server, service) = test_server(tx);
+        tokio::spawn(server.run(listener));
+
+        let mut oversized = connect(&addr).await;
+        oversized
+            .send(Message::Text("x".repeat(MAX_CONSENT_ACTION_BYTES + 1).into()))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(service.state(), ConsentSessionState::Pending);
+
+        let mut legitimate = connect(&addr).await;
+        legitimate
+            .send(Message::Text("Approve".into()))
+            .await
+            .unwrap();
+        assert!(rx.await.unwrap());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

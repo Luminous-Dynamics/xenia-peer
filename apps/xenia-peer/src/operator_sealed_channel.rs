@@ -89,6 +89,8 @@ pub(crate) enum OperatorChannelError {
     /// The handshake authenticated an enrolled operator, but that operator id is
     /// on the live revocation list — refused fail-closed without a restart.
     Revoked(String),
+    /// A decrypted operator payload exceeded the bounded consent-action size.
+    OversizedPayload { bytes: usize, limit: usize },
 }
 
 impl std::fmt::Display for OperatorChannelError {
@@ -100,6 +102,9 @@ impl std::fmt::Display for OperatorChannelError {
             }
             OperatorChannelError::Revoked(id) => {
                 write!(f, "operator '{id}' is revoked")
+            }
+            OperatorChannelError::OversizedPayload { bytes, limit } => {
+                write!(f, "operator payload is {bytes} bytes; limit is {limit}")
             }
         }
     }
@@ -340,6 +345,12 @@ pub(crate) async fn serve_sealed_operator_channel<T: Transport>(
                     tracing::warn!("failed to open sealed consent envelope");
                     continue;
                 };
+                if plaintext.len() > crate::consent_authority::MAX_CONSENT_ACTION_BYTES {
+                    return Err(OperatorChannelError::OversizedPayload {
+                        bytes: plaintext.len(),
+                        limit: crate::consent_authority::MAX_CONSENT_ACTION_BYTES,
+                    });
+                }
                 let Ok(text) = std::str::from_utf8(&plaintext) else {
                     continue;
                 };
@@ -437,6 +448,11 @@ pub(crate) async fn run_sealed_operator_endpoint(
             Err(err @ OperatorChannelError::Revoked(_)) => {
                 let total = metrics.record_revoked();
                 tracing::warn!(error = %err, peer = %peer, revoked_total = total, "revoked operator attempted the sealed operator channel");
+                continue 'accept;
+            }
+            Err(err @ OperatorChannelError::OversizedPayload { .. }) => {
+                let total = metrics.record_handshake_failure();
+                tracing::warn!(error = %err, peer = %peer, protocol_failures_total = total, "oversized sealed operator payload refused");
                 continue 'accept;
             }
         }

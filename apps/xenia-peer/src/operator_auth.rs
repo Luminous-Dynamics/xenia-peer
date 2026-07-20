@@ -87,6 +87,10 @@ impl RateLimiter {
     }
 }
 
+/// Maximum number of unconsumed authentication challenges retained at once.
+/// This bounds unauthenticated memory growth even when callers never answer.
+pub(crate) const MAX_OUTSTANDING_CHALLENGES: usize = 1_024;
+
 /// Outstanding challenges awaiting a response: nonce -> expiry (unix secs).
 /// A challenge is single-use -- [`Self::consume`] removes it.
 #[derive(Debug, Default)]
@@ -99,9 +103,16 @@ impl ChallengeStore {
         Self::default()
     }
 
-    /// Record an issued challenge with `now + ttl_secs` expiry.
-    pub(crate) fn issue(&mut self, nonce: [u8; 32], now: u64, ttl_secs: u64) {
-        self.outstanding.insert(nonce, now.saturating_add(ttl_secs));
+    /// Record an issued challenge with `now + ttl_secs` expiry. Returns false
+    /// when the bounded store is full; callers must refuse issuance rather than
+    /// evicting a still-valid challenge and surprising an in-flight operator.
+    pub(crate) fn issue(&mut self, nonce: [u8; 32], now: u64, ttl_secs: u64) -> bool {
+        if self.outstanding.len() >= MAX_OUTSTANDING_CHALLENGES {
+            return false;
+        }
+        self.outstanding
+            .insert(nonce, now.saturating_add(ttl_secs));
+        true
     }
 
     /// Consume a challenge: it must be outstanding and unexpired. Returns
@@ -656,6 +667,20 @@ mod tests {
         // Next window resets the count.
         assert!(rl.allow(1060));
         assert!(rl.allow(1061));
+    }
+
+    #[test]
+    fn challenge_store_refuses_unbounded_growth() {
+        let mut challenges = ChallengeStore::new();
+        for index in 0..MAX_OUTSTANDING_CHALLENGES {
+            let mut nonce = [0u8; 32];
+            nonce[..8].copy_from_slice(&(index as u64).to_le_bytes());
+            assert!(challenges.issue(nonce, 1_000, CHALLENGE_TTL_SECS));
+        }
+        assert_eq!(challenges.len(), MAX_OUTSTANDING_CHALLENGES);
+        assert!(!challenges.issue([0xFF; 32], 1_000, CHALLENGE_TTL_SECS));
+        challenges.gc(1_000 + CHALLENGE_TTL_SECS + 1);
+        assert!(challenges.issue([0xFF; 32], 2_000, CHALLENGE_TTL_SECS));
     }
 
     #[test]
