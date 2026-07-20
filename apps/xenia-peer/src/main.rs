@@ -2341,6 +2341,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         receipt.offer_digest,
                         &receipt.operator_id,
                         receipt.operator_ed25519_pubkey,
+                        receipt.authorization_deadline_unix_secs,
                     )?;
                 } else if require_operator_auth {
                     return Err(

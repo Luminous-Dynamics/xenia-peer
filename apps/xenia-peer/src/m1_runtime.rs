@@ -19,6 +19,7 @@ use std::fmt;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -62,6 +63,10 @@ pub(crate) enum M1RuntimeError {
     InvalidAuthorizationBinding(String),
     DuplicateAuthorizationBinding,
     MissingRequiredAuthorizationBinding,
+    AuthorizationLeaseExpired {
+        deadline_unix_secs: u64,
+        now_unix_secs: u64,
+    },
     GrantDoesNotMatchOffer {
         offered: M1PermissionSet,
         granted: M1PermissionSet,
@@ -123,6 +128,13 @@ impl fmt::Display for M1RuntimeError {
             Self::MissingRequiredAuthorizationBinding => write!(
                 f,
                 "M1 privileged flow requires an authenticated operator authorization binding"
+            ),
+            Self::AuthorizationLeaseExpired {
+                deadline_unix_secs,
+                now_unix_secs,
+            } => write!(
+                f,
+                "M1 operator authorization lease expired at unix second {deadline_unix_secs} (current second {now_unix_secs})"
             ),
             Self::GrantDoesNotMatchOffer { offered, granted } => write!(
                 f,
@@ -808,8 +820,10 @@ pub(crate) fn verify_sealed_transcript_bound_evidence_bundle_dir_with_backend(
     ))
 }
 
-const AUTHORIZATION_BINDING_SCOPE_PREFIX: &str =
+const AUTHORIZATION_BINDING_SCOPE_PREFIX_V1: &str =
     "xenia-runtime-authorization-binding-v1:";
+const AUTHORIZATION_BINDING_SCOPE_PREFIX_V2: &str =
+    "xenia-runtime-authorization-binding-v2:";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeAuthorizationPolicy {
@@ -822,12 +836,14 @@ fn authorization_binding_scope(
     offer_digest: &[u8; 32],
     operator_id: &str,
     operator_ed25519_pubkey: &[u8; 32],
+    authorization_deadline_unix_secs: Option<u64>,
 ) -> String {
     format!(
-        "{AUTHORIZATION_BINDING_SCOPE_PREFIX}permissions={permissions};offer_digest={};operator_id_hex={};operator_ed25519={}",
+        "{AUTHORIZATION_BINDING_SCOPE_PREFIX_V2}permissions={permissions};offer_digest={};operator_id_hex={};operator_ed25519={};lease_deadline_unix_secs={}",
         hex::encode(offer_digest),
         hex::encode(operator_id.as_bytes()),
         hex::encode(operator_ed25519_pubkey),
+        authorization_deadline_unix_secs.unwrap_or(0),
     )
 }
 
@@ -835,12 +851,21 @@ fn validate_authorization_binding_scope(
     scope: &str,
     expected_permissions: &str,
     event_source_id: &[u8; 32],
-) -> Result<(), M1RuntimeError> {
-    let fields = scope
-        .strip_prefix(AUTHORIZATION_BINDING_SCOPE_PREFIX)
-        .ok_or_else(|| {
-            M1RuntimeError::InvalidAuthorizationBinding("unknown binding version".to_string())
-        })?;
+) -> Result<Option<u64>, M1RuntimeError> {
+    let (fields, binding_version) = if let Some(fields) =
+        scope.strip_prefix(AUTHORIZATION_BINDING_SCOPE_PREFIX_V2)
+    {
+        (fields, 2u8)
+    } else if let Some(fields) = scope.strip_prefix(AUTHORIZATION_BINDING_SCOPE_PREFIX_V1) {
+        // Historical bindings did not persist the host-local authorization
+        // deadline. They remain readable as unlimited grants for compatibility,
+        // but every newly written authenticated binding uses v2.
+        (fields, 1u8)
+    } else {
+        return Err(M1RuntimeError::InvalidAuthorizationBinding(
+            "unknown binding version".to_string(),
+        ));
+    };
     let mut fields = fields.split(';');
     let permissions = fields
         .next()
@@ -866,6 +891,25 @@ fn validate_authorization_binding_scope(
         .ok_or_else(|| {
             M1RuntimeError::InvalidAuthorizationBinding("missing operator key".to_string())
         })?;
+    let authorization_deadline_unix_secs = if binding_version == 2 {
+        let deadline = fields
+            .next()
+            .and_then(|field| field.strip_prefix("lease_deadline_unix_secs="))
+            .ok_or_else(|| {
+                M1RuntimeError::InvalidAuthorizationBinding(
+                    "missing authorization lease deadline".to_string(),
+                )
+            })?
+            .parse::<u64>()
+            .map_err(|_| {
+                M1RuntimeError::InvalidAuthorizationBinding(
+                    "malformed authorization lease deadline".to_string(),
+                )
+            })?;
+        (deadline > 0).then_some(deadline)
+    } else {
+        None
+    };
     if fields.next().is_some() {
         return Err(M1RuntimeError::InvalidAuthorizationBinding(
             "unexpected trailing fields".to_string(),
@@ -905,7 +949,7 @@ fn validate_authorization_binding_scope(
             "authorization binding operator key",
         ));
     }
-    Ok(())
+    Ok(authorization_deadline_unix_secs)
 }
 
 pub(crate) struct M1RuntimeSession {
@@ -918,6 +962,7 @@ pub(crate) struct M1RuntimeSession {
     scope: String,
     session_transcript_hash: Option<[u8; 32]>,
     authorization_binding_action_id: Option<Uuid>,
+    authorization_deadline_unix_secs: Option<u64>,
     authorization_policy: RuntimeAuthorizationPolicy,
     next_audit_index: usize,
 }
@@ -956,6 +1001,7 @@ impl M1RuntimeSession {
             scope: configured_permissions.scope_descriptor(),
             session_transcript_hash: None,
             authorization_binding_action_id: None,
+            authorization_deadline_unix_secs: None,
             authorization_policy: RuntimeAuthorizationPolicy::Compatibility,
             next_audit_index: 0,
         }
@@ -1025,6 +1071,12 @@ impl M1RuntimeSession {
         self.authorization_binding_action_id
     }
 
+    /// Host-local authorization deadline committed into the signed runtime
+    /// binding. `None` means no restrictive lease was configured.
+    pub(crate) fn authorization_deadline_unix_secs(&self) -> Option<u64> {
+        self.authorization_deadline_unix_secs
+    }
+
     /// Require a signed operator-authorization binding before any privileged
     /// runtime operation or transcript-bound evidence export. The grant may be
     /// activated first so the authority can append its receipt immediately
@@ -1035,11 +1087,23 @@ impl M1RuntimeSession {
     }
 
     fn ensure_authorization_binding(&self) -> Result<(), M1RuntimeError> {
+        self.ensure_authorization_binding_at(unix_now_secs())
+    }
+
+    fn ensure_authorization_binding_at(&self, now_unix_secs: u64) -> Result<(), M1RuntimeError> {
         if self.authorization_policy
             == RuntimeAuthorizationPolicy::AuthenticatedOperatorBindingRequired
             && self.authorization_binding_action_id.is_none()
         {
             return Err(M1RuntimeError::MissingRequiredAuthorizationBinding);
+        }
+        if let Some(deadline_unix_secs) = self.authorization_deadline_unix_secs
+            && now_unix_secs >= deadline_unix_secs
+        {
+            return Err(M1RuntimeError::AuthorizationLeaseExpired {
+                deadline_unix_secs,
+                now_unix_secs,
+            });
         }
         Ok(())
     }
@@ -1055,6 +1119,7 @@ impl M1RuntimeSession {
         offer_digest: [u8; 32],
         operator_id: &str,
         operator_ed25519_pubkey: [u8; 32],
+        authorization_deadline_unix_secs: Option<u64>,
     ) -> Result<(), M1RuntimeError> {
         if self.session.state() != M1SessionState::Active {
             return Err(M1RuntimeError::InvalidAuthorizationBinding(
@@ -1069,6 +1134,7 @@ impl M1RuntimeSession {
             &offer_digest,
             operator_id,
             &operator_ed25519_pubkey,
+            authorization_deadline_unix_secs,
         );
         self.chain.append(ConsentEventRecord {
             source_id: operator_ed25519_pubkey,
@@ -1078,6 +1144,7 @@ impl M1RuntimeSession {
             scope,
         })?;
         self.authorization_binding_action_id = Some(Uuid::from_bytes(action_id));
+        self.authorization_deadline_unix_secs = authorization_deadline_unix_secs;
         Ok(())
     }
 
@@ -1219,12 +1286,13 @@ impl M1RuntimeSession {
                 if self.authorization_binding_action_id.is_some() {
                     return Err(M1RuntimeError::DuplicateAuthorizationBinding);
                 }
-                validate_authorization_binding_scope(
+                let authorization_deadline_unix_secs = validate_authorization_binding_scope(
                     &entry.event.scope,
                     &self.scope,
                     &entry.event.source_id,
                 )?;
                 self.authorization_binding_action_id = Some(entry.event.request_id);
+                self.authorization_deadline_unix_secs = authorization_deadline_unix_secs;
                 continue;
             }
             if entry.event.source_id != self.source_id {
@@ -1397,6 +1465,13 @@ impl M1RuntimeSession {
         self.next_audit_index = self.session.audit().len();
         Ok(())
     }
+}
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn evidence_bundle_paths(dir: &Path) -> M1EvidenceBundlePaths {
@@ -3185,6 +3260,7 @@ mod tests {
                 [0x33; 32],
                 "alice",
                 [0x11; 32],
+                None,
             )
             .unwrap();
         runtime.stream_frame().unwrap();
@@ -3217,6 +3293,7 @@ mod tests {
                 [0x33; 32],
                 "alice",
                 [0x11; 32],
+                None,
             )
             .unwrap();
         assert_eq!(
@@ -3240,6 +3317,63 @@ mod tests {
             rehydrated.authorization_binding_action_id(),
             Some(Uuid::from_bytes(action_id))
         );
+    }
+
+    #[test]
+    fn authorization_lease_survives_rehydration_and_blocks_expired_runtime() {
+        let signing_key = SigningKey::from_bytes(&[22; 32]);
+        let source_id = [0xAB; 32];
+        let session_id = Uuid::from_bytes([1; 16]);
+        let request_id = Uuid::from_bytes([2; 16]);
+        let grant = M1PermissionSet {
+            stream_frame: true,
+            ..M1PermissionSet::default()
+        };
+        let mut runtime = M1RuntimeSession::new(
+            signing_key.clone(),
+            source_id,
+            session_id,
+            request_id,
+            grant,
+        );
+        runtime.require_authenticated_operator_binding();
+        runtime.offer().unwrap();
+        runtime.grant_consent().unwrap();
+        runtime
+            .bind_operator_authorization(
+                [0x45; 16],
+                [0x34; 32],
+                "alice",
+                [0x12; 32],
+                Some(110),
+            )
+            .unwrap();
+        assert!(runtime.ensure_authorization_binding_at(109).is_ok());
+        assert!(matches!(
+            runtime.ensure_authorization_binding_at(110),
+            Err(M1RuntimeError::AuthorizationLeaseExpired {
+                deadline_unix_secs: 110,
+                now_unix_secs: 110,
+            })
+        ));
+
+        let mut rehydrated = M1RuntimeSession::from_persisted_entries(
+            signing_key,
+            runtime.entries(),
+            source_id,
+            session_id,
+            request_id,
+        )
+        .unwrap();
+        rehydrated.require_authenticated_operator_binding();
+        assert_eq!(rehydrated.authorization_deadline_unix_secs(), Some(110));
+        assert!(matches!(
+            rehydrated.ensure_authorization_binding_at(111),
+            Err(M1RuntimeError::AuthorizationLeaseExpired {
+                deadline_unix_secs: 110,
+                now_unix_secs: 111,
+            })
+        ));
     }
 
     #[test]

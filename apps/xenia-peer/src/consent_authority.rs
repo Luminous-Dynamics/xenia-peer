@@ -48,6 +48,11 @@ pub(crate) struct ConsentApprovalReceipt {
     pub(crate) offer_digest: [u8; 32],
     pub(crate) operator_id: String,
     pub(crate) operator_ed25519_pubkey: [u8; 32],
+    /// Host-local authorization deadline that was active when approval was
+    /// durably committed. `None` preserves the historical unlimited-session
+    /// behavior. The runtime evidence ledger copies this value so restart or
+    /// offline rehydration cannot silently forget a restrictive lease.
+    pub(crate) authorization_deadline_unix_secs: Option<u64>,
 }
 
 /// Daemon-generated reason for a terminal lifecycle transition that was not
@@ -697,12 +702,15 @@ impl ConsentDecisionService {
                 .authorized
                 .as_ref()
                 .map(|authorized| authorized.operator_id.clone());
+            let authorization_deadline_unix_secs = (self.authorization_lease_secs > 0)
+                .then(|| now.saturating_add(self.authorization_lease_secs));
             let approval_receipt = decoded.authorized.as_ref().map(|authorized| {
                 ConsentApprovalReceipt {
                     action_id: authorized.action_id,
                     offer_digest: authorized.offer_digest,
                     operator_id: authorized.operator_id.clone(),
                     operator_ed25519_pubkey: authorized.ed25519_pubkey,
+                    authorization_deadline_unix_secs,
                 }
             });
             match self.approving_operator_id.write() {
@@ -1158,6 +1166,7 @@ mod tests {
         let receipt = service.approval_receipt().expect("authenticated receipt");
         assert_eq!(receipt.action_id, [0x44; 16]);
         assert_eq!(receipt.operator_id, "alice");
+        assert_eq!(receipt.authorization_deadline_unix_secs, None);
         assert_eq!(ledger.lock().await.len(), 1);
 
         let replay = service
@@ -1200,13 +1209,27 @@ mod tests {
         let mut service = service_with_sender(grant_tx, ledger.clone());
         service.authorization_lease_secs = 10;
 
-        let approval = service.decode_at("Approve", 100).unwrap();
         assert!(matches!(
-            service.apply_at(approval, 100).await,
+            service
+                .apply_at(
+                    DecodedConsent {
+                        action: ConsentAction::Approve,
+                        authorized: Some(authorized_approval()),
+                    },
+                    100,
+                )
+                .await,
             ConsentFollowup::KeepServing
         ));
         assert!(grant_rx.await.unwrap());
         assert_eq!(service.authorization_lease_deadline(), Some(110));
+        assert_eq!(
+            service
+                .approval_receipt()
+                .expect("authenticated approval receipt")
+                .authorization_deadline_unix_secs,
+            Some(110)
+        );
         assert!(!service.expire_active_lease_at(109).await);
         assert!(service.expire_active_lease_at(110).await);
         assert_eq!(service.state(), ConsentSessionState::LeaseExpired);
