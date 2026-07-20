@@ -38,6 +38,8 @@ pub(crate) const CONSENT_COMPACTED_ACTIVE_STATE_SCHEMA: &str =
     "xenia-consent-compacted-active-state-v2";
 const CONSENT_COMPACTED_CUTOVER_RECEIPT_SCHEMA: &str =
     "xenia-consent-compacted-cutover-receipt-v1";
+pub(crate) const CONSENT_COMPACTED_STATE_PIN_SCHEMA: &str =
+    "xenia-consent-compacted-state-pin-v1";
 
 /// One completed consent ceremony retained after its detailed entries move to
 /// verified cold storage.
@@ -107,6 +109,21 @@ pub(crate) struct ConsentCompactedCutoverReceiptV1 {
     pub(crate) signature: [u8; 64],
 }
 
+/// Independently retainable signed observation of one compacted active-state
+/// generation. A later state can prove append-only extension from this pin by
+/// presenting the resident signed suffix after the pinned checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConsentCompactedStatePinV1 {
+    pub(crate) schema: String,
+    pub(crate) ledger_epoch_id: [u8; 32],
+    pub(crate) cutover_receipt_fingerprint: [u8; 32],
+    pub(crate) generation: u64,
+    pub(crate) active_state_digest: [u8; 32],
+    pub(crate) checkpoint: LedgerCheckpoint,
+    pub(crate) created_at_unix_secs: u64,
+    pub(crate) signature: [u8; 64],
+}
+
 /// Durable, appendable consent-ledger state after a verified compaction
 /// activation. The original snapshot and signed cutover receipt remain
 /// immutable, while `resident_entries` and `current_checkpoint` advance
@@ -116,6 +133,8 @@ pub(crate) struct ConsentCompactedActiveStateV1 {
     pub(crate) schema: String,
     pub(crate) activation_snapshot: ConsentCompactedSnapshotV1,
     pub(crate) cutover_receipt: ConsentCompactedCutoverReceiptV1,
+    pub(crate) generation: u64,
+    pub(crate) previous_state_digest: [u8; 32],
     pub(crate) current_checkpoint: LedgerCheckpoint,
     pub(crate) resident_entries: Vec<LedgerEntry>,
     pub(crate) archived_replay_action_ids: Vec<[u8; 16]>,
@@ -254,6 +273,24 @@ pub(crate) enum ConsentRecoveryError {
     CutoverTimestampRegressed,
     #[error("consent compacted cutover receipt does not bind the activation snapshot")]
     CutoverSnapshotMismatch,
+    #[error("unsupported consent compacted state pin schema: {schema}")]
+    UnsupportedStatePinSchema { schema: String },
+    #[error("consent compacted state pin signature is invalid")]
+    InvalidStatePinSignature,
+    #[error("consent compacted state pin belongs to a different cutover or ledger epoch")]
+    StatePinIdentityMismatch,
+    #[error("consent compacted state pin generation {pinned} is ahead of active generation {active}")]
+    StatePinGenerationRollback { pinned: u64, active: u64 },
+    #[error("consent compacted state pin does not match the active state at the same generation")]
+    StatePinSameGenerationMismatch,
+    #[error("consent compacted state pin predates the compacted archive anchor")]
+    StatePinPredatesAnchor,
+    #[error("consent compacted state pin creation timestamp predates its checkpoint")]
+    StatePinTimestampRegressed,
+    #[error("consent compacted active-state generation metadata is invalid")]
+    ActiveGenerationMismatch,
+    #[error("consent compacted active-state generation overflow")]
+    ActiveGenerationOverflow,
     #[error("consent compaction manifest verification failed: {0}")]
     Manifest(#[from] LedgerCompactionError),
     #[error("consent recovery checkpoint fingerprint failed: {0}")]
@@ -771,6 +808,97 @@ impl ConsentCompactedCutoverReceiptV1 {
     }
 }
 
+impl ConsentCompactedStatePinV1 {
+    pub(crate) fn sign_for_state(
+        state: &ConsentCompactedActiveStateV1,
+        signing_key: &LedgerSigningKey,
+        created_at_unix_secs: u64,
+    ) -> Result<Self, ConsentRecoveryError> {
+        state.verify(&signing_key.verifying_key())?;
+        if created_at_unix_secs < state.current_checkpoint.timestamp_unix_secs {
+            return Err(ConsentRecoveryError::StatePinTimestampRegressed);
+        }
+        let mut pin = Self {
+            schema: CONSENT_COMPACTED_STATE_PIN_SCHEMA.to_string(),
+            ledger_epoch_id: state.cutover_receipt.ledger_epoch_id,
+            cutover_receipt_fingerprint: consent_compacted_cutover_receipt_fingerprint(
+                &state.cutover_receipt,
+            )?,
+            generation: state.generation,
+            active_state_digest: state.state_digest,
+            checkpoint: state.current_checkpoint.clone(),
+            created_at_unix_secs,
+            signature: [0u8; 64],
+        };
+        let message = consent_compacted_state_pin_message(&pin)?;
+        pin.signature = signing_key.sign(&message).to_bytes();
+        pin.verify_against_state(state, &signing_key.verifying_key())?;
+        Ok(pin)
+    }
+
+    pub(crate) fn verify_against_state(
+        &self,
+        state: &ConsentCompactedActiveStateV1,
+        public_key: &VerifyingKey,
+    ) -> Result<(), ConsentRecoveryError> {
+        if self.schema != CONSENT_COMPACTED_STATE_PIN_SCHEMA {
+            return Err(ConsentRecoveryError::UnsupportedStatePinSchema {
+                schema: self.schema.clone(),
+            });
+        }
+        state.verify(public_key)?;
+        Verifier::verify_checkpoint(&self.checkpoint)?;
+        if self.checkpoint.ledger_public_key != public_key.to_bytes()
+            || self.ledger_epoch_id != state.cutover_receipt.ledger_epoch_id
+            || self.cutover_receipt_fingerprint
+                != consent_compacted_cutover_receipt_fingerprint(&state.cutover_receipt)?
+        {
+            return Err(ConsentRecoveryError::StatePinIdentityMismatch);
+        }
+        if self.created_at_unix_secs < self.checkpoint.timestamp_unix_secs {
+            return Err(ConsentRecoveryError::StatePinTimestampRegressed);
+        }
+        let message = consent_compacted_state_pin_message(self)?;
+        public_key
+            .verify(&message, &Signature::from_bytes(&self.signature))
+            .map_err(|_| ConsentRecoveryError::InvalidStatePinSignature)?;
+        if self.generation > state.generation {
+            return Err(ConsentRecoveryError::StatePinGenerationRollback {
+                pinned: self.generation,
+                active: state.generation,
+            });
+        }
+        if self.generation == state.generation {
+            if self.active_state_digest != state.state_digest
+                || self.checkpoint != state.current_checkpoint
+            {
+                return Err(ConsentRecoveryError::StatePinSameGenerationMismatch);
+            }
+            return Ok(());
+        }
+        let base = &state.activation_snapshot.recovery_summary.through_checkpoint;
+        if self.checkpoint.entry_count < base.entry_count {
+            return Err(ConsentRecoveryError::StatePinPredatesAnchor);
+        }
+        let offset = self
+            .checkpoint
+            .entry_count
+            .checked_sub(base.entry_count)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or(ConsentRecoveryError::StatePinPredatesAnchor)?;
+        let suffix = state
+            .resident_entries
+            .get(offset..)
+            .ok_or(ConsentRecoveryError::StatePinPredatesAnchor)?;
+        Verifier::verify_checkpoint_extension(
+            &self.checkpoint,
+            &state.current_checkpoint,
+            suffix,
+        )?;
+        Ok(())
+    }
+}
+
 impl ConsentCompactedActiveStateV1 {
     /// Activate a verified compacted snapshot. Cold archive segments are
     /// required here; later startup can verify the signed active state without
@@ -804,6 +932,8 @@ impl ConsentCompactedActiveStateV1 {
             schema: CONSENT_COMPACTED_ACTIVE_STATE_SCHEMA.to_string(),
             activation_snapshot: snapshot,
             cutover_receipt,
+            generation: 0,
+            previous_state_digest: [0u8; 32],
             current_checkpoint,
             resident_entries,
             archived_replay_action_ids,
@@ -836,6 +966,11 @@ impl ConsentCompactedActiveStateV1 {
         }
         if consent_compacted_active_state_digest(self)? != self.state_digest {
             return Err(ConsentRecoveryError::ActiveStateDigestMismatch);
+        }
+        if (self.generation == 0 && self.previous_state_digest != [0u8; 32])
+            || (self.generation > 0 && self.previous_state_digest == [0u8; 32])
+        {
+            return Err(ConsentRecoveryError::ActiveGenerationMismatch);
         }
         self.activation_snapshot.verify_signed_frontier(public_key)?;
         self.cutover_receipt
@@ -896,10 +1031,16 @@ impl ConsentCompactedActiveStateV1 {
         if chain.base_checkpoint() != Some(expected_anchor) {
             return Err(ConsentRecoveryError::ActiveAnchorMismatch);
         }
+        let generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(ConsentRecoveryError::ActiveGenerationOverflow)?;
         let mut next = Self {
             schema: CONSENT_COMPACTED_ACTIVE_STATE_SCHEMA.to_string(),
             activation_snapshot: self.activation_snapshot.clone(),
             cutover_receipt: self.cutover_receipt.clone(),
+            generation,
+            previous_state_digest: self.state_digest,
             current_checkpoint: chain.sign_checkpoint(timestamp_unix_secs),
             resident_entries: chain.iter().cloned().collect(),
             archived_replay_action_ids: self.archived_replay_action_ids.clone(),
@@ -1108,6 +1249,37 @@ fn consent_compacted_cutover_receipt_fingerprint(
     Ok(*blake3::hash(&message).as_bytes())
 }
 
+fn consent_compacted_state_pin_message(
+    pin: &ConsentCompactedStatePinV1,
+) -> Result<Vec<u8>, ConsentRecoveryError> {
+    if pin.schema != CONSENT_COMPACTED_STATE_PIN_SCHEMA {
+        return Err(ConsentRecoveryError::UnsupportedStatePinSchema {
+            schema: pin.schema.clone(),
+        });
+    }
+    let checkpoint = checkpoint_fingerprint(&pin.checkpoint)?;
+    let mut message = Vec::with_capacity(256);
+    message.extend_from_slice(b"xenia:consent-compacted-state-pin:v1");
+    message.push(0);
+    message.extend_from_slice(pin.schema.as_bytes());
+    message.push(0);
+    message.extend_from_slice(&pin.ledger_epoch_id);
+    message.extend_from_slice(&pin.cutover_receipt_fingerprint);
+    message.extend_from_slice(&pin.generation.to_be_bytes());
+    message.extend_from_slice(&pin.active_state_digest);
+    message.extend_from_slice(&checkpoint);
+    message.extend_from_slice(&pin.created_at_unix_secs.to_be_bytes());
+    Ok(message)
+}
+
+pub(crate) fn consent_compacted_state_pin_fingerprint(
+    pin: &ConsentCompactedStatePinV1,
+) -> Result<[u8; 32], ConsentRecoveryError> {
+    let mut message = consent_compacted_state_pin_message(pin)?;
+    message.extend_from_slice(&pin.signature);
+    Ok(*blake3::hash(&message).as_bytes())
+}
+
 fn consent_compacted_active_state_digest(
     state: &ConsentCompactedActiveStateV1,
 ) -> Result<[u8; 32], ConsentRecoveryError> {
@@ -1127,6 +1299,8 @@ fn consent_compacted_active_state_digest(
     hasher.update(&consent_compacted_cutover_receipt_fingerprint(
         &state.cutover_receipt,
     )?);
+    hasher.update(&state.generation.to_be_bytes());
+    hasher.update(&state.previous_state_digest);
     hasher.update(&activation);
     hasher.update(&current);
     hasher.update(&(state.resident_entries.len() as u64).to_be_bytes());
@@ -1564,6 +1738,53 @@ mod tests {
                 &active.activation_snapshot,
             ),
             Err(ConsentRecoveryError::CrossEpochCutover)
+        );
+    }
+
+    #[test]
+    fn compacted_state_pin_detects_rollback_and_accepts_signed_extension() {
+        let segments = complete_archive();
+        let key = SigningKey::from_bytes(&[0x44; 32]);
+        let mut chain = Chain::from_entries(segments[0].entries.clone(), key.clone());
+        chain
+            .append(event(2, 4, ConsentKind::Denial, [0x30; 32]))
+            .unwrap();
+        let bundle = ConsentCompactionBundleV1::build(&chain, segments.clone(), 102).unwrap();
+        let entries = chain.iter().cloned().collect::<Vec<_>>();
+        let snapshot = ConsentCompactedSnapshotV1::build(
+            &bundle,
+            &entries,
+            &key.verifying_key(),
+        )
+        .unwrap();
+        let active = ConsentCompactedActiveStateV1::activate(
+            snapshot,
+            &segments,
+            &key,
+            103,
+        )
+        .unwrap();
+        let pin = ConsentCompactedStatePinV1::sign_for_state(&active, &key, 104).unwrap();
+
+        let mut restored = active.restore_state(&key).unwrap();
+        restored
+            .chain
+            .append(event(3, 5, ConsentKind::Denial, [0x31; 32]))
+            .unwrap();
+        let advanced = active.advance_from_chain(&restored.chain, 105).unwrap();
+        pin.verify_against_state(&advanced, &key.verifying_key())
+            .unwrap();
+        assert_eq!(advanced.generation, 1);
+        assert_eq!(advanced.previous_state_digest, active.state_digest);
+
+        let newer_pin =
+            ConsentCompactedStatePinV1::sign_for_state(&advanced, &key, 106).unwrap();
+        assert_eq!(
+            newer_pin.verify_against_state(&active, &key.verifying_key()),
+            Err(ConsentRecoveryError::StatePinGenerationRollback {
+                pinned: 1,
+                active: 0,
+            })
         );
     }
 
