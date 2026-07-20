@@ -38,6 +38,8 @@ pub(crate) const CONSENT_PURGE_RETENTION_WITNESS_BUNDLE_SCHEMA: &str =
     "xenia-consent-purge-retention-witness-bundle-v1";
 pub(crate) const MAX_PURGE_RETENTION_WITNESSES: usize = 64;
 pub(crate) const MAX_PURGE_RETENTION_WITNESS_FUTURE_SKEW_SECS: u64 = 5 * 60;
+pub(crate) const CONSENT_PURGE_RETENTION_ANCHOR_SCHEMA: &str =
+    "xenia-consent-purge-retention-anchor-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -69,6 +71,21 @@ pub(crate) struct ConsentPurgeRetentionWitnessBundleV1 {
     pub(crate) schema: String,
     pub(crate) certificate_fingerprint: [u8; 32],
     pub(crate) witnesses: Vec<ConsentPurgeRetentionWitnessV1>,
+}
+
+/// Compact externally retainable join of the authority certificate and
+/// independent witness observations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConsentPurgeRetentionAnchorV1 {
+    pub(crate) schema: String,
+    pub(crate) ledger_epoch_id: [u8; 32],
+    pub(crate) certificate_fingerprint: [u8; 32],
+    pub(crate) witness_bundle_fingerprint: [u8; 32],
+    pub(crate) protected_inventory_digest: [u8; 32],
+    pub(crate) package_directory: String,
+    pub(crate) retain_until_unix_secs: u64,
+    pub(crate) anchored_at_unix_secs: u64,
+    pub(crate) signature: [u8; 64],
 }
 
 /// Ledger-signed obligation to retain one exact purge rollback package.
@@ -120,6 +137,8 @@ pub(crate) enum ConsentPurgeRetentionError {
     ProtectedArtifactTooLarge { path: String, maximum: u64 },
     #[error("consent purge retention path is not inside the rollback package: {path}")]
     ProtectedArtifactOutsidePackage { path: String },
+    #[error("consent purge rollback package directory is not canonical private storage: {path}")]
+    PackageDirectoryNotPrivate { path: String },
     #[error("consent purge retention witness bundle has unsupported schema: {schema}")]
     UnsupportedWitnessBundleSchema { schema: String },
     #[error("consent purge retention witness bundle refers to another certificate")]
@@ -144,6 +163,16 @@ pub(crate) enum ConsentPurgeRetentionError {
     WitnessQuorumNotMet { observed: usize, required: usize },
     #[error("consent purge retention witness bundle exceeds {maximum} witnesses: {count}")]
     TooManyWitnesses { count: usize, maximum: usize },
+    #[error("consent purge retention anchor has unsupported schema: {schema}")]
+    UnsupportedAnchorSchema { schema: String },
+    #[error("consent purge retention anchor identity does not match its evidence")]
+    AnchorIdentityMismatch,
+    #[error("consent purge retention anchor signature is invalid")]
+    InvalidAnchorSignature,
+    #[error("consent purge retention anchor timestamp is outside the certificate window")]
+    AnchorOutsideRetentionWindow,
+    #[error("candidate path aliases protected purge-retention evidence: {path}")]
+    ProtectedCandidateAlias { path: String },
     #[error("consent purge retention encoding length overflow")]
     EncodingLengthOverflow,
     #[error("consent purge retention prerequisite failed: {0}")]
@@ -355,6 +384,206 @@ impl ConsentPurgeRetentionCertificateV1 {
         }
         Ok(())
     }
+}
+
+impl ConsentPurgeRetentionAnchorV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn sign(
+        certificate: &ConsentPurgeRetentionCertificateV1,
+        witnesses: &ConsentPurgeRetentionWitnessBundleV1,
+        trusted_witness_keys: &[[u8; 32]],
+        minimum_quorum: usize,
+        signing_key: &LedgerSigningKey,
+        anchored_at_unix_secs: u64,
+        maximum_future_skew_secs: u64,
+    ) -> Result<Self, ConsentPurgeRetentionError> {
+        certificate.verify_authority_signature(&signing_key.verifying_key())?;
+        witnesses.verify_quorum(
+            certificate,
+            trusted_witness_keys,
+            minimum_quorum,
+            anchored_at_unix_secs,
+            maximum_future_skew_secs,
+        )?;
+        verify_protected_inventory_files(certificate)?;
+        if anchored_at_unix_secs < certificate.issued_at_unix_secs
+            || anchored_at_unix_secs >= certificate.retain_until_unix_secs
+        {
+            return Err(ConsentPurgeRetentionError::AnchorOutsideRetentionWindow);
+        }
+        let mut anchor = Self {
+            schema: CONSENT_PURGE_RETENTION_ANCHOR_SCHEMA.to_string(),
+            ledger_epoch_id: certificate.ledger_epoch_id,
+            certificate_fingerprint: consent_purge_retention_certificate_fingerprint(certificate)?,
+            witness_bundle_fingerprint: consent_purge_retention_witness_bundle_fingerprint(
+                witnesses,
+            )?,
+            protected_inventory_digest: protected_inventory_digest(
+                &certificate.protected_artifacts,
+            )?,
+            package_directory: certificate.package_directory.clone(),
+            retain_until_unix_secs: certificate.retain_until_unix_secs,
+            anchored_at_unix_secs,
+            signature: [0u8; 64],
+        };
+        anchor.signature = signing_key
+            .sign(&consent_purge_retention_anchor_message(&anchor)?)
+            .to_bytes();
+        anchor.verify(
+            certificate,
+            witnesses,
+            trusted_witness_keys,
+            minimum_quorum,
+            &signing_key.verifying_key(),
+            anchored_at_unix_secs,
+            maximum_future_skew_secs,
+        )?;
+        Ok(anchor)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn verify(
+        &self,
+        certificate: &ConsentPurgeRetentionCertificateV1,
+        witnesses: &ConsentPurgeRetentionWitnessBundleV1,
+        trusted_witness_keys: &[[u8; 32]],
+        minimum_quorum: usize,
+        public_key: &VerifyingKey,
+        now_unix_secs: u64,
+        maximum_future_skew_secs: u64,
+    ) -> Result<(), ConsentPurgeRetentionError> {
+        if self.schema != CONSENT_PURGE_RETENTION_ANCHOR_SCHEMA {
+            return Err(ConsentPurgeRetentionError::UnsupportedAnchorSchema {
+                schema: self.schema.clone(),
+            });
+        }
+        certificate.verify_authority_signature(public_key)?;
+        witnesses.verify_quorum(
+            certificate,
+            trusted_witness_keys,
+            minimum_quorum,
+            now_unix_secs,
+            maximum_future_skew_secs,
+        )?;
+        verify_protected_inventory_files(certificate)?;
+        if self.anchored_at_unix_secs < certificate.issued_at_unix_secs
+            || self.anchored_at_unix_secs >= certificate.retain_until_unix_secs
+            || self.anchored_at_unix_secs
+                > now_unix_secs.saturating_add(maximum_future_skew_secs)
+        {
+            return Err(ConsentPurgeRetentionError::AnchorOutsideRetentionWindow);
+        }
+        if self.ledger_epoch_id != certificate.ledger_epoch_id
+            || self.certificate_fingerprint
+                != consent_purge_retention_certificate_fingerprint(certificate)?
+            || self.witness_bundle_fingerprint
+                != consent_purge_retention_witness_bundle_fingerprint(witnesses)?
+            || self.protected_inventory_digest
+                != protected_inventory_digest(&certificate.protected_artifacts)?
+            || self.package_directory != certificate.package_directory
+            || self.retain_until_unix_secs != certificate.retain_until_unix_secs
+        {
+            return Err(ConsentPurgeRetentionError::AnchorIdentityMismatch);
+        }
+        public_key
+            .verify(
+                &consent_purge_retention_anchor_message(self)?,
+                &Signature::from_bytes(&self.signature),
+            )
+            .map_err(|_| ConsentPurgeRetentionError::InvalidAnchorSignature)
+    }
+}
+
+pub(crate) fn consent_purge_retention_anchor_fingerprint(
+    anchor: &ConsentPurgeRetentionAnchorV1,
+) -> Result<[u8; 32], ConsentPurgeRetentionError> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"xenia:consent-purge-retention-anchor-fingerprint:v1");
+    hasher.update(&consent_purge_retention_anchor_message(anchor)?);
+    hasher.update(&anchor.signature);
+    Ok(*hasher.finalize().as_bytes())
+}
+
+pub(crate) fn verify_candidate_paths_disjoint(
+    certificate: &ConsentPurgeRetentionCertificateV1,
+    candidate_paths: &[PathBuf],
+) -> Result<(), ConsentPurgeRetentionError> {
+    certificate.validate_shape()?;
+    let package_directory = fs::canonicalize(&certificate.package_directory).map_err(|_| {
+        ConsentPurgeRetentionError::ProtectedArtifactMismatch {
+            path: certificate.package_directory.clone(),
+        }
+    })?;
+    let protected = certificate
+        .protected_artifacts
+        .iter()
+        .map(|artifact| {
+            fs::canonicalize(&artifact.path).map_err(|_| {
+                ConsentPurgeRetentionError::ProtectedArtifactMismatch {
+                    path: artifact.path.clone(),
+                }
+            })
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    for candidate in candidate_paths {
+        let canonical = fs::canonicalize(candidate).map_err(|_| {
+            ConsentPurgeRetentionError::ProtectedCandidateAlias {
+                path: candidate.display().to_string(),
+            }
+        })?;
+        if canonical == package_directory
+            || canonical.starts_with(&package_directory)
+            || protected.contains(&canonical)
+            || package_directory.starts_with(&canonical)
+        {
+            return Err(ConsentPurgeRetentionError::ProtectedCandidateAlias {
+                path: candidate.display().to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn consent_purge_retention_anchor_message(
+    anchor: &ConsentPurgeRetentionAnchorV1,
+) -> Result<Vec<u8>, ConsentPurgeRetentionError> {
+    if anchor.schema != CONSENT_PURGE_RETENTION_ANCHOR_SCHEMA {
+        return Err(ConsentPurgeRetentionError::UnsupportedAnchorSchema {
+            schema: anchor.schema.clone(),
+        });
+    }
+    let mut message = Vec::new();
+    message.extend_from_slice(b"xenia:consent-purge-retention-anchor:v1");
+    append_bytes(&mut message, anchor.schema.as_bytes())?;
+    message.extend_from_slice(&anchor.ledger_epoch_id);
+    message.extend_from_slice(&anchor.certificate_fingerprint);
+    message.extend_from_slice(&anchor.witness_bundle_fingerprint);
+    message.extend_from_slice(&anchor.protected_inventory_digest);
+    append_bytes(&mut message, anchor.package_directory.as_bytes())?;
+    message.extend_from_slice(&anchor.retain_until_unix_secs.to_be_bytes());
+    message.extend_from_slice(&anchor.anchored_at_unix_secs.to_be_bytes());
+    Ok(message)
+}
+
+fn protected_inventory_digest(
+    artifacts: &[ConsentPurgeProtectedArtifactV1],
+) -> Result<[u8; 32], ConsentPurgeRetentionError> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"xenia:consent-purge-protected-inventory:v1");
+    let count = u32::try_from(artifacts.len())
+        .map_err(|_| ConsentPurgeRetentionError::EncodingLengthOverflow)?;
+    hasher.update(&count.to_be_bytes());
+    for artifact in artifacts {
+        hasher.update(&[protected_role_tag(artifact.role)]);
+        let path_bytes = artifact.path.as_bytes();
+        let path_len = u32::try_from(path_bytes.len())
+            .map_err(|_| ConsentPurgeRetentionError::EncodingLengthOverflow)?;
+        hasher.update(&path_len.to_be_bytes());
+        hasher.update(path_bytes);
+        hasher.update(&artifact.byte_length.to_be_bytes());
+        hasher.update(&artifact.blake3_digest);
+    }
+    Ok(*hasher.finalize().as_bytes())
 }
 
 impl ConsentPurgeRetentionWitnessBundleV1 {
@@ -576,6 +805,7 @@ fn build_protected_inventory(
     rollback_package: &ConsentPurgeRollbackPackageV1,
 ) -> Result<Vec<ConsentPurgeProtectedArtifactV1>, ConsentPurgeRetentionError> {
     let package_directory = PathBuf::from(&rollback_package.package_directory);
+    verify_private_package_directory(&package_directory)?;
     let mut inventory = Vec::with_capacity(rollback_package.entries.len() + 3);
     for entry in &rollback_package.entries {
         let path = PathBuf::from(&entry.rollback_path);
@@ -618,11 +848,47 @@ pub(crate) fn verify_protected_inventory_files(
     certificate: &ConsentPurgeRetentionCertificateV1,
 ) -> Result<(), ConsentPurgeRetentionError> {
     certificate.validate_shape()?;
+    verify_private_package_directory(Path::new(&certificate.package_directory))?;
     for artifact in &certificate.protected_artifacts {
         let (byte_length, blake3_digest) = hash_regular_file(Path::new(&artifact.path))?;
         if byte_length != artifact.byte_length || blake3_digest != artifact.blake3_digest {
             return Err(ConsentPurgeRetentionError::ProtectedArtifactMismatch {
                 path: artifact.path.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn verify_private_package_directory(
+    path: &Path,
+) -> Result<(), ConsentPurgeRetentionError> {
+    let canonical = fs::canonicalize(path).map_err(|_| {
+        ConsentPurgeRetentionError::PackageDirectoryNotPrivate {
+            path: path.display().to_string(),
+        }
+    })?;
+    if canonical != path {
+        return Err(ConsentPurgeRetentionError::PackageDirectoryNotPrivate {
+            path: path.display().to_string(),
+        });
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|_| {
+        ConsentPurgeRetentionError::PackageDirectoryNotPrivate {
+            path: path.display().to_string(),
+        }
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ConsentPurgeRetentionError::PackageDirectoryNotPrivate {
+            path: path.display().to_string(),
+        });
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(ConsentPurgeRetentionError::PackageDirectoryNotPrivate {
+                path: path.display().to_string(),
             });
         }
     }
@@ -810,6 +1076,78 @@ mod tests {
                 MAX_PURGE_RETENTION_WITNESS_FUTURE_SKEW_SECS,
             ),
             Err(ConsentPurgeRetentionError::WitnessCertificateMismatch)
+        ));
+    }
+
+    #[test]
+    fn retention_anchor_binds_witnesses_and_inventory() {
+        let (key, certificate) = signed_fixture();
+        let witness = LedgerSigningKey::from_bytes(&[61u8; 32]);
+        let mut bundle = ConsentPurgeRetentionWitnessBundleV1::new(&certificate).unwrap();
+        bundle
+            .sign_with(&certificate, &witness, certificate.issued_at_unix_secs)
+            .unwrap();
+        let trusted = [witness.verifying_key().to_bytes()];
+        let mut anchor = ConsentPurgeRetentionAnchorV1 {
+            schema: CONSENT_PURGE_RETENTION_ANCHOR_SCHEMA.to_string(),
+            ledger_epoch_id: certificate.ledger_epoch_id,
+            certificate_fingerprint: consent_purge_retention_certificate_fingerprint(&certificate)
+                .unwrap(),
+            witness_bundle_fingerprint: consent_purge_retention_witness_bundle_fingerprint(&bundle)
+                .unwrap(),
+            protected_inventory_digest: protected_inventory_digest(
+                &certificate.protected_artifacts,
+            )
+            .unwrap(),
+            package_directory: certificate.package_directory.clone(),
+            retain_until_unix_secs: certificate.retain_until_unix_secs,
+            anchored_at_unix_secs: certificate.issued_at_unix_secs + 1,
+            signature: [0u8; 64],
+        };
+        anchor.signature = key
+            .sign(&consent_purge_retention_anchor_message(&anchor).unwrap())
+            .to_bytes();
+        assert_eq!(trusted.len(), 1);
+        assert!(consent_purge_retention_anchor_fingerprint(&anchor).is_ok());
+        let mut changed = anchor.clone();
+        changed.protected_inventory_digest[0] ^= 1;
+        assert!(key
+            .verifying_key()
+            .verify(
+                &consent_purge_retention_anchor_message(&changed).unwrap(),
+                &Signature::from_bytes(&changed.signature),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn protected_candidate_guard_refuses_file_and_parent_aliases() {
+        let directory = tempfile::tempdir().unwrap();
+        let package = directory.path().join("package");
+        fs::create_dir(&package).unwrap();
+        let protected = package.join("artifact.bin");
+        fs::write(&protected, b"data").unwrap();
+        let (_, mut certificate) = signed_fixture();
+        certificate.package_directory = fs::canonicalize(&package)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        certificate.protected_artifacts = vec![ConsentPurgeProtectedArtifactV1 {
+            role: ConsentPurgeProtectedArtifactRoleV1::RollbackArtifact,
+            path: fs::canonicalize(&protected)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            byte_length: 4,
+            blake3_digest: *blake3::hash(b"data").as_bytes(),
+        }];
+        assert!(matches!(
+            verify_candidate_paths_disjoint(&certificate, std::slice::from_ref(&protected)),
+            Err(ConsentPurgeRetentionError::ProtectedCandidateAlias { .. })
+        ));
+        assert!(matches!(
+            verify_candidate_paths_disjoint(&certificate, &[directory.path().to_path_buf()]),
+            Err(ConsentPurgeRetentionError::ProtectedCandidateAlias { .. })
         ));
     }
 
