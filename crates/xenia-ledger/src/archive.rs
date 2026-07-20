@@ -25,6 +25,13 @@ pub const LEDGER_ARCHIVE_SEGMENT_SCHEMA: &str = "xenia-ledger-archive-segment-v1
 /// Maximum entries carried in one archive segment.
 pub const MAX_LEDGER_ARCHIVE_SEGMENT_ENTRIES: usize = 4_096;
 
+/// Maximum number of bounded segments accepted as one archive sequence.
+///
+/// A long-lived deployment can retain multiple sequences, but one verifier
+/// operation stays explicitly bounded so hostile JSON cannot induce an
+/// unbounded walk or allocation.
+pub const MAX_LEDGER_ARCHIVE_SEQUENCE_SEGMENTS: usize = 256;
+
 /// A self-contained, append-only proof between two signed checkpoints.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LedgerArchiveSegment {
@@ -62,6 +69,39 @@ pub fn ledger_archive_segment_digest(
         hasher.update(&entry.signature);
     }
     hasher.update(&terminal);
+    Ok(*hasher.finalize().as_bytes())
+}
+
+/// Compute a stable commitment to one ordered, verified archive sequence.
+///
+/// The digest covers every segment commitment and both signed boundary
+/// checkpoints. Callers can therefore bind a recovery summary or compaction
+/// preflight artifact to the exact archived history without embedding all
+/// entries in the signed manifest itself.
+pub fn ledger_archive_sequence_digest(
+    segments: &[LedgerArchiveSegment],
+) -> Result<[u8; 32], LedgerArchiveError> {
+    if segments.is_empty() {
+        return Err(LedgerArchiveError::EmptySequence);
+    }
+    if segments.len() > MAX_LEDGER_ARCHIVE_SEQUENCE_SEGMENTS {
+        return Err(LedgerArchiveError::TooManySegments {
+            count: segments.len(),
+            maximum: MAX_LEDGER_ARCHIVE_SEQUENCE_SEGMENTS,
+        });
+    }
+    Verifier::verify_ledger_archive_sequence(segments)?;
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"xenia:ledger-archive-sequence:v1");
+    hasher.update(&[0]);
+    hasher.update(&(segments.len() as u64).to_be_bytes());
+    for segment in segments {
+        hasher.update(&checkpoint_fingerprint(&segment.base_checkpoint)?);
+        hasher.update(&(segment.entries.len() as u64).to_be_bytes());
+        hasher.update(&segment.segment_digest);
+        hasher.update(&checkpoint_fingerprint(&segment.terminal_checkpoint)?);
+    }
     Ok(*hasher.finalize().as_bytes())
 }
 
@@ -139,6 +179,17 @@ pub enum LedgerArchiveError {
     /// The stored segment commitment did not recompute.
     #[error("archive segment digest mismatch")]
     DigestMismatch,
+    /// A sequence commitment was requested without any archive segments.
+    #[error("ledger archive sequence must contain at least one segment")]
+    EmptySequence,
+    /// One verification operation exceeded the explicit segment bound.
+    #[error("ledger archive sequence has {count} segments; maximum is {maximum}")]
+    TooManySegments {
+        /// Supplied segment count.
+        count: usize,
+        /// Maximum supported count.
+        maximum: usize,
+    },
     /// Two adjacent segments did not share the exact same boundary checkpoint.
     #[error("archive segments are not contiguous at boundary index {index}")]
     SequenceDiscontinuity {
@@ -184,6 +235,12 @@ impl Verifier {
     pub fn verify_ledger_archive_sequence(
         segments: &[LedgerArchiveSegment],
     ) -> Result<(), LedgerArchiveError> {
+        if segments.len() > MAX_LEDGER_ARCHIVE_SEQUENCE_SEGMENTS {
+            return Err(LedgerArchiveError::TooManySegments {
+                count: segments.len(),
+                maximum: MAX_LEDGER_ARCHIVE_SEQUENCE_SEGMENTS,
+            });
+        }
         for segment in segments {
             Self::verify_ledger_archive_segment(segment)?;
         }

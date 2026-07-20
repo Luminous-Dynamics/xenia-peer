@@ -81,8 +81,9 @@ mod witness;
 mod tests;
 
 pub use archive::{
-    ledger_archive_segment_digest, LedgerArchiveError, LedgerArchiveSegment,
-    LEDGER_ARCHIVE_SEGMENT_SCHEMA, MAX_LEDGER_ARCHIVE_SEGMENT_ENTRIES,
+    ledger_archive_segment_digest, ledger_archive_sequence_digest, LedgerArchiveError,
+    LedgerArchiveSegment, LEDGER_ARCHIVE_SEGMENT_SCHEMA, MAX_LEDGER_ARCHIVE_SEGMENT_ENTRIES,
+    MAX_LEDGER_ARCHIVE_SEQUENCE_SEGMENTS,
 };
 
 pub use binding::{

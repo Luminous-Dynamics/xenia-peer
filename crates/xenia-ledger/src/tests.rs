@@ -1798,6 +1798,54 @@ fn archive_segment_rejects_missing_or_tampered_entries() {
 }
 
 #[test]
+fn archive_sequence_digest_commits_to_ordered_verified_segments() {
+    let key = SigningKey::from_bytes(&[63u8; 32]);
+    let mut chain = crate::Chain::new(key);
+    let genesis = chain.sign_checkpoint(100);
+    chain.append(sample_event(ConsentKind::Request)).unwrap();
+    let first = LedgerArchiveSegment::from_chain(&chain, genesis, 101).unwrap();
+
+    chain.append(sample_event(ConsentKind::Approval)).unwrap();
+    let second = LedgerArchiveSegment::from_chain(
+        &chain,
+        first.terminal_checkpoint.clone(),
+        102,
+    )
+    .unwrap();
+    let segments = vec![first.clone(), second.clone()];
+
+    let digest = ledger_archive_sequence_digest(&segments).unwrap();
+    assert_eq!(digest, ledger_archive_sequence_digest(&segments).unwrap());
+
+    let reordered = vec![second, first];
+    assert!(ledger_archive_sequence_digest(&reordered).is_err());
+    assert_eq!(
+        ledger_archive_sequence_digest(&[]),
+        Err(LedgerArchiveError::EmptySequence)
+    );
+}
+
+#[test]
+fn archive_sequence_verifier_enforces_segment_bound_before_walking() {
+    let too_many = vec![
+        LedgerArchiveSegment {
+            schema: LEDGER_ARCHIVE_SEGMENT_SCHEMA.to_string(),
+            base_checkpoint: crate::Chain::new(SigningKey::from_bytes(&[64u8; 32]))
+                .sign_checkpoint(100),
+            entries: Vec::new(),
+            terminal_checkpoint: crate::Chain::new(SigningKey::from_bytes(&[64u8; 32]))
+                .sign_checkpoint(100),
+            segment_digest: [0u8; 32],
+        };
+        MAX_LEDGER_ARCHIVE_SEQUENCE_SEGMENTS + 1
+    ];
+    assert!(matches!(
+        Verifier::verify_ledger_archive_sequence(&too_many),
+        Err(LedgerArchiveError::TooManySegments { .. })
+    ));
+}
+
+#[test]
 fn checkpoint_freshness_rejects_stale_and_future_anchors() {
     use crate::{CheckpointFreshnessPolicy, Verifier};
     use ed25519_dalek::SigningKey;
