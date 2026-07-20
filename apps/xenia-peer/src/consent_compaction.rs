@@ -17,9 +17,9 @@ use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use xenia_ledger::{
-    checkpoint_fingerprint, ledger_archive_sequence_digest, Chain, ConsentKind,
-    LedgerArchiveError, LedgerArchiveSegment, LedgerCheckpoint, LedgerCompactionError,
-    LedgerCompactionManifest, LedgerEntry, Verifier,
+    checkpoint_fingerprint, ledger_archive_sequence_digest, Chain, CheckpointContinuityError,
+    ConsentKind, LedgerArchiveError, LedgerArchiveSegment, LedgerCheckpoint,
+    LedgerCompactionError, LedgerCompactionManifest, LedgerEntry, Verifier,
 };
 
 const CONSENT_RECOVERY_SUMMARY_SCHEMA: &str = "xenia-consent-recovery-summary-v1";
@@ -28,7 +28,10 @@ const MAX_RECOVERY_SESSIONS: usize = 100_000;
 
 pub(crate) const CONSENT_COMPACTION_BUNDLE_SCHEMA: &str =
     "xenia-consent-compaction-bundle-v1";
+pub(crate) const CONSENT_COMPACTED_SNAPSHOT_SCHEMA: &str =
+    "xenia-consent-compacted-snapshot-v1";
 pub(crate) const MAX_CONSENT_COMPACTION_BUNDLE_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_CONSENT_COMPACTED_SUFFIX_ENTRIES: usize = 100_000;
 
 /// One completed consent ceremony retained after its detailed entries move to
 /// verified cold storage.
@@ -64,6 +67,21 @@ pub(crate) struct ConsentCompactionBundleV1 {
     pub(crate) archive_segments: Vec<LedgerArchiveSegment>,
     pub(crate) recovery_summary: ConsentRecoverySummaryV1,
     pub(crate) manifest: LedgerCompactionManifest,
+}
+
+/// Minimal restore artifact for a future compacted live ledger.
+///
+/// Detailed prefix entries remain in independently verified archive segments.
+/// This snapshot retains only the deterministic recovery summary, the
+/// ledger-signed compaction manifest, and the authenticated live suffix after
+/// the archived boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConsentCompactedSnapshotV1 {
+    pub(crate) schema: String,
+    pub(crate) recovery_summary: ConsentRecoverySummaryV1,
+    pub(crate) manifest: LedgerCompactionManifest,
+    pub(crate) suffix_entries: Vec<LedgerEntry>,
+    pub(crate) snapshot_digest: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +145,12 @@ pub(crate) enum ConsentRecoveryError {
     ManifestBoundaryMismatch,
     #[error("consent compaction archived entry count does not fit this platform")]
     ArchivedEntryCountOverflow,
+    #[error("consent compacted suffix has {count} entries; maximum is {maximum}")]
+    TooManySuffixEntries { count: usize, maximum: usize },
+    #[error("unsupported consent compacted snapshot schema: {schema}")]
+    UnsupportedSnapshotSchema { schema: String },
+    #[error("consent compacted snapshot digest mismatch")]
+    SnapshotDigestMismatch,
     #[error("signed decision action id {action_id} reappears at sequence {seq}")]
     SignedDecisionReplay { action_id: String, seq: u64 },
     #[error("terminal archived session {session_id} reappears at sequence {seq}")]
@@ -135,6 +159,8 @@ pub(crate) enum ConsentRecoveryError {
     Manifest(#[from] LedgerCompactionError),
     #[error("consent recovery checkpoint fingerprint failed: {0}")]
     Checkpoint(#[from] xenia_ledger::CheckpointError),
+    #[error("consent compacted suffix continuity failed: {0}")]
+    Continuity(#[from] CheckpointContinuityError),
 }
 
 impl ConsentRecoverySummaryV1 {
@@ -363,42 +389,129 @@ impl ConsentCompactionBundleV1 {
         let suffix = entries
             .get(archived_entry_count..)
             .ok_or(ConsentRecoveryError::SummaryMismatch)?;
-        let mut seen_action_ids = self
-            .recovery_summary
-            .replay_action_ids
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        let archived_sessions = self
-            .recovery_summary
-            .sessions
-            .iter()
-            .map(|session| session.session_id)
-            .collect::<BTreeSet<_>>();
+        verify_recovery_suffix_compatibility(&self.recovery_summary, suffix)
+    }
+}
 
-        for entry in suffix {
-            let session_id = *entry.event.session_id.as_bytes();
-            if archived_sessions.contains(&session_id) {
-                return Err(ConsentRecoveryError::ArchivedSessionReused {
-                    session_id: hex::encode(session_id),
+impl ConsentCompactedSnapshotV1 {
+    /// Build a minimal suffix snapshot from a fully verified preflight bundle
+    /// and the complete live ledger. This operation does not mutate storage.
+    pub(crate) fn build(
+        bundle: &ConsentCompactionBundleV1,
+        entries: &[LedgerEntry],
+        public_key: &VerifyingKey,
+    ) -> Result<Self, ConsentRecoveryError> {
+        bundle.verify_against_live_ledger(entries, public_key)?;
+        let archived_entry_count = usize::try_from(bundle.recovery_summary.archived_entry_count)
+            .map_err(|_| ConsentRecoveryError::ArchivedEntryCountOverflow)?;
+        let suffix_entries = entries
+            .get(archived_entry_count..)
+            .ok_or(ConsentRecoveryError::SummaryMismatch)?
+            .to_vec();
+        if suffix_entries.len() > MAX_CONSENT_COMPACTED_SUFFIX_ENTRIES {
+            return Err(ConsentRecoveryError::TooManySuffixEntries {
+                count: suffix_entries.len(),
+                maximum: MAX_CONSENT_COMPACTED_SUFFIX_ENTRIES,
+            });
+        }
+        let mut snapshot = Self {
+            schema: CONSENT_COMPACTED_SNAPSHOT_SCHEMA.to_string(),
+            recovery_summary: bundle.recovery_summary.clone(),
+            manifest: bundle.manifest.clone(),
+            suffix_entries,
+            snapshot_digest: [0u8; 32],
+        };
+        snapshot.snapshot_digest = consent_compacted_snapshot_digest(&snapshot)?;
+        Ok(snapshot)
+    }
+
+    /// Verify the archived recovery state, signed boundary manifest, exact
+    /// resident suffix, and snapshot commitment without requiring the complete
+    /// pre-compaction live ledger.
+    pub(crate) fn verify(
+        &self,
+        archive_segments: &[LedgerArchiveSegment],
+        public_key: &VerifyingKey,
+    ) -> Result<(), ConsentRecoveryError> {
+        if self.schema != CONSENT_COMPACTED_SNAPSHOT_SCHEMA {
+            return Err(ConsentRecoveryError::UnsupportedSnapshotSchema {
+                schema: self.schema.clone(),
+            });
+        }
+        if self.suffix_entries.len() > MAX_CONSENT_COMPACTED_SUFFIX_ENTRIES {
+            return Err(ConsentRecoveryError::TooManySuffixEntries {
+                count: self.suffix_entries.len(),
+                maximum: MAX_CONSENT_COMPACTED_SUFFIX_ENTRIES,
+            });
+        }
+        if consent_compacted_snapshot_digest(self)? != self.snapshot_digest {
+            return Err(ConsentRecoveryError::SnapshotDigestMismatch);
+        }
+        self.recovery_summary
+            .verify_against_archive(archive_segments)?;
+        if self.manifest.archive_sequence_digest
+            != self.recovery_summary.archive_sequence_digest
+        {
+            return Err(ConsentRecoveryError::ManifestArchiveMismatch);
+        }
+        if self.manifest.recovery_summary_digest != self.recovery_summary.summary_digest {
+            return Err(ConsentRecoveryError::ManifestRecoveryMismatch);
+        }
+        if self.manifest.archived_through_checkpoint
+            != self.recovery_summary.through_checkpoint
+        {
+            return Err(ConsentRecoveryError::ManifestBoundaryMismatch);
+        }
+        Verifier::verify_ledger_compaction_manifest(&self.manifest)?;
+        if self.manifest.current_checkpoint.ledger_public_key != public_key.to_bytes() {
+            return Err(ConsentRecoveryError::SummaryMismatch);
+        }
+        Verifier::verify_checkpoint_extension(
+            &self.recovery_summary.through_checkpoint,
+            &self.manifest.current_checkpoint,
+            &self.suffix_entries,
+        )?;
+        verify_recovery_suffix_compatibility(&self.recovery_summary, &self.suffix_entries)
+    }
+}
+
+fn verify_recovery_suffix_compatibility(
+    recovery_summary: &ConsentRecoverySummaryV1,
+    suffix: &[LedgerEntry],
+) -> Result<(), ConsentRecoveryError> {
+    let mut seen_action_ids = recovery_summary
+        .replay_action_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let archived_sessions = recovery_summary
+        .sessions
+        .iter()
+        .map(|session| session.session_id)
+        .collect::<BTreeSet<_>>();
+
+    for entry in suffix {
+        let session_id = *entry.event.session_id.as_bytes();
+        if archived_sessions.contains(&session_id) {
+            return Err(ConsentRecoveryError::ArchivedSessionReused {
+                session_id: hex::encode(session_id),
+                seq: entry.seq,
+            });
+        }
+        if matches!(
+            entry.event.kind,
+            ConsentKind::Approval | ConsentKind::Denial | ConsentKind::Revocation
+        ) {
+            let action_id = *entry.event.request_id.as_bytes();
+            if !seen_action_ids.insert(action_id) {
+                return Err(ConsentRecoveryError::SignedDecisionReplay {
+                    action_id: hex::encode(action_id),
                     seq: entry.seq,
                 });
             }
-            if matches!(
-                entry.event.kind,
-                ConsentKind::Approval | ConsentKind::Denial | ConsentKind::Revocation
-            ) {
-                let action_id = *entry.event.request_id.as_bytes();
-                if !seen_action_ids.insert(action_id) {
-                    return Err(ConsentRecoveryError::SignedDecisionReplay {
-                        action_id: hex::encode(action_id),
-                        seq: entry.seq,
-                    });
-                }
-            }
         }
-        Ok(())
     }
+    Ok(())
 }
 
 fn invalid_transition(session_id: [u8; 16], seq: u64) -> ConsentRecoveryError {
@@ -451,6 +564,35 @@ fn consent_recovery_summary_digest(
                 hasher.update(&[0]);
             }
         }
+    }
+    Ok(*hasher.finalize().as_bytes())
+}
+
+fn consent_compacted_snapshot_digest(
+    snapshot: &ConsentCompactedSnapshotV1,
+) -> Result<[u8; 32], ConsentRecoveryError> {
+    if snapshot.schema != CONSENT_COMPACTED_SNAPSHOT_SCHEMA {
+        return Err(ConsentRecoveryError::UnsupportedSnapshotSchema {
+            schema: snapshot.schema.clone(),
+        });
+    }
+    let archived = checkpoint_fingerprint(&snapshot.manifest.archived_through_checkpoint)?;
+    let current = checkpoint_fingerprint(&snapshot.manifest.current_checkpoint)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"xenia:consent-compacted-snapshot:v1");
+    hasher.update(&[0]);
+    hasher.update(snapshot.schema.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(&snapshot.recovery_summary.summary_digest);
+    hasher.update(&snapshot.recovery_summary.archive_sequence_digest);
+    hasher.update(&archived);
+    hasher.update(&current);
+    hasher.update(&snapshot.manifest.signature);
+    hasher.update(&(snapshot.suffix_entries.len() as u64).to_be_bytes());
+    for entry in &snapshot.suffix_entries {
+        hasher.update(&entry.seq.to_be_bytes());
+        hasher.update(&entry.entry_hash);
+        hasher.update(&entry.signature);
     }
     Ok(*hasher.finalize().as_bytes())
 }
@@ -620,4 +762,76 @@ mod tests {
             Err(ConsentRecoveryError::DigestMismatch)
         ));
     }
+
+    #[test]
+    fn compacted_snapshot_verifies_without_the_complete_live_prefix() {
+        let segments = complete_archive();
+        let key = SigningKey::from_bytes(&[0x44; 32]);
+        let public_key = key.verifying_key();
+        let mut chain = Chain::from_entries(segments[0].entries.clone(), key.clone());
+        chain
+            .append(event(2, 4, ConsentKind::Denial, [0x30; 32]))
+            .unwrap();
+        let bundle = ConsentCompactionBundleV1::build(&chain, segments.clone(), 102).unwrap();
+        let entries = chain.iter().cloned().collect::<Vec<_>>();
+        let snapshot = ConsentCompactedSnapshotV1::build(&bundle, &entries, &public_key).unwrap();
+
+        snapshot.verify(&segments, &public_key).unwrap();
+        assert_eq!(snapshot.suffix_entries.len(), 1);
+        assert_eq!(snapshot.suffix_entries[0].seq, 3);
+
+        let mut restored = Chain::from_checkpoint_suffix(
+            snapshot.recovery_summary.through_checkpoint.clone(),
+            snapshot.suffix_entries.clone(),
+            key,
+        );
+        let appended = restored
+            .append(event(3, 5, ConsentKind::Denial, [0x31; 32]))
+            .unwrap();
+        assert_eq!(appended.seq, 4);
+    }
+
+    #[test]
+    fn compacted_snapshot_refuses_tampered_suffix_even_with_recomputed_envelope_digest() {
+        let segments = complete_archive();
+        let key = SigningKey::from_bytes(&[0x44; 32]);
+        let public_key = key.verifying_key();
+        let mut chain = Chain::from_entries(segments[0].entries.clone(), key);
+        chain
+            .append(event(2, 4, ConsentKind::Denial, [0x30; 32]))
+            .unwrap();
+        let bundle = ConsentCompactionBundleV1::build(&chain, segments.clone(), 102).unwrap();
+        let entries = chain.iter().cloned().collect::<Vec<_>>();
+        let mut snapshot =
+            ConsentCompactedSnapshotV1::build(&bundle, &entries, &public_key).unwrap();
+        snapshot.suffix_entries[0].entry_hash[0] ^= 1;
+        snapshot.snapshot_digest = consent_compacted_snapshot_digest(&snapshot).unwrap();
+
+        assert!(matches!(
+            snapshot.verify(&segments, &public_key),
+            Err(ConsentRecoveryError::Continuity(_))
+        ));
+    }
+
+    #[test]
+    fn compacted_snapshot_refuses_summary_or_manifest_substitution() {
+        let segments = complete_archive();
+        let key = SigningKey::from_bytes(&[0x44; 32]);
+        let public_key = key.verifying_key();
+        let chain = Chain::from_entries(segments[0].entries.clone(), key);
+        let bundle = ConsentCompactionBundleV1::build(&chain, segments.clone(), 102).unwrap();
+        let entries = chain.iter().cloned().collect::<Vec<_>>();
+        let mut snapshot =
+            ConsentCompactedSnapshotV1::build(&bundle, &entries, &public_key).unwrap();
+        snapshot.recovery_summary.summary_digest[0] ^= 1;
+        snapshot.snapshot_digest = consent_compacted_snapshot_digest(&snapshot).unwrap();
+
+        assert!(matches!(
+            snapshot.verify(&segments, &public_key),
+            Err(ConsentRecoveryError::DigestMismatch)
+                | Err(ConsentRecoveryError::SummaryMismatch)
+                | Err(ConsentRecoveryError::ManifestRecoveryMismatch)
+        ));
+    }
+
 }
