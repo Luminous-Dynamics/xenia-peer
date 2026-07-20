@@ -162,6 +162,7 @@ async fn operator_rbac_full_chain_smoke() {
         true,
         state.clone(),
         offer,
+        0,
         no_revocations.clone(),
         Arc::new(tokio::sync::Mutex::new(Chain::new(SigningKey::generate(
             &mut rand::thread_rng(),
@@ -188,6 +189,7 @@ async fn operator_rbac_full_chain_smoke() {
         true,
         state.clone(),
         offer,
+        0,
         revocations,
         Arc::new(tokio::sync::Mutex::new(Chain::new(SigningKey::generate(
             &mut rand::thread_rng(),
@@ -222,6 +224,7 @@ async fn operator_rbac_full_chain_smoke() {
         true,
         state,
         other_offer,
+        0,
         no_revocations,
         Arc::new(tokio::sync::Mutex::new(Chain::new(SigningKey::generate(
             &mut rand::thread_rng(),

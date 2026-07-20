@@ -13,7 +13,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{Mutex, oneshot, watch};
@@ -59,6 +59,7 @@ pub(crate) enum ConsentTerminationReason {
     TransportFailure,
     OfferExpired,
     ApproverRevoked,
+    AuthorizationLeaseExpired,
 }
 
 impl ConsentTerminationReason {
@@ -67,6 +68,7 @@ impl ConsentTerminationReason {
             Self::TransportFailure => "transport_failure",
             Self::OfferExpired => "offer_expired",
             Self::ApproverRevoked => "approver_revoked",
+            Self::AuthorizationLeaseExpired => "authorization_lease_expired",
         }
     }
 
@@ -75,6 +77,7 @@ impl ConsentTerminationReason {
             Self::TransportFailure => 1,
             Self::OfferExpired => 2,
             Self::ApproverRevoked => 3,
+            Self::AuthorizationLeaseExpired => 4,
         }
     }
 }
@@ -87,6 +90,7 @@ impl ConsentTerminationReason {
 /// - `Pending -> Denied`
 /// - `Pending -> Failed`
 /// - `Pending -> Expired`
+/// - `Approved -> LeaseExpired`
 ///
 /// A revoke received while still pending is treated as a fail-safe denial. A
 /// deny received after approval is not silently reinterpreted as revocation;
@@ -106,6 +110,10 @@ pub(crate) enum ConsentSessionState {
     Failed = 4,
     /// The daemon-authored approval window elapsed before an initial decision.
     Expired = 5,
+    /// A locally configured maximum authorization lifetime elapsed after an
+    /// approved session became active. This is a stricter host-side limit, not
+    /// an expansion of the operator-signed grant.
+    LeaseExpired = 6,
 }
 
 impl ConsentSessionState {
@@ -117,6 +125,7 @@ impl ConsentSessionState {
             3 => Self::Revoked,
             4 => Self::Failed,
             5 => Self::Expired,
+            6 => Self::LeaseExpired,
             _ => Self::Failed,
         }
     }
@@ -124,7 +133,11 @@ impl ConsentSessionState {
     fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Denied | Self::Revoked | Self::Failed | Self::Expired
+            Self::Denied
+                | Self::Revoked
+                | Self::Failed
+                | Self::Expired
+                | Self::LeaseExpired
         )
     }
 
@@ -153,6 +166,12 @@ pub(crate) struct ConsentDecisionService {
     /// only its digest, lets the authority independently enforce the approval
     /// window and derive the audit session identity from the same signed data.
     offer: xenia_operator_proto::ConsentOfferV2,
+    /// Optional host-local maximum lifetime for an approved authorization. A
+    /// value of zero preserves historical unlimited-session behavior.
+    authorization_lease_secs: u64,
+    /// Unix second at which approval was durably committed; zero while no
+    /// approval is active. Written before publishing the Approved state.
+    approved_at: AtomicU64,
     revocations: OperatorRevocations,
     ledger: Arc<Mutex<Chain>>,
     ledger_path: Arc<PathBuf>,
@@ -166,7 +185,8 @@ pub(crate) struct ConsentDecisionService {
     state_tx: watch::Sender<ConsentSessionState>,
     /// Resolves exactly once when the initial ceremony reaches Approved or
     /// Denied. It is dropped on Failed or Expired so the waiter receives
-    /// channel closure.
+    /// channel closure. An active lease expiry occurs only after this sender
+    /// has already resolved and therefore needs no second decision signal.
     grant_tx: Mutex<Option<oneshot::Sender<bool>>>,
     /// Operator whose authenticated approval activated this session. The
     /// approval remains valid only while this identity remains non-revoked.
@@ -186,6 +206,7 @@ impl ConsentDecisionService {
         require_operator_auth: bool,
         auth_state: Arc<OperatorAuthState>,
         offer: xenia_operator_proto::ConsentOfferV2,
+        authorization_lease_secs: u64,
         revocations: OperatorRevocations,
         ledger: Arc<Mutex<Chain>>,
         ledger_path: Arc<PathBuf>,
@@ -196,6 +217,8 @@ impl ConsentDecisionService {
             require_operator_auth,
             auth_state,
             offer,
+            authorization_lease_secs,
+            approved_at: AtomicU64::new(0),
             revocations,
             ledger,
             ledger_path,
@@ -338,6 +361,48 @@ impl ConsentDecisionService {
         .await;
         self.publish_state(ConsentSessionState::Expired);
         self.grant_tx.lock().await.take();
+    }
+
+    /// Runtime authorization deadline after durable approval, when a local
+    /// lease limit is configured. The signed scope is not expanded by this
+    /// value; the host is only choosing to terminate authority sooner.
+    pub(crate) fn authorization_lease_deadline(&self) -> Option<u64> {
+        let approved_at = self.approved_at.load(Ordering::SeqCst);
+        (self.authorization_lease_secs > 0 && approved_at > 0)
+            .then(|| approved_at.saturating_add(self.authorization_lease_secs))
+    }
+
+    /// Terminate an approved session whose host-local authorization lease has
+    /// elapsed. Rechecked under the transition lock so an explicit revoke or
+    /// other terminal transition wins without duplicate audit events.
+    pub(crate) async fn expire_active_lease(&self) -> bool {
+        self.expire_active_lease_at(unix_now_secs()).await
+    }
+
+    async fn expire_active_lease_at(&self, now: u64) -> bool {
+        let _transition = self.transition_lock.lock().await;
+        if self.state() != ConsentSessionState::Approved {
+            return false;
+        }
+        let Some(deadline) = self.authorization_lease_deadline() else {
+            return false;
+        };
+        if now < deadline {
+            return false;
+        }
+        let approving_operator = self
+            .approving_operator_id
+            .read()
+            .ok()
+            .and_then(|operator| operator.clone());
+        self.persist_lifecycle_transition(
+            ConsentTerminationReason::AuthorizationLeaseExpired,
+            ConsentSessionState::LeaseExpired,
+            approving_operator.as_deref(),
+        )
+        .await;
+        self.publish_state(ConsentSessionState::LeaseExpired);
+        true
     }
 
     /// Whether an authenticated operator is currently revoked. Sealed
@@ -659,6 +724,9 @@ impl ConsentDecisionService {
                 }
             }
         }
+        if next == ConsentSessionState::Approved {
+            self.approved_at.store(now, Ordering::SeqCst);
+        }
         self.publish_state(next);
         if let Some(decision) = initial_decision
             && let Some(tx) = self.grant_tx.lock().await.take()
@@ -676,7 +744,8 @@ impl ConsentDecisionService {
             ConsentSessionState::Revoked => tracing::info!("consent revocation committed"),
             ConsentSessionState::Pending
             | ConsentSessionState::Failed
-            | ConsentSessionState::Expired => {}
+            | ConsentSessionState::Expired
+            | ConsentSessionState::LeaseExpired => {}
         }
         followup
     }
@@ -742,6 +811,7 @@ mod tests {
             false,
             auth_state,
             test_offer(Uuid::from_u128(10)),
+            0,
             OperatorRevocations::empty(),
             ledger,
             Arc::new(
@@ -1121,5 +1191,33 @@ mod tests {
             entries[0].event.source_id,
             service.auth_state.host_identity.identity_public_key_bytes()
         );
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_authorization_lease_terminates_an_approved_session() {
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let ledger = Arc::new(Mutex::new(Chain::new(daemon)));
+        let (grant_tx, grant_rx) = oneshot::channel();
+        let mut service = service_with_sender(grant_tx, ledger.clone());
+        service.authorization_lease_secs = 10;
+
+        let approval = service.decode_at("Approve", 100).unwrap();
+        assert!(matches!(
+            service.apply_at(approval, 100).await,
+            ConsentFollowup::KeepServing
+        ));
+        assert!(grant_rx.await.unwrap());
+        assert_eq!(service.authorization_lease_deadline(), Some(110));
+        assert!(!service.expire_active_lease_at(109).await);
+        assert!(service.expire_active_lease_at(110).await);
+        assert_eq!(service.state(), ConsentSessionState::LeaseExpired);
+
+        let entries = ledger.lock().await.iter().cloned().collect::<Vec<_>>();
+        assert!(entries.iter().any(|entry| {
+            entry.event.kind == xenia_ledger::ConsentKind::LifecycleTermination
+                && entry
+                    .event
+                    .scope
+                    .contains("reason=authorization_lease_expired")
+        }));
     }
 }

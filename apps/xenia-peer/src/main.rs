@@ -197,6 +197,13 @@ struct Args {
     #[arg(long, default_value_t = 120)]
     consent_timeout_secs: u64,
 
+    /// Optional host-local maximum lifetime, in seconds, for an approved
+    /// authorization. Zero preserves historical unlimited-session behavior.
+    /// This is a stricter local safety limit: it never expands the signed
+    /// consent scope, and expiry terminates every privileged runtime lane.
+    #[arg(long, default_value_t = 0)]
+    authorization_lease_secs: u64,
+
     #[arg(long, default_value_t = 1_000)]
     telemetry_interval_ms: u64,
 
@@ -434,7 +441,8 @@ struct Args {
     /// and blank lines ignored). Consulted live by the `--operator-sealed`
     /// endpoint after the handshake authenticates a peer, so a compromised
     /// operator is refused fail-closed. Edit the file and send the daemon
-    /// `SIGHUP` to reload it without a restart (existing sessions untouched).
+    /// `SIGHUP` to reload it without a restart. Sessions approved by a newly
+    /// revoked operator terminate immediately; source read failures fail closed.
     #[arg(long)]
     revoked_operators_file: Option<std::path::PathBuf>,
 
@@ -2129,6 +2137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         require_operator_auth,
         operator_auth_state.clone(),
         consent_offer,
+        args.authorization_lease_secs,
         revocations.clone(),
         shared_ledger.clone(),
         ledger_path.clone(),
@@ -2141,6 +2150,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             while revocation_changes.changed().await.is_ok() {
                 if consent_service.revoke_if_approver_revoked().await {
                     break;
+                }
+            }
+        });
+    }
+    if args.authorization_lease_secs > 0 {
+        let consent_service = Arc::clone(&consent_service);
+        tokio::spawn(async move {
+            let mut states = consent_service.subscribe_state();
+            loop {
+                match *states.borrow() {
+                    crate::consent_authority::ConsentSessionState::Approved => break,
+                    state if state.runtime_must_stop() => return,
+                    _ => {}
+                }
+                if states.changed().await.is_err() {
+                    return;
+                }
+            }
+            let Some(deadline) = consent_service.authorization_lease_deadline() else {
+                return;
+            };
+            let now = now_ms() / 1_000;
+            let lease_timer = tokio::time::sleep(Duration::from_secs(
+                deadline.saturating_sub(now),
+            ));
+            tokio::pin!(lease_timer);
+            loop {
+                tokio::select! {
+                    _ = &mut lease_timer => {
+                        if consent_service.expire_active_lease().await {
+                            tracing::warn!(
+                                deadline,
+                                "authorization lease expired; terminating session"
+                            );
+                        }
+                        return;
+                    }
+                    changed = states.changed() => {
+                        if changed.is_err() || states.borrow().runtime_must_stop() {
+                            return;
+                        }
+                    }
                 }
             }
         });

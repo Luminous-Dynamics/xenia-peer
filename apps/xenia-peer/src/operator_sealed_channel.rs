@@ -507,6 +507,7 @@ mod tests {
                 1,
                 u64::MAX,
             ),
+            0,
             revocations,
             ledger,
             Arc::new(std::env::temp_dir().join("xenia-sealed-channel-test.ledger")),

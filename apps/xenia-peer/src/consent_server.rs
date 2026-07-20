@@ -120,6 +120,7 @@ mod tests {
                 1,
                 u64::MAX,
             ),
+            0,
             crate::operator_revocations::OperatorRevocations::empty(),
             ledger,
             Arc::new(ledger_path),
