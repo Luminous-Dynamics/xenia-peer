@@ -128,6 +128,7 @@ mod tests {
                     ledger_path,
                 ),
             ),
+            crate::consent_authority::ConsentHistoricalIndexes::default(),
             grant_tx,
         ))
     }

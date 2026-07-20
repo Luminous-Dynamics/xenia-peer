@@ -207,8 +207,63 @@ session indexes that a future activation path must consult before accepting any
 operator action. The signing key must match the ledger identity committed by the
 snapshot.
 
-The operation remains deliberately non-destructive. It does not replace the
-configured live ledger, delete archived entries, or enable daemon startup from a
-compacted file. Safe activation still requires a versioned durable suffix store
-that atomically preserves the recovery summary and loads its replay/session
-indexes before any HTTP or consent transport begins serving.
+The snapshot export and verification operations remain non-destructive. They do
+not replace the configured live ledger or delete archived entries. Activation is
+a separate, explicit step described below.
+
+## Activating compacted consent state
+
+A verified snapshot can be converted into a durable active-state envelope only
+while its chronological cold archive is available:
+
+```bash
+xenia-peer \
+  --operator-key-path /srv/xenia-peer-state/operator.key \
+  --activate-consent-ledger-compacted-state /srv/xenia-peer-state/consent.compacted.json \
+  --consent-ledger-activation-snapshot /retention/compacted-restore.json \
+  --consent-ledger-activation-archive-segment /archive/segment-0001.json \
+  --consent-ledger-activation-archive-segment /archive/segment-0002.json
+```
+
+Activation verifies the archive, recovery summary, signed cutover manifest,
+resident suffix, signing identity, and exact current checkpoint before writing
+an owner-only active-state file atomically. It does not mutate the old complete
+ledger or the cold archive.
+
+Normal startup then selects the activated state explicitly:
+
+```bash
+xenia-peer \
+  --operator-key-path /srv/xenia-peer-state/operator.key \
+  --consent-ledger-compacted-state /srv/xenia-peer-state/consent.compacted.json \
+  ...
+```
+
+Before opening the admin, consent, or viewer listeners, startup:
+
+1. Verifies the active-state schema, digest, cutover snapshot, current signed
+   checkpoint, and resident suffix.
+2. Reconstructs an appendable chain whose absolute sequence and previous-hash
+   frontier begin at the archived checkpoint.
+3. Materializes every archived signed-decision action ID needed for durable
+   replay refusal.
+4. Materializes every archived terminal session ID needed to prevent session
+   resurrection.
+5. Adds action and session identities from the resident suffix.
+6. Generates the new session ID only after proving that it does not collide
+   with verified history.
+
+Every later consent append atomically advances the same active-state envelope;
+it cannot silently discard the compacted anchor, recovery indexes, or signed
+head. A configured retained checkpoint or witness quorum can still constrain a
+same-key compacted suffix at or after its archived base. A checkpoint older than
+the compacted base requires the cold archive and is refused by normal startup.
+
+The following boundaries remain intentional:
+
+- The old complete ledger and cold archive are not automatically deleted.
+- Compaction across ledger-key epochs is not activated by this format.
+- The active-state file is a local durability artifact, not a replacement for
+  independently retained checkpoints, witnesses, or cold archives.
+- Losing both the active state and all retained archive evidence remains a
+  recovery failure, not an invitation to synthesize history.

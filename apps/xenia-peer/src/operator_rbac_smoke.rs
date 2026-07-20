@@ -172,6 +172,7 @@ async fn operator_rbac_full_chain_smoke() {
                 std::env::temp_dir().join("xenia-operator-rbac-smoke.ledger"),
             ),
         ),
+        crate::consent_authority::ConsentHistoricalIndexes::default(),
         grant_sender(),
     );
     let decoded = authority
@@ -203,6 +204,7 @@ async fn operator_rbac_full_chain_smoke() {
                 std::env::temp_dir().join("xenia-operator-rbac-smoke-revoked.ledger"),
             ),
         ),
+        crate::consent_authority::ConsentHistoricalIndexes::default(),
         grant_sender(),
     );
     assert!(
@@ -242,6 +244,7 @@ async fn operator_rbac_full_chain_smoke() {
                 std::env::temp_dir().join("xenia-operator-rbac-smoke-other.ledger"),
             ),
         ),
+        crate::consent_authority::ConsentHistoricalIndexes::default(),
         grant_sender(),
     );
     let bad = other_authority.decode(&consent_json);

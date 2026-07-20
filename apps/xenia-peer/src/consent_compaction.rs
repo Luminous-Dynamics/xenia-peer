@@ -121,6 +121,18 @@ impl RestoredConsentStateV1 {
     pub(crate) fn archived_terminal_session_count(&self) -> usize {
         self.archived_terminal_sessions.len()
     }
+
+    /// Consume the verified restore frontier so startup can materialize the
+    /// historical replay and session indexes before opening any listener.
+    pub(crate) fn into_parts(
+        self,
+    ) -> (Chain, BTreeSet<[u8; 16]>, BTreeSet<[u8; 16]>) {
+        (
+            self.chain,
+            self.archived_replay_action_ids,
+            self.archived_terminal_sessions,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

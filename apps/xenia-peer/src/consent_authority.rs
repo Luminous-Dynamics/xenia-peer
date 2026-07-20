@@ -10,14 +10,14 @@
 //! consent-session lifecycle. Keeping those invariants in one service prevents
 //! a future transport from accidentally implementing weaker state semantics.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{Mutex, oneshot, watch};
 use uuid::Uuid;
-use xenia_ledger::Chain;
+use xenia_ledger::{Chain, ConsentKind};
 
 #[cfg(test)]
 use crate::audit_ledger_store::AuditLedgerStoreError;
@@ -37,6 +37,69 @@ pub(crate) const MAX_CONSENT_ACTION_BYTES: usize = 32 * 1024;
 pub(crate) struct DecodedConsent {
     pub(crate) action: ConsentAction,
     pub(crate) authorized: Option<AuthorizedConsentAction>,
+}
+
+/// Replay and session-identity state materialized from verified persistence
+/// before any privileged listener is opened. For a complete ledger this is
+/// derived from every resident entry; for a compacted ledger it also includes
+/// the authenticated archived indexes carried by the activation envelope.
+#[derive(Clone, Default)]
+pub(crate) struct ConsentHistoricalIndexes {
+    action_ids: Arc<HashSet<[u8; 16]>>,
+    session_ids: Arc<HashSet<[u8; 16]>>,
+}
+
+impl ConsentHistoricalIndexes {
+    pub(crate) fn from_chain_and_archived(
+        chain: &Chain,
+        archived_action_ids: BTreeSet<[u8; 16]>,
+        archived_session_ids: BTreeSet<[u8; 16]>,
+    ) -> Self {
+        let mut action_ids = archived_action_ids.into_iter().collect::<HashSet<_>>();
+        let mut session_ids = archived_session_ids.into_iter().collect::<HashSet<_>>();
+        for entry in chain.iter() {
+            session_ids.insert(*entry.event.session_id.as_bytes());
+            if matches!(
+                entry.event.kind,
+                ConsentKind::Approval | ConsentKind::Denial | ConsentKind::Revocation
+            ) {
+                action_ids.insert(*entry.event.request_id.as_bytes());
+            }
+        }
+        Self {
+            action_ids: Arc::new(action_ids),
+            session_ids: Arc::new(session_ids),
+        }
+    }
+
+    pub(crate) fn from_complete_chain(chain: &Chain) -> Self {
+        Self::from_chain_and_archived(chain, BTreeSet::new(), BTreeSet::new())
+    }
+
+    pub(crate) fn contains_action(&self, action_id: &[u8; 16]) -> bool {
+        self.action_ids.contains(action_id)
+    }
+
+    pub(crate) fn contains_session(&self, session_id: &[u8; 16]) -> bool {
+        self.session_ids.contains(session_id)
+    }
+
+    pub(crate) fn fresh_session_id(&self) -> Uuid {
+        loop {
+            let candidate = Uuid::new_v4();
+            if !self.contains_session(candidate.as_bytes()) {
+                return candidate;
+            }
+        }
+    }
+
+    pub(crate) fn action_count(&self) -> usize {
+        self.action_ids.len()
+    }
+
+    pub(crate) fn session_count(&self) -> usize {
+        self.session_ids.len()
+    }
 }
 
 /// Durable authorization receipt produced only after an authenticated approval
@@ -209,6 +272,7 @@ pub(crate) struct ConsentDecisionService {
     revocations: OperatorRevocations,
     ledger: Arc<Mutex<Chain>>,
     ledger_persister: SharedConsentLedgerPersister,
+    historical_indexes: ConsentHistoricalIndexes,
     /// Serializes audit + lifecycle transitions across every transport.
     transition_lock: Mutex<()>,
     /// Lock-free mirror for synchronous state inspection.
@@ -243,6 +307,7 @@ impl ConsentDecisionService {
         revocations: OperatorRevocations,
         ledger: Arc<Mutex<Chain>>,
         ledger_persister: SharedConsentLedgerPersister,
+        historical_indexes: ConsentHistoricalIndexes,
         grant_tx: oneshot::Sender<bool>,
     ) -> Self {
         let (state_tx, _state_rx) = watch::channel(ConsentSessionState::Pending);
@@ -255,6 +320,7 @@ impl ConsentDecisionService {
             revocations,
             ledger,
             ledger_persister,
+            historical_indexes,
             transition_lock: Mutex::new(()),
             state: AtomicU8::new(ConsentSessionState::Pending as u8),
             state_tx,
@@ -584,6 +650,19 @@ impl ConsentDecisionService {
         let _transition = self.transition_lock.lock().await;
         let current = self.state();
 
+        if self
+            .historical_indexes
+            .contains_session(&self.offer.session_id)
+        {
+            tracing::error!(
+                session_id = %hex::encode(self.offer.session_id),
+                "consent offer reuses a session identity present in verified history"
+            );
+            self.publish_state(ConsentSessionState::Failed);
+            self.grant_tx.lock().await.take();
+            return ConsentFollowup::Stop;
+        }
+
         // Authorization is checked again under the transition lock. A valid
         // action can be decoded immediately before its operator is revoked;
         // commit must never rely on the earlier snapshot.
@@ -621,6 +700,21 @@ impl ConsentDecisionService {
         }
 
         if let Some(authorized) = &decoded.authorized {
+            if self
+                .historical_indexes
+                .contains_action(&authorized.action_id)
+            {
+                tracing::error!(
+                    action_id = %hex::encode(authorized.action_id),
+                    action = ?authorized.action,
+                    "authenticated consent action already exists in verified historical state"
+                );
+                if current == ConsentSessionState::Pending {
+                    self.publish_state(ConsentSessionState::Failed);
+                    self.grant_tx.lock().await.take();
+                }
+                return ConsentFollowup::Stop;
+            }
             if self
                 .seen_action_ids
                 .lock()
@@ -878,6 +972,7 @@ mod tests {
                         .join(format!("unused-consent-ledger-{}", Uuid::new_v4())),
                 ),
             ),
+            crate::consent_authority::ConsentHistoricalIndexes::default(),
             grant_tx,
         )
     }
@@ -1299,5 +1394,97 @@ mod tests {
                     .scope
                     .contains("reason=authorization_lease_expired")
         }));
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn archived_action_id_is_refused_before_a_new_grant() {
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let ledger = Arc::new(Mutex::new(Chain::new(daemon)));
+        let (grant_tx, grant_rx) = oneshot::channel();
+        let mut service = service_with_sender(grant_tx, ledger.clone());
+        service.historical_indexes = ConsentHistoricalIndexes {
+            action_ids: Arc::new(std::iter::once([0x44; 16]).collect()),
+            session_ids: Arc::new(HashSet::new()),
+        };
+
+        let outcome = service
+            .apply(DecodedConsent {
+                action: ConsentAction::Approve,
+                authorized: Some(authorized_approval()),
+            })
+            .await;
+
+        assert!(matches!(outcome, ConsentFollowup::Stop));
+        assert_eq!(service.state(), ConsentSessionState::Failed);
+        assert!(grant_rx.await.is_err());
+        assert_eq!(ledger.lock().await.entry_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn archived_terminal_session_identity_cannot_be_reopened() {
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let ledger = Arc::new(Mutex::new(Chain::new(daemon)));
+        let (grant_tx, grant_rx) = oneshot::channel();
+        let mut service = service_with_sender(grant_tx, ledger.clone());
+        let reused_session = *Uuid::from_u128(10).as_bytes();
+        service.historical_indexes = ConsentHistoricalIndexes {
+            action_ids: Arc::new(HashSet::new()),
+            session_ids: Arc::new(std::iter::once(reused_session).collect()),
+        };
+
+        let outcome = service
+            .apply(DecodedConsent {
+                action: ConsentAction::Approve,
+                authorized: None,
+            })
+            .await;
+
+        assert!(matches!(outcome, ConsentFollowup::Stop));
+        assert_eq!(service.state(), ConsentSessionState::Failed);
+        assert!(grant_rx.await.is_err());
+        assert_eq!(ledger.lock().await.entry_count(), 0);
+    }
+
+    #[test]
+    fn complete_history_materializes_decision_and_session_indexes() {
+        let key = SigningKey::from_bytes(&[0x72; 32]);
+        let session_id = Uuid::from_u128(20);
+        let action_id = Uuid::from_u128(21);
+        let lifecycle_id = Uuid::from_u128(22);
+        let mut chain = Chain::new(key);
+        chain
+            .append(xenia_ledger::ConsentEventRecord {
+                source_id: [0x31; 32],
+                session_id,
+                request_id: action_id,
+                kind: ConsentKind::Approval,
+                scope: "screen".to_string(),
+            })
+            .unwrap();
+        chain
+            .append(xenia_ledger::ConsentEventRecord {
+                source_id: [0x31; 32],
+                session_id,
+                request_id: lifecycle_id,
+                kind: ConsentKind::LifecycleTermination,
+                scope: "reason=revoked".to_string(),
+            })
+            .unwrap();
+
+        let indexes = ConsentHistoricalIndexes::from_complete_chain(&chain);
+        assert!(indexes.contains_session(session_id.as_bytes()));
+        assert!(indexes.contains_action(action_id.as_bytes()));
+        assert!(!indexes.contains_action(lifecycle_id.as_bytes()));
+    }
+
+    #[test]
+    fn historical_index_generates_a_fresh_session_identity() {
+        let known = *Uuid::from_u128(10).as_bytes();
+        let indexes = ConsentHistoricalIndexes {
+            action_ids: Arc::new(HashSet::new()),
+            session_ids: Arc::new(std::iter::once(known).collect()),
+        };
+        let fresh = indexes.fresh_session_id();
+        assert_ne!(fresh.as_bytes(), &known);
+        assert!(!indexes.contains_session(fresh.as_bytes()));
     }
 }

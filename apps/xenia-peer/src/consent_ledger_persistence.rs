@@ -172,6 +172,7 @@ mod tests {
         assert_eq!(loaded.entry_count(), 1);
         std::fs::remove_dir_all(dir).ok();
     }
+
     #[test]
     fn compacted_persister_round_trips_and_advances_the_signed_suffix() {
         let dir = std::env::temp_dir().join(format!(
@@ -238,5 +239,4 @@ mod tests {
         assert_eq!(reloaded.chain.resident_len(), 2);
         std::fs::remove_dir_all(dir).ok();
     }
-
 }

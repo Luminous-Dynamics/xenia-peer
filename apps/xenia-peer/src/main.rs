@@ -2154,9 +2154,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let (ledger, ledger_persister, compacted_state_loaded): (
+    let (ledger, ledger_persister, historical_indexes, compacted_state_loaded): (
         xenia_ledger::Chain,
         crate::consent_ledger_persistence::SharedConsentLedgerPersister,
+        crate::consent_authority::ConsentHistoricalIndexes,
         bool,
     ) = if let Some(path) = args.consent_ledger_compacted_state.as_deref() {
         let (active, restored) =
@@ -2185,7 +2186,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 active,
             ),
         );
-        (restored.chain, persister, true)
+        let (chain, archived_actions, archived_sessions) = restored.into_parts();
+        let historical = crate::consent_authority::ConsentHistoricalIndexes::from_chain_and_archived(
+            &chain,
+            archived_actions,
+            archived_sessions,
+        );
+        (chain, persister, historical, true)
     } else {
         let path = &args.consent_ledger_path;
         let ledger = audit_ledger_store::load_verified(path, &signing_key).map_err(
@@ -2207,7 +2214,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 path.clone(),
             ),
         );
-        (ledger, persister, false)
+        let historical =
+            crate::consent_authority::ConsentHistoricalIndexes::from_complete_chain(&ledger);
+        (ledger, persister, historical, false)
     };
 
     let mut telemetry = SysinfoTelemetryStream::new();
@@ -2761,7 +2770,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         vec![]
     };
     let shared_rules = std::sync::Arc::new(rules);
-    let session_id = Uuid::new_v4();
+    let session_id = historical_indexes.fresh_session_id();
+    info!(
+        historical_actions = historical_indexes.action_count(),
+        historical_sessions = historical_indexes.session_count(),
+        session_id = %session_id,
+        "historical consent indexes materialized before listener startup"
+    );
 
     use axum::{
         Router,
@@ -3046,6 +3061,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         revocations.clone(),
         shared_ledger.clone(),
         ledger_persister.clone(),
+        historical_indexes.clone(),
         consent_decision_tx,
     ));
     {

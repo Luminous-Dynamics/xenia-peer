@@ -515,6 +515,7 @@ mod tests {
                     std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
                 ),
             ),
+            crate::consent_authority::ConsentHistoricalIndexes::default(),
             grant_tx,
         ))
     }
