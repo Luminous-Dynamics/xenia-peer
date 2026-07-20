@@ -123,7 +123,11 @@ mod tests {
             0,
             crate::operator_revocations::OperatorRevocations::empty(),
             ledger,
-            Arc::new(ledger_path),
+            Arc::new(
+                crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
+                    ledger_path,
+                ),
+            ),
             grant_tx,
         ))
     }

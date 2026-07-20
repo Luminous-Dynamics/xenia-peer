@@ -11,21 +11,22 @@
 //! a future transport from accidentally implementing weaker state semantics.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{Mutex, oneshot, watch};
 use uuid::Uuid;
-use xenia_ledger::{Chain, LedgerEntry};
+use xenia_ledger::Chain;
 
+#[cfg(test)]
 use crate::audit_ledger_store::AuditLedgerStoreError;
+#[cfg(test)]
+use crate::consent_ledger_persistence::ConsentLedgerPersister;
+use crate::consent_ledger_persistence::SharedConsentLedgerPersister;
 use crate::operator_auth::{AuthorizedConsentAction, ConsentAction};
 use crate::operator_http::OperatorAuthState;
 use crate::operator_revocations::OperatorRevocations;
-
-type PersistLedger = fn(&std::path::Path, &[LedgerEntry]) -> Result<(), AuditLedgerStoreError>;
 
 /// Maximum decoded consent-action payload accepted by either operator transport.
 /// Authenticated requests are only a few kilobytes even with ML-DSA signatures.
@@ -207,7 +208,7 @@ pub(crate) struct ConsentDecisionService {
     approved_at: AtomicU64,
     revocations: OperatorRevocations,
     ledger: Arc<Mutex<Chain>>,
-    ledger_path: Arc<PathBuf>,
+    ledger_persister: SharedConsentLedgerPersister,
     /// Serializes audit + lifecycle transitions across every transport.
     transition_lock: Mutex<()>,
     /// Lock-free mirror for synchronous state inspection.
@@ -230,7 +231,6 @@ pub(crate) struct ConsentDecisionService {
     /// Kept behind the transition lock so check-and-insert is race-free across
     /// plaintext and sealed transports.
     seen_action_ids: Mutex<HashSet<[u8; 16]>>,
-    persist_ledger: PersistLedger,
 }
 
 impl ConsentDecisionService {
@@ -242,7 +242,7 @@ impl ConsentDecisionService {
         authorization_lease_secs: u64,
         revocations: OperatorRevocations,
         ledger: Arc<Mutex<Chain>>,
-        ledger_path: Arc<PathBuf>,
+        ledger_persister: SharedConsentLedgerPersister,
         grant_tx: oneshot::Sender<bool>,
     ) -> Self {
         let (state_tx, _state_rx) = watch::channel(ConsentSessionState::Pending);
@@ -254,7 +254,7 @@ impl ConsentDecisionService {
             approved_at: AtomicU64::new(0),
             revocations,
             ledger,
-            ledger_path,
+            ledger_persister,
             transition_lock: Mutex::new(()),
             state: AtomicU8::new(ConsentSessionState::Pending as u8),
             state_tx,
@@ -262,13 +262,15 @@ impl ConsentDecisionService {
             approving_operator_id: RwLock::new(None),
             approval_receipt: RwLock::new(None),
             seen_action_ids: Mutex::new(HashSet::new()),
-            persist_ledger: crate::audit_ledger_store::persist_entries_atomic,
         }
     }
 
     #[cfg(test)]
-    fn with_persist_ledger(mut self, persist_ledger: PersistLedger) -> Self {
-        self.persist_ledger = persist_ledger;
+    fn with_ledger_persister(
+        mut self,
+        ledger_persister: SharedConsentLedgerPersister,
+    ) -> Self {
+        self.ledger_persister = ledger_persister;
         self
     }
 
@@ -344,9 +346,7 @@ impl ConsentDecisionService {
         let event = self.lifecycle_event(reason, target, approving_operator);
         let mut chain = self.ledger.lock().await;
         let committed = chain
-            .append_transactional(event, |entries| {
-                (self.persist_ledger)(self.ledger_path.as_path(), entries)
-            })
+            .append_transactional_chain(event, |chain| self.ledger_persister.persist(chain))
             .map(|_entry| ());
         if let Err(err) = committed {
             // Loss of audit durability must never delay a safety transition.
@@ -717,8 +717,8 @@ impl ConsentDecisionService {
             let mut chain = self.ledger.lock().await;
             let committed = tokio::task::block_in_place(|| {
                 chain
-                    .append_transactional(event, |entries| {
-                        (self.persist_ledger)(self.ledger_path.as_path(), entries)
+                    .append_transactional_chain(event, |chain| {
+                        self.ledger_persister.persist(chain)
                     })
                     .map(|_entry| ())
             });
@@ -842,13 +842,14 @@ mod tests {
         }
     }
 
-    fn fail_persist(
-        _path: &std::path::Path,
-        _entries: &[LedgerEntry],
-    ) -> Result<(), AuditLedgerStoreError> {
-        Err(AuditLedgerStoreError::Io(std::io::Error::other(
-            "forced persistence failure",
-        )))
+    struct FailingPersister;
+
+    impl ConsentLedgerPersister for FailingPersister {
+        fn persist(&self, _chain: &Chain) -> Result<(), AuditLedgerStoreError> {
+            Err(AuditLedgerStoreError::Io(std::io::Error::other(
+                "forced persistence failure",
+            )))
+        }
     }
 
     fn service_with_sender(
@@ -872,8 +873,10 @@ mod tests {
             OperatorRevocations::empty(),
             ledger,
             Arc::new(
-                std::env::temp_dir()
-                    .join(format!("unused-consent-ledger-{}", Uuid::new_v4())),
+                crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
+                    std::env::temp_dir()
+                        .join(format!("unused-consent-ledger-{}", Uuid::new_v4())),
+                ),
             ),
             grant_tx,
         )
@@ -884,7 +887,8 @@ mod tests {
         let daemon = SigningKey::generate(&mut rand::thread_rng());
         let ledger = Arc::new(Mutex::new(Chain::new(daemon)));
         let (grant_tx, grant_rx) = oneshot::channel();
-        let service = service_with_sender(grant_tx, ledger.clone()).with_persist_ledger(fail_persist);
+        let service = service_with_sender(grant_tx, ledger.clone())
+            .with_ledger_persister(Arc::new(FailingPersister));
 
         let outcome = service
             .apply(DecodedConsent {
@@ -1201,8 +1205,12 @@ mod tests {
         let daemon = SigningKey::generate(&mut rand::thread_rng());
         let ledger = Arc::new(Mutex::new(Chain::new(daemon)));
         let (grant_tx, grant_rx) = oneshot::channel();
-        let mut service = service_with_sender(grant_tx, ledger.clone());
-        service.ledger_path = Arc::new(dir.join("consent.ledger"));
+        let service = service_with_sender(grant_tx, ledger.clone())
+            .with_ledger_persister(Arc::new(
+                crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
+                    dir.join("consent.ledger"),
+                ),
+            ));
 
         let first = service
             .apply(DecodedConsent {

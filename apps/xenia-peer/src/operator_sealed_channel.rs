@@ -510,7 +510,11 @@ mod tests {
             0,
             revocations,
             ledger,
-            Arc::new(std::env::temp_dir().join("xenia-sealed-channel-test.ledger")),
+            Arc::new(
+                crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
+                    std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+                ),
+            ),
             grant_tx,
         ))
     }

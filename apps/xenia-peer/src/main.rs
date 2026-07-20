@@ -57,6 +57,7 @@ mod admin_ui;
 mod audit_ledger_store;
 mod consent_authority;
 mod consent_compaction;
+mod consent_ledger_persistence;
 mod consent_server;
 mod evidence_verifier;
 mod file_transfer;
@@ -2039,6 +2040,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "consent ledger loaded and verified"
     );
 
+    let ledger_persister: crate::consent_ledger_persistence::SharedConsentLedgerPersister =
+        std::sync::Arc::new(
+            crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
+                args.consent_ledger_path.clone(),
+            ),
+        );
+
     let checkpoint_freshness = xenia_ledger::CheckpointFreshnessPolicy {
         max_age_secs: args.trusted_consent_ledger_checkpoint_max_age_secs,
         max_future_skew_secs: args
@@ -2847,7 +2855,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.authorization_lease_secs,
         revocations.clone(),
         shared_ledger.clone(),
-        ledger_path.clone(),
+        ledger_persister.clone(),
         consent_decision_tx,
     ));
     {

@@ -167,7 +167,11 @@ async fn operator_rbac_full_chain_smoke() {
         Arc::new(tokio::sync::Mutex::new(Chain::new(SigningKey::generate(
             &mut rand::thread_rng(),
         )))),
-        Arc::new(std::env::temp_dir().join("xenia-operator-rbac-smoke.ledger")),
+        Arc::new(
+            crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
+                std::env::temp_dir().join("xenia-operator-rbac-smoke.ledger"),
+            ),
+        ),
         grant_sender(),
     );
     let decoded = authority
@@ -194,7 +198,11 @@ async fn operator_rbac_full_chain_smoke() {
         Arc::new(tokio::sync::Mutex::new(Chain::new(SigningKey::generate(
             &mut rand::thread_rng(),
         )))),
-        Arc::new(std::env::temp_dir().join("xenia-operator-rbac-smoke-revoked.ledger")),
+        Arc::new(
+            crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
+                std::env::temp_dir().join("xenia-operator-rbac-smoke-revoked.ledger"),
+            ),
+        ),
         grant_sender(),
     );
     assert!(
@@ -229,7 +237,11 @@ async fn operator_rbac_full_chain_smoke() {
         Arc::new(tokio::sync::Mutex::new(Chain::new(SigningKey::generate(
             &mut rand::thread_rng(),
         )))),
-        Arc::new(std::env::temp_dir().join("xenia-operator-rbac-smoke-other.ledger")),
+        Arc::new(
+            crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
+                std::env::temp_dir().join("xenia-operator-rbac-smoke-other.ledger"),
+            ),
+        ),
         grant_sender(),
     );
     let bad = other_authority.decode(&consent_json);
