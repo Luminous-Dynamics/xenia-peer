@@ -38,6 +38,18 @@ pub(crate) struct DecodedConsent {
     pub(crate) authorized: Option<AuthorizedConsentAction>,
 }
 
+/// Durable authorization receipt produced only after an authenticated approval
+/// has been committed to the daemon ledger. The M1 runtime copies this receipt
+/// into its own evidence chain so the operator audit and runtime evidence can be
+/// joined by exact action id and offer digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConsentApprovalReceipt {
+    pub(crate) action_id: [u8; 16],
+    pub(crate) offer_digest: [u8; 32],
+    pub(crate) operator_id: String,
+    pub(crate) operator_ed25519_pubkey: [u8; 32],
+}
+
 /// Authoritative lifecycle state for one consent ceremony.
 ///
 /// The state machine is deliberately small and terminal-state-heavy:
@@ -130,6 +142,8 @@ pub(crate) struct ConsentDecisionService {
     /// Operator whose authenticated approval activated this session. The
     /// approval remains valid only while this identity remains non-revoked.
     approving_operator_id: RwLock<Option<String>>,
+    /// Authenticated approval identity available only after durable commit.
+    approval_receipt: RwLock<Option<ConsentApprovalReceipt>>,
     /// Authenticated action ids already durably committed for this ceremony.
     /// Kept behind the transition lock so check-and-insert is race-free across
     /// plaintext and sealed transports.
@@ -161,6 +175,7 @@ impl ConsentDecisionService {
             state_tx,
             grant_tx: Mutex::new(Some(grant_tx)),
             approving_operator_id: RwLock::new(None),
+            approval_receipt: RwLock::new(None),
             seen_action_ids: Mutex::new(HashSet::new()),
             persist_ledger: crate::audit_ledger_store::persist_entries_atomic,
         }
@@ -181,6 +196,16 @@ impl ConsentDecisionService {
     /// exposes the current state and then wakes on every later transition.
     pub(crate) fn subscribe_state(&self) -> watch::Receiver<ConsentSessionState> {
         self.state_tx.subscribe()
+    }
+
+    /// Return the authenticated approval receipt after it has been durably
+    /// committed. Unauthenticated compatibility approvals intentionally return
+    /// `None` and therefore cannot claim operator-attributed runtime evidence.
+    pub(crate) fn approval_receipt(&self) -> Option<ConsentApprovalReceipt> {
+        self.approval_receipt
+            .read()
+            .map(|receipt| receipt.clone())
+            .unwrap_or(None)
     }
 
     fn publish_state(&self, next: ConsentSessionState) {
@@ -490,10 +515,27 @@ impl ConsentDecisionService {
                 .authorized
                 .as_ref()
                 .map(|authorized| authorized.operator_id.clone());
+            let approval_receipt = decoded.authorized.as_ref().map(|authorized| {
+                ConsentApprovalReceipt {
+                    action_id: authorized.action_id,
+                    offer_digest: authorized.offer_digest,
+                    operator_id: authorized.operator_id.clone(),
+                    operator_ed25519_pubkey: authorized.ed25519_pubkey,
+                }
+            });
             match self.approving_operator_id.write() {
                 Ok(mut stored) => *stored = approving_operator,
                 Err(_) => {
                     tracing::error!("approving-operator lock poisoned; refusing grant fail-closed");
+                    self.publish_state(ConsentSessionState::Failed);
+                    self.grant_tx.lock().await.take();
+                    return ConsentFollowup::Stop;
+                }
+            }
+            match self.approval_receipt.write() {
+                Ok(mut stored) => *stored = approval_receipt,
+                Err(_) => {
+                    tracing::error!("approval-receipt lock poisoned; refusing grant fail-closed");
                     self.publish_state(ConsentSessionState::Failed);
                     self.grant_tx.lock().await.take();
                     return ConsentFollowup::Stop;
@@ -923,6 +965,9 @@ mod tests {
             .await;
         assert!(matches!(first, ConsentFollowup::KeepServing));
         assert!(grant_rx.await.unwrap());
+        let receipt = service.approval_receipt().expect("authenticated receipt");
+        assert_eq!(receipt.action_id, [0x44; 16]);
+        assert_eq!(receipt.operator_id, "alice");
         assert_eq!(ledger.lock().await.len(), 1);
 
         let replay = service

@@ -35,6 +35,10 @@ fn consent_kind_stable_names_are_contractual() {
         (ConsentKind::Revocation, "consent.revoked"),
         (ConsentKind::Violation, "consent.protocol_violation"),
         (ConsentKind::AthenaTriage, "admin.athena_triage"),
+        (
+            ConsentKind::AuthorizationBinding,
+            "consent.authorization_binding",
+        ),
     ];
 
     for (kind, expected) in cases {

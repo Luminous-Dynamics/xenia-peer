@@ -25,7 +25,8 @@ use uuid::Uuid;
 use xenia_ledger::{
     CURRENT_EVIDENCE_CRYPTO_MANIFEST, Chain, ConsentKind, CryptoPolicyProfile, DowngradePolicy,
     Ed25519EvidenceSignatureBackend, EvidenceBundleSeal, EvidenceBundleVerifyError,
-    EvidenceCryptoManifest, EvidencePublicKeyBinding, EvidenceSignatureBackend, LedgerEntry,
+    ConsentEventRecord, EvidenceCryptoManifest, EvidencePublicKeyBinding,
+    EvidenceSignatureBackend, LedgerEntry,
     LedgerEntryExport, LedgerError, SessionTranscriptBinding, SessionTranscriptSignature,
     SignatureEnvelope, SignatureSuite, Verifier, VerifyError,
 };
@@ -55,6 +56,8 @@ pub(crate) enum M1RuntimeError {
     },
     InvalidPersistedPermissionDescriptor(String),
     PersistedConsentContextMismatch(&'static str),
+    InvalidAuthorizationBinding(String),
+    DuplicateAuthorizationBinding,
     GrantDoesNotMatchOffer {
         offered: M1PermissionSet,
         granted: M1PermissionSet,
@@ -104,6 +107,12 @@ impl fmt::Display for M1RuntimeError {
                 f,
                 "M1 persisted consent entry changed authoritative {field}"
             ),
+            Self::InvalidAuthorizationBinding(reason) => {
+                write!(f, "M1 operator authorization binding is invalid: {reason}")
+            }
+            Self::DuplicateAuthorizationBinding => {
+                write!(f, "M1 operator authorization binding was recorded more than once")
+            }
             Self::GrantDoesNotMatchOffer { offered, granted } => write!(
                 f,
                 "M1 granted permissions {granted:?} do not match offered permissions {offered:?}"
@@ -760,6 +769,100 @@ pub(crate) fn verify_sealed_transcript_bound_evidence_bundle_dir_with_backend(
     ))
 }
 
+const AUTHORIZATION_BINDING_SCOPE_PREFIX: &str =
+    "xenia-runtime-authorization-binding-v1:";
+
+fn authorization_binding_scope(
+    permissions: &str,
+    offer_digest: &[u8; 32],
+    operator_id: &str,
+    operator_ed25519_pubkey: &[u8; 32],
+) -> String {
+    format!(
+        "{AUTHORIZATION_BINDING_SCOPE_PREFIX}permissions={permissions};offer_digest={};operator_id_hex={};operator_ed25519={}",
+        hex::encode(offer_digest),
+        hex::encode(operator_id.as_bytes()),
+        hex::encode(operator_ed25519_pubkey),
+    )
+}
+
+fn validate_authorization_binding_scope(
+    scope: &str,
+    expected_permissions: &str,
+    event_source_id: &[u8; 32],
+) -> Result<(), M1RuntimeError> {
+    let fields = scope
+        .strip_prefix(AUTHORIZATION_BINDING_SCOPE_PREFIX)
+        .ok_or_else(|| {
+            M1RuntimeError::InvalidAuthorizationBinding("unknown binding version".to_string())
+        })?;
+    let mut fields = fields.split(';');
+    let permissions = fields
+        .next()
+        .and_then(|field| field.strip_prefix("permissions="))
+        .ok_or_else(|| {
+            M1RuntimeError::InvalidAuthorizationBinding("missing permissions".to_string())
+        })?;
+    let offer_digest = fields
+        .next()
+        .and_then(|field| field.strip_prefix("offer_digest="))
+        .ok_or_else(|| {
+            M1RuntimeError::InvalidAuthorizationBinding("missing offer digest".to_string())
+        })?;
+    let operator_id = fields
+        .next()
+        .and_then(|field| field.strip_prefix("operator_id_hex="))
+        .ok_or_else(|| {
+            M1RuntimeError::InvalidAuthorizationBinding("missing operator id".to_string())
+        })?;
+    let operator_key = fields
+        .next()
+        .and_then(|field| field.strip_prefix("operator_ed25519="))
+        .ok_or_else(|| {
+            M1RuntimeError::InvalidAuthorizationBinding("missing operator key".to_string())
+        })?;
+    if fields.next().is_some() {
+        return Err(M1RuntimeError::InvalidAuthorizationBinding(
+            "unexpected trailing fields".to_string(),
+        ));
+    }
+    if permissions != expected_permissions {
+        return Err(M1RuntimeError::PersistedConsentContextMismatch(
+            "authorization binding permission scope",
+        ));
+    }
+    let digest = hex::decode(offer_digest).map_err(|_| {
+        M1RuntimeError::InvalidAuthorizationBinding("malformed offer digest".to_string())
+    })?;
+    if digest.len() != 32 {
+        return Err(M1RuntimeError::InvalidAuthorizationBinding(
+            "offer digest must be 32 bytes".to_string(),
+        ));
+    }
+    let operator_id = hex::decode(operator_id).map_err(|_| {
+        M1RuntimeError::InvalidAuthorizationBinding("malformed operator id".to_string())
+    })?;
+    if operator_id.is_empty() {
+        return Err(M1RuntimeError::InvalidAuthorizationBinding(
+            "operator id must not be empty".to_string(),
+        ));
+    }
+    let key = hex::decode(operator_key).map_err(|_| {
+        M1RuntimeError::InvalidAuthorizationBinding("malformed operator key".to_string())
+    })?;
+    if key.len() != 32 {
+        return Err(M1RuntimeError::InvalidAuthorizationBinding(
+            "operator key must be 32 bytes".to_string(),
+        ));
+    }
+    if key.as_slice() != event_source_id {
+        return Err(M1RuntimeError::PersistedConsentContextMismatch(
+            "authorization binding operator key",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) struct M1RuntimeSession {
     session: M1SessionMachine,
     chain: Chain,
@@ -769,6 +872,7 @@ pub(crate) struct M1RuntimeSession {
     configured_permissions: M1PermissionSet,
     scope: String,
     session_transcript_hash: Option<[u8; 32]>,
+    authorization_binding_action_id: Option<Uuid>,
     next_audit_index: usize,
 }
 
@@ -805,6 +909,7 @@ impl M1RuntimeSession {
             configured_permissions,
             scope: configured_permissions.scope_descriptor(),
             session_transcript_hash: None,
+            authorization_binding_action_id: None,
             next_audit_index: 0,
         }
     }
@@ -818,10 +923,13 @@ impl M1RuntimeSession {
     ) -> Result<Self, M1RuntimeError> {
         Verifier::verify_chain(&entries, &signing_key.verifying_key())?;
         let persisted_scope = entries
-            .first()
+            .iter()
+            .find(|entry| entry.event.kind == ConsentKind::Request)
             .map(|entry| entry.event.scope.clone())
             .ok_or_else(|| {
-                M1RuntimeError::InvalidPersistedPermissionDescriptor("missing ledger entry".into())
+                M1RuntimeError::InvalidPersistedPermissionDescriptor(
+                    "missing consent.requested ledger entry".into(),
+                )
             })?;
         let configured_permissions = M1PermissionSet::from_scope_descriptor(&persisted_scope)
             .ok_or_else(|| {
@@ -862,6 +970,49 @@ impl M1RuntimeSession {
                 CURRENT_EVIDENCE_CRYPTO_MANIFEST.transcript_signature,
             )
         })
+    }
+
+    /// Signed operator action id cross-linked into this runtime ledger, if an
+    /// authenticated approval has been bound.
+    pub(crate) fn authorization_binding_action_id(&self) -> Option<Uuid> {
+        self.authorization_binding_action_id
+    }
+
+    /// Append a runtime-evidence record joining the M1 grant to the exact
+    /// authenticated operator action and daemon-attested offer that authorized
+    /// it. This must occur after the scoped grant becomes active and at most
+    /// once; the ledger signature covers the action id, offer digest, operator
+    /// identity, and permission descriptor.
+    pub(crate) fn bind_operator_authorization(
+        &mut self,
+        action_id: [u8; 16],
+        offer_digest: [u8; 32],
+        operator_id: &str,
+        operator_ed25519_pubkey: [u8; 32],
+    ) -> Result<(), M1RuntimeError> {
+        if self.session.state() != M1SessionState::Active {
+            return Err(M1RuntimeError::InvalidAuthorizationBinding(
+                "binding requires an active scoped grant".to_string(),
+            ));
+        }
+        if self.authorization_binding_action_id.is_some() {
+            return Err(M1RuntimeError::DuplicateAuthorizationBinding);
+        }
+        let scope = authorization_binding_scope(
+            &self.scope,
+            &offer_digest,
+            operator_id,
+            &operator_ed25519_pubkey,
+        );
+        self.chain.append(ConsentEventRecord {
+            source_id: operator_ed25519_pubkey,
+            session_id: self.session_id,
+            request_id: Uuid::from_bytes(action_id),
+            kind: ConsentKind::AuthorizationBinding,
+            scope,
+        })?;
+        self.authorization_binding_action_id = Some(Uuid::from_bytes(action_id));
+        Ok(())
     }
 
     pub(crate) fn verify_transcript_bound_export(
@@ -979,11 +1130,28 @@ impl M1RuntimeSession {
         let entries = self.entries();
 
         for entry in entries {
-            if entry.event.source_id != self.source_id {
-                return Err(M1RuntimeError::PersistedConsentContextMismatch("source_id"));
-            }
             if entry.event.session_id != self.session_id {
                 return Err(M1RuntimeError::PersistedConsentContextMismatch("session_id"));
+            }
+            if entry.event.kind == ConsentKind::AuthorizationBinding {
+                if self.session.state() != M1SessionState::Active {
+                    return Err(M1RuntimeError::InvalidAuthorizationBinding(
+                        "binding appeared before an active approval".to_string(),
+                    ));
+                }
+                if self.authorization_binding_action_id.is_some() {
+                    return Err(M1RuntimeError::DuplicateAuthorizationBinding);
+                }
+                validate_authorization_binding_scope(
+                    &entry.event.scope,
+                    &self.scope,
+                    &entry.event.source_id,
+                )?;
+                self.authorization_binding_action_id = Some(entry.event.request_id);
+                continue;
+            }
+            if entry.event.source_id != self.source_id {
+                return Err(M1RuntimeError::PersistedConsentContextMismatch("source_id"));
             }
             if entry.event.request_id != self.request_id {
                 return Err(M1RuntimeError::PersistedConsentContextMismatch("request_id"));
@@ -1000,6 +1168,7 @@ impl M1RuntimeSession {
                 ConsentKind::Revocation => self.session.revoke()?,
                 ConsentKind::Violation => self.session.fail()?,
                 ConsentKind::AthenaTriage => {}
+                ConsentKind::AuthorizationBinding => unreachable!("handled above"),
             }
         }
 
@@ -2754,6 +2923,58 @@ mod tests {
             ),
             Err(M1RuntimeError::PersistedConsentContextMismatch("session_id"))
         ));
+    }
+
+    #[test]
+    fn authenticated_approval_binding_survives_rehydration() {
+        let signing_key = SigningKey::from_bytes(&[21; 32]);
+        let source_id = [0xAB; 32];
+        let session_id = Uuid::from_bytes([1; 16]);
+        let request_id = Uuid::from_bytes([2; 16]);
+        let action_id = [0x44; 16];
+        let grant = M1PermissionSet {
+            stream_frame: true,
+            inject_input: true,
+            ..M1PermissionSet::default()
+        };
+        let mut runtime = M1RuntimeSession::new(
+            signing_key.clone(),
+            source_id,
+            session_id,
+            request_id,
+            grant,
+        );
+        runtime.offer().unwrap();
+        runtime.grant_consent().unwrap();
+        runtime
+            .bind_operator_authorization(
+                action_id,
+                [0x33; 32],
+                "alice",
+                [0x11; 32],
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.authorization_binding_action_id(),
+            Some(Uuid::from_bytes(action_id))
+        );
+        assert_eq!(
+            runtime.entries().last().unwrap().event.kind,
+            ConsentKind::AuthorizationBinding
+        );
+
+        let rehydrated = M1RuntimeSession::from_persisted_entries(
+            signing_key,
+            runtime.entries(),
+            source_id,
+            session_id,
+            request_id,
+        )
+        .unwrap();
+        assert_eq!(
+            rehydrated.authorization_binding_action_id(),
+            Some(Uuid::from_bytes(action_id))
+        );
     }
 
     #[test]

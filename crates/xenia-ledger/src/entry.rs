@@ -131,6 +131,9 @@ pub enum ConsentKind {
     Violation,
     /// Automated action triggered by Athena AI triage.
     AthenaTriage,
+    /// Runtime evidence binding an M1 grant to the authenticated operator
+    /// action and daemon-attested offer that authorized it.
+    AuthorizationBinding,
 }
 
 impl ConsentKind {
@@ -148,6 +151,7 @@ impl ConsentKind {
             Self::Revocation => "consent.revoked",
             Self::Violation => "consent.protocol_violation",
             Self::AthenaTriage => "admin.athena_triage",
+            Self::AuthorizationBinding => "consent.authorization_binding",
         }
     }
 }

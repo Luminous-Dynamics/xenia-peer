@@ -842,7 +842,7 @@ fn cycle_kind(k: ConsentKind) -> ConsentKind {
         ConsentKind::Denial => ConsentKind::Approval,
         ConsentKind::Revocation => ConsentKind::Approval,
         ConsentKind::Violation => ConsentKind::Request,
-        ConsentKind::AthenaTriage => ConsentKind::Request,
+        ConsentKind::AthenaTriage | ConsentKind::AuthorizationBinding => ConsentKind::Request,
     }
 }
 

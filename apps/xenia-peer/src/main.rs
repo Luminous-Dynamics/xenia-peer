@@ -2275,6 +2275,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(Ok(true)) => {
                 let granted = offered_permissions;
                 m1_runtime.grant_consent_scoped(granted)?;
+                if let Some(receipt) = consent_service.approval_receipt() {
+                    m1_runtime.bind_operator_authorization(
+                        receipt.action_id,
+                        receipt.offer_digest,
+                        &receipt.operator_id,
+                        receipt.operator_ed25519_pubkey,
+                    )?;
+                } else if require_operator_auth {
+                    return Err(
+                        "authenticated consent grant committed without an approval receipt"
+                            .into(),
+                    );
+                }
                 info!(
                     inject_input = granted.inject_input,
                     read_host_clipboard = granted.read_host_clipboard,
