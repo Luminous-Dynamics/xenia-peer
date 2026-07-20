@@ -146,6 +146,34 @@ impl ConsentSessionState {
         )
     }
 
+    /// Stable machine-readable label used when joining consent lifecycle
+    /// termination into the independently signed M1 runtime evidence chain.
+    pub(crate) const fn stable_name(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Approved => "approved",
+            Self::Denied => "denied",
+            Self::Revoked => "revoked",
+            Self::Failed => "failed",
+            Self::Expired => "offer_expired",
+            Self::LeaseExpired => "authorization_lease_expired",
+        }
+    }
+
+    /// Parse a label produced by [`Self::stable_name`].
+    pub(crate) fn from_stable_name(name: &str) -> Option<Self> {
+        match name {
+            "pending" => Some(Self::Pending),
+            "approved" => Some(Self::Approved),
+            "denied" => Some(Self::Denied),
+            "revoked" => Some(Self::Revoked),
+            "failed" => Some(Self::Failed),
+            "offer_expired" => Some(Self::Expired),
+            "authorization_lease_expired" => Some(Self::LeaseExpired),
+            _ => None,
+        }
+    }
+
     /// Whether a live M1 runtime must stop privileged work immediately.
     /// Terminal ceremony states are fail-closed. `Pending` is retained only for
     /// the explicitly pre-production auto-consent fixture, whose M1 state is
@@ -536,10 +564,23 @@ impl ConsentDecisionService {
     /// fail-closed. The transition lock makes plaintext and sealed delivery
     /// race-safe and prevents duplicate audit entries for replayed decisions.
     pub(crate) async fn apply(&self, decoded: DecodedConsent) -> ConsentFollowup {
-        self.apply_at(decoded, unix_now_secs()).await
+        self.apply_with_commit_clock(decoded, unix_now_secs(), unix_now_secs)
+            .await
     }
 
     async fn apply_at(&self, decoded: DecodedConsent, now: u64) -> ConsentFollowup {
+        self.apply_with_commit_clock(decoded, now, move || now).await
+    }
+
+    async fn apply_with_commit_clock<F>(
+        &self,
+        decoded: DecodedConsent,
+        now: u64,
+        commit_clock: F,
+    ) -> ConsentFollowup
+    where
+        F: FnOnce() -> u64 + Send,
+    {
         let _transition = self.transition_lock.lock().await;
         let current = self.state();
 
@@ -697,13 +738,21 @@ impl ConsentDecisionService {
                 .insert(authorized.action_id);
         }
 
+        // Sample the lease epoch only after any authenticated action has been
+        // durably committed. A slow fsync therefore cannot consume part of the
+        // configured authorization lifetime before the grant exists.
+        let approval_committed_at =
+            (next == ConsentSessionState::Approved).then(commit_clock);
+
         if next == ConsentSessionState::Approved {
+            let approved_at = approval_committed_at
+                .expect("approved transition must sample its durable commit time");
             let approving_operator = decoded
                 .authorized
                 .as_ref()
                 .map(|authorized| authorized.operator_id.clone());
             let authorization_deadline_unix_secs = (self.authorization_lease_secs > 0)
-                .then(|| now.saturating_add(self.authorization_lease_secs));
+                .then(|| approved_at.saturating_add(self.authorization_lease_secs));
             let approval_receipt = decoded.authorized.as_ref().map(|authorized| {
                 ConsentApprovalReceipt {
                     action_id: authorized.action_id,
@@ -732,8 +781,8 @@ impl ConsentDecisionService {
                 }
             }
         }
-        if next == ConsentSessionState::Approved {
-            self.approved_at.store(now, Ordering::SeqCst);
+        if let Some(approved_at) = approval_committed_at {
+            self.approved_at.store(approved_at, Ordering::SeqCst);
         }
         self.publish_state(next);
         if let Some(decision) = initial_decision

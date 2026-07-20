@@ -37,6 +37,7 @@ use xenia_peer_core::{
     M1Permission, M1PermissionSet, M1SessionError, M1SessionMachine, M1SessionState,
 };
 
+use crate::consent_authority::ConsentSessionState;
 use crate::m1_ledger::consent_record_for_m1_event;
 
 #[derive(Debug)]
@@ -63,6 +64,8 @@ pub(crate) enum M1RuntimeError {
     InvalidAuthorizationBinding(String),
     DuplicateAuthorizationBinding,
     MissingRequiredAuthorizationBinding,
+    InvalidAuthorityTermination(String),
+    DuplicateAuthorityTermination,
     AuthorizationLeaseExpired {
         deadline_unix_secs: u64,
         now_unix_secs: u64,
@@ -131,6 +134,13 @@ impl fmt::Display for M1RuntimeError {
             Self::MissingRequiredAuthorizationBinding => write!(
                 f,
                 "M1 privileged flow requires an authenticated operator authorization binding"
+            ),
+            Self::InvalidAuthorityTermination(reason) => {
+                write!(f, "M1 consent-authority termination binding is invalid: {reason}")
+            }
+            Self::DuplicateAuthorityTermination => write!(
+                f,
+                "M1 consent-authority termination was recorded more than once"
             ),
             Self::AuthorizationLeaseExpired {
                 deadline_unix_secs,
@@ -964,6 +974,76 @@ fn validate_authorization_binding_scope(
     Ok(authorization_deadline_unix_secs)
 }
 
+const AUTHORITY_TERMINATION_SCOPE_PREFIX: &str =
+    "xenia-runtime-authority-termination-v1:";
+
+fn authority_termination_scope(permissions: &str, state: ConsentSessionState) -> String {
+    format!(
+        "{AUTHORITY_TERMINATION_SCOPE_PREFIX}permissions={permissions};state={}",
+        state.stable_name()
+    )
+}
+
+fn validate_authority_termination_scope(
+    scope: &str,
+    expected_permissions: &str,
+) -> Result<ConsentSessionState, M1RuntimeError> {
+    let fields = scope
+        .strip_prefix(AUTHORITY_TERMINATION_SCOPE_PREFIX)
+        .ok_or_else(|| {
+            M1RuntimeError::InvalidAuthorityTermination(
+                "unknown termination binding version".to_string(),
+            )
+        })?;
+    let mut fields = fields.split(';');
+    let permissions = fields
+        .next()
+        .and_then(|field| field.strip_prefix("permissions="))
+        .ok_or_else(|| {
+            M1RuntimeError::InvalidAuthorityTermination("missing permissions".to_string())
+        })?;
+    let state = fields
+        .next()
+        .and_then(|field| field.strip_prefix("state="))
+        .and_then(ConsentSessionState::from_stable_name)
+        .ok_or_else(|| {
+            M1RuntimeError::InvalidAuthorityTermination("missing or unknown state".to_string())
+        })?;
+    if fields.next().is_some() {
+        return Err(M1RuntimeError::InvalidAuthorityTermination(
+            "unexpected trailing fields".to_string(),
+        ));
+    }
+    if permissions != expected_permissions {
+        return Err(M1RuntimeError::PersistedConsentContextMismatch(
+            "authority termination permission scope",
+        ));
+    }
+    if !state.runtime_must_stop() {
+        return Err(M1RuntimeError::InvalidAuthorityTermination(
+            "non-terminal authority state".to_string(),
+        ));
+    }
+    Ok(state)
+}
+
+fn expected_m1_state_for_authority_termination(
+    state: ConsentSessionState,
+) -> Result<M1SessionState, M1RuntimeError> {
+    match state {
+        ConsentSessionState::Denied => Ok(M1SessionState::Denied),
+        ConsentSessionState::Revoked | ConsentSessionState::LeaseExpired => {
+            Ok(M1SessionState::Revoked)
+        }
+        ConsentSessionState::Failed | ConsentSessionState::Expired => Ok(M1SessionState::Failed),
+        ConsentSessionState::Pending | ConsentSessionState::Approved => Err(
+            M1RuntimeError::InvalidAuthorityTermination(
+                "authority state is not terminal".to_string(),
+            ),
+        ),
+    }
+}
+
 pub(crate) struct M1RuntimeSession {
     session: M1SessionMachine,
     chain: Chain,
@@ -975,6 +1055,7 @@ pub(crate) struct M1RuntimeSession {
     session_transcript_hash: Option<[u8; 32]>,
     authorization_binding_action_id: Option<Uuid>,
     authorization_deadline_unix_secs: Option<u64>,
+    authority_termination_state: Option<ConsentSessionState>,
     authorization_policy: RuntimeAuthorizationPolicy,
     next_audit_index: usize,
 }
@@ -1014,6 +1095,7 @@ impl M1RuntimeSession {
             session_transcript_hash: None,
             authorization_binding_action_id: None,
             authorization_deadline_unix_secs: None,
+            authority_termination_state: None,
             authorization_policy: RuntimeAuthorizationPolicy::Compatibility,
             next_audit_index: 0,
         }
@@ -1087,6 +1169,11 @@ impl M1RuntimeSession {
     /// binding. `None` means no restrictive lease was configured.
     pub(crate) fn authorization_deadline_unix_secs(&self) -> Option<u64> {
         self.authorization_deadline_unix_secs
+    }
+
+    /// Terminal consent-authority state cross-linked into this runtime chain.
+    pub(crate) fn authority_termination_state(&self) -> Option<ConsentSessionState> {
+        self.authority_termination_state
     }
 
     /// Require a signed operator-authorization binding before any privileged
@@ -1386,6 +1473,23 @@ impl M1RuntimeSession {
             if entry.event.request_id != self.request_id {
                 return Err(M1RuntimeError::PersistedConsentContextMismatch("request_id"));
             }
+            if entry.event.kind == ConsentKind::LifecycleTermination {
+                if self.authority_termination_state.is_some() {
+                    return Err(M1RuntimeError::DuplicateAuthorityTermination);
+                }
+                let authority_state =
+                    validate_authority_termination_scope(&entry.event.scope, &self.scope)?;
+                let expected_state = expected_m1_state_for_authority_termination(authority_state)?;
+                if self.session.state() != expected_state {
+                    return Err(M1RuntimeError::InvalidAuthorityTermination(format!(
+                        "authority state {} does not match replayed M1 state {:?}",
+                        authority_state.stable_name(),
+                        self.session.state()
+                    )));
+                }
+                self.authority_termination_state = Some(authority_state);
+                continue;
+            }
             if entry.event.scope != self.scope {
                 return Err(M1RuntimeError::PersistedConsentContextMismatch("permission scope"));
             }
@@ -1397,8 +1501,10 @@ impl M1RuntimeSession {
                 ConsentKind::Denial => self.session.deny_consent()?,
                 ConsentKind::Revocation => self.session.revoke()?,
                 ConsentKind::Violation => self.session.fail()?,
-                ConsentKind::AthenaTriage | ConsentKind::LifecycleTermination => {}
-                ConsentKind::AuthorizationBinding => unreachable!("handled above"),
+                ConsentKind::AthenaTriage => {}
+                ConsentKind::AuthorizationBinding | ConsentKind::LifecycleTermination => {
+                    unreachable!("handled above")
+                }
             }
         }
 
@@ -1509,6 +1615,54 @@ impl M1RuntimeSession {
 
     pub(crate) fn allow_file_receive_from_viewer(&mut self) -> Result<(), M1RuntimeError> {
         self.receive_file_from_viewer()
+    }
+
+    /// Terminate privileged runtime authority for the exact terminal state
+    /// published by the consent authority, then append a signed join record
+    /// carrying that stable state and the immutable permission descriptor.
+    pub(crate) fn record_authority_termination(
+        &mut self,
+        authority_state: ConsentSessionState,
+    ) -> Result<(), M1RuntimeError> {
+        let expected_state = expected_m1_state_for_authority_termination(authority_state)?;
+        if let Some(recorded) = self.authority_termination_state {
+            return if recorded == authority_state {
+                Ok(())
+            } else {
+                Err(M1RuntimeError::DuplicateAuthorityTermination)
+            };
+        }
+
+        if self.session.state() != expected_state {
+            match (self.session.state(), expected_state) {
+                (M1SessionState::Offered, M1SessionState::Denied) => {
+                    self.session.deny_consent()?;
+                }
+                (M1SessionState::Offered | M1SessionState::Active, M1SessionState::Revoked) => {
+                    self.session.revoke()?;
+                }
+                (M1SessionState::Idle | M1SessionState::Offered | M1SessionState::Active,
+                    M1SessionState::Failed) => {
+                    self.session.fail()?;
+                }
+                (current, expected) => {
+                    return Err(M1RuntimeError::InvalidAuthorityTermination(format!(
+                        "cannot map M1 state {current:?} to required state {expected:?}"
+                    )));
+                }
+            }
+            self.flush_new_audit_events()?;
+        }
+
+        self.chain.append(ConsentEventRecord {
+            source_id: self.source_id,
+            session_id: self.session_id,
+            request_id: self.request_id,
+            kind: ConsentKind::LifecycleTermination,
+            scope: authority_termination_scope(&self.scope, authority_state),
+        })?;
+        self.authority_termination_state = Some(authority_state);
+        Ok(())
     }
 
     pub(crate) fn revoke(&mut self) -> Result<(), M1RuntimeError> {
@@ -3241,6 +3395,86 @@ mod tests {
         ));
 
         runtime.verify(&verifying_key).unwrap();
+    }
+
+    #[test]
+    fn consent_authority_termination_reason_is_signed_and_rehydrates() {
+        let signing_key = SigningKey::from_bytes(&[24; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let source_id = [0xAB; 32];
+        let session_id = Uuid::from_bytes([1; 16]);
+        let request_id = Uuid::from_bytes([2; 16]);
+        let grant = M1PermissionSet {
+            stream_frame: true,
+            ..M1PermissionSet::default()
+        };
+        let mut runtime = M1RuntimeSession::new(
+            signing_key.clone(),
+            source_id,
+            session_id,
+            request_id,
+            grant,
+        );
+        runtime.offer().unwrap();
+        runtime.grant_consent().unwrap();
+        runtime
+            .record_authority_termination(ConsentSessionState::LeaseExpired)
+            .unwrap();
+        assert_eq!(runtime.state(), M1SessionState::Revoked);
+        assert_eq!(
+            runtime.authority_termination_state(),
+            Some(ConsentSessionState::LeaseExpired)
+        );
+        let entries = runtime.entries();
+        assert_eq!(
+            entries.last().unwrap().event.kind,
+            ConsentKind::LifecycleTermination
+        );
+        assert!(entries
+            .last()
+            .unwrap()
+            .event
+            .scope
+            .contains("state=authorization_lease_expired"));
+        M1RuntimeSession::verify_entries(&entries, &verifying_key).unwrap();
+
+        let rehydrated = M1RuntimeSession::from_persisted_entries(
+            signing_key,
+            entries,
+            source_id,
+            session_id,
+            request_id,
+        )
+        .unwrap();
+        assert_eq!(rehydrated.state(), M1SessionState::Revoked);
+        assert_eq!(
+            rehydrated.authority_termination_state(),
+            Some(ConsentSessionState::LeaseExpired)
+        );
+    }
+
+    #[test]
+    fn conflicting_authority_termination_cannot_be_recorded_twice() {
+        let (mut runtime, _verifying_key) = runtime(26);
+        runtime.offer().unwrap();
+        runtime.grant_consent().unwrap();
+        runtime
+            .record_authority_termination(ConsentSessionState::Revoked)
+            .unwrap();
+        assert!(matches!(
+            runtime.record_authority_termination(ConsentSessionState::LeaseExpired),
+            Err(M1RuntimeError::DuplicateAuthorityTermination)
+        ));
+    }
+
+    #[test]
+    fn nonterminal_authority_state_is_refused() {
+        let (mut runtime, _verifying_key) = runtime(27);
+        runtime.offer().unwrap();
+        assert!(matches!(
+            runtime.record_authority_termination(ConsentSessionState::Approved),
+            Err(M1RuntimeError::InvalidAuthorityTermination(_))
+        ));
     }
 
     #[test]

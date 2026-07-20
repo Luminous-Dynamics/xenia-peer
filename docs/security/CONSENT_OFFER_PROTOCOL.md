@@ -119,3 +119,20 @@ Changes to canonical scope fields or tags require a new scope domain/version.
 Changes to offer canonical bytes require a new offer domain/version. Changes to
 the action transcript require a new action domain/version. Breaking agent API
 shape changes require a `xenia-operator-agent-proto::SCHEMA_VERSION` bump.
+
+## Runtime authorization continuity
+
+Authenticated approvals are copied into the M1 evidence chain as
+`xenia-runtime-authorization-binding-v2`. In addition to action id, offer digest,
+operator identity, operator key, and exact permission descriptor, v2 records the
+host-local authorization lease deadline. Privileged runtime gates and evidence
+exports recheck that deadline after rehydration.
+
+When the consent authority later reaches a terminal state, the M1 chain appends
+a separate `xenia-runtime-authority-termination-v1` record carrying the stable
+reason. This distinguishes explicit revocation, lease expiry, offer expiry, and
+fail-closed transport/authority loss in offline evidence rather than presenting
+all runtime shutdowns as the same generic revocation.
+
+See `RUNTIME_AUTHORIZATION_CONTINUITY.md` for persistence, restore, and rollback
+boundaries.

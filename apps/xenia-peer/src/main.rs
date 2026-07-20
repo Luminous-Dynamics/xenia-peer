@@ -2391,7 +2391,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut runtime_consent_state = consent_service.subscribe_state();
     if runtime_consent_state.borrow().runtime_must_stop() {
         let state = *runtime_consent_state.borrow();
-        if let Err(err) = m1_runtime.lock().await.revoke() {
+        if let Err(err) = m1_runtime
+            .lock()
+            .await
+            .record_authority_termination(state)
+        {
             warn!(error = %err, ?state, "failed to record pre-runtime consent termination");
         }
         info!(?state, "consent terminated before privileged runtime startup");
@@ -2625,8 +2629,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ = ticker.tick() => {}
             changed = runtime_consent_state.changed() => {
                 if changed.is_err() || runtime_consent_state.borrow().runtime_must_stop() {
-                    let state = *runtime_consent_state.borrow();
-                    if let Err(err) = m1_runtime.lock().await.revoke() {
+                    let state = if changed.is_err() {
+                        crate::consent_authority::ConsentSessionState::Failed
+                    } else {
+                        *runtime_consent_state.borrow()
+                    };
+                    if let Err(err) = m1_runtime
+                        .lock()
+                        .await
+                        .record_authority_termination(state)
+                    {
                         warn!(error = %err, ?state, "failed to record consent termination");
                     }
                     info!(?state, "consent lifecycle stopped outbound privileged flow");

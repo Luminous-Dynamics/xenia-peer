@@ -80,15 +80,16 @@ project avoids elsewhere). What actually happens on a bad restore differs
 by file type:
 
 - **`consent.ledger` and `audit.log` are real hash chains with per-entry
-  signatures.** A tampered or truncated one is caught the moment
-  `xenia-peer`/`xenia-operator-agent` tries to load it --
-  `audit_ledger_store::load_verified` and `AgentAuditChain::load_verified`
-  both refuse to start rather than trust unverified history (see
-  `apps/xenia-peer/src/audit_ledger_store.rs`'s
-  `tampered_persisted_history_is_rejected_before_rehydration` test and
-  `apps/xenia-operator-agent/src/audit_log.rs`'s
-  `tampered_event_fails_verification`/`tampered_signature_fails_verification`/
-  `broken_link_fails_verification` tests for the exact guarantee).
+  signatures.** Bit-level tampering, broken links, malformed persistence
+  envelopes, and signatures under the wrong key are caught when
+  `xenia-peer`/`xenia-operator-agent` loads them. The daemon's live ledger now
+  also uses a versioned, size-bounded envelope whose entry count and head must
+  agree with the decoded signed chain. A *complete older valid prefix* is a
+  different threat: the chain alone cannot distinguish it from the historical
+  state that genuinely existed at that point. Detect rollback by retaining
+  signed checkpoints from `/v1/audit/checkpoint` outside the restored state
+  directory and comparing key, count, and head continuity. See
+  `docs/security/RUNTIME_AUTHORIZATION_CONTINUITY.md` for the exact boundary.
 - **The raw key files (`*.key`) have no such structure.** Any byte string
   of the right length parses as a "valid" key -- a bit-flipped or
   otherwise corrupted key file is silently accepted at load time as a
