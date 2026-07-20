@@ -56,7 +56,6 @@ use xenia_capture::ScapCapture;
 mod admin_ui;
 mod audit_ledger_store;
 mod consent_authority;
-#[cfg(test)]
 mod consent_compaction;
 mod consent_server;
 mod evidence_verifier;
@@ -473,8 +472,8 @@ struct Args {
     advance_consent_ledger_checkpoint: Option<std::path::PathBuf>,
 
     /// Export a bounded, verifiable JSON archive segment and exit. This does
-    /// not truncate the live ledger; safe online compaction still requires
-    /// replay indexes and recovery summaries for archived authorization state.
+    /// not truncate the live ledger. Compaction preflight bundles can now bind
+    /// replay/recovery state, but live pruning remains intentionally disabled.
     #[arg(
         long,
         value_name = "FILE",
@@ -491,6 +490,44 @@ struct Args {
         requires = "export_consent_ledger_archive_segment"
     )]
     consent_ledger_archive_base_checkpoint: Option<std::path::PathBuf>,
+
+    /// Export a non-destructive compaction preflight bundle and exit. The
+    /// bundle embeds one or more verified archive segments, a deterministic
+    /// replay/recovery summary, and a ledger-signed manifest binding both to
+    /// the current live ledger head. No live entries are deleted.
+    #[arg(
+        long,
+        value_name = "FILE",
+        conflicts_with_all = [
+            "advance_consent_ledger_checkpoint",
+            "export_consent_ledger_archive_segment",
+            "verify_consent_ledger_compaction_bundle"
+        ]
+    )]
+    export_consent_ledger_compaction_bundle: Option<std::path::PathBuf>,
+
+    /// Verifiable archive segment to include in the compaction preflight
+    /// bundle. Repeat in chronological order. The first segment must begin at
+    /// genesis and the archived prefix must contain only completed ceremonies.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "export_consent_ledger_compaction_bundle"
+    )]
+    consent_ledger_compaction_archive_segment: Vec<std::path::PathBuf>,
+
+    /// Verify an existing compaction preflight bundle against the complete
+    /// current consent ledger and exit. This is a read-only verification gate.
+    #[arg(
+        long,
+        value_name = "FILE",
+        conflicts_with_all = [
+            "advance_consent_ledger_checkpoint",
+            "export_consent_ledger_archive_segment",
+            "export_consent_ledger_compaction_bundle"
+        ]
+    )]
+    verify_consent_ledger_compaction_bundle: Option<std::path::PathBuf>,
 
     /// M1 consent-ledger signing key path. Signs the consent grant/deny/revoke
     /// boundary events; generated on first run with owner-only (0600)
@@ -2121,6 +2158,170 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("terminal entries: {}", segment.terminal_checkpoint.entry_count);
         println!("segment entries: {}", segment.entries.len());
         println!("segment blake3: {}", hex::encode(segment.segment_digest));
+        return Ok(());
+    }
+
+    if let Some(output_path) = args
+        .export_consent_ledger_compaction_bundle
+        .as_deref()
+    {
+        if args.consent_ledger_compaction_archive_segment.is_empty() {
+            return Err(concat!(
+                "--export-consent-ledger-compaction-bundle requires at least one ",
+                "--consent-ledger-compaction-archive-segment"
+            )
+            .into());
+        }
+        if args.consent_ledger_compaction_archive_segment.len()
+            > xenia_ledger::MAX_LEDGER_ARCHIVE_SEQUENCE_SEGMENTS
+        {
+            return Err(format!(
+                "compaction bundle has {} archive segments; maximum is {}",
+                args.consent_ledger_compaction_archive_segment.len(),
+                xenia_ledger::MAX_LEDGER_ARCHIVE_SEQUENCE_SEGMENTS
+            )
+            .into());
+        }
+        let mut archive_segments = Vec::with_capacity(
+            args.consent_ledger_compaction_archive_segment.len(),
+        );
+        let mut archive_input_bytes = 0u64;
+        for path in &args.consent_ledger_compaction_archive_segment {
+            let remaining_input_bytes =
+                consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
+                    .saturating_sub(archive_input_bytes);
+            let per_file_limit = audit_ledger_store::MAX_AUDIT_LEDGER_BYTES
+                .min(remaining_input_bytes);
+            let (segment, input_bytes) = audit_ledger_store::read_bounded_json_with_size::<
+                xenia_ledger::LedgerArchiveSegment,
+            >(
+                path,
+                per_file_limit,
+                "consent ledger archive segment",
+            )
+            .map_err(|err| -> Box<dyn std::error::Error> {
+                format!(
+                    "failed to read compaction archive segment {}: {err}",
+                    path.display()
+                )
+                .into()
+            })?;
+            archive_input_bytes = archive_input_bytes
+                .checked_add(input_bytes)
+                .ok_or("compaction archive input byte count overflow")?;
+            if archive_input_bytes
+                > consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
+            {
+                return Err(format!(
+                    "compaction archive inputs exceed {} bytes",
+                    consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
+                )
+                .into());
+            }
+            archive_segments.push(segment);
+        }
+        let bundle = consent_compaction::ConsentCompactionBundleV1::build(
+            &ledger,
+            archive_segments,
+            unix_now_secs(),
+        )
+        .map_err(|err| -> Box<dyn std::error::Error> {
+            format!("consent ledger compaction preflight failed: {err}").into()
+        })?;
+        let mut bytes = serde_json::to_vec_pretty(&bundle)?;
+        bytes.push(b'\n');
+        if bytes.len() as u64
+            > consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
+        {
+            return Err(format!(
+                "serialized compaction bundle is {} bytes; maximum is {}",
+                bytes.len(),
+                consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
+            )
+            .into());
+        }
+        audit_ledger_store::persist_owner_only_atomic(output_path, &bytes).map_err(
+            |err| -> Box<dyn std::error::Error> {
+                format!(
+                    "failed to persist consent ledger compaction bundle {}: {err}",
+                    output_path.display()
+                )
+                .into()
+            },
+        )?;
+        println!("consent-ledger compaction preflight bundle exported");
+        println!("path: {}", output_path.display());
+        println!(
+            "archived entries: {}",
+            bundle.recovery_summary.archived_entry_count
+        );
+        println!(
+            "replay action ids: {}",
+            bundle.recovery_summary.replay_action_ids.len()
+        );
+        println!(
+            "completed sessions: {}",
+            bundle.recovery_summary.sessions.len()
+        );
+        println!(
+            "archive sequence blake3: {}",
+            hex::encode(bundle.recovery_summary.archive_sequence_digest)
+        );
+        println!(
+            "recovery summary blake3: {}",
+            hex::encode(bundle.recovery_summary.summary_digest)
+        );
+        println!("live entries: {}", bundle.manifest.current_checkpoint.entry_count);
+        println!("no live ledger entries were deleted");
+        return Ok(());
+    }
+
+    if let Some(bundle_path) = args
+        .verify_consent_ledger_compaction_bundle
+        .as_deref()
+    {
+        let bundle = audit_ledger_store::read_bounded_json::<
+            consent_compaction::ConsentCompactionBundleV1,
+        >(
+            bundle_path,
+            consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES,
+            "consent ledger compaction bundle",
+        )
+        .map_err(|err| -> Box<dyn std::error::Error> {
+            format!(
+                "failed to read --verify-consent-ledger-compaction-bundle {}: {err}",
+                bundle_path.display()
+            )
+            .into()
+        })?;
+        let entries = ledger.iter().cloned().collect::<Vec<_>>();
+        bundle
+            .verify_against_live_ledger(&entries, &signing_key.verifying_key())
+            .map_err(|err| -> Box<dyn std::error::Error> {
+                format!(
+                    "consent ledger compaction bundle {} failed verification: {err}",
+                    bundle_path.display()
+                )
+                .into()
+            })?;
+        println!("consent-ledger compaction preflight bundle verified");
+        println!("path: {}", bundle_path.display());
+        println!(
+            "archived entries: {}",
+            bundle.recovery_summary.archived_entry_count
+        );
+        println!(
+            "current entries: {}",
+            bundle.manifest.current_checkpoint.entry_count
+        );
+        println!(
+            "replay action ids: {}",
+            bundle.recovery_summary.replay_action_ids.len()
+        );
+        println!(
+            "completed sessions: {}",
+            bundle.recovery_summary.sessions.len()
+        );
         return Ok(());
     }
     let shared_ledger = std::sync::Arc::new(tokio::sync::Mutex::new(ledger));

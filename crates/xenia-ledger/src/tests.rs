@@ -1873,6 +1873,50 @@ fn compaction_manifest_binds_archive_recovery_and_live_head() {
 }
 
 #[test]
+fn compaction_manifest_refuses_regressed_or_forked_current_heads() {
+    let key = SigningKey::from_bytes(&[66u8; 32]);
+    let mut chain = crate::Chain::new(key.clone());
+    chain.append(sample_event(ConsentKind::Request)).unwrap();
+    let older_current = chain.sign_checkpoint(102);
+    chain.append(sample_event(ConsentKind::Approval)).unwrap();
+    let newer_archive = chain.sign_checkpoint(101);
+
+    let regressed = LedgerCompactionManifest {
+        schema: LEDGER_COMPACTION_MANIFEST_SCHEMA.to_string(),
+        archived_through_checkpoint: newer_archive,
+        current_checkpoint: older_current,
+        archive_sequence_digest: [0xA1; 32],
+        recovery_summary_digest: [0xB2; 32],
+        timestamp_unix_secs: 102,
+        signature: [0u8; 64],
+    };
+    assert_eq!(
+        Verifier::verify_ledger_compaction_manifest(&regressed),
+        Err(LedgerCompactionError::CurrentBeforeArchive)
+    );
+
+    let mut left = crate::Chain::new(key.clone());
+    left.append(sample_event(ConsentKind::Request)).unwrap();
+    let archived = left.sign_checkpoint(100);
+    let mut right = crate::Chain::new(key);
+    right.append(sample_event(ConsentKind::Denial)).unwrap();
+    let current = right.sign_checkpoint(101);
+    let forked = LedgerCompactionManifest {
+        schema: LEDGER_COMPACTION_MANIFEST_SCHEMA.to_string(),
+        archived_through_checkpoint: archived,
+        current_checkpoint: current,
+        archive_sequence_digest: [0xA1; 32],
+        recovery_summary_digest: [0xB2; 32],
+        timestamp_unix_secs: 101,
+        signature: [0u8; 64],
+    };
+    assert_eq!(
+        Verifier::verify_ledger_compaction_manifest(&forked),
+        Err(LedgerCompactionError::ForkAtArchiveBoundary)
+    );
+}
+
+#[test]
 fn compaction_manifest_refuses_placeholders_and_unrelated_boundaries() {
     let key = SigningKey::from_bytes(&[66u8; 32]);
     let mut chain = crate::Chain::new(key);

@@ -84,6 +84,12 @@ pub enum LedgerCompactionError {
     /// The current checkpoint timestamp did not equal the signed manifest time.
     #[error("current checkpoint timestamp does not match compaction manifest timestamp")]
     CurrentTimestampMismatch,
+    /// The claimed current live head was older than the archived boundary.
+    #[error("ledger compaction current checkpoint precedes the archived boundary")]
+    CurrentBeforeArchive,
+    /// Checkpoints at the same height committed to different ledger heads.
+    #[error("ledger compaction checkpoints fork at the archived boundary")]
+    ForkAtArchiveBoundary,
     /// An all-zero commitment placeholder was supplied.
     #[error("ledger compaction {field} digest must not be all zero")]
     EmptyDigest {
@@ -122,6 +128,18 @@ impl Verifier {
         }
         if manifest.current_checkpoint.timestamp_unix_secs != manifest.timestamp_unix_secs {
             return Err(LedgerCompactionError::CurrentTimestampMismatch);
+        }
+        if manifest.current_checkpoint.entry_count
+            < manifest.archived_through_checkpoint.entry_count
+        {
+            return Err(LedgerCompactionError::CurrentBeforeArchive);
+        }
+        if manifest.current_checkpoint.entry_count
+            == manifest.archived_through_checkpoint.entry_count
+            && manifest.current_checkpoint.head_hash
+                != manifest.archived_through_checkpoint.head_hash
+        {
+            return Err(LedgerCompactionError::ForkAtArchiveBoundary);
         }
         if manifest.archive_sequence_digest == [0u8; 32] {
             return Err(LedgerCompactionError::EmptyDigest {

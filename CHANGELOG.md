@@ -15,6 +15,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   witness quorums and retained-checkpoint freshness policy.
 - Bounded, atomically exported ledger archive segments with exact checkpoint
   and signed-entry continuity verification.
+- Bounded archive-sequence commitments, deterministic consent replay/recovery
+  summaries, and ledger-signed non-destructive compaction preflight bundles.
 
 ## [0.0.0-m0] — 2026-04-18
 

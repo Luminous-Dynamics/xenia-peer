@@ -5,7 +5,7 @@
 //!
 //! The generic ledger crate proves archive integrity but intentionally does not
 //! understand Xenia's authorization semantics. This module derives the minimum
-//! state a future pruning implementation must retain: every authenticated
+//! state a future pruning implementation must retain: every signed decision
 //! action id for replay refusal, every completed session, approval provenance,
 //! and the exact archive boundary. A summary is accepted only when the archive
 //! begins at genesis and every consent ceremony in the archived prefix is
@@ -13,16 +13,22 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use xenia_ledger::{
-    checkpoint_fingerprint, ledger_archive_sequence_digest, ConsentKind, LedgerArchiveError,
-    LedgerArchiveSegment, LedgerCheckpoint,
+    checkpoint_fingerprint, ledger_archive_sequence_digest, Chain, ConsentKind,
+    LedgerArchiveError, LedgerArchiveSegment, LedgerCheckpoint, LedgerCompactionError,
+    LedgerCompactionManifest, LedgerEntry, Verifier,
 };
 
 const CONSENT_RECOVERY_SUMMARY_SCHEMA: &str = "xenia-consent-recovery-summary-v1";
 const MAX_RECOVERY_ACTION_IDS: usize = 100_000;
 const MAX_RECOVERY_SESSIONS: usize = 100_000;
+
+pub(crate) const CONSENT_COMPACTION_BUNDLE_SCHEMA: &str =
+    "xenia-consent-compaction-bundle-v1";
+pub(crate) const MAX_CONSENT_COMPACTION_BUNDLE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// One completed consent ceremony retained after its detailed entries move to
 /// verified cold storage.
@@ -46,6 +52,18 @@ pub(crate) struct ConsentRecoverySummaryV1 {
     pub(crate) replay_action_ids: Vec<[u8; 16]>,
     pub(crate) sessions: Vec<ConsentRecoverySessionV1>,
     pub(crate) summary_digest: [u8; 32],
+}
+
+/// Non-destructive compaction preflight artifact. Every detailed archived entry
+/// remains embedded and independently verifiable; the recovery summary and
+/// signed manifest prove what state a future pruning implementation would need
+/// to retain before it is permitted to remove that prefix from live storage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConsentCompactionBundleV1 {
+    pub(crate) schema: String,
+    pub(crate) archive_segments: Vec<LedgerArchiveSegment>,
+    pub(crate) recovery_summary: ConsentRecoverySummaryV1,
+    pub(crate) manifest: LedgerCompactionManifest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,7 +103,9 @@ pub(crate) enum ConsentRecoveryError {
     NonGenesisBase,
     #[error("consent recovery action id appears more than once: {action_id}")]
     DuplicateActionId { action_id: String },
-    #[error("consent recovery contains an invalid transition for session {session_id} at seq {seq}")]
+    #[error(
+        "consent recovery contains an invalid transition for session {session_id} at seq {seq}"
+    )]
     InvalidTransition { session_id: String, seq: u64 },
     #[error("consent recovery session {session_id} is not terminal at archive boundary")]
     IncompleteSession { session_id: String },
@@ -97,6 +117,22 @@ pub(crate) enum ConsentRecoveryError {
     DigestMismatch,
     #[error("consent recovery summary does not match the verified archive sequence")]
     SummaryMismatch,
+    #[error("unsupported consent compaction bundle schema: {schema}")]
+    UnsupportedBundleSchema { schema: String },
+    #[error("consent compaction manifest does not bind the archive sequence")]
+    ManifestArchiveMismatch,
+    #[error("consent compaction manifest does not bind the recovery summary")]
+    ManifestRecoveryMismatch,
+    #[error("consent compaction manifest archive boundary does not match the summary")]
+    ManifestBoundaryMismatch,
+    #[error("consent compaction archived entry count does not fit this platform")]
+    ArchivedEntryCountOverflow,
+    #[error("signed decision action id {action_id} reappears at sequence {seq}")]
+    SignedDecisionReplay { action_id: String, seq: u64 },
+    #[error("terminal archived session {session_id} reappears at sequence {seq}")]
+    ArchivedSessionReused { session_id: String, seq: u64 },
+    #[error("consent compaction manifest verification failed: {0}")]
+    Manifest(#[from] LedgerCompactionError),
     #[error("consent recovery checkpoint fingerprint failed: {0}")]
     Checkpoint(#[from] xenia_ledger::CheckpointError),
 }
@@ -124,11 +160,11 @@ impl ConsentRecoverySummaryV1 {
         for entry in segments.iter().flat_map(|segment| segment.entries.iter()) {
             let session_id = *entry.event.session_id.as_bytes();
             let request_id = *entry.event.request_id.as_bytes();
-            let is_authenticated_action = matches!(
+            let is_signed_decision = matches!(
                 entry.event.kind,
                 ConsentKind::Approval | ConsentKind::Denial | ConsentKind::Revocation
             );
-            if is_authenticated_action && !replay_action_ids.insert(request_id) {
+            if is_signed_decision && !replay_action_ids.insert(request_id) {
                 return Err(ConsentRecoveryError::DuplicateActionId {
                     action_id: hex::encode(request_id),
                 });
@@ -254,10 +290,114 @@ impl ConsentRecoverySummaryV1 {
         }
         Ok(())
     }
+}
 
-    /// Whether an authenticated action id was committed in archived history.
-    pub(crate) fn contains_action_id(&self, action_id: &[u8; 16]) -> bool {
-        self.replay_action_ids.binary_search(action_id).is_ok()
+impl ConsentCompactionBundleV1 {
+    /// Build and sign a preflight bundle from verified archive segments and the
+    /// current complete live ledger. This operation never mutates the ledger.
+    pub(crate) fn build(
+        chain: &Chain,
+        archive_segments: Vec<LedgerArchiveSegment>,
+        timestamp_unix_secs: u64,
+    ) -> Result<Self, ConsentRecoveryError> {
+        let recovery_summary =
+            ConsentRecoverySummaryV1::from_archive_sequence(&archive_segments)?;
+        let manifest = chain.sign_compaction_manifest(
+            recovery_summary.through_checkpoint.clone(),
+            recovery_summary.archive_sequence_digest,
+            recovery_summary.summary_digest,
+            timestamp_unix_secs,
+        )?;
+        let bundle = Self {
+            schema: CONSENT_COMPACTION_BUNDLE_SCHEMA.to_string(),
+            archive_segments,
+            recovery_summary,
+            manifest,
+        };
+        let entries = chain.iter().cloned().collect::<Vec<_>>();
+        bundle.verify_suffix_compatibility(&entries)?;
+        Ok(bundle)
+    }
+
+    /// Verify the archive, recovery summary, signed manifest, and current live
+    /// ledger as one indivisible preflight statement.
+    pub(crate) fn verify_against_live_ledger(
+        &self,
+        entries: &[LedgerEntry],
+        public_key: &VerifyingKey,
+    ) -> Result<(), ConsentRecoveryError> {
+        if self.schema != CONSENT_COMPACTION_BUNDLE_SCHEMA {
+            return Err(ConsentRecoveryError::UnsupportedBundleSchema {
+                schema: self.schema.clone(),
+            });
+        }
+        self.recovery_summary
+            .verify_against_archive(&self.archive_segments)?;
+        if self.manifest.archive_sequence_digest
+            != self.recovery_summary.archive_sequence_digest
+        {
+            return Err(ConsentRecoveryError::ManifestArchiveMismatch);
+        }
+        if self.manifest.recovery_summary_digest != self.recovery_summary.summary_digest {
+            return Err(ConsentRecoveryError::ManifestRecoveryMismatch);
+        }
+        if self.manifest.archived_through_checkpoint
+            != self.recovery_summary.through_checkpoint
+        {
+            return Err(ConsentRecoveryError::ManifestBoundaryMismatch);
+        }
+        Verifier::verify_ledger_compaction_manifest_against_entries(
+            &self.manifest,
+            entries,
+            public_key,
+        )?;
+        self.verify_suffix_compatibility(entries)
+    }
+
+    fn verify_suffix_compatibility(
+        &self,
+        entries: &[LedgerEntry],
+    ) -> Result<(), ConsentRecoveryError> {
+        let archived_entry_count = usize::try_from(self.recovery_summary.archived_entry_count)
+            .map_err(|_| ConsentRecoveryError::ArchivedEntryCountOverflow)?;
+        let suffix = entries
+            .get(archived_entry_count..)
+            .ok_or(ConsentRecoveryError::SummaryMismatch)?;
+        let mut seen_action_ids = self
+            .recovery_summary
+            .replay_action_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let archived_sessions = self
+            .recovery_summary
+            .sessions
+            .iter()
+            .map(|session| session.session_id)
+            .collect::<BTreeSet<_>>();
+
+        for entry in suffix {
+            let session_id = *entry.event.session_id.as_bytes();
+            if archived_sessions.contains(&session_id) {
+                return Err(ConsentRecoveryError::ArchivedSessionReused {
+                    session_id: hex::encode(session_id),
+                    seq: entry.seq,
+                });
+            }
+            if matches!(
+                entry.event.kind,
+                ConsentKind::Approval | ConsentKind::Denial | ConsentKind::Revocation
+            ) {
+                let action_id = *entry.event.request_id.as_bytes();
+                if !seen_action_ids.insert(action_id) {
+                    return Err(ConsentRecoveryError::SignedDecisionReplay {
+                        action_id: hex::encode(action_id),
+                        seq: entry.seq,
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -360,7 +500,7 @@ mod tests {
 
         assert_eq!(summary.archived_entry_count, 3);
         assert_eq!(summary.replay_action_ids, vec![[2u8; 16], [3u8; 16]]);
-        assert!(summary.contains_action_id(&[2u8; 16]));
+        assert!(summary.replay_action_ids.binary_search(&[2u8; 16]).is_ok());
         assert_eq!(summary.sessions.len(), 1);
         assert_eq!(summary.sessions[0].terminal_event, "consent.revoked");
         assert_eq!(summary.sessions[0].approving_operator_key, Some([0x20; 32]));
@@ -409,6 +549,64 @@ mod tests {
         assert!(matches!(
             ConsentRecoverySummaryV1::from_archive_sequence(&segments),
             Err(ConsentRecoveryError::DuplicateActionId { .. })
+        ));
+    }
+
+    #[test]
+    fn bundle_binds_archive_summary_and_current_live_head() {
+        let segments = complete_archive();
+        let key = SigningKey::from_bytes(&[0x44; 32]);
+        let mut chain = Chain::from_entries(segments[0].entries.clone(), key);
+        chain
+            .append(event(2, 4, ConsentKind::Denial, [0x30; 32]))
+            .unwrap();
+        let bundle = ConsentCompactionBundleV1::build(&chain, segments, 102).unwrap();
+        let entries = chain.iter().cloned().collect::<Vec<_>>();
+        bundle
+            .verify_against_live_ledger(
+                &entries,
+                &SigningKey::from_bytes(&[0x44; 32]).verifying_key(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn bundle_refuses_manifest_or_summary_substitution() {
+        let segments = complete_archive();
+        let key = SigningKey::from_bytes(&[0x44; 32]);
+        let chain = Chain::from_entries(segments[0].entries.clone(), key);
+        let mut bundle = ConsentCompactionBundleV1::build(&chain, segments, 102).unwrap();
+        let entries = chain.iter().cloned().collect::<Vec<_>>();
+        bundle.manifest.archive_sequence_digest[0] ^= 1;
+        assert_eq!(
+            bundle.verify_against_live_ledger(
+                &entries,
+                &SigningKey::from_bytes(&[0x44; 32]).verifying_key(),
+            ),
+            Err(ConsentRecoveryError::ManifestArchiveMismatch)
+        );
+    }
+
+    #[test]
+    fn bundle_refuses_archived_action_or_session_reuse_in_the_live_suffix() {
+        let segments = complete_archive();
+        let key = SigningKey::from_bytes(&[0x44; 32]);
+        let mut replayed_action = Chain::from_entries(segments[0].entries.clone(), key.clone());
+        replayed_action
+            .append(event(2, 2, ConsentKind::Denial, [0x30; 32]))
+            .unwrap();
+        assert!(matches!(
+            ConsentCompactionBundleV1::build(&replayed_action, segments.clone(), 102),
+            Err(ConsentRecoveryError::SignedDecisionReplay { .. })
+        ));
+
+        let mut reused_session = Chain::from_entries(segments[0].entries.clone(), key);
+        reused_session
+            .append(event(1, 4, ConsentKind::Request, [0x30; 32]))
+            .unwrap();
+        assert!(matches!(
+            ConsentCompactionBundleV1::build(&reused_session, segments, 102),
+            Err(ConsentRecoveryError::ArchivedSessionReused { .. })
         ));
     }
 

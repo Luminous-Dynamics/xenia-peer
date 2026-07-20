@@ -97,15 +97,64 @@ xenia-peer \
 ```
 
 The export is written with owner-only permissions and atomic replacement. It
-does **not** truncate the live ledger. Automatic online compaction is unsafe
-until Xenia also persists replay indexes and recovery summaries for archived
-action IDs, grants, operator provenance, and terminal states. Reaching the live
-ledger's hard persistence limit must therefore continue to fail closed rather
-than discarding history.
+does **not** truncate the live ledger. An archive segment by itself is not a
+recovery index; use the compaction preflight below to derive and authenticate
+that state. Reaching the live ledger's hard persistence limit must continue to
+fail closed rather than discarding history.
 
 `Verifier::verify_ledger_archive_segment` verifies one segment;
 `Verifier::verify_ledger_archive_sequence` verifies that ordered segments share
-identical boundary checkpoints.
+identical boundary checkpoints. `ledger_archive_sequence_digest` adds one
+bounded commitment over the exact ordered sequence.
+
+## Compaction preflight bundles
+
+Xenia can now produce a **non-destructive** compaction preflight bundle. The
+bundle embeds the complete verified archive sequence plus two derived artifacts:
+
+- `ConsentRecoverySummaryV1`, containing every archived signed decision action ID
+  needed for replay refusal, every completed session, approval provenance, and
+  the exact archived boundary.
+- `LedgerCompactionManifest`, signed by the ledger key and binding the archive
+  sequence digest and recovery-summary digest to both the archived checkpoint
+  and the current full live-ledger checkpoint.
+
+The recovery builder refuses a sequence unless it begins at genesis and every
+consent ceremony in the archived prefix is terminal. A pending request or an
+approved-but-not-terminated session remains a hard stop because pruning it would
+remove live authorization state.
+
+Create a preflight bundle from archive segments supplied in chronological order:
+
+```bash
+xenia-peer \
+  --operator-key-path /srv/xenia-peer-state/operator.key \
+  --consent-ledger-path /srv/xenia-peer-state/consent.ledger \
+  --consent-ledger-compaction-archive-segment /archive/segment-0001.json \
+  --consent-ledger-compaction-archive-segment /archive/segment-0002.json \
+  --export-consent-ledger-compaction-bundle /retention/compaction-preflight.json
+```
+
+Verify it later against the same complete live ledger:
+
+```bash
+xenia-peer \
+  --operator-key-path /srv/xenia-peer-state/operator.key \
+  --consent-ledger-path /srv/xenia-peer-state/consent.ledger \
+  --verify-consent-ledger-compaction-bundle /retention/compaction-preflight.json
+```
+
+Both commands are one-shot and read-only with respect to the live ledger. The
+export uses owner-only atomic replacement. Verification recomputes the archive
+sequence, replay index, session summaries, signed manifest, archived prefix, and
+current full-ledger checkpoint. It also rejects any live-suffix reuse of an
+archived decision action ID or terminal session ID.
+
+This is intentionally a pruning **precondition**, not pruning itself. Safe live
+truncation still requires an anchored-suffix persistence format and startup
+integration that loads the authenticated replay index before accepting any new
+action. Until those pieces exist, the daemon must retain the full live ledger
+and continue to fail closed at its hard storage bounds.
 
 ## Non-claims
 

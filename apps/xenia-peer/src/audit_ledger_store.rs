@@ -31,7 +31,7 @@
 //! durable, until the directory entry pointing at it is fsync'd too.
 
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -314,18 +314,30 @@ pub(crate) fn verify_retained_key_successor(
     Ok(transition)
 }
 
-fn read_bounded_json<T: serde::de::DeserializeOwned>(
+pub(crate) fn read_bounded_json<T: serde::de::DeserializeOwned>(
     path: &Path,
     maximum_bytes: u64,
     label: &str,
 ) -> Result<T, AuditLedgerStoreError> {
-    let file_len = std::fs::metadata(path)?.len();
-    if file_len > maximum_bytes {
+    read_bounded_json_with_size(path, maximum_bytes, label).map(|(value, _)| value)
+}
+
+pub(crate) fn read_bounded_json_with_size<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    maximum_bytes: u64,
+    label: &str,
+) -> Result<(T, u64), AuditLedgerStoreError> {
+    let mut bytes = Vec::new();
+    File::open(path)?
+        .take(maximum_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > maximum_bytes {
         return Err(AuditLedgerStoreError::LimitExceeded(format!(
-            "{label} is {file_len} bytes; maximum is {maximum_bytes}"
+            "{label} is larger than {maximum_bytes} bytes"
         )));
     }
-    Ok(serde_json::from_slice(&std::fs::read(path)?)?)
+    let byte_count = bytes.len() as u64;
+    Ok((serde_json::from_slice(&bytes)?, byte_count))
 }
 
 /// Export a bounded, verifiable archive segment without mutating or truncating
@@ -399,7 +411,10 @@ pub(crate) fn advance_retained_checkpoint(
     Ok(candidate)
 }
 
-fn persist_owner_only_atomic(path: &Path, bytes: &[u8]) -> Result<(), AuditLedgerStoreError> {
+pub(crate) fn persist_owner_only_atomic(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), AuditLedgerStoreError> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -630,6 +645,18 @@ mod tests {
         assert!(matches!(
             load_verified(&path, &sk),
             Err(AuditLedgerStoreError::UnsupportedSchema(2))
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn bounded_json_reader_enforces_the_limit_on_bytes_actually_read() {
+        let dir = temp_dir("bounded-json");
+        let path = dir.join("artifact.json");
+        std::fs::write(&path, br#"{"value":1}"#).unwrap();
+        assert!(matches!(
+            read_bounded_json::<serde_json::Value>(&path, 4, "test artifact"),
+            Err(AuditLedgerStoreError::LimitExceeded(_))
         ));
         std::fs::remove_dir_all(&dir).ok();
     }
