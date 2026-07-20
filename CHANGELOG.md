@@ -71,3 +71,17 @@ at least M1 makes it useful.
 
 [Unreleased]: https://github.com/Luminous-Dynamics/xenia-peer/compare/v0.0.0-m0...HEAD
 [0.0.0-m0]: https://github.com/Luminous-Dynamics/xenia-peer/releases/tag/v0.0.0-m0
+
+### Compacted consent cutover assurance
+
+- Advanced compacted active-state persistence to schema v2 and added
+  ledger-signed cutover receipts that bind activation to the exact
+  complete-ledger head and signing-key epoch. Historical v1 envelopes must be
+  reactivated from their verified snapshot and cold archive.
+- Added generation-linked active states and independently retainable signed
+  compacted-state pins for rollback detection before listener startup.
+- Added signed, non-destructive GC-readiness certificates that join the cold
+  archive, recovery summary, cutover receipt, active state, and retained pin.
+- Added bounded atomic CLI workflows for pin advancement and GC-certificate
+  export/verification. No automatic deletion or cross-epoch compaction is
+  enabled.

@@ -198,3 +198,19 @@ Bounded verifiable archive segments can be exported with
 `--consent-ledger-archive-base-checkpoint`. Export does not delete live history.
 See `docs/security/LEDGER_EPOCHS_WITNESSES_AND_ARCHIVES.md` for the exact
 continuity and non-claim boundaries.
+
+## Compacted consent-ledger retention
+
+An activated compacted state is not a replacement for its cold archive. Back up
+all of the following in independent retention domains:
+
+- the active compacted-state file;
+- every archive segment represented by its recovery summary;
+- the operator signing key under the deployment's key-custody policy;
+- a retained compacted-state pin; and
+- any GC-readiness certificate used during an operational review.
+
+Advance the retained pin after a known-good state checkpoint. At restore time,
+pass `--trusted-consent-ledger-compacted-state-pin` so rollback verification
+completes before listeners open. See
+`docs/security/COMPACTED_STATE_CUTOVER_AND_GC.md` for commands and non-claims.

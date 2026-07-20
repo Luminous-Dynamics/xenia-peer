@@ -426,7 +426,10 @@ struct Args {
             "export_consent_ledger_compaction_bundle",
             "verify_consent_ledger_compaction_bundle",
             "export_consent_ledger_compacted_snapshot",
-            "verify_consent_ledger_compacted_snapshot"
+            "verify_consent_ledger_compacted_snapshot",
+            "advance_consent_ledger_compacted_state_pin",
+            "export_consent_ledger_compaction_gc_certificate",
+            "verify_consent_ledger_compaction_gc_certificate"
         ]
     )]
     activate_consent_ledger_compacted_state: Option<std::path::PathBuf>,
@@ -448,6 +451,70 @@ struct Args {
         requires = "activate_consent_ledger_compacted_state"
     )]
     consent_ledger_activation_archive_segment: Vec<std::path::PathBuf>,
+
+    /// Independently retained signed compacted-state pin. During normal
+    /// compacted startup, the active state must equal or cryptographically
+    /// extend this pin before any listener opens.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "consent_ledger_compacted_state"
+    )]
+    trusted_consent_ledger_compacted_state_pin: Option<std::path::PathBuf>,
+
+    /// Atomically create or advance an independently retained compacted-state
+    /// pin and exit. An existing pin is overwritten only after the current
+    /// active state proves append-only extension from it.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "consent_ledger_compacted_state",
+        conflicts_with_all = [
+            "activate_consent_ledger_compacted_state",
+            "export_consent_ledger_compaction_gc_certificate",
+            "verify_consent_ledger_compaction_gc_certificate"
+        ]
+    )]
+    advance_consent_ledger_compacted_state_pin: Option<std::path::PathBuf>,
+
+    /// Cold archive segment used to certify or verify compaction
+    /// garbage-collection readiness. Repeat in chronological order from
+    /// genesis. The certificate is non-destructive and never deletes files.
+    #[arg(long, value_name = "FILE")]
+    consent_ledger_gc_archive_segment: Vec<std::path::PathBuf>,
+
+    /// Export a signed, non-destructive garbage-collection readiness
+    /// certificate and exit. Requires an activated compacted state, a retained
+    /// state pin, and the complete cold archive represented by the activation.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires_all = [
+            "consent_ledger_compacted_state",
+            "trusted_consent_ledger_compacted_state_pin"
+        ],
+        conflicts_with_all = [
+            "activate_consent_ledger_compacted_state",
+            "verify_consent_ledger_compaction_gc_certificate"
+        ]
+    )]
+    export_consent_ledger_compaction_gc_certificate: Option<std::path::PathBuf>,
+
+    /// Verify a signed garbage-collection readiness certificate and exit. This
+    /// is a read-only proof check; no live or archived artifact is removed.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires_all = [
+            "consent_ledger_compacted_state",
+            "trusted_consent_ledger_compacted_state_pin"
+        ],
+        conflicts_with_all = [
+            "activate_consent_ledger_compacted_state",
+            "export_consent_ledger_compaction_gc_certificate"
+        ]
+    )]
+    verify_consent_ledger_compaction_gc_certificate: Option<std::path::PathBuf>,
 
     /// Independently retained signed checkpoint that the current consent
     /// ledger must contain as an exact prefix. Store this outside the daemon
@@ -1212,6 +1279,70 @@ fn unix_now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_secs()
+}
+
+fn read_consent_archive_segments(
+    paths: &[std::path::PathBuf],
+    label: &str,
+) -> Result<Vec<xenia_ledger::LedgerArchiveSegment>, Box<dyn std::error::Error>> {
+    if paths.is_empty() {
+        return Err(format!("{label} requires at least one archive segment").into());
+    }
+    if paths.len() > xenia_ledger::MAX_LEDGER_ARCHIVE_SEQUENCE_SEGMENTS {
+        return Err(format!(
+            "{label} has {} archive segments; maximum is {}",
+            paths.len(),
+            xenia_ledger::MAX_LEDGER_ARCHIVE_SEQUENCE_SEGMENTS
+        )
+        .into());
+    }
+    let mut segments = Vec::with_capacity(paths.len());
+    let mut aggregate_bytes = 0u64;
+    for path in paths {
+        let remaining = consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
+            .saturating_sub(aggregate_bytes);
+        let (segment, bytes) = audit_ledger_store::read_bounded_json_with_size(
+            path,
+            remaining,
+            label,
+        )
+        .map_err(|err| -> Box<dyn std::error::Error> {
+            format!("failed to read {label} {}: {err}", path.display()).into()
+        })?;
+        aggregate_bytes = aggregate_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| -> Box<dyn std::error::Error> {
+                format!("{label} aggregate byte count overflow").into()
+            })?;
+        if aggregate_bytes > consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES {
+            return Err(format!(
+                "{label} inputs exceed {} bytes",
+                consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
+            )
+            .into());
+        }
+        segments.push(segment);
+    }
+    Ok(segments)
+}
+
+fn persist_json_owner_only<T: serde::Serialize>(
+    path: &std::path::Path,
+    value: &T,
+    maximum_bytes: u64,
+    label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    if bytes.len() as u64 > maximum_bytes {
+        return Err(format!(
+            "serialized {label} is {} bytes; maximum is {maximum_bytes}",
+            bytes.len()
+        )
+        .into());
+    }
+    audit_ledger_store::persist_owner_only_atomic(path, &bytes)
+        .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })
 }
 
 async fn perform_rekey(
@@ -2150,7 +2281,173 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         println!("resident suffix entries: {}", active.resident_entries.len());
         println!("total entries: {}", active.current_checkpoint.entry_count);
+        println!("active generation: {}", active.generation);
+        println!(
+            "ledger epoch blake3: {}",
+            hex::encode(active.cutover_receipt.ledger_epoch_id)
+        );
         println!("state blake3: {}", hex::encode(active.state_digest));
+        return Ok(());
+    }
+
+    if let Some(pin_path) = args
+        .advance_consent_ledger_compacted_state_pin
+        .as_deref()
+    {
+        let state_path = args
+            .consent_ledger_compacted_state
+            .as_deref()
+            .expect("clap requires compacted state for pin advancement");
+        if pin_path == state_path {
+            return Err("compacted-state pin path must differ from the active-state path".into());
+        }
+        let (active, _) =
+            crate::consent_ledger_persistence::load_compacted_active_state(
+                state_path,
+                &signing_key,
+            )
+            .map_err(|err| -> Box<dyn std::error::Error> {
+                format!(
+                    "failed to load compacted state {} for pin advancement: {err}",
+                    state_path.display()
+                )
+                .into()
+            })?;
+        if pin_path.exists() {
+            let retained: consent_compaction::ConsentCompactedStatePinV1 =
+                audit_ledger_store::read_bounded_json(
+                    pin_path,
+                    audit_ledger_store::MAX_CONTINUITY_ARTIFACT_BYTES,
+                    "retained compacted-state pin",
+                )?;
+            retained
+                .verify_against_state(&active, &signing_key.verifying_key())
+                .map_err(|err| -> Box<dyn std::error::Error> {
+                    format!(
+                        "current compacted state does not extend retained pin {}: {err}",
+                        pin_path.display()
+                    )
+                    .into()
+                })?;
+        }
+        let pin = consent_compaction::ConsentCompactedStatePinV1::sign_for_state(
+            &active,
+            &signing_key,
+            unix_now_secs(),
+        )?;
+        persist_json_owner_only(
+            pin_path,
+            &pin,
+            audit_ledger_store::MAX_CONTINUITY_ARTIFACT_BYTES,
+            "compacted-state pin",
+        )?;
+        println!("compacted-state pin advanced");
+        println!("path: {}", pin_path.display());
+        println!("generation: {}", pin.generation);
+        println!("entries: {}", pin.checkpoint.entry_count);
+        println!(
+            "pin blake3: {}",
+            hex::encode(consent_compaction::consent_compacted_state_pin_fingerprint(
+                &pin
+            )?)
+        );
+        return Ok(());
+    }
+
+    if args
+        .export_consent_ledger_compaction_gc_certificate
+        .is_some()
+        || args
+            .verify_consent_ledger_compaction_gc_certificate
+            .is_some()
+    {
+        let state_path = args
+            .consent_ledger_compacted_state
+            .as_deref()
+            .expect("clap requires compacted state for GC certification");
+        let pin_path = args
+            .trusted_consent_ledger_compacted_state_pin
+            .as_deref()
+            .expect("clap requires compacted-state pin for GC certification");
+        let (active, _) =
+            crate::consent_ledger_persistence::load_compacted_active_state(
+                state_path,
+                &signing_key,
+            )?;
+        let pin: consent_compaction::ConsentCompactedStatePinV1 =
+            audit_ledger_store::read_bounded_json(
+                pin_path,
+                audit_ledger_store::MAX_CONTINUITY_ARTIFACT_BYTES,
+                "trusted compacted-state pin",
+            )?;
+        let archive_segments = read_consent_archive_segments(
+            &args.consent_ledger_gc_archive_segment,
+            "consent-ledger GC archive",
+        )?;
+
+        if let Some(output_path) = args
+            .export_consent_ledger_compaction_gc_certificate
+            .as_deref()
+        {
+            if output_path == state_path
+                || output_path == pin_path
+                || args
+                    .consent_ledger_gc_archive_segment
+                    .iter()
+                    .any(|path| path == output_path)
+            {
+                return Err(
+                    "GC certificate output must not overwrite active state, retained pin, or cold archive"
+                        .into(),
+                );
+            }
+            let certificate =
+                consent_compaction::ConsentCompactionGcCertificateV1::sign_for_state(
+                    &active,
+                    &pin,
+                    &archive_segments,
+                    &signing_key,
+                    unix_now_secs(),
+                )?;
+            persist_json_owner_only(
+                output_path,
+                &certificate,
+                audit_ledger_store::MAX_CONTINUITY_ARTIFACT_BYTES,
+                "compaction GC certificate",
+            )?;
+            println!("consent-ledger GC readiness certificate exported");
+            println!("path: {}", output_path.display());
+            println!(
+                "archive through entries: {}",
+                certificate.archive_through_checkpoint.entry_count
+            );
+            println!(
+                "active entries: {}",
+                certificate.current_checkpoint.entry_count
+            );
+            println!("no live or archived artifact was deleted");
+            return Ok(());
+        }
+
+        let certificate_path = args
+            .verify_consent_ledger_compaction_gc_certificate
+            .as_deref()
+            .expect("checked GC certificate verification mode");
+        let certificate: consent_compaction::ConsentCompactionGcCertificateV1 =
+            audit_ledger_store::read_bounded_json(
+                certificate_path,
+                audit_ledger_store::MAX_CONTINUITY_ARTIFACT_BYTES,
+                "compaction GC certificate",
+            )?;
+        certificate.verify(
+            &active,
+            &pin,
+            &archive_segments,
+            &signing_key.verifying_key(),
+        )?;
+        println!("consent-ledger GC readiness certificate verified");
+        println!("path: {}", certificate_path.display());
+        println!("no live or archived artifact was deleted");
         return Ok(());
     }
 
@@ -2172,10 +2469,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .into()
             })?;
+        if let Some(pin_path) = args
+            .trusted_consent_ledger_compacted_state_pin
+            .as_deref()
+        {
+            let pin: consent_compaction::ConsentCompactedStatePinV1 =
+                audit_ledger_store::read_bounded_json(
+                    pin_path,
+                    audit_ledger_store::MAX_CONTINUITY_ARTIFACT_BYTES,
+                    "trusted compacted-state pin",
+                )
+                .map_err(|err| -> Box<dyn std::error::Error> {
+                    format!(
+                        "failed to read --trusted-consent-ledger-compacted-state-pin {}: {err}",
+                        pin_path.display()
+                    )
+                    .into()
+                })?;
+            pin.verify_against_state(&active, &signing_key.verifying_key())
+                .map_err(|err| -> Box<dyn std::error::Error> {
+                    format!(
+                        "compacted state {} does not extend trusted pin {}: {err}",
+                        path.display(),
+                        pin_path.display()
+                    )
+                    .into()
+                })?;
+        }
         info!(
             path = %path.display(),
             total_entries = restored.chain.entry_count(),
             resident_entries = restored.chain.resident_len(),
+            active_generation = active.generation,
             archived_replay_actions = restored.archived_replay_action_count(),
             archived_terminal_sessions = restored.archived_terminal_session_count(),
             "compacted consent ledger loaded and verified before listener startup"
@@ -3848,6 +4173,49 @@ fn run_m1_runtime_smoke(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod compaction_cli_tests {
+    use super::*;
+
+    #[test]
+    fn compacted_pin_advancement_requires_an_active_state() {
+        assert!(
+            Args::try_parse_from([
+                "xenia-peer",
+                "--advance-consent-ledger-compacted-state-pin",
+                "retained.pin.json",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn gc_certificate_export_requires_state_and_retained_pin() {
+        assert!(
+            Args::try_parse_from([
+                "xenia-peer",
+                "--export-consent-ledger-compaction-gc-certificate",
+                "gc-ready.json",
+            ])
+            .is_err()
+        );
+        assert!(
+            Args::try_parse_from([
+                "xenia-peer",
+                "--consent-ledger-compacted-state",
+                "active.json",
+                "--trusted-consent-ledger-compacted-state-pin",
+                "retained.pin.json",
+                "--export-consent-ledger-compaction-gc-certificate",
+                "gc-ready.json",
+                "--verify-consent-ledger-compaction-gc-certificate",
+                "gc-ready.json",
+            ])
+            .is_err()
+        );
+    }
 }
 
 #[cfg(test)]
