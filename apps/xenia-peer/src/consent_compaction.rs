@@ -40,6 +40,8 @@ const CONSENT_COMPACTED_CUTOVER_RECEIPT_SCHEMA: &str =
     "xenia-consent-compacted-cutover-receipt-v1";
 pub(crate) const CONSENT_COMPACTED_STATE_PIN_SCHEMA: &str =
     "xenia-consent-compacted-state-pin-v1";
+pub(crate) const CONSENT_COMPACTION_GC_CERTIFICATE_SCHEMA: &str =
+    "xenia-consent-compaction-gc-certificate-v1";
 
 /// One completed consent ceremony retained after its detailed entries move to
 /// verified cold storage.
@@ -121,6 +123,25 @@ pub(crate) struct ConsentCompactedStatePinV1 {
     pub(crate) active_state_digest: [u8; 32],
     pub(crate) checkpoint: LedgerCheckpoint,
     pub(crate) created_at_unix_secs: u64,
+    pub(crate) signature: [u8; 64],
+}
+
+/// Signed proof that the cold archive, recovery summary, cutover receipt,
+/// current active state, and independently retained state pin all agree. This
+/// is a non-destructive prerequisite artifact; it does not authorize deletion
+/// by itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConsentCompactionGcCertificateV1 {
+    pub(crate) schema: String,
+    pub(crate) ledger_epoch_id: [u8; 32],
+    pub(crate) cutover_receipt_fingerprint: [u8; 32],
+    pub(crate) archive_sequence_digest: [u8; 32],
+    pub(crate) recovery_summary_digest: [u8; 32],
+    pub(crate) active_state_digest: [u8; 32],
+    pub(crate) state_pin_fingerprint: [u8; 32],
+    pub(crate) archive_through_checkpoint: LedgerCheckpoint,
+    pub(crate) current_checkpoint: LedgerCheckpoint,
+    pub(crate) issued_at_unix_secs: u64,
     pub(crate) signature: [u8; 64],
 }
 
@@ -291,6 +312,16 @@ pub(crate) enum ConsentRecoveryError {
     ActiveGenerationMismatch,
     #[error("consent compacted active-state generation overflow")]
     ActiveGenerationOverflow,
+    #[error("unsupported consent compaction GC certificate schema: {schema}")]
+    UnsupportedGcCertificateSchema { schema: String },
+    #[error("consent compaction GC certificate signature is invalid")]
+    InvalidGcCertificateSignature,
+    #[error("consent compaction GC certificate does not match the verified active state")]
+    GcCertificateStateMismatch,
+    #[error("consent compaction GC certificate does not match the verified cold archive")]
+    GcCertificateArchiveMismatch,
+    #[error("consent compaction GC certificate timestamp predates the active checkpoint")]
+    GcCertificateTimestampRegressed,
     #[error("consent compaction manifest verification failed: {0}")]
     Manifest(#[from] LedgerCompactionError),
     #[error("consent recovery checkpoint fingerprint failed: {0}")]
@@ -899,6 +930,103 @@ impl ConsentCompactedStatePinV1 {
     }
 }
 
+impl ConsentCompactionGcCertificateV1 {
+    pub(crate) fn sign_for_state(
+        state: &ConsentCompactedActiveStateV1,
+        state_pin: &ConsentCompactedStatePinV1,
+        archive_segments: &[LedgerArchiveSegment],
+        signing_key: &LedgerSigningKey,
+        issued_at_unix_secs: u64,
+    ) -> Result<Self, ConsentRecoveryError> {
+        let public_key = signing_key.verifying_key();
+        state.verify(&public_key)?;
+        state
+            .activation_snapshot
+            .verify(archive_segments, &public_key)?;
+        state_pin.verify_against_state(state, &public_key)?;
+        if issued_at_unix_secs < state.current_checkpoint.timestamp_unix_secs {
+            return Err(ConsentRecoveryError::GcCertificateTimestampRegressed);
+        }
+        let archive_through_checkpoint = archive_segments
+            .last()
+            .ok_or(LedgerArchiveError::EmptySequence)?
+            .terminal_checkpoint
+            .clone();
+        let mut certificate = Self {
+            schema: CONSENT_COMPACTION_GC_CERTIFICATE_SCHEMA.to_string(),
+            ledger_epoch_id: state.cutover_receipt.ledger_epoch_id,
+            cutover_receipt_fingerprint: consent_compacted_cutover_receipt_fingerprint(
+                &state.cutover_receipt,
+            )?,
+            archive_sequence_digest: ledger_archive_sequence_digest(archive_segments)?,
+            recovery_summary_digest: state
+                .activation_snapshot
+                .recovery_summary
+                .summary_digest,
+            active_state_digest: state.state_digest,
+            state_pin_fingerprint: consent_compacted_state_pin_fingerprint(state_pin)?,
+            archive_through_checkpoint,
+            current_checkpoint: state.current_checkpoint.clone(),
+            issued_at_unix_secs,
+            signature: [0u8; 64],
+        };
+        let message = consent_compaction_gc_certificate_message(&certificate)?;
+        certificate.signature = signing_key.sign(&message).to_bytes();
+        certificate.verify(state, state_pin, archive_segments, &public_key)?;
+        Ok(certificate)
+    }
+
+    pub(crate) fn verify(
+        &self,
+        state: &ConsentCompactedActiveStateV1,
+        state_pin: &ConsentCompactedStatePinV1,
+        archive_segments: &[LedgerArchiveSegment],
+        public_key: &VerifyingKey,
+    ) -> Result<(), ConsentRecoveryError> {
+        if self.schema != CONSENT_COMPACTION_GC_CERTIFICATE_SCHEMA {
+            return Err(ConsentRecoveryError::UnsupportedGcCertificateSchema {
+                schema: self.schema.clone(),
+            });
+        }
+        state.verify(public_key)?;
+        state
+            .activation_snapshot
+            .verify(archive_segments, public_key)?;
+        state_pin.verify_against_state(state, public_key)?;
+        let archive_through_checkpoint = archive_segments
+            .last()
+            .ok_or(LedgerArchiveError::EmptySequence)?
+            .terminal_checkpoint
+            .clone();
+        if self.archive_sequence_digest != ledger_archive_sequence_digest(archive_segments)?
+            || self.archive_through_checkpoint != archive_through_checkpoint
+            || self.archive_through_checkpoint
+                != state.activation_snapshot.recovery_summary.through_checkpoint
+        {
+            return Err(ConsentRecoveryError::GcCertificateArchiveMismatch);
+        }
+        if self.ledger_epoch_id != state.cutover_receipt.ledger_epoch_id
+            || self.cutover_receipt_fingerprint
+                != consent_compacted_cutover_receipt_fingerprint(&state.cutover_receipt)?
+            || self.recovery_summary_digest
+                != state.activation_snapshot.recovery_summary.summary_digest
+            || self.active_state_digest != state.state_digest
+            || self.state_pin_fingerprint
+                != consent_compacted_state_pin_fingerprint(state_pin)?
+            || self.current_checkpoint != state.current_checkpoint
+        {
+            return Err(ConsentRecoveryError::GcCertificateStateMismatch);
+        }
+        if self.issued_at_unix_secs < self.current_checkpoint.timestamp_unix_secs {
+            return Err(ConsentRecoveryError::GcCertificateTimestampRegressed);
+        }
+        let message = consent_compaction_gc_certificate_message(self)?;
+        public_key
+            .verify(&message, &Signature::from_bytes(&self.signature))
+            .map_err(|_| ConsentRecoveryError::InvalidGcCertificateSignature)
+    }
+}
+
 impl ConsentCompactedActiveStateV1 {
     /// Activate a verified compacted snapshot. Cold archive segments are
     /// required here; later startup can verify the signed active state without
@@ -1278,6 +1406,33 @@ pub(crate) fn consent_compacted_state_pin_fingerprint(
     let mut message = consent_compacted_state_pin_message(pin)?;
     message.extend_from_slice(&pin.signature);
     Ok(*blake3::hash(&message).as_bytes())
+}
+
+fn consent_compaction_gc_certificate_message(
+    certificate: &ConsentCompactionGcCertificateV1,
+) -> Result<Vec<u8>, ConsentRecoveryError> {
+    if certificate.schema != CONSENT_COMPACTION_GC_CERTIFICATE_SCHEMA {
+        return Err(ConsentRecoveryError::UnsupportedGcCertificateSchema {
+            schema: certificate.schema.clone(),
+        });
+    }
+    let archive = checkpoint_fingerprint(&certificate.archive_through_checkpoint)?;
+    let current = checkpoint_fingerprint(&certificate.current_checkpoint)?;
+    let mut message = Vec::with_capacity(320);
+    message.extend_from_slice(b"xenia:consent-compaction-gc-certificate:v1");
+    message.push(0);
+    message.extend_from_slice(certificate.schema.as_bytes());
+    message.push(0);
+    message.extend_from_slice(&certificate.ledger_epoch_id);
+    message.extend_from_slice(&certificate.cutover_receipt_fingerprint);
+    message.extend_from_slice(&certificate.archive_sequence_digest);
+    message.extend_from_slice(&certificate.recovery_summary_digest);
+    message.extend_from_slice(&certificate.active_state_digest);
+    message.extend_from_slice(&certificate.state_pin_fingerprint);
+    message.extend_from_slice(&archive);
+    message.extend_from_slice(&current);
+    message.extend_from_slice(&certificate.issued_at_unix_secs.to_be_bytes());
+    Ok(message)
 }
 
 fn consent_compacted_active_state_digest(
@@ -1785,6 +1940,50 @@ mod tests {
                 pinned: 1,
                 active: 0,
             })
+        );
+    }
+
+    #[test]
+    fn gc_certificate_requires_archive_state_and_pin_agreement() {
+        let segments = complete_archive();
+        let key = SigningKey::from_bytes(&[0x44; 32]);
+        let mut chain = Chain::from_entries(segments[0].entries.clone(), key.clone());
+        chain
+            .append(event(2, 4, ConsentKind::Denial, [0x30; 32]))
+            .unwrap();
+        let bundle = ConsentCompactionBundleV1::build(&chain, segments.clone(), 102).unwrap();
+        let entries = chain.iter().cloned().collect::<Vec<_>>();
+        let snapshot = ConsentCompactedSnapshotV1::build(
+            &bundle,
+            &entries,
+            &key.verifying_key(),
+        )
+        .unwrap();
+        let active = ConsentCompactedActiveStateV1::activate(
+            snapshot,
+            &segments,
+            &key,
+            103,
+        )
+        .unwrap();
+        let pin = ConsentCompactedStatePinV1::sign_for_state(&active, &key, 104).unwrap();
+        let certificate = ConsentCompactionGcCertificateV1::sign_for_state(
+            &active,
+            &pin,
+            &segments,
+            &key,
+            105,
+        )
+        .unwrap();
+        certificate
+            .verify(&active, &pin, &segments, &key.verifying_key())
+            .unwrap();
+
+        let mut tampered = certificate.clone();
+        tampered.active_state_digest[0] ^= 1;
+        assert_eq!(
+            tampered.verify(&active, &pin, &segments, &key.verifying_key()),
+            Err(ConsentRecoveryError::GcCertificateStateMismatch)
         );
     }
 
