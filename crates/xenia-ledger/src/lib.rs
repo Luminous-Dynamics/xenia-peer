@@ -63,6 +63,7 @@
 #![warn(rust_2018_idioms)]
 #![deny(unsafe_code)]
 
+mod archive;
 mod binding;
 mod chain;
 mod checkpoint;
@@ -78,6 +79,11 @@ mod witness;
 
 #[cfg(test)]
 mod tests;
+
+pub use archive::{
+    ledger_archive_segment_digest, LedgerArchiveError, LedgerArchiveSegment,
+    LEDGER_ARCHIVE_SEGMENT_SCHEMA, MAX_LEDGER_ARCHIVE_SEGMENT_ENTRIES,
+};
 
 pub use binding::{
     EVIDENCE_PUBLIC_KEY_BINDING_SCHEMA, EVIDENCE_PUBLIC_KEY_FINGERPRINT_ALGORITHM,
@@ -136,7 +142,6 @@ pub use signature::{
 pub use signature::{
     MlDsa65EvidenceSignatureBackend, MlDsa87EvidenceSignatureBackend, PQC_SIGNATURE_BACKEND_STATUS,
 };
-
 pub use witness::{
     checkpoint_witness_message, CheckpointWitnessBundle, CheckpointWitnessError,
     CheckpointWitnessSignature, CHECKPOINT_WITNESS_BUNDLE_SCHEMA,

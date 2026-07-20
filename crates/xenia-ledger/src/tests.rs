@@ -1718,3 +1718,40 @@ fn checkpoint_witness_bundle_rejects_tampering_and_untrusted_keys() {
     )
     .is_err());
 }
+
+#[test]
+fn archive_segment_proves_every_entry_between_checkpoints() {
+    use crate::{LedgerArchiveSegment, Verifier};
+    use ed25519_dalek::SigningKey;
+
+    let key = SigningKey::from_bytes(&[61u8; 32]);
+    let mut chain = crate::Chain::new(key);
+    let base = chain.sign_checkpoint(100);
+    chain.append(sample_event(ConsentKind::Request)).unwrap();
+    chain.append(sample_event(ConsentKind::Approval)).unwrap();
+    let segment = LedgerArchiveSegment::from_chain(&chain, base, 101).unwrap();
+
+    assert_eq!(segment.entries.len(), 2);
+    Verifier::verify_ledger_archive_segment(&segment).unwrap();
+}
+
+#[test]
+fn archive_segment_rejects_missing_or_tampered_entries() {
+    use crate::{LedgerArchiveSegment, Verifier};
+    use ed25519_dalek::SigningKey;
+
+    let key = SigningKey::from_bytes(&[62u8; 32]);
+    let mut chain = crate::Chain::new(key);
+    let base = chain.sign_checkpoint(100);
+    chain.append(sample_event(ConsentKind::Request)).unwrap();
+    chain.append(sample_event(ConsentKind::Approval)).unwrap();
+    let segment = LedgerArchiveSegment::from_chain(&chain, base, 101).unwrap();
+
+    let mut missing = segment.clone();
+    missing.entries.pop();
+    assert!(Verifier::verify_ledger_archive_segment(&missing).is_err());
+
+    let mut tampered = segment;
+    tampered.segment_digest[0] ^= 0x20;
+    assert!(Verifier::verify_ledger_archive_segment(&tampered).is_err());
+}
