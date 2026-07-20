@@ -175,3 +175,26 @@ entry after height `N` and a current signed checkpoint, allowing an auditor to
 prove extension with `Verifier::verify_checkpoint_extension` without fetching
 the complete ledger. Responses are capped at 4,096 entries; an auditor that
 falls further behind must fetch the full authenticated ledger.
+
+### Freshness, witnesses, and signer rotation
+
+A retained checkpoint can also be required to satisfy a host-local freshness
+SLA with `--trusted-consent-ledger-checkpoint-max-age-secs`. Use
+`--trusted-consent-ledger-checkpoint-max-future-skew-secs` to bound future
+clock skew.
+
+For higher-assurance retention, supply a `CheckpointWitnessBundle`, repeat
+`--trusted-consent-ledger-witness-key-hex` for each independently controlled
+trusted witness, and set `--trusted-consent-ledger-witness-quorum`.
+
+When the consent-ledger signer is intentionally rotated, start a fresh ledger
+epoch and retain a dual-signed `LedgerKeyTransition` beside the old epoch's
+final checkpoint. Restore the successor with
+`--trusted-consent-ledger-key-transition`; never accept an unexplained ledger
+key change.
+
+Bounded verifiable archive segments can be exported with
+`--export-consent-ledger-archive-segment` and
+`--consent-ledger-archive-base-checkpoint`. Export does not delete live history.
+See `docs/security/LEDGER_EPOCHS_WITNESSES_AND_ARCHIVES.md` for the exact
+continuity and non-claim boundaries.

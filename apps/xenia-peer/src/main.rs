@@ -409,11 +409,86 @@ struct Args {
     #[arg(long, value_name = "FILE")]
     trusted_consent_ledger_checkpoint: Option<std::path::PathBuf>,
 
+    /// Dual-signed old-key/new-key transition authorizing the currently loaded
+    /// ledger as a fresh successor epoch to
+    /// `--trusted-consent-ledger-checkpoint`. Without this artifact, retained
+    /// checkpoints must be exact prefixes under the current ledger key.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "trusted_consent_ledger_checkpoint",
+        conflicts_with = "trusted_consent_ledger_witness_bundle"
+    )]
+    trusted_consent_ledger_key_transition: Option<std::path::PathBuf>,
+
+    /// Independently countersigned checkpoint bundle. The embedded checkpoint
+    /// must be an exact prefix of the current ledger and satisfy the configured
+    /// distinct trusted-witness quorum.
+    #[arg(
+        long,
+        value_name = "FILE",
+        conflicts_with = "trusted_consent_ledger_checkpoint"
+    )]
+    trusted_consent_ledger_witness_bundle: Option<std::path::PathBuf>,
+
+    /// Trusted Ed25519 checkpoint-witness public key, encoded as 64 lowercase
+    /// or uppercase hexadecimal characters. Repeat once per independent
+    /// witness key.
+    #[arg(
+        long,
+        value_name = "HEX",
+        requires = "trusted_consent_ledger_witness_bundle"
+    )]
+    trusted_consent_ledger_witness_key_hex: Vec<String>,
+
+    /// Minimum number of distinct trusted countersignatures required in the
+    /// retained witness bundle. Defaults to one when a bundle is supplied.
+    #[arg(
+        long,
+        value_name = "N",
+        requires = "trusted_consent_ledger_witness_bundle"
+    )]
+    trusted_consent_ledger_witness_quorum: Option<usize>,
+
+    /// Optional maximum age, in seconds, for a direct retained checkpoint or
+    /// witnessed checkpoint. Key-transition anchors are historical by design
+    /// and cannot be combined with this freshness SLA.
+    #[arg(long, value_name = "SECONDS")]
+    trusted_consent_ledger_checkpoint_max_age_secs: Option<u64>,
+
+    /// Maximum positive clock skew accepted for retained checkpoint timestamps.
+    #[arg(long, default_value_t = 300, value_name = "SECONDS")]
+    trusted_consent_ledger_checkpoint_max_future_skew_secs: u64,
+
     /// Atomically create or advance an independently stored consent-ledger
     /// checkpoint and exit. An existing checkpoint is overwritten only when
     /// the current verified ledger contains it as an exact prefix.
-    #[arg(long, value_name = "FILE")]
+    #[arg(
+        long,
+        value_name = "FILE",
+        conflicts_with = "export_consent_ledger_archive_segment"
+    )]
     advance_consent_ledger_checkpoint: Option<std::path::PathBuf>,
+
+    /// Export a bounded, verifiable JSON archive segment and exit. This does
+    /// not truncate the live ledger; safe online compaction still requires
+    /// replay indexes and recovery summaries for archived authorization state.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "consent_ledger_archive_base_checkpoint",
+        conflicts_with = "advance_consent_ledger_checkpoint"
+    )]
+    export_consent_ledger_archive_segment: Option<std::path::PathBuf>,
+
+    /// Signed checkpoint immediately before the first entry to include in
+    /// `--export-consent-ledger-archive-segment`.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "export_consent_ledger_archive_segment"
+    )]
+    consent_ledger_archive_base_checkpoint: Option<std::path::PathBuf>,
 
     /// M1 consent-ledger signing key path. Signs the consent grant/deny/revoke
     /// boundary events; generated on first run with owner-only (0600)
@@ -830,6 +905,13 @@ fn parse_source_id(hex: &str) -> Result<[u8; 8], String> {
         .map_err(|_| "Source ID must be 8 bytes (16 hex chars)".to_string())
 }
 
+fn parse_ed25519_public_key_hex(value: &str) -> Result<[u8; 32], String> {
+    let bytes = hex::decode(value.trim()).map_err(|err| err.to_string())?;
+    bytes.try_into().map_err(|_| {
+        "Ed25519 public key must be exactly 32 bytes (64 hexadecimal characters)".to_string()
+    })
+}
+
 fn make_encoder(
     choice: CodecChoice,
     params: EncodeParams,
@@ -987,6 +1069,13 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_millis() as u64
+}
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs()
 }
 
 async fn perform_rekey(
@@ -1860,25 +1949,129 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "consent ledger loaded and verified"
     );
 
-    if let Some(checkpoint_path) = args.trusted_consent_ledger_checkpoint.as_deref() {
-        let checkpoint = audit_ledger_store::verify_retained_checkpoint(
-            checkpoint_path,
+    let checkpoint_freshness = xenia_ledger::CheckpointFreshnessPolicy {
+        max_age_secs: args.trusted_consent_ledger_checkpoint_max_age_secs,
+        max_future_skew_secs: args
+            .trusted_consent_ledger_checkpoint_max_future_skew_secs,
+    };
+    let continuity_anchor_configured = args.trusted_consent_ledger_checkpoint.is_some()
+        || args.trusted_consent_ledger_witness_bundle.is_some();
+    if args.trusted_consent_ledger_checkpoint_max_age_secs.is_some()
+        && !continuity_anchor_configured
+    {
+        return Err(
+            "--trusted-consent-ledger-checkpoint-max-age-secs requires a retained checkpoint or witness bundle"
+                .into(),
+        );
+    }
+
+    if args.trusted_consent_ledger_checkpoint_max_age_secs.is_some()
+        && args.trusted_consent_ledger_key_transition.is_some()
+    {
+        return Err(
+            "--trusted-consent-ledger-checkpoint-max-age-secs cannot be used with a historical key-transition anchor"
+                .into(),
+        );
+    }
+
+    if let Some(bundle_path) = args.trusted_consent_ledger_witness_bundle.as_deref() {
+        if args.trusted_consent_ledger_witness_key_hex.is_empty() {
+            return Err(
+                "--trusted-consent-ledger-witness-bundle requires at least one --trusted-consent-ledger-witness-key-hex"
+                    .into(),
+            );
+        }
+        let trusted_witness_keys = args
+            .trusted_consent_ledger_witness_key_hex
+            .iter()
+            .map(|value| parse_ed25519_public_key_hex(value))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| -> Box<dyn std::error::Error> {
+                format!("invalid trusted checkpoint witness key: {err}").into()
+            })?;
+        let quorum = args.trusted_consent_ledger_witness_quorum.unwrap_or(1);
+        if quorum == 0 {
+            return Err("checkpoint witness quorum must be greater than zero".into());
+        }
+        if quorum > trusted_witness_keys.len() {
+            return Err(format!(
+                "checkpoint witness quorum {quorum} exceeds {} configured trusted witness keys",
+                trusted_witness_keys.len()
+            )
+            .into());
+        }
+        let bundle = audit_ledger_store::verify_retained_witness_bundle(
+            bundle_path,
             &ledger,
             &signing_key.verifying_key(),
+            &trusted_witness_keys,
+            quorum,
+            unix_now_secs(),
+            checkpoint_freshness,
         )
         .map_err(|err| -> Box<dyn std::error::Error> {
             format!(
-                "current consent ledger does not extend --trusted-consent-ledger-checkpoint {}: {err}",
-                checkpoint_path.display()
+                "current consent ledger does not satisfy --trusted-consent-ledger-witness-bundle {}: {err}",
+                bundle_path.display()
             )
             .into()
         })?;
         info!(
-            checkpoint = %checkpoint_path.display(),
-            retained_entries = checkpoint.entry_count,
+            bundle = %bundle_path.display(),
+            retained_entries = bundle.checkpoint.entry_count,
             current_entries = ledger.len(),
-            "retained consent-ledger checkpoint verified as an exact prefix"
+            witness_quorum = quorum,
+            "witnessed consent-ledger checkpoint verified"
         );
+    } else if let Some(checkpoint_path) = args.trusted_consent_ledger_checkpoint.as_deref() {
+        if let Some(transition_path) = args
+            .trusted_consent_ledger_key_transition
+            .as_deref()
+        {
+            let transition = audit_ledger_store::verify_retained_key_successor(
+                checkpoint_path,
+                transition_path,
+                &ledger,
+                &signing_key.verifying_key(),
+                unix_now_secs(),
+            )
+            .map_err(|err| -> Box<dyn std::error::Error> {
+                format!(
+                    "current consent ledger is not an authorized successor of checkpoint {} via transition {}: {err}",
+                    checkpoint_path.display(),
+                    transition_path.display()
+                )
+                .into()
+            })?;
+            info!(
+                checkpoint = %checkpoint_path.display(),
+                transition = %transition_path.display(),
+                previous_entries = transition.previous_checkpoint.entry_count,
+                current_entries = ledger.len(),
+                "dual-signed consent-ledger key succession verified"
+            );
+        } else {
+            let checkpoint = audit_ledger_store::verify_retained_checkpoint_with_policy(
+                checkpoint_path,
+                &ledger,
+                &signing_key.verifying_key(),
+                unix_now_secs(),
+                checkpoint_freshness,
+            )
+            .map_err(|err| -> Box<dyn std::error::Error> {
+                format!(
+                    "current consent ledger does not extend --trusted-consent-ledger-checkpoint {}: {err}",
+                    checkpoint_path.display()
+                )
+                .into()
+            })?;
+            info!(
+                checkpoint = %checkpoint_path.display(),
+                retained_entries = checkpoint.entry_count,
+                current_entries = ledger.len(),
+                "retained consent-ledger checkpoint verified as an exact prefix"
+            );
+        }
     }
 
     if let Some(checkpoint_path) = args.advance_consent_ledger_checkpoint.as_deref() {
@@ -1899,6 +2092,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("path: {}", checkpoint_path.display());
         println!("entries: {}", checkpoint.entry_count);
         println!("head blake3: {}", hex::encode(checkpoint.head_hash));
+        return Ok(());
+    }
+
+    if let Some(output_path) = args.export_consent_ledger_archive_segment.as_deref() {
+        let base_path = args
+            .consent_ledger_archive_base_checkpoint
+            .as_deref()
+            .expect("clap requires an archive base checkpoint");
+        let segment = audit_ledger_store::export_archive_segment_atomic(
+            output_path,
+            base_path,
+            &ledger,
+            unix_now_secs(),
+        )
+        .map_err(|err| -> Box<dyn std::error::Error> {
+            format!(
+                "failed to export consent ledger archive segment {}: {err}",
+                output_path.display()
+            )
+            .into()
+        })?;
+        println!("consent-ledger archive segment exported");
+        println!("path: {}", output_path.display());
+        println!("base entries: {}", segment.base_checkpoint.entry_count);
+        println!("terminal entries: {}", segment.terminal_checkpoint.entry_count);
+        println!("segment entries: {}", segment.entries.len());
+        println!("segment blake3: {}", hex::encode(segment.segment_digest));
         return Ok(());
     }
     let shared_ledger = std::sync::Arc::new(tokio::sync::Mutex::new(ledger));

@@ -16,10 +16,13 @@ use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 use thiserror::Error;
 
-use crate::{CheckpointError, LedgerCheckpoint, Verifier, checkpoint_fingerprint};
+use crate::{checkpoint_fingerprint, CheckpointError, LedgerCheckpoint, Verifier};
 
 /// Stable schema label for [`CheckpointWitnessBundle`].
 pub const CHECKPOINT_WITNESS_BUNDLE_SCHEMA: &str = "xenia-checkpoint-witness-bundle-v1";
+
+/// Maximum distinct countersignatures accepted in one bundle.
+pub const MAX_CHECKPOINT_WITNESSES: usize = 64;
 
 /// One independent witness's countersignature over an exact checkpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +84,12 @@ impl CheckpointWitnessBundle {
         if timestamp_unix_secs < self.checkpoint.timestamp_unix_secs {
             return Err(CheckpointWitnessError::WitnessPredatesCheckpoint);
         }
+        if self.witnesses.len() >= MAX_CHECKPOINT_WITNESSES {
+            return Err(CheckpointWitnessError::TooManyWitnesses {
+                count: self.witnesses.len() + 1,
+                maximum: MAX_CHECKPOINT_WITNESSES,
+            });
+        }
         let witness_public_key = witness_signing_key.verifying_key().to_bytes();
         if self
             .witnesses
@@ -132,6 +141,14 @@ pub enum CheckpointWitnessError {
     /// A countersignature came from a key outside the caller's trust set.
     #[error("checkpoint witness key is not trusted")]
     UntrustedWitness,
+    /// The bundle exceeded the explicit countersignature bound.
+    #[error("checkpoint witness bundle has {count} signatures; maximum is {maximum}")]
+    TooManyWitnesses {
+        /// Observed countersignature count.
+        count: usize,
+        /// Maximum accepted countersignature count.
+        maximum: usize,
+    },
     /// A zero quorum would accept an unwitnessed checkpoint.
     #[error("checkpoint witness quorum must be greater than zero")]
     ZeroQuorum,
@@ -164,6 +181,12 @@ impl Verifier {
         }
         if minimum_quorum == 0 {
             return Err(CheckpointWitnessError::ZeroQuorum);
+        }
+        if bundle.witnesses.len() > MAX_CHECKPOINT_WITNESSES {
+            return Err(CheckpointWitnessError::TooManyWitnesses {
+                count: bundle.witnesses.len(),
+                maximum: MAX_CHECKPOINT_WITNESSES,
+            });
         }
         Self::verify_checkpoint(&bundle.checkpoint)?;
         let trusted = trusted_witness_keys.iter().copied().collect::<BTreeSet<_>>();

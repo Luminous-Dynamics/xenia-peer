@@ -17,8 +17,8 @@ use serde_big_array::BigArray;
 use thiserror::Error;
 
 use crate::{
-    CheckpointContinuityError, CheckpointError, LedgerCheckpoint, LedgerEntry, Verifier,
-    checkpoint_fingerprint,
+    checkpoint_fingerprint, CheckpointContinuityError, CheckpointError, LedgerCheckpoint,
+    LedgerEntry, Verifier,
 };
 
 /// Stable schema label for [`LedgerKeyTransition`].
@@ -78,7 +78,13 @@ impl LedgerKeyTransition {
         {
             return Err(LedgerKeyTransitionError::PreviousKeyMismatch);
         }
+        if timestamp_unix_secs < previous_checkpoint.timestamp_unix_secs {
+            return Err(LedgerKeyTransitionError::TransitionPredatesCheckpoint);
+        }
         let new_ledger_public_key = new_signing_key.verifying_key().to_bytes();
+        if new_ledger_public_key == previous_checkpoint.ledger_public_key {
+            return Err(LedgerKeyTransitionError::KeyUnchanged);
+        }
         let fingerprint = checkpoint_fingerprint(&previous_checkpoint)?;
         let message = ledger_key_transition_message(
             &fingerprint,
@@ -111,6 +117,12 @@ pub enum LedgerKeyTransitionError {
     /// The supplied old signing key did not own the previous checkpoint.
     #[error("previous signing key does not match the checkpoint ledger key")]
     PreviousKeyMismatch,
+    /// The handover timestamp preceded the checkpoint it claims to finalize.
+    #[error("ledger key transition timestamp predates the previous checkpoint")]
+    TransitionPredatesCheckpoint,
+    /// A key-transition artifact attempted to rotate to the existing key.
+    #[error("successor ledger key must differ from the previous ledger key")]
+    KeyUnchanged,
     /// The successor public key was malformed.
     #[error("successor ledger public key is malformed")]
     BadNewPublicKey,
@@ -146,6 +158,16 @@ impl Verifier {
             });
         }
         Self::verify_checkpoint(&transition.previous_checkpoint)?;
+        if transition.timestamp_unix_secs
+            < transition.previous_checkpoint.timestamp_unix_secs
+        {
+            return Err(LedgerKeyTransitionError::TransitionPredatesCheckpoint);
+        }
+        if transition.new_ledger_public_key
+            == transition.previous_checkpoint.ledger_public_key
+        {
+            return Err(LedgerKeyTransitionError::KeyUnchanged);
+        }
         let previous_key = VerifyingKey::from_bytes(
             &transition.previous_checkpoint.ledger_public_key,
         )

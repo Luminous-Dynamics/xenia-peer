@@ -76,7 +76,6 @@ pub fn checkpoint_message(
     message
 }
 
-
 /// Compute a stable BLAKE3 fingerprint over every signed field of a checkpoint.
 ///
 /// This is used by higher-level continuity artifacts such as key-transition
@@ -95,6 +94,30 @@ pub fn checkpoint_fingerprint(
     );
     bytes.extend_from_slice(&checkpoint.signature);
     Ok(*blake3::hash(&bytes).as_bytes())
+}
+
+/// Host-local freshness policy for retained public checkpoints.
+///
+/// Signature and prefix verification prove authenticity and continuity. This
+/// policy additionally lets deployments require that their independent
+/// retention process is still alive and reject checkpoints implausibly far in
+/// the future. A `None` maximum age preserves historical checkpoints without
+/// imposing a freshness SLA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckpointFreshnessPolicy {
+    /// Maximum accepted checkpoint age in seconds, or `None` for no age limit.
+    pub max_age_secs: Option<u64>,
+    /// Maximum accepted positive clock skew in seconds.
+    pub max_future_skew_secs: u64,
+}
+
+impl Default for CheckpointFreshnessPolicy {
+    fn default() -> Self {
+        Self {
+            max_age_secs: None,
+            max_future_skew_secs: 300,
+        }
+    }
 }
 
 /// Why a [`LedgerCheckpoint`] failed to verify.
@@ -250,6 +273,28 @@ pub enum CheckpointContinuityError {
     /// The verified suffix did not terminate at the candidate checkpoint head.
     #[error("checkpoint extension suffix does not terminate at the candidate head")]
     CandidateHeadMismatch,
+    /// A retained checkpoint timestamp was implausibly far in the future.
+    #[error(
+        "ledger checkpoint timestamp {checkpoint} exceeds now {now} plus allowed future skew {maximum_skew}"
+    )]
+    CheckpointFromFuture {
+        /// Signed checkpoint timestamp.
+        checkpoint: u64,
+        /// Verifier wall-clock timestamp.
+        now: u64,
+        /// Configured positive clock-skew allowance.
+        maximum_skew: u64,
+    },
+    /// A retained checkpoint was older than the deployment's freshness SLA.
+    #[error(
+        "ledger checkpoint age {age} seconds exceeds maximum accepted age {maximum_age}"
+    )]
+    CheckpointTooOld {
+        /// Observed age in seconds.
+        age: u64,
+        /// Configured maximum age.
+        maximum_age: u64,
+    },
     /// Full-chain verification failed while checking a retained checkpoint
     /// against a supplied ledger.
     #[error("ledger failed verification while checking checkpoint continuity: {0}")]
@@ -257,6 +302,34 @@ pub enum CheckpointContinuityError {
 }
 
 impl Verifier {
+    /// Verify a checkpoint's signature plus host-local freshness policy.
+    pub fn verify_checkpoint_freshness(
+        checkpoint: &LedgerCheckpoint,
+        now_unix_secs: u64,
+        policy: CheckpointFreshnessPolicy,
+    ) -> Result<(), CheckpointContinuityError> {
+        Self::verify_checkpoint(checkpoint)?;
+        if checkpoint.timestamp_unix_secs
+            > now_unix_secs.saturating_add(policy.max_future_skew_secs)
+        {
+            return Err(CheckpointContinuityError::CheckpointFromFuture {
+                checkpoint: checkpoint.timestamp_unix_secs,
+                now: now_unix_secs,
+                maximum_skew: policy.max_future_skew_secs,
+            });
+        }
+        if let Some(maximum_age) = policy.max_age_secs {
+            let age = now_unix_secs.saturating_sub(checkpoint.timestamp_unix_secs);
+            if age > maximum_age {
+                return Err(CheckpointContinuityError::CheckpointTooOld {
+                    age,
+                    maximum_age,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Check the facts that two independently valid signed checkpoints can
     /// establish without any ledger entries.
     ///

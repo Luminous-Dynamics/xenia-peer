@@ -36,7 +36,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use xenia_ledger::{
-    Chain, CheckpointContinuityError, LedgerCheckpoint, LedgerEntry, Verifier, VerifyError,
+    Chain, CheckpointContinuityError, CheckpointFreshnessPolicy, CheckpointWitnessBundle,
+    CheckpointWitnessError, LedgerArchiveError, LedgerArchiveSegment, LedgerCheckpoint,
+    LedgerEntry, LedgerKeyTransition, LedgerKeyTransitionError, Verifier, VerifyError,
 };
 
 /// Errors surfaced while loading or persisting the live audit ledger.
@@ -63,13 +65,22 @@ pub(crate) enum AuditLedgerStoreError {
     /// not trust it.
     #[error("persisted audit ledger failed verification: {0}")]
     Verify(#[from] VerifyError),
-    /// A retained public checkpoint could not be decoded.
-    #[error("retained audit checkpoint JSON error: {0}")]
-    CheckpointJson(#[from] serde_json::Error),
+    /// A retained continuity artifact could not be decoded.
+    #[error("audit continuity artifact JSON error: {0}")]
+    ContinuityJson(#[from] serde_json::Error),
     /// The current ledger failed to contain the independently retained
     /// checkpoint as an exact authenticated prefix.
     #[error("retained audit checkpoint continuity failure: {0}")]
     CheckpointContinuity(#[from] CheckpointContinuityError),
+    /// A dual-signed ledger-key succession proof was invalid.
+    #[error("retained ledger key transition failure: {0}")]
+    KeyTransition(#[from] LedgerKeyTransitionError),
+    /// An independently witnessed checkpoint bundle failed quorum policy.
+    #[error("retained checkpoint witness failure: {0}")]
+    CheckpointWitness(#[from] CheckpointWitnessError),
+    /// A bounded archive segment could not be produced or verified.
+    #[error("consent ledger archive failure: {0}")]
+    LedgerArchive(#[from] LedgerArchiveError),
 }
 
 const PERSISTED_AUDIT_LEDGER_MAGIC: &[u8] = b"XENIA-AUDIT-LEDGER\0";
@@ -79,6 +90,14 @@ const PERSISTED_AUDIT_LEDGER_HEADER_LEN: usize =
 pub(crate) const MAX_AUDIT_LEDGER_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const MAX_AUDIT_LEDGER_ENTRIES: usize = 100_000;
 pub(crate) const MAX_RETAINED_CHECKPOINT_BYTES: u64 = 64 * 1024;
+pub(crate) const MAX_CONTINUITY_ARTIFACT_BYTES: u64 = 1024 * 1024;
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
 
 fn head_hash(entries: &[LedgerEntry]) -> [u8; 32] {
     entries
@@ -203,17 +222,142 @@ pub(crate) fn verify_retained_checkpoint(
     chain: &Chain,
     public_key: &ed25519_dalek::VerifyingKey,
 ) -> Result<LedgerCheckpoint, AuditLedgerStoreError> {
-    let file_len = std::fs::metadata(checkpoint_path)?.len();
-    if file_len > MAX_RETAINED_CHECKPOINT_BYTES {
-        return Err(AuditLedgerStoreError::LimitExceeded(format!(
-            "retained checkpoint is {file_len} bytes; maximum is {MAX_RETAINED_CHECKPOINT_BYTES}"
-        )));
-    }
-    let bytes = std::fs::read(checkpoint_path)?;
-    let checkpoint: LedgerCheckpoint = serde_json::from_slice(&bytes)?;
+    verify_retained_checkpoint_with_policy(
+        checkpoint_path,
+        chain,
+        public_key,
+        unix_now_secs(),
+        CheckpointFreshnessPolicy::default(),
+    )
+}
+
+/// Load and verify one retained checkpoint with an explicit host-local
+/// freshness SLA in addition to signature and exact-prefix continuity.
+pub(crate) fn verify_retained_checkpoint_with_policy(
+    checkpoint_path: &Path,
+    chain: &Chain,
+    public_key: &ed25519_dalek::VerifyingKey,
+    now_unix_secs: u64,
+    freshness: CheckpointFreshnessPolicy,
+) -> Result<LedgerCheckpoint, AuditLedgerStoreError> {
+    let checkpoint: LedgerCheckpoint = read_bounded_json(
+        checkpoint_path,
+        MAX_RETAINED_CHECKPOINT_BYTES,
+        "retained checkpoint",
+    )?;
+    Verifier::verify_checkpoint_freshness(&checkpoint, now_unix_secs, freshness)?;
     let entries = chain.iter().cloned().collect::<Vec<_>>();
     Verifier::verify_checkpoint_prefix(&checkpoint, &entries, public_key)?;
     Ok(checkpoint)
+}
+
+/// Verify a witnessed checkpoint restore anchor. The checkpoint must both be
+/// an exact prefix of the current ledger and satisfy the caller's distinct
+/// trusted-witness quorum.
+pub(crate) fn verify_retained_witness_bundle(
+    bundle_path: &Path,
+    chain: &Chain,
+    public_key: &ed25519_dalek::VerifyingKey,
+    trusted_witness_keys: &[[u8; 32]],
+    minimum_quorum: usize,
+    now_unix_secs: u64,
+    freshness: CheckpointFreshnessPolicy,
+) -> Result<CheckpointWitnessBundle, AuditLedgerStoreError> {
+    let bundle: CheckpointWitnessBundle = read_bounded_json(
+        bundle_path,
+        MAX_CONTINUITY_ARTIFACT_BYTES,
+        "checkpoint witness bundle",
+    )?;
+    Verifier::verify_checkpoint_freshness(&bundle.checkpoint, now_unix_secs, freshness)?;
+    let entries = chain.iter().cloned().collect::<Vec<_>>();
+    Verifier::verify_checkpoint_prefix(&bundle.checkpoint, &entries, public_key)?;
+    Verifier::verify_checkpoint_witness_quorum(
+        &bundle,
+        trusted_witness_keys,
+        minimum_quorum,
+    )?;
+    Ok(bundle)
+}
+
+/// Verify an explicit old-key/new-key epoch handover when the current ledger
+/// intentionally begins a fresh epoch under a successor signing key.
+pub(crate) fn verify_retained_key_successor(
+    checkpoint_path: &Path,
+    transition_path: &Path,
+    chain: &Chain,
+    current_public_key: &ed25519_dalek::VerifyingKey,
+    now_unix_secs: u64,
+) -> Result<LedgerKeyTransition, AuditLedgerStoreError> {
+    let retained: LedgerCheckpoint = read_bounded_json(
+        checkpoint_path,
+        MAX_RETAINED_CHECKPOINT_BYTES,
+        "retained checkpoint",
+    )?;
+    let transition: LedgerKeyTransition = read_bounded_json(
+        transition_path,
+        MAX_CONTINUITY_ARTIFACT_BYTES,
+        "ledger key transition",
+    )?;
+    let candidate = chain.sign_checkpoint(now_unix_secs);
+    let entries = chain.iter().cloned().collect::<Vec<_>>();
+    Verifier::verify_ledger_key_successor(
+        &retained,
+        &transition,
+        &candidate,
+        &entries,
+    )?;
+    if candidate.ledger_public_key != current_public_key.to_bytes() {
+        return Err(AuditLedgerStoreError::MetadataMismatch(
+            "successor checkpoint key",
+        ));
+    }
+    Ok(transition)
+}
+
+fn read_bounded_json<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    maximum_bytes: u64,
+    label: &str,
+) -> Result<T, AuditLedgerStoreError> {
+    let file_len = std::fs::metadata(path)?.len();
+    if file_len > maximum_bytes {
+        return Err(AuditLedgerStoreError::LimitExceeded(format!(
+            "{label} is {file_len} bytes; maximum is {maximum_bytes}"
+        )));
+    }
+    Ok(serde_json::from_slice(&std::fs::read(path)?)?)
+}
+
+/// Export a bounded, verifiable archive segment without mutating or truncating
+/// the live ledger. The supplied base checkpoint must be an exact prefix of the
+/// current chain.
+pub(crate) fn export_archive_segment_atomic(
+    output_path: &Path,
+    base_checkpoint_path: &Path,
+    chain: &Chain,
+    timestamp_unix_secs: u64,
+) -> Result<LedgerArchiveSegment, AuditLedgerStoreError> {
+    let base_checkpoint: LedgerCheckpoint = read_bounded_json(
+        base_checkpoint_path,
+        MAX_RETAINED_CHECKPOINT_BYTES,
+        "archive base checkpoint",
+    )?;
+    let segment = LedgerArchiveSegment::from_chain(
+        chain,
+        base_checkpoint,
+        timestamp_unix_secs,
+    )?;
+    let mut bytes = serde_json::to_vec_pretty(&segment)?;
+    bytes.push(b'\n');
+    if bytes.len() as u64 > MAX_AUDIT_LEDGER_BYTES {
+        return Err(AuditLedgerStoreError::LimitExceeded(format!(
+            "serialized archive segment is {} bytes; maximum is {}",
+            bytes.len(),
+            MAX_AUDIT_LEDGER_BYTES
+        )));
+    }
+    persist_owner_only_atomic(output_path, &bytes)?;
+    Ok(segment)
 }
 
 /// Atomically advance an externally retained checkpoint, refusing to overwrite
@@ -740,6 +884,144 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn retained_checkpoint_freshness_policy_rejects_stale_anchor() {
+        let dir = temp_dir("checkpoint-freshness");
+        let checkpoint_path = dir.join("checkpoint.json");
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[81u8; 32]);
+        let mut chain = Chain::new(sk.clone());
+        chain.append(event()).unwrap();
+        std::fs::write(
+            &checkpoint_path,
+            serde_json::to_vec(&chain.sign_checkpoint(100)).unwrap(),
+        )
+        .unwrap();
+
+        let error = verify_retained_checkpoint_with_policy(
+            &checkpoint_path,
+            &chain,
+            &sk.verifying_key(),
+            200,
+            CheckpointFreshnessPolicy {
+                max_age_secs: Some(50),
+                max_future_skew_secs: 5,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            AuditLedgerStoreError::CheckpointContinuity(
+                CheckpointContinuityError::CheckpointTooOld { .. }
+            )
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn witnessed_restore_requires_the_configured_quorum() {
+        let dir = temp_dir("witnessed-restore");
+        let bundle_path = dir.join("witnesses.json");
+        let ledger_key = ed25519_dalek::SigningKey::from_bytes(&[82u8; 32]);
+        let witness_a = ed25519_dalek::SigningKey::from_bytes(&[83u8; 32]);
+        let witness_b = ed25519_dalek::SigningKey::from_bytes(&[84u8; 32]);
+        let mut chain = Chain::new(ledger_key.clone());
+        chain.append(event()).unwrap();
+        let mut bundle = xenia_ledger::CheckpointWitnessBundle::new(
+            chain.sign_checkpoint(100),
+        )
+        .unwrap();
+        bundle.sign_with(&witness_a, 101).unwrap();
+        bundle.sign_with(&witness_b, 102).unwrap();
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+
+        let trusted = [
+            witness_a.verifying_key().to_bytes(),
+            witness_b.verifying_key().to_bytes(),
+        ];
+        let verified = verify_retained_witness_bundle(
+            &bundle_path,
+            &chain,
+            &ledger_key.verifying_key(),
+            &trusted,
+            2,
+            102,
+            CheckpointFreshnessPolicy {
+                max_age_secs: Some(10),
+                max_future_skew_secs: 5,
+            },
+        )
+        .unwrap();
+        assert_eq!(verified.witnesses.len(), 2);
+        assert!(verify_retained_witness_bundle(
+            &bundle_path,
+            &chain,
+            &ledger_key.verifying_key(),
+            &trusted,
+            3,
+            102,
+            CheckpointFreshnessPolicy {
+                max_age_secs: Some(10),
+                max_future_skew_secs: 5,
+            },
+        )
+        .is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn dual_signed_transition_allows_a_new_ledger_epoch() {
+        let dir = temp_dir("key-successor");
+        let checkpoint_path = dir.join("previous.json");
+        let transition_path = dir.join("transition.json");
+        let old_key = ed25519_dalek::SigningKey::from_bytes(&[85u8; 32]);
+        let new_key = ed25519_dalek::SigningKey::from_bytes(&[86u8; 32]);
+        let mut previous_chain = Chain::new(old_key.clone());
+        previous_chain.append(event()).unwrap();
+        let previous = previous_chain.sign_checkpoint(100);
+        let transition = xenia_ledger::LedgerKeyTransition::sign(
+            previous.clone(),
+            &old_key,
+            &new_key,
+            101,
+        )
+        .unwrap();
+        std::fs::write(&checkpoint_path, serde_json::to_vec(&previous).unwrap()).unwrap();
+        std::fs::write(&transition_path, serde_json::to_vec(&transition).unwrap()).unwrap();
+
+        let mut successor = Chain::new(new_key.clone());
+        successor.append(event()).unwrap();
+        let verified = verify_retained_key_successor(
+            &checkpoint_path,
+            &transition_path,
+            &successor,
+            &new_key.verifying_key(),
+            102,
+        )
+        .unwrap();
+        assert_eq!(verified.new_ledger_public_key, new_key.verifying_key().to_bytes());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn archive_export_is_atomic_and_independently_verifiable() {
+        let dir = temp_dir("archive-export");
+        let base_path = dir.join("base.json");
+        let output_path = dir.join("archive/segment.json");
+        let key = ed25519_dalek::SigningKey::from_bytes(&[87u8; 32]);
+        let mut chain = Chain::new(key);
+        let base = chain.sign_checkpoint(100);
+        chain.append(event()).unwrap();
+        std::fs::write(&base_path, serde_json::to_vec(&base).unwrap()).unwrap();
+
+        let segment = export_archive_segment_atomic(&output_path, &base_path, &chain, 101)
+            .unwrap();
+        xenia_ledger::Verifier::verify_ledger_archive_segment(&segment).unwrap();
+        let stored: xenia_ledger::LedgerArchiveSegment =
+            serde_json::from_slice(&std::fs::read(&output_path).unwrap()).unwrap();
+        assert_eq!(stored, segment);
         std::fs::remove_dir_all(&dir).ok();
     }
 

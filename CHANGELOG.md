@@ -7,6 +7,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Dual-signed consent-ledger key succession artifacts for explicit epoch
+  rotation without silently changing the signer inside one hash chain.
+- Independent checkpoint countersignature bundles with configurable trusted
+  witness quorums and retained-checkpoint freshness policy.
+- Bounded, atomically exported ledger archive segments with exact checkpoint
+  and signed-entry continuity verification.
+
 ## [0.0.0-m0] — 2026-04-18
 
 Initial milestone. Workspace scaffold + `xenia-peer-core` crate with

@@ -101,7 +101,7 @@ pub use chain::Chain;
 
 pub use checkpoint::{
     checkpoint_fingerprint, checkpoint_message, CheckpointContinuityError, CheckpointError,
-    LedgerCheckpoint, LEDGER_CHECKPOINT_SCHEMA,
+    CheckpointFreshnessPolicy, LedgerCheckpoint, LEDGER_CHECKPOINT_SCHEMA,
 };
 
 pub use entry::{
@@ -144,7 +144,7 @@ pub use signature::{
 };
 pub use witness::{
     checkpoint_witness_message, CheckpointWitnessBundle, CheckpointWitnessError,
-    CheckpointWitnessSignature, CHECKPOINT_WITNESS_BUNDLE_SCHEMA,
+    CheckpointWitnessSignature, CHECKPOINT_WITNESS_BUNDLE_SCHEMA, MAX_CHECKPOINT_WITNESSES,
 };
 
 pub use verify::Verifier;

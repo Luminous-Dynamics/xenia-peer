@@ -1650,6 +1650,26 @@ fn ledger_key_transition_requires_both_epoch_keys() {
 }
 
 #[test]
+fn ledger_key_transition_rejects_same_key_and_predated_handover() {
+    use crate::{LedgerKeyTransition, LedgerKeyTransitionError};
+    use ed25519_dalek::SigningKey;
+
+    let old = SigningKey::from_bytes(&[45u8; 32]);
+    let new = SigningKey::from_bytes(&[46u8; 32]);
+    let chain = crate::Chain::new(old.clone());
+    let previous = chain.sign_checkpoint(100);
+
+    assert!(matches!(
+        LedgerKeyTransition::sign(previous.clone(), &old, &old, 101),
+        Err(LedgerKeyTransitionError::KeyUnchanged)
+    ));
+    assert!(matches!(
+        LedgerKeyTransition::sign(previous, &old, &new, 99),
+        Err(LedgerKeyTransitionError::TransitionPredatesCheckpoint)
+    ));
+}
+
+#[test]
 fn ledger_key_transition_authorizes_a_fresh_successor_epoch() {
     use crate::{LedgerKeyTransition, Verifier};
     use ed25519_dalek::SigningKey;
@@ -1689,6 +1709,27 @@ fn checkpoint_witness_bundle_requires_distinct_trusted_quorum() {
     ];
     Verifier::verify_checkpoint_witness_quorum(&bundle, &trusted, 2).unwrap();
     assert!(Verifier::verify_checkpoint_witness_quorum(&bundle, &trusted, 3).is_err());
+}
+
+#[test]
+fn checkpoint_witness_bundle_enforces_the_signature_bound() {
+    use crate::{
+        CheckpointWitnessBundle, CheckpointWitnessError, MAX_CHECKPOINT_WITNESSES,
+    };
+    use ed25519_dalek::SigningKey;
+
+    let ledger_key = SigningKey::from_bytes(&[57u8; 32]);
+    let chain = crate::Chain::new(ledger_key);
+    let mut bundle = CheckpointWitnessBundle::new(chain.sign_checkpoint(100)).unwrap();
+    for seed in 1..=MAX_CHECKPOINT_WITNESSES {
+        let witness = SigningKey::from_bytes(&[seed as u8; 32]);
+        bundle.sign_with(&witness, 101).unwrap();
+    }
+    let extra = SigningKey::from_bytes(&[65u8; 32]);
+    assert!(matches!(
+        bundle.sign_with(&extra, 101),
+        Err(CheckpointWitnessError::TooManyWitnesses { .. })
+    ));
 }
 
 #[test]
@@ -1754,4 +1795,22 @@ fn archive_segment_rejects_missing_or_tampered_entries() {
     let mut tampered = segment;
     tampered.segment_digest[0] ^= 0x20;
     assert!(Verifier::verify_ledger_archive_segment(&tampered).is_err());
+}
+
+#[test]
+fn checkpoint_freshness_rejects_stale_and_future_anchors() {
+    use crate::{CheckpointFreshnessPolicy, Verifier};
+    use ed25519_dalek::SigningKey;
+
+    let chain = crate::Chain::new(SigningKey::from_bytes(&[63u8; 32]));
+    let checkpoint = chain.sign_checkpoint(100);
+    let policy = CheckpointFreshnessPolicy {
+        max_age_secs: Some(20),
+        max_future_skew_secs: 5,
+    };
+    Verifier::verify_checkpoint_freshness(&checkpoint, 120, policy).unwrap();
+    assert!(Verifier::verify_checkpoint_freshness(&checkpoint, 121, policy).is_err());
+
+    let future = chain.sign_checkpoint(126);
+    assert!(Verifier::verify_checkpoint_freshness(&future, 120, policy).is_err());
 }

@@ -99,3 +99,7 @@ The daemon startup gate `--trusted-consent-ledger-checkpoint` implements claim
 2. `GET /v1/audit/witness` supplies the bounded suffix needed for claim 3.
 `--advance-consent-ledger-checkpoint` atomically advances an independent pin
 only after claim 2 succeeds.
+
+For explicit signer rotation, independent checkpoint countersignatures,
+retention freshness policy, and bounded archive segments, see
+[`LEDGER_EPOCHS_WITNESSES_AND_ARCHIVES.md`](LEDGER_EPOCHS_WITNESSES_AND_ARCHIVES.md).

@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    Chain, CheckpointContinuityError, LedgerCheckpoint, LedgerEntry, Verifier,
-    checkpoint_fingerprint,
+    checkpoint_fingerprint, Chain, CheckpointContinuityError, LedgerCheckpoint, LedgerEntry,
+    Verifier,
 };
 
 /// Stable schema label for [`LedgerArchiveSegment`].
@@ -139,6 +139,12 @@ pub enum LedgerArchiveError {
     /// The stored segment commitment did not recompute.
     #[error("archive segment digest mismatch")]
     DigestMismatch,
+    /// Two adjacent segments did not share the exact same boundary checkpoint.
+    #[error("archive segments are not contiguous at boundary index {index}")]
+    SequenceDiscontinuity {
+        /// Index of the first segment in the mismatched adjacent pair.
+        index: usize,
+    },
 }
 
 impl Verifier {
@@ -181,9 +187,9 @@ impl Verifier {
         for segment in segments {
             Self::verify_ledger_archive_segment(segment)?;
         }
-        for pair in segments.windows(2) {
+        for (index, pair) in segments.windows(2).enumerate() {
             if pair[0].terminal_checkpoint != pair[1].base_checkpoint {
-                return Err(LedgerArchiveError::DigestMismatch);
+                return Err(LedgerArchiveError::SequenceDiscontinuity { index });
             }
         }
         Ok(())
