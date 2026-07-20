@@ -20,7 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, Query, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     response::Response,
     routing::{get, post},
@@ -691,17 +691,74 @@ struct AuditLedgerExportDto {
     checkpoint: LedgerCheckpoint,
 }
 
-/// `GET /v1/audit/ledger` -- an authenticated, role-gated export of the
-/// full in-memory consent ledger. Requires a valid, unexpired operator
-/// token in the `X-Operator-Token` header (same JSON shape `POST
-/// /operator/revoke` embeds in its body) whose role permits
-/// [`crate::operator_auth::authorize_ledger_read`] (`ReadAudit`, `Viewer`
-/// and above -- every enrolled role). Every auth failure returns `403`
-/// without disclosing which check failed, matching `revoke_operator_handler`.
-async fn audit_ledger_handler(
-    State(state): State<AuditState>,
-    headers: HeaderMap,
-) -> Result<Json<AuditLedgerExportDto>, (StatusCode, String)> {
+const AUDIT_EXTENSION_WITNESS_SCHEMA: &str = "xenia-ledger-extension-witness-v1";
+const MAX_AUDIT_WITNESS_ENTRIES: usize = 4_096;
+
+/// Query for `GET /v1/audit/witness`. `after_entry_count` is the retained
+/// checkpoint height; every entry after that height is returned so the caller
+/// can prove append-only extension rather than merely compare two checkpoints.
+#[derive(Debug, Deserialize)]
+struct AuditWitnessQuery {
+    after_entry_count: u64,
+}
+
+/// Authenticated extension proof from a retained checkpoint height to the
+/// daemon's current signed checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct AuditExtensionWitnessDto {
+    schema: String,
+    base_entry_count: u64,
+    entries: Vec<LedgerEntry>,
+    checkpoint: LedgerCheckpoint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuditWitnessBuildError {
+    BaseAheadOfLedger { base: u64, ledger: u64 },
+    TooManyEntries { requested: usize, maximum: usize },
+}
+
+fn build_audit_extension_witness(
+    ledger: &Chain,
+    after_entry_count: u64,
+    timestamp_unix_secs: u64,
+) -> Result<AuditExtensionWitnessDto, AuditWitnessBuildError> {
+    let ledger_len = ledger.len() as u64;
+    if after_entry_count > ledger_len {
+        return Err(AuditWitnessBuildError::BaseAheadOfLedger {
+            base: after_entry_count,
+            ledger: ledger_len,
+        });
+    }
+    let requested = usize::try_from(ledger_len - after_entry_count)
+        .expect("ledger length is already bounded by usize");
+    if requested > MAX_AUDIT_WITNESS_ENTRIES {
+        return Err(AuditWitnessBuildError::TooManyEntries {
+            requested,
+            maximum: MAX_AUDIT_WITNESS_ENTRIES,
+        });
+    }
+    let after_index = usize::try_from(after_entry_count)
+        .expect("entry count is already bounded by the in-memory ledger length");
+    let entries = ledger
+        .iter()
+        .skip(after_index)
+        .cloned()
+        .collect();
+    Ok(AuditExtensionWitnessDto {
+        schema: AUDIT_EXTENSION_WITNESS_SCHEMA.to_string(),
+        base_entry_count: after_entry_count,
+        entries,
+        checkpoint: ledger.sign_checkpoint(timestamp_unix_secs),
+    })
+}
+
+/// Authenticate and authorize one reader for the private audit endpoints.
+/// Public checkpoint access deliberately bypasses this helper.
+fn authorize_audit_reader(
+    state: &AuditState,
+    headers: &HeaderMap,
+) -> Result<OperatorToken, (StatusCode, String)> {
     let token_header = headers
         .get("X-Operator-Token")
         .and_then(|v| v.to_str().ok())
@@ -720,25 +777,32 @@ async fn audit_ledger_handler(
     let signed = token_dto
         .into_signed()
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-
-    let token = match crate::operator_auth::authorize_ledger_read(
+    let token = crate::operator_auth::authorize_ledger_read(
         &state.auth.policy,
         &state.auth.daemon_key.verifying_key(),
         &state.auth.daemon_ml_dsa.public_key_bytes(),
         unix_now_secs(),
         &signed,
-    ) {
-        Ok(token) => token,
-        Err(_) => {
-            tracing::warn!("ledger read refused");
-            return Err((StatusCode::FORBIDDEN, "ledger read refused".to_string()));
-        }
-    };
+    )
+    .map_err(|_| {
+        tracing::warn!("ledger read refused");
+        (StatusCode::FORBIDDEN, "ledger read refused".to_string())
+    })?;
     if state.revocations.is_revoked(&token.operator_id) {
         tracing::warn!(operator = %token.operator_id, "ledger read refused: operator is revoked");
         return Err((StatusCode::FORBIDDEN, "ledger read refused".to_string()));
     }
+    Ok(token)
+}
 
+/// `GET /v1/audit/ledger` -- an authenticated, role-gated export of the
+/// full in-memory consent ledger. Requires a valid, unexpired operator token
+/// whose role permits [`crate::operator_auth::authorize_ledger_read`].
+async fn audit_ledger_handler(
+    State(state): State<AuditState>,
+    headers: HeaderMap,
+) -> Result<Json<AuditLedgerExportDto>, (StatusCode, String)> {
+    authorize_audit_reader(&state, &headers)?;
     let ledger = state.ledger.lock().await;
     let checkpoint = ledger.sign_checkpoint(unix_now_secs());
     let entries: Vec<LedgerEntry> = ledger.iter().cloned().collect();
@@ -746,6 +810,39 @@ async fn audit_ledger_handler(
         entries,
         checkpoint,
     }))
+}
+
+/// `GET /v1/audit/witness` -- authenticated append-only extension proof from
+/// an externally retained checkpoint height to the current ledger head.
+///
+/// The endpoint is deliberately bounded. An auditor that falls more than
+/// `MAX_AUDIT_WITNESS_ENTRIES` behind must fetch the full authenticated ledger
+/// rather than force the daemon to allocate an unbounded response.
+async fn audit_witness_handler(
+    State(state): State<AuditState>,
+    headers: HeaderMap,
+    Query(query): Query<AuditWitnessQuery>,
+) -> Result<Json<AuditExtensionWitnessDto>, (StatusCode, String)> {
+    authorize_audit_reader(&state, &headers)?;
+    let ledger = state.ledger.lock().await;
+    let witness = build_audit_extension_witness(
+        &ledger,
+        query.after_entry_count,
+        unix_now_secs(),
+    )
+    .map_err(|err| match err {
+        AuditWitnessBuildError::BaseAheadOfLedger { base, ledger } => (
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            format!("retained entry count {base} is ahead of current ledger length {ledger}"),
+        ),
+        AuditWitnessBuildError::TooManyEntries { requested, maximum } => (
+            StatusCode::CONFLICT,
+            format!(
+                "extension requires {requested} entries, exceeding witness maximum {maximum}; fetch /v1/audit/ledger"
+            ),
+        ),
+    })?;
+    Ok(Json(witness))
 }
 
 /// A `Router` carrying the auth routes plus the admin revoke/replace-key
@@ -805,6 +902,7 @@ pub(crate) fn router(
             Router::new()
                 .route("/v1/audit/checkpoint", get(audit_checkpoint_handler))
                 .route("/v1/audit/ledger", get(audit_ledger_handler))
+                .route("/v1/audit/witness", get(audit_witness_handler))
                 .with_state(audit),
         )
         .merge(
@@ -1905,5 +2003,43 @@ mod tests {
         let (status, _) =
             get_json_with_header(&router, "/v1/audit/ledger", "X-Operator-Token", "not json").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn audit_witness_proves_extension_from_a_retained_checkpoint() {
+        use xenia_ledger::{ConsentEventRecord, ConsentKind, Verifier};
+
+        let signing_key = SigningKey::from_bytes(&[83u8; 32]);
+        let mut ledger = Chain::new(signing_key);
+        let event = |request: u8, kind| ConsentEventRecord {
+            source_id: [7u8; 32],
+            session_id: uuid::Uuid::from_bytes([8u8; 16]),
+            request_id: uuid::Uuid::from_bytes([request; 16]),
+            kind,
+            scope: "test".to_string(),
+        };
+        ledger.append(event(1, ConsentKind::Request)).unwrap();
+        let retained = ledger.sign_checkpoint(100);
+        ledger.append(event(2, ConsentKind::Approval)).unwrap();
+        ledger.append(event(3, ConsentKind::Revocation)).unwrap();
+
+        let witness = build_audit_extension_witness(&ledger, retained.entry_count, 101).unwrap();
+        assert_eq!(witness.schema, AUDIT_EXTENSION_WITNESS_SCHEMA);
+        assert_eq!(witness.entries.len(), 2);
+        Verifier::verify_checkpoint_extension(
+            &retained,
+            &witness.checkpoint,
+            &witness.entries,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn audit_witness_refuses_a_base_ahead_of_the_current_ledger() {
+        let ledger = Chain::new(SigningKey::from_bytes(&[84u8; 32]));
+        assert_eq!(
+            build_audit_extension_witness(&ledger, 1, 100),
+            Err(AuditWitnessBuildError::BaseAheadOfLedger { base: 1, ledger: 0 })
+        );
     }
 }
