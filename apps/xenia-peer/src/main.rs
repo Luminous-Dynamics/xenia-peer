@@ -529,6 +529,57 @@ struct Args {
     )]
     verify_consent_ledger_compaction_bundle: Option<std::path::PathBuf>,
 
+    /// Export a minimal, non-destructive compacted restore snapshot and exit.
+    /// The snapshot contains the authenticated recovery summary and only the
+    /// live suffix after the archived boundary; the detailed archive remains a
+    /// separate cold-storage artifact.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "consent_ledger_compaction_bundle_input",
+        conflicts_with_all = [
+            "advance_consent_ledger_checkpoint",
+            "export_consent_ledger_archive_segment",
+            "export_consent_ledger_compaction_bundle",
+            "verify_consent_ledger_compaction_bundle",
+            "verify_consent_ledger_compacted_snapshot"
+        ]
+    )]
+    export_consent_ledger_compacted_snapshot: Option<std::path::PathBuf>,
+
+    /// Previously verified compaction preflight bundle used to derive
+    /// `--export-consent-ledger-compacted-snapshot`.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "export_consent_ledger_compacted_snapshot"
+    )]
+    consent_ledger_compaction_bundle_input: Option<std::path::PathBuf>,
+
+    /// Verify a compacted restore snapshot against its detailed archive
+    /// segments and exit. No live ledger file is replaced.
+    #[arg(
+        long,
+        value_name = "FILE",
+        conflicts_with_all = [
+            "advance_consent_ledger_checkpoint",
+            "export_consent_ledger_archive_segment",
+            "export_consent_ledger_compaction_bundle",
+            "verify_consent_ledger_compaction_bundle",
+            "export_consent_ledger_compacted_snapshot"
+        ]
+    )]
+    verify_consent_ledger_compacted_snapshot: Option<std::path::PathBuf>,
+
+    /// Detailed archive segment required to verify a compacted restore
+    /// snapshot. Repeat in chronological order from genesis.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "verify_consent_ledger_compacted_snapshot"
+    )]
+    consent_ledger_compacted_snapshot_archive_segment: Vec<std::path::PathBuf>,
+
     /// M1 consent-ledger signing key path. Signs the consent grant/deny/revoke
     /// boundary events; generated on first run with owner-only (0600)
     /// permissions. Must be a real per-host secret -- a shared or well-known
@@ -2324,6 +2375,174 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         return Ok(());
     }
+    if let Some(output_path) = args
+        .export_consent_ledger_compacted_snapshot
+        .as_deref()
+    {
+        let bundle_path = args
+            .consent_ledger_compaction_bundle_input
+            .as_deref()
+            .expect("clap requires a compaction bundle input");
+        let bundle = audit_ledger_store::read_bounded_json::<
+            consent_compaction::ConsentCompactionBundleV1,
+        >(
+            bundle_path,
+            consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES,
+            "consent ledger compaction bundle",
+        )
+        .map_err(|err| -> Box<dyn std::error::Error> {
+            format!(
+                "failed to read --consent-ledger-compaction-bundle-input {}: {err}",
+                bundle_path.display()
+            )
+            .into()
+        })?;
+        let entries = ledger.iter().cloned().collect::<Vec<_>>();
+        let snapshot = consent_compaction::ConsentCompactedSnapshotV1::build(
+            &bundle,
+            &entries,
+            &signing_key.verifying_key(),
+        )
+        .map_err(|err| -> Box<dyn std::error::Error> {
+            format!("consent compacted snapshot export failed: {err}").into()
+        })?;
+        let mut bytes = serde_json::to_vec_pretty(&snapshot)?;
+        bytes.push(b'\n');
+        if bytes.len() as u64 > consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES {
+            return Err(format!(
+                "serialized compacted snapshot is {} bytes; maximum is {}",
+                bytes.len(),
+                consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
+            )
+            .into());
+        }
+        audit_ledger_store::persist_owner_only_atomic(output_path, &bytes).map_err(
+            |err| -> Box<dyn std::error::Error> {
+                format!(
+                    "failed to persist compacted consent snapshot {}: {err}",
+                    output_path.display()
+                )
+                .into()
+            },
+        )?;
+        println!("consent-ledger compacted restore snapshot exported");
+        println!("path: {}", output_path.display());
+        println!(
+            "archived entries represented by summary: {}",
+            snapshot.recovery_summary.archived_entry_count
+        );
+        println!("resident suffix entries: {}", snapshot.suffix_entries.len());
+        println!(
+            "current entries: {}",
+            snapshot.manifest.current_checkpoint.entry_count
+        );
+        println!("snapshot blake3: {}", hex::encode(snapshot.snapshot_digest));
+        println!("no live ledger entries were deleted or replaced");
+        return Ok(());
+    }
+
+    if let Some(snapshot_path) = args
+        .verify_consent_ledger_compacted_snapshot
+        .as_deref()
+    {
+        if args
+            .consent_ledger_compacted_snapshot_archive_segment
+            .is_empty()
+        {
+            return Err(concat!(
+                "--verify-consent-ledger-compacted-snapshot requires at least one ",
+                "--consent-ledger-compacted-snapshot-archive-segment"
+            )
+            .into());
+        }
+        if args
+            .consent_ledger_compacted_snapshot_archive_segment
+            .len()
+            > xenia_ledger::MAX_LEDGER_ARCHIVE_SEQUENCE_SEGMENTS
+        {
+            return Err(format!(
+                "compacted snapshot has {} archive segments; maximum is {}",
+                args.consent_ledger_compacted_snapshot_archive_segment.len(),
+                xenia_ledger::MAX_LEDGER_ARCHIVE_SEQUENCE_SEGMENTS
+            )
+            .into());
+        }
+        let snapshot = audit_ledger_store::read_bounded_json::<
+            consent_compaction::ConsentCompactedSnapshotV1,
+        >(
+            snapshot_path,
+            consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES,
+            "consent compacted restore snapshot",
+        )
+        .map_err(|err| -> Box<dyn std::error::Error> {
+            format!(
+                "failed to read --verify-consent-ledger-compacted-snapshot {}: {err}",
+                snapshot_path.display()
+            )
+            .into()
+        })?;
+        let mut archive_segments = Vec::with_capacity(
+            args.consent_ledger_compacted_snapshot_archive_segment.len(),
+        );
+        let mut archive_input_bytes = 0u64;
+        for path in &args.consent_ledger_compacted_snapshot_archive_segment {
+            let remaining_input_bytes =
+                consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
+                    .saturating_sub(archive_input_bytes);
+            let per_file_limit = audit_ledger_store::MAX_AUDIT_LEDGER_BYTES
+                .min(remaining_input_bytes);
+            let (segment, input_bytes) = audit_ledger_store::read_bounded_json_with_size::<
+                xenia_ledger::LedgerArchiveSegment,
+            >(
+                path,
+                per_file_limit,
+                "consent ledger archive segment",
+            )
+            .map_err(|err| -> Box<dyn std::error::Error> {
+                format!(
+                    "failed to read compacted snapshot archive segment {}: {err}",
+                    path.display()
+                )
+                .into()
+            })?;
+            archive_input_bytes = archive_input_bytes
+                .checked_add(input_bytes)
+                .ok_or("compacted snapshot archive input byte count overflow")?;
+            if archive_input_bytes
+                > consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
+            {
+                return Err(format!(
+                    "compacted snapshot archive inputs exceed {} bytes",
+                    consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
+                )
+                .into());
+            }
+            archive_segments.push(segment);
+        }
+        snapshot
+            .verify(&archive_segments, &signing_key.verifying_key())
+            .map_err(|err| -> Box<dyn std::error::Error> {
+                format!(
+                    "consent compacted snapshot {} failed verification: {err}",
+                    snapshot_path.display()
+                )
+                .into()
+            })?;
+        println!("consent-ledger compacted restore snapshot verified");
+        println!("path: {}", snapshot_path.display());
+        println!(
+            "archived entries represented by summary: {}",
+            snapshot.recovery_summary.archived_entry_count
+        );
+        println!("resident suffix entries: {}", snapshot.suffix_entries.len());
+        println!(
+            "current entries: {}",
+            snapshot.manifest.current_checkpoint.entry_count
+        );
+        println!("snapshot blake3: {}", hex::encode(snapshot.snapshot_digest));
+        return Ok(());
+    }
+
     let shared_ledger = std::sync::Arc::new(tokio::sync::Mutex::new(ledger));
 
     let policy_path = std::path::Path::new("policy.json");
