@@ -43,10 +43,13 @@ up the active compacted-state envelope, complete chronological cold archive,
 retained state pin, GC-readiness certificate, and any retirement plans,
 approval bundles, quarantine journals, and signed receipts. Keep the retained
 pin, witness keys, and at least one archive copy outside the rollback domain of
-the active daemon state. Quarantined artifacts remain recovery material until a
-separately authorized permanent-purge mechanism exists; the current retirement
-workflow never deletes them. See
-`docs/security/CONSENT_ARTIFACT_RETIREMENT.md`.
+the active daemon state. Quarantined artifacts remain recovery material unless a separately signed,
+independently approved purge first copies them into a retained rollback package.
+The purge removes only the quarantine copies and never removes the rollback
+package. Back up purge plans, approval bundles, rollback-package manifests,
+journals, and signed receipts as well. See
+`docs/security/CONSENT_ARTIFACT_RETIREMENT.md` and
+`docs/security/CONSENT_ARTIFACT_PURGE.md`.
 
 ## Usage
 

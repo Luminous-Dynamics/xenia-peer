@@ -9,6 +9,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- A separate aged-quarantine purge ceremony with one-hour ledger-signed plans,
+  purge-witness keys distinct from retirement witnesses, a complete owner-only
+  rollback package persisted before the first unlink, per-file deletion
+  journals, signed completion receipts, and public-key-only crash recovery.
 - Short-lived ledger-signed consent-artifact retirement plans that bind exact
   candidate roles, canonical paths, lengths, digests, active compacted state,
   retained pin, GC-readiness certificate, and quarantine root.

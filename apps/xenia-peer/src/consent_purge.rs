@@ -526,7 +526,7 @@ impl ConsentPurgePlanV1 {
                 });
             }
             let expected = expected_rollback_directory.join(format!("{index:04}-artifact.bin"));
-            if Path::new(&candidate.rollback_path) != expected {
+            if Path::new(&candidate.rollback_path) != expected.as_path() {
                 return Err(ConsentPurgeError::CandidateOrderMismatch);
             }
             if let Some((previous_path, previous_role)) = previous {
@@ -953,7 +953,10 @@ pub(crate) fn execute_consent_purge(
     create_owner_only_directory(&temporary_directory)?;
     sync_directory(Path::new(&plan.rollback_root))?;
 
-    let preparation = (|| -> Result<ConsentPurgeRollbackPackageV1, ConsentPurgeError> {
+    let preparation = (|| -> Result<
+        (ConsentPurgeRollbackPackageV1, ConsentPurgeJournalV1),
+        ConsentPurgeError,
+    > {
         for (index, artifact) in plan.candidates.iter().enumerate() {
             let source = Path::new(&artifact.quarantine_path);
             verify_exact_file(source, artifact, false)?;
@@ -970,13 +973,36 @@ pub(crate) fn execute_consent_purge(
             &temporary_directory.join("rollback-package.json"),
             &rollback_package,
         )?;
+        let journal = ConsentPurgeJournalV1 {
+            schema: CONSENT_PURGE_JOURNAL_SCHEMA.to_string(),
+            plan_fingerprint: consent_purge_plan_fingerprint(plan)?,
+            approval_bundle_fingerprint: consent_purge_approval_bundle_fingerprint(approvals)?,
+            rollback_package_fingerprint: consent_purge_rollback_package_fingerprint(&rollback_package)?,
+            transaction_directory: transaction_directory.to_string_lossy().into_owned(),
+            state: ConsentPurgeJournalStateV1::Prepared,
+            started_at_unix_secs: now_unix_secs,
+            updated_at_unix_secs: now_unix_secs,
+            entries: plan
+                .candidates
+                .iter()
+                .cloned()
+                .map(|artifact| ConsentPurgeJournalEntryV1 {
+                    artifact,
+                    state: ConsentPurgeJournalEntryStateV1::Pending,
+                })
+                .collect(),
+        };
+        // Persist the recovery journal inside the temporary package before the
+        // directory becomes visible at its final name. A crash after rename can
+        // therefore always be recovered, even before the first unlink.
+        persist_purge_json(&temporary_directory.join("journal.json"), &journal)?;
         sync_directory(&temporary_directory)?;
         fs::rename(&temporary_directory, &transaction_directory)?;
         sync_directory(Path::new(&plan.rollback_root))?;
-        Ok(rollback_package)
+        Ok((rollback_package, journal))
     })();
-    let rollback_package = match preparation {
-        Ok(package) => package,
+    let (rollback_package, mut journal) = match preparation {
+        Ok(value) => value,
         Err(error) => {
             let _ = fs::remove_dir_all(&temporary_directory);
             return Err(error);
@@ -985,26 +1011,6 @@ pub(crate) fn execute_consent_purge(
     verify_rollback_package_files(&rollback_package)?;
 
     let journal_path = transaction_directory.join("journal.json");
-    let mut journal = ConsentPurgeJournalV1 {
-        schema: CONSENT_PURGE_JOURNAL_SCHEMA.to_string(),
-        plan_fingerprint: consent_purge_plan_fingerprint(plan)?,
-        approval_bundle_fingerprint: consent_purge_approval_bundle_fingerprint(approvals)?,
-        rollback_package_fingerprint: consent_purge_rollback_package_fingerprint(&rollback_package)?,
-        transaction_directory: transaction_directory.to_string_lossy().into_owned(),
-        state: ConsentPurgeJournalStateV1::Prepared,
-        started_at_unix_secs: now_unix_secs,
-        updated_at_unix_secs: now_unix_secs,
-        entries: plan
-            .candidates
-            .iter()
-            .cloned()
-            .map(|artifact| ConsentPurgeJournalEntryV1 {
-                artifact,
-                state: ConsentPurgeJournalEntryStateV1::Pending,
-            })
-            .collect(),
-    };
-    persist_purge_json(&journal_path, &journal)?;
     journal.state = ConsentPurgeJournalStateV1::Deleting;
     persist_purge_json(&journal_path, &journal)?;
 
@@ -1138,7 +1144,7 @@ pub(crate) fn verify_purge_receipt_files(
     Ok(())
 }
 
-fn verify_purge_prerequisite_identity(
+pub(crate) fn verify_purge_prerequisite_identity(
     plan: &ConsentPurgePlanV1,
     retirement_plan: &ConsentRetirementPlanV1,
     retirement_approvals: &ConsentRetirementApprovalBundleV1,
@@ -1252,7 +1258,8 @@ fn verify_purge_journal_identity(
             != consent_purge_rollback_package_fingerprint(rollback_package)?
         || journal.transaction_directory
             != purge_transaction_directory(plan).to_string_lossy().as_ref()
-        || journal_path != purge_journal_path(plan)
+        || std::fs::canonicalize(journal_path).ok()
+            != std::fs::canonicalize(purge_journal_path(plan)).ok()
         || !same_artifacts
     {
         return Err(ConsentPurgeError::JournalIdentityMismatch);

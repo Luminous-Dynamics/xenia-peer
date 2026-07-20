@@ -113,7 +113,7 @@ This mechanism does not:
 
 The reversible retirement path now provides an exact short-lived plan,
 independent witness quorum, immediate rehashing, crash journal, rollback, and a
-signed quarantine receipt. It still performs no unlink. A future permanent
-purge must be a separate ceremony with a minimum quarantine-retention period,
+signed quarantine receipt. It still performs no unlink. Removal from quarantine
+is a separate rollback-package purge ceremony with a minimum retention period,
 new authorization, immediate digest verification, externally retained proof,
 and a crash-audited completion record.

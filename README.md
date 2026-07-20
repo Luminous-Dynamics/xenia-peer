@@ -336,7 +336,9 @@ For compacted-ledger retention and the explicitly authorized, reversible
 quarantine workflow, see
 [`docs/security/COMPACTED_STATE_CUTOVER_AND_GC.md`](docs/security/COMPACTED_STATE_CUTOVER_AND_GC.md)
 and
-[`docs/security/CONSENT_ARTIFACT_RETIREMENT.md`](docs/security/CONSENT_ARTIFACT_RETIREMENT.md).
+[`docs/security/CONSENT_ARTIFACT_RETIREMENT.md`](docs/security/CONSENT_ARTIFACT_RETIREMENT.md),
+followed by the separately approved rollback-package purge ceremony in
+[`docs/security/CONSENT_ARTIFACT_PURGE.md`](docs/security/CONSENT_ARTIFACT_PURGE.md).
 
 ## Relationship to Track A
 

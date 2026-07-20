@@ -194,7 +194,9 @@ This workflow does not:
   witness quorum; or
 - authorize an unattended cleanup timer.
 
-Permanent purge, if ever added, should be a separate ceremony with a new
-short-lived signed plan, immediate digest verification, a minimum quarantine
-retention period, externally retained receipts, explicit operator action, and a
-crash-audited completion record.
+Removal from quarantine is a separate ceremony with a new short-lived plan,
+a distinct purge-witness quorum, a minimum retention period, immediate digest
+verification, a complete retained rollback package, explicit operator action,
+and a crash-audited completion record. See
+[`CONSENT_ARTIFACT_PURGE.md`](CONSENT_ARTIFACT_PURGE.md). The rollback package
+itself is not deleted by that workflow.

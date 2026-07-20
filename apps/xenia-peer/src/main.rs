@@ -557,9 +557,9 @@ struct Args {
     #[arg(long, value_name = "FILE")]
     consent_retirement_plan_input: Option<std::path::PathBuf>,
 
-    /// Ledger Ed25519 public key used by independent approval, recovery, and
-    /// receipt-verification operations. These operations do not require access
-    /// to the ledger private key.
+    /// Ledger Ed25519 public key used by independent retirement or purge
+    /// approval, recovery, and receipt-verification operations. These
+    /// operations do not require access to the ledger private key.
     #[arg(long, value_name = "HEX")]
     consent_retirement_ledger_public_key_hex: Option<String>,
 
@@ -600,6 +600,78 @@ struct Args {
     /// Verify a signed quarantine receipt and rehash every quarantined file.
     #[arg(long, value_name = "FILE")]
     verify_consent_retirement_receipt: Option<std::path::PathBuf>,
+
+    /// Export a short-lived ledger-signed purge plan for exact aged
+    /// quarantine bytes. This operation does not unlink anything.
+    #[arg(long, value_name = "FILE")]
+    export_consent_purge_plan: Option<std::path::PathBuf>,
+
+    /// Existing private directory that will retain the complete rollback
+    /// package after quarantine bytes are removed.
+    #[arg(long, value_name = "DIR")]
+    consent_purge_rollback_root: Option<std::path::PathBuf>,
+
+    /// Minimum age of the signed quarantine receipt before a purge plan may be
+    /// issued. The protocol minimum is 24 hours.
+    #[arg(long, default_value_t = 7 * 24 * 60 * 60)]
+    consent_purge_min_quarantine_age_secs: u64,
+
+    /// Maximum validity of a newly exported purge plan.
+    #[arg(long, default_value_t = 3600)]
+    consent_purge_plan_lifetime_secs: u64,
+
+    /// Original signed retirement plan that created the quarantine receipt.
+    #[arg(long, value_name = "FILE")]
+    consent_purge_retirement_plan_input: Option<std::path::PathBuf>,
+
+    /// Original independent retirement approval bundle.
+    #[arg(long, value_name = "FILE")]
+    consent_purge_retirement_approval_bundle: Option<std::path::PathBuf>,
+
+    /// Signed quarantine receipt whose exact files are eligible for purge.
+    #[arg(long, value_name = "FILE")]
+    consent_purge_quarantine_receipt: Option<std::path::PathBuf>,
+
+    /// Signed purge plan input for approval, execution, recovery, or receipt
+    /// verification.
+    #[arg(long, value_name = "FILE")]
+    consent_purge_plan_input: Option<std::path::PathBuf>,
+
+    /// Add one independent purge-key approval and exit. This operation does not
+    /// access the ledger private key.
+    #[arg(long)]
+    sign_consent_purge_plan: bool,
+
+    /// Existing 32-byte Ed25519 seed used only for one purge approval.
+    #[arg(long, value_name = "FILE")]
+    consent_purge_witness_key: Option<std::path::PathBuf>,
+
+    /// Purge approval bundle input/output.
+    #[arg(long, value_name = "FILE")]
+    consent_purge_approval_bundle: Option<std::path::PathBuf>,
+
+    /// Trusted independent purge witness public key, as 64 hex characters.
+    #[arg(long, value_name = "HEX")]
+    trusted_consent_purge_witness_key_hex: Vec<String>,
+
+    /// Minimum number of distinct trusted purge approvals required.
+    #[arg(long)]
+    trusted_consent_purge_witness_quorum: Option<usize>,
+
+    /// Create and fsync a complete rollback package, then remove the exact
+    /// quarantine files under a crash-audited journal.
+    #[arg(long)]
+    execute_consent_purge: bool,
+
+    /// Recover an interrupted purge. Without a valid signed receipt, missing
+    /// quarantine files are restored from the retained rollback package.
+    #[arg(long, value_name = "FILE")]
+    recover_consent_purge_journal: Option<std::path::PathBuf>,
+
+    /// Verify a signed purge receipt, the retained rollback package, and the
+    /// absence of every purged quarantine file.
+    #[arg(long, value_name = "FILE")]
+    verify_consent_purge_receipt: Option<std::path::PathBuf>,
 
     /// Independently retained signed checkpoint that the current consent
     /// ledger must contain as an exact prefix. Store this outside the daemon
@@ -1615,6 +1687,99 @@ fn read_retirement_approvals(
     )?)
 }
 
+fn read_retirement_receipt(
+    path: &std::path::Path,
+) -> Result<consent_retirement::ConsentRetirementQuarantineReceiptV1, Box<dyn std::error::Error>> {
+    Ok(audit_ledger_store::read_bounded_json(
+        path,
+        consent_retirement::MAX_RETIREMENT_TRANSACTION_BYTES,
+        "consent retirement quarantine receipt",
+    )?)
+}
+
+fn read_purge_plan(
+    path: &std::path::Path,
+) -> Result<consent_purge::ConsentPurgePlanV1, Box<dyn std::error::Error>> {
+    Ok(audit_ledger_store::read_bounded_json(
+        path,
+        consent_purge::MAX_PURGE_TRANSACTION_BYTES,
+        "consent purge plan",
+    )?)
+}
+
+fn read_purge_approvals(
+    path: &std::path::Path,
+) -> Result<consent_purge::ConsentPurgeApprovalBundleV1, Box<dyn std::error::Error>> {
+    Ok(audit_ledger_store::read_bounded_json(
+        path,
+        consent_purge::MAX_PURGE_TRANSACTION_BYTES,
+        "consent purge approval bundle",
+    )?)
+}
+
+fn parse_purge_witness_policy(
+    args: &Args,
+) -> Result<(Vec<[u8; 32]>, usize), Box<dyn std::error::Error>> {
+    if args.trusted_consent_purge_witness_key_hex.is_empty() {
+        return Err("purge operation requires at least one --trusted-consent-purge-witness-key-hex".into());
+    }
+    let keys = args
+        .trusted_consent_purge_witness_key_hex
+        .iter()
+        .map(|value| parse_ed25519_public_key_hex(value))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| -> Box<dyn std::error::Error> {
+            format!("invalid trusted purge witness key: {err}").into()
+        })?;
+    for key in &keys {
+        ed25519_dalek::VerifyingKey::from_bytes(key).map_err(
+            |_| -> Box<dyn std::error::Error> {
+                "trusted purge witness key is not a valid Ed25519 key".into()
+            },
+        )?;
+    }
+    if keys.len() > consent_purge::MAX_PURGE_APPROVALS {
+        return Err(format!(
+            "purge witness trust set has {} keys; maximum is {}",
+            keys.len(),
+            consent_purge::MAX_PURGE_APPROVALS
+        )
+        .into());
+    }
+    let distinct = keys.iter().copied().collect::<std::collections::BTreeSet<_>>();
+    if distinct.len() != keys.len() {
+        return Err("purge witness trust set contains a duplicate key".into());
+    }
+    let quorum = args.trusted_consent_purge_witness_quorum.unwrap_or(1);
+    if quorum == 0 || quorum > keys.len() {
+        return Err(format!(
+            "purge witness quorum {quorum} must be between 1 and {}",
+            keys.len()
+        )
+        .into());
+    }
+    Ok((keys, quorum))
+}
+
+fn ensure_purge_witness_separation(
+    purge_keys: &[[u8; 32]],
+    ledger_key: &[u8; 32],
+    retirement_approvals: &consent_retirement::ConsentRetirementApprovalBundleV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let retirement_keys = retirement_approvals
+        .approvals
+        .iter()
+        .map(|approval| approval.witness_public_key)
+        .collect::<std::collections::BTreeSet<_>>();
+    if purge_keys.iter().any(|key| key == ledger_key) {
+        return Err("trusted purge witness keys must be distinct from the ledger key".into());
+    }
+    if purge_keys.iter().any(|key| retirement_keys.contains(key)) {
+        return Err("trusted purge witness keys must be distinct from retirement approval keys".into());
+    }
+    Ok(())
+}
+
 fn ensure_retirement_candidates_are_unprotected(
     plan: &consent_retirement::ConsentRetirementPlanV1,
     protected_paths: &[std::path::PathBuf],
@@ -2334,7 +2499,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("select only one consent-retirement operation per invocation".into());
     }
     let retirement_operation_requested = retirement_operation_count == 1;
-    if retirement_operation_requested
+    let purge_operation_count = args.export_consent_purge_plan.is_some() as usize
+        + args.sign_consent_purge_plan as usize
+        + args.execute_consent_purge as usize
+        + args.recover_consent_purge_journal.is_some() as usize
+        + args.verify_consent_purge_receipt.is_some() as usize;
+    if purge_operation_count > 1 {
+        return Err("select only one consent-purge operation per invocation".into());
+    }
+    let purge_operation_requested = purge_operation_count == 1;
+    if retirement_operation_requested && purge_operation_requested {
+        return Err("consent retirement and purge operations cannot share one invocation".into());
+    }
+    if (retirement_operation_requested || purge_operation_requested)
         && (args.m1_runtime_smoke
             || args.verify_evidence_bundle.is_some()
             || args.verify_sealed_evidence_bundle.is_some()
@@ -2345,7 +2522,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             || args.export_consent_ledger_compaction_gc_certificate.is_some()
             || args.verify_consent_ledger_compaction_gc_certificate.is_some())
     {
-        return Err("consent-retirement operations cannot be combined with another one-shot verification, activation, pin, or GC-certificate operation".into());
+        return Err("consent-retirement or purge operations cannot be combined with another one-shot verification, activation, pin, or GC-certificate operation".into());
     }
 
     // Fail closed before doing any work: never expose the operator surface to
@@ -2649,7 +2826,242 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let signing_key = if retirement_operation_requested {
+    if args.sign_consent_purge_plan {
+        let ledger_public_key = retirement_ledger_verifying_key(&args)?;
+        let purge_plan_path = args
+            .consent_purge_plan_input
+            .as_deref()
+            .ok_or("--sign-consent-purge-plan requires --consent-purge-plan-input")?;
+        let approval_path = args
+            .consent_purge_approval_bundle
+            .as_deref()
+            .ok_or("--sign-consent-purge-plan requires --consent-purge-approval-bundle")?;
+        let witness_key_path = args
+            .consent_purge_witness_key
+            .as_deref()
+            .ok_or("--sign-consent-purge-plan requires --consent-purge-witness-key")?;
+        let retirement_plan_path = args
+            .consent_purge_retirement_plan_input
+            .as_deref()
+            .ok_or("--sign-consent-purge-plan requires --consent-purge-retirement-plan-input")?;
+        let retirement_approval_path = args
+            .consent_purge_retirement_approval_bundle
+            .as_deref()
+            .ok_or("--sign-consent-purge-plan requires --consent-purge-retirement-approval-bundle")?;
+        let quarantine_receipt_path = args
+            .consent_purge_quarantine_receipt
+            .as_deref()
+            .ok_or("--sign-consent-purge-plan requires --consent-purge-quarantine-receipt")?;
+        let purge_plan = read_purge_plan(purge_plan_path)?;
+        let retirement_plan = read_retirement_plan(retirement_plan_path)?;
+        let retirement_approvals = read_retirement_approvals(retirement_approval_path)?;
+        let quarantine_receipt = read_retirement_receipt(quarantine_receipt_path)?;
+        purge_plan.verify_authority_signature_and_window(&ledger_public_key, unix_now_secs())?;
+        consent_purge::verify_purge_prerequisite_identity(
+            &purge_plan,
+            &retirement_plan,
+            &retirement_approvals,
+            &quarantine_receipt,
+            &ledger_public_key,
+        )?;
+        let witness_key = load_existing_signing_key(witness_key_path)?;
+        if witness_key.verifying_key() == ledger_public_key
+            || retirement_approvals
+                .approvals
+                .iter()
+                .any(|approval| approval.witness_public_key == witness_key.verifying_key().to_bytes())
+        {
+            return Err("purge witness key must be distinct from the ledger and retirement witness keys".into());
+        }
+        let mut approvals = if approval_path.exists() {
+            let existing = read_purge_approvals(approval_path)?;
+            if !existing.approvals.is_empty() {
+                let observed = existing
+                    .approvals
+                    .iter()
+                    .map(|approval| approval.witness_public_key)
+                    .collect::<Vec<_>>();
+                existing.verify_quorum(&purge_plan, &observed, observed.len())?;
+            }
+            existing
+        } else {
+            consent_purge::ConsentPurgeApprovalBundleV1::new(&purge_plan)?
+        };
+        approvals.sign_with(&purge_plan, &witness_key, unix_now_secs())?;
+        let normalized_output = normalized_output_path(approval_path)?;
+        if normalized_output == normalized_output_path(purge_plan_path)?
+            || normalized_output == normalized_output_path(retirement_plan_path)?
+            || normalized_output == normalized_output_path(retirement_approval_path)?
+            || normalized_output == normalized_output_path(quarantine_receipt_path)?
+            || normalized_output == std::fs::canonicalize(witness_key_path)?
+            || normalized_output.starts_with(std::path::Path::new(&purge_plan.rollback_root))
+            || normalized_output.starts_with(std::path::Path::new(
+                &purge_plan.quarantine_transaction_directory,
+            ))
+            || purge_plan.candidates.iter().any(|candidate| {
+                std::path::Path::new(&candidate.quarantine_path) == normalized_output.as_path()
+                    || std::path::Path::new(&candidate.rollback_path) == normalized_output.as_path()
+            })
+        {
+            return Err("purge approval output aliases a protected input or artifact".into());
+        }
+        persist_json_owner_only(
+            approval_path,
+            &approvals,
+            consent_purge::MAX_PURGE_TRANSACTION_BYTES,
+            "consent purge approval bundle",
+        )?;
+        println!("consent purge approval added");
+        println!("path: {}", approval_path.display());
+        println!("witness public key: {}", hex::encode(witness_key.verifying_key().to_bytes()));
+        println!("approval count: {}", approvals.approvals.len());
+        println!("the ledger private key was not accessed");
+        println!("no artifact was removed");
+        return Ok(());
+    }
+
+    if let Some(journal_path) = args.recover_consent_purge_journal.as_deref() {
+        let ledger_public_key = retirement_ledger_verifying_key(&args)?;
+        let purge_plan_path = args
+            .consent_purge_plan_input
+            .as_deref()
+            .ok_or("--recover-consent-purge-journal requires --consent-purge-plan-input")?;
+        let purge_approval_path = args
+            .consent_purge_approval_bundle
+            .as_deref()
+            .ok_or("--recover-consent-purge-journal requires --consent-purge-approval-bundle")?;
+        let retirement_plan_path = args
+            .consent_purge_retirement_plan_input
+            .as_deref()
+            .ok_or("--recover-consent-purge-journal requires --consent-purge-retirement-plan-input")?;
+        let retirement_approval_path = args
+            .consent_purge_retirement_approval_bundle
+            .as_deref()
+            .ok_or("--recover-consent-purge-journal requires --consent-purge-retirement-approval-bundle")?;
+        let quarantine_receipt_path = args
+            .consent_purge_quarantine_receipt
+            .as_deref()
+            .ok_or("--recover-consent-purge-journal requires --consent-purge-quarantine-receipt")?;
+        let purge_plan = read_purge_plan(purge_plan_path)?;
+        let purge_approvals = read_purge_approvals(purge_approval_path)?;
+        let retirement_plan = read_retirement_plan(retirement_plan_path)?;
+        let retirement_approvals = read_retirement_approvals(retirement_approval_path)?;
+        let quarantine_receipt = read_retirement_receipt(quarantine_receipt_path)?;
+        let (trusted_purge_keys, purge_quorum) = parse_purge_witness_policy(&args)?;
+        ensure_purge_witness_separation(
+            &trusted_purge_keys,
+            &ledger_public_key.to_bytes(),
+            &retirement_approvals,
+        )?;
+        let outcome = consent_purge::recover_consent_purge(
+            journal_path,
+            &purge_plan,
+            &purge_approvals,
+            &retirement_plan,
+            &retirement_approvals,
+            &quarantine_receipt,
+            &trusted_purge_keys,
+            purge_quorum,
+            &ledger_public_key,
+            unix_now_secs(),
+        )?;
+        let label = match outcome {
+            consent_purge::ConsentPurgeRecoveryOutcomeV1::FinalizedCommitted => {
+                "finalized committed purge"
+            }
+            consent_purge::ConsentPurgeRecoveryOutcomeV1::RolledBack => {
+                "restored incomplete purge from rollback package"
+            }
+            consent_purge::ConsentPurgeRecoveryOutcomeV1::AlreadyCommitted => {
+                "purge already committed"
+            }
+            consent_purge::ConsentPurgeRecoveryOutcomeV1::AlreadyRolledBack => {
+                "purge already rolled back"
+            }
+        };
+        println!("consent purge recovery: {label}");
+        println!("journal: {}", journal_path.display());
+        println!("the ledger private key was not accessed");
+        println!("the rollback package was retained");
+        return Ok(());
+    }
+
+    if let Some(receipt_path) = args.verify_consent_purge_receipt.as_deref() {
+        let ledger_public_key = retirement_ledger_verifying_key(&args)?;
+        let purge_plan_path = args
+            .consent_purge_plan_input
+            .as_deref()
+            .ok_or("--verify-consent-purge-receipt requires --consent-purge-plan-input")?;
+        let purge_approval_path = args
+            .consent_purge_approval_bundle
+            .as_deref()
+            .ok_or("--verify-consent-purge-receipt requires --consent-purge-approval-bundle")?;
+        let retirement_plan_path = args
+            .consent_purge_retirement_plan_input
+            .as_deref()
+            .ok_or("--verify-consent-purge-receipt requires --consent-purge-retirement-plan-input")?;
+        let retirement_approval_path = args
+            .consent_purge_retirement_approval_bundle
+            .as_deref()
+            .ok_or("--verify-consent-purge-receipt requires --consent-purge-retirement-approval-bundle")?;
+        let quarantine_receipt_path = args
+            .consent_purge_quarantine_receipt
+            .as_deref()
+            .ok_or("--verify-consent-purge-receipt requires --consent-purge-quarantine-receipt")?;
+        let purge_plan = read_purge_plan(purge_plan_path)?;
+        let purge_approvals = read_purge_approvals(purge_approval_path)?;
+        let retirement_plan = read_retirement_plan(retirement_plan_path)?;
+        let retirement_approvals = read_retirement_approvals(retirement_approval_path)?;
+        let quarantine_receipt = read_retirement_receipt(quarantine_receipt_path)?;
+        let (trusted_purge_keys, purge_quorum) = parse_purge_witness_policy(&args)?;
+        ensure_purge_witness_separation(
+            &trusted_purge_keys,
+            &ledger_public_key.to_bytes(),
+            &retirement_approvals,
+        )?;
+        purge_plan.verify_authority_signature(&ledger_public_key)?;
+        consent_purge::verify_purge_prerequisite_identity(
+            &purge_plan,
+            &retirement_plan,
+            &retirement_approvals,
+            &quarantine_receipt,
+            &ledger_public_key,
+        )?;
+        purge_approvals.verify_quorum(&purge_plan, &trusted_purge_keys, purge_quorum)?;
+        let rollback_package_path =
+            consent_purge::purge_transaction_directory(&purge_plan).join("rollback-package.json");
+        let rollback_package: consent_purge::ConsentPurgeRollbackPackageV1 =
+            audit_ledger_store::read_bounded_json(
+                &rollback_package_path,
+                consent_purge::MAX_PURGE_TRANSACTION_BYTES,
+                "consent purge rollback package",
+            )?;
+        rollback_package.verify(&purge_plan, &purge_approvals, &ledger_public_key)?;
+        let receipt: consent_purge::ConsentPurgeReceiptV1 =
+            audit_ledger_store::read_bounded_json(
+                receipt_path,
+                consent_purge::MAX_PURGE_TRANSACTION_BYTES,
+                "consent purge receipt",
+            )?;
+        receipt.verify(
+            &purge_plan,
+            &purge_approvals,
+            &rollback_package,
+            &ledger_public_key,
+        )?;
+        consent_purge::verify_purge_receipt_files(&receipt)?;
+        println!("consent purge receipt and rollback package verified");
+        println!("path: {}", receipt_path.display());
+        println!("artifacts removed from quarantine: {}", receipt.entries.len());
+        println!("the ledger private key was not accessed");
+        println!("the rollback package remains intact");
+        return Ok(());
+    }
+
+    let signing_key = if retirement_operation_requested
+        || args.export_consent_purge_plan.is_some()
+        || args.execute_consent_purge
+    {
         load_existing_signing_key(&args.operator_key_path)?
     } else {
         load_or_create_signing_key(&args.operator_key_path)?
@@ -3048,6 +3460,123 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if let Some(output_path) = args.export_consent_purge_plan.as_deref() {
+        let retirement_plan_path = args
+            .consent_purge_retirement_plan_input
+            .as_deref()
+            .ok_or("--export-consent-purge-plan requires --consent-purge-retirement-plan-input")?;
+        let retirement_approval_path = args
+            .consent_purge_retirement_approval_bundle
+            .as_deref()
+            .ok_or("--export-consent-purge-plan requires --consent-purge-retirement-approval-bundle")?;
+        let quarantine_receipt_path = args
+            .consent_purge_quarantine_receipt
+            .as_deref()
+            .ok_or("--export-consent-purge-plan requires --consent-purge-quarantine-receipt")?;
+        let rollback_root_path = args
+            .consent_purge_rollback_root
+            .as_deref()
+            .ok_or("--export-consent-purge-plan requires --consent-purge-rollback-root")?;
+        let retirement_plan = read_retirement_plan(retirement_plan_path)?;
+        let retirement_approvals = read_retirement_approvals(retirement_approval_path)?;
+        let quarantine_receipt = read_retirement_receipt(quarantine_receipt_path)?;
+        let rollback_root = consent_purge::canonical_private_root(rollback_root_path)?;
+        let issued_at = unix_now_secs();
+        let expires_at = issued_at
+            .checked_add(args.consent_purge_plan_lifetime_secs)
+            .ok_or("consent purge plan expiry overflow")?;
+        let purge_plan = consent_purge::ConsentPurgePlanV1::sign(
+            &retirement_plan,
+            &retirement_approvals,
+            &quarantine_receipt,
+            rollback_root,
+            args.consent_purge_min_quarantine_age_secs,
+            &signing_key,
+            issued_at,
+            expires_at,
+        )?;
+        let normalized_output = normalized_output_path(output_path)?;
+        if normalized_output == normalized_output_path(retirement_plan_path)?
+            || normalized_output == normalized_output_path(retirement_approval_path)?
+            || normalized_output == normalized_output_path(quarantine_receipt_path)?
+            || normalized_output == std::fs::canonicalize(&args.operator_key_path)?
+            || normalized_output.starts_with(std::path::Path::new(&purge_plan.rollback_root))
+            || normalized_output.starts_with(std::path::Path::new(
+                &purge_plan.quarantine_transaction_directory,
+            ))
+            || purge_plan.candidates.iter().any(|candidate| {
+                std::path::Path::new(&candidate.quarantine_path) == normalized_output.as_path()
+                    || std::path::Path::new(&candidate.rollback_path) == normalized_output.as_path()
+            })
+        {
+            return Err("purge plan output aliases a prerequisite or protected artifact".into());
+        }
+        persist_json_owner_only(
+            output_path,
+            &purge_plan,
+            consent_purge::MAX_PURGE_TRANSACTION_BYTES,
+            "consent purge plan",
+        )?;
+        println!("consent purge plan exported");
+        println!("path: {}", output_path.display());
+        println!("purge id: {}", hex::encode(purge_plan.purge_id));
+        println!("candidates: {}", purge_plan.candidates.len());
+        println!("rollback root: {}", purge_plan.rollback_root);
+        println!("expires at unix seconds: {}", purge_plan.expires_at_unix_secs);
+        println!("no artifact was removed");
+        return Ok(());
+    }
+
+    if args.execute_consent_purge {
+        let purge_plan_path = args
+            .consent_purge_plan_input
+            .as_deref()
+            .ok_or("--execute-consent-purge requires --consent-purge-plan-input")?;
+        let purge_approval_path = args
+            .consent_purge_approval_bundle
+            .as_deref()
+            .ok_or("--execute-consent-purge requires --consent-purge-approval-bundle")?;
+        let retirement_plan_path = args
+            .consent_purge_retirement_plan_input
+            .as_deref()
+            .ok_or("--execute-consent-purge requires --consent-purge-retirement-plan-input")?;
+        let retirement_approval_path = args
+            .consent_purge_retirement_approval_bundle
+            .as_deref()
+            .ok_or("--execute-consent-purge requires --consent-purge-retirement-approval-bundle")?;
+        let quarantine_receipt_path = args
+            .consent_purge_quarantine_receipt
+            .as_deref()
+            .ok_or("--execute-consent-purge requires --consent-purge-quarantine-receipt")?;
+        let purge_plan = read_purge_plan(purge_plan_path)?;
+        let purge_approvals = read_purge_approvals(purge_approval_path)?;
+        let retirement_plan = read_retirement_plan(retirement_plan_path)?;
+        let retirement_approvals = read_retirement_approvals(retirement_approval_path)?;
+        let quarantine_receipt = read_retirement_receipt(quarantine_receipt_path)?;
+        let (trusted_purge_keys, purge_quorum) = parse_purge_witness_policy(&args)?;
+        ensure_purge_witness_separation(
+            &trusted_purge_keys,
+            &signing_key.verifying_key().to_bytes(),
+            &retirement_approvals,
+        )?;
+        let receipt = consent_purge::execute_consent_purge(
+            &purge_plan,
+            &purge_approvals,
+            &retirement_plan,
+            &retirement_approvals,
+            &quarantine_receipt,
+            &trusted_purge_keys,
+            purge_quorum,
+            &signing_key,
+            unix_now_secs(),
+        )?;
+        println!("consent quarantine artifacts removed after rollback packaging");
+        println!("transaction: {}", receipt.transaction_directory);
+        println!("artifacts: {}", receipt.entries.len());
+        println!("rollback package retained: {}", receipt.transaction_directory);
+        return Ok(());
+    }
+
     let retirement_auxiliary_args_present = args.consent_retirement_gc_certificate.is_some()
         || args.consent_retirement_quarantine_root.is_some()
         || !args.consent_retirement_complete_ledger_candidate.is_empty()
@@ -3059,8 +3588,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         || args.consent_retirement_approval_bundle.is_some()
         || !args.trusted_consent_retirement_witness_key_hex.is_empty()
         || args.trusted_consent_retirement_witness_quorum.is_some();
-    if !retirement_operation_requested && retirement_auxiliary_args_present {
+    if !retirement_operation_requested && !purge_operation_requested && retirement_auxiliary_args_present {
         return Err("consent-retirement arguments require an explicit retirement operation".into());
+    }
+
+    let purge_auxiliary_args_present = args.consent_purge_rollback_root.is_some()
+        || args.consent_purge_retirement_plan_input.is_some()
+        || args.consent_purge_retirement_approval_bundle.is_some()
+        || args.consent_purge_quarantine_receipt.is_some()
+        || args.consent_purge_plan_input.is_some()
+        || args.consent_purge_witness_key.is_some()
+        || args.consent_purge_approval_bundle.is_some()
+        || !args.trusted_consent_purge_witness_key_hex.is_empty()
+        || args.trusted_consent_purge_witness_quorum.is_some();
+    if !purge_operation_requested && purge_auxiliary_args_present {
+        return Err("consent-purge arguments require an explicit purge operation".into());
     }
 
     let (ledger, ledger_persister, historical_indexes, compacted_state_loaded): (
