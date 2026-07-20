@@ -1668,3 +1668,53 @@ fn ledger_key_transition_authorizes_a_fresh_successor_epoch() {
 
     Verifier::verify_ledger_key_successor(&previous, &transition, &candidate, &entries).unwrap();
 }
+
+#[test]
+fn checkpoint_witness_bundle_requires_distinct_trusted_quorum() {
+    use crate::{CheckpointWitnessBundle, Verifier};
+    use ed25519_dalek::SigningKey;
+
+    let ledger_key = SigningKey::from_bytes(&[51u8; 32]);
+    let witness_a = SigningKey::from_bytes(&[52u8; 32]);
+    let witness_b = SigningKey::from_bytes(&[53u8; 32]);
+    let mut chain = crate::Chain::new(ledger_key);
+    chain.append(sample_event(ConsentKind::Request)).unwrap();
+    let mut bundle = CheckpointWitnessBundle::new(chain.sign_checkpoint(100)).unwrap();
+    bundle.sign_with(&witness_a, 101).unwrap();
+    bundle.sign_with(&witness_b, 102).unwrap();
+
+    let trusted = [
+        witness_a.verifying_key().to_bytes(),
+        witness_b.verifying_key().to_bytes(),
+    ];
+    Verifier::verify_checkpoint_witness_quorum(&bundle, &trusted, 2).unwrap();
+    assert!(Verifier::verify_checkpoint_witness_quorum(&bundle, &trusted, 3).is_err());
+}
+
+#[test]
+fn checkpoint_witness_bundle_rejects_tampering_and_untrusted_keys() {
+    use crate::{CheckpointWitnessBundle, Verifier};
+    use ed25519_dalek::SigningKey;
+
+    let ledger_key = SigningKey::from_bytes(&[54u8; 32]);
+    let witness = SigningKey::from_bytes(&[55u8; 32]);
+    let other = SigningKey::from_bytes(&[56u8; 32]);
+    let chain = crate::Chain::new(ledger_key);
+    let mut bundle = CheckpointWitnessBundle::new(chain.sign_checkpoint(100)).unwrap();
+    bundle.sign_with(&witness, 101).unwrap();
+
+    assert!(Verifier::verify_checkpoint_witness_quorum(
+        &bundle,
+        &[other.verifying_key().to_bytes()],
+        1,
+    )
+    .is_err());
+
+    bundle.witnesses[0].signature[0] ^= 0x40;
+    assert!(Verifier::verify_checkpoint_witness_quorum(
+        &bundle,
+        &[witness.verifying_key().to_bytes()],
+        1,
+    )
+    .is_err());
+}

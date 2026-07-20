@@ -74,6 +74,7 @@ mod policy;
 mod seal;
 mod signature;
 mod verify;
+mod witness;
 
 #[cfg(test)]
 mod tests;
@@ -134,6 +135,11 @@ pub use signature::{
 #[cfg(feature = "pqc-signatures")]
 pub use signature::{
     MlDsa65EvidenceSignatureBackend, MlDsa87EvidenceSignatureBackend, PQC_SIGNATURE_BACKEND_STATUS,
+};
+
+pub use witness::{
+    checkpoint_witness_message, CheckpointWitnessBundle, CheckpointWitnessError,
+    CheckpointWitnessSignature, CHECKPOINT_WITNESS_BUNDLE_SCHEMA,
 };
 
 pub use verify::Verifier;
