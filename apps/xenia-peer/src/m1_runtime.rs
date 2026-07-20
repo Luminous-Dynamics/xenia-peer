@@ -1201,7 +1201,7 @@ impl M1RuntimeSession {
                 ConsentKind::Denial => self.session.deny_consent()?,
                 ConsentKind::Revocation => self.session.revoke()?,
                 ConsentKind::Violation => self.session.fail()?,
-                ConsentKind::AthenaTriage => {}
+                ConsentKind::AthenaTriage | ConsentKind::LifecycleTermination => {}
                 ConsentKind::AuthorizationBinding => unreachable!("handled above"),
             }
         }

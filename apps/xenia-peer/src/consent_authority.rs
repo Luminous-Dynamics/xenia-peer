@@ -50,6 +50,35 @@ pub(crate) struct ConsentApprovalReceipt {
     pub(crate) operator_ed25519_pubkey: [u8; 32],
 }
 
+/// Daemon-generated reason for a terminal lifecycle transition that was not
+/// itself an authenticated operator action. Each reason is persisted with a
+/// stable machine-readable label before or alongside the fail-closed state
+/// transition, making automatic termination auditable offline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConsentTerminationReason {
+    TransportFailure,
+    OfferExpired,
+    ApproverRevoked,
+}
+
+impl ConsentTerminationReason {
+    const fn stable_name(self) -> &'static str {
+        match self {
+            Self::TransportFailure => "transport_failure",
+            Self::OfferExpired => "offer_expired",
+            Self::ApproverRevoked => "approver_revoked",
+        }
+    }
+
+    const fn tag(self) -> u8 {
+        match self {
+            Self::TransportFailure => 1,
+            Self::OfferExpired => 2,
+            Self::ApproverRevoked => 3,
+        }
+    }
+}
+
 /// Authoritative lifecycle state for one consent ceremony.
 ///
 /// The state machine is deliberately small and terminal-state-heavy:
@@ -218,6 +247,64 @@ impl ConsentDecisionService {
         self.state() == ConsentSessionState::Revoked
     }
 
+    fn lifecycle_event(
+        &self,
+        reason: ConsentTerminationReason,
+        target: ConsentSessionState,
+        approving_operator: Option<&str>,
+    ) -> xenia_ledger::ConsentEventRecord {
+        let mut id_material = Vec::with_capacity(
+            32 + self.offer.session_id.len() + 1 + approving_operator.map(str::len).unwrap_or(0),
+        );
+        id_material.extend_from_slice(b"xenia-consent-lifecycle-request-v1\0");
+        id_material.extend_from_slice(&self.offer.session_id);
+        id_material.push(reason.tag());
+        if let Some(operator) = approving_operator {
+            id_material.extend_from_slice(operator.as_bytes());
+        }
+        let digest = blake3::hash(&id_material);
+        let mut request_id = [0u8; 16];
+        request_id.copy_from_slice(&digest.as_bytes()[..16]);
+        xenia_ledger::ConsentEventRecord {
+            source_id: self.auth_state.host_identity.identity_public_key_bytes(),
+            session_id: Uuid::from_bytes(self.offer.session_id),
+            request_id: Uuid::from_bytes(request_id),
+            kind: xenia_ledger::ConsentKind::LifecycleTermination,
+            scope: format!(
+                "xenia-consent-lifecycle-v1;reason={};state={target:?};approver={};offer_digest={}",
+                reason.stable_name(),
+                approving_operator.unwrap_or("none"),
+                hex::encode(self.offer.digest()),
+            ),
+        }
+    }
+
+    async fn persist_lifecycle_transition(
+        &self,
+        reason: ConsentTerminationReason,
+        target: ConsentSessionState,
+        approving_operator: Option<&str>,
+    ) {
+        let event = self.lifecycle_event(reason, target, approving_operator);
+        let mut chain = self.ledger.lock().await;
+        let committed = chain
+            .append_transactional(event, |entries| {
+                (self.persist_ledger)(self.ledger_path.as_path(), entries)
+            })
+            .map(|_entry| ());
+        if let Err(err) = committed {
+            // Loss of audit durability must never delay a safety transition.
+            // The runtime still terminates; the explicit error prevents an
+            // operator from mistaking the resulting evidence as complete.
+            tracing::error!(
+                error = %err,
+                reason = reason.stable_name(),
+                ?target,
+                "consent lifecycle termination could not be durably audited"
+            );
+        }
+    }
+
     /// Mark a still-pending ceremony failed, dropping the initial decision
     /// sender so the main task cannot wait indefinitely after a transport dies.
     pub(crate) async fn fail_pending(&self) {
@@ -225,6 +312,12 @@ impl ConsentDecisionService {
         if self.state() != ConsentSessionState::Pending {
             return;
         }
+        self.persist_lifecycle_transition(
+            ConsentTerminationReason::TransportFailure,
+            ConsentSessionState::Failed,
+            None,
+        )
+        .await;
         self.publish_state(ConsentSessionState::Failed);
         self.grant_tx.lock().await.take();
     }
@@ -237,6 +330,12 @@ impl ConsentDecisionService {
         if self.state() != ConsentSessionState::Pending {
             return;
         }
+        self.persist_lifecycle_transition(
+            ConsentTerminationReason::OfferExpired,
+            ConsentSessionState::Expired,
+            None,
+        )
+        .await;
         self.publish_state(ConsentSessionState::Expired);
         self.grant_tx.lock().await.take();
     }
@@ -261,6 +360,12 @@ impl ConsentDecisionService {
             Ok(operator) => operator.clone(),
             Err(_) => {
                 tracing::error!("approving-operator lock poisoned; revoking session fail-closed");
+                self.persist_lifecycle_transition(
+                    ConsentTerminationReason::ApproverRevoked,
+                    ConsentSessionState::Revoked,
+                    None,
+                )
+                .await;
                 self.publish_state(ConsentSessionState::Revoked);
                 return true;
             }
@@ -272,6 +377,12 @@ impl ConsentDecisionService {
             return false;
         }
         tracing::warn!(operator = %operator_id, "approving operator was revoked; terminating active session");
+        self.persist_lifecycle_transition(
+            ConsentTerminationReason::ApproverRevoked,
+            ConsentSessionState::Revoked,
+            Some(&operator_id),
+        )
+        .await;
         self.publish_state(ConsentSessionState::Revoked);
         true
     }
@@ -387,6 +498,12 @@ impl ConsentDecisionService {
             && !self.offer.can_approve_at(now, 0)
         {
             tracing::warn!("consent approval refused at commit: daemon offer window expired");
+            self.persist_lifecycle_transition(
+                ConsentTerminationReason::OfferExpired,
+                ConsentSessionState::Expired,
+                None,
+            )
+            .await;
             self.publish_state(ConsentSessionState::Expired);
             self.grant_tx.lock().await.take();
             return ConsentFollowup::Stop;
@@ -627,7 +744,10 @@ mod tests {
             test_offer(Uuid::from_u128(10)),
             OperatorRevocations::empty(),
             ledger,
-            Arc::new(std::env::temp_dir().join("unused-consent-ledger")),
+            Arc::new(
+                std::env::temp_dir()
+                    .join(format!("unused-consent-ledger-{}", Uuid::new_v4())),
+            ),
             grant_tx,
         )
     }
@@ -981,4 +1101,25 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn automatic_terminal_transitions_are_durably_attributed_to_the_daemon() {
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let ledger = Arc::new(Mutex::new(Chain::new(daemon)));
+        let (grant_tx, grant_rx) = oneshot::channel();
+        let service = service_with_sender(grant_tx, ledger.clone());
+
+        service.fail_pending().await;
+        assert!(grant_rx.await.is_err());
+        let entries = ledger.lock().await.iter().cloned().collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].event.kind,
+            xenia_ledger::ConsentKind::LifecycleTermination
+        );
+        assert!(entries[0].event.scope.contains("reason=transport_failure"));
+        assert_eq!(
+            entries[0].event.source_id,
+            service.auth_state.host_identity.identity_public_key_bytes()
+        );
+    }
 }

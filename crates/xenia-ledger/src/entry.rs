@@ -134,6 +134,11 @@ pub enum ConsentKind {
     /// Runtime evidence binding an M1 grant to the authenticated operator
     /// action and daemon-attested offer that authorized it.
     AuthorizationBinding,
+    /// Daemon-authored terminal lifecycle transition not directly requested by
+    /// an operator action, such as transport failure, offer expiry, or loss of
+    /// the approving operator's authorization. Appended last to preserve the
+    /// persisted enum discriminants of all earlier variants.
+    LifecycleTermination,
 }
 
 impl ConsentKind {
@@ -152,6 +157,7 @@ impl ConsentKind {
             Self::Violation => "consent.protocol_violation",
             Self::AthenaTriage => "admin.athena_triage",
             Self::AuthorizationBinding => "consent.authorization_binding",
+            Self::LifecycleTermination => "consent.lifecycle_termination",
         }
     }
 }

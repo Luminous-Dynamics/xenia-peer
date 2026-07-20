@@ -39,6 +39,10 @@ fn consent_kind_stable_names_are_contractual() {
             ConsentKind::AuthorizationBinding,
             "consent.authorization_binding",
         ),
+        (
+            ConsentKind::LifecycleTermination,
+            "consent.lifecycle_termination",
+        ),
     ];
 
     for (kind, expected) in cases {
