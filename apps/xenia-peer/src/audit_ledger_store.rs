@@ -94,6 +94,23 @@ fn read_u16_be(bytes: &[u8]) -> Option<u16> {
     Some(u16::from_be_bytes(bytes.try_into().ok()?))
 }
 
+fn declared_bincode_vec_len(bytes: &[u8]) -> Result<usize, AuditLedgerStoreError> {
+    let encoded = bytes
+        .get(..8)
+        .ok_or(AuditLedgerStoreError::MetadataMismatch(
+            "truncated bincode vector length",
+        ))?;
+    let count = u64::from_le_bytes(
+        encoded
+            .try_into()
+            .map_err(|_| AuditLedgerStoreError::MetadataMismatch("bincode vector length"))?,
+    );
+    let count = usize::try_from(count)
+        .map_err(|_| AuditLedgerStoreError::LimitExceeded("entry count overflow".into()))?;
+    validate_entry_count(count)?;
+    Ok(count)
+}
+
 /// Load `path` and verify every persisted entry under `signing_key` before
 /// trusting it; if `path` doesn't exist yet, return a fresh empty chain.
 /// Fails closed: a present-but-corrupt-or-tampered file is an error, never
@@ -133,6 +150,12 @@ pub(crate) fn load_verified(
         let mut expected_head_hash = [0u8; 32];
         expected_head_hash.copy_from_slice(&bytes[offset..offset + 32]);
         offset += 32;
+        let encoded_entry_count = declared_bincode_vec_len(&bytes[offset..])?;
+        if encoded_entry_count != entry_count {
+            return Err(AuditLedgerStoreError::MetadataMismatch(
+                "encoded_entry_count",
+            ));
+        }
         let entries: Vec<LedgerEntry> = bincode::deserialize(&bytes[offset..])?;
         if entry_count != entries.len() {
             return Err(AuditLedgerStoreError::MetadataMismatch("entry_count"));
@@ -146,8 +169,13 @@ pub(crate) fn load_verified(
         // readable for migration; the next successful append rewrites it in
         // the explicit v1 envelope. The total file-size bound is applied before
         // this compatibility decoder is reached.
+        let declared_entry_count = declared_bincode_vec_len(&bytes)?;
         let entries: Vec<LedgerEntry> = bincode::deserialize(&bytes)?;
-        validate_entry_count(entries.len())?;
+        if entries.len() != declared_entry_count {
+            return Err(AuditLedgerStoreError::MetadataMismatch(
+                "legacy encoded_entry_count",
+            ));
+        }
         entries
     };
     Verifier::verify_chain(&entries, &signing_key.verifying_key())?;
@@ -369,6 +397,19 @@ mod tests {
             .unwrap()
             .set_len(MAX_AUDIT_LEDGER_BYTES + 1)
             .unwrap();
+        let sk = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        assert!(matches!(
+            load_verified(&path, &sk),
+            Err(AuditLedgerStoreError::LimitExceeded(_))
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn malicious_legacy_vector_length_is_bounded_before_decode() {
+        let dir = temp_dir("declared-count");
+        let path = dir.join("consent.ledger");
+        std::fs::write(&path, u64::MAX.to_le_bytes()).unwrap();
         let sk = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
         assert!(matches!(
             load_verified(&path, &sk),

@@ -74,6 +74,9 @@ pub(crate) enum M1RuntimeError {
     PersistIo(std::io::Error),
     PersistCodec(bincode::Error),
     PersistJson(serde_json::Error),
+    PersistLimitExceeded(String),
+    PersistUnsupportedSchema(u16),
+    PersistMetadataMismatch(&'static str),
 }
 
 impl fmt::Display for M1RuntimeError {
@@ -143,6 +146,15 @@ impl fmt::Display for M1RuntimeError {
             Self::PersistIo(err) => write!(f, "M1 ledger persistence I/O error: {err}"),
             Self::PersistCodec(err) => write!(f, "M1 ledger persistence codec error: {err}"),
             Self::PersistJson(err) => write!(f, "M1 evidence JSON persistence error: {err}"),
+            Self::PersistLimitExceeded(reason) => {
+                write!(f, "M1 persisted ledger resource limit exceeded: {reason}")
+            }
+            Self::PersistUnsupportedSchema(schema) => {
+                write!(f, "unsupported M1 persisted ledger schema: {schema}")
+            }
+            Self::PersistMetadataMismatch(field) => {
+                write!(f, "M1 persisted ledger metadata mismatch: {field}")
+            }
         }
     }
 }
@@ -1250,16 +1262,89 @@ impl M1RuntimeSession {
         &self,
         path: impl AsRef<Path>,
     ) -> Result<(), M1RuntimeError> {
-        let bytes = bincode::serialize(&self.entries())?;
-        std::fs::write(path, bytes)?;
-        Ok(())
+        let entries = self.entries();
+        validate_persisted_m1_entry_count(entries.len())?;
+        let payload = bincode::serialize(&entries)?;
+        let mut bytes = Vec::with_capacity(PERSISTED_M1_LEDGER_HEADER_LEN + payload.len());
+        bytes.extend_from_slice(PERSISTED_M1_LEDGER_MAGIC);
+        bytes.extend_from_slice(&PERSISTED_M1_LEDGER_SCHEMA_V1.to_be_bytes());
+        bytes.extend_from_slice(&(entries.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(&persisted_m1_head_hash(&entries));
+        bytes.extend_from_slice(&payload);
+        if bytes.len() as u64 > MAX_PERSISTED_M1_LEDGER_BYTES {
+            return Err(M1RuntimeError::PersistLimitExceeded(format!(
+                "{} serialized bytes exceeds maximum {}",
+                bytes.len(), MAX_PERSISTED_M1_LEDGER_BYTES
+            )));
+        }
+        write_bytes_atomic(path.as_ref(), &bytes)
     }
 
     pub(crate) fn load_entries_bincode(
         path: impl AsRef<Path>,
     ) -> Result<Vec<LedgerEntry>, M1RuntimeError> {
+        let path = path.as_ref();
+        let file_len = std::fs::metadata(path)?.len();
+        if file_len > MAX_PERSISTED_M1_LEDGER_BYTES {
+            return Err(M1RuntimeError::PersistLimitExceeded(format!(
+                "{file_len} bytes exceeds maximum {MAX_PERSISTED_M1_LEDGER_BYTES}"
+            )));
+        }
         let bytes = std::fs::read(path)?;
-        Ok(bincode::deserialize(&bytes)?)
+        if bytes.starts_with(PERSISTED_M1_LEDGER_MAGIC) {
+            if bytes.len() < PERSISTED_M1_LEDGER_HEADER_LEN {
+                return Err(M1RuntimeError::PersistMetadataMismatch("truncated header"));
+            }
+            let mut offset = PERSISTED_M1_LEDGER_MAGIC.len();
+            let schema = u16::from_be_bytes(
+                bytes[offset..offset + 2]
+                    .try_into()
+                    .map_err(|_| M1RuntimeError::PersistMetadataMismatch("schema"))?,
+            );
+            offset += 2;
+            if schema != PERSISTED_M1_LEDGER_SCHEMA_V1 {
+                return Err(M1RuntimeError::PersistUnsupportedSchema(schema));
+            }
+            let entry_count = u64::from_be_bytes(
+                bytes[offset..offset + 8]
+                    .try_into()
+                    .map_err(|_| M1RuntimeError::PersistMetadataMismatch("entry_count"))?,
+            );
+            offset += 8;
+            let entry_count = usize::try_from(entry_count).map_err(|_| {
+                M1RuntimeError::PersistLimitExceeded("entry count overflow".to_string())
+            })?;
+            validate_persisted_m1_entry_count(entry_count)?;
+            let mut expected_head_hash = [0u8; 32];
+            expected_head_hash.copy_from_slice(&bytes[offset..offset + 32]);
+            offset += 32;
+            let encoded_entry_count = persisted_m1_bincode_vec_len(&bytes[offset..])?;
+            if encoded_entry_count != entry_count {
+                return Err(M1RuntimeError::PersistMetadataMismatch(
+                    "encoded_entry_count",
+                ));
+            }
+            let entries: Vec<LedgerEntry> = bincode::deserialize(&bytes[offset..])?;
+            if entries.len() != entry_count {
+                return Err(M1RuntimeError::PersistMetadataMismatch("entry_count"));
+            }
+            if persisted_m1_head_hash(&entries) != expected_head_hash {
+                return Err(M1RuntimeError::PersistMetadataMismatch("head_hash"));
+            }
+            Ok(entries)
+        } else {
+            // Compatibility with historical raw Vec<LedgerEntry> files. A
+            // subsequent successful persist migrates them into the explicit
+            // envelope without changing any signed ledger entry.
+            let declared_entry_count = persisted_m1_bincode_vec_len(&bytes)?;
+            let entries: Vec<LedgerEntry> = bincode::deserialize(&bytes)?;
+            if entries.len() != declared_entry_count {
+                return Err(M1RuntimeError::PersistMetadataMismatch(
+                    "legacy encoded_entry_count",
+                ));
+            }
+            Ok(entries)
+        }
     }
 
     pub(crate) fn verify_entries(
@@ -1465,6 +1550,45 @@ impl M1RuntimeSession {
         self.next_audit_index = self.session.audit().len();
         Ok(())
     }
+}
+
+const PERSISTED_M1_LEDGER_MAGIC: &[u8] = b"XENIA-M1-LEDGER\0";
+const PERSISTED_M1_LEDGER_SCHEMA_V1: u16 = 1;
+const PERSISTED_M1_LEDGER_HEADER_LEN: usize = PERSISTED_M1_LEDGER_MAGIC.len() + 2 + 8 + 32;
+const MAX_PERSISTED_M1_LEDGER_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PERSISTED_M1_LEDGER_ENTRIES: usize = 100_000;
+
+fn persisted_m1_head_hash(entries: &[LedgerEntry]) -> [u8; 32] {
+    entries
+        .last()
+        .map(|entry| entry.entry_hash)
+        .unwrap_or([0u8; 32])
+}
+
+fn validate_persisted_m1_entry_count(count: usize) -> Result<(), M1RuntimeError> {
+    if count > MAX_PERSISTED_M1_LEDGER_ENTRIES {
+        return Err(M1RuntimeError::PersistLimitExceeded(format!(
+            "{count} entries exceeds maximum {MAX_PERSISTED_M1_LEDGER_ENTRIES}"
+        )));
+    }
+    Ok(())
+}
+
+fn persisted_m1_bincode_vec_len(bytes: &[u8]) -> Result<usize, M1RuntimeError> {
+    let encoded = bytes
+        .get(..8)
+        .ok_or(M1RuntimeError::PersistMetadataMismatch(
+            "truncated bincode vector length",
+        ))?;
+    let count = u64::from_le_bytes(
+        encoded
+            .try_into()
+            .map_err(|_| M1RuntimeError::PersistMetadataMismatch("bincode vector length"))?,
+    );
+    let count = usize::try_from(count)
+        .map_err(|_| M1RuntimeError::PersistLimitExceeded("entry count overflow".into()))?;
+    validate_persisted_m1_entry_count(count)?;
+    Ok(count)
 }
 
 fn unix_now_secs() -> u64 {
@@ -3134,11 +3258,114 @@ mod tests {
         ));
 
         runtime.persist_entries_bincode(&path).unwrap();
+        assert!(
+            std::fs::read(&path)
+                .unwrap()
+                .starts_with(PERSISTED_M1_LEDGER_MAGIC)
+        );
         let reloaded = M1RuntimeSession::load_entries_bincode(&path).unwrap();
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(reloaded, runtime.entries());
         M1RuntimeSession::verify_entries(&reloaded, &verifying_key).unwrap();
+    }
+
+    #[test]
+    fn legacy_runtime_transcript_loads_and_migrates_on_persist() {
+        let (mut runtime, _verifying_key) = runtime(18);
+        runtime.offer().unwrap();
+        runtime.grant_consent().unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "xenia-m1-runtime-legacy-{}-{}.bin",
+            std::process::id(),
+            18
+        ));
+        std::fs::write(&path, bincode::serialize(&runtime.entries()).unwrap()).unwrap();
+
+        let entries = M1RuntimeSession::load_entries_bincode(&path).unwrap();
+        assert_eq!(entries, runtime.entries());
+        runtime.persist_entries_bincode(&path).unwrap();
+        assert!(
+            std::fs::read(&path)
+                .unwrap()
+                .starts_with(PERSISTED_M1_LEDGER_MAGIC)
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn runtime_transcript_metadata_tampering_is_rejected() {
+        let (mut runtime, _verifying_key) = runtime(19);
+        runtime.offer().unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "xenia-m1-runtime-metadata-{}-{}.bin",
+            std::process::id(),
+            19
+        ));
+        runtime.persist_entries_bincode(&path).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        let head_offset = PERSISTED_M1_LEDGER_MAGIC.len() + 2 + 8;
+        bytes[head_offset] ^= 0xFF;
+        std::fs::write(&path, bytes).unwrap();
+        assert!(matches!(
+            M1RuntimeSession::load_entries_bincode(&path),
+            Err(M1RuntimeError::PersistMetadataMismatch("head_hash"))
+        ));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn runtime_transcript_unknown_schema_is_rejected() {
+        let (mut runtime, _verifying_key) = runtime(20);
+        runtime.offer().unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "xenia-m1-runtime-schema-{}-{}.bin",
+            std::process::id(),
+            20
+        ));
+        runtime.persist_entries_bincode(&path).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        let schema_offset = PERSISTED_M1_LEDGER_MAGIC.len();
+        bytes[schema_offset..schema_offset + 2].copy_from_slice(&2u16.to_be_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        assert!(matches!(
+            M1RuntimeSession::load_entries_bincode(&path),
+            Err(M1RuntimeError::PersistUnsupportedSchema(2))
+        ));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn malicious_runtime_vector_length_is_bounded_before_decode() {
+        let path = std::env::temp_dir().join(format!(
+            "xenia-m1-runtime-declared-count-{}-{}.bin",
+            std::process::id(),
+            21
+        ));
+        std::fs::write(&path, u64::MAX.to_le_bytes()).unwrap();
+        assert!(matches!(
+            M1RuntimeSession::load_entries_bincode(&path),
+            Err(M1RuntimeError::PersistLimitExceeded(_))
+        ));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn oversized_runtime_transcript_is_refused_before_decode() {
+        let path = std::env::temp_dir().join(format!(
+            "xenia-m1-runtime-oversized-{}-{}.bin",
+            std::process::id(),
+            21
+        ));
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_PERSISTED_M1_LEDGER_BYTES + 1)
+            .unwrap();
+        assert!(matches!(
+            M1RuntimeSession::load_entries_bincode(&path),
+            Err(M1RuntimeError::PersistLimitExceeded(_))
+        ));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
