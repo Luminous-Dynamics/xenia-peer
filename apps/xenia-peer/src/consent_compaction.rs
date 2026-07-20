@@ -1408,6 +1408,16 @@ pub(crate) fn consent_compacted_state_pin_fingerprint(
     Ok(*blake3::hash(&message).as_bytes())
 }
 
+pub(crate) fn consent_compaction_gc_certificate_fingerprint(
+    certificate: &ConsentCompactionGcCertificateV1,
+) -> Result<[u8; 32], ConsentRecoveryError> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"xenia:consent-compaction-gc-certificate-fingerprint:v1");
+    hasher.update(&consent_compaction_gc_certificate_message(certificate)?);
+    hasher.update(&certificate.signature);
+    Ok(*hasher.finalize().as_bytes())
+}
+
 fn consent_compaction_gc_certificate_message(
     certificate: &ConsentCompactionGcCertificateV1,
 ) -> Result<Vec<u8>, ConsentRecoveryError> {
