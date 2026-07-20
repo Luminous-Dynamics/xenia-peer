@@ -9,6 +9,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Bounded, read-only validation orchestration: single-process Python syntax
+  checks, batched shell syntax checks, per-command timeouts and duration
+  summaries, opt-in advisory dashboard generation, and mutation tests proving
+  timeout cleanup and non-polluting behavior.
+
+- Consolidated the one-shot consent-maintenance surface behind a typed operation
+  selector that rejects ambiguous invocations before key loading, a canonical
+  symlink-safe artifact-path guard, and a verified retention context that
+  carries validated evidence plus output-protection provenance. Added a CI
+  architecture check and design note to prevent the orchestration from
+  spreading back into ad hoc `main.rs` counters and repeated unchecked reads.
+
+- Added monotonic signed purge-retention renewal chains, independently signed
+  custody assertions for exact replica identities, and short-lived
+  authorization-only final-destruction readiness plans with a separate trusted
+  approval quorum. No final-destruction executor or implicit cleanup path was
+  added.
+
 - Added ledger-signed purge rollback-retention certificates, independent witness
   bundles, externally retainable anchors, and exact protected-file inventory
   checks before any future final-destruction ceremony.

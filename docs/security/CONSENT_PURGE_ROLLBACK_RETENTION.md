@@ -93,4 +93,4 @@ This workflow does not:
 - authorize any implicit directory cleanup;
 - allow a later cleanup plan to select a protected file by alias or parent path.
 
-Permanent destruction remains a separate future ceremony.
+Permanent destruction remains a separate future ceremony. The renewal, custody, and authorization-only readiness layer is specified in [`CONSENT_FINAL_DESTRUCTION_READINESS.md`](CONSENT_FINAL_DESTRUCTION_READINESS.md).

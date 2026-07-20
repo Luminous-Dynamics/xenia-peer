@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: rustfmt
       - run: cargo fmt --check
@@ -51,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.94
+      - uses: dtolnay/rust-toolchain@1.94.0
       - uses: Swatinem/rust-cache@v2
       # `xenia-capture-scrcpy` depends on ffmpeg (only available via the flake)
       # and `sovereign-admin` is a wasm32 target; both are excluded here so MSRV
@@ -85,3 +85,19 @@ jobs:
             cargo test  --locked -p xenia-peer-core --features opus
             cargo check --locked -p xenia-peer      --features audio-opus
             cargo check --locked -p xenia-viewer    --features audio-opus'
+      - name: pure-Rust HDC codec
+        run: |
+          nix develop .#ci --command bash -c '
+            set -euo pipefail
+            cargo test  --locked -p xenia-video  --features hdc
+            cargo check --locked -p xenia-peer   --features hdc
+            cargo check --locked -p xenia-viewer --features hdc'
+      - name: platform capability compile matrix
+        run: |
+          nix develop .#ci --command bash -c '
+            set -euo pipefail
+            cargo check --locked -p xenia-peer --features scap
+            cargo check --locked -p xenia-peer --features xdg-portal
+            cargo check --locked -p xenia-peer --features uinput
+            cargo check --locked -p xenia-peer --features scrcpy
+            cargo check --locked -p xenia-peer --features preprod-fixtures'

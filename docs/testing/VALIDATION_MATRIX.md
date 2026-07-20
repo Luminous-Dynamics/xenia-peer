@@ -7,7 +7,7 @@ and should fail early before expensive checks run.
 |---|---|---|---|
 | Workspace hygiene | `scripts/xenia-hygiene-audit.sh .` | Detect build artifacts, nested VCS state, tarballs, absolute paths, local runtime state. | Yes |
 | Cargo boundaries | `scripts/check-cargo-boundaries.py .` | Detect absolute path deps, app-to-crate inversion, wire depending on product crates. | Yes after normalization |
-| Shell syntax | `find scripts -name '*.sh' -print0 | xargs -0 bash -n` | Catch broken project automation. | Yes |
+| Script syntax | `python3 scripts/check-shell-syntax.py . && python3 scripts/check-python-syntax.py .` | Catch broken automation without creating bytecode caches or one timeout process per file. | Yes |
 | Metadata | `cargo metadata --format-version 1 --no-deps` | Prove workspace path dependencies resolve. | Yes |
 | Formatting | `cargo fmt --all -- --check` | Keep code stable for diffs and agents. | Yes |
 | Static Rust check | `cargo check --workspace --all-targets` | Catch type/feature breakage. | Yes |
@@ -24,6 +24,10 @@ and should fail early before expensive checks run.
 
 ```bash
 scripts/xenia-validate.sh .
+# Explicit non-compiling diagnostic pass only:
+scripts/xenia-static-validate.sh .
+# Optional evidence/report generation; not part of the default gate:
+scripts/xenia-static-validate.sh --with-reports .
 scripts/export-source-archive.sh . /tmp/xenia-source.tar.gz
 scripts/check-source-archive.sh /tmp/xenia-source.tar.gz
 ```
@@ -49,3 +53,7 @@ or desktop integration tests behind explicit features or environment variables.
 | Runtime risk report | `scripts/check-runtime-risk-patterns.py .` | advisory | reviewed | Counts `unwrap`, `expect`, `panic`, `todo`, and `unimplemented` in runtime source. |
 | Strict runtime risk | `scripts/check-runtime-risk-patterns.py . --strict` | optional | required or exception-tracked | Blocks release candidates with unresolved runtime panic/unwrap debt. |
 | Agent handoff | `scripts/xenia-agent-handoff-report.sh . /tmp/xenia-agent-handoff.md` | advisory | required for external review | Prevents future agents from relying on stale conversational state. |
+
+## Contract details
+
+See `docs/testing/VALIDATION_CONTRACT.md` for strict versus static modes, the pinned toolchain contract, feature coverage, and negative tests.

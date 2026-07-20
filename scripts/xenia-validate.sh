@@ -5,37 +5,124 @@ set -euo pipefail
 # This prevents cargo check/test from recreating ./target and causing hygiene
 # checks to fail immediately after successful validation.
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/xenia-peer-target}"
+# Validation must not leave ignored Python bytecode state in the source tree.
+export PYTHONDONTWRITEBYTECODE=1
 
 
-root="${1:-.}"
+validation_mode="full"
+with_reports=0
+root="."
+root_seen=0
+for arg in "$@"; do
+  case "$arg" in
+    --static-only)
+      validation_mode="static"
+      ;;
+    --require-rust)
+      validation_mode="full"
+      ;;
+    --with-reports)
+      with_reports=1
+      ;;
+    -h|--help)
+      cat <<'EOF_USAGE'
+usage: scripts/xenia-validate.sh [--require-rust|--static-only] [--with-reports] [ROOT]
+
+  --require-rust  Run the complete validation contract. This is the default and
+                  fails when cargo/rustc are unavailable or below the MSRV.
+  --static-only   Run only source, policy, evidence, and script checks. The
+                  success message explicitly states that Rust was not checked.
+  --with-reports  Also generate advisory release-dashboard reports. Report
+                  generation reruns several checks and is not part of the gate.
+EOF_USAGE
+      exit 0
+      ;;
+    --*)
+      echo "unknown option: $arg" >&2
+      exit 2
+      ;;
+    *)
+      if [[ "$root_seen" -ne 0 ]]; then
+        echo "multiple repository roots supplied: $root and $arg" >&2
+        exit 2
+      fi
+      root="$arg"
+      root_seen=1
+      ;;
+  esac
+done
 cd "$root"
 
 failures=0
+validation_commands=0
+validation_timeouts=0
+validation_started_at=$SECONDS
+validation_check_timeout_secs="${XENIA_VALIDATION_CHECK_TIMEOUT_SECS:-300}"
+if ! [[ "$validation_check_timeout_secs" =~ ^[1-9][0-9]*$ ]]; then
+  echo "XENIA_VALIDATION_CHECK_TIMEOUT_SECS must be a positive integer" >&2
+  exit 2
+fi
 warn() { echo "WARN: $*" >&2; }
 fail() { echo "FAIL: $*" >&2; failures=$((failures + 1)); }
 run() {
+  local started=$SECONDS
+  local status=0
+  validation_commands=$((validation_commands + 1))
   echo "+ $*"
-  if ! "$@"; then
-    fail "command failed: $*"
+  if command -v python3 >/dev/null 2>&1 && [[ -x scripts/run-validation-command.py ]]; then
+    python3 -B scripts/run-validation-command.py \
+      --timeout-secs "$validation_check_timeout_secs" -- "$@" || status=$?
+  else
+    "$@" || status=$?
   fi
+  local elapsed=$((SECONDS - started))
+  if [[ "$status" -eq 0 ]]; then
+    echo "validation command passed (${elapsed}s): $*"
+  else
+    if [[ "$status" -eq 124 ]]; then
+      validation_timeouts=$((validation_timeouts + 1))
+    fi
+    fail "command failed with status ${status} after ${elapsed}s: $*"
+  fi
+}
+validation_summary() {
+  local elapsed=$((SECONDS - validation_started_at))
+  echo "validation summary: commands=${validation_commands} failures=${failures} timeouts=${validation_timeouts} elapsed=${elapsed}s"
 }
 
 if [[ -x scripts/xenia-hygiene-audit.sh ]]; then
-  run scripts/xenia-hygiene-audit.sh .
+  if [[ "$validation_mode" == "static" ]]; then
+    run scripts/xenia-hygiene-audit.sh . --static-only
+  else
+    run scripts/xenia-hygiene-audit.sh . --require-rust
+  fi
 else
   warn "scripts/xenia-hygiene-audit.sh not found or not executable"
 fi
 
-# Shell/Python syntax check for project scripts.
-while IFS= read -r -d '' script; do
-  run bash -n "$script"
-done < <(find scripts -type f -name '*.sh' -print0 2>/dev/null || true)
+# Script syntax checks run as two bounded batches rather than spawning one
+# timeout wrapper per source file.
 if command -v python3 >/dev/null 2>&1; then
-  while IFS= read -r -d '' script; do
-    run python3 -m py_compile "$script"
-  done < <(find scripts -type f -name '*.py' -print0 2>/dev/null || true)
+  if [[ -x scripts/check-shell-syntax.py ]]; then
+    run python3 scripts/check-shell-syntax.py .
+  else
+    fail "scripts/check-shell-syntax.py not found or not executable"
+  fi
+  if [[ -x scripts/check-python-syntax.py ]]; then
+    run python3 scripts/check-python-syntax.py .
+  else
+    fail "scripts/check-python-syntax.py not found or not executable"
+  fi
 else
-  warn "python3 not found; skipping Python script syntax checks"
+  warn "python3 not found; skipping shell/Python script syntax checks"
+fi
+
+if [[ -x scripts/check-rust-toolchain-contract.py ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    run python3 scripts/check-rust-toolchain-contract.py .
+  else
+    fail "python3 not found; cannot verify the Rust toolchain declaration contract"
+  fi
 fi
 
 if [[ -x scripts/check-xenia-policy.py ]]; then
@@ -114,6 +201,29 @@ if [[ -x scripts/check-canonical-handshake-transcript.sh ]]; then
   run scripts/check-canonical-handshake-transcript.sh .
 fi
 
+if [[ -x scripts/check-consent-final-destruction-boundary.py ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    run python3 scripts/check-consent-final-destruction-boundary.py .
+  else
+    warn "python3 not found; skipping final-destruction boundary check"
+  fi
+fi
+
+if [[ -x scripts/check-consent-maintenance-boundary.py ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    run python3 scripts/check-consent-maintenance-boundary.py .
+  else
+    warn "python3 not found; skipping consent-maintenance architecture check"
+  fi
+fi
+
+if [[ -x scripts/check-validation-contract-negative.sh ]]; then
+  run scripts/check-validation-contract-negative.sh .
+fi
+
+if [[ -x scripts/check-validation-runtime-negative.sh ]]; then
+  run scripts/check-validation-runtime-negative.sh .
+fi
 
 if [[ -x scripts/check-m1-evidence-bundle-export.sh ]]; then
   run scripts/check-m1-evidence-bundle-export.sh .
@@ -160,6 +270,14 @@ fi
 
 # Cargo path/boundary checks are cheap and catch the most common migration
 # mistakes before cargo metadata tries to resolve the whole workspace.
+if [[ -x scripts/check-feature-matrix.py ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    run python3 scripts/check-feature-matrix.py .
+  else
+    fail "python3 not found; cannot verify the Cargo feature matrix"
+  fi
+fi
+
 if [[ -x scripts/check-cargo-boundaries.py ]]; then
   if command -v python3 >/dev/null 2>&1; then
     run python3 scripts/check-cargo-boundaries.py .
@@ -190,18 +308,41 @@ if [[ -x scripts/check-unsafe-surfaces.py ]]; then
 fi
 
 
-if [[ -x scripts/generate-release-dashboard.py ]]; then
+if [[ "$with_reports" -eq 1 && -x scripts/generate-release-dashboard.py ]]; then
   if command -v python3 >/dev/null 2>&1; then
     echo "+ python3 scripts/generate-release-dashboard.py . --markdown /tmp/xenia-release-dashboard.md --json /tmp/xenia-release-dashboard.json"
-    python3 scripts/generate-release-dashboard.py . --markdown /tmp/xenia-release-dashboard.md --json /tmp/xenia-release-dashboard.json || warn "release dashboard generation failed"
+    python3 -B scripts/run-validation-command.py \
+      --timeout-secs "$validation_check_timeout_secs" -- \
+      python3 -B scripts/generate-release-dashboard.py . \
+        --markdown /tmp/xenia-release-dashboard.md \
+        --json /tmp/xenia-release-dashboard.json \
+      || warn "release dashboard generation failed"
   else
     warn "python3 not found; skipping release dashboard generation"
   fi
+elif [[ "$with_reports" -eq 0 ]]; then
+  echo "release dashboard generation: skipped (use --with-reports)"
 fi
 
-if ! command -v cargo >/dev/null 2>&1; then
-  warn "cargo not found; skipping Rust checks"
-  exit "$failures"
+if [[ "$validation_mode" == "static" ]]; then
+  validation_summary
+  if [[ "$failures" -ne 0 ]]; then
+    echo "xenia static validation failed with ${failures} failure(s)" >&2
+    exit 1
+  fi
+  echo "xenia static validation completed; Rust compilation and tests were NOT run"
+  exit 0
+fi
+
+if ! command -v cargo >/dev/null 2>&1 || ! command -v rustc >/dev/null 2>&1; then
+  fail "full validation requires cargo and rustc; use --static-only only when a non-Rust evidence pass is intentional"
+  validation_summary
+  echo "xenia validation failed with ${failures} failure(s)" >&2
+  exit 1
+fi
+
+if [[ -x scripts/check-rust-toolchain-contract.py ]]; then
+  run python3 scripts/check-rust-toolchain-contract.py . --runtime
 fi
 
 check_cargo_dir() {
@@ -277,6 +418,7 @@ fi
 # manifests, do not try to synthesize a workspace here. That normalization belongs
 # in the active repo, not in this validator.
 
+validation_summary
 if [[ "$failures" -ne 0 ]]; then
   echo "xenia validation failed with ${failures} failure(s)" >&2
   exit 1

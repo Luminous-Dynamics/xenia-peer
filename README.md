@@ -341,6 +341,12 @@ followed by the separately approved rollback-package purge ceremony in
 [`docs/security/CONSENT_ARTIFACT_PURGE.md`](docs/security/CONSENT_ARTIFACT_PURGE.md),
 with the retained rollback-package evidence anchored as described in
 [`docs/security/CONSENT_PURGE_ROLLBACK_RETENTION.md`](docs/security/CONSENT_PURGE_ROLLBACK_RETENTION.md).
+Retention renewal, independent custody assertions, and the authorization-only
+final-destruction readiness boundary are documented in
+[`docs/security/CONSENT_FINAL_DESTRUCTION_READINESS.md`](docs/security/CONSENT_FINAL_DESTRUCTION_READINESS.md).
+The shared dispatch, path-protection, and verified-input boundaries for these
+one-shot workflows are documented in
+[`docs/security/CONSENT_MAINTENANCE_ARCHITECTURE.md`](docs/security/CONSENT_MAINTENANCE_ARCHITECTURE.md).
 
 ## Relationship to Track A
 

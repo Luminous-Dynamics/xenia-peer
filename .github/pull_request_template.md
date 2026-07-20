@@ -16,7 +16,8 @@ Paste the relevant output or attach a preflight report:
 
 ```text
 scripts/check-pqc-evidence-boundary.sh .
-scripts/xenia-validate.sh .
+scripts/xenia-validate.sh .        # full; Rust toolchain required
+scripts/xenia-static-validate.sh . # diagnostic fallback; not a merge gate
 scripts/xenia-preflight-report.sh . /tmp/xenia-preflight-report.md
 ```
 

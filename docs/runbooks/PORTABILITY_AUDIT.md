@@ -24,3 +24,7 @@ overrides.
   migration helpers.
 - Move release bundles out of active source paths.
 - Regenerate source archives with `scripts/export-source-archive.sh`.
+
+## Toolchain absence
+
+Full validation fails closed when `cargo` or `rustc` is unavailable. Use `scripts/xenia-static-validate.sh .` only to collect a clearly labeled non-compiling diagnostic result.

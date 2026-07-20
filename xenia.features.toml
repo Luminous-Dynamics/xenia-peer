@@ -1,0 +1,146 @@
+schema = 1
+
+# Every non-default Cargo feature must be listed exactly once. `ci` entries name
+# literal workflow evidence; `manual` and `scaffold` entries must explain why
+# they are not ordinary CI lanes.
+
+[[feature]]
+package = "xenia-peer"
+name = "scap"
+status = "ci"
+evidence = [".github/workflows/ci.yml::cargo check --locked -p xenia-peer --features scap"]
+[[feature]]
+package = "xenia-peer"
+name = "xdg-portal"
+status = "ci"
+evidence = [".github/workflows/ci.yml::cargo check --locked -p xenia-peer --features xdg-portal"]
+[[feature]]
+package = "xenia-peer"
+name = "uinput"
+status = "ci"
+evidence = [".github/workflows/ci.yml::cargo check --locked -p xenia-peer --features uinput"]
+[[feature]]
+package = "xenia-peer"
+name = "audio-capture"
+status = "ci"
+evidence = [".github/workflows/ci.yml::cargo test  --locked -p xenia-peer      --features audio-capture"]
+[[feature]]
+package = "xenia-peer"
+name = "audio-opus"
+status = "ci"
+evidence = [".github/workflows/ci.yml::cargo check --locked -p xenia-peer      --features audio-opus"]
+[[feature]]
+package = "xenia-peer"
+name = "h264"
+status = "ci"
+evidence = [".github/workflows/ci.yml::cargo build --locked -p xenia-peer   --features h264"]
+[[feature]]
+package = "xenia-peer"
+name = "hdc"
+status = "ci"
+evidence = [".github/workflows/ci.yml::cargo check --locked -p xenia-peer --features hdc"]
+[[feature]]
+package = "xenia-peer"
+name = "scrcpy"
+status = "ci"
+evidence = [".github/workflows/ci.yml::cargo check --locked -p xenia-peer --features scrcpy"]
+[[feature]]
+package = "xenia-peer"
+name = "embedded-console"
+status = "manual"
+rationale = "Requires a separately built sovereign-admin dist tree; exercised by the browser vertical-slice release lane."
+[[feature]]
+package = "xenia-peer"
+name = "preprod-fixtures"
+status = "ci"
+evidence = [".github/workflows/ci.yml::cargo check --locked -p xenia-peer --features preprod-fixtures"]
+[[feature]]
+package = "xenia-peer"
+name = "pqc-signatures"
+status = "ci"
+evidence = [".github/workflows/xenia-validate.yml::cargo test --locked -p xenia-peer --features pqc-signatures --no-fail-fast"]
+
+[[feature]]
+package = "xenia-viewer"
+name = "h264"
+status = "ci"
+evidence = [".github/workflows/ci.yml::cargo build --locked -p xenia-viewer --features h264"]
+[[feature]]
+package = "xenia-viewer"
+name = "hdc"
+status = "ci"
+evidence = [".github/workflows/ci.yml::cargo check --locked -p xenia-viewer --features hdc"]
+[[feature]]
+package = "xenia-viewer"
+name = "audio-output"
+status = "ci"
+evidence = [".github/workflows/ci.yml::cargo test  --locked -p xenia-viewer    --features audio-output"]
+[[feature]]
+package = "xenia-viewer"
+name = "audio-opus"
+status = "ci"
+evidence = [".github/workflows/ci.yml::cargo check --locked -p xenia-viewer    --features audio-opus"]
+
+[[feature]]
+package = "xenia-capture"
+name = "scap-backend"
+status = "ci"
+evidence = [".github/workflows/ci.yml::cargo check --locked -p xenia-peer --features scap"]
+[[feature]]
+package = "xenia-capture"
+name = "audio-cpal"
+status = "ci"
+evidence = [".github/workflows/ci.yml::cargo test  --locked -p xenia-peer      --features audio-capture"]
+[[feature]]
+package = "xenia-capture"
+name = "wayland-wlroots"
+status = "scaffold"
+rationale = "Declared placeholder with no dependency activation; direct implementation remains intentionally absent."
+[[feature]]
+package = "xenia-capture"
+name = "wayland-portal"
+status = "scaffold"
+rationale = "Declared placeholder retained for a future hand-rolled portal backend."
+
+[[feature]]
+package = "xenia-capture-scrcpy"
+name = "hevc"
+status = "ci"
+evidence = [".github/workflows/ci.yml::cargo check --locked -p xenia-peer --features scrcpy"]
+
+[[feature]]
+package = "xenia-inject"
+name = "wayland-virtual"
+status = "scaffold"
+rationale = "Protocol scaffold only; real wayland-client plumbing is not implemented."
+[[feature]]
+package = "xenia-inject"
+name = "uinput"
+status = "ci"
+evidence = [".github/workflows/ci.yml::cargo check --locked -p xenia-peer --features uinput"]
+[[feature]]
+package = "xenia-inject"
+name = "xdg-portal"
+status = "ci"
+evidence = [".github/workflows/ci.yml::cargo check --locked -p xenia-peer --features xdg-portal"]
+
+[[feature]]
+package = "xenia-ledger"
+name = "pqc-signatures"
+status = "ci"
+evidence = [".github/workflows/xenia-validate.yml::cargo test --locked -p xenia-ledger --features pqc-signatures --lib --no-fail-fast"]
+[[feature]]
+package = "xenia-peer-core"
+name = "opus"
+status = "ci"
+evidence = [".github/workflows/ci.yml::cargo test  --locked -p xenia-peer-core --features opus"]
+[[feature]]
+package = "xenia-video"
+name = "h264"
+status = "ci"
+evidence = [".github/workflows/ci.yml::cargo test  --locked -p xenia-video  --features h264"]
+[[feature]]
+package = "xenia-video"
+name = "hdc"
+status = "ci"
+evidence = [".github/workflows/ci.yml::cargo test --locked -p xenia-video --features hdc"]

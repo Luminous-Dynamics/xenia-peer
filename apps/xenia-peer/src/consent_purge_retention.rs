@@ -40,6 +40,12 @@ pub(crate) const MAX_PURGE_RETENTION_WITNESSES: usize = 64;
 pub(crate) const MAX_PURGE_RETENTION_WITNESS_FUTURE_SKEW_SECS: u64 = 5 * 60;
 pub(crate) const CONSENT_PURGE_RETENTION_ANCHOR_SCHEMA: &str =
     "xenia-consent-purge-retention-anchor-v1";
+pub(crate) const CONSENT_PURGE_RETENTION_RENEWAL_SCHEMA: &str =
+    "xenia-consent-purge-retention-renewal-v1";
+pub(crate) const CONSENT_PURGE_RETENTION_RENEWAL_CHAIN_SCHEMA: &str =
+    "xenia-consent-purge-retention-renewal-chain-v1";
+pub(crate) const MAX_PURGE_RETENTION_RENEWALS: usize = 64;
+pub(crate) const MAX_PURGE_RETENTION_RENEWAL_FUTURE_SKEW_SECS: u64 = 5 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -86,6 +92,44 @@ pub(crate) struct ConsentPurgeRetentionAnchorV1 {
     pub(crate) retain_until_unix_secs: u64,
     pub(crate) anchored_at_unix_secs: u64,
     pub(crate) signature: [u8; 64],
+}
+
+/// Ledger-signed monotonic extension of one existing rollback-retention
+/// obligation. Renewals cannot revive an expired obligation or change the
+/// protected inventory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConsentPurgeRetentionRenewalV1 {
+    pub(crate) schema: String,
+    pub(crate) ledger_epoch_id: [u8; 32],
+    pub(crate) base_certificate_fingerprint: [u8; 32],
+    pub(crate) previous_renewal_fingerprint: [u8; 32],
+    pub(crate) sequence: u32,
+    pub(crate) protected_inventory_digest: [u8; 32],
+    pub(crate) package_directory: String,
+    pub(crate) previous_retain_until_unix_secs: u64,
+    pub(crate) retain_until_unix_secs: u64,
+    pub(crate) issued_at_unix_secs: u64,
+    pub(crate) signature: [u8; 64],
+}
+
+/// Verified, compact identity of the currently effective retention obligation.
+/// Callers should construct this only through `verify_retention_subject`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConsentPurgeRetentionSubjectV1 {
+    pub(crate) ledger_epoch_id: [u8; 32],
+    pub(crate) base_certificate_fingerprint: [u8; 32],
+    pub(crate) anchor_fingerprint: [u8; 32],
+    pub(crate) obligation_fingerprint: [u8; 32],
+    pub(crate) protected_inventory_digest: [u8; 32],
+    pub(crate) package_directory: String,
+    pub(crate) retain_until_unix_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConsentPurgeRetentionRenewalChainV1 {
+    pub(crate) schema: String,
+    pub(crate) base_certificate_fingerprint: [u8; 32],
+    pub(crate) renewals: Vec<ConsentPurgeRetentionRenewalV1>,
 }
 
 /// Ledger-signed obligation to retain one exact purge rollback package.
@@ -171,6 +215,28 @@ pub(crate) enum ConsentPurgeRetentionError {
     InvalidAnchorSignature,
     #[error("consent purge retention anchor timestamp is outside the certificate window")]
     AnchorOutsideRetentionWindow,
+    #[error("consent purge retention renewal has unsupported schema: {schema}")]
+    UnsupportedRenewalSchema { schema: String },
+    #[error("consent purge retention renewal chain has unsupported schema: {schema}")]
+    UnsupportedRenewalChainSchema { schema: String },
+    #[error("consent purge retention renewal chain exceeds {maximum} entries: {count}")]
+    TooManyRenewals { count: usize, maximum: usize },
+    #[error("consent purge retention renewal sequence is not contiguous")]
+    RenewalSequenceMismatch,
+    #[error("consent purge retention renewal does not extend the exact previous obligation")]
+    RenewalPredecessorMismatch,
+    #[error("consent purge retention renewal changes the protected inventory or ledger epoch")]
+    RenewalIdentityMismatch,
+    #[error("consent purge retention renewal was issued after the prior obligation expired")]
+    RenewalAfterExpiry,
+    #[error("consent purge retention renewal does not extend the deadline")]
+    RenewalDoesNotExtend,
+    #[error("consent purge retention renewal exceeds the maximum retention horizon")]
+    RenewalBeyondMaximumHorizon,
+    #[error("consent purge retention renewal timestamp is too far in the future")]
+    RenewalFromFuture,
+    #[error("consent purge retention renewal signature is invalid")]
+    InvalidRenewalSignature,
     #[error("candidate path aliases protected purge-retention evidence: {path}")]
     ProtectedCandidateAlias { path: String },
     #[error("consent purge retention encoding length overflow")]
@@ -421,6 +487,23 @@ impl ConsentPurgeRetentionAnchorV1 {
         Ok(anchor)
     }
 
+    pub(crate) fn verify_authority_signature(
+        &self,
+        public_key: &VerifyingKey,
+    ) -> Result<(), ConsentPurgeRetentionError> {
+        if self.schema != CONSENT_PURGE_RETENTION_ANCHOR_SCHEMA {
+            return Err(ConsentPurgeRetentionError::UnsupportedAnchorSchema {
+                schema: self.schema.clone(),
+            });
+        }
+        public_key
+            .verify(
+                &consent_purge_retention_anchor_message(self)?,
+                &Signature::from_bytes(&self.signature),
+            )
+            .map_err(|_| ConsentPurgeRetentionError::InvalidAnchorSignature)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn verify(
         &self,
@@ -472,6 +555,350 @@ impl ConsentPurgeRetentionAnchorV1 {
             )
             .map_err(|_| ConsentPurgeRetentionError::InvalidAnchorSignature)
     }
+}
+
+impl ConsentPurgeRetentionRenewalChainV1 {
+    pub(crate) fn new(
+        certificate: &ConsentPurgeRetentionCertificateV1,
+    ) -> Result<Self, ConsentPurgeRetentionError> {
+        Ok(Self {
+            schema: CONSENT_PURGE_RETENTION_RENEWAL_CHAIN_SCHEMA.to_string(),
+            base_certificate_fingerprint: consent_purge_retention_certificate_fingerprint(
+                certificate,
+            )?,
+            renewals: Vec::new(),
+        })
+    }
+
+    pub(crate) fn verify(
+        &self,
+        certificate: &ConsentPurgeRetentionCertificateV1,
+        anchor: &ConsentPurgeRetentionAnchorV1,
+        public_key: &VerifyingKey,
+        now_unix_secs: u64,
+    ) -> Result<u64, ConsentPurgeRetentionError> {
+        if self.schema != CONSENT_PURGE_RETENTION_RENEWAL_CHAIN_SCHEMA {
+            return Err(ConsentPurgeRetentionError::UnsupportedRenewalChainSchema {
+                schema: self.schema.clone(),
+            });
+        }
+        if self.base_certificate_fingerprint
+            != consent_purge_retention_certificate_fingerprint(certificate)?
+        {
+            return Err(ConsentPurgeRetentionError::RenewalIdentityMismatch);
+        }
+        verify_retention_renewal_chain(
+            certificate,
+            anchor,
+            &self.renewals,
+            public_key,
+            now_unix_secs,
+        )
+    }
+
+    pub(crate) fn append(
+        &mut self,
+        certificate: &ConsentPurgeRetentionCertificateV1,
+        anchor: &ConsentPurgeRetentionAnchorV1,
+        signing_key: &LedgerSigningKey,
+        issued_at_unix_secs: u64,
+        retain_until_unix_secs: u64,
+    ) -> Result<(), ConsentPurgeRetentionError> {
+        if self.schema != CONSENT_PURGE_RETENTION_RENEWAL_CHAIN_SCHEMA {
+            return Err(ConsentPurgeRetentionError::UnsupportedRenewalChainSchema {
+                schema: self.schema.clone(),
+            });
+        }
+        if self.base_certificate_fingerprint
+            != consent_purge_retention_certificate_fingerprint(certificate)?
+        {
+            return Err(ConsentPurgeRetentionError::RenewalIdentityMismatch);
+        }
+        self.verify(
+            certificate,
+            anchor,
+            &signing_key.verifying_key(),
+            issued_at_unix_secs,
+        )?;
+        if self.renewals.len() >= MAX_PURGE_RETENTION_RENEWALS {
+            return Err(ConsentPurgeRetentionError::TooManyRenewals {
+                count: self.renewals.len() + 1,
+                maximum: MAX_PURGE_RETENTION_RENEWALS,
+            });
+        }
+        let renewal = ConsentPurgeRetentionRenewalV1::sign(
+            certificate,
+            anchor,
+            self.renewals.last(),
+            signing_key,
+            issued_at_unix_secs,
+            retain_until_unix_secs,
+        )?;
+        self.renewals.push(renewal);
+        Ok(())
+    }
+}
+
+impl ConsentPurgeRetentionRenewalV1 {
+    pub(crate) fn sign(
+        certificate: &ConsentPurgeRetentionCertificateV1,
+        anchor: &ConsentPurgeRetentionAnchorV1,
+        previous: Option<&ConsentPurgeRetentionRenewalV1>,
+        signing_key: &LedgerSigningKey,
+        issued_at_unix_secs: u64,
+        retain_until_unix_secs: u64,
+    ) -> Result<Self, ConsentPurgeRetentionError> {
+        let public_key = signing_key.verifying_key();
+        verify_retention_anchor_identity(certificate, anchor, &public_key)?;
+        verify_protected_inventory_files(certificate)?;
+        let base_fingerprint = consent_purge_retention_certificate_fingerprint(certificate)?;
+        let inventory_digest = protected_inventory_digest(&certificate.protected_artifacts)?;
+        let (sequence, previous_fingerprint, previous_deadline) = match previous {
+            Some(previous) => {
+                previous.verify_authority_signature(&public_key)?;
+                if previous.base_certificate_fingerprint != base_fingerprint
+                    || previous.ledger_epoch_id != certificate.ledger_epoch_id
+                    || previous.protected_inventory_digest != inventory_digest
+                    || previous.package_directory != certificate.package_directory
+                {
+                    return Err(ConsentPurgeRetentionError::RenewalIdentityMismatch);
+                }
+                (
+                    previous
+                        .sequence
+                        .checked_add(1)
+                        .ok_or(ConsentPurgeRetentionError::RenewalSequenceMismatch)?,
+                    consent_purge_retention_renewal_fingerprint(previous)?,
+                    previous.retain_until_unix_secs,
+                )
+            }
+            None => (1, [0u8; 32], certificate.retain_until_unix_secs),
+        };
+        if issued_at_unix_secs > previous_deadline {
+            return Err(ConsentPurgeRetentionError::RenewalAfterExpiry);
+        }
+        if retain_until_unix_secs <= previous_deadline {
+            return Err(ConsentPurgeRetentionError::RenewalDoesNotExtend);
+        }
+        let maximum_deadline = certificate
+            .retained_from_unix_secs
+            .checked_add(MAX_PURGE_ROLLBACK_RETENTION_SECS)
+            .ok_or(ConsentPurgeRetentionError::RenewalBeyondMaximumHorizon)?;
+        if retain_until_unix_secs > maximum_deadline {
+            return Err(ConsentPurgeRetentionError::RenewalBeyondMaximumHorizon);
+        }
+        let mut renewal = Self {
+            schema: CONSENT_PURGE_RETENTION_RENEWAL_SCHEMA.to_string(),
+            ledger_epoch_id: certificate.ledger_epoch_id,
+            base_certificate_fingerprint: base_fingerprint,
+            previous_renewal_fingerprint: previous_fingerprint,
+            sequence,
+            protected_inventory_digest: inventory_digest,
+            package_directory: certificate.package_directory.clone(),
+            previous_retain_until_unix_secs: previous_deadline,
+            retain_until_unix_secs,
+            issued_at_unix_secs,
+            signature: [0u8; 64],
+        };
+        renewal.validate_shape(certificate)?;
+        renewal.signature = signing_key
+            .sign(&consent_purge_retention_renewal_message(&renewal)?)
+            .to_bytes();
+        renewal.verify_authority_signature(&public_key)?;
+        Ok(renewal)
+    }
+
+    pub(crate) fn verify_authority_signature(
+        &self,
+        public_key: &VerifyingKey,
+    ) -> Result<(), ConsentPurgeRetentionError> {
+        if self.schema != CONSENT_PURGE_RETENTION_RENEWAL_SCHEMA {
+            return Err(ConsentPurgeRetentionError::UnsupportedRenewalSchema {
+                schema: self.schema.clone(),
+            });
+        }
+        public_key
+            .verify(
+                &consent_purge_retention_renewal_message(self)?,
+                &Signature::from_bytes(&self.signature),
+            )
+            .map_err(|_| ConsentPurgeRetentionError::InvalidRenewalSignature)
+    }
+
+    fn validate_shape(
+        &self,
+        certificate: &ConsentPurgeRetentionCertificateV1,
+    ) -> Result<(), ConsentPurgeRetentionError> {
+        if self.schema != CONSENT_PURGE_RETENTION_RENEWAL_SCHEMA {
+            return Err(ConsentPurgeRetentionError::UnsupportedRenewalSchema {
+                schema: self.schema.clone(),
+            });
+        }
+        if self.sequence == 0 {
+            return Err(ConsentPurgeRetentionError::RenewalSequenceMismatch);
+        }
+        if self.retain_until_unix_secs <= self.previous_retain_until_unix_secs {
+            return Err(ConsentPurgeRetentionError::RenewalDoesNotExtend);
+        }
+        if self.issued_at_unix_secs > self.previous_retain_until_unix_secs {
+            return Err(ConsentPurgeRetentionError::RenewalAfterExpiry);
+        }
+        let maximum_deadline = certificate
+            .retained_from_unix_secs
+            .checked_add(MAX_PURGE_ROLLBACK_RETENTION_SECS)
+            .ok_or(ConsentPurgeRetentionError::RenewalBeyondMaximumHorizon)?;
+        if self.retain_until_unix_secs > maximum_deadline {
+            return Err(ConsentPurgeRetentionError::RenewalBeyondMaximumHorizon);
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn verify_retention_renewal_chain(
+    certificate: &ConsentPurgeRetentionCertificateV1,
+    anchor: &ConsentPurgeRetentionAnchorV1,
+    renewals: &[ConsentPurgeRetentionRenewalV1],
+    public_key: &VerifyingKey,
+    now_unix_secs: u64,
+) -> Result<u64, ConsentPurgeRetentionError> {
+    if renewals.len() > MAX_PURGE_RETENTION_RENEWALS {
+        return Err(ConsentPurgeRetentionError::TooManyRenewals {
+            count: renewals.len(),
+            maximum: MAX_PURGE_RETENTION_RENEWALS,
+        });
+    }
+    verify_retention_anchor_identity(certificate, anchor, public_key)?;
+    verify_protected_inventory_files(certificate)?;
+    let certificate_fingerprint = consent_purge_retention_certificate_fingerprint(certificate)?;
+    let inventory_digest = protected_inventory_digest(&certificate.protected_artifacts)?;
+    let mut previous_fingerprint = [0u8; 32];
+    let mut previous_deadline = certificate.retain_until_unix_secs;
+    for (index, renewal) in renewals.iter().enumerate() {
+        renewal.verify_authority_signature(public_key)?;
+        renewal.validate_shape(certificate)?;
+        let expected_sequence = u32::try_from(index + 1)
+            .map_err(|_| ConsentPurgeRetentionError::RenewalSequenceMismatch)?;
+        if renewal.sequence != expected_sequence {
+            return Err(ConsentPurgeRetentionError::RenewalSequenceMismatch);
+        }
+        if renewal.base_certificate_fingerprint != certificate_fingerprint
+            || renewal.ledger_epoch_id != certificate.ledger_epoch_id
+            || renewal.protected_inventory_digest != inventory_digest
+            || renewal.package_directory != certificate.package_directory
+        {
+            return Err(ConsentPurgeRetentionError::RenewalIdentityMismatch);
+        }
+        if renewal.previous_renewal_fingerprint != previous_fingerprint
+            || renewal.previous_retain_until_unix_secs != previous_deadline
+        {
+            return Err(ConsentPurgeRetentionError::RenewalPredecessorMismatch);
+        }
+        if renewal.issued_at_unix_secs
+            > now_unix_secs.saturating_add(MAX_PURGE_RETENTION_RENEWAL_FUTURE_SKEW_SECS)
+        {
+            return Err(ConsentPurgeRetentionError::RenewalFromFuture);
+        }
+        previous_fingerprint = consent_purge_retention_renewal_fingerprint(renewal)?;
+        previous_deadline = renewal.retain_until_unix_secs;
+    }
+    Ok(previous_deadline)
+}
+
+pub(crate) fn consent_purge_retention_renewal_fingerprint(
+    renewal: &ConsentPurgeRetentionRenewalV1,
+) -> Result<[u8; 32], ConsentPurgeRetentionError> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"xenia:consent-purge-retention-renewal-fingerprint:v1");
+    hasher.update(&consent_purge_retention_renewal_message(renewal)?);
+    hasher.update(&renewal.signature);
+    Ok(*hasher.finalize().as_bytes())
+}
+
+pub(crate) fn consent_purge_retention_obligation_fingerprint(
+    certificate: &ConsentPurgeRetentionCertificateV1,
+    renewals: &[ConsentPurgeRetentionRenewalV1],
+) -> Result<[u8; 32], ConsentPurgeRetentionError> {
+    if let Some(last) = renewals.last() {
+        consent_purge_retention_renewal_fingerprint(last)
+    } else {
+        consent_purge_retention_certificate_fingerprint(certificate)
+    }
+}
+
+
+pub(crate) fn verify_retention_subject(
+    certificate: &ConsentPurgeRetentionCertificateV1,
+    anchor: &ConsentPurgeRetentionAnchorV1,
+    renewals: &[ConsentPurgeRetentionRenewalV1],
+    public_key: &VerifyingKey,
+    now_unix_secs: u64,
+) -> Result<ConsentPurgeRetentionSubjectV1, ConsentPurgeRetentionError> {
+    let retain_until_unix_secs = verify_retention_renewal_chain(
+        certificate,
+        anchor,
+        renewals,
+        public_key,
+        now_unix_secs,
+    )?;
+    Ok(ConsentPurgeRetentionSubjectV1 {
+        ledger_epoch_id: certificate.ledger_epoch_id,
+        base_certificate_fingerprint: consent_purge_retention_certificate_fingerprint(
+            certificate,
+        )?,
+        anchor_fingerprint: consent_purge_retention_anchor_fingerprint(anchor)?,
+        obligation_fingerprint: consent_purge_retention_obligation_fingerprint(
+            certificate,
+            renewals,
+        )?,
+        protected_inventory_digest: protected_inventory_digest(
+            &certificate.protected_artifacts,
+        )?,
+        package_directory: certificate.package_directory.clone(),
+        retain_until_unix_secs,
+    })
+}
+
+fn verify_retention_anchor_identity(
+    certificate: &ConsentPurgeRetentionCertificateV1,
+    anchor: &ConsentPurgeRetentionAnchorV1,
+    public_key: &VerifyingKey,
+) -> Result<(), ConsentPurgeRetentionError> {
+    certificate.verify_authority_signature(public_key)?;
+    anchor.verify_authority_signature(public_key)?;
+    if anchor.ledger_epoch_id != certificate.ledger_epoch_id
+        || anchor.certificate_fingerprint
+            != consent_purge_retention_certificate_fingerprint(certificate)?
+        || anchor.protected_inventory_digest
+            != protected_inventory_digest(&certificate.protected_artifacts)?
+        || anchor.package_directory != certificate.package_directory
+        || anchor.retain_until_unix_secs != certificate.retain_until_unix_secs
+    {
+        return Err(ConsentPurgeRetentionError::AnchorIdentityMismatch);
+    }
+    Ok(())
+}
+
+fn consent_purge_retention_renewal_message(
+    renewal: &ConsentPurgeRetentionRenewalV1,
+) -> Result<Vec<u8>, ConsentPurgeRetentionError> {
+    if renewal.schema != CONSENT_PURGE_RETENTION_RENEWAL_SCHEMA {
+        return Err(ConsentPurgeRetentionError::UnsupportedRenewalSchema {
+            schema: renewal.schema.clone(),
+        });
+    }
+    let mut message = Vec::new();
+    message.extend_from_slice(b"xenia:consent-purge-retention-renewal:v1");
+    append_bytes(&mut message, renewal.schema.as_bytes())?;
+    message.extend_from_slice(&renewal.ledger_epoch_id);
+    message.extend_from_slice(&renewal.base_certificate_fingerprint);
+    message.extend_from_slice(&renewal.previous_renewal_fingerprint);
+    message.extend_from_slice(&renewal.sequence.to_be_bytes());
+    message.extend_from_slice(&renewal.protected_inventory_digest);
+    append_bytes(&mut message, renewal.package_directory.as_bytes())?;
+    message.extend_from_slice(&renewal.previous_retain_until_unix_secs.to_be_bytes());
+    message.extend_from_slice(&renewal.retain_until_unix_secs.to_be_bytes());
+    message.extend_from_slice(&renewal.issued_at_unix_secs.to_be_bytes());
+    Ok(message)
 }
 
 pub(crate) fn consent_purge_retention_anchor_fingerprint(
@@ -545,7 +972,7 @@ fn consent_purge_retention_anchor_message(
     Ok(message)
 }
 
-fn protected_inventory_digest(
+pub(crate) fn protected_inventory_digest(
     artifacts: &[ConsentPurgeProtectedArtifactV1],
 ) -> Result<[u8; 32], ConsentPurgeRetentionError> {
     let mut hasher = blake3::Hasher::new();
@@ -960,6 +1387,41 @@ mod tests {
         (key, certificate)
     }
 
+    fn signed_file_fixture() -> (
+        tempfile::TempDir,
+        LedgerSigningKey,
+        ConsentPurgeRetentionCertificateV1,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let package = directory.path().join("package");
+        fs::create_dir(&package).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&package, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let artifact = package.join("0000-artifact.bin");
+        fs::write(&artifact, b"data").unwrap();
+        let (key, mut certificate) = signed_fixture();
+        certificate.package_directory = fs::canonicalize(&package)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        certificate.protected_artifacts = vec![ConsentPurgeProtectedArtifactV1 {
+            role: ConsentPurgeProtectedArtifactRoleV1::RollbackArtifact,
+            path: fs::canonicalize(&artifact)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            byte_length: 4,
+            blake3_digest: *blake3::hash(b"data").as_bytes(),
+        }];
+        certificate.signature = key
+            .sign(&consent_purge_retention_certificate_message(&certificate).unwrap())
+            .to_bytes();
+        (directory, key, certificate)
+    }
+
     #[test]
     fn retention_certificate_binds_inventory_and_deadline() {
         let (key, certificate) = signed_fixture();
@@ -1128,6 +1590,176 @@ mod tests {
         assert!(matches!(
             verify_candidate_paths_disjoint(&certificate, &[directory.path().to_path_buf()]),
             Err(ConsentPurgeRetentionError::ProtectedCandidateAlias { .. })
+        ));
+    }
+
+    #[test]
+    fn renewal_chain_is_monotonic_and_cannot_revive_expired_obligation() {
+        let (_directory, key, certificate) = signed_file_fixture();
+        let mut anchor = ConsentPurgeRetentionAnchorV1 {
+            schema: CONSENT_PURGE_RETENTION_ANCHOR_SCHEMA.to_string(),
+            ledger_epoch_id: certificate.ledger_epoch_id,
+            certificate_fingerprint: consent_purge_retention_certificate_fingerprint(&certificate)
+                .unwrap(),
+            witness_bundle_fingerprint: [7u8; 32],
+            protected_inventory_digest: protected_inventory_digest(
+                &certificate.protected_artifacts,
+            )
+            .unwrap(),
+            package_directory: certificate.package_directory.clone(),
+            retain_until_unix_secs: certificate.retain_until_unix_secs,
+            anchored_at_unix_secs: certificate.issued_at_unix_secs + 1,
+            signature: [0u8; 64],
+        };
+        anchor.signature = key
+            .sign(&consent_purge_retention_anchor_message(&anchor).unwrap())
+            .to_bytes();
+        let first = ConsentPurgeRetentionRenewalV1::sign(
+            &certificate,
+            &anchor,
+            None,
+            &key,
+            certificate.issued_at_unix_secs + 2,
+            certificate.retain_until_unix_secs + 60,
+        )
+        .unwrap();
+        let second = ConsentPurgeRetentionRenewalV1::sign(
+            &certificate,
+            &anchor,
+            Some(&first),
+            &key,
+            first.issued_at_unix_secs + 1,
+            first.retain_until_unix_secs + 60,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_retention_renewal_chain(
+                &certificate,
+                &anchor,
+                &[first.clone(), second.clone()],
+                &key.verifying_key(),
+                second.issued_at_unix_secs,
+            )
+            .unwrap(),
+            second.retain_until_unix_secs
+        );
+        assert!(matches!(
+            ConsentPurgeRetentionRenewalV1::sign(
+                &certificate,
+                &anchor,
+                Some(&second),
+                &key,
+                second.retain_until_unix_secs + 1,
+                second.retain_until_unix_secs + 120,
+            ),
+            Err(ConsentPurgeRetentionError::RenewalAfterExpiry)
+        ));
+    }
+
+    #[test]
+    fn versioned_renewal_chain_binds_base_certificate() {
+        let (_directory, key, certificate) = signed_file_fixture();
+        let mut anchor = ConsentPurgeRetentionAnchorV1 {
+            schema: CONSENT_PURGE_RETENTION_ANCHOR_SCHEMA.to_string(),
+            ledger_epoch_id: certificate.ledger_epoch_id,
+            certificate_fingerprint: consent_purge_retention_certificate_fingerprint(&certificate)
+                .unwrap(),
+            witness_bundle_fingerprint: [9u8; 32],
+            protected_inventory_digest: protected_inventory_digest(
+                &certificate.protected_artifacts,
+            )
+            .unwrap(),
+            package_directory: certificate.package_directory.clone(),
+            retain_until_unix_secs: certificate.retain_until_unix_secs,
+            anchored_at_unix_secs: certificate.issued_at_unix_secs + 1,
+            signature: [0u8; 64],
+        };
+        anchor.signature = key
+            .sign(&consent_purge_retention_anchor_message(&anchor).unwrap())
+            .to_bytes();
+        let mut chain = ConsentPurgeRetentionRenewalChainV1::new(&certificate).unwrap();
+        chain
+            .append(
+                &certificate,
+                &anchor,
+                &key,
+                certificate.issued_at_unix_secs + 2,
+                certificate.retain_until_unix_secs + 60,
+            )
+            .unwrap();
+        assert_eq!(
+            chain
+                .verify(
+                    &certificate,
+                    &anchor,
+                    &key.verifying_key(),
+                    certificate.issued_at_unix_secs + 3,
+                )
+                .unwrap(),
+            certificate.retain_until_unix_secs + 60
+        );
+        let mut changed = chain.clone();
+        changed.base_certificate_fingerprint[0] ^= 1;
+        assert!(matches!(
+            changed.verify(
+                &certificate,
+                &anchor,
+                &key.verifying_key(),
+                certificate.issued_at_unix_secs + 3,
+            ),
+            Err(ConsentPurgeRetentionError::RenewalIdentityMismatch)
+        ));
+    }
+
+    #[test]
+    fn renewal_chain_rejects_reordering_and_inventory_substitution() {
+        let (_directory, key, certificate) = signed_file_fixture();
+        let mut anchor = ConsentPurgeRetentionAnchorV1 {
+            schema: CONSENT_PURGE_RETENTION_ANCHOR_SCHEMA.to_string(),
+            ledger_epoch_id: certificate.ledger_epoch_id,
+            certificate_fingerprint: consent_purge_retention_certificate_fingerprint(&certificate)
+                .unwrap(),
+            witness_bundle_fingerprint: [8u8; 32],
+            protected_inventory_digest: protected_inventory_digest(
+                &certificate.protected_artifacts,
+            )
+            .unwrap(),
+            package_directory: certificate.package_directory.clone(),
+            retain_until_unix_secs: certificate.retain_until_unix_secs,
+            anchored_at_unix_secs: certificate.issued_at_unix_secs + 1,
+            signature: [0u8; 64],
+        };
+        anchor.signature = key
+            .sign(&consent_purge_retention_anchor_message(&anchor).unwrap())
+            .to_bytes();
+        let first = ConsentPurgeRetentionRenewalV1::sign(
+            &certificate,
+            &anchor,
+            None,
+            &key,
+            certificate.issued_at_unix_secs + 2,
+            certificate.retain_until_unix_secs + 60,
+        )
+        .unwrap();
+        let second = ConsentPurgeRetentionRenewalV1::sign(
+            &certificate,
+            &anchor,
+            Some(&first),
+            &key,
+            first.issued_at_unix_secs + 1,
+            first.retain_until_unix_secs + 60,
+        )
+        .unwrap();
+        assert!(matches!(
+            verify_retention_renewal_chain(
+                &certificate,
+                &anchor,
+                &[second, first],
+                &key.verifying_key(),
+                certificate.issued_at_unix_secs + 10,
+            ),
+            Err(ConsentPurgeRetentionError::RenewalSequenceMismatch)
+                | Err(ConsentPurgeRetentionError::RenewalPredecessorMismatch)
         ));
     }
 

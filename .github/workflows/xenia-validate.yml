@@ -10,6 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt, clippy
       - name: Script syntax
         run: |
           if [ -d scripts ]; then
@@ -115,7 +119,7 @@ jobs:
           fi
       - name: Install Rust toolchain
         if: steps.check.outputs.exists == 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
       - name: Check xenia-wire
         if: steps.check.outputs.exists == 'true'
         run: |

@@ -6,6 +6,15 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/xenia-peer-target}"
 
 
 ROOT="${1:-.}"
+MODE="${2:-full}"
+case "$MODE" in
+  full|--require-rust) MODE="full" ;;
+  static|--static-only) MODE="static" ;;
+  *)
+    echo "usage: scripts/xenia-hygiene-audit.sh [ROOT] [--require-rust|--static-only]" >&2
+    exit 2
+    ;;
+esac
 cd "$ROOT"
 
 failures=0
@@ -77,6 +86,12 @@ fail_if_any "build output directories in active paths" \
     -path './_archive' -prune -o \
     -type d \( -name target -o -name dist -o -name build -o -name node_modules \) -print
 
+fail_if_any "Python bytecode caches in active paths" \
+  find . \
+    -path './.git' -prune -o \
+    -path './_archive' -prune -o \
+    \( -type d -name __pycache__ -o -type f \( -name '*.pyc' -o -name '*.pyo' \) \) -print
+
 fail_if_any "migration scratch scripts in active paths" \
   find . \
     -maxdepth 2 \
@@ -124,8 +139,15 @@ fail_if_any "local runtime secret/state files" \
     -type f \( -name '.env' -o -name '*.pem' -o -name '*.key' -o -name '*.sqlite' -o -name '*.db' \) -print
 
 section "cargo metadata smoke check"
-cargo metadata --format-version 1 --no-deps >/dev/null
-echo "cargo metadata: ok"
+if [[ "$MODE" == "static" ]]; then
+  echo "skipped by explicit --static-only mode"
+elif command -v cargo >/dev/null 2>&1; then
+  cargo metadata --format-version 1 --no-deps >/dev/null
+  echo "cargo metadata: ok"
+else
+  echo "cargo metadata: cargo not found" >&2
+  failures=$((failures + 1))
+fi
 
 if [ "$failures" -ne 0 ]; then
   echo
