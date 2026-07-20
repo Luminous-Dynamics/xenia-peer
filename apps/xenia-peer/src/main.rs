@@ -57,7 +57,6 @@ mod admin_ui;
 mod audit_ledger_store;
 mod consent_authority;
 mod consent_compaction;
-#[allow(dead_code)]
 mod consent_retirement;
 mod consent_ledger_persistence;
 mod consent_server;
@@ -517,6 +516,89 @@ struct Args {
         ]
     )]
     verify_consent_ledger_compaction_gc_certificate: Option<std::path::PathBuf>,
+
+    /// Signed GC-readiness certificate used as a prerequisite for explicit
+    /// retirement planning or quarantine. This is an input artifact, not the
+    /// read-only verification operation above.
+    #[arg(long, value_name = "FILE")]
+    consent_retirement_gc_certificate: Option<std::path::PathBuf>,
+
+    /// Export a short-lived, ledger-signed plan for exact superseded artifact
+    /// bytes. No file is moved or deleted by this operation.
+    #[arg(long, value_name = "FILE")]
+    export_consent_retirement_plan: Option<std::path::PathBuf>,
+
+    /// Existing canonical directory under which a unique quarantine
+    /// transaction directory will be created.
+    #[arg(long, value_name = "DIR")]
+    consent_retirement_quarantine_root: Option<std::path::PathBuf>,
+
+    /// Superseded complete consent ledger to include in the retirement plan.
+    /// Repeat only when multiple independently named complete-ledger copies are
+    /// intentionally being retired.
+    #[arg(long, value_name = "FILE")]
+    consent_retirement_complete_ledger_candidate: Vec<std::path::PathBuf>,
+
+    /// Superseded compaction-preflight bundle candidate. Repeat as needed.
+    #[arg(long, value_name = "FILE")]
+    consent_retirement_compaction_bundle_candidate: Vec<std::path::PathBuf>,
+
+    /// Superseded compacted snapshot candidate. Repeat as needed.
+    #[arg(long, value_name = "FILE")]
+    consent_retirement_compacted_snapshot_candidate: Vec<std::path::PathBuf>,
+
+    /// Maximum validity of a newly exported retirement plan.
+    #[arg(long, default_value_t = 3600)]
+    consent_retirement_plan_lifetime_secs: u64,
+
+    /// Signed retirement plan input for approval, quarantine, recovery, or
+    /// receipt verification.
+    #[arg(long, value_name = "FILE")]
+    consent_retirement_plan_input: Option<std::path::PathBuf>,
+
+    /// Ledger Ed25519 public key used by independent approval, recovery, and
+    /// receipt-verification operations. These operations do not require access
+    /// to the ledger private key.
+    #[arg(long, value_name = "HEX")]
+    consent_retirement_ledger_public_key_hex: Option<String>,
+
+    /// Add one independent retention-key approval to the approval bundle and
+    /// exit. The key must already exist; this operation never generates it.
+    #[arg(long)]
+    sign_consent_retirement_plan: bool,
+
+    /// Existing 32-byte Ed25519 witness seed used only by the one-shot
+    /// retirement approval operation.
+    #[arg(long, value_name = "FILE")]
+    consent_retirement_witness_key: Option<std::path::PathBuf>,
+
+    /// Retirement approval bundle input/output. The signing operation creates
+    /// or appends to it; quarantine and recovery treat it as read-only.
+    #[arg(long, value_name = "FILE")]
+    consent_retirement_approval_bundle: Option<std::path::PathBuf>,
+
+    /// Trusted independent retirement witness public key, as 64 hex
+    /// characters. Repeat to configure the accepted trust set.
+    #[arg(long, value_name = "HEX")]
+    trusted_consent_retirement_witness_key_hex: Vec<String>,
+
+    /// Minimum number of distinct trusted retirement approvals required.
+    #[arg(long)]
+    trusted_consent_retirement_witness_quorum: Option<usize>,
+
+    /// Execute the signed plan by moving exact verified bytes into quarantine.
+    /// No unlink is performed; a signed receipt and crash journal are written.
+    #[arg(long)]
+    quarantine_consent_retirement: bool,
+
+    /// Recover one interrupted quarantine transaction. A valid signed receipt
+    /// finalizes commit; otherwise moved files are restored from the journal.
+    #[arg(long, value_name = "FILE")]
+    recover_consent_retirement_journal: Option<std::path::PathBuf>,
+
+    /// Verify a signed quarantine receipt and rehash every quarantined file.
+    #[arg(long, value_name = "FILE")]
+    verify_consent_retirement_receipt: Option<std::path::PathBuf>,
 
     /// Independently retained signed checkpoint that the current consent
     /// ledger must contain as an exact prefix. Store this outside the daemon
@@ -1347,6 +1429,216 @@ fn persist_json_owner_only<T: serde::Serialize>(
         .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })
 }
 
+struct ConsentRetirementEvidence {
+    active: consent_compaction::ConsentCompactedActiveStateV1,
+    pin: consent_compaction::ConsentCompactedStatePinV1,
+    certificate: consent_compaction::ConsentCompactionGcCertificateV1,
+    archive_segments: Vec<xenia_ledger::LedgerArchiveSegment>,
+    protected_paths: Vec<std::path::PathBuf>,
+}
+
+fn load_consent_retirement_evidence(
+    args: &Args,
+    signing_key: &SigningKey,
+) -> Result<ConsentRetirementEvidence, Box<dyn std::error::Error>> {
+    let state_path = args
+        .consent_ledger_compacted_state
+        .as_deref()
+        .ok_or("consent retirement requires --consent-ledger-compacted-state")?;
+    let pin_path = args
+        .trusted_consent_ledger_compacted_state_pin
+        .as_deref()
+        .ok_or("consent retirement requires --trusted-consent-ledger-compacted-state-pin")?;
+    let certificate_path = args
+        .consent_retirement_gc_certificate
+        .as_deref()
+        .ok_or("consent retirement requires --consent-retirement-gc-certificate")?;
+    let (active, _) = crate::consent_ledger_persistence::load_compacted_active_state(
+        state_path,
+        signing_key,
+    )?;
+    let pin: consent_compaction::ConsentCompactedStatePinV1 =
+        audit_ledger_store::read_bounded_json(
+            pin_path,
+            audit_ledger_store::MAX_CONTINUITY_ARTIFACT_BYTES,
+            "consent retirement retained compacted-state pin",
+        )?;
+    let certificate: consent_compaction::ConsentCompactionGcCertificateV1 =
+        audit_ledger_store::read_bounded_json(
+            certificate_path,
+            audit_ledger_store::MAX_CONTINUITY_ARTIFACT_BYTES,
+            "consent retirement GC certificate",
+        )?;
+    let archive_segments = read_consent_archive_segments(
+        &args.consent_ledger_gc_archive_segment,
+        "consent retirement cold archive",
+    )?;
+    certificate.verify(
+        &active,
+        &pin,
+        &archive_segments,
+        &signing_key.verifying_key(),
+    )?;
+    let mut protected_paths = vec![
+        std::fs::canonicalize(state_path)?,
+        std::fs::canonicalize(pin_path)?,
+        std::fs::canonicalize(certificate_path)?,
+        std::fs::canonicalize(&args.operator_key_path)?,
+    ];
+    for path in &args.consent_ledger_gc_archive_segment {
+        protected_paths.push(std::fs::canonicalize(path)?);
+    }
+    Ok(ConsentRetirementEvidence {
+        active,
+        pin,
+        certificate,
+        archive_segments,
+        protected_paths,
+    })
+}
+
+fn load_existing_signing_key(
+    path: &std::path::Path,
+) -> Result<SigningKey, Box<dyn std::error::Error>> {
+    if !path.exists() {
+        return Err(format!("required signing key does not exist: {}", path.display()).into());
+    }
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "required signing key must be a regular non-symlink file: {}",
+            path.display()
+        )
+        .into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    let bytes = std::fs::read(path)?;
+    let seed: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| format!("signing key {} must contain exactly 32 bytes", path.display()))?;
+    Ok(SigningKey::from_bytes(&seed))
+}
+
+fn normalized_output_path(
+    path: &std::path::Path,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    if path.exists() {
+        return Ok(std::fs::canonicalize(path)?);
+    }
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let canonical_parent = std::fs::canonicalize(parent)?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| format!("output path has no file name: {}", path.display()))?;
+    Ok(canonical_parent.join(file_name))
+}
+
+fn retirement_ledger_verifying_key(
+    args: &Args,
+) -> Result<ed25519_dalek::VerifyingKey, Box<dyn std::error::Error>> {
+    let value = args
+        .consent_retirement_ledger_public_key_hex
+        .as_deref()
+        .ok_or("operation requires --consent-retirement-ledger-public-key-hex")?;
+    let bytes = parse_ed25519_public_key_hex(value)
+        .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
+    ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+        .map_err(|_| "consent retirement ledger public key is not a valid Ed25519 key".into())
+}
+
+fn parse_retirement_witness_policy(
+    args: &Args,
+) -> Result<(Vec<[u8; 32]>, usize), Box<dyn std::error::Error>> {
+    if args.trusted_consent_retirement_witness_key_hex.is_empty() {
+        return Err("retirement operation requires at least one --trusted-consent-retirement-witness-key-hex".into());
+    }
+    let keys = args
+        .trusted_consent_retirement_witness_key_hex
+        .iter()
+        .map(|value| parse_ed25519_public_key_hex(value))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| -> Box<dyn std::error::Error> {
+            format!("invalid trusted retirement witness key: {err}").into()
+        })?;
+    for key in &keys {
+        ed25519_dalek::VerifyingKey::from_bytes(key).map_err(
+            |_| -> Box<dyn std::error::Error> {
+                "trusted retirement witness key is not a valid Ed25519 key".into()
+            },
+        )?;
+    }
+    if keys.len() > consent_retirement::MAX_RETIREMENT_APPROVALS {
+        return Err(format!(
+            "retirement witness trust set has {} keys; maximum is {}",
+            keys.len(),
+            consent_retirement::MAX_RETIREMENT_APPROVALS
+        )
+        .into());
+    }
+    let distinct = keys.iter().copied().collect::<std::collections::BTreeSet<_>>();
+    if distinct.len() != keys.len() {
+        return Err("retirement witness trust set contains a duplicate key".into());
+    }
+    let quorum = args.trusted_consent_retirement_witness_quorum.unwrap_or(1);
+    if quorum == 0 || quorum > keys.len() {
+        return Err(format!(
+            "retirement witness quorum {quorum} must be between 1 and {}",
+            keys.len()
+        )
+        .into());
+    }
+    Ok((keys, quorum))
+}
+
+fn read_retirement_plan(
+    path: &std::path::Path,
+) -> Result<consent_retirement::ConsentRetirementPlanV1, Box<dyn std::error::Error>> {
+    Ok(audit_ledger_store::read_bounded_json(
+        path,
+        consent_retirement::MAX_RETIREMENT_TRANSACTION_BYTES,
+        "consent retirement plan",
+    )?)
+}
+
+fn read_retirement_approvals(
+    path: &std::path::Path,
+) -> Result<consent_retirement::ConsentRetirementApprovalBundleV1, Box<dyn std::error::Error>> {
+    Ok(audit_ledger_store::read_bounded_json(
+        path,
+        consent_retirement::MAX_RETIREMENT_TRANSACTION_BYTES,
+        "consent retirement approval bundle",
+    )?)
+}
+
+fn ensure_retirement_candidates_are_unprotected(
+    plan: &consent_retirement::ConsentRetirementPlanV1,
+    protected_paths: &[std::path::PathBuf],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let quarantine_root = std::path::Path::new(&plan.quarantine_root);
+    for candidate in &plan.candidates {
+        let canonical = std::fs::canonicalize(&candidate.canonical_path)?;
+        if protected_paths.iter().any(|protected| protected == &canonical) {
+            return Err(format!(
+                "retirement candidate aliases a protected artifact: {}",
+                canonical.display()
+            )
+            .into());
+        }
+        if canonical.starts_with(quarantine_root) {
+            return Err(format!(
+                "retirement candidate is already inside the quarantine root: {}",
+                canonical.display()
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 async fn perform_rekey(
     transport: &mut AnyTransport,
     session: &mut LaneSession,
@@ -2032,6 +2324,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let source_id = parse_source_id(&args.source_id_hex)?;
 
+    let retirement_operation_count = args.export_consent_retirement_plan.is_some() as usize
+        + args.sign_consent_retirement_plan as usize
+        + args.quarantine_consent_retirement as usize
+        + args.recover_consent_retirement_journal.is_some() as usize
+        + args.verify_consent_retirement_receipt.is_some() as usize;
+    if retirement_operation_count > 1 {
+        return Err("select only one consent-retirement operation per invocation".into());
+    }
+    let retirement_operation_requested = retirement_operation_count == 1;
+    if retirement_operation_requested
+        && (args.m1_runtime_smoke
+            || args.verify_evidence_bundle.is_some()
+            || args.verify_sealed_evidence_bundle.is_some()
+            || args.audit_evidence_report.is_some()
+            || args.audit_sealed_evidence_report.is_some()
+            || args.activate_consent_ledger_compacted_state.is_some()
+            || args.advance_consent_ledger_compacted_state_pin.is_some()
+            || args.export_consent_ledger_compaction_gc_certificate.is_some()
+            || args.verify_consent_ledger_compaction_gc_certificate.is_some())
+    {
+        return Err("consent-retirement operations cannot be combined with another one-shot verification, activation, pin, or GC-certificate operation".into());
+    }
+
     // Fail closed before doing any work: never expose the operator surface to
     // the network without operator auth (Phase 6 — remote operators).
     crate::operator_exposure::validate_operator_exposure(
@@ -2184,7 +2499,160 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let signing_key = load_or_create_signing_key(&args.operator_key_path)?;
+    if args.sign_consent_retirement_plan {
+        let ledger_public_key = retirement_ledger_verifying_key(&args)?;
+        let plan_path = args
+            .consent_retirement_plan_input
+            .as_deref()
+            .ok_or("--sign-consent-retirement-plan requires --consent-retirement-plan-input")?;
+        let approval_path = args
+            .consent_retirement_approval_bundle
+            .as_deref()
+            .ok_or("--sign-consent-retirement-plan requires --consent-retirement-approval-bundle")?;
+        let witness_key_path = args
+            .consent_retirement_witness_key
+            .as_deref()
+            .ok_or("--sign-consent-retirement-plan requires --consent-retirement-witness-key")?;
+        let plan = read_retirement_plan(plan_path)?;
+        plan.verify_authority_signature_and_window(&ledger_public_key, unix_now_secs())?;
+        let witness_key = load_existing_signing_key(witness_key_path)?;
+        if witness_key.verifying_key() == ledger_public_key {
+            return Err("retirement witness key must be distinct from the ledger signing key".into());
+        }
+        let mut approvals = if approval_path.exists() {
+            let existing = read_retirement_approvals(approval_path)?;
+            if !existing.approvals.is_empty() {
+                let observed_keys = existing
+                    .approvals
+                    .iter()
+                    .map(|approval| approval.witness_public_key)
+                    .collect::<Vec<_>>();
+                existing.verify_quorum(&plan, &observed_keys, observed_keys.len())?;
+            }
+            existing
+        } else {
+            consent_retirement::ConsentRetirementApprovalBundleV1::new(&plan)?
+        };
+        approvals.sign_with(&plan, &witness_key, unix_now_secs())?;
+        let normalized_output = normalized_output_path(approval_path)?;
+        if normalized_output == normalized_output_path(plan_path)?
+            || normalized_output == std::fs::canonicalize(witness_key_path)?
+            || normalized_output.starts_with(std::path::Path::new(&plan.quarantine_root))
+            || plan.candidates.iter().any(|candidate| {
+                std::path::Path::new(&candidate.canonical_path) == normalized_output.as_path()
+            })
+        {
+            return Err("retirement approval output aliases a protected input or candidate".into());
+        }
+        persist_json_owner_only(
+            approval_path,
+            &approvals,
+            consent_retirement::MAX_RETIREMENT_TRANSACTION_BYTES,
+            "consent retirement approval bundle",
+        )?;
+        println!("consent retirement approval added");
+        println!("path: {}", approval_path.display());
+        println!(
+            "witness public key: {}",
+            hex::encode(witness_key.verifying_key().to_bytes())
+        );
+        println!("approval count: {}", approvals.approvals.len());
+        println!("the ledger private key was not accessed");
+        println!("no artifact was moved or deleted");
+        return Ok(());
+    }
+
+    if let Some(journal_path) = args.recover_consent_retirement_journal.as_deref() {
+        let ledger_public_key = retirement_ledger_verifying_key(&args)?;
+        let plan_path = args
+            .consent_retirement_plan_input
+            .as_deref()
+            .ok_or("--recover-consent-retirement-journal requires --consent-retirement-plan-input")?;
+        let approval_path = args
+            .consent_retirement_approval_bundle
+            .as_deref()
+            .ok_or("--recover-consent-retirement-journal requires --consent-retirement-approval-bundle")?;
+        let plan = read_retirement_plan(plan_path)?;
+        let approvals = read_retirement_approvals(approval_path)?;
+        let (trusted_witness_keys, quorum) = parse_retirement_witness_policy(&args)?;
+        if trusted_witness_keys
+            .iter()
+            .any(|key| *key == ledger_public_key.to_bytes())
+        {
+            return Err("trusted retirement witness keys must be distinct from the ledger key".into());
+        }
+        let outcome = consent_retirement::recover_retirement_transaction(
+            journal_path,
+            &plan,
+            &approvals,
+            &trusted_witness_keys,
+            quorum,
+            &ledger_public_key,
+            unix_now_secs(),
+        )?;
+        let outcome_label = match outcome {
+            consent_retirement::ConsentRetirementRecoveryOutcomeV1::FinalizedCommitted => {
+                "finalized committed transaction"
+            }
+            consent_retirement::ConsentRetirementRecoveryOutcomeV1::RolledBack => {
+                "rolled back incomplete transaction"
+            }
+            consent_retirement::ConsentRetirementRecoveryOutcomeV1::AlreadyCommitted => {
+                "transaction already committed"
+            }
+            consent_retirement::ConsentRetirementRecoveryOutcomeV1::AlreadyRolledBack => {
+                "transaction already rolled back"
+            }
+        };
+        println!("consent retirement recovery: {outcome_label}");
+        println!("journal: {}", journal_path.display());
+        println!("the ledger private key was not accessed");
+        println!("no artifact was unlinked");
+        return Ok(());
+    }
+
+    if let Some(receipt_path) = args.verify_consent_retirement_receipt.as_deref() {
+        let ledger_public_key = retirement_ledger_verifying_key(&args)?;
+        let plan_path = args
+            .consent_retirement_plan_input
+            .as_deref()
+            .ok_or("--verify-consent-retirement-receipt requires --consent-retirement-plan-input")?;
+        let approval_path = args
+            .consent_retirement_approval_bundle
+            .as_deref()
+            .ok_or("--verify-consent-retirement-receipt requires --consent-retirement-approval-bundle")?;
+        let plan = read_retirement_plan(plan_path)?;
+        let approvals = read_retirement_approvals(approval_path)?;
+        let (trusted_witness_keys, quorum) = parse_retirement_witness_policy(&args)?;
+        if trusted_witness_keys
+            .iter()
+            .any(|key| *key == ledger_public_key.to_bytes())
+        {
+            return Err("trusted retirement witness keys must be distinct from the ledger key".into());
+        }
+        plan.verify_authority_signature(&ledger_public_key)?;
+        approvals.verify_quorum(&plan, &trusted_witness_keys, quorum)?;
+        let receipt: consent_retirement::ConsentRetirementQuarantineReceiptV1 =
+            audit_ledger_store::read_bounded_json(
+                receipt_path,
+                consent_retirement::MAX_RETIREMENT_TRANSACTION_BYTES,
+                "consent retirement quarantine receipt",
+            )?;
+        receipt.verify(&plan, &approvals, &ledger_public_key)?;
+        consent_retirement::verify_quarantined_receipt_files(&receipt)?;
+        println!("consent retirement quarantine receipt verified");
+        println!("path: {}", receipt_path.display());
+        println!("artifacts: {}", receipt.entries.len());
+        println!("the ledger private key was not accessed");
+        println!("no artifact was unlinked");
+        return Ok(());
+    }
+
+    let signing_key = if retirement_operation_requested {
+        load_existing_signing_key(&args.operator_key_path)?
+    } else {
+        load_or_create_signing_key(&args.operator_key_path)?
+    };
 
     if let Some(output_path) = args
         .activate_consent_ledger_compacted_state
@@ -2451,6 +2919,147 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("path: {}", certificate_path.display());
         println!("no live or archived artifact was deleted");
         return Ok(());
+    }
+
+    if let Some(output_path) = args.export_consent_retirement_plan.as_deref() {
+        let evidence = load_consent_retirement_evidence(&args, &signing_key)?;
+        let quarantine_root_path = args
+            .consent_retirement_quarantine_root
+            .as_deref()
+            .ok_or("--export-consent-retirement-plan requires --consent-retirement-quarantine-root")?;
+        let quarantine_root =
+            consent_retirement::canonical_quarantine_root(quarantine_root_path)?;
+        let mut candidates = Vec::new();
+        for path in &args.consent_retirement_complete_ledger_candidate {
+            candidates.push(consent_retirement::observe_retirement_artifact(
+                consent_retirement::ConsentRetirementArtifactRoleV1::SupersededCompleteLedger,
+                path,
+            )?);
+        }
+        for path in &args.consent_retirement_compaction_bundle_candidate {
+            candidates.push(consent_retirement::observe_retirement_artifact(
+                consent_retirement::ConsentRetirementArtifactRoleV1::SupersededCompactionBundle,
+                path,
+            )?);
+        }
+        for path in &args.consent_retirement_compacted_snapshot_candidate {
+            candidates.push(consent_retirement::observe_retirement_artifact(
+                consent_retirement::ConsentRetirementArtifactRoleV1::SupersededCompactedSnapshot,
+                path,
+            )?);
+        }
+        if candidates.is_empty() {
+            return Err("retirement plan requires at least one candidate artifact".into());
+        }
+        let issued_at = unix_now_secs();
+        let expires_at = issued_at
+            .checked_add(args.consent_retirement_plan_lifetime_secs)
+            .ok_or("consent retirement plan expiry overflow")?;
+        let plan = consent_retirement::ConsentRetirementPlanV1::sign(
+            &evidence.active,
+            &evidence.pin,
+            &evidence.certificate,
+            &evidence.archive_segments,
+            quarantine_root,
+            candidates,
+            &signing_key,
+            issued_at,
+            expires_at,
+        )?;
+        ensure_retirement_candidates_are_unprotected(&plan, &evidence.protected_paths)?;
+        let normalized_output = normalized_output_path(output_path)?;
+        if evidence
+            .protected_paths
+            .iter()
+            .any(|protected| protected == &normalized_output)
+            || plan.candidates.iter().any(|candidate| {
+                std::path::Path::new(&candidate.canonical_path) == normalized_output.as_path()
+            })
+            || normalized_output.starts_with(std::path::Path::new(&plan.quarantine_root))
+        {
+            return Err("retirement plan output aliases protected, candidate, or quarantine storage".into());
+        }
+        persist_json_owner_only(
+            output_path,
+            &plan,
+            consent_retirement::MAX_RETIREMENT_TRANSACTION_BYTES,
+            "consent retirement plan",
+        )?;
+        println!("consent retirement plan exported");
+        println!("path: {}", output_path.display());
+        println!("plan id: {}", hex::encode(plan.plan_id));
+        println!("candidates: {}", plan.candidates.len());
+        println!("expires at unix seconds: {}", plan.expires_at_unix_secs);
+        println!("no artifact was moved or deleted");
+        return Ok(());
+    }
+
+    if args.quarantine_consent_retirement {
+        let evidence = load_consent_retirement_evidence(&args, &signing_key)?;
+        let plan_path = args
+            .consent_retirement_plan_input
+            .as_deref()
+            .ok_or("--quarantine-consent-retirement requires --consent-retirement-plan-input")?;
+        let approval_path = args
+            .consent_retirement_approval_bundle
+            .as_deref()
+            .ok_or("--quarantine-consent-retirement requires --consent-retirement-approval-bundle")?;
+        let plan = read_retirement_plan(plan_path)?;
+        let approvals = read_retirement_approvals(approval_path)?;
+        let (trusted_witness_keys, quorum) = parse_retirement_witness_policy(&args)?;
+        if trusted_witness_keys
+            .iter()
+            .any(|key| *key == signing_key.verifying_key().to_bytes())
+        {
+            return Err("trusted retirement witness keys must be distinct from the ledger key".into());
+        }
+        plan.verify(
+            &evidence.active,
+            &evidence.pin,
+            &evidence.certificate,
+            &evidence.archive_segments,
+            &signing_key.verifying_key(),
+            unix_now_secs(),
+        )?;
+        ensure_retirement_candidates_are_unprotected(&plan, &evidence.protected_paths)?;
+        let receipt = consent_retirement::execute_retirement_quarantine(
+            &plan,
+            &approvals,
+            &evidence.active,
+            &evidence.pin,
+            &evidence.certificate,
+            &evidence.archive_segments,
+            &trusted_witness_keys,
+            quorum,
+            &signing_key,
+            unix_now_secs(),
+        )?;
+        println!("consent artifacts moved into reversible quarantine");
+        println!("transaction: {}", receipt.transaction_directory);
+        println!("artifacts: {}", receipt.entries.len());
+        println!(
+            "receipt blake3: {}",
+            hex::encode(consent_retirement::consent_retirement_receipt_fingerprint(
+                &receipt
+            )?)
+        );
+        println!("no artifact was unlinked");
+        return Ok(());
+    }
+
+    let retirement_auxiliary_args_present = args.consent_retirement_gc_certificate.is_some()
+        || args.consent_retirement_quarantine_root.is_some()
+        || !args.consent_retirement_complete_ledger_candidate.is_empty()
+        || !args.consent_retirement_compaction_bundle_candidate.is_empty()
+        || !args.consent_retirement_compacted_snapshot_candidate.is_empty()
+        || args.consent_retirement_plan_input.is_some()
+        || args.consent_retirement_ledger_public_key_hex.is_some()
+        || args.consent_retirement_witness_key.is_some()
+        || args.consent_retirement_approval_bundle.is_some()
+        || !args.trusted_consent_retirement_witness_key_hex.is_empty()
+        || args.trusted_consent_retirement_witness_quorum.is_some();
+    if !retirement_operation_requested && retirement_auxiliary_args_present {
+        return Err("consent-retirement arguments require an explicit retirement operation".into());
     }
 
     let (ledger, ledger_persister, historical_indexes, compacted_state_loaded): (

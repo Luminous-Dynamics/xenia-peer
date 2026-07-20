@@ -9,6 +9,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Short-lived ledger-signed consent-artifact retirement plans that bind exact
+  candidate roles, canonical paths, lengths, digests, active compacted state,
+  retained pin, GC-readiness certificate, and quarantine root.
+- Independent retirement-witness approval bundles with configurable distinct
+  trusted-key quorum; approval, recovery, and receipt verification require only
+  the ledger public key rather than access to its private key.
+- Owner-only reversible quarantine transactions with immediate candidate
+  rehashing, per-rename crash journals, directory synchronization, signed
+  completion receipts, and filesystem-reconciled rollback after stale journal
+  writes. No artifact is unlinked.
 - Dual-signed consent-ledger key succession artifacts for explicit epoch
   rotation without silently changing the signer inside one hash chain.
 - Independent checkpoint countersignature bundles with configurable trusted

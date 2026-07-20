@@ -12,8 +12,10 @@ must not be conflated:
    cold archive, recovery summary, cutover receipt, active state, and retained
    pin all agree.
 
-None of these artifacts deletes data. They are prerequisites for a future,
-separately reviewed garbage-collection implementation.
+None of these artifacts deletes data. Xenia now has a separate, explicitly
+authorized **reversible quarantine** workflow for superseded artifacts; see
+`CONSENT_ARTIFACT_RETIREMENT.md`. Permanent deletion remains a distinct,
+unimplemented operation.
 
 ## Active-state schema migration
 
@@ -109,7 +111,9 @@ This mechanism does not:
 - protect an active state and pin stored in the same rollback domain; or
 - authorize an unattended cleanup job.
 
-A future destructive GC path must additionally use an explicit deletion plan,
-verify every target path and digest immediately before unlinking, preserve a
-rollback package, and commit an auditable completion record after directory
-synchronization.
+The reversible retirement path now provides an exact short-lived plan,
+independent witness quorum, immediate rehashing, crash journal, rollback, and a
+signed quarantine receipt. It still performs no unlink. A future permanent
+purge must be a separate ceremony with a minimum quarantine-retention period,
+new authorization, immediate digest verification, externally retained proof,
+and a crash-audited completion record.

@@ -331,6 +331,13 @@ Do not report security issues via public GitHub issues.
 For the audit claim boundary, see
 [`docs/security/LEDGER_VERIFICATION_BOUNDARY.md`](docs/security/LEDGER_VERIFICATION_BOUNDARY.md).
 
+
+For compacted-ledger retention and the explicitly authorized, reversible
+quarantine workflow, see
+[`docs/security/COMPACTED_STATE_CUTOVER_AND_GC.md`](docs/security/COMPACTED_STATE_CUTOVER_AND_GC.md)
+and
+[`docs/security/CONSENT_ARTIFACT_RETIREMENT.md`](docs/security/CONSENT_ARTIFACT_RETIREMENT.md).
+
 ## Relationship to Track A
 
 [`xenia-wire`](https://github.com/Luminous-Dynamics/xenia-wire) is
