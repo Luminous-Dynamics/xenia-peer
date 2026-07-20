@@ -34,6 +34,10 @@ pub(crate) const MIN_PURGE_ROLLBACK_RETENTION_SECS: u64 = 24 * 60 * 60;
 pub(crate) const MAX_PURGE_ROLLBACK_RETENTION_SECS: u64 = 10 * 365 * 24 * 60 * 60;
 pub(crate) const MAX_PURGE_RETENTION_ARTIFACTS: usize = 64;
 pub(crate) const MAX_PURGE_RETENTION_BYTES: u64 = 1024 * 1024;
+pub(crate) const CONSENT_PURGE_RETENTION_WITNESS_BUNDLE_SCHEMA: &str =
+    "xenia-consent-purge-retention-witness-bundle-v1";
+pub(crate) const MAX_PURGE_RETENTION_WITNESSES: usize = 64;
+pub(crate) const MAX_PURGE_RETENTION_WITNESS_FUTURE_SKEW_SECS: u64 = 5 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -50,6 +54,21 @@ pub(crate) struct ConsentPurgeProtectedArtifactV1 {
     pub(crate) path: String,
     pub(crate) byte_length: u64,
     pub(crate) blake3_digest: [u8; 32],
+}
+
+/// One independently controlled key's observation of an exact retention certificate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConsentPurgeRetentionWitnessV1 {
+    pub(crate) witness_public_key: [u8; 32],
+    pub(crate) observed_at_unix_secs: u64,
+    pub(crate) signature: [u8; 64],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConsentPurgeRetentionWitnessBundleV1 {
+    pub(crate) schema: String,
+    pub(crate) certificate_fingerprint: [u8; 32],
+    pub(crate) witnesses: Vec<ConsentPurgeRetentionWitnessV1>,
 }
 
 /// Ledger-signed obligation to retain one exact purge rollback package.
@@ -101,6 +120,30 @@ pub(crate) enum ConsentPurgeRetentionError {
     ProtectedArtifactTooLarge { path: String, maximum: u64 },
     #[error("consent purge retention path is not inside the rollback package: {path}")]
     ProtectedArtifactOutsidePackage { path: String },
+    #[error("consent purge retention witness bundle has unsupported schema: {schema}")]
+    UnsupportedWitnessBundleSchema { schema: String },
+    #[error("consent purge retention witness bundle refers to another certificate")]
+    WitnessCertificateMismatch,
+    #[error("consent purge retention witness timestamp predates the certificate")]
+    WitnessBeforeCertificate,
+    #[error("consent purge retention witness timestamp is too far in the future")]
+    WitnessFromFuture,
+    #[error("consent purge retention witness timestamp is outside the retention window")]
+    WitnessOutsideRetentionWindow,
+    #[error("consent purge retention witness key appears more than once")]
+    DuplicateWitnessKey,
+    #[error("consent purge retention witness key is not trusted")]
+    UntrustedWitnessKey,
+    #[error("consent purge retention witness public key is malformed")]
+    BadWitnessPublicKey,
+    #[error("consent purge retention witness signature is invalid")]
+    InvalidWitnessSignature,
+    #[error("consent purge retention witness quorum cannot be zero")]
+    ZeroWitnessQuorum,
+    #[error("consent purge retention witness quorum was not met: observed={observed}, required={required}")]
+    WitnessQuorumNotMet { observed: usize, required: usize },
+    #[error("consent purge retention witness bundle exceeds {maximum} witnesses: {count}")]
+    TooManyWitnesses { count: usize, maximum: usize },
     #[error("consent purge retention encoding length overflow")]
     EncodingLengthOverflow,
     #[error("consent purge retention prerequisite failed: {0}")]
@@ -312,6 +355,170 @@ impl ConsentPurgeRetentionCertificateV1 {
         }
         Ok(())
     }
+}
+
+impl ConsentPurgeRetentionWitnessBundleV1 {
+    pub(crate) fn new(
+        certificate: &ConsentPurgeRetentionCertificateV1,
+    ) -> Result<Self, ConsentPurgeRetentionError> {
+        Ok(Self {
+            schema: CONSENT_PURGE_RETENTION_WITNESS_BUNDLE_SCHEMA.to_string(),
+            certificate_fingerprint: consent_purge_retention_certificate_fingerprint(certificate)?,
+            witnesses: Vec::new(),
+        })
+    }
+
+    pub(crate) fn sign_with(
+        &mut self,
+        certificate: &ConsentPurgeRetentionCertificateV1,
+        witness_key: &LedgerSigningKey,
+        observed_at_unix_secs: u64,
+    ) -> Result<(), ConsentPurgeRetentionError> {
+        self.validate_identity(certificate)?;
+        if observed_at_unix_secs < certificate.issued_at_unix_secs {
+            return Err(ConsentPurgeRetentionError::WitnessBeforeCertificate);
+        }
+        if observed_at_unix_secs >= certificate.retain_until_unix_secs {
+            return Err(ConsentPurgeRetentionError::WitnessOutsideRetentionWindow);
+        }
+        if self.witnesses.len() >= MAX_PURGE_RETENTION_WITNESSES {
+            return Err(ConsentPurgeRetentionError::TooManyWitnesses {
+                count: self.witnesses.len() + 1,
+                maximum: MAX_PURGE_RETENTION_WITNESSES,
+            });
+        }
+        let witness_public_key = witness_key.verifying_key().to_bytes();
+        if self
+            .witnesses
+            .iter()
+            .any(|witness| witness.witness_public_key == witness_public_key)
+        {
+            return Err(ConsentPurgeRetentionError::DuplicateWitnessKey);
+        }
+        let signature = witness_key
+            .sign(&consent_purge_retention_witness_message(
+                self.certificate_fingerprint,
+                observed_at_unix_secs,
+            ))
+            .to_bytes();
+        self.witnesses.push(ConsentPurgeRetentionWitnessV1 {
+            witness_public_key,
+            observed_at_unix_secs,
+            signature,
+        });
+        self.witnesses
+            .sort_by_key(|witness| witness.witness_public_key);
+        Ok(())
+    }
+
+    pub(crate) fn verify_quorum(
+        &self,
+        certificate: &ConsentPurgeRetentionCertificateV1,
+        trusted_witness_keys: &[[u8; 32]],
+        minimum_quorum: usize,
+        now_unix_secs: u64,
+        maximum_future_skew_secs: u64,
+    ) -> Result<(), ConsentPurgeRetentionError> {
+        self.validate_identity(certificate)?;
+        if minimum_quorum == 0 {
+            return Err(ConsentPurgeRetentionError::ZeroWitnessQuorum);
+        }
+        if self.witnesses.len() > MAX_PURGE_RETENTION_WITNESSES {
+            return Err(ConsentPurgeRetentionError::TooManyWitnesses {
+                count: self.witnesses.len(),
+                maximum: MAX_PURGE_RETENTION_WITNESSES,
+            });
+        }
+        let trusted = trusted_witness_keys.iter().copied().collect::<BTreeSet<_>>();
+        let mut observed = BTreeSet::new();
+        for witness in &self.witnesses {
+            if !observed.insert(witness.witness_public_key) {
+                return Err(ConsentPurgeRetentionError::DuplicateWitnessKey);
+            }
+            if !trusted.contains(&witness.witness_public_key) {
+                return Err(ConsentPurgeRetentionError::UntrustedWitnessKey);
+            }
+            if witness.observed_at_unix_secs < certificate.issued_at_unix_secs {
+                return Err(ConsentPurgeRetentionError::WitnessBeforeCertificate);
+            }
+            if witness.observed_at_unix_secs >= certificate.retain_until_unix_secs {
+                return Err(ConsentPurgeRetentionError::WitnessOutsideRetentionWindow);
+            }
+            if witness.observed_at_unix_secs
+                > now_unix_secs.saturating_add(maximum_future_skew_secs)
+            {
+                return Err(ConsentPurgeRetentionError::WitnessFromFuture);
+            }
+            let verifying_key = VerifyingKey::from_bytes(&witness.witness_public_key)
+                .map_err(|_| ConsentPurgeRetentionError::BadWitnessPublicKey)?;
+            verifying_key
+                .verify(
+                    &consent_purge_retention_witness_message(
+                        self.certificate_fingerprint,
+                        witness.observed_at_unix_secs,
+                    ),
+                    &Signature::from_bytes(&witness.signature),
+                )
+                .map_err(|_| ConsentPurgeRetentionError::InvalidWitnessSignature)?;
+        }
+        if observed.len() < minimum_quorum {
+            return Err(ConsentPurgeRetentionError::WitnessQuorumNotMet {
+                observed: observed.len(),
+                required: minimum_quorum,
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_identity(
+        &self,
+        certificate: &ConsentPurgeRetentionCertificateV1,
+    ) -> Result<(), ConsentPurgeRetentionError> {
+        if self.schema != CONSENT_PURGE_RETENTION_WITNESS_BUNDLE_SCHEMA {
+            return Err(ConsentPurgeRetentionError::UnsupportedWitnessBundleSchema {
+                schema: self.schema.clone(),
+            });
+        }
+        if self.certificate_fingerprint
+            != consent_purge_retention_certificate_fingerprint(certificate)?
+        {
+            return Err(ConsentPurgeRetentionError::WitnessCertificateMismatch);
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn consent_purge_retention_witness_bundle_fingerprint(
+    bundle: &ConsentPurgeRetentionWitnessBundleV1,
+) -> Result<[u8; 32], ConsentPurgeRetentionError> {
+    if bundle.schema != CONSENT_PURGE_RETENTION_WITNESS_BUNDLE_SCHEMA {
+        return Err(ConsentPurgeRetentionError::UnsupportedWitnessBundleSchema {
+            schema: bundle.schema.clone(),
+        });
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"xenia:consent-purge-retention-witness-bundle-fingerprint:v1");
+    hasher.update(&bundle.certificate_fingerprint);
+    let count = u32::try_from(bundle.witnesses.len())
+        .map_err(|_| ConsentPurgeRetentionError::EncodingLengthOverflow)?;
+    hasher.update(&count.to_be_bytes());
+    for witness in &bundle.witnesses {
+        hasher.update(&witness.witness_public_key);
+        hasher.update(&witness.observed_at_unix_secs.to_be_bytes());
+        hasher.update(&witness.signature);
+    }
+    Ok(*hasher.finalize().as_bytes())
+}
+
+fn consent_purge_retention_witness_message(
+    certificate_fingerprint: [u8; 32],
+    observed_at_unix_secs: u64,
+) -> Vec<u8> {
+    let mut message = Vec::new();
+    message.extend_from_slice(b"xenia:consent-purge-retention-witness:v1");
+    message.extend_from_slice(&certificate_fingerprint);
+    message.extend_from_slice(&observed_at_unix_secs.to_be_bytes());
+    message
 }
 
 pub(crate) fn consent_purge_retention_certificate_fingerprint(
@@ -544,4 +751,66 @@ mod tests {
         let (_, certificate) = signed_fixture();
         assert!(certificate.retain_until_unix_secs > certificate.issued_at_unix_secs);
     }
+    #[test]
+    fn witness_quorum_requires_distinct_trusted_keys() {
+        let (_, certificate) = signed_fixture();
+        let witness_one = LedgerSigningKey::from_bytes(&[51u8; 32]);
+        let witness_two = LedgerSigningKey::from_bytes(&[52u8; 32]);
+        let mut bundle = ConsentPurgeRetentionWitnessBundleV1::new(&certificate).unwrap();
+        bundle
+            .sign_with(&certificate, &witness_one, certificate.issued_at_unix_secs)
+            .unwrap();
+        bundle
+            .sign_with(&certificate, &witness_two, certificate.issued_at_unix_secs + 1)
+            .unwrap();
+        let trusted = vec![
+            witness_one.verifying_key().to_bytes(),
+            witness_two.verifying_key().to_bytes(),
+        ];
+        bundle
+            .verify_quorum(
+                &certificate,
+                &trusted,
+                2,
+                certificate.issued_at_unix_secs + 2,
+                MAX_PURGE_RETENTION_WITNESS_FUTURE_SKEW_SECS,
+            )
+            .unwrap();
+
+        let mut duplicate = bundle.clone();
+        duplicate.witnesses.push(duplicate.witnesses[0].clone());
+        assert!(matches!(
+            duplicate.verify_quorum(
+                &certificate,
+                &trusted,
+                2,
+                certificate.issued_at_unix_secs + 2,
+                MAX_PURGE_RETENTION_WITNESS_FUTURE_SKEW_SECS,
+            ),
+            Err(ConsentPurgeRetentionError::DuplicateWitnessKey)
+        ));
+    }
+
+    #[test]
+    fn witness_signature_is_bound_to_the_exact_certificate() {
+        let (_, certificate) = signed_fixture();
+        let witness = LedgerSigningKey::from_bytes(&[53u8; 32]);
+        let mut bundle = ConsentPurgeRetentionWitnessBundleV1::new(&certificate).unwrap();
+        bundle
+            .sign_with(&certificate, &witness, certificate.issued_at_unix_secs)
+            .unwrap();
+        let mut changed = certificate.clone();
+        changed.retain_until_unix_secs += 1;
+        assert!(matches!(
+            bundle.verify_quorum(
+                &changed,
+                &[witness.verifying_key().to_bytes()],
+                1,
+                certificate.issued_at_unix_secs + 1,
+                MAX_PURGE_RETENTION_WITNESS_FUTURE_SKEW_SECS,
+            ),
+            Err(ConsentPurgeRetentionError::WitnessCertificateMismatch)
+        ));
+    }
+
 }
