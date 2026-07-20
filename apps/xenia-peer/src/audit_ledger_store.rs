@@ -81,6 +81,10 @@ pub(crate) enum AuditLedgerStoreError {
     /// A bounded archive segment could not be produced or verified.
     #[error("consent ledger archive failure: {0}")]
     LedgerArchive(#[from] LedgerArchiveError),
+    /// An activated compacted ledger failed structural, cryptographic, or
+    /// recovery-index verification.
+    #[error("compacted consent state failure: {0}")]
+    CompactedState(#[from] crate::consent_compaction::ConsentRecoveryError),
 }
 
 const PERSISTED_AUDIT_LEDGER_MAGIC: &[u8] = b"XENIA-AUDIT-LEDGER\0";
@@ -211,6 +215,78 @@ pub(crate) fn load_verified(
     Ok(Chain::from_entries(entries, signing_key.clone()))
 }
 
+fn verify_checkpoint_against_chain(
+    checkpoint: &LedgerCheckpoint,
+    chain: &Chain,
+    public_key: &ed25519_dalek::VerifyingKey,
+) -> Result<(), AuditLedgerStoreError> {
+    if chain.base_checkpoint().is_none() {
+        let entries = chain.iter().cloned().collect::<Vec<_>>();
+        Verifier::verify_checkpoint_prefix(checkpoint, &entries, public_key)?;
+        return Ok(());
+    }
+
+    Verifier::verify_checkpoint(checkpoint)
+        .map_err(CheckpointContinuityError::from)?;
+    if checkpoint.ledger_public_key != public_key.to_bytes() {
+        return Err(AuditLedgerStoreError::CheckpointContinuity(
+            CheckpointContinuityError::TrustedKeyMismatch,
+        ));
+    }
+    let base = chain
+        .base_checkpoint()
+        .expect("checked compacted chain anchor");
+    Verifier::verify_checkpoint(base)
+        .map_err(CheckpointContinuityError::from)?;
+    if checkpoint.entry_count < base.entry_count {
+        return Err(AuditLedgerStoreError::MetadataMismatch(
+            "retained checkpoint predates compacted ledger anchor",
+        ));
+    }
+    if checkpoint.entry_count > chain.entry_count() {
+        return Err(AuditLedgerStoreError::CheckpointContinuity(
+            CheckpointContinuityError::CheckpointAheadOfLedger {
+                checkpoint: checkpoint.entry_count,
+                ledger: chain.entry_count(),
+            },
+        ));
+    }
+    let observed_head = if checkpoint.entry_count == base.entry_count {
+        base.head_hash
+    } else {
+        let resident_index = usize::try_from(checkpoint.entry_count - base.entry_count - 1)
+            .map_err(|_| {
+                AuditLedgerStoreError::LimitExceeded(
+                    "retained checkpoint resident index overflow".into(),
+                )
+            })?;
+        chain
+            .iter()
+            .nth(resident_index)
+            .map(|entry| entry.entry_hash)
+            .ok_or_else(|| {
+                AuditLedgerStoreError::CheckpointContinuity(
+                    CheckpointContinuityError::CheckpointAheadOfLedger {
+                        checkpoint: checkpoint.entry_count,
+                        ledger: chain.entry_count(),
+                    },
+                )
+            })?
+    };
+    if observed_head != checkpoint.head_hash {
+        return Err(AuditLedgerStoreError::CheckpointContinuity(
+            CheckpointContinuityError::PrefixHeadMismatch {
+                entry_count: checkpoint.entry_count,
+            },
+        ));
+    }
+    let entries = chain.iter().cloned().collect::<Vec<_>>();
+    let timestamp = unix_now_secs().max(base.timestamp_unix_secs);
+    let current = chain.sign_checkpoint(timestamp);
+    Verifier::verify_checkpoint_extension(base, &current, &entries)?;
+    Ok(())
+}
+
 /// Load an independently retained public checkpoint and prove that the current
 /// verified ledger contains it as an exact prefix.
 ///
@@ -246,8 +322,7 @@ pub(crate) fn verify_retained_checkpoint_with_policy(
         "retained checkpoint",
     )?;
     Verifier::verify_checkpoint_freshness(&checkpoint, now_unix_secs, freshness)?;
-    let entries = chain.iter().cloned().collect::<Vec<_>>();
-    Verifier::verify_checkpoint_prefix(&checkpoint, &entries, public_key)?;
+    verify_checkpoint_against_chain(&checkpoint, chain, public_key)?;
     Ok(checkpoint)
 }
 
@@ -269,8 +344,7 @@ pub(crate) fn verify_retained_witness_bundle(
         "checkpoint witness bundle",
     )?;
     Verifier::verify_checkpoint_freshness(&bundle.checkpoint, now_unix_secs, freshness)?;
-    let entries = chain.iter().cloned().collect::<Vec<_>>();
-    Verifier::verify_checkpoint_prefix(&bundle.checkpoint, &entries, public_key)?;
+    verify_checkpoint_against_chain(&bundle.checkpoint, chain, public_key)?;
     Verifier::verify_checkpoint_witness_quorum(
         &bundle,
         trusted_witness_keys,
@@ -781,6 +855,62 @@ mod tests {
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn retained_checkpoint_verifies_inside_an_anchored_suffix() {
+        let dir = temp_dir("retained-checkpoint-anchored-suffix");
+        let checkpoint_path = dir.join("retained-checkpoint.json");
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[70u8; 32]);
+        let mut complete = Chain::new(sk.clone());
+        complete.append(event()).unwrap();
+        let base = complete.sign_checkpoint(100);
+        complete.append(event()).unwrap();
+        let retained = complete.sign_checkpoint(101);
+        let resident = complete.iter().skip(1).cloned().collect::<Vec<_>>();
+        let compacted = Chain::from_checkpoint_suffix(base, resident, sk.clone());
+        std::fs::write(
+            &checkpoint_path,
+            serde_json::to_vec(&retained).unwrap(),
+        )
+        .unwrap();
+
+        verify_retained_checkpoint(
+            &checkpoint_path,
+            &compacted,
+            &sk.verifying_key(),
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn retained_checkpoint_before_compacted_anchor_requires_archive_proof() {
+        let dir = temp_dir("retained-checkpoint-before-anchor");
+        let checkpoint_path = dir.join("retained-checkpoint.json");
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[69u8; 32]);
+        let mut complete = Chain::new(sk.clone());
+        let genesis = complete.sign_checkpoint(99);
+        complete.append(event()).unwrap();
+        let base = complete.sign_checkpoint(100);
+        let compacted = Chain::from_checkpoint_suffix(base, Vec::new(), sk.clone());
+        std::fs::write(
+            &checkpoint_path,
+            serde_json::to_vec(&genesis).unwrap(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            verify_retained_checkpoint(
+                &checkpoint_path,
+                &compacted,
+                &sk.verifying_key(),
+            ),
+            Err(AuditLedgerStoreError::MetadataMismatch(
+                "retained checkpoint predates compacted ledger anchor"
+            ))
+        ));
         std::fs::remove_dir_all(&dir).ok();
     }
 

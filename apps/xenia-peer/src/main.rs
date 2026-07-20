@@ -404,6 +404,51 @@ struct Args {
     #[arg(long, default_value = "xenia-peer-state/consent.ledger")]
     consent_ledger_path: std::path::PathBuf,
 
+    /// Activated compacted consent-ledger state to use for normal daemon
+    /// startup instead of `--consent-ledger-path`. The file contains the
+    /// signed compaction cutover, archived replay/terminal indexes, current
+    /// signed head, and resident suffix. It is fully verified before admin,
+    /// consent, or viewer listeners are opened.
+    #[arg(long, value_name = "FILE")]
+    consent_ledger_compacted_state: Option<std::path::PathBuf>,
+
+    /// Verify a compacted snapshot against its cold archive, atomically
+    /// materialize an activated compacted state at FILE, and exit. This is the
+    /// only operation that may create the initial active-state envelope;
+    /// normal startup never trusts an unactivated snapshot directly.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "consent_ledger_activation_snapshot",
+        conflicts_with_all = [
+            "advance_consent_ledger_checkpoint",
+            "export_consent_ledger_archive_segment",
+            "export_consent_ledger_compaction_bundle",
+            "verify_consent_ledger_compaction_bundle",
+            "export_consent_ledger_compacted_snapshot",
+            "verify_consent_ledger_compacted_snapshot"
+        ]
+    )]
+    activate_consent_ledger_compacted_state: Option<std::path::PathBuf>,
+
+    /// Compacted snapshot input for
+    /// `--activate-consent-ledger-compacted-state`.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "activate_consent_ledger_compacted_state"
+    )]
+    consent_ledger_activation_snapshot: Option<std::path::PathBuf>,
+
+    /// Detailed cold archive segment used to verify compacted-state
+    /// activation. Repeat in chronological order from genesis.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "activate_consent_ledger_compacted_state"
+    )]
+    consent_ledger_activation_archive_segment: Vec<std::path::PathBuf>,
+
     /// Independently retained signed checkpoint that the current consent
     /// ledger must contain as an exact prefix. Store this outside the daemon
     /// state directory or backup set being restored; otherwise an attacker can
@@ -2006,9 +2051,164 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    info!(addr = %args.listen, "xenia-peer daemon listening");
-
     let signing_key = load_or_create_signing_key(&args.operator_key_path)?;
+
+    if let Some(output_path) = args
+        .activate_consent_ledger_compacted_state
+        .as_deref()
+    {
+        let snapshot_path = args
+            .consent_ledger_activation_snapshot
+            .as_deref()
+            .expect("clap requires an activation snapshot");
+        if args.consent_ledger_activation_archive_segment.is_empty() {
+            return Err(
+                "--activate-consent-ledger-compacted-state requires at least one \
+                 --consent-ledger-activation-archive-segment"
+                    .into(),
+            );
+        }
+        if args.consent_ledger_activation_archive_segment.len()
+            > xenia_ledger::MAX_LEDGER_ARCHIVE_SEQUENCE_SEGMENTS
+        {
+            return Err(format!(
+                "compacted-state activation has {} archive segments; maximum is {}",
+                args.consent_ledger_activation_archive_segment.len(),
+                xenia_ledger::MAX_LEDGER_ARCHIVE_SEQUENCE_SEGMENTS
+            )
+            .into());
+        }
+        let snapshot: consent_compaction::ConsentCompactedSnapshotV1 =
+            audit_ledger_store::read_bounded_json(
+                snapshot_path,
+                consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES,
+                "consent compacted snapshot",
+            )
+            .map_err(|err| -> Box<dyn std::error::Error> {
+                format!(
+                    "failed to read activation snapshot {}: {err}",
+                    snapshot_path.display()
+                )
+                .into()
+            })?;
+        let mut archive_segments = Vec::with_capacity(
+            args.consent_ledger_activation_archive_segment.len(),
+        );
+        let mut aggregate_bytes = 0u64;
+        for path in &args.consent_ledger_activation_archive_segment {
+            let (segment, bytes) = audit_ledger_store::read_bounded_json_with_size(
+                path,
+                consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES,
+                "consent ledger activation archive segment",
+            )
+            .map_err(|err| -> Box<dyn std::error::Error> {
+                format!(
+                    "failed to read activation archive segment {}: {err}",
+                    path.display()
+                )
+                .into()
+            })?;
+            aggregate_bytes = aggregate_bytes
+                .checked_add(bytes)
+                .ok_or("activation archive input byte count overflow")?;
+            if aggregate_bytes
+                > consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
+            {
+                return Err(format!(
+                    "activation archive inputs exceed {} bytes",
+                    consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
+                )
+                .into());
+            }
+            archive_segments.push(segment);
+        }
+        let active = consent_compaction::ConsentCompactedActiveStateV1::activate(
+            snapshot,
+            &archive_segments,
+            &signing_key,
+            now_ms() / 1_000,
+        )
+        .map_err(|err| -> Box<dyn std::error::Error> {
+            format!("consent compacted-state activation failed: {err}").into()
+        })?;
+        crate::consent_ledger_persistence::persist_compacted_active_state_atomic(
+            output_path,
+            &active,
+        )
+        .map_err(|err| -> Box<dyn std::error::Error> {
+            format!(
+                "failed to persist activated compacted consent state {}: {err}",
+                output_path.display()
+            )
+            .into()
+        })?;
+        println!("consent-ledger compacted active state created");
+        println!("path: {}", output_path.display());
+        println!(
+            "archived entries: {}",
+            active.activation_snapshot.recovery_summary.archived_entry_count
+        );
+        println!("resident suffix entries: {}", active.resident_entries.len());
+        println!("total entries: {}", active.current_checkpoint.entry_count);
+        println!("state blake3: {}", hex::encode(active.state_digest));
+        return Ok(());
+    }
+
+    let (ledger, ledger_persister, compacted_state_loaded): (
+        xenia_ledger::Chain,
+        crate::consent_ledger_persistence::SharedConsentLedgerPersister,
+        bool,
+    ) = if let Some(path) = args.consent_ledger_compacted_state.as_deref() {
+        let (active, restored) =
+            crate::consent_ledger_persistence::load_compacted_active_state(
+                path,
+                &signing_key,
+            )
+            .map_err(|err| -> Box<dyn std::error::Error> {
+                format!(
+                    "failed to load --consent-ledger-compacted-state {}: {err}",
+                    path.display()
+                )
+                .into()
+            })?;
+        info!(
+            path = %path.display(),
+            total_entries = restored.chain.entry_count(),
+            resident_entries = restored.chain.resident_len(),
+            archived_replay_actions = restored.archived_replay_action_count(),
+            archived_terminal_sessions = restored.archived_terminal_session_count(),
+            "compacted consent ledger loaded and verified before listener startup"
+        );
+        let persister = std::sync::Arc::new(
+            crate::consent_ledger_persistence::CompactedConsentLedgerPersister::new(
+                path.to_path_buf(),
+                active,
+            ),
+        );
+        (restored.chain, persister, true)
+    } else {
+        let path = &args.consent_ledger_path;
+        let ledger = audit_ledger_store::load_verified(path, &signing_key).map_err(
+            |err| -> Box<dyn std::error::Error> {
+                format!(
+                    "failed to load --consent-ledger-path {}: {err}",
+                    path.display()
+                )
+                .into()
+            },
+        )?;
+        info!(
+            path = %path.display(),
+            entries = ledger.len(),
+            "complete consent ledger loaded and verified before listener startup"
+        );
+        let persister = std::sync::Arc::new(
+            crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
+                path.clone(),
+            ),
+        );
+        (ledger, persister, false)
+    };
 
     let mut telemetry = SysinfoTelemetryStream::new();
     let mut audio = build_audio_source(args.audio)?;
@@ -2020,33 +2220,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "daemon audio codec configured"
     );
 
-    // Fails closed: a present-but-corrupt-or-tampered consent-ledger file
-    // refuses startup rather than being silently trusted or discarded.
-    // See `audit_ledger_store`'s module doc comment for the two gaps this
-    // closes (no persistence at all, and an unverified reload path).
-    let ledger_path = std::sync::Arc::new(args.consent_ledger_path.clone());
-    let ledger = audit_ledger_store::load_verified(&ledger_path, &signing_key).map_err(
-        |err| -> Box<dyn std::error::Error> {
-            format!(
-                "failed to load --consent-ledger-path {}: {err}",
-                ledger_path.display()
-            )
-            .into()
-        },
-    )?;
-    info!(
-        path = %ledger_path.display(),
-        entries = ledger.len(),
-        "consent ledger loaded and verified"
-    );
-
-    let ledger_persister: crate::consent_ledger_persistence::SharedConsentLedgerPersister =
-        std::sync::Arc::new(
-            crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
-                args.consent_ledger_path.clone(),
-            ),
-        );
-
     let checkpoint_freshness = xenia_ledger::CheckpointFreshnessPolicy {
         max_age_secs: args.trusted_consent_ledger_checkpoint_max_age_secs,
         max_future_skew_secs: args
@@ -2054,6 +2227,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let continuity_anchor_configured = args.trusted_consent_ledger_checkpoint.is_some()
         || args.trusted_consent_ledger_witness_bundle.is_some();
+    if compacted_state_loaded && args.trusted_consent_ledger_key_transition.is_some() {
+        return Err(
+            "--trusted-consent-ledger-key-transition is not yet supported with an activated compacted ledger; retain the complete successor epoch or use a same-key checkpoint/witness anchor"
+                .into(),
+        );
+    }
+    let complete_ledger_operation_requested =
+        args.export_consent_ledger_archive_segment.is_some()
+            || args.export_consent_ledger_compaction_bundle.is_some()
+            || args.verify_consent_ledger_compaction_bundle.is_some()
+            || args.export_consent_ledger_compacted_snapshot.is_some();
+    if compacted_state_loaded && complete_ledger_operation_requested {
+        return Err(
+            "archive and compaction-preflight operations currently require a complete genesis-based consent ledger; activated compacted state supports normal append, checkpoint, witness, and runtime paths only"
+                .into(),
+        );
+    }
     if args.trusted_consent_ledger_checkpoint_max_age_secs.is_some()
         && !continuity_anchor_configured
     {
