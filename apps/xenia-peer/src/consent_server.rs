@@ -13,9 +13,7 @@ use std::sync::Arc;
 use futures::StreamExt;
 use tokio::net::TcpListener;
 
-use crate::consent_authority::{
-    ConsentDecisionService, ConsentFollowup, MAX_CONSENT_ACTION_BYTES,
-};
+use crate::consent_authority::{ConsentDecisionService, ConsentFollowup, MAX_CONSENT_ACTION_BYTES};
 
 /// The plaintext consent transport for a single session.
 pub(crate) struct ConsentServer {
@@ -124,9 +122,7 @@ mod tests {
             crate::operator_revocations::OperatorRevocations::empty(),
             ledger,
             Arc::new(
-                crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
-                    ledger_path,
-                ),
+                crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(ledger_path),
             ),
             crate::consent_authority::ConsentHistoricalIndexes::default(),
             grant_tx,
@@ -167,14 +163,14 @@ mod tests {
         let daemon = SigningKey::generate(&mut rand::thread_rng());
         let ledger = Arc::new(TokioMutex::new(Chain::new(daemon)));
         let (approve_tx, approve_rx) = oneshot::channel();
-        let service = service(
+        let approve_service = service(
             approve_tx,
             ledger,
             std::env::temp_dir().join("xenia-consent-decisions-test.ledger"),
             Uuid::from_u128(2),
         );
 
-        let followup = service
+        let followup = approve_service
             .apply(DecodedConsent {
                 action: ConsentAction::Approve,
                 authorized: None,
@@ -182,16 +178,16 @@ mod tests {
             .await;
         assert!(matches!(followup, ConsentFollowup::KeepServing));
         assert!(approve_rx.await.unwrap());
-        assert_eq!(service.state(), ConsentSessionState::Approved);
+        assert_eq!(approve_service.state(), ConsentSessionState::Approved);
 
-        let followup = service
+        let followup = approve_service
             .apply(DecodedConsent {
                 action: ConsentAction::Revoke,
                 authorized: None,
             })
             .await;
         assert!(matches!(followup, ConsentFollowup::Stop));
-        assert!(service.is_session_revoked());
+        assert!(approve_service.is_session_revoked());
 
         let daemon = SigningKey::generate(&mut rand::thread_rng());
         let (deny_tx, deny_rx) = oneshot::channel();
@@ -235,7 +231,7 @@ mod tests {
         let (tx, rx) = oneshot::channel();
         let service = service(
             tx,
-            Arc::new(TokioMutex::new(Chain::new(daemon))),
+            Arc::new(TokioMutex::new(Chain::new(daemon.clone()))),
             ledger_path.clone(),
             Uuid::from_u128(9),
         );
@@ -247,9 +243,15 @@ mod tests {
             .await;
         assert!(matches!(outcome, ConsentFollowup::KeepServing));
         assert!(rx.await.unwrap());
-        let bytes = std::fs::read(&ledger_path).unwrap();
-        let entries: Vec<xenia_ledger::LedgerEntry> = bincode::deserialize(&bytes).unwrap();
-        assert_eq!(entries.len(), 1);
+        // `persist_entries_atomic` prepends a magic/schema/count/head-hash
+        // header before the bincode payload (see `audit_ledger_store.rs`) --
+        // reading the raw file straight into `bincode::deserialize` (as a
+        // prior version of this test did) misaligns every field against
+        // that header and fails opaquely ("overflow deserializing
+        // SystemTime"). `load_verified` is the real reader: it strips the
+        // header, checks it, and verifies every entry's signature.
+        let chain = crate::audit_ledger_store::load_verified(&ledger_path, &daemon).unwrap();
+        assert_eq!(chain.iter().count(), 1);
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -263,7 +265,7 @@ mod tests {
 
         let mut oversized = connect(&addr).await;
         oversized
-            .send(Message::Text("x".repeat(MAX_CONSENT_ACTION_BYTES + 1).into()))
+            .send(Message::Text("x".repeat(MAX_CONSENT_ACTION_BYTES + 1)))
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;

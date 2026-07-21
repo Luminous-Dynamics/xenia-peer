@@ -11,8 +11,8 @@
 //! a future transport from accidentally implementing weaker state semantics.
 
 use std::collections::{BTreeSet, HashSet};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{Mutex, oneshot, watch};
@@ -202,11 +202,7 @@ impl ConsentSessionState {
     fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Denied
-                | Self::Revoked
-                | Self::Failed
-                | Self::Expired
-                | Self::LeaseExpired
+            Self::Denied | Self::Revoked | Self::Failed | Self::Expired | Self::LeaseExpired
         )
     }
 
@@ -299,6 +295,7 @@ pub(crate) struct ConsentDecisionService {
 
 impl ConsentDecisionService {
     /// Construct the single consent authority for a daemon session.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         require_operator_auth: bool,
         auth_state: Arc<OperatorAuthState>,
@@ -332,10 +329,7 @@ impl ConsentDecisionService {
     }
 
     #[cfg(test)]
-    fn with_ledger_persister(
-        mut self,
-        ledger_persister: SharedConsentLedgerPersister,
-    ) -> Self {
+    fn with_ledger_persister(mut self, ledger_persister: SharedConsentLedgerPersister) -> Self {
         self.ledger_persister = ledger_persister;
         self
     }
@@ -367,6 +361,11 @@ impl ConsentDecisionService {
     }
 
     /// Whether the live runtime must stop privileged frame flow.
+    ///
+    /// Not yet called from any production frame-forwarding path -- only
+    /// exercised by tests. Disclosed here rather than silently wired into
+    /// new production logic under a lint-cleanup pass.
+    #[allow(dead_code)]
     pub(crate) fn is_session_revoked(&self) -> bool {
         self.state() == ConsentSessionState::Revoked
     }
@@ -520,9 +519,16 @@ impl ConsentDecisionService {
         if self.state() != ConsentSessionState::Approved {
             return false;
         }
-        let approving_operator = match self.approving_operator_id.read() {
-            Ok(operator) => operator.clone(),
-            Err(_) => {
+        // Resolve the (non-Send) std::sync::RwLockReadGuard to a plain owned
+        // value in a match with no `.await` in either arm, so nothing
+        // guard-typed is ever live across the `.await` below.
+        let read_result = match self.approving_operator_id.read() {
+            Ok(operator) => Ok(operator.clone()),
+            Err(_) => Err(()),
+        };
+        let approving_operator = match read_result {
+            Ok(operator) => operator,
+            Err(()) => {
                 tracing::error!("approving-operator lock poisoned; revoking session fail-closed");
                 self.persist_lifecycle_transition(
                     ConsentTerminationReason::ApproverRevoked,
@@ -634,8 +640,10 @@ impl ConsentDecisionService {
             .await
     }
 
+    #[cfg(test)]
     async fn apply_at(&self, decoded: DecodedConsent, now: u64) -> ConsentFollowup {
-        self.apply_with_commit_clock(decoded, now, move || now).await
+        self.apply_with_commit_clock(decoded, now, move || now)
+            .await
     }
 
     async fn apply_with_commit_clock<F>(
@@ -777,11 +785,9 @@ impl ConsentDecisionService {
                 ConsentFollowup::Stop,
                 Some(false),
             ),
-            (ConsentSessionState::Approved, ConsentAction::Revoke) => (
-                ConsentSessionState::Revoked,
-                ConsentFollowup::Stop,
-                None,
-            ),
+            (ConsentSessionState::Approved, ConsentAction::Revoke) => {
+                (ConsentSessionState::Revoked, ConsentFollowup::Stop, None)
+            }
             // Replays of the already-effective action are idempotent and do not
             // append duplicate audit records.
             (ConsentSessionState::Approved, ConsentAction::Approve) => {
@@ -794,7 +800,11 @@ impl ConsentDecisionService {
             // Deny after approval is not an alias for revoke; terminal states
             // never reopen, and a failed ceremony accepts no later decisions.
             (state, action) => {
-                tracing::warn!(?state, ?action, "consent action invalid for current lifecycle state");
+                tracing::warn!(
+                    ?state,
+                    ?action,
+                    "consent action invalid for current lifecycle state"
+                );
                 return if state.is_terminal() {
                     ConsentFollowup::Stop
                 } else {
@@ -811,9 +821,7 @@ impl ConsentDecisionService {
             let mut chain = self.ledger.lock().await;
             let committed = tokio::task::block_in_place(|| {
                 chain
-                    .append_transactional_chain(event, |chain| {
-                        self.ledger_persister.persist(chain)
-                    })
+                    .append_transactional_chain(event, |chain| self.ledger_persister.persist(chain))
                     .map(|_entry| ())
             });
             drop(chain);
@@ -835,8 +843,7 @@ impl ConsentDecisionService {
         // Sample the lease epoch only after any authenticated action has been
         // durably committed. A slow fsync therefore cannot consume part of the
         // configured authorization lifetime before the grant exists.
-        let approval_committed_at =
-            (next == ConsentSessionState::Approved).then(commit_clock);
+        let approval_committed_at = (next == ConsentSessionState::Approved).then(commit_clock);
 
         if next == ConsentSessionState::Approved {
             let approved_at = approval_committed_at
@@ -847,32 +854,48 @@ impl ConsentDecisionService {
                 .map(|authorized| authorized.operator_id.clone());
             let authorization_deadline_unix_secs = (self.authorization_lease_secs > 0)
                 .then(|| approved_at.saturating_add(self.authorization_lease_secs));
-            let approval_receipt = decoded.authorized.as_ref().map(|authorized| {
-                ConsentApprovalReceipt {
-                    action_id: authorized.action_id,
-                    offer_digest: authorized.offer_digest,
-                    operator_id: authorized.operator_id.clone(),
-                    operator_ed25519_pubkey: authorized.ed25519_pubkey,
-                    authorization_deadline_unix_secs,
+            let approval_receipt =
+                decoded
+                    .authorized
+                    .as_ref()
+                    .map(|authorized| ConsentApprovalReceipt {
+                        action_id: authorized.action_id,
+                        offer_digest: authorized.offer_digest,
+                        operator_id: authorized.operator_id.clone(),
+                        operator_ed25519_pubkey: authorized.ed25519_pubkey,
+                        authorization_deadline_unix_secs,
+                    });
+            // std::sync::RwLockWriteGuard is deliberately !Send, so it must
+            // never be alive across an `.await` point in this async fn --
+            // not even nested inside an unrelated match arm elsewhere in the
+            // same generator. Resolve both locks to a plain (Send) bool
+            // fully synchronously first, then do the shared async
+            // fail-closed cleanup once, outside any lock scope.
+            let poisoned = match self.approving_operator_id.write() {
+                Ok(mut stored) => {
+                    *stored = approving_operator;
+                    match self.approval_receipt.write() {
+                        Ok(mut stored) => {
+                            *stored = approval_receipt;
+                            false
+                        }
+                        Err(_) => {
+                            tracing::error!(
+                                "approval-receipt lock poisoned; refusing grant fail-closed"
+                            );
+                            true
+                        }
+                    }
                 }
-            });
-            match self.approving_operator_id.write() {
-                Ok(mut stored) => *stored = approving_operator,
                 Err(_) => {
                     tracing::error!("approving-operator lock poisoned; refusing grant fail-closed");
-                    self.publish_state(ConsentSessionState::Failed);
-                    self.grant_tx.lock().await.take();
-                    return ConsentFollowup::Stop;
+                    true
                 }
-            }
-            match self.approval_receipt.write() {
-                Ok(mut stored) => *stored = approval_receipt,
-                Err(_) => {
-                    tracing::error!("approval-receipt lock poisoned; refusing grant fail-closed");
-                    self.publish_state(ConsentSessionState::Failed);
-                    self.grant_tx.lock().await.take();
-                    return ConsentFollowup::Stop;
-                }
+            };
+            if poisoned {
+                self.publish_state(ConsentSessionState::Failed);
+                self.grant_tx.lock().await.take();
+                return ConsentFollowup::Stop;
             }
         }
         if let Some(approved_at) = approval_committed_at {
@@ -968,8 +991,7 @@ mod tests {
             ledger,
             Arc::new(
                 crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
-                    std::env::temp_dir()
-                        .join(format!("unused-consent-ledger-{}", Uuid::new_v4())),
+                    std::env::temp_dir().join(format!("unused-consent-ledger-{}", Uuid::new_v4())),
                 ),
             ),
             crate::consent_authority::ConsentHistoricalIndexes::default(),
@@ -1199,7 +1221,7 @@ mod tests {
         assert!(grant_rx.try_recv().is_err(), "grant must remain unresolved");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn revoking_the_approving_operator_revokes_the_active_session() {
         let daemon = SigningKey::generate(&mut rand::thread_rng());
         let ledger = Arc::new(Mutex::new(Chain::new(daemon)));
@@ -1300,8 +1322,8 @@ mod tests {
         let daemon = SigningKey::generate(&mut rand::thread_rng());
         let ledger = Arc::new(Mutex::new(Chain::new(daemon)));
         let (grant_tx, grant_rx) = oneshot::channel();
-        let service = service_with_sender(grant_tx, ledger.clone())
-            .with_ledger_persister(Arc::new(
+        let service =
+            service_with_sender(grant_tx, ledger.clone()).with_ledger_persister(Arc::new(
                 crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
                     dir.join("consent.ledger"),
                 ),

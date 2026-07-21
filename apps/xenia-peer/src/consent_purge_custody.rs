@@ -9,13 +9,12 @@
 
 use std::collections::BTreeSet;
 
-use ed25519_dalek::{
-    Signature, Signer, SigningKey, Verifier as DalekVerifier, VerifyingKey,
-};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier as DalekVerifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::consent_purge_retention::ConsentPurgeRetentionSubjectV1;
+use serde_big_array::BigArray;
 
 pub(crate) const CONSENT_PURGE_CUSTODY_ATTESTATION_SCHEMA: &str =
     "xenia-consent-purge-custody-attestation-v1";
@@ -48,6 +47,7 @@ pub(crate) struct ConsentPurgeCustodyAttestationV1 {
     pub(crate) observed_at_unix_secs: u64,
     pub(crate) available_until_unix_secs: u64,
     pub(crate) custodian_public_key: [u8; 32],
+    #[serde(with = "BigArray")]
     pub(crate) signature: [u8; 64],
 }
 
@@ -170,9 +170,7 @@ impl ConsentPurgeCustodyAttestationV1 {
         if self.available_until_unix_secs < subject.retain_until_unix_secs {
             return Err(ConsentPurgeCustodyError::AvailabilityTooShort);
         }
-        if self.observed_at_unix_secs
-            > now_unix_secs.saturating_add(maximum_future_skew_secs)
-        {
+        if self.observed_at_unix_secs > now_unix_secs.saturating_add(maximum_future_skew_secs) {
             return Err(ConsentPurgeCustodyError::ObservationFromFuture);
         }
         if now_unix_secs > self.available_until_unix_secs {
@@ -246,7 +244,8 @@ impl ConsentPurgeCustodyBundleV1 {
             return Err(ConsentPurgeCustodyError::DuplicateReplicaId);
         }
         self.attestations.push(attestation);
-        self.attestations.sort_by_key(|entry| entry.custodian_public_key);
+        self.attestations
+            .sort_by_key(|entry| entry.custodian_public_key);
         Ok(())
     }
 
@@ -270,7 +269,10 @@ impl ConsentPurgeCustodyBundleV1 {
                 maximum: MAX_PURGE_CUSTODY_ATTESTATIONS,
             });
         }
-        let trusted = trusted_custodian_keys.iter().copied().collect::<BTreeSet<_>>();
+        let trusted = trusted_custodian_keys
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
         let mut keys = BTreeSet::new();
         let mut replicas = BTreeSet::new();
         let mut previous_key: Option<[u8; 32]> = None;
@@ -404,8 +406,8 @@ fn custody_class_tag(class: ConsentPurgeCustodyClassV1) -> u8 {
 }
 
 fn append_bytes(output: &mut Vec<u8>, bytes: &[u8]) -> Result<(), ConsentPurgeCustodyError> {
-    let length = u32::try_from(bytes.len())
-        .map_err(|_| ConsentPurgeCustodyError::EncodingLengthOverflow)?;
+    let length =
+        u32::try_from(bytes.len()).map_err(|_| ConsentPurgeCustodyError::EncodingLengthOverflow)?;
     output.extend_from_slice(&length.to_be_bytes());
     output.extend_from_slice(bytes);
     Ok(())
@@ -558,11 +560,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            attestation.verify(
-                &subject,
-                20_001,
-                MAX_PURGE_CUSTODY_FUTURE_SKEW_SECS,
-            ),
+            attestation.verify(&subject, 20_001, MAX_PURGE_CUSTODY_FUTURE_SKEW_SECS,),
             Err(ConsentPurgeCustodyError::AvailabilityExpired)
         ));
     }

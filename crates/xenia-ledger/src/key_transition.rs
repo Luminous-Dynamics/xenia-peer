@@ -17,8 +17,8 @@ use serde_big_array::BigArray;
 use thiserror::Error;
 
 use crate::{
-    checkpoint_fingerprint, CheckpointContinuityError, CheckpointError, LedgerCheckpoint,
-    LedgerEntry, Verifier,
+    CheckpointContinuityError, CheckpointError, LedgerCheckpoint, LedgerEntry, Verifier,
+    checkpoint_fingerprint,
 };
 
 /// Stable schema label for [`LedgerKeyTransition`].
@@ -73,8 +73,7 @@ impl LedgerKeyTransition {
         timestamp_unix_secs: u64,
     ) -> Result<Self, LedgerKeyTransitionError> {
         Verifier::verify_checkpoint(&previous_checkpoint)?;
-        if previous_checkpoint.ledger_public_key
-            != previous_signing_key.verifying_key().to_bytes()
+        if previous_checkpoint.ledger_public_key != previous_signing_key.verifying_key().to_bytes()
         {
             return Err(LedgerKeyTransitionError::PreviousKeyMismatch);
         }
@@ -158,20 +157,15 @@ impl Verifier {
             });
         }
         Self::verify_checkpoint(&transition.previous_checkpoint)?;
-        if transition.timestamp_unix_secs
-            < transition.previous_checkpoint.timestamp_unix_secs
-        {
+        if transition.timestamp_unix_secs < transition.previous_checkpoint.timestamp_unix_secs {
             return Err(LedgerKeyTransitionError::TransitionPredatesCheckpoint);
         }
-        if transition.new_ledger_public_key
-            == transition.previous_checkpoint.ledger_public_key
-        {
+        if transition.new_ledger_public_key == transition.previous_checkpoint.ledger_public_key {
             return Err(LedgerKeyTransitionError::KeyUnchanged);
         }
-        let previous_key = VerifyingKey::from_bytes(
-            &transition.previous_checkpoint.ledger_public_key,
-        )
-        .map_err(|_| CheckpointError::BadPublicKey)?;
+        let previous_key =
+            VerifyingKey::from_bytes(&transition.previous_checkpoint.ledger_public_key)
+                .map_err(|_| CheckpointError::BadPublicKey)?;
         let new_key = VerifyingKey::from_bytes(&transition.new_ledger_public_key)
             .map_err(|_| LedgerKeyTransitionError::BadNewPublicKey)?;
         let fingerprint = checkpoint_fingerprint(&transition.previous_checkpoint)?;

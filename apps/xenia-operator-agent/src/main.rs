@@ -101,7 +101,7 @@ use xenia_operator_agent_proto::{
 use xenia_operator_proto::{OperatorEnrollmentRecord, OperatorRole};
 use xenia_wire::handshake::ViewerHandshake;
 use xenia_wire::handshake_highsec::{
-    derive_ml_dsa_87_seed_from_ed25519_secret, ViewerHandshakeHighSec, ML_DSA_87_PK_LEN,
+    ML_DSA_87_PK_LEN, ViewerHandshakeHighSec, derive_ml_dsa_87_seed_from_ed25519_secret,
 };
 use zeroize::Zeroizing;
 
@@ -676,7 +676,9 @@ async fn sign_consent_action(
     const CONSENT_OFFER_CLOCK_SKEW_SECS: u64 = 60;
     let now = unix_now_secs();
     if !offer.is_issued_by(now, CONSENT_OFFER_CLOCK_SKEW_SECS) {
-        return Err(bad_request("consent offer has an invalid or future time interval"));
+        return Err(bad_request(
+            "consent offer has an invalid or future time interval",
+        ));
     }
     if req.action == xenia_operator_proto::ConsentAction::Approve
         && !offer.can_approve_at(now, CONSENT_OFFER_CLOCK_SKEW_SECS)
@@ -2217,12 +2219,7 @@ mod tests {
         scope: xenia_operator_proto::ConsentScopeV1,
     ) -> xenia_operator_proto::AttestedConsentOfferV2 {
         let now = unix_now_secs();
-        attested_test_offer_with_window(
-            host,
-            scope,
-            now.saturating_sub(1),
-            now.saturating_add(600),
-        )
+        attested_test_offer_with_window(host, scope, now.saturating_sub(1), now.saturating_add(600))
     }
 
     /// Builds a valid `/v1/sign/consent-action` body carrying `cert`, a
@@ -2345,12 +2342,14 @@ mod tests {
         );
         let ed_sig_bytes: [u8; 64] = decode_fixed_hex(&resp.ed_signature_hex).unwrap();
         let ed_sig = ed25519_dalek::Signature::from_bytes(&ed_sig_bytes);
-        assert!(HandshakeManager::verify(
-            &expected_manager.identity_public_key(),
-            &wrong_transcript,
-            &ed_sig,
-        )
-        .is_err());
+        assert!(
+            HandshakeManager::verify(
+                &expected_manager.identity_public_key(),
+                &wrong_transcript,
+                &ed_sig,
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]
@@ -2402,12 +2401,14 @@ mod tests {
         );
         let ed_sig_bytes: [u8; 64] = decode_fixed_hex(&resp.ed_signature_hex).unwrap();
         let ed_sig = ed25519_dalek::Signature::from_bytes(&ed_sig_bytes);
-        assert!(HandshakeManager::verify(
-            &expected_manager.identity_public_key(),
-            &wrong_transcript,
-            &ed_sig,
-        )
-        .is_err());
+        assert!(
+            HandshakeManager::verify(
+                &expected_manager.identity_public_key(),
+                &wrong_transcript,
+                &ed_sig,
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]
@@ -2575,8 +2576,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sign_consent_action_fails_closed_when_a_new_host_needs_confirmation_and_none_is_available(
-    ) {
+    async fn sign_consent_action_fails_closed_when_a_new_host_needs_confirmation_and_none_is_available()
+     {
         let state = test_state_with_host_trust("secret", &["http://localhost:8134"], false);
         let app = build_router(state);
         let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
@@ -2691,8 +2692,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sign_revoke_fails_closed_when_the_host_itself_needs_confirmation_and_none_is_available(
-    ) {
+    async fn sign_revoke_fails_closed_when_the_host_itself_needs_confirmation_and_none_is_available()
+     {
         let state = test_state_with_host_trust("secret", &["http://localhost:8134"], false);
         let app = build_router(state);
         let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
@@ -2876,8 +2877,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sign_replace_key_fails_closed_when_the_host_itself_needs_confirmation_and_none_is_available(
-    ) {
+    async fn sign_replace_key_fails_closed_when_the_host_itself_needs_confirmation_and_none_is_available()
+     {
         let state = test_state_with_host_trust("secret", &["http://localhost:8134"], false);
         let app = build_router(state);
         let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
@@ -3246,8 +3247,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handshake_finish_fails_closed_when_the_new_host_needs_confirmation_and_none_is_available(
-    ) {
+    async fn handshake_finish_fails_closed_when_the_new_host_needs_confirmation_and_none_is_available()
+     {
         let state = test_state_with_host_trust("secret", &["http://localhost:8134"], false);
         let app = build_router(state);
 

@@ -24,10 +24,7 @@ impl ProtectedPathSet {
         }
     }
 
-    pub(crate) fn protect_file(
-        mut self,
-        path: &Path,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub(crate) fn protect_file(mut self, path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         self.exact.push(std::fs::canonicalize(path).map_err(|err| {
             format!(
                 "failed to canonicalize protected {} input {}: {err}",
@@ -48,10 +45,7 @@ impl ProtectedPathSet {
         Ok(self)
     }
 
-    pub(crate) fn protect_tree(
-        mut self,
-        path: &Path,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub(crate) fn protect_tree(mut self, path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         self.trees.push(std::fs::canonicalize(path).map_err(|err| {
             format!(
                 "failed to canonicalize protected {} tree {}: {err}",
@@ -91,9 +85,7 @@ impl ProtectedPathSet {
     }
 }
 
-pub(crate) fn normalized_output_path(
-    path: &Path,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
+pub(crate) fn normalized_output_path(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
     if path.exists() {
         return Ok(std::fs::canonicalize(path)?);
     }
@@ -165,9 +157,11 @@ mod tests {
         let protected = ProtectedPathSet::new("test")
             .protect_tree(&evidence)
             .unwrap();
-        assert!(protected
-            .ensure_output(&evidence.join("replacement.json"))
-            .is_err());
+        assert!(
+            protected
+                .ensure_output(&evidence.join("replacement.json"))
+                .is_err()
+        );
     }
 
     #[test]

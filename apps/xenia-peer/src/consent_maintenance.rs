@@ -124,13 +124,9 @@ impl OneShotOperation {
             Self::ExportRetentionRenewal => "--export-consent-purge-retention-renewal",
             Self::SignCustodyAssertion => "--sign-consent-purge-custody",
             Self::SignFinalDestructionPlan => "--sign-consent-final-destruction-plan",
-            Self::VerifyFinalDestructionReadiness => {
-                "--verify-consent-final-destruction-readiness"
-            }
+            Self::VerifyFinalDestructionReadiness => "--verify-consent-final-destruction-readiness",
             Self::ExportFinalDestructionPlan => "--export-consent-final-destruction-plan",
-            Self::ExportFinalDestructionReadiness => {
-                "--export-consent-final-destruction-readiness"
-            }
+            Self::ExportFinalDestructionReadiness => "--export-consent-final-destruction-readiness",
             Self::ActivateCompactedState => "--activate-consent-ledger-compacted-state",
             Self::AdvanceCompactedStatePin => "--advance-consent-ledger-compacted-state-pin",
             Self::ExportCompactionGcCertificate => {
@@ -158,7 +154,11 @@ fn push_if(operations: &mut Vec<OneShotOperation>, condition: bool, operation: O
 pub(crate) fn selected_one_shot_operations(args: &Args) -> Vec<OneShotOperation> {
     let mut operations = Vec::new();
 
-    push_if(&mut operations, args.m1_runtime_smoke, OneShotOperation::M1RuntimeSmoke);
+    push_if(
+        &mut operations,
+        args.m1_runtime_smoke,
+        OneShotOperation::M1RuntimeSmoke,
+    );
     push_if(
         &mut operations,
         args.verify_evidence_bundle.is_some(),
@@ -296,12 +296,14 @@ pub(crate) fn selected_one_shot_operations(args: &Args) -> Vec<OneShotOperation>
     );
     push_if(
         &mut operations,
-        args.export_consent_ledger_compaction_gc_certificate.is_some(),
+        args.export_consent_ledger_compaction_gc_certificate
+            .is_some(),
         OneShotOperation::ExportCompactionGcCertificate,
     );
     push_if(
         &mut operations,
-        args.verify_consent_ledger_compaction_gc_certificate.is_some(),
+        args.verify_consent_ledger_compaction_gc_certificate
+            .is_some(),
         OneShotOperation::VerifyCompactionGcCertificate,
     );
     push_if(

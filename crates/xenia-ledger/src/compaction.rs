@@ -15,8 +15,8 @@ use serde_big_array::BigArray;
 use thiserror::Error;
 
 use crate::{
-    checkpoint_fingerprint, Chain, CheckpointContinuityError, CheckpointError,
-    LedgerCheckpoint, LedgerEntry, Verifier,
+    Chain, CheckpointContinuityError, CheckpointError, LedgerCheckpoint, LedgerEntry, Verifier,
+    checkpoint_fingerprint,
 };
 
 /// Stable schema label for [`LedgerCompactionManifest`].
@@ -121,9 +121,7 @@ impl Verifier {
         {
             return Err(LedgerCompactionError::LedgerKeyMismatch);
         }
-        if manifest.timestamp_unix_secs
-            < manifest.archived_through_checkpoint.timestamp_unix_secs
-        {
+        if manifest.timestamp_unix_secs < manifest.archived_through_checkpoint.timestamp_unix_secs {
             return Err(LedgerCompactionError::ManifestPredatesArchive);
         }
         if manifest.current_checkpoint.timestamp_unix_secs != manifest.timestamp_unix_secs {
@@ -161,10 +159,8 @@ impl Verifier {
             &manifest.recovery_summary_digest,
             manifest.timestamp_unix_secs,
         );
-        let key = VerifyingKey::from_bytes(
-            &manifest.archived_through_checkpoint.ledger_public_key,
-        )
-        .map_err(|_| CheckpointError::BadPublicKey)?;
+        let key = VerifyingKey::from_bytes(&manifest.archived_through_checkpoint.ledger_public_key)
+            .map_err(|_| CheckpointError::BadPublicKey)?;
         key.verify(&message, &Signature::from_bytes(&manifest.signature))
             .map_err(|_| LedgerCompactionError::BadSignature)
     }
@@ -176,11 +172,7 @@ impl Verifier {
         public_key: &VerifyingKey,
     ) -> Result<(), LedgerCompactionError> {
         Self::verify_ledger_compaction_manifest(manifest)?;
-        Self::verify_checkpoint_prefix(
-            &manifest.archived_through_checkpoint,
-            entries,
-            public_key,
-        )?;
+        Self::verify_checkpoint_prefix(&manifest.archived_through_checkpoint, entries, public_key)?;
         Self::verify_checkpoint_prefix(&manifest.current_checkpoint, entries, public_key)?;
         Ok(())
     }
@@ -207,11 +199,7 @@ impl Chain {
         }
         let public_key = self.signing_key.verifying_key();
         let entries = self.iter().cloned().collect::<Vec<_>>();
-        Verifier::verify_checkpoint_prefix(
-            &archived_through_checkpoint,
-            &entries,
-            &public_key,
-        )?;
+        Verifier::verify_checkpoint_prefix(&archived_through_checkpoint, &entries, &public_key)?;
         if timestamp_unix_secs < archived_through_checkpoint.timestamp_unix_secs {
             return Err(LedgerCompactionError::ManifestPredatesArchive);
         }

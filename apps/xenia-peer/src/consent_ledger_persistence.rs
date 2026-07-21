@@ -19,9 +19,7 @@ use crate::audit_ledger_store::{
     AuditLedgerStoreError, MAX_AUDIT_LEDGER_BYTES, persist_entries_atomic,
     persist_owner_only_atomic, read_bounded_json,
 };
-use crate::consent_compaction::{
-    ConsentCompactedActiveStateV1, RestoredConsentStateV1,
-};
+use crate::consent_compaction::{ConsentCompactedActiveStateV1, RestoredConsentStateV1};
 
 /// Storage implementation used by transactional consent-ledger appends.
 pub(crate) trait ConsentLedgerPersister: Send + Sync {
@@ -127,8 +125,7 @@ mod tests {
     use xenia_ledger::{ConsentEventRecord, ConsentKind, LedgerArchiveSegment};
 
     use crate::consent_compaction::{
-        ConsentCompactedActiveStateV1, ConsentCompactedSnapshotV1,
-        ConsentCompactionBundleV1,
+        ConsentCompactedActiveStateV1, ConsentCompactedSnapshotV1, ConsentCompactionBundleV1,
     };
 
     fn event() -> ConsentEventRecord {
@@ -185,9 +182,7 @@ mod tests {
         let mut complete = Chain::new(key.clone());
         let genesis = complete.sign_checkpoint(100);
         complete.append(event()).unwrap();
-        let archive = vec![
-            LedgerArchiveSegment::from_chain(&complete, genesis, 101).unwrap(),
-        ];
+        let archive = vec![LedgerArchiveSegment::from_chain(&complete, genesis, 101).unwrap()];
         complete
             .append(ConsentEventRecord {
                 source_id: [0x12; 32],
@@ -197,30 +192,15 @@ mod tests {
                 scope: "screen".into(),
             })
             .unwrap();
-        let bundle = ConsentCompactionBundleV1::build(
-            &complete,
-            archive.clone(),
-            102,
-        )
-        .unwrap();
+        let bundle = ConsentCompactionBundleV1::build(&complete, archive.clone(), 102).unwrap();
         let entries = complete.iter().cloned().collect::<Vec<_>>();
-        let snapshot = ConsentCompactedSnapshotV1::build(
-            &bundle,
-            &entries,
-            &key.verifying_key(),
-        )
-        .unwrap();
-        let active = ConsentCompactedActiveStateV1::activate(
-            snapshot,
-            &archive,
-            &key,
-            103,
-        )
-        .unwrap();
+        let snapshot =
+            ConsentCompactedSnapshotV1::build(&bundle, &entries, &key.verifying_key()).unwrap();
+        let active =
+            ConsentCompactedActiveStateV1::activate(snapshot, &archive, &key, 103).unwrap();
         persist_compacted_active_state_atomic(&path, &active).unwrap();
 
-        let (activation, mut restored) =
-            load_compacted_active_state(&path, &key).unwrap();
+        let (activation, mut restored) = load_compacted_active_state(&path, &key).unwrap();
         restored
             .chain
             .append(ConsentEventRecord {

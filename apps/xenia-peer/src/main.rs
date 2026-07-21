@@ -59,12 +59,12 @@ mod consent_artifact_paths;
 mod consent_authority;
 mod consent_compaction;
 mod consent_final_destruction;
+mod consent_ledger_persistence;
+mod consent_maintenance;
 mod consent_purge;
 mod consent_purge_custody;
 mod consent_purge_retention;
 mod consent_retirement;
-mod consent_ledger_persistence;
-mod consent_maintenance;
 mod consent_server;
 mod evidence_verifier;
 mod file_transfer;
@@ -462,11 +462,7 @@ struct Args {
     /// Independently retained signed compacted-state pin. During normal
     /// compacted startup, the active state must equal or cryptographically
     /// extend this pin before any listener opens.
-    #[arg(
-        long,
-        value_name = "FILE",
-        requires = "consent_ledger_compacted_state"
-    )]
+    #[arg(long, value_name = "FILE", requires = "consent_ledger_compacted_state")]
     trusted_consent_ledger_compacted_state_pin: Option<std::path::PathBuf>,
 
     /// Atomically create or advance an independently retained compacted-state
@@ -1541,8 +1537,8 @@ fn session_capabilities(
     args: &Args,
 ) -> xenia_peer_core::RawCapabilities {
     use xenia_peer_core::{
-        AudioSourceCapability, ClipboardCapability, FileTransferCapability,
-        InputControlCapability, TelemetryCapability,
+        AudioSourceCapability, ClipboardCapability, FileTransferCapability, InputControlCapability,
+        TelemetryCapability,
     };
 
     let telemetry = match args.telemetry_level {
@@ -1620,21 +1616,20 @@ fn read_consent_archive_segments(
     let mut segments = Vec::with_capacity(paths.len());
     let mut aggregate_bytes = 0u64;
     for path in paths {
-        let remaining = consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
-            .saturating_sub(aggregate_bytes);
+        let remaining =
+            consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES.saturating_sub(aggregate_bytes);
         let (segment, bytes) = audit_ledger_store::read_bounded_json_with_size(
-            path,
-            remaining,
-            label,
+            path, remaining, label,
         )
         .map_err(|err| -> Box<dyn std::error::Error> {
             format!("failed to read {label} {}: {err}", path.display()).into()
         })?;
-        aggregate_bytes = aggregate_bytes
-            .checked_add(bytes)
-            .ok_or_else(|| -> Box<dyn std::error::Error> {
-                format!("{label} aggregate byte count overflow").into()
-            })?;
+        aggregate_bytes =
+            aggregate_bytes
+                .checked_add(bytes)
+                .ok_or_else(|| -> Box<dyn std::error::Error> {
+                    format!("{label} aggregate byte count overflow").into()
+                })?;
         if aggregate_bytes > consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES {
             return Err(format!(
                 "{label} inputs exceed {} bytes",
@@ -1690,10 +1685,8 @@ fn load_consent_retirement_evidence(
         .consent_retirement_gc_certificate
         .as_deref()
         .ok_or("consent retirement requires --consent-retirement-gc-certificate")?;
-    let (active, _) = crate::consent_ledger_persistence::load_compacted_active_state(
-        state_path,
-        signing_key,
-    )?;
+    let (active, _) =
+        crate::consent_ledger_persistence::load_compacted_active_state(state_path, signing_key)?;
     let pin: consent_compaction::ConsentCompactedStatePinV1 =
         audit_ledger_store::read_bounded_json(
             pin_path,
@@ -1754,9 +1747,12 @@ fn load_existing_signing_key(
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     let bytes = std::fs::read(path)?;
-    let seed: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| format!("signing key {} must contain exactly 32 bytes", path.display()))?;
+    let seed: [u8; 32] = bytes.try_into().map_err(|_| {
+        format!(
+            "signing key {} must contain exactly 32 bytes",
+            path.display()
+        )
+    })?;
     Ok(SigningKey::from_bytes(&seed))
 }
 
@@ -1773,9 +1769,13 @@ fn retirement_ledger_verifying_key(
         .map_err(|_| "consent retirement ledger public key is not a valid Ed25519 key".into())
 }
 
+/// Trusted witness public keys and the minimum quorum of them required,
+/// parsed from CLI args for one of the purge/retention/retirement ceremonies.
+type WitnessPolicy = (Vec<[u8; 32]>, usize);
+
 fn parse_retirement_witness_policy(
     args: &Args,
-) -> Result<(Vec<[u8; 32]>, usize), Box<dyn std::error::Error>> {
+) -> Result<WitnessPolicy, Box<dyn std::error::Error>> {
     if args.trusted_consent_retirement_witness_key_hex.is_empty() {
         return Err("retirement operation requires at least one --trusted-consent-retirement-witness-key-hex".into());
     }
@@ -1802,7 +1802,10 @@ fn parse_retirement_witness_policy(
         )
         .into());
     }
-    let distinct = keys.iter().copied().collect::<std::collections::BTreeSet<_>>();
+    let distinct = keys
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
     if distinct.len() != keys.len() {
         return Err("retirement witness trust set contains a duplicate key".into());
     }
@@ -1890,10 +1893,8 @@ fn read_purge_rollback_package(
 
 fn read_purge_retention_certificate(
     path: &std::path::Path,
-) -> Result<
-    consent_purge_retention::ConsentPurgeRetentionCertificateV1,
-    Box<dyn std::error::Error>,
-> {
+) -> Result<consent_purge_retention::ConsentPurgeRetentionCertificateV1, Box<dyn std::error::Error>>
+{
     Ok(audit_ledger_store::read_bounded_json(
         path,
         consent_purge_retention::MAX_PURGE_RETENTION_BYTES,
@@ -1903,10 +1904,8 @@ fn read_purge_retention_certificate(
 
 fn read_purge_retention_witnesses(
     path: &std::path::Path,
-) -> Result<
-    consent_purge_retention::ConsentPurgeRetentionWitnessBundleV1,
-    Box<dyn std::error::Error>,
-> {
+) -> Result<consent_purge_retention::ConsentPurgeRetentionWitnessBundleV1, Box<dyn std::error::Error>>
+{
     Ok(audit_ledger_store::read_bounded_json(
         path,
         consent_purge_retention::MAX_PURGE_RETENTION_BYTES,
@@ -1916,10 +1915,7 @@ fn read_purge_retention_witnesses(
 
 fn read_purge_retention_anchor(
     path: &std::path::Path,
-) -> Result<
-    consent_purge_retention::ConsentPurgeRetentionAnchorV1,
-    Box<dyn std::error::Error>,
-> {
+) -> Result<consent_purge_retention::ConsentPurgeRetentionAnchorV1, Box<dyn std::error::Error>> {
     Ok(audit_ledger_store::read_bounded_json(
         path,
         consent_purge_retention::MAX_PURGE_RETENTION_BYTES,
@@ -1929,10 +1925,8 @@ fn read_purge_retention_anchor(
 
 fn read_purge_retention_renewal_chain(
     path: &std::path::Path,
-) -> Result<
-    consent_purge_retention::ConsentPurgeRetentionRenewalChainV1,
-    Box<dyn std::error::Error>,
-> {
+) -> Result<consent_purge_retention::ConsentPurgeRetentionRenewalChainV1, Box<dyn std::error::Error>>
+{
     Ok(audit_ledger_store::read_bounded_json(
         path,
         consent_purge_retention::MAX_PURGE_RETENTION_BYTES,
@@ -1952,10 +1946,7 @@ fn read_purge_custody_bundle(
 
 fn read_final_destruction_plan(
     path: &std::path::Path,
-) -> Result<
-    consent_final_destruction::ConsentFinalDestructionPlanV1,
-    Box<dyn std::error::Error>,
-> {
+) -> Result<consent_final_destruction::ConsentFinalDestructionPlanV1, Box<dyn std::error::Error>> {
     Ok(audit_ledger_store::read_bounded_json(
         path,
         consent_final_destruction::MAX_FINAL_DESTRUCTION_BYTES,
@@ -1978,10 +1969,8 @@ fn read_final_destruction_approvals(
 
 fn read_final_destruction_readiness(
     path: &std::path::Path,
-) -> Result<
-    consent_final_destruction::ConsentFinalDestructionReadinessV1,
-    Box<dyn std::error::Error>,
-> {
+) -> Result<consent_final_destruction::ConsentFinalDestructionReadinessV1, Box<dyn std::error::Error>>
+{
     Ok(audit_ledger_store::read_bounded_json(
         path,
         consent_final_destruction::MAX_FINAL_DESTRUCTION_BYTES,
@@ -1991,7 +1980,7 @@ fn read_final_destruction_readiness(
 
 fn parse_purge_retention_witness_policy(
     args: &Args,
-) -> Result<(Vec<[u8; 32]>, usize), Box<dyn std::error::Error>> {
+) -> Result<WitnessPolicy, Box<dyn std::error::Error>> {
     if args
         .trusted_consent_purge_retention_witness_key_hex
         .is_empty()
@@ -2052,10 +2041,14 @@ fn ensure_purge_retention_witness_separation(
         .map(|approval| approval.witness_public_key)
         .collect::<std::collections::BTreeSet<_>>();
     if retention_keys.iter().any(|key| key == ledger_key) {
-        return Err("trusted purge-retention witness keys must be distinct from the ledger key".into());
+        return Err(
+            "trusted purge-retention witness keys must be distinct from the ledger key".into(),
+        );
     }
     if retention_keys.iter().any(|key| purge_keys.contains(key)) {
-        return Err("trusted purge-retention witness keys must be distinct from purge approval keys".into());
+        return Err(
+            "trusted purge-retention witness keys must be distinct from purge approval keys".into(),
+        );
     }
     Ok(())
 }
@@ -2065,7 +2058,7 @@ fn parse_distinct_trusted_key_policy(
     configured_quorum: Option<usize>,
     maximum: usize,
     label: &str,
-) -> Result<(Vec<[u8; 32]>, usize), Box<dyn std::error::Error>> {
+) -> Result<WitnessPolicy, Box<dyn std::error::Error>> {
     if values.is_empty() {
         return Err(format!("{label} requires at least one trusted public key").into());
     }
@@ -2083,7 +2076,10 @@ fn parse_distinct_trusted_key_policy(
         ed25519_dalek::VerifyingKey::from_bytes(key)
             .map_err(|_| format!("{label} contains a malformed Ed25519 public key"))?;
     }
-    let distinct = keys.iter().copied().collect::<std::collections::BTreeSet<_>>();
+    let distinct = keys
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
     if distinct.len() != keys.len() {
         return Err(format!("{label} contains a duplicate key").into());
     }
@@ -2098,9 +2094,7 @@ fn parse_distinct_trusted_key_policy(
     Ok((keys, quorum))
 }
 
-fn parse_purge_custody_policy(
-    args: &Args,
-) -> Result<(Vec<[u8; 32]>, usize), Box<dyn std::error::Error>> {
+fn parse_purge_custody_policy(args: &Args) -> Result<WitnessPolicy, Box<dyn std::error::Error>> {
     parse_distinct_trusted_key_policy(
         &args.trusted_consent_purge_custody_key_hex,
         args.trusted_consent_purge_custody_quorum,
@@ -2111,7 +2105,7 @@ fn parse_purge_custody_policy(
 
 fn parse_final_destruction_policy(
     args: &Args,
-) -> Result<(Vec<[u8; 32]>, usize), Box<dyn std::error::Error>> {
+) -> Result<WitnessPolicy, Box<dyn std::error::Error>> {
     parse_distinct_trusted_key_policy(
         &args.trusted_consent_final_destruction_witness_key_hex,
         args.trusted_consent_final_destruction_witness_quorum,
@@ -2306,16 +2300,19 @@ fn ensure_final_destruction_key_separation(
         return Err("final-destruction witnesses must be distinct from the ledger key".into());
     }
     if destruction_keys.iter().any(|key| excluded.contains(key)) {
-        return Err("final-destruction witnesses must be distinct from purge, retention, and custody keys".into());
+        return Err(
+            "final-destruction witnesses must be distinct from purge, retention, and custody keys"
+                .into(),
+        );
     }
     Ok(())
 }
 
-fn parse_purge_witness_policy(
-    args: &Args,
-) -> Result<(Vec<[u8; 32]>, usize), Box<dyn std::error::Error>> {
+fn parse_purge_witness_policy(args: &Args) -> Result<WitnessPolicy, Box<dyn std::error::Error>> {
     if args.trusted_consent_purge_witness_key_hex.is_empty() {
-        return Err("purge operation requires at least one --trusted-consent-purge-witness-key-hex".into());
+        return Err(
+            "purge operation requires at least one --trusted-consent-purge-witness-key-hex".into(),
+        );
     }
     let keys = args
         .trusted_consent_purge_witness_key_hex
@@ -2340,7 +2337,10 @@ fn parse_purge_witness_policy(
         )
         .into());
     }
-    let distinct = keys.iter().copied().collect::<std::collections::BTreeSet<_>>();
+    let distinct = keys
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
     if distinct.len() != keys.len() {
         return Err("purge witness trust set contains a duplicate key".into());
     }
@@ -2369,7 +2369,9 @@ fn ensure_purge_witness_separation(
         return Err("trusted purge witness keys must be distinct from the ledger key".into());
     }
     if purge_keys.iter().any(|key| retirement_keys.contains(key)) {
-        return Err("trusted purge witness keys must be distinct from retirement approval keys".into());
+        return Err(
+            "trusted purge witness keys must be distinct from retirement approval keys".into(),
+        );
     }
     Ok(())
 }
@@ -2381,7 +2383,10 @@ fn ensure_retirement_candidates_are_unprotected(
     let quarantine_root = std::path::Path::new(&plan.quarantine_root);
     for candidate in &plan.candidates {
         let canonical = std::fs::canonicalize(&candidate.canonical_path)?;
-        if protected_paths.iter().any(|protected| protected == &canonical) {
+        if protected_paths
+            .iter()
+            .any(|protected| protected == &canonical)
+        {
             return Err(format!(
                 "retirement candidate aliases a protected artifact: {}",
                 canonical.display()
@@ -2662,8 +2667,8 @@ fn m1_consent_scope(
     capabilities: &xenia_peer_core::RawCapabilities,
 ) -> xenia_operator_proto::ConsentScopeV1 {
     use xenia_peer_core::{
-        AudioSourceCapability, ClipboardCapability, FileTransferCapability,
-        InputControlCapability, TelemetryCapability,
+        AudioSourceCapability, ClipboardCapability, FileTransferCapability, InputControlCapability,
+        TelemetryCapability,
     };
 
     let telemetry = match capabilities.telemetry {
@@ -3105,8 +3110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     if args.m1_preprod_auto_consent && args.require_operator_auth {
         return Err(
-            "--m1-preprod-auto-consent cannot be combined with --require-operator-auth"
-                .into(),
+            "--m1-preprod-auto-consent cannot be combined with --require-operator-auth".into(),
         );
     }
     if !crate::operator_exposure::is_loopback_bind(&args.operator_bind) {
@@ -3255,10 +3259,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .consent_retirement_plan_input
             .as_deref()
             .ok_or("--sign-consent-retirement-plan requires --consent-retirement-plan-input")?;
-        let approval_path = args
-            .consent_retirement_approval_bundle
-            .as_deref()
-            .ok_or("--sign-consent-retirement-plan requires --consent-retirement-approval-bundle")?;
+        let approval_path = args.consent_retirement_approval_bundle.as_deref().ok_or(
+            "--sign-consent-retirement-plan requires --consent-retirement-approval-bundle",
+        )?;
         let witness_key_path = args
             .consent_retirement_witness_key
             .as_deref()
@@ -3267,7 +3270,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         plan.verify_authority_signature_and_window(&ledger_public_key, unix_now_secs())?;
         let witness_key = load_existing_signing_key(witness_key_path)?;
         if witness_key.verifying_key() == ledger_public_key {
-            return Err("retirement witness key must be distinct from the ledger signing key".into());
+            return Err(
+                "retirement witness key must be distinct from the ledger signing key".into(),
+            );
         }
         let mut approvals = if approval_path.exists() {
             let existing = read_retirement_approvals(approval_path)?;
@@ -3314,14 +3319,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(journal_path) = args.recover_consent_retirement_journal.as_deref() {
         let ledger_public_key = retirement_ledger_verifying_key(&args)?;
-        let plan_path = args
-            .consent_retirement_plan_input
-            .as_deref()
-            .ok_or("--recover-consent-retirement-journal requires --consent-retirement-plan-input")?;
-        let approval_path = args
-            .consent_retirement_approval_bundle
-            .as_deref()
-            .ok_or("--recover-consent-retirement-journal requires --consent-retirement-approval-bundle")?;
+        let plan_path = args.consent_retirement_plan_input.as_deref().ok_or(
+            "--recover-consent-retirement-journal requires --consent-retirement-plan-input",
+        )?;
+        let approval_path = args.consent_retirement_approval_bundle.as_deref().ok_or(
+            "--recover-consent-retirement-journal requires --consent-retirement-approval-bundle",
+        )?;
         let plan = read_retirement_plan(plan_path)?;
         let approvals = read_retirement_approvals(approval_path)?;
         let (trusted_witness_keys, quorum) = parse_retirement_witness_policy(&args)?;
@@ -3329,7 +3332,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .iter()
             .any(|key| *key == ledger_public_key.to_bytes())
         {
-            return Err("trusted retirement witness keys must be distinct from the ledger key".into());
+            return Err(
+                "trusted retirement witness keys must be distinct from the ledger key".into(),
+            );
         }
         let outcome = consent_retirement::recover_retirement_transaction(
             journal_path,
@@ -3363,14 +3368,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(receipt_path) = args.verify_consent_retirement_receipt.as_deref() {
         let ledger_public_key = retirement_ledger_verifying_key(&args)?;
-        let plan_path = args
-            .consent_retirement_plan_input
-            .as_deref()
-            .ok_or("--verify-consent-retirement-receipt requires --consent-retirement-plan-input")?;
-        let approval_path = args
-            .consent_retirement_approval_bundle
-            .as_deref()
-            .ok_or("--verify-consent-retirement-receipt requires --consent-retirement-approval-bundle")?;
+        let plan_path = args.consent_retirement_plan_input.as_deref().ok_or(
+            "--verify-consent-retirement-receipt requires --consent-retirement-plan-input",
+        )?;
+        let approval_path = args.consent_retirement_approval_bundle.as_deref().ok_or(
+            "--verify-consent-retirement-receipt requires --consent-retirement-approval-bundle",
+        )?;
         let plan = read_retirement_plan(plan_path)?;
         let approvals = read_retirement_approvals(approval_path)?;
         let (trusted_witness_keys, quorum) = parse_retirement_witness_policy(&args)?;
@@ -3378,7 +3381,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .iter()
             .any(|key| *key == ledger_public_key.to_bytes())
         {
-            return Err("trusted retirement witness keys must be distinct from the ledger key".into());
+            return Err(
+                "trusted retirement witness keys must be distinct from the ledger key".into(),
+            );
         }
         plan.verify_authority_signature(&ledger_public_key)?;
         approvals.verify_quorum(&plan, &trusted_witness_keys, quorum)?;
@@ -3419,7 +3424,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let retirement_approval_path = args
             .consent_purge_retirement_approval_bundle
             .as_deref()
-            .ok_or("--sign-consent-purge-plan requires --consent-purge-retirement-approval-bundle")?;
+            .ok_or(
+                "--sign-consent-purge-plan requires --consent-purge-retirement-approval-bundle",
+            )?;
         let quarantine_receipt_path = args
             .consent_purge_quarantine_receipt
             .as_deref()
@@ -3438,12 +3445,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         let witness_key = load_existing_signing_key(witness_key_path)?;
         if witness_key.verifying_key() == ledger_public_key
-            || retirement_approvals
-                .approvals
-                .iter()
-                .any(|approval| approval.witness_public_key == witness_key.verifying_key().to_bytes())
+            || retirement_approvals.approvals.iter().any(|approval| {
+                approval.witness_public_key == witness_key.verifying_key().to_bytes()
+            })
         {
-            return Err("purge witness key must be distinct from the ledger and retirement witness keys".into());
+            return Err(
+                "purge witness key must be distinct from the ledger and retirement witness keys"
+                    .into(),
+            );
         }
         let mut approvals = if approval_path.exists() {
             let existing = read_purge_approvals(approval_path)?;
@@ -3462,9 +3471,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         approvals.sign_with(&purge_plan, &witness_key, unix_now_secs())?;
         let normalized_output = consent_artifact_paths::normalized_output_path(approval_path)?;
         if normalized_output == consent_artifact_paths::normalized_output_path(purge_plan_path)?
-            || normalized_output == consent_artifact_paths::normalized_output_path(retirement_plan_path)?
-            || normalized_output == consent_artifact_paths::normalized_output_path(retirement_approval_path)?
-            || normalized_output == consent_artifact_paths::normalized_output_path(quarantine_receipt_path)?
+            || normalized_output
+                == consent_artifact_paths::normalized_output_path(retirement_plan_path)?
+            || normalized_output
+                == consent_artifact_paths::normalized_output_path(retirement_approval_path)?
+            || normalized_output
+                == consent_artifact_paths::normalized_output_path(quarantine_receipt_path)?
             || normalized_output == std::fs::canonicalize(witness_key_path)?
             || normalized_output.starts_with(std::path::Path::new(&purge_plan.rollback_root))
             || normalized_output.starts_with(std::path::Path::new(
@@ -3485,7 +3497,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         println!("consent purge approval added");
         println!("path: {}", approval_path.display());
-        println!("witness public key: {}", hex::encode(witness_key.verifying_key().to_bytes()));
+        println!(
+            "witness public key: {}",
+            hex::encode(witness_key.verifying_key().to_bytes())
+        );
         println!("approval count: {}", approvals.approvals.len());
         println!("the ledger private key was not accessed");
         println!("no artifact was removed");
@@ -3502,10 +3517,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .consent_purge_approval_bundle
             .as_deref()
             .ok_or("--recover-consent-purge-journal requires --consent-purge-approval-bundle")?;
-        let retirement_plan_path = args
-            .consent_purge_retirement_plan_input
-            .as_deref()
-            .ok_or("--recover-consent-purge-journal requires --consent-purge-retirement-plan-input")?;
+        let retirement_plan_path = args.consent_purge_retirement_plan_input.as_deref().ok_or(
+            "--recover-consent-purge-journal requires --consent-purge-retirement-plan-input",
+        )?;
         let retirement_approval_path = args
             .consent_purge_retirement_approval_bundle
             .as_deref()
@@ -3568,10 +3582,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .consent_purge_approval_bundle
             .as_deref()
             .ok_or("--verify-consent-purge-receipt requires --consent-purge-approval-bundle")?;
-        let retirement_plan_path = args
-            .consent_purge_retirement_plan_input
-            .as_deref()
-            .ok_or("--verify-consent-purge-receipt requires --consent-purge-retirement-plan-input")?;
+        let retirement_plan_path = args.consent_purge_retirement_plan_input.as_deref().ok_or(
+            "--verify-consent-purge-receipt requires --consent-purge-retirement-plan-input",
+        )?;
         let retirement_approval_path = args
             .consent_purge_retirement_approval_bundle
             .as_deref()
@@ -3600,16 +3613,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &ledger_public_key,
         )?;
         purge_approvals.verify_quorum(&purge_plan, &trusted_purge_keys, purge_quorum)?;
-        let rollback_package_path =
-            consent_purge::purge_transaction_directory(&purge_plan).join("rollback-package.json");
         let rollback_package = read_purge_rollback_package(&purge_plan)?;
         rollback_package.verify(&purge_plan, &purge_approvals, &ledger_public_key)?;
-        let receipt: consent_purge::ConsentPurgeReceiptV1 =
-            audit_ledger_store::read_bounded_json(
-                receipt_path,
-                consent_purge::MAX_PURGE_TRANSACTION_BYTES,
-                "consent purge receipt",
-            )?;
+        let receipt: consent_purge::ConsentPurgeReceiptV1 = audit_ledger_store::read_bounded_json(
+            receipt_path,
+            consent_purge::MAX_PURGE_TRANSACTION_BYTES,
+            "consent purge receipt",
+        )?;
         receipt.verify(
             &purge_plan,
             &purge_approvals,
@@ -3619,7 +3629,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         consent_purge::verify_purge_receipt_files(&receipt)?;
         println!("consent purge receipt and rollback package verified");
         println!("path: {}", receipt_path.display());
-        println!("artifacts removed from quarantine: {}", receipt.entries.len());
+        println!(
+            "artifacts removed from quarantine: {}",
+            receipt.entries.len()
+        );
         println!("the ledger private key was not accessed");
         println!("the rollback package remains intact");
         return Ok(());
@@ -3639,18 +3652,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .consent_purge_retention_witness_bundle
             .as_deref()
             .ok_or("--sign-consent-purge-retention-certificate requires --consent-purge-retention-witness-bundle")?;
-        let purge_plan_path = args
-            .consent_purge_plan_input
-            .as_deref()
-            .ok_or("--sign-consent-purge-retention-certificate requires --consent-purge-plan-input")?;
-        let purge_approval_path = args
-            .consent_purge_approval_bundle
-            .as_deref()
-            .ok_or("--sign-consent-purge-retention-certificate requires --consent-purge-approval-bundle")?;
-        let purge_receipt_path = args
-            .consent_purge_receipt_input
-            .as_deref()
-            .ok_or("--sign-consent-purge-retention-certificate requires --consent-purge-receipt-input")?;
+        let purge_plan_path = args.consent_purge_plan_input.as_deref().ok_or(
+            "--sign-consent-purge-retention-certificate requires --consent-purge-plan-input",
+        )?;
+        let purge_approval_path = args.consent_purge_approval_bundle.as_deref().ok_or(
+            "--sign-consent-purge-retention-certificate requires --consent-purge-approval-bundle",
+        )?;
+        let purge_receipt_path = args.consent_purge_receipt_input.as_deref().ok_or(
+            "--sign-consent-purge-retention-certificate requires --consent-purge-receipt-input",
+        )?;
         let certificate = read_purge_retention_certificate(certificate_path)?;
         let purge_plan = read_purge_plan(purge_plan_path)?;
         let purge_approvals = read_purge_approvals(purge_approval_path)?;
@@ -3699,7 +3709,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             || output == std::fs::canonicalize(witness_key_path)?
             || output.starts_with(std::path::Path::new(&certificate.package_directory))
         {
-            return Err("retention-witness output aliases protected evidence or key material".into());
+            return Err(
+                "retention-witness output aliases protected evidence or key material".into(),
+            );
         }
         persist_json_owner_only(
             witness_bundle_path,
@@ -3729,14 +3741,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .consent_purge_plan_input
             .as_deref()
             .ok_or("--verify-consent-purge-retention-anchor requires --consent-purge-plan-input")?;
-        let purge_approval_path = args
-            .consent_purge_approval_bundle
-            .as_deref()
-            .ok_or("--verify-consent-purge-retention-anchor requires --consent-purge-approval-bundle")?;
-        let purge_receipt_path = args
-            .consent_purge_receipt_input
-            .as_deref()
-            .ok_or("--verify-consent-purge-retention-anchor requires --consent-purge-receipt-input")?;
+        let purge_approval_path = args.consent_purge_approval_bundle.as_deref().ok_or(
+            "--verify-consent-purge-retention-anchor requires --consent-purge-approval-bundle",
+        )?;
+        let purge_receipt_path = args.consent_purge_receipt_input.as_deref().ok_or(
+            "--verify-consent-purge-retention-anchor requires --consent-purge-receipt-input",
+        )?;
         let certificate = read_purge_retention_certificate(certificate_path)?;
         let witnesses = read_purge_retention_witnesses(witness_bundle_path)?;
         let anchor = read_purge_retention_anchor(anchor_path)?;
@@ -3772,8 +3782,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         println!("consent purge retention anchor verified");
         println!("path: {}", anchor_path.display());
-        println!("protected artifacts: {}", certificate.protected_artifacts.len());
-        println!("retain until unix seconds: {}", certificate.retain_until_unix_secs);
+        println!(
+            "protected artifacts: {}",
+            certificate.protected_artifacts.len()
+        );
+        println!(
+            "retain until unix seconds: {}",
+            certificate.retain_until_unix_secs
+        );
         println!("the ledger private key was not accessed");
         return Ok(());
     }
@@ -3799,11 +3815,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .consent_purge_custody_locator
             .as_deref()
             .ok_or("--sign-consent-purge-custody requires --consent-purge-custody-locator")?;
-        let replica_id = parse_replica_id_hex(
-            args.consent_purge_custody_replica_id_hex
-                .as_deref()
-                .ok_or("--sign-consent-purge-custody requires --consent-purge-custody-replica-id-hex")?,
-        )?;
+        let replica_id =
+            parse_replica_id_hex(args.consent_purge_custody_replica_id_hex.as_deref().ok_or(
+                "--sign-consent-purge-custody requires --consent-purge-custody-replica-id-hex",
+            )?)?;
         let custody_key = load_existing_signing_key(custody_key_path)?;
         let custody_public = custody_key.verifying_key().to_bytes();
         ensure_custody_key_separation(
@@ -3853,11 +3868,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             consent_purge_custody::ConsentPurgeCustodyBundleV1::new(subject)
         };
         bundle.add(subject, attestation)?;
-        retention.protect_output(
-            custody_bundle_path,
-            &[custody_key_path],
-            "custody bundle",
-        )?;
+        retention.protect_output(custody_bundle_path, &[custody_key_path], "custody bundle")?;
         persist_json_owner_only(
             custody_bundle_path,
             &bundle,
@@ -3877,10 +3888,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.sign_consent_final_destruction_plan {
         let ledger_public_key = retirement_ledger_verifying_key(&args)?;
         let retention = verified_retention_context(&args, &ledger_public_key)?;
-        let plan_path = args
-            .consent_final_destruction_plan_input
-            .as_deref()
-            .ok_or("--sign-consent-final-destruction-plan requires --consent-final-destruction-plan-input")?;
+        let plan_path = args.consent_final_destruction_plan_input.as_deref().ok_or(
+            "--sign-consent-final-destruction-plan requires --consent-final-destruction-plan-input",
+        )?;
         let approval_path = args
             .consent_final_destruction_approval_bundle
             .as_deref()
@@ -3889,10 +3899,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .consent_final_destruction_witness_key
             .as_deref()
             .ok_or("--sign-consent-final-destruction-plan requires --consent-final-destruction-witness-key")?;
-        let custody_bundle_path = args
-            .consent_purge_custody_bundle
-            .as_deref()
-            .ok_or("--sign-consent-final-destruction-plan requires --consent-purge-custody-bundle")?;
+        let custody_bundle_path = args.consent_purge_custody_bundle.as_deref().ok_or(
+            "--sign-consent-final-destruction-plan requires --consent-purge-custody-bundle",
+        )?;
         let plan = read_final_destruction_plan(plan_path)?;
         let custody_bundle = read_purge_custody_bundle(custody_bundle_path)?;
         let (custody_keys, custody_quorum) = parse_purge_custody_policy(&args)?;
@@ -3973,10 +3982,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .consent_final_destruction_approval_bundle
             .as_deref()
             .ok_or("--verify-consent-final-destruction-readiness requires --consent-final-destruction-approval-bundle")?;
-        let custody_bundle_path = args
-            .consent_purge_custody_bundle
-            .as_deref()
-            .ok_or("--verify-consent-final-destruction-readiness requires --consent-purge-custody-bundle")?;
+        let custody_bundle_path = args.consent_purge_custody_bundle.as_deref().ok_or(
+            "--verify-consent-final-destruction-readiness requires --consent-purge-custody-bundle",
+        )?;
         let plan = read_final_destruction_plan(plan_path)?;
         let approvals = read_final_destruction_approvals(approval_path)?;
         let custody_bundle = read_purge_custody_bundle(custody_bundle_path)?;
@@ -4014,20 +4022,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &ledger_public_key,
         )?;
         if readiness.ready_at_unix_secs
-            > unix_now_secs().saturating_add(
-                consent_final_destruction::MAX_FINAL_DESTRUCTION_FUTURE_SKEW_SECS,
-            )
+            > unix_now_secs()
+                .saturating_add(consent_final_destruction::MAX_FINAL_DESTRUCTION_FUTURE_SKEW_SECS)
         {
             return Err("final-destruction readiness timestamp is too far in the future".into());
         }
         println!("final-destruction readiness verified");
         println!("path: {}", readiness_path.display());
         println!("candidates: {}", readiness.candidate_count);
-        println!("readiness blake3: {}", hex::encode(
-            consent_final_destruction::consent_final_destruction_readiness_fingerprint(
-                &readiness,
-            )?
-        ));
+        println!(
+            "readiness blake3: {}",
+            hex::encode(
+                consent_final_destruction::consent_final_destruction_readiness_fingerprint(
+                    &readiness,
+                )?
+            )
+        );
         println!("the ledger private key was not accessed");
         println!("no artifact was removed");
         return Ok(());
@@ -4048,8 +4058,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if let Some(output_path) = args.export_consent_purge_retention_renewal.as_deref() {
-        let mut retention =
-            verified_retention_context(&args, &signing_key.verifying_key())?;
+        let mut retention = verified_retention_context(&args, &signing_key.verifying_key())?;
         let current_deadline = retention.renewal_chain.verify(
             &retention.certificate,
             &retention.anchor,
@@ -4088,10 +4097,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(output_path) = args.export_consent_final_destruction_plan.as_deref() {
         let retention = verified_retention_context(&args, &signing_key.verifying_key())?;
-        let custody_bundle_path = args
-            .consent_purge_custody_bundle
-            .as_deref()
-            .ok_or("--export-consent-final-destruction-plan requires --consent-purge-custody-bundle")?;
+        let custody_bundle_path = args.consent_purge_custody_bundle.as_deref().ok_or(
+            "--export-consent-final-destruction-plan requires --consent-purge-custody-bundle",
+        )?;
         let custody_bundle = read_purge_custody_bundle(custody_bundle_path)?;
         let (custody_keys, custody_quorum) = parse_purge_custody_policy(&args)?;
         ensure_custody_key_separation(
@@ -4144,10 +4152,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .consent_final_destruction_approval_bundle
             .as_deref()
             .ok_or("--export-consent-final-destruction-readiness requires --consent-final-destruction-approval-bundle")?;
-        let custody_bundle_path = args
-            .consent_purge_custody_bundle
-            .as_deref()
-            .ok_or("--export-consent-final-destruction-readiness requires --consent-purge-custody-bundle")?;
+        let custody_bundle_path = args.consent_purge_custody_bundle.as_deref().ok_or(
+            "--export-consent-final-destruction-readiness requires --consent-purge-custody-bundle",
+        )?;
         let plan = read_final_destruction_plan(plan_path)?;
         let approvals = read_final_destruction_approvals(approval_path)?;
         let custody_bundle = read_purge_custody_bundle(custody_bundle_path)?;
@@ -4203,16 +4210,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("final-destruction readiness exported");
         println!("path: {}", output_path.display());
         println!("candidates: {}", readiness.candidate_count);
-        println!("expires at unix seconds: {}", readiness.expires_at_unix_secs);
+        println!(
+            "expires at unix seconds: {}",
+            readiness.expires_at_unix_secs
+        );
         println!("this artifact authorizes no implicit cleanup implementation");
         println!("no artifact was removed");
         return Ok(());
     }
 
-    if let Some(output_path) = args
-        .activate_consent_ledger_compacted_state
-        .as_deref()
-    {
+    if let Some(output_path) = args.activate_consent_ledger_compacted_state.as_deref() {
         let snapshot_path = args
             .consent_ledger_activation_snapshot
             .as_deref()
@@ -4247,9 +4254,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .into()
             })?;
-        let mut archive_segments = Vec::with_capacity(
-            args.consent_ledger_activation_archive_segment.len(),
-        );
+        let mut archive_segments =
+            Vec::with_capacity(args.consent_ledger_activation_archive_segment.len());
         let mut aggregate_bytes = 0u64;
         for path in &args.consent_ledger_activation_archive_segment {
             let (segment, bytes) = audit_ledger_store::read_bounded_json_with_size(
@@ -4267,9 +4273,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             aggregate_bytes = aggregate_bytes
                 .checked_add(bytes)
                 .ok_or("activation archive input byte count overflow")?;
-            if aggregate_bytes
-                > consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
-            {
+            if aggregate_bytes > consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES {
                 return Err(format!(
                     "activation archive inputs exceed {} bytes",
                     consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
@@ -4302,7 +4306,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("path: {}", output_path.display());
         println!(
             "archived entries: {}",
-            active.activation_snapshot.recovery_summary.archived_entry_count
+            active
+                .activation_snapshot
+                .recovery_summary
+                .archived_entry_count
         );
         println!("resident suffix entries: {}", active.resident_entries.len());
         println!("total entries: {}", active.current_checkpoint.entry_count);
@@ -4315,10 +4322,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    if let Some(pin_path) = args
-        .advance_consent_ledger_compacted_state_pin
-        .as_deref()
-    {
+    if let Some(pin_path) = args.advance_consent_ledger_compacted_state_pin.as_deref() {
         let state_path = args
             .consent_ledger_compacted_state
             .as_deref()
@@ -4326,18 +4330,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if pin_path == state_path {
             return Err("compacted-state pin path must differ from the active-state path".into());
         }
-        let (active, _) =
-            crate::consent_ledger_persistence::load_compacted_active_state(
-                state_path,
-                &signing_key,
+        let (active, _) = crate::consent_ledger_persistence::load_compacted_active_state(
+            state_path,
+            &signing_key,
+        )
+        .map_err(|err| -> Box<dyn std::error::Error> {
+            format!(
+                "failed to load compacted state {} for pin advancement: {err}",
+                state_path.display()
             )
-            .map_err(|err| -> Box<dyn std::error::Error> {
-                format!(
-                    "failed to load compacted state {} for pin advancement: {err}",
-                    state_path.display()
-                )
-                .into()
-            })?;
+            .into()
+        })?;
         if pin_path.exists() {
             let retained: consent_compaction::ConsentCompactedStatePinV1 =
                 audit_ledger_store::read_bounded_json(
@@ -4394,11 +4397,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .trusted_consent_ledger_compacted_state_pin
             .as_deref()
             .expect("clap requires compacted-state pin for GC certification");
-        let (active, _) =
-            crate::consent_ledger_persistence::load_compacted_active_state(
-                state_path,
-                &signing_key,
-            )?;
+        let (active, _) = crate::consent_ledger_persistence::load_compacted_active_state(
+            state_path,
+            &signing_key,
+        )?;
         let pin: consent_compaction::ConsentCompactedStatePinV1 =
             audit_ledger_store::read_bounded_json(
                 pin_path,
@@ -4426,14 +4428,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .into(),
                 );
             }
-            let certificate =
-                consent_compaction::ConsentCompactionGcCertificateV1::sign_for_state(
-                    &active,
-                    &pin,
-                    &archive_segments,
-                    &signing_key,
-                    unix_now_secs(),
-                )?;
+            let certificate = consent_compaction::ConsentCompactionGcCertificateV1::sign_for_state(
+                &active,
+                &pin,
+                &archive_segments,
+                &signing_key,
+                unix_now_secs(),
+            )?;
             persist_json_owner_only(
                 output_path,
                 &certificate,
@@ -4478,12 +4479,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(output_path) = args.export_consent_retirement_plan.as_deref() {
         let evidence = load_consent_retirement_evidence(&args, &signing_key)?;
-        let quarantine_root_path = args
-            .consent_retirement_quarantine_root
-            .as_deref()
-            .ok_or("--export-consent-retirement-plan requires --consent-retirement-quarantine-root")?;
-        let quarantine_root =
-            consent_retirement::canonical_quarantine_root(quarantine_root_path)?;
+        let quarantine_root_path = args.consent_retirement_quarantine_root.as_deref().ok_or(
+            "--export-consent-retirement-plan requires --consent-retirement-quarantine-root",
+        )?;
+        let quarantine_root = consent_retirement::canonical_quarantine_root(quarantine_root_path)?;
         let mut candidates = Vec::new();
         for path in &args.consent_retirement_complete_ledger_candidate {
             candidates.push(consent_retirement::observe_retirement_artifact(
@@ -4532,7 +4531,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             || normalized_output.starts_with(std::path::Path::new(&plan.quarantine_root))
         {
-            return Err("retirement plan output aliases protected, candidate, or quarantine storage".into());
+            return Err(
+                "retirement plan output aliases protected, candidate, or quarantine storage".into(),
+            );
         }
         persist_json_owner_only(
             output_path,
@@ -4555,10 +4556,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .consent_retirement_plan_input
             .as_deref()
             .ok_or("--quarantine-consent-retirement requires --consent-retirement-plan-input")?;
-        let approval_path = args
-            .consent_retirement_approval_bundle
-            .as_deref()
-            .ok_or("--quarantine-consent-retirement requires --consent-retirement-approval-bundle")?;
+        let approval_path = args.consent_retirement_approval_bundle.as_deref().ok_or(
+            "--quarantine-consent-retirement requires --consent-retirement-approval-bundle",
+        )?;
         let plan = read_retirement_plan(plan_path)?;
         let approvals = read_retirement_approvals(approval_path)?;
         let (trusted_witness_keys, quorum) = parse_retirement_witness_policy(&args)?;
@@ -4566,7 +4566,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .iter()
             .any(|key| *key == signing_key.verifying_key().to_bytes())
         {
-            return Err("trusted retirement witness keys must be distinct from the ledger key".into());
+            return Err(
+                "trusted retirement witness keys must be distinct from the ledger key".into(),
+            );
         }
         plan.verify(
             &evidence.active,
@@ -4602,22 +4604,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    if let Some(output_path) = args
-        .export_consent_purge_retention_certificate
-        .as_deref()
-    {
-        let purge_plan_path = args
-            .consent_purge_plan_input
-            .as_deref()
-            .ok_or("--export-consent-purge-retention-certificate requires --consent-purge-plan-input")?;
-        let purge_approval_path = args
-            .consent_purge_approval_bundle
-            .as_deref()
-            .ok_or("--export-consent-purge-retention-certificate requires --consent-purge-approval-bundle")?;
-        let purge_receipt_path = args
-            .consent_purge_receipt_input
-            .as_deref()
-            .ok_or("--export-consent-purge-retention-certificate requires --consent-purge-receipt-input")?;
+    if let Some(output_path) = args.export_consent_purge_retention_certificate.as_deref() {
+        let purge_plan_path = args.consent_purge_plan_input.as_deref().ok_or(
+            "--export-consent-purge-retention-certificate requires --consent-purge-plan-input",
+        )?;
+        let purge_approval_path = args.consent_purge_approval_bundle.as_deref().ok_or(
+            "--export-consent-purge-retention-certificate requires --consent-purge-approval-bundle",
+        )?;
+        let purge_receipt_path = args.consent_purge_receipt_input.as_deref().ok_or(
+            "--export-consent-purge-retention-certificate requires --consent-purge-receipt-input",
+        )?;
         let purge_plan = read_purge_plan(purge_plan_path)?;
         let purge_approvals = read_purge_approvals(purge_approval_path)?;
         let rollback_package_path =
@@ -4644,13 +4640,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         let normalized_output = consent_artifact_paths::normalized_output_path(output_path)?;
         if normalized_output == consent_artifact_paths::normalized_output_path(purge_plan_path)?
-            || normalized_output == consent_artifact_paths::normalized_output_path(purge_approval_path)?
-            || normalized_output == consent_artifact_paths::normalized_output_path(purge_receipt_path)?
-            || normalized_output == consent_artifact_paths::normalized_output_path(&rollback_package_path)?
+            || normalized_output
+                == consent_artifact_paths::normalized_output_path(purge_approval_path)?
+            || normalized_output
+                == consent_artifact_paths::normalized_output_path(purge_receipt_path)?
+            || normalized_output
+                == consent_artifact_paths::normalized_output_path(&rollback_package_path)?
             || normalized_output == std::fs::canonicalize(&args.operator_key_path)?
             || normalized_output.starts_with(std::path::Path::new(&certificate.package_directory))
         {
-            return Err("retention-certificate output aliases protected evidence or key material".into());
+            return Err(
+                "retention-certificate output aliases protected evidence or key material".into(),
+            );
         }
         persist_json_owner_only(
             output_path,
@@ -4660,8 +4661,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         println!("consent purge retention certificate exported");
         println!("path: {}", output_path.display());
-        println!("protected artifacts: {}", certificate.protected_artifacts.len());
-        println!("retain until unix seconds: {}", certificate.retain_until_unix_secs);
+        println!(
+            "protected artifacts: {}",
+            certificate.protected_artifacts.len()
+        );
+        println!(
+            "retain until unix seconds: {}",
+            certificate.retain_until_unix_secs
+        );
         println!("no artifact was removed");
         return Ok(());
     }
@@ -4679,14 +4686,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .consent_purge_plan_input
             .as_deref()
             .ok_or("--export-consent-purge-retention-anchor requires --consent-purge-plan-input")?;
-        let purge_approval_path = args
-            .consent_purge_approval_bundle
-            .as_deref()
-            .ok_or("--export-consent-purge-retention-anchor requires --consent-purge-approval-bundle")?;
-        let purge_receipt_path = args
-            .consent_purge_receipt_input
-            .as_deref()
-            .ok_or("--export-consent-purge-retention-anchor requires --consent-purge-receipt-input")?;
+        let purge_approval_path = args.consent_purge_approval_bundle.as_deref().ok_or(
+            "--export-consent-purge-retention-anchor requires --consent-purge-approval-bundle",
+        )?;
+        let purge_receipt_path = args.consent_purge_receipt_input.as_deref().ok_or(
+            "--export-consent-purge-retention-anchor requires --consent-purge-receipt-input",
+        )?;
         let certificate = read_purge_retention_certificate(certificate_path)?;
         let witnesses = read_purge_retention_witnesses(witness_bundle_path)?;
         let purge_plan = read_purge_plan(purge_plan_path)?;
@@ -4717,14 +4722,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         let normalized_output = consent_artifact_paths::normalized_output_path(output_path)?;
         if normalized_output == consent_artifact_paths::normalized_output_path(certificate_path)?
-            || normalized_output == consent_artifact_paths::normalized_output_path(witness_bundle_path)?
+            || normalized_output
+                == consent_artifact_paths::normalized_output_path(witness_bundle_path)?
             || normalized_output == consent_artifact_paths::normalized_output_path(purge_plan_path)?
-            || normalized_output == consent_artifact_paths::normalized_output_path(purge_approval_path)?
-            || normalized_output == consent_artifact_paths::normalized_output_path(purge_receipt_path)?
+            || normalized_output
+                == consent_artifact_paths::normalized_output_path(purge_approval_path)?
+            || normalized_output
+                == consent_artifact_paths::normalized_output_path(purge_receipt_path)?
             || normalized_output == std::fs::canonicalize(&args.operator_key_path)?
             || normalized_output.starts_with(std::path::Path::new(&certificate.package_directory))
         {
-            return Err("retention-anchor output aliases protected evidence or key material".into());
+            return Err(
+                "retention-anchor output aliases protected evidence or key material".into(),
+            );
         }
         persist_json_owner_only(
             output_path,
@@ -4736,11 +4746,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("path: {}", output_path.display());
         println!(
             "anchor blake3: {}",
-            hex::encode(consent_purge_retention::consent_purge_retention_anchor_fingerprint(
-                &anchor
-            )?)
+            hex::encode(
+                consent_purge_retention::consent_purge_retention_anchor_fingerprint(&anchor)?
+            )
         );
-        println!("retain until unix seconds: {}", anchor.retain_until_unix_secs);
+        println!(
+            "retain until unix seconds: {}",
+            anchor.retain_until_unix_secs
+        );
         println!("no artifact was removed");
         return Ok(());
     }
@@ -4753,7 +4766,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let retirement_approval_path = args
             .consent_purge_retirement_approval_bundle
             .as_deref()
-            .ok_or("--export-consent-purge-plan requires --consent-purge-retirement-approval-bundle")?;
+            .ok_or(
+                "--export-consent-purge-plan requires --consent-purge-retirement-approval-bundle",
+            )?;
         let quarantine_receipt_path = args
             .consent_purge_quarantine_receipt
             .as_deref()
@@ -4781,9 +4796,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             expires_at,
         )?;
         let normalized_output = consent_artifact_paths::normalized_output_path(output_path)?;
-        if normalized_output == consent_artifact_paths::normalized_output_path(retirement_plan_path)?
-            || normalized_output == consent_artifact_paths::normalized_output_path(retirement_approval_path)?
-            || normalized_output == consent_artifact_paths::normalized_output_path(quarantine_receipt_path)?
+        if normalized_output
+            == consent_artifact_paths::normalized_output_path(retirement_plan_path)?
+            || normalized_output
+                == consent_artifact_paths::normalized_output_path(retirement_approval_path)?
+            || normalized_output
+                == consent_artifact_paths::normalized_output_path(quarantine_receipt_path)?
             || normalized_output == std::fs::canonicalize(&args.operator_key_path)?
             || normalized_output.starts_with(std::path::Path::new(&purge_plan.rollback_root))
             || normalized_output.starts_with(std::path::Path::new(
@@ -4807,7 +4825,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("purge id: {}", hex::encode(purge_plan.purge_id));
         println!("candidates: {}", purge_plan.candidates.len());
         println!("rollback root: {}", purge_plan.rollback_root);
-        println!("expires at unix seconds: {}", purge_plan.expires_at_unix_secs);
+        println!(
+            "expires at unix seconds: {}",
+            purge_plan.expires_at_unix_secs
+        );
         println!("no artifact was removed");
         return Ok(());
     }
@@ -4858,15 +4879,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("consent quarantine artifacts removed after rollback packaging");
         println!("transaction: {}", receipt.transaction_directory);
         println!("artifacts: {}", receipt.entries.len());
-        println!("rollback package retained: {}", receipt.transaction_directory);
+        println!(
+            "rollback package retained: {}",
+            receipt.transaction_directory
+        );
         return Ok(());
     }
 
     let retirement_auxiliary_args_present = args.consent_retirement_gc_certificate.is_some()
         || args.consent_retirement_quarantine_root.is_some()
         || !args.consent_retirement_complete_ledger_candidate.is_empty()
-        || !args.consent_retirement_compaction_bundle_candidate.is_empty()
-        || !args.consent_retirement_compacted_snapshot_candidate.is_empty()
+        || !args
+            .consent_retirement_compaction_bundle_candidate
+            .is_empty()
+        || !args
+            .consent_retirement_compacted_snapshot_candidate
+            .is_empty()
         || args.consent_retirement_plan_input.is_some()
         || args.consent_retirement_ledger_public_key_hex.is_some()
         || args.consent_retirement_witness_key.is_some()
@@ -4938,17 +4966,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("consent-purge-custody arguments require an explicit custody or final-destruction operation".into());
     }
 
-    let final_destruction_auxiliary_args_present = args
-        .consent_final_destruction_plan_input
-        .is_some()
-        || args.consent_final_destruction_witness_key.is_some()
-        || args.consent_final_destruction_approval_bundle.is_some()
-        || !args
-            .trusted_consent_final_destruction_witness_key_hex
-            .is_empty()
-        || args
-            .trusted_consent_final_destruction_witness_quorum
-            .is_some();
+    let final_destruction_auxiliary_args_present =
+        args.consent_final_destruction_plan_input.is_some()
+            || args.consent_final_destruction_witness_key.is_some()
+            || args.consent_final_destruction_approval_bundle.is_some()
+            || !args
+                .trusted_consent_final_destruction_witness_key_hex
+                .is_empty()
+            || args
+                .trusted_consent_final_destruction_witness_quorum
+                .is_some();
     if !final_destruction_operation_requested && final_destruction_auxiliary_args_present {
         return Err("final-destruction arguments require an explicit readiness operation".into());
     }
@@ -4960,21 +4987,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bool,
     ) = if let Some(path) = args.consent_ledger_compacted_state.as_deref() {
         let (active, restored) =
-            crate::consent_ledger_persistence::load_compacted_active_state(
-                path,
-                &signing_key,
-            )
-            .map_err(|err| -> Box<dyn std::error::Error> {
-                format!(
-                    "failed to load --consent-ledger-compacted-state {}: {err}",
-                    path.display()
-                )
-                .into()
-            })?;
-        if let Some(pin_path) = args
-            .trusted_consent_ledger_compacted_state_pin
-            .as_deref()
-        {
+            crate::consent_ledger_persistence::load_compacted_active_state(path, &signing_key)
+                .map_err(|err| -> Box<dyn std::error::Error> {
+                    format!(
+                        "failed to load --consent-ledger-compacted-state {}: {err}",
+                        path.display()
+                    )
+                    .into()
+                })?;
+        if let Some(pin_path) = args.trusted_consent_ledger_compacted_state_pin.as_deref() {
             let pin: consent_compaction::ConsentCompactedStatePinV1 =
                 audit_ledger_store::read_bounded_json(
                     pin_path,
@@ -5014,11 +5035,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
         );
         let (chain, archived_actions, archived_sessions) = restored.into_parts();
-        let historical = crate::consent_authority::ConsentHistoricalIndexes::from_chain_and_archived(
-            &chain,
-            archived_actions,
-            archived_sessions,
-        );
+        let historical =
+            crate::consent_authority::ConsentHistoricalIndexes::from_chain_and_archived(
+                &chain,
+                archived_actions,
+                archived_sessions,
+            );
         (chain, persister, historical, true)
     } else {
         let path = &args.consent_ledger_path;
@@ -5037,9 +5059,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "complete consent ledger loaded and verified before listener startup"
         );
         let persister = std::sync::Arc::new(
-            crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
-                path.clone(),
-            ),
+            crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(path.clone()),
         );
         let historical =
             crate::consent_authority::ConsentHistoricalIndexes::from_complete_chain(&ledger);
@@ -5058,8 +5078,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let checkpoint_freshness = xenia_ledger::CheckpointFreshnessPolicy {
         max_age_secs: args.trusted_consent_ledger_checkpoint_max_age_secs,
-        max_future_skew_secs: args
-            .trusted_consent_ledger_checkpoint_max_future_skew_secs,
+        max_future_skew_secs: args.trusted_consent_ledger_checkpoint_max_future_skew_secs,
     };
     let continuity_anchor_configured = args.trusted_consent_ledger_checkpoint.is_some()
         || args.trusted_consent_ledger_witness_bundle.is_some();
@@ -5069,18 +5088,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .into(),
         );
     }
-    let complete_ledger_operation_requested =
-        args.export_consent_ledger_archive_segment.is_some()
-            || args.export_consent_ledger_compaction_bundle.is_some()
-            || args.verify_consent_ledger_compaction_bundle.is_some()
-            || args.export_consent_ledger_compacted_snapshot.is_some();
+    let complete_ledger_operation_requested = args.export_consent_ledger_archive_segment.is_some()
+        || args.export_consent_ledger_compaction_bundle.is_some()
+        || args.verify_consent_ledger_compaction_bundle.is_some()
+        || args.export_consent_ledger_compacted_snapshot.is_some();
     if compacted_state_loaded && complete_ledger_operation_requested {
         return Err(
             "archive and compaction-preflight operations currently require a complete genesis-based consent ledger; activated compacted state supports normal append, checkpoint, witness, and runtime paths only"
                 .into(),
         );
     }
-    if args.trusted_consent_ledger_checkpoint_max_age_secs.is_some()
+    if args
+        .trusted_consent_ledger_checkpoint_max_age_secs
+        .is_some()
         && !continuity_anchor_configured
     {
         return Err(
@@ -5089,7 +5109,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    if args.trusted_consent_ledger_checkpoint_max_age_secs.is_some()
+    if args
+        .trusted_consent_ledger_checkpoint_max_age_secs
+        .is_some()
         && args.trusted_consent_ledger_key_transition.is_some()
     {
         return Err(
@@ -5148,10 +5170,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "witnessed consent-ledger checkpoint verified"
         );
     } else if let Some(checkpoint_path) = args.trusted_consent_ledger_checkpoint.as_deref() {
-        if let Some(transition_path) = args
-            .trusted_consent_ledger_key_transition
-            .as_deref()
-        {
+        if let Some(transition_path) = args.trusted_consent_ledger_key_transition.as_deref() {
             let transition = audit_ledger_store::verify_retained_key_successor(
                 checkpoint_path,
                 transition_path,
@@ -5240,16 +5259,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("consent-ledger archive segment exported");
         println!("path: {}", output_path.display());
         println!("base entries: {}", segment.base_checkpoint.entry_count);
-        println!("terminal entries: {}", segment.terminal_checkpoint.entry_count);
+        println!(
+            "terminal entries: {}",
+            segment.terminal_checkpoint.entry_count
+        );
         println!("segment entries: {}", segment.entries.len());
         println!("segment blake3: {}", hex::encode(segment.segment_digest));
         return Ok(());
     }
 
-    if let Some(output_path) = args
-        .export_consent_ledger_compaction_bundle
-        .as_deref()
-    {
+    if let Some(output_path) = args.export_consent_ledger_compaction_bundle.as_deref() {
         if args.consent_ledger_compaction_archive_segment.is_empty() {
             return Err(concat!(
                 "--export-consent-ledger-compaction-bundle requires at least one ",
@@ -5267,22 +5286,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .into());
         }
-        let mut archive_segments = Vec::with_capacity(
-            args.consent_ledger_compaction_archive_segment.len(),
-        );
+        let mut archive_segments =
+            Vec::with_capacity(args.consent_ledger_compaction_archive_segment.len());
         let mut archive_input_bytes = 0u64;
         for path in &args.consent_ledger_compaction_archive_segment {
-            let remaining_input_bytes =
-                consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
-                    .saturating_sub(archive_input_bytes);
-            let per_file_limit = audit_ledger_store::MAX_AUDIT_LEDGER_BYTES
-                .min(remaining_input_bytes);
+            let remaining_input_bytes = consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
+                .saturating_sub(archive_input_bytes);
+            let per_file_limit =
+                audit_ledger_store::MAX_AUDIT_LEDGER_BYTES.min(remaining_input_bytes);
             let (segment, input_bytes) = audit_ledger_store::read_bounded_json_with_size::<
                 xenia_ledger::LedgerArchiveSegment,
             >(
-                path,
-                per_file_limit,
-                "consent ledger archive segment",
+                path, per_file_limit, "consent ledger archive segment"
             )
             .map_err(|err| -> Box<dyn std::error::Error> {
                 format!(
@@ -5294,9 +5309,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             archive_input_bytes = archive_input_bytes
                 .checked_add(input_bytes)
                 .ok_or("compaction archive input byte count overflow")?;
-            if archive_input_bytes
-                > consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
-            {
+            if archive_input_bytes > consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES {
                 return Err(format!(
                     "compaction archive inputs exceed {} bytes",
                     consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
@@ -5315,9 +5328,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?;
         let mut bytes = serde_json::to_vec_pretty(&bundle)?;
         bytes.push(b'\n');
-        if bytes.len() as u64
-            > consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
-        {
+        if bytes.len() as u64 > consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES {
             return Err(format!(
                 "serialized compaction bundle is {} bytes; maximum is {}",
                 bytes.len(),
@@ -5356,29 +5367,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "recovery summary blake3: {}",
             hex::encode(bundle.recovery_summary.summary_digest)
         );
-        println!("live entries: {}", bundle.manifest.current_checkpoint.entry_count);
+        println!(
+            "live entries: {}",
+            bundle.manifest.current_checkpoint.entry_count
+        );
         println!("no live ledger entries were deleted");
         return Ok(());
     }
 
-    if let Some(bundle_path) = args
-        .verify_consent_ledger_compaction_bundle
-        .as_deref()
-    {
-        let bundle = audit_ledger_store::read_bounded_json::<
-            consent_compaction::ConsentCompactionBundleV1,
-        >(
-            bundle_path,
-            consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES,
-            "consent ledger compaction bundle",
-        )
-        .map_err(|err| -> Box<dyn std::error::Error> {
-            format!(
-                "failed to read --verify-consent-ledger-compaction-bundle {}: {err}",
-                bundle_path.display()
+    if let Some(bundle_path) = args.verify_consent_ledger_compaction_bundle.as_deref() {
+        let bundle =
+            audit_ledger_store::read_bounded_json::<consent_compaction::ConsentCompactionBundleV1>(
+                bundle_path,
+                consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES,
+                "consent ledger compaction bundle",
             )
-            .into()
-        })?;
+            .map_err(|err| -> Box<dyn std::error::Error> {
+                format!(
+                    "failed to read --verify-consent-ledger-compaction-bundle {}: {err}",
+                    bundle_path.display()
+                )
+                .into()
+            })?;
         let entries = ledger.iter().cloned().collect::<Vec<_>>();
         bundle
             .verify_against_live_ledger(&entries, &signing_key.verifying_key())
@@ -5409,28 +5419,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         return Ok(());
     }
-    if let Some(output_path) = args
-        .export_consent_ledger_compacted_snapshot
-        .as_deref()
-    {
+    if let Some(output_path) = args.export_consent_ledger_compacted_snapshot.as_deref() {
         let bundle_path = args
             .consent_ledger_compaction_bundle_input
             .as_deref()
             .expect("clap requires a compaction bundle input");
-        let bundle = audit_ledger_store::read_bounded_json::<
-            consent_compaction::ConsentCompactionBundleV1,
-        >(
-            bundle_path,
-            consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES,
-            "consent ledger compaction bundle",
-        )
-        .map_err(|err| -> Box<dyn std::error::Error> {
-            format!(
-                "failed to read --consent-ledger-compaction-bundle-input {}: {err}",
-                bundle_path.display()
+        let bundle =
+            audit_ledger_store::read_bounded_json::<consent_compaction::ConsentCompactionBundleV1>(
+                bundle_path,
+                consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES,
+                "consent ledger compaction bundle",
             )
-            .into()
-        })?;
+            .map_err(|err| -> Box<dyn std::error::Error> {
+                format!(
+                    "failed to read --consent-ledger-compaction-bundle-input {}: {err}",
+                    bundle_path.display()
+                )
+                .into()
+            })?;
         let entries = ledger.iter().cloned().collect::<Vec<_>>();
         let snapshot = consent_compaction::ConsentCompactedSnapshotV1::build(
             &bundle,
@@ -5475,10 +5481,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    if let Some(snapshot_path) = args
-        .verify_consent_ledger_compacted_snapshot
-        .as_deref()
-    {
+    if let Some(snapshot_path) = args.verify_consent_ledger_compacted_snapshot.as_deref() {
         if args
             .consent_ledger_compacted_snapshot_archive_segment
             .is_empty()
@@ -5489,9 +5492,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .into());
         }
-        if args
-            .consent_ledger_compacted_snapshot_archive_segment
-            .len()
+        if args.consent_ledger_compacted_snapshot_archive_segment.len()
             > xenia_ledger::MAX_LEDGER_ARCHIVE_SEQUENCE_SEGMENTS
         {
             return Err(format!(
@@ -5515,22 +5516,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .into()
         })?;
-        let mut archive_segments = Vec::with_capacity(
-            args.consent_ledger_compacted_snapshot_archive_segment.len(),
-        );
+        let mut archive_segments =
+            Vec::with_capacity(args.consent_ledger_compacted_snapshot_archive_segment.len());
         let mut archive_input_bytes = 0u64;
         for path in &args.consent_ledger_compacted_snapshot_archive_segment {
-            let remaining_input_bytes =
-                consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
-                    .saturating_sub(archive_input_bytes);
-            let per_file_limit = audit_ledger_store::MAX_AUDIT_LEDGER_BYTES
-                .min(remaining_input_bytes);
+            let remaining_input_bytes = consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
+                .saturating_sub(archive_input_bytes);
+            let per_file_limit =
+                audit_ledger_store::MAX_AUDIT_LEDGER_BYTES.min(remaining_input_bytes);
             let (segment, input_bytes) = audit_ledger_store::read_bounded_json_with_size::<
                 xenia_ledger::LedgerArchiveSegment,
             >(
-                path,
-                per_file_limit,
-                "consent ledger archive segment",
+                path, per_file_limit, "consent ledger archive segment"
             )
             .map_err(|err| -> Box<dyn std::error::Error> {
                 format!(
@@ -5542,9 +5539,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             archive_input_bytes = archive_input_bytes
                 .checked_add(input_bytes)
                 .ok_or("compacted snapshot archive input byte count overflow")?;
-            if archive_input_bytes
-                > consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
-            {
+            if archive_input_bytes > consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES {
                 return Err(format!(
                     "compacted snapshot archive inputs exceed {} bytes",
                     consent_compaction::MAX_CONSENT_COMPACTION_BUNDLE_BYTES
@@ -5575,7 +5570,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         println!("snapshot blake3: {}", hex::encode(snapshot.snapshot_digest));
         println!("restored total entries: {}", restored.chain.entry_count());
-        println!("restored resident entries: {}", restored.chain.resident_len());
+        println!(
+            "restored resident entries: {}",
+            restored.chain.resident_len()
+        );
         println!(
             "restored archived replay action ids: {}",
             restored.archived_replay_action_count()
@@ -5682,15 +5680,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // enforce (fail-closed).
     let revocations = match &args.revoked_operators_file {
         Some(path) => {
-            let r = crate::operator_revocations::OperatorRevocations::from_required_file(path).map_err(
-                |err| -> Box<dyn std::error::Error> {
+            let r = crate::operator_revocations::OperatorRevocations::from_required_file(path)
+                .map_err(|err| -> Box<dyn std::error::Error> {
                     format!(
                         "failed to load --revoked-operators-file {}: {err}",
                         path.display()
                     )
                     .into()
-                },
-            )?;
+                })?;
             info!(path = %path.display(), revoked = r.len(), "loaded operator revocation list");
             r
         }
@@ -5920,9 +5917,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             };
             let now = now_ms() / 1_000;
-            let lease_timer = tokio::time::sleep(Duration::from_secs(
-                deadline.saturating_sub(now),
-            ));
+            let lease_timer = tokio::time::sleep(Duration::from_secs(deadline.saturating_sub(now)));
             tokio::pin!(lease_timer);
             loop {
                 tokio::select! {
@@ -6093,8 +6088,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )?;
                 } else if require_operator_auth {
                     return Err(
-                        "authenticated consent grant committed without an approval receipt"
-                            .into(),
+                        "authenticated consent grant committed without an approval receipt".into(),
                     );
                 }
                 info!(
@@ -6139,14 +6133,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut runtime_consent_state = consent_service.subscribe_state();
     if runtime_consent_state.borrow().runtime_must_stop() {
         let state = *runtime_consent_state.borrow();
-        if let Err(err) = m1_runtime
-            .lock()
-            .await
-            .record_authority_termination(state)
-        {
+        if let Err(err) = m1_runtime.lock().await.record_authority_termination(state) {
             warn!(error = %err, ?state, "failed to record pre-runtime consent termination");
         }
-        info!(?state, "consent terminated before privileged runtime startup");
+        info!(
+            ?state,
+            "consent terminated before privileged runtime startup"
+        );
         return Ok(());
     }
     let (rekey_ack_tx, mut rekey_ack_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);

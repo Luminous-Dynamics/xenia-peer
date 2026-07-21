@@ -8967,6 +8967,7 @@ dependencies = [
  "reqwest",
  "rust-embed",
  "serde",
+ "serde-big-array",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",

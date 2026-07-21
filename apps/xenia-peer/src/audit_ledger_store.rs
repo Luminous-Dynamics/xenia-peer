@@ -89,8 +89,7 @@ pub(crate) enum AuditLedgerStoreError {
 
 const PERSISTED_AUDIT_LEDGER_MAGIC: &[u8] = b"XENIA-AUDIT-LEDGER\0";
 const PERSISTED_AUDIT_LEDGER_SCHEMA_V1: u16 = 1;
-const PERSISTED_AUDIT_LEDGER_HEADER_LEN: usize =
-    PERSISTED_AUDIT_LEDGER_MAGIC.len() + 2 + 8 + 32;
+const PERSISTED_AUDIT_LEDGER_HEADER_LEN: usize = PERSISTED_AUDIT_LEDGER_MAGIC.len() + 2 + 8 + 32;
 pub(crate) const MAX_AUDIT_LEDGER_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const MAX_AUDIT_LEDGER_ENTRIES: usize = 100_000;
 pub(crate) const MAX_RETAINED_CHECKPOINT_BYTES: u64 = 64 * 1024;
@@ -226,8 +225,7 @@ fn verify_checkpoint_against_chain(
         return Ok(());
     }
 
-    Verifier::verify_checkpoint(checkpoint)
-        .map_err(CheckpointContinuityError::from)?;
+    Verifier::verify_checkpoint(checkpoint).map_err(CheckpointContinuityError::from)?;
     if checkpoint.ledger_public_key != public_key.to_bytes() {
         return Err(AuditLedgerStoreError::CheckpointContinuity(
             CheckpointContinuityError::TrustedKeyMismatch,
@@ -236,8 +234,7 @@ fn verify_checkpoint_against_chain(
     let base = chain
         .base_checkpoint()
         .expect("checked compacted chain anchor");
-    Verifier::verify_checkpoint(base)
-        .map_err(CheckpointContinuityError::from)?;
+    Verifier::verify_checkpoint(base).map_err(CheckpointContinuityError::from)?;
     if checkpoint.entry_count < base.entry_count {
         return Err(AuditLedgerStoreError::MetadataMismatch(
             "retained checkpoint predates compacted ledger anchor",
@@ -345,11 +342,7 @@ pub(crate) fn verify_retained_witness_bundle(
     )?;
     Verifier::verify_checkpoint_freshness(&bundle.checkpoint, now_unix_secs, freshness)?;
     verify_checkpoint_against_chain(&bundle.checkpoint, chain, public_key)?;
-    Verifier::verify_checkpoint_witness_quorum(
-        &bundle,
-        trusted_witness_keys,
-        minimum_quorum,
-    )?;
+    Verifier::verify_checkpoint_witness_quorum(&bundle, trusted_witness_keys, minimum_quorum)?;
     Ok(bundle)
 }
 
@@ -374,12 +367,7 @@ pub(crate) fn verify_retained_key_successor(
     )?;
     let candidate = chain.sign_checkpoint(now_unix_secs);
     let entries = chain.iter().cloned().collect::<Vec<_>>();
-    Verifier::verify_ledger_key_successor(
-        &retained,
-        &transition,
-        &candidate,
-        &entries,
-    )?;
+    Verifier::verify_ledger_key_successor(&retained, &transition, &candidate, &entries)?;
     if candidate.ledger_public_key != current_public_key.to_bytes() {
         return Err(AuditLedgerStoreError::MetadataMismatch(
             "successor checkpoint key",
@@ -428,11 +416,7 @@ pub(crate) fn export_archive_segment_atomic(
         MAX_RETAINED_CHECKPOINT_BYTES,
         "archive base checkpoint",
     )?;
-    let segment = LedgerArchiveSegment::from_chain(
-        chain,
-        base_checkpoint,
-        timestamp_unix_secs,
-    )?;
+    let segment = LedgerArchiveSegment::from_chain(chain, base_checkpoint, timestamp_unix_secs)?;
     let mut bytes = serde_json::to_vec_pretty(&segment)?;
     bytes.push(b'\n');
     if bytes.len() as u64 > MAX_AUDIT_LEDGER_BYTES {
@@ -536,7 +520,8 @@ pub(crate) fn persist_entries_atomic(
     if bytes.len() as u64 > MAX_AUDIT_LEDGER_BYTES {
         return Err(AuditLedgerStoreError::LimitExceeded(format!(
             "{} serialized bytes exceeds maximum {}",
-            bytes.len(), MAX_AUDIT_LEDGER_BYTES
+            bytes.len(),
+            MAX_AUDIT_LEDGER_BYTES
         )));
     }
     let parent = path
@@ -870,18 +855,9 @@ mod tests {
         let retained = complete.sign_checkpoint(101);
         let resident = complete.iter().skip(1).cloned().collect::<Vec<_>>();
         let compacted = Chain::from_checkpoint_suffix(base, resident, sk.clone());
-        std::fs::write(
-            &checkpoint_path,
-            serde_json::to_vec(&retained).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(&checkpoint_path, serde_json::to_vec(&retained).unwrap()).unwrap();
 
-        verify_retained_checkpoint(
-            &checkpoint_path,
-            &compacted,
-            &sk.verifying_key(),
-        )
-        .unwrap();
+        verify_retained_checkpoint(&checkpoint_path, &compacted, &sk.verifying_key()).unwrap();
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -895,18 +871,10 @@ mod tests {
         complete.append(event()).unwrap();
         let base = complete.sign_checkpoint(100);
         let compacted = Chain::from_checkpoint_suffix(base, Vec::new(), sk.clone());
-        std::fs::write(
-            &checkpoint_path,
-            serde_json::to_vec(&genesis).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(&checkpoint_path, serde_json::to_vec(&genesis).unwrap()).unwrap();
 
         assert!(matches!(
-            verify_retained_checkpoint(
-                &checkpoint_path,
-                &compacted,
-                &sk.verifying_key(),
-            ),
+            verify_retained_checkpoint(&checkpoint_path, &compacted, &sk.verifying_key(),),
             Err(AuditLedgerStoreError::MetadataMismatch(
                 "retained checkpoint predates compacted ledger anchor"
             ))
@@ -925,12 +893,8 @@ mod tests {
         std::fs::write(&checkpoint_path, serde_json::to_vec(&retained).unwrap()).unwrap();
         chain.append(event()).unwrap();
 
-        let loaded = verify_retained_checkpoint(
-            &checkpoint_path,
-            &chain,
-            &sk.verifying_key(),
-        )
-        .unwrap();
+        let loaded =
+            verify_retained_checkpoint(&checkpoint_path, &chain, &sk.verifying_key()).unwrap();
         assert_eq!(loaded, retained);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -949,11 +913,7 @@ mod tests {
         let mut rolled_back = Chain::new(sk.clone());
         rolled_back.append(event()).unwrap();
         assert!(matches!(
-            verify_retained_checkpoint(
-                &checkpoint_path,
-                &rolled_back,
-                &sk.verifying_key(),
-            ),
+            verify_retained_checkpoint(&checkpoint_path, &rolled_back, &sk.verifying_key(),),
             Err(AuditLedgerStoreError::CheckpointContinuity(
                 CheckpointContinuityError::CheckpointAheadOfLedger { .. }
             ))
@@ -968,21 +928,12 @@ mod tests {
         let sk = ed25519_dalek::SigningKey::from_bytes(&[73u8; 32]);
         let mut chain = Chain::new(sk.clone());
         chain.append(event()).unwrap();
-        let first = advance_retained_checkpoint(
-            &checkpoint_path,
-            &chain,
-            &sk.verifying_key(),
-            100,
-        )
-        .unwrap();
+        let first = advance_retained_checkpoint(&checkpoint_path, &chain, &sk.verifying_key(), 100)
+            .unwrap();
         chain.append(event()).unwrap();
-        let second = advance_retained_checkpoint(
-            &checkpoint_path,
-            &chain,
-            &sk.verifying_key(),
-            101,
-        )
-        .unwrap();
+        let second =
+            advance_retained_checkpoint(&checkpoint_path, &chain, &sk.verifying_key(), 101)
+                .unwrap();
         assert!(second.entry_count > first.entry_count);
         let stored: LedgerCheckpoint =
             serde_json::from_slice(&std::fs::read(&checkpoint_path).unwrap()).unwrap();
@@ -998,24 +949,15 @@ mod tests {
         let mut newer = Chain::new(sk.clone());
         newer.append(event()).unwrap();
         newer.append(event()).unwrap();
-        advance_retained_checkpoint(
-            &checkpoint_path,
-            &newer,
-            &sk.verifying_key(),
-            100,
-        )
-        .unwrap();
+        advance_retained_checkpoint(&checkpoint_path, &newer, &sk.verifying_key(), 100).unwrap();
         let original = std::fs::read(&checkpoint_path).unwrap();
 
         let mut rolled_back = Chain::new(sk.clone());
         rolled_back.append(event()).unwrap();
-        assert!(advance_retained_checkpoint(
-            &checkpoint_path,
-            &rolled_back,
-            &sk.verifying_key(),
-            101,
-        )
-        .is_err());
+        assert!(
+            advance_retained_checkpoint(&checkpoint_path, &rolled_back, &sk.verifying_key(), 101,)
+                .is_err()
+        );
         assert_eq!(std::fs::read(&checkpoint_path).unwrap(), original);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1028,13 +970,7 @@ mod tests {
         let checkpoint_path = dir.join("checkpoint.json");
         let sk = ed25519_dalek::SigningKey::from_bytes(&[75u8; 32]);
         let chain = Chain::new(sk.clone());
-        advance_retained_checkpoint(
-            &checkpoint_path,
-            &chain,
-            &sk.verifying_key(),
-            100,
-        )
-        .unwrap();
+        advance_retained_checkpoint(&checkpoint_path, &chain, &sk.verifying_key(), 100).unwrap();
         let mode = std::fs::metadata(&checkpoint_path)
             .unwrap()
             .permissions()
@@ -1086,10 +1022,8 @@ mod tests {
         let witness_b = ed25519_dalek::SigningKey::from_bytes(&[84u8; 32]);
         let mut chain = Chain::new(ledger_key.clone());
         chain.append(event()).unwrap();
-        let mut bundle = xenia_ledger::CheckpointWitnessBundle::new(
-            chain.sign_checkpoint(100),
-        )
-        .unwrap();
+        let mut bundle =
+            xenia_ledger::CheckpointWitnessBundle::new(chain.sign_checkpoint(100)).unwrap();
         bundle.sign_with(&witness_a, 101).unwrap();
         bundle.sign_with(&witness_b, 102).unwrap();
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
@@ -1112,19 +1046,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(verified.witnesses.len(), 2);
-        assert!(verify_retained_witness_bundle(
-            &bundle_path,
-            &chain,
-            &ledger_key.verifying_key(),
-            &trusted,
-            3,
-            102,
-            CheckpointFreshnessPolicy {
-                max_age_secs: Some(10),
-                max_future_skew_secs: 5,
-            },
-        )
-        .is_err());
+        assert!(
+            verify_retained_witness_bundle(
+                &bundle_path,
+                &chain,
+                &ledger_key.verifying_key(),
+                &trusted,
+                3,
+                102,
+                CheckpointFreshnessPolicy {
+                    max_age_secs: Some(10),
+                    max_future_skew_secs: 5,
+                },
+            )
+            .is_err()
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1138,13 +1074,9 @@ mod tests {
         let mut previous_chain = Chain::new(old_key.clone());
         previous_chain.append(event()).unwrap();
         let previous = previous_chain.sign_checkpoint(100);
-        let transition = xenia_ledger::LedgerKeyTransition::sign(
-            previous.clone(),
-            &old_key,
-            &new_key,
-            101,
-        )
-        .unwrap();
+        let transition =
+            xenia_ledger::LedgerKeyTransition::sign(previous.clone(), &old_key, &new_key, 101)
+                .unwrap();
         std::fs::write(&checkpoint_path, serde_json::to_vec(&previous).unwrap()).unwrap();
         std::fs::write(&transition_path, serde_json::to_vec(&transition).unwrap()).unwrap();
 
@@ -1158,7 +1090,10 @@ mod tests {
             102,
         )
         .unwrap();
-        assert_eq!(verified.new_ledger_public_key, new_key.verifying_key().to_bytes());
+        assert_eq!(
+            verified.new_ledger_public_key,
+            new_key.verifying_key().to_bytes()
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1173,13 +1108,11 @@ mod tests {
         chain.append(event()).unwrap();
         std::fs::write(&base_path, serde_json::to_vec(&base).unwrap()).unwrap();
 
-        let segment = export_archive_segment_atomic(&output_path, &base_path, &chain, 101)
-            .unwrap();
+        let segment = export_archive_segment_atomic(&output_path, &base_path, &chain, 101).unwrap();
         xenia_ledger::Verifier::verify_ledger_archive_segment(&segment).unwrap();
         let stored: xenia_ledger::LedgerArchiveSegment =
             serde_json::from_slice(&std::fs::read(&output_path).unwrap()).unwrap();
         assert_eq!(stored, segment);
         std::fs::remove_dir_all(&dir).ok();
     }
-
 }

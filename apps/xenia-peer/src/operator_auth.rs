@@ -26,7 +26,7 @@ use std::collections::HashMap;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 
-use xenia_handshake::{HandshakeManager, MlDsaIdentity, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN};
+use xenia_handshake::{HandshakeManager, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN, MlDsaIdentity};
 
 use crate::operator::{OperatorPolicy, OperatorRole};
 
@@ -35,8 +35,8 @@ use crate::operator::{OperatorPolicy, OperatorRole};
 // the daemon verifies. Re-exported at `crate::operator_auth::*` so existing
 // call sites (main.rs, operator_http, the smoke test) stay unchanged.
 pub(crate) use xenia_operator_proto::{
-    challenge_transcript, consent_action_transcript, operator_token_canonical_bytes,
-    replace_operator_key_transcript, revoke_operator_transcript, ConsentAction, OperatorAction,
+    ConsentAction, OperatorAction, challenge_transcript, consent_action_transcript,
+    operator_token_canonical_bytes, replace_operator_key_transcript, revoke_operator_transcript,
 };
 
 /// Default lifetime of an issued challenge (seconds). Short: a challenge is
@@ -110,8 +110,7 @@ impl ChallengeStore {
         if self.outstanding.len() >= MAX_OUTSTANDING_CHALLENGES {
             return false;
         }
-        self.outstanding
-            .insert(nonce, now.saturating_add(ttl_secs));
+        self.outstanding.insert(nonce, now.saturating_add(ttl_secs));
         true
     }
 
@@ -903,12 +902,8 @@ mod tests {
             [5u8; 16],
         );
         let action_id = [0xA5u8; 16];
-        let transcript = consent_action_transcript(
-            action,
-            &action_id,
-            &signed.token.token_nonce,
-            offer_digest,
-        );
+        let transcript =
+            consent_action_transcript(action, &action_id, &signed.token.token_nonce, offer_digest);
         let action_signature = op.sign(&transcript).to_bytes();
         let ml_dsa_action_signature = op.sign_ml_dsa(&transcript);
         AuthenticatedConsentAction {
@@ -1519,5 +1514,4 @@ mod tests {
             Err(AuthError::Ed25519VerifyFailed)
         );
     }
-
 }

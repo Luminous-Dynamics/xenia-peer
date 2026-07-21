@@ -65,6 +65,12 @@ impl OperatorRevocations {
     /// Load a revocation list from `path` (creating an empty set if the file is
     /// absent — an absent file simply means "nothing revoked yet"). Records the
     /// path for later [`OperatorRevocations::reload`].
+    ///
+    /// Every current daemon startup path uses [`Self::from_required_file`]
+    /// instead (a missing configured source should fail closed, not silently
+    /// mean "nothing revoked"); this constructor is only exercised by tests
+    /// today. Disclosed rather than silently allowed away.
+    #[allow(dead_code)]
     pub(crate) fn from_file(path: &Path) -> std::io::Result<Self> {
         let set = read_revocations(path)?;
         let (changes, _rx) = watch::channel(0);
@@ -111,8 +117,11 @@ impl OperatorRevocations {
     }
 
     /// Revoke `operator_id` in-process. This is intentionally monotonic: there
-    /// is no implicit "un-revoke" when the backing file is reloaded. Tests and
-    /// deployments without a backing file use this path directly.
+    /// is no implicit "un-revoke" when the backing file is reloaded. Tests use
+    /// this path directly today; no production caller (e.g. an admin API for
+    /// file-less deployments) exists yet. Disclosed rather than silently
+    /// allowed away.
+    #[allow(dead_code)]
     pub(crate) fn revoke(&self, operator_id: &str) {
         if self.insert(operator_id) {
             self.notify_changed();
@@ -186,9 +195,7 @@ impl OperatorRevocations {
             Err(_) => {
                 self.healthy.store(false, Ordering::SeqCst);
                 self.notify_changed();
-                return Err(std::io::Error::other(
-                    "operator revocation lock poisoned",
-                ));
+                return Err(std::io::Error::other("operator revocation lock poisoned"));
             }
         };
         let recovered = !self.healthy.swap(true, Ordering::SeqCst);
@@ -283,6 +290,10 @@ fn sync_directory(path: &Path) -> std::io::Result<()> {
 
 /// Read a revocation file into a set of `operator_id`s. Missing file -> empty
 /// set. Blank lines and `#` comments are ignored; ids are trimmed.
+///
+/// Only [`OperatorRevocations::from_file`] calls this, and that constructor
+/// itself has no production caller today -- see its doc comment.
+#[allow(dead_code)]
 fn read_revocations(path: &Path) -> std::io::Result<HashSet<String>> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -325,18 +336,17 @@ mod tests {
     #[tokio::test]
     async fn subscribers_wake_only_when_the_set_changes() {
         let r = OperatorRevocations::empty();
-        let changes = r.subscribe();
+        let mut changes = r.subscribe();
         r.revoke("alice");
         changes.changed().await.unwrap();
         assert_eq!(*changes.borrow(), 1);
 
         r.revoke("alice");
-        assert!(tokio::time::timeout(
-            std::time::Duration::from_millis(10),
-            changes.changed()
-        )
-        .await
-        .is_err());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), changes.changed())
+                .await
+                .is_err()
+        );
     }
 
     #[test]

@@ -302,9 +302,15 @@ mod tests {
 
     #[test]
     fn purge_expired_removes_stale_entries_but_keeps_fresh_ones() {
-        let mut state = HandshakeState::new(Duration::from_millis(20));
+        // A wide TTL/sleep margin: this ran flaky under a heavily loaded
+        // shared test runner (25+ load average, many concurrent processes)
+        // with a 20ms TTL / 30ms sleep, because scheduling jitter alone could
+        // exceed the gap between "stale" and "fresh". 200ms/400ms keeps the
+        // same test intent with headroom real thread-pool contention can't
+        // eat through.
+        let mut state = HandshakeState::new(Duration::from_millis(200));
         let stale = begin_standard(&mut state, "http://localhost:8134");
-        std::thread::sleep(Duration::from_millis(30));
+        std::thread::sleep(Duration::from_millis(400));
         let fresh = begin_standard(&mut state, "http://localhost:8134");
 
         state.purge_expired();

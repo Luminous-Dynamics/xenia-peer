@@ -19,11 +19,11 @@
 
 use tokio::net::{TcpListener, TcpStream};
 
+use xenia_peer_core::HandshakeManager;
 use xenia_peer_core::handshake::{
     perform_host_handshake_authenticating_peer, perform_viewer_handshake_with_transcript,
 };
 use xenia_peer_core::transport::TcpTransport;
-use xenia_peer_core::HandshakeManager;
 
 use crate::operator::{EnrolledOperator, OperatorPolicy, OperatorRole};
 

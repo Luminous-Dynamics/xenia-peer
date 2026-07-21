@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    checkpoint_fingerprint, Chain, CheckpointContinuityError, LedgerCheckpoint, LedgerEntry,
-    Verifier,
+    Chain, CheckpointContinuityError, LedgerCheckpoint, LedgerEntry, Verifier,
+    checkpoint_fingerprint,
 };
 
 /// Stable schema label for [`LedgerArchiveSegment`].
@@ -127,16 +127,9 @@ impl LedgerArchiveSegment {
             });
         }
         let terminal_checkpoint = chain.sign_checkpoint(terminal_timestamp_unix_secs);
-        Verifier::verify_checkpoint_extension(
-            &base_checkpoint,
-            &terminal_checkpoint,
-            &entries,
-        )?;
-        let segment_digest = ledger_archive_segment_digest(
-            &base_checkpoint,
-            &entries,
-            &terminal_checkpoint,
-        )?;
+        Verifier::verify_checkpoint_extension(&base_checkpoint, &terminal_checkpoint, &entries)?;
+        let segment_digest =
+            ledger_archive_segment_digest(&base_checkpoint, &entries, &terminal_checkpoint)?;
         Ok(Self {
             schema: LEDGER_ARCHIVE_SEGMENT_SCHEMA.to_string(),
             base_checkpoint,

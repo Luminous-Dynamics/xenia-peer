@@ -1567,7 +1567,9 @@ fn checkpoint_monotonicity_detects_rollback_and_same_height_fork() {
         &rollback.ledger_public_key,
         rollback.timestamp_unix_secs,
     );
-    rollback.signature = SigningKey::from_bytes(&[31u8; 32]).sign(&message).to_bytes();
+    rollback.signature = SigningKey::from_bytes(&[31u8; 32])
+        .sign(&message)
+        .to_bytes();
     assert!(matches!(
         Verifier::verify_checkpoint_monotonic(&second, &rollback),
         Err(CheckpointContinuityError::EntryCountRegressed { .. })
@@ -1638,7 +1640,9 @@ fn ledger_key_transition_requires_both_epoch_keys() {
     let old = SigningKey::from_bytes(&[41u8; 32]);
     let new = SigningKey::from_bytes(&[42u8; 32]);
     let mut old_chain = crate::Chain::new(old.clone());
-    old_chain.append(sample_event(ConsentKind::Request)).unwrap();
+    old_chain
+        .append(sample_event(ConsentKind::Request))
+        .unwrap();
     let previous = old_chain.sign_checkpoint(100);
     let transition = LedgerKeyTransition::sign(previous.clone(), &old, &new, 101).unwrap();
 
@@ -1677,12 +1681,16 @@ fn ledger_key_transition_authorizes_a_fresh_successor_epoch() {
     let old = SigningKey::from_bytes(&[43u8; 32]);
     let new = SigningKey::from_bytes(&[44u8; 32]);
     let mut old_chain = crate::Chain::new(old.clone());
-    old_chain.append(sample_event(ConsentKind::Request)).unwrap();
+    old_chain
+        .append(sample_event(ConsentKind::Request))
+        .unwrap();
     let previous = old_chain.sign_checkpoint(100);
     let transition = LedgerKeyTransition::sign(previous.clone(), &old, &new, 101).unwrap();
 
     let mut successor = crate::Chain::new(new);
-    successor.append(sample_event(ConsentKind::Request)).unwrap();
+    successor
+        .append(sample_event(ConsentKind::Request))
+        .unwrap();
     let candidate = successor.sign_checkpoint(102);
     let entries = successor.iter().cloned().collect::<Vec<_>>();
 
@@ -1713,9 +1721,7 @@ fn checkpoint_witness_bundle_requires_distinct_trusted_quorum() {
 
 #[test]
 fn checkpoint_witness_bundle_enforces_the_signature_bound() {
-    use crate::{
-        CheckpointWitnessBundle, CheckpointWitnessError, MAX_CHECKPOINT_WITNESSES,
-    };
+    use crate::{CheckpointWitnessBundle, CheckpointWitnessError, MAX_CHECKPOINT_WITNESSES};
     use ed25519_dalek::SigningKey;
 
     let ledger_key = SigningKey::from_bytes(&[57u8; 32]);
@@ -1752,12 +1758,14 @@ fn checkpoint_witness_bundle_rejects_tampering_and_untrusted_keys() {
     .is_err());
 
     bundle.witnesses[0].signature[0] ^= 0x40;
-    assert!(Verifier::verify_checkpoint_witness_quorum(
-        &bundle,
-        &[witness.verifying_key().to_bytes()],
-        1,
-    )
-    .is_err());
+    assert!(
+        Verifier::verify_checkpoint_witness_quorum(
+            &bundle,
+            &[witness.verifying_key().to_bytes()],
+            1,
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -1806,12 +1814,8 @@ fn archive_sequence_digest_commits_to_ordered_verified_segments() {
     let first = LedgerArchiveSegment::from_chain(&chain, genesis, 101).unwrap();
 
     chain.append(sample_event(ConsentKind::Approval)).unwrap();
-    let second = LedgerArchiveSegment::from_chain(
-        &chain,
-        first.terminal_checkpoint.clone(),
-        102,
-    )
-    .unwrap();
+    let second =
+        LedgerArchiveSegment::from_chain(&chain, first.terminal_checkpoint.clone(), 102).unwrap();
     let segments = vec![first.clone(), second.clone()];
 
     let digest = ledger_archive_sequence_digest(&segments).unwrap();
@@ -1923,26 +1927,18 @@ fn compaction_manifest_refuses_placeholders_and_unrelated_boundaries() {
     chain.append(sample_event(ConsentKind::Request)).unwrap();
 
     assert_eq!(
-        chain.sign_compaction_manifest(
-            chain.sign_checkpoint(100),
-            [0u8; 32],
-            [0xB2; 32],
-            101,
-        ),
+        chain.sign_compaction_manifest(chain.sign_checkpoint(100), [0u8; 32], [0xB2; 32], 101,),
         Err(LedgerCompactionError::EmptyDigest {
             field: "archive_sequence",
         })
     );
 
     let other = crate::Chain::new(SigningKey::from_bytes(&[67u8; 32]));
-    assert!(chain
-        .sign_compaction_manifest(
-            other.sign_checkpoint(100),
-            [0xA1; 32],
-            [0xB2; 32],
-            101,
-        )
-        .is_err());
+    assert!(
+        chain
+            .sign_compaction_manifest(other.sign_checkpoint(100), [0xA1; 32], [0xB2; 32], 101,)
+            .is_err()
+    );
 }
 
 #[test]
@@ -1968,9 +1964,7 @@ fn checkpoint_suffix_chain_preserves_absolute_sequence_frontier() {
     let key = SigningKey::from_bytes(&[68u8; 32]);
     let public_key = key.verifying_key();
     let mut complete = crate::Chain::new(key.clone());
-    complete
-        .append(sample_event(ConsentKind::Request))
-        .unwrap();
+    complete.append(sample_event(ConsentKind::Request)).unwrap();
     let base = complete.sign_checkpoint(100);
     complete
         .append(sample_event(ConsentKind::Approval))
@@ -1998,7 +1992,10 @@ fn checkpoint_suffix_chain_preserves_absolute_sequence_frontier() {
         &compacted.iter().cloned().collect::<Vec<_>>(),
     )
     .unwrap();
-    assert_eq!(compacted.sign_checkpoint(102).ledger_public_key, public_key.to_bytes());
+    assert_eq!(
+        compacted.sign_checkpoint(102).ledger_public_key,
+        public_key.to_bytes()
+    );
 }
 
 #[test]
@@ -2008,15 +2005,13 @@ fn transactional_chain_callback_observes_compacted_anchor_and_rolls_back() {
     let base = complete.sign_checkpoint(100);
     let mut compacted = crate::Chain::from_checkpoint_suffix(base, Vec::new(), key);
 
-    let result = compacted.append_transactional_chain(
-        sample_event(ConsentKind::Request),
-        |candidate| {
+    let result =
+        compacted.append_transactional_chain(sample_event(ConsentKind::Request), |candidate| {
             assert_eq!(candidate.entry_count(), 1);
             assert_eq!(candidate.resident_len(), 1);
             assert!(candidate.base_checkpoint().is_some());
             Err("disk full")
-        },
-    );
+        });
     assert!(matches!(
         result,
         Err(crate::TransactionalAppendError::Persist("disk full"))

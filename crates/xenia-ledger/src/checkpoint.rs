@@ -82,9 +82,7 @@ pub fn checkpoint_message(
 /// certificates and witness countersignatures. Including the checkpoint
 /// signature binds the exact signed object, not merely an equivalent set of
 /// unsigned fields.
-pub fn checkpoint_fingerprint(
-    checkpoint: &LedgerCheckpoint,
-) -> Result<[u8; 32], CheckpointError> {
+pub fn checkpoint_fingerprint(checkpoint: &LedgerCheckpoint) -> Result<[u8; 32], CheckpointError> {
     Verifier::verify_checkpoint(checkpoint)?;
     let mut bytes = checkpoint_message(
         checkpoint.entry_count,
@@ -286,9 +284,7 @@ pub enum CheckpointContinuityError {
         maximum_skew: u64,
     },
     /// A retained checkpoint was older than the deployment's freshness SLA.
-    #[error(
-        "ledger checkpoint age {age} seconds exceeds maximum accepted age {maximum_age}"
-    )]
+    #[error("ledger checkpoint age {age} seconds exceeds maximum accepted age {maximum_age}")]
     CheckpointTooOld {
         /// Observed age in seconds.
         age: u64,
@@ -321,10 +317,7 @@ impl Verifier {
         if let Some(maximum_age) = policy.max_age_secs {
             let age = now_unix_secs.saturating_sub(checkpoint.timestamp_unix_secs);
             if age > maximum_age {
-                return Err(CheckpointContinuityError::CheckpointTooOld {
-                    age,
-                    maximum_age,
-                });
+                return Err(CheckpointContinuityError::CheckpointTooOld { age, maximum_age });
             }
         }
         Ok(())
@@ -441,13 +434,11 @@ impl Verifier {
             if entry.prev_hash != expected_prev {
                 return Err(CheckpointContinuityError::SuffixBrokenLink { seq: entry.seq });
             }
-            let recomputed = compute_entry_hash(
-                entry.seq,
-                &entry.prev_hash,
-                &entry.timestamp,
-                &entry.event,
-            )
-            .map_err(|_| CheckpointContinuityError::SuffixEntryHashMismatch { seq: entry.seq })?;
+            let recomputed =
+                compute_entry_hash(entry.seq, &entry.prev_hash, &entry.timestamp, &entry.event)
+                    .map_err(|_| CheckpointContinuityError::SuffixEntryHashMismatch {
+                        seq: entry.seq,
+                    })?;
             if recomputed != entry.entry_hash {
                 return Err(CheckpointContinuityError::SuffixEntryHashMismatch { seq: entry.seq });
             }

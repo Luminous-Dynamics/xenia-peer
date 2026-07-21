@@ -34,21 +34,20 @@ use crate::audit_ledger_store::{
     AuditLedgerStoreError, persist_owner_only_atomic, read_bounded_json,
 };
 use crate::consent_compaction::{
-    consent_compacted_state_pin_fingerprint, consent_compaction_gc_certificate_fingerprint,
-    ConsentCompactedActiveStateV1, ConsentCompactedStatePinV1,
-    ConsentCompactionGcCertificateV1, ConsentRecoveryError,
+    ConsentCompactedActiveStateV1, ConsentCompactedStatePinV1, ConsentCompactionGcCertificateV1,
+    ConsentRecoveryError, consent_compacted_state_pin_fingerprint,
+    consent_compaction_gc_certificate_fingerprint,
 };
+use serde_big_array::BigArray;
 
-pub(crate) const CONSENT_RETIREMENT_PLAN_SCHEMA: &str =
-    "xenia-consent-retirement-plan-v1";
+pub(crate) const CONSENT_RETIREMENT_PLAN_SCHEMA: &str = "xenia-consent-retirement-plan-v1";
 pub(crate) const MAX_RETIREMENT_CANDIDATES: usize = 32;
 pub(crate) const MAX_RETIREMENT_PLAN_LIFETIME_SECS: u64 = 24 * 60 * 60;
 pub(crate) const MAX_RETIREMENT_PATH_BYTES: usize = 4096;
 pub(crate) const CONSENT_RETIREMENT_APPROVAL_BUNDLE_SCHEMA: &str =
     "xenia-consent-retirement-approval-bundle-v1";
 pub(crate) const MAX_RETIREMENT_APPROVALS: usize = 64;
-pub(crate) const CONSENT_RETIREMENT_JOURNAL_SCHEMA: &str =
-    "xenia-consent-retirement-journal-v1";
+pub(crate) const CONSENT_RETIREMENT_JOURNAL_SCHEMA: &str = "xenia-consent-retirement-journal-v1";
 pub(crate) const CONSENT_RETIREMENT_RECEIPT_SCHEMA: &str =
     "xenia-consent-retirement-quarantine-receipt-v1";
 pub(crate) const MAX_RETIREMENT_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
@@ -58,6 +57,11 @@ pub(crate) const MAX_RETIREMENT_TRANSACTION_BYTES: u64 = 1024 * 1024;
 /// activation. Cold archives, active state, retained pins, signing keys, and
 /// certificates are intentionally absent and therefore cannot appear in a
 /// valid plan.
+// The shared `Superseded` prefix is deliberate, not repetition: it marks
+// every current variant as a role for content that's already been replaced
+// by something newer (as opposed to, say, a future `Active*` role), and
+// dropping it would read as though these artifacts weren't superseded at all.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ConsentRetirementArtifactRoleV1 {
@@ -85,11 +89,28 @@ pub(crate) struct ConsentRetirementArtifactV1 {
     pub(crate) blake3_digest: [u8; 32],
 }
 
+impl ConsentRetirementArtifactV1 {
+    /// Whether `self` and `other` describe the same content, ignoring
+    /// `canonical_path`. A freshly re-observed artifact's path legitimately
+    /// differs from a journal-recorded one whenever it's read back from its
+    /// quarantine location instead of its original one -- that's the normal
+    /// shape of reconciling a rename the journal hasn't caught up to yet, not
+    /// tampering. Full `PartialEq` (path included) is for cases where the
+    /// artifact is re-observed at the *same* path it was originally recorded
+    /// at, where an unexpected path change would itself be suspicious.
+    fn matches_content(&self, other: &Self) -> bool {
+        self.role == other.role
+            && self.byte_length == other.byte_length
+            && self.blake3_digest == other.blake3_digest
+    }
+}
+
 /// One independently controlled retention key's approval of an exact plan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ConsentRetirementApprovalV1 {
     pub(crate) witness_public_key: [u8; 32],
     pub(crate) approved_at_unix_secs: u64,
+    #[serde(with = "BigArray")]
     pub(crate) signature: [u8; 64],
 }
 
@@ -160,6 +181,7 @@ pub(crate) struct ConsentRetirementQuarantineReceiptV1 {
     pub(crate) started_at_unix_secs: u64,
     pub(crate) completed_at_unix_secs: u64,
     pub(crate) entries: Vec<ConsentRetirementJournalEntryV1>,
+    #[serde(with = "BigArray")]
     pub(crate) signature: [u8; 64],
 }
 
@@ -176,6 +198,7 @@ pub(crate) struct ConsentRetirementPlanV1 {
     pub(crate) candidates: Vec<ConsentRetirementArtifactV1>,
     pub(crate) issued_at_unix_secs: u64,
     pub(crate) expires_at_unix_secs: u64,
+    #[serde(with = "BigArray")]
     pub(crate) signature: [u8; 64],
 }
 
@@ -223,7 +246,9 @@ pub(crate) enum ConsentRetirementError {
     ArtifactChanged { path: String },
     #[error("consent retirement quarantine root is invalid: {path}")]
     InvalidQuarantineRoot { path: String },
-    #[error("consent retirement quarantine root permissions are too broad: path={path}, mode={mode:o}")]
+    #[error(
+        "consent retirement quarantine root permissions are too broad: path={path}, mode={mode:o}"
+    )]
     InsecureQuarantineRootPermissions { path: String, mode: u32 },
     #[error("consent retirement transaction already exists: {path}")]
     TransactionAlreadyExists { path: String },
@@ -237,10 +262,20 @@ pub(crate) enum ConsentRetirementError {
     InvalidJournalState,
     #[error("consent retirement transaction already has a signed completion receipt")]
     ReceiptAlreadyExists,
-    #[error("consent retirement rollback found both original and quarantined copies: original={original}, quarantine={quarantine}")]
-    RollbackArtifactPresentInBoth { original: String, quarantine: String },
-    #[error("consent retirement rollback found neither original nor quarantined copy: original={original}, quarantine={quarantine}")]
-    RollbackArtifactMissing { original: String, quarantine: String },
+    #[error(
+        "consent retirement rollback found both original and quarantined copies: original={original}, quarantine={quarantine}"
+    )]
+    RollbackArtifactPresentInBoth {
+        original: String,
+        quarantine: String,
+    },
+    #[error(
+        "consent retirement rollback found neither original nor quarantined copy: original={original}, quarantine={quarantine}"
+    )]
+    RollbackArtifactMissing {
+        original: String,
+        quarantine: String,
+    },
     #[error("consent retirement rollback failed after an execution error: {0}")]
     RollbackFailed(String),
     #[error("consent retirement receipt has unsupported schema: {schema}")]
@@ -317,12 +352,7 @@ impl ConsentRetirementPlanV1 {
         expires_at_unix_secs: u64,
     ) -> Result<Self, ConsentRetirementError> {
         let public_key = signing_key.verifying_key();
-        gc_certificate.verify(
-            active_state,
-            state_pin,
-            archive_segments,
-            &public_key,
-        )?;
+        gc_certificate.verify(active_state, state_pin, archive_segments, &public_key)?;
         candidates.sort_by(|left, right| {
             left.canonical_path
                 .cmp(&right.canonical_path)
@@ -455,12 +485,11 @@ impl ConsentRetirementPlanV1 {
                     path: candidate.canonical_path.clone(),
                 });
             }
-            if let Some((previous_path, previous_role)) = previous {
-                if (previous_path, previous_role)
+            if let Some((previous_path, previous_role)) = previous
+                && (previous_path, previous_role)
                     > (candidate.canonical_path.as_str(), candidate.role)
-                {
-                    return Err(ConsentRetirementError::CandidateOrderMismatch);
-                }
+            {
+                return Err(ConsentRetirementError::CandidateOrderMismatch);
             }
             previous = Some((candidate.canonical_path.as_str(), candidate.role));
         }
@@ -501,12 +530,12 @@ pub(crate) fn observe_retirement_artifact(
         if read == 0 {
             break;
         }
-        observed = observed
-            .checked_add(read as u64)
-            .ok_or_else(|| ConsentRetirementError::ArtifactTooLarge {
+        observed = observed.checked_add(read as u64).ok_or_else(|| {
+            ConsentRetirementError::ArtifactTooLarge {
                 path: canonical_path.clone(),
                 maximum: MAX_RETIREMENT_ARTIFACT_BYTES,
-            })?;
+            }
+        })?;
         if observed > MAX_RETIREMENT_ARTIFACT_BYTES {
             return Err(ConsentRetirementError::ArtifactTooLarge {
                 path: canonical_path,
@@ -528,14 +557,11 @@ pub(crate) fn observe_retirement_artifact(
     })
 }
 
-pub(crate) fn canonical_quarantine_root(
-    path: &Path,
-) -> Result<String, ConsentRetirementError> {
-    let metadata = fs::symlink_metadata(path).map_err(|_| {
-        ConsentRetirementError::InvalidQuarantineRoot {
+pub(crate) fn canonical_quarantine_root(path: &Path) -> Result<String, ConsentRetirementError> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| ConsentRetirementError::InvalidQuarantineRoot {
             path: path.display().to_string(),
-        }
-    })?;
+        })?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(ConsentRetirementError::InvalidQuarantineRoot {
             path: path.display().to_string(),
@@ -635,10 +661,8 @@ pub(crate) fn execute_retirement_quarantine(
         for index in 0..journal.entries.len() {
             let artifact = journal.entries[index].artifact.clone();
             let quarantine_path = journal.entries[index].quarantine_path.clone();
-            let observed = observe_retirement_artifact(
-                artifact.role,
-                Path::new(&artifact.canonical_path),
-            )?;
+            let observed =
+                observe_retirement_artifact(artifact.role, Path::new(&artifact.canonical_path))?;
             if observed != artifact {
                 return Err(ConsentRetirementError::ArtifactChanged {
                     path: artifact.canonical_path,
@@ -799,7 +823,10 @@ pub(crate) fn rollback_retirement_journal(
     {
         return Err(ConsentRetirementError::InvalidJournalState);
     }
-    if quarantine_transaction_directory(plan).join("receipt.json").exists() {
+    if quarantine_transaction_directory(plan)
+        .join("receipt.json")
+        .exists()
+    {
         return Err(ConsentRetirementError::ReceiptAlreadyExists);
     }
     for index in (0..journal.entries.len()).rev() {
@@ -818,26 +845,22 @@ pub(crate) fn rollback_retirement_journal(
             }
             (false, true) => {
                 let observed = observe_retirement_artifact(artifact.role, quarantined)?;
-                if observed != artifact {
+                if !observed.matches_content(&artifact) {
                     return Err(ConsentRetirementError::ArtifactChanged {
                         path: quarantine_path,
                     });
                 }
                 fs::rename(quarantined, original)?;
-                sync_directory(
-                    original
-                        .parent()
-                        .ok_or_else(|| ConsentRetirementError::NonCanonicalPath {
-                            path: artifact.canonical_path.clone(),
-                        })?,
-                )?;
-                sync_directory(
-                    quarantined
-                        .parent()
-                        .ok_or_else(|| ConsentRetirementError::NonCanonicalPath {
-                            path: quarantine_path.clone(),
-                        })?,
-                )?;
+                sync_directory(original.parent().ok_or_else(|| {
+                    ConsentRetirementError::NonCanonicalPath {
+                        path: artifact.canonical_path.clone(),
+                    }
+                })?)?;
+                sync_directory(quarantined.parent().ok_or_else(|| {
+                    ConsentRetirementError::NonCanonicalPath {
+                        path: quarantine_path.clone(),
+                    }
+                })?)?;
             }
             (true, true) => {
                 return Err(ConsentRetirementError::RollbackArtifactPresentInBoth {
@@ -950,8 +973,7 @@ pub(crate) fn recover_retirement_transaction(
             verify_rolled_back_journal_files(&journal)?;
             Ok(ConsentRetirementRecoveryOutcomeV1::AlreadyRolledBack)
         }
-        ConsentRetirementJournalStateV1::Prepared
-        | ConsentRetirementJournalStateV1::Moving => {
+        ConsentRetirementJournalStateV1::Prepared | ConsentRetirementJournalStateV1::Moving => {
             rollback_retirement_journal(
                 journal_path,
                 plan,
@@ -975,13 +997,11 @@ pub(crate) fn verify_quarantined_receipt_files(
                 path: entry.artifact.canonical_path.clone(),
             });
         }
-        let observed = observe_retirement_artifact(
-            entry.artifact.role,
-            Path::new(&entry.quarantine_path),
-        )
-        .map_err(|_| ConsentRetirementError::QuarantinedArtifactMismatch {
-            path: entry.quarantine_path.clone(),
-        })?;
+        let observed =
+            observe_retirement_artifact(entry.artifact.role, Path::new(&entry.quarantine_path))
+                .map_err(|_| ConsentRetirementError::QuarantinedArtifactMismatch {
+                    path: entry.quarantine_path.clone(),
+                })?;
         if observed.byte_length != entry.artifact.byte_length
             || observed.blake3_digest != entry.artifact.blake3_digest
         {
@@ -1009,7 +1029,9 @@ impl ConsentRetirementQuarantineReceiptV1 {
             || self.approval_bundle_fingerprint
                 != consent_retirement_approval_bundle_fingerprint(approvals)?
             || self.transaction_directory
-                != quarantine_transaction_directory(plan).to_string_lossy().as_ref()
+                != quarantine_transaction_directory(plan)
+                    .to_string_lossy()
+                    .as_ref()
             || self.entries.len() != plan.candidates.len()
             || self.completed_at_unix_secs < self.started_at_unix_secs
         {
@@ -1116,9 +1138,7 @@ fn sync_directory(path: &Path) -> Result<(), std::io::Error> {
 }
 
 impl ConsentRetirementApprovalBundleV1 {
-    pub(crate) fn new(
-        plan: &ConsentRetirementPlanV1,
-    ) -> Result<Self, ConsentRetirementError> {
+    pub(crate) fn new(plan: &ConsentRetirementPlanV1) -> Result<Self, ConsentRetirementError> {
         Ok(Self {
             schema: CONSENT_RETIREMENT_APPROVAL_BUNDLE_SCHEMA.to_string(),
             plan_fingerprint: consent_retirement_plan_fingerprint(plan)?,
@@ -1197,7 +1217,10 @@ impl ConsentRetirementApprovalBundleV1 {
         if self.plan_fingerprint != expected_plan {
             return Err(ConsentRetirementError::ApprovalPlanMismatch);
         }
-        let trusted = trusted_witness_keys.iter().copied().collect::<BTreeSet<_>>();
+        let trusted = trusted_witness_keys
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
         let mut observed = BTreeSet::new();
         for approval in &self.approvals {
             if approval.approved_at_unix_secs < plan.issued_at_unix_secs
@@ -1305,19 +1328,16 @@ fn consent_retirement_plan_message(
     Ok(message)
 }
 
-fn append_bytes(
-    output: &mut Vec<u8>,
-    bytes: &[u8],
-) -> Result<(), ConsentRetirementError> {
-    let length = u32::try_from(bytes.len())
-        .map_err(|_| ConsentRetirementError::EncodingLengthOverflow)?;
+fn append_bytes(output: &mut Vec<u8>, bytes: &[u8]) -> Result<(), ConsentRetirementError> {
+    let length =
+        u32::try_from(bytes.len()).map_err(|_| ConsentRetirementError::EncodingLengthOverflow)?;
     output.extend_from_slice(&length.to_be_bytes());
     output.extend_from_slice(bytes);
     Ok(())
 }
 
 fn validate_absolute_normal_path(path: &str) -> Result<(), ConsentRetirementError> {
-    if path.as_bytes().len() > MAX_RETIREMENT_PATH_BYTES {
+    if path.len() > MAX_RETIREMENT_PATH_BYTES {
         return Err(ConsentRetirementError::PathTooLong {
             path: path.to_string(),
             maximum: MAX_RETIREMENT_PATH_BYTES,
@@ -1325,12 +1345,9 @@ fn validate_absolute_normal_path(path: &str) -> Result<(), ConsentRetirementErro
     }
     let candidate = Path::new(path);
     if !candidate.is_absolute()
-        || candidate.components().any(|component| {
-            matches!(
-                component,
-                Component::CurDir | Component::ParentDir
-            )
-        })
+        || candidate
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
     {
         return Err(ConsentRetirementError::NonCanonicalPath {
             path: path.to_string(),
@@ -1347,8 +1364,8 @@ mod tests {
 
     use crate::audit_ledger_store::read_bounded_json;
     use crate::consent_compaction::{
-        ConsentCompactedSnapshotV1, ConsentCompactedStatePinV1,
-        ConsentCompactionBundleV1, ConsentCompactionGcCertificateV1,
+        ConsentCompactedSnapshotV1, ConsentCompactedStatePinV1, ConsentCompactionBundleV1,
+        ConsentCompactionGcCertificateV1,
     };
 
     fn event(kind: ConsentKind, session: u128, request: u128) -> ConsentEventRecord {
@@ -1375,23 +1392,14 @@ mod tests {
         let archive = vec![LedgerArchiveSegment::from_chain(&complete, genesis, 101).unwrap()];
         let bundle = ConsentCompactionBundleV1::build(&complete, archive.clone(), 102).unwrap();
         let entries = complete.iter().cloned().collect::<Vec<_>>();
-        let snapshot = ConsentCompactedSnapshotV1::build(
-            &bundle,
-            &entries,
-            &key.verifying_key(),
-        )
-        .unwrap();
-        let active = ConsentCompactedActiveStateV1::activate(snapshot, &archive, &key, 103)
-            .unwrap();
+        let snapshot =
+            ConsentCompactedSnapshotV1::build(&bundle, &entries, &key.verifying_key()).unwrap();
+        let active =
+            ConsentCompactedActiveStateV1::activate(snapshot, &archive, &key, 103).unwrap();
         let pin = ConsentCompactedStatePinV1::sign_for_state(&active, &key, 104).unwrap();
-        let certificate = ConsentCompactionGcCertificateV1::sign_for_state(
-            &active,
-            &pin,
-            &archive,
-            &key,
-            105,
-        )
-        .unwrap();
+        let certificate =
+            ConsentCompactionGcCertificateV1::sign_for_state(&active, &pin, &archive, &key, 105)
+                .unwrap();
         (key, active, pin, certificate, archive)
     }
 
@@ -1428,7 +1436,10 @@ mod tests {
             150,
         )
         .unwrap();
-        assert_ne!(consent_retirement_plan_fingerprint(&plan).unwrap(), [0u8; 32]);
+        assert_ne!(
+            consent_retirement_plan_fingerprint(&plan).unwrap(),
+            [0u8; 32]
+        );
     }
 
     #[test]
@@ -1517,10 +1528,15 @@ mod tests {
             108,
         )
         .unwrap();
-        receipt.verify(&plan, &approvals, &key.verifying_key()).unwrap();
+        receipt
+            .verify(&plan, &approvals, &key.verifying_key())
+            .unwrap();
         assert!(!candidate_path.exists());
         assert!(Path::new(&receipt.entries[0].quarantine_path).exists());
-        assert_ne!(consent_retirement_receipt_fingerprint(&receipt).unwrap(), [0u8; 32]);
+        assert_ne!(
+            consent_retirement_receipt_fingerprint(&receipt).unwrap(),
+            [0u8; 32]
+        );
     }
 
     #[test]
@@ -1611,7 +1627,10 @@ mod tests {
         std::fs::rename(&original, &quarantined).unwrap();
         // Simulate a crash after rename and directory sync but before the
         // journal entry could be advanced from Pending to Moved.
-        assert_eq!(entries[0].state, ConsentRetirementJournalEntryStateV1::Pending);
+        assert_eq!(
+            entries[0].state,
+            ConsentRetirementJournalEntryStateV1::Pending
+        );
         let journal_path = transaction.join("journal.json");
         let journal = ConsentRetirementJournalV1 {
             schema: CONSENT_RETIREMENT_JOURNAL_SCHEMA.into(),
@@ -1684,12 +1703,8 @@ mod tests {
         )
         .unwrap();
         let journal_path = Path::new(&receipt.transaction_directory).join("journal.json");
-        let mut journal: ConsentRetirementJournalV1 = read_bounded_json(
-            &journal_path,
-            MAX_RETIREMENT_TRANSACTION_BYTES,
-            "journal",
-        )
-        .unwrap();
+        let mut journal: ConsentRetirementJournalV1 =
+            read_bounded_json(&journal_path, MAX_RETIREMENT_TRANSACTION_BYTES, "journal").unwrap();
         journal.state = ConsentRetirementJournalStateV1::Moving;
         persist_retirement_json(&journal_path, &journal).unwrap();
         assert_eq!(
@@ -1767,11 +1782,7 @@ mod tests {
         );
         approvals.approvals.push(approvals.approvals[0].clone());
         assert_eq!(
-            approvals.verify_quorum(
-                &plan,
-                &[witness.verifying_key().to_bytes()],
-                1,
-            ),
+            approvals.verify_quorum(&plan, &[witness.verifying_key().to_bytes()], 1,),
             Err(ConsentRetirementError::DuplicateApprovalKey)
         );
     }

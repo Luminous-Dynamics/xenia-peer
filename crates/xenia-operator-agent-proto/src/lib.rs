@@ -44,8 +44,7 @@
 use serde::{Deserialize, Serialize};
 
 pub use xenia_operator_proto::{
-    AttestedConsentOfferV2, ConsentAction, ConsentScopeV1, DaemonIdentityCertificate,
-    OperatorRole,
+    AttestedConsentOfferV2, ConsentAction, ConsentScopeV1, DaemonIdentityCertificate, OperatorRole,
 };
 
 /// Current schema version for the `/v1/sign/*` request/response shapes.
@@ -646,7 +645,10 @@ mod tests {
             parsed.attested_offer.offer.scope,
             ConsentScopeV1::screen_only()
         );
-        assert_eq!(parsed.attested_offer.offer.session_transcript_hash, [0x77; 32]);
+        assert_eq!(
+            parsed.attested_offer.offer.session_transcript_hash,
+            [0x77; 32]
+        );
         assert_eq!(parsed.token, req.token);
     }
 

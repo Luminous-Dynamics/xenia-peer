@@ -91,7 +91,9 @@ impl M1PermissionSet {
     /// Decode a grant persisted by [`Self::scope_descriptor`]. Unknown versions,
     /// malformed lengths, and non-binary fields fail closed.
     pub fn from_scope_descriptor(scope: &str) -> Option<Self> {
-        let bits = scope.strip_prefix(Self::SCOPE_DESCRIPTOR_PREFIX)?.as_bytes();
+        let bits = scope
+            .strip_prefix(Self::SCOPE_DESCRIPTOR_PREFIX)?
+            .as_bytes();
         if bits.len() != 6 || bits.iter().any(|bit| !matches!(bit, b'0' | b'1')) {
             return None;
         }
@@ -427,7 +429,10 @@ mod tests {
         };
         let descriptor = grant.scope_descriptor();
         assert_eq!(descriptor, "xenia-m1-permissions-v1:101010");
-        assert_eq!(M1PermissionSet::from_scope_descriptor(&descriptor), Some(grant));
+        assert_eq!(
+            M1PermissionSet::from_scope_descriptor(&descriptor),
+            Some(grant)
+        );
         assert_eq!(M1PermissionSet::from_scope_descriptor("view screen"), None);
         assert_eq!(
             M1PermissionSet::from_scope_descriptor("xenia-m1-permissions-v2:101010"),

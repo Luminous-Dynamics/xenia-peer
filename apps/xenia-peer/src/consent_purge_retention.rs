@@ -21,12 +21,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::consent_purge::{
+    ConsentPurgeApprovalBundleV1, ConsentPurgePlanV1, ConsentPurgeReceiptV1,
+    ConsentPurgeRollbackPackageV1, MAX_PURGE_ARTIFACT_BYTES,
     consent_purge_approval_bundle_fingerprint, consent_purge_plan_fingerprint,
     consent_purge_receipt_fingerprint, consent_purge_rollback_package_fingerprint,
-    verify_purge_receipt_files, verify_rollback_package_files, ConsentPurgeApprovalBundleV1,
-    ConsentPurgePlanV1, ConsentPurgeReceiptV1, ConsentPurgeRollbackPackageV1,
-    MAX_PURGE_ARTIFACT_BYTES,
+    verify_purge_receipt_files, verify_rollback_package_files,
 };
+use serde_big_array::BigArray;
 
 pub(crate) const CONSENT_PURGE_RETENTION_CERTIFICATE_SCHEMA: &str =
     "xenia-consent-purge-retention-certificate-v1";
@@ -69,6 +70,7 @@ pub(crate) struct ConsentPurgeProtectedArtifactV1 {
 pub(crate) struct ConsentPurgeRetentionWitnessV1 {
     pub(crate) witness_public_key: [u8; 32],
     pub(crate) observed_at_unix_secs: u64,
+    #[serde(with = "BigArray")]
     pub(crate) signature: [u8; 64],
 }
 
@@ -91,6 +93,7 @@ pub(crate) struct ConsentPurgeRetentionAnchorV1 {
     pub(crate) package_directory: String,
     pub(crate) retain_until_unix_secs: u64,
     pub(crate) anchored_at_unix_secs: u64,
+    #[serde(with = "BigArray")]
     pub(crate) signature: [u8; 64],
 }
 
@@ -109,6 +112,7 @@ pub(crate) struct ConsentPurgeRetentionRenewalV1 {
     pub(crate) previous_retain_until_unix_secs: u64,
     pub(crate) retain_until_unix_secs: u64,
     pub(crate) issued_at_unix_secs: u64,
+    #[serde(with = "BigArray")]
     pub(crate) signature: [u8; 64],
 }
 
@@ -146,9 +150,16 @@ pub(crate) struct ConsentPurgeRetentionCertificateV1 {
     pub(crate) retained_from_unix_secs: u64,
     pub(crate) retain_until_unix_secs: u64,
     pub(crate) issued_at_unix_secs: u64,
+    #[serde(with = "BigArray")]
     pub(crate) signature: [u8; 64],
 }
 
+// `CertificateFromFuture` and `RetentionExpired` are reserved for a
+// temporal-freshness check (certificate not-yet-valid / retention window
+// elapsed) that isn't wired into any verify/validate function yet -- the
+// quorum and minimum-age gating this module does enforce doesn't need them.
+// Disclosed as a gap rather than silently dropped or force-implemented here.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum ConsentPurgeRetentionError {
     #[error("consent purge retention certificate has unsupported schema: {schema}")]
@@ -203,7 +214,9 @@ pub(crate) enum ConsentPurgeRetentionError {
     InvalidWitnessSignature,
     #[error("consent purge retention witness quorum cannot be zero")]
     ZeroWitnessQuorum,
-    #[error("consent purge retention witness quorum was not met: observed={observed}, required={required}")]
+    #[error(
+        "consent purge retention witness quorum was not met: observed={observed}, required={required}"
+    )]
     WitnessQuorumNotMet { observed: usize, required: usize },
     #[error("consent purge retention witness bundle exceeds {maximum} witnesses: {count}")]
     TooManyWitnesses { count: usize, maximum: usize },
@@ -418,9 +431,11 @@ impl ConsentPurgeRetentionCertificateV1 {
                 });
             }
             if !Path::new(&artifact.path).starts_with(package_directory) {
-                return Err(ConsentPurgeRetentionError::ProtectedArtifactOutsidePackage {
-                    path: artifact.path.clone(),
-                });
+                return Err(
+                    ConsentPurgeRetentionError::ProtectedArtifactOutsidePackage {
+                        path: artifact.path.clone(),
+                    },
+                );
             }
             let current = (artifact.path.as_str(), artifact.role);
             if previous.is_some_and(|prior| prior >= current) {
@@ -531,8 +546,7 @@ impl ConsentPurgeRetentionAnchorV1 {
         verify_protected_inventory_files(certificate)?;
         if self.anchored_at_unix_secs < certificate.issued_at_unix_secs
             || self.anchored_at_unix_secs >= certificate.retain_until_unix_secs
-            || self.anchored_at_unix_secs
-                > now_unix_secs.saturating_add(maximum_future_skew_secs)
+            || self.anchored_at_unix_secs > now_unix_secs.saturating_add(maximum_future_skew_secs)
         {
             return Err(ConsentPurgeRetentionError::AnchorOutsideRetentionWindow);
         }
@@ -825,7 +839,6 @@ pub(crate) fn consent_purge_retention_obligation_fingerprint(
     }
 }
 
-
 pub(crate) fn verify_retention_subject(
     certificate: &ConsentPurgeRetentionCertificateV1,
     anchor: &ConsentPurgeRetentionAnchorV1,
@@ -833,26 +846,17 @@ pub(crate) fn verify_retention_subject(
     public_key: &VerifyingKey,
     now_unix_secs: u64,
 ) -> Result<ConsentPurgeRetentionSubjectV1, ConsentPurgeRetentionError> {
-    let retain_until_unix_secs = verify_retention_renewal_chain(
-        certificate,
-        anchor,
-        renewals,
-        public_key,
-        now_unix_secs,
-    )?;
+    let retain_until_unix_secs =
+        verify_retention_renewal_chain(certificate, anchor, renewals, public_key, now_unix_secs)?;
     Ok(ConsentPurgeRetentionSubjectV1 {
         ledger_epoch_id: certificate.ledger_epoch_id,
-        base_certificate_fingerprint: consent_purge_retention_certificate_fingerprint(
-            certificate,
-        )?,
+        base_certificate_fingerprint: consent_purge_retention_certificate_fingerprint(certificate)?,
         anchor_fingerprint: consent_purge_retention_anchor_fingerprint(anchor)?,
         obligation_fingerprint: consent_purge_retention_obligation_fingerprint(
             certificate,
             renewals,
         )?,
-        protected_inventory_digest: protected_inventory_digest(
-            &certificate.protected_artifacts,
-        )?,
+        protected_inventory_digest: protected_inventory_digest(&certificate.protected_artifacts)?,
         package_directory: certificate.package_directory.clone(),
         retain_until_unix_secs,
     })
@@ -1065,7 +1069,10 @@ impl ConsentPurgeRetentionWitnessBundleV1 {
                 maximum: MAX_PURGE_RETENTION_WITNESSES,
             });
         }
-        let trusted = trusted_witness_keys.iter().copied().collect::<BTreeSet<_>>();
+        let trusted = trusted_witness_keys
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
         let mut observed = BTreeSet::new();
         for witness in &self.witnesses {
             if !observed.insert(witness.witness_public_key) {
@@ -1267,9 +1274,7 @@ pub(crate) fn verify_protected_inventory_files(
     Ok(())
 }
 
-fn verify_private_package_directory(
-    path: &Path,
-) -> Result<(), ConsentPurgeRetentionError> {
+fn verify_private_package_directory(path: &Path) -> Result<(), ConsentPurgeRetentionError> {
     let canonical = fs::canonicalize(path).map_err(|_| {
         ConsentPurgeRetentionError::PackageDirectoryNotPrivate {
             path: path.display().to_string(),
@@ -1345,10 +1350,7 @@ fn hash_regular_file(path: &Path) -> Result<(u64, [u8; 32]), ConsentPurgeRetenti
     Ok((total, *hasher.finalize().as_bytes()))
 }
 
-fn append_bytes(
-    output: &mut Vec<u8>,
-    bytes: &[u8],
-) -> Result<(), ConsentPurgeRetentionError> {
+fn append_bytes(output: &mut Vec<u8>, bytes: &[u8]) -> Result<(), ConsentPurgeRetentionError> {
     let length = u32::try_from(bytes.len())
         .map_err(|_| ConsentPurgeRetentionError::EncodingLengthOverflow)?;
     output.extend_from_slice(&length.to_be_bytes());
@@ -1433,14 +1435,18 @@ mod tests {
 
         let mut changed = certificate.clone();
         changed.protected_artifacts[0].byte_length += 1;
-        assert!(changed
-            .verify_authority_signature(&key.verifying_key())
-            .is_err());
+        assert!(
+            changed
+                .verify_authority_signature(&key.verifying_key())
+                .is_err()
+        );
         changed = certificate.clone();
         changed.retain_until_unix_secs += 1;
-        assert!(changed
-            .verify_authority_signature(&key.verifying_key())
-            .is_err());
+        assert!(
+            changed
+                .verify_authority_signature(&key.verifying_key())
+                .is_err()
+        );
         assert_ne!(
             original_fingerprint,
             consent_purge_retention_certificate_fingerprint(&changed).unwrap()
@@ -1469,7 +1475,11 @@ mod tests {
             .sign_with(&certificate, &witness_one, certificate.issued_at_unix_secs)
             .unwrap();
         bundle
-            .sign_with(&certificate, &witness_two, certificate.issued_at_unix_secs + 1)
+            .sign_with(
+                &certificate,
+                &witness_two,
+                certificate.issued_at_unix_secs + 1,
+            )
             .unwrap();
         let trusted = vec![
             witness_one.verifying_key().to_bytes(),
@@ -1553,13 +1563,14 @@ mod tests {
         assert!(consent_purge_retention_anchor_fingerprint(&anchor).is_ok());
         let mut changed = anchor.clone();
         changed.protected_inventory_digest[0] ^= 1;
-        assert!(key
-            .verifying_key()
-            .verify(
-                &consent_purge_retention_anchor_message(&changed).unwrap(),
-                &Signature::from_bytes(&changed.signature),
-            )
-            .is_err());
+        assert!(
+            key.verifying_key()
+                .verify(
+                    &consent_purge_retention_anchor_message(&changed).unwrap(),
+                    &Signature::from_bytes(&changed.signature),
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -1762,5 +1773,4 @@ mod tests {
                 | Err(ConsentPurgeRetentionError::RenewalPredecessorMismatch)
         ));
     }
-
 }

@@ -48,8 +48,7 @@ use xenia_operator_agent_proto::{
     SignRevokeRequest, SignedTokenDto,
 };
 use xenia_operator_proto::{
-    AttestedConsentOfferV2, ConsentAction, DaemonIdentityCertificate, OperatorAction,
-    OperatorRole,
+    AttestedConsentOfferV2, ConsentAction, DaemonIdentityCertificate, OperatorAction, OperatorRole,
 };
 
 /// Track A (the plain-HTTP `/auth/*` ceremony -- challenge/consent-action/

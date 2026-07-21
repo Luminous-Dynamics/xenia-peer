@@ -19,15 +19,16 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::consent_purge_custody::{
-    consent_purge_custody_bundle_fingerprint, ConsentPurgeCustodyBundleV1,
-    ConsentPurgeCustodyError, MAX_PURGE_CUSTODY_FUTURE_SKEW_SECS,
+    ConsentPurgeCustodyBundleV1, ConsentPurgeCustodyError, MAX_PURGE_CUSTODY_FUTURE_SKEW_SECS,
+    consent_purge_custody_bundle_fingerprint,
 };
 use crate::consent_purge_retention::{
-    consent_purge_retention_certificate_fingerprint, protected_inventory_digest,
-    verify_protected_inventory_files,
     ConsentPurgeProtectedArtifactV1, ConsentPurgeRetentionCertificateV1,
     ConsentPurgeRetentionError, ConsentPurgeRetentionSubjectV1,
+    consent_purge_retention_certificate_fingerprint, protected_inventory_digest,
+    verify_protected_inventory_files,
 };
+use serde_big_array::BigArray;
 
 pub(crate) const CONSENT_FINAL_DESTRUCTION_PLAN_SCHEMA: &str =
     "xenia-consent-final-destruction-plan-v1";
@@ -56,6 +57,7 @@ pub(crate) struct ConsentFinalDestructionPlanV1 {
     pub(crate) retention_satisfied_at_unix_secs: u64,
     pub(crate) issued_at_unix_secs: u64,
     pub(crate) expires_at_unix_secs: u64,
+    #[serde(with = "BigArray")]
     pub(crate) signature: [u8; 64],
 }
 
@@ -63,6 +65,7 @@ pub(crate) struct ConsentFinalDestructionPlanV1 {
 pub(crate) struct ConsentFinalDestructionApprovalV1 {
     pub(crate) witness_public_key: [u8; 32],
     pub(crate) approved_at_unix_secs: u64,
+    #[serde(with = "BigArray")]
     pub(crate) signature: [u8; 64],
 }
 
@@ -88,6 +91,7 @@ pub(crate) struct ConsentFinalDestructionReadinessV1 {
     pub(crate) candidate_count: u32,
     pub(crate) ready_at_unix_secs: u64,
     pub(crate) expires_at_unix_secs: u64,
+    #[serde(with = "BigArray")]
     pub(crate) signature: [u8; 64],
 }
 
@@ -147,7 +151,9 @@ pub(crate) enum ConsentFinalDestructionError {
     ApprovalAfterReadiness,
     #[error("final-destruction approval quorum cannot be zero")]
     ZeroApprovalQuorum,
-    #[error("final-destruction approval quorum was not met: observed={observed}, required={required}")]
+    #[error(
+        "final-destruction approval quorum was not met: observed={observed}, required={required}"
+    )]
     ApprovalQuorumNotMet { observed: usize, required: usize },
     #[error("final-destruction approval bundle exceeds {maximum} approvals: {count}")]
     TooManyApprovals { count: usize, maximum: usize },
@@ -208,9 +214,7 @@ impl ConsentFinalDestructionPlanV1 {
             retention_base_certificate_fingerprint: subject.base_certificate_fingerprint,
             retention_obligation_fingerprint: subject.obligation_fingerprint,
             retention_anchor_fingerprint: subject.anchor_fingerprint,
-            custody_bundle_fingerprint: consent_purge_custody_bundle_fingerprint(
-                custody_bundle,
-            )?,
+            custody_bundle_fingerprint: consent_purge_custody_bundle_fingerprint(custody_bundle)?,
             protected_inventory_digest: subject.protected_inventory_digest,
             package_directory: subject.package_directory.clone(),
             candidates: certificate.protected_artifacts.clone(),
@@ -227,6 +231,7 @@ impl ConsentFinalDestructionPlanV1 {
         Ok(plan)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn verify(
         &self,
         certificate: &ConsentPurgeRetentionCertificateV1,
@@ -256,8 +261,7 @@ impl ConsentFinalDestructionPlanV1 {
             return Err(ConsentFinalDestructionError::PlanExpired);
         }
         if self.ledger_epoch_id != subject.ledger_epoch_id
-            || self.retention_base_certificate_fingerprint
-                != subject.base_certificate_fingerprint
+            || self.retention_base_certificate_fingerprint != subject.base_certificate_fingerprint
             || self.retention_obligation_fingerprint != subject.obligation_fingerprint
             || self.retention_anchor_fingerprint != subject.anchor_fingerprint
             || self.custody_bundle_fingerprint
@@ -320,7 +324,10 @@ impl ConsentFinalDestructionPlanV1 {
         }
         let package_directory = Path::new(&self.package_directory);
         let mut seen = BTreeSet::new();
-        let mut previous: Option<(&str, crate::consent_purge_retention::ConsentPurgeProtectedArtifactRoleV1)> = None;
+        let mut previous: Option<(
+            &str,
+            crate::consent_purge_retention::ConsentPurgeProtectedArtifactRoleV1,
+        )> = None;
         for candidate in &self.candidates {
             if candidate.blake3_digest == [0u8; 32] {
                 return Err(ConsentFinalDestructionError::ZeroCandidateDigest {
@@ -398,7 +405,8 @@ impl ConsentFinalDestructionApprovalBundleV1 {
             approved_at_unix_secs,
             signature,
         });
-        self.approvals.sort_by_key(|approval| approval.witness_public_key);
+        self.approvals
+            .sort_by_key(|approval| approval.witness_public_key);
         Ok(())
     }
 
@@ -418,7 +426,10 @@ impl ConsentFinalDestructionApprovalBundleV1 {
                 maximum: MAX_FINAL_DESTRUCTION_APPROVALS,
             });
         }
-        let trusted = trusted_witness_keys.iter().copied().collect::<BTreeSet<_>>();
+        let trusted = trusted_witness_keys
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
         let mut seen = BTreeSet::new();
         let mut previous_key: Option<[u8; 32]> = None;
         let mut observed = 0usize;
@@ -465,9 +476,11 @@ impl ConsentFinalDestructionApprovalBundleV1 {
         plan: &ConsentFinalDestructionPlanV1,
     ) -> Result<(), ConsentFinalDestructionError> {
         if self.schema != CONSENT_FINAL_DESTRUCTION_APPROVAL_BUNDLE_SCHEMA {
-            return Err(ConsentFinalDestructionError::UnsupportedApprovalBundleSchema {
-                schema: self.schema.clone(),
-            });
+            return Err(
+                ConsentFinalDestructionError::UnsupportedApprovalBundleSchema {
+                    schema: self.schema.clone(),
+                },
+            );
         }
         if self.plan_fingerprint != consent_final_destruction_plan_fingerprint(plan)? {
             return Err(ConsentFinalDestructionError::ApprovalPlanMismatch);
@@ -604,9 +617,11 @@ pub(crate) fn consent_final_destruction_approval_bundle_fingerprint(
     approvals: &ConsentFinalDestructionApprovalBundleV1,
 ) -> Result<[u8; 32], ConsentFinalDestructionError> {
     if approvals.schema != CONSENT_FINAL_DESTRUCTION_APPROVAL_BUNDLE_SCHEMA {
-        return Err(ConsentFinalDestructionError::UnsupportedApprovalBundleSchema {
-            schema: approvals.schema.clone(),
-        });
+        return Err(
+            ConsentFinalDestructionError::UnsupportedApprovalBundleSchema {
+                schema: approvals.schema.clone(),
+            },
+        );
     }
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"xenia:consent-final-destruction-approval-bundle-fingerprint:v1");
@@ -729,10 +744,7 @@ fn protected_role_tag(
     }
 }
 
-fn append_bytes(
-    output: &mut Vec<u8>,
-    bytes: &[u8],
-) -> Result<(), ConsentFinalDestructionError> {
+fn append_bytes(output: &mut Vec<u8>, bytes: &[u8]) -> Result<(), ConsentFinalDestructionError> {
     let length = u32::try_from(bytes.len())
         .map_err(|_| ConsentFinalDestructionError::EncodingLengthOverflow)?;
     output.extend_from_slice(&length.to_be_bytes());
@@ -747,7 +759,7 @@ mod tests {
         ConsentPurgeCustodyAttestationV1, ConsentPurgeCustodyClassV1,
     };
     use crate::consent_purge_retention::{
-        ConsentPurgeProtectedArtifactRoleV1, CONSENT_PURGE_RETENTION_CERTIFICATE_SCHEMA,
+        CONSENT_PURGE_RETENTION_CERTIFICATE_SCHEMA, ConsentPurgeProtectedArtifactRoleV1,
     };
 
     fn subject() -> ConsentPurgeRetentionSubjectV1 {
@@ -788,8 +800,10 @@ mod tests {
         }
     }
 
-    fn custody(subject: &ConsentPurgeRetentionSubjectV1) -> (SigningKey, ConsentPurgeCustodyBundleV1) {
-        let key = SigningKey::from_bytes(&[21u8; 32]);
+    fn custody(
+        subject: &ConsentPurgeRetentionSubjectV1,
+    ) -> (LedgerSigningKey, ConsentPurgeCustodyBundleV1) {
+        let key = LedgerSigningKey::from_bytes(&[21u8; 32]);
         let attestation = ConsentPurgeCustodyAttestationV1::sign(
             subject,
             ConsentPurgeCustodyClassV1::RemoteVault,

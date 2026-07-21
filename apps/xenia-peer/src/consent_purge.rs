@@ -18,15 +18,16 @@ use ed25519_dalek::{
     Signature, Signer, SigningKey as LedgerSigningKey, Verifier as DalekVerifier, VerifyingKey,
 };
 use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::audit_ledger_store::{persist_owner_only_atomic, read_bounded_json};
 use crate::consent_retirement::{
-    consent_retirement_approval_bundle_fingerprint, consent_retirement_plan_fingerprint,
-    consent_retirement_receipt_fingerprint, verify_quarantined_receipt_files,
-    ConsentRetirementApprovalBundleV1, ConsentRetirementArtifactRoleV1,
-    ConsentRetirementPlanV1, ConsentRetirementQuarantineReceiptV1,
+    ConsentRetirementApprovalBundleV1, ConsentRetirementArtifactRoleV1, ConsentRetirementPlanV1,
+    ConsentRetirementQuarantineReceiptV1, consent_retirement_approval_bundle_fingerprint,
+    consent_retirement_plan_fingerprint, consent_retirement_receipt_fingerprint,
+    verify_quarantined_receipt_files,
 };
 
 pub(crate) const CONSENT_PURGE_PLAN_SCHEMA: &str = "xenia-consent-purge-plan-v1";
@@ -59,6 +60,7 @@ pub(crate) struct ConsentPurgeArtifactV1 {
 pub(crate) struct ConsentPurgeApprovalV1 {
     pub(crate) witness_public_key: [u8; 32],
     pub(crate) approved_at_unix_secs: u64,
+    #[serde(with = "BigArray")]
     pub(crate) signature: [u8; 64],
 }
 
@@ -77,6 +79,7 @@ pub(crate) struct ConsentPurgeRollbackPackageV1 {
     pub(crate) package_directory: String,
     pub(crate) created_at_unix_secs: u64,
     pub(crate) entries: Vec<ConsentPurgeArtifactV1>,
+    #[serde(with = "BigArray")]
     pub(crate) signature: [u8; 64],
 }
 
@@ -126,6 +129,7 @@ pub(crate) struct ConsentPurgeReceiptV1 {
     pub(crate) started_at_unix_secs: u64,
     pub(crate) completed_at_unix_secs: u64,
     pub(crate) entries: Vec<ConsentPurgeJournalEntryV1>,
+    #[serde(with = "BigArray")]
     pub(crate) signature: [u8; 64],
 }
 
@@ -155,6 +159,7 @@ pub(crate) struct ConsentPurgePlanV1 {
     pub(crate) minimum_quarantine_age_secs: u64,
     pub(crate) issued_at_unix_secs: u64,
     pub(crate) expires_at_unix_secs: u64,
+    #[serde(with = "BigArray")]
     pub(crate) signature: [u8; 64],
 }
 
@@ -248,8 +253,13 @@ pub(crate) enum ConsentPurgeError {
     MissingCommittedReceipt,
     #[error("consent purge journal state is invalid for this operation")]
     InvalidJournalState,
-    #[error("consent purge filesystem state is ambiguous: quarantine={quarantine}, rollback={rollback}")]
-    AmbiguousFilesystemState { quarantine: String, rollback: String },
+    #[error(
+        "consent purge filesystem state is ambiguous: quarantine={quarantine}, rollback={rollback}"
+    )]
+    AmbiguousFilesystemState {
+        quarantine: String,
+        rollback: String,
+    },
     #[error("consent purge I/O failed: {0}")]
     Io(String),
     #[error("consent purge JSON failed: {0}")]
@@ -335,12 +345,14 @@ impl ConsentPurgePlanV1 {
             ledger_epoch_id: retirement_plan.ledger_epoch_id,
             retirement_plan_fingerprint: consent_retirement_plan_fingerprint(retirement_plan)
                 .map_err(|err| ConsentPurgeError::Retirement(err.to_string()))?,
-            retirement_approval_bundle_fingerprint:
-                consent_retirement_approval_bundle_fingerprint(retirement_approvals)
-                    .map_err(|err| ConsentPurgeError::Retirement(err.to_string()))?,
-            quarantine_receipt_fingerprint:
-                consent_retirement_receipt_fingerprint(quarantine_receipt)
-                    .map_err(|err| ConsentPurgeError::Retirement(err.to_string()))?,
+            retirement_approval_bundle_fingerprint: consent_retirement_approval_bundle_fingerprint(
+                retirement_approvals,
+            )
+            .map_err(|err| ConsentPurgeError::Retirement(err.to_string()))?,
+            quarantine_receipt_fingerprint: consent_retirement_receipt_fingerprint(
+                quarantine_receipt,
+            )
+            .map_err(|err| ConsentPurgeError::Retirement(err.to_string()))?,
             quarantine_transaction_directory: quarantine_receipt.transaction_directory.clone(),
             rollback_root,
             candidates,
@@ -351,7 +363,9 @@ impl ConsentPurgePlanV1 {
             signature: [0u8; 64],
         };
         plan.validate_shape()?;
-        plan.signature = signing_key.sign(&consent_purge_plan_message(&plan)?).to_bytes();
+        plan.signature = signing_key
+            .sign(&consent_purge_plan_message(&plan)?)
+            .to_bytes();
         plan.verify(
             retirement_plan,
             retirement_approvals,
@@ -429,8 +443,7 @@ impl ConsentPurgePlanV1 {
             != consent_retirement_receipt_fingerprint(quarantine_receipt)
                 .map_err(|err| ConsentPurgeError::Retirement(err.to_string()))?
             || self.quarantine_transaction_directory != quarantine_receipt.transaction_directory
-            || self.quarantine_completed_at_unix_secs
-                != quarantine_receipt.completed_at_unix_secs
+            || self.quarantine_completed_at_unix_secs != quarantine_receipt.completed_at_unix_secs
         {
             return Err(ConsentPurgeError::QuarantineReceiptMismatch);
         }
@@ -509,7 +522,8 @@ impl ConsentPurgePlanV1 {
                 maximum: MAX_PURGE_PLAN_LIFETIME_SECS,
             });
         }
-        let expected_rollback_directory = Path::new(&self.rollback_root).join(hex::encode(self.purge_id));
+        let expected_rollback_directory =
+            Path::new(&self.rollback_root).join(hex::encode(self.purge_id));
         let mut paths = BTreeSet::new();
         let mut previous: Option<(&str, ConsentRetirementArtifactRoleV1)> = None;
         for (index, candidate) in self.candidates.iter().enumerate() {
@@ -529,12 +543,11 @@ impl ConsentPurgePlanV1 {
             if Path::new(&candidate.rollback_path) != expected.as_path() {
                 return Err(ConsentPurgeError::CandidateOrderMismatch);
             }
-            if let Some((previous_path, previous_role)) = previous {
-                if (previous_path, previous_role)
+            if let Some((previous_path, previous_role)) = previous
+                && (previous_path, previous_role)
                     > (candidate.quarantine_path.as_str(), candidate.role)
-                {
-                    return Err(ConsentPurgeError::CandidateOrderMismatch);
-                }
+            {
+                return Err(ConsentPurgeError::CandidateOrderMismatch);
             }
             previous = Some((candidate.quarantine_path.as_str(), candidate.role));
         }
@@ -620,7 +633,10 @@ impl ConsentPurgeApprovalBundleV1 {
         if self.plan_fingerprint != consent_purge_plan_fingerprint(plan)? {
             return Err(ConsentPurgeError::ApprovalPlanMismatch);
         }
-        let trusted = trusted_witness_keys.iter().copied().collect::<BTreeSet<_>>();
+        let trusted = trusted_witness_keys
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
         let mut observed = BTreeSet::new();
         for approval in &self.approvals {
             if approval.approved_at_unix_secs < plan.issued_at_unix_secs
@@ -746,18 +762,20 @@ fn retirement_role_tag(role: ConsentRetirementArtifactRoleV1) -> u8 {
 }
 
 fn append_bytes(output: &mut Vec<u8>, bytes: &[u8]) -> Result<(), ConsentPurgeError> {
-    let length = u32::try_from(bytes.len()).map_err(|_| ConsentPurgeError::EncodingLengthOverflow)?;
+    let length =
+        u32::try_from(bytes.len()).map_err(|_| ConsentPurgeError::EncodingLengthOverflow)?;
     output.extend_from_slice(&length.to_be_bytes());
     output.extend_from_slice(bytes);
     Ok(())
 }
 
 pub(crate) fn canonical_private_root(path: &Path) -> Result<String, ConsentPurgeError> {
-    let canonical = std::fs::canonicalize(path).map_err(|_| ConsentPurgeError::NonCanonicalPath {
-        path: path.display().to_string(),
-    })?;
-    let metadata = std::fs::symlink_metadata(&canonical)
-        .map_err(|_| ConsentPurgeError::NonCanonicalPath {
+    let canonical =
+        std::fs::canonicalize(path).map_err(|_| ConsentPurgeError::NonCanonicalPath {
+            path: path.display().to_string(),
+        })?;
+    let metadata =
+        std::fs::symlink_metadata(&canonical).map_err(|_| ConsentPurgeError::NonCanonicalPath {
             path: canonical.display().to_string(),
         })?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -785,7 +803,7 @@ pub(crate) fn canonical_private_root(path: &Path) -> Result<String, ConsentPurge
 }
 
 fn validate_absolute_normal_path(path: &str) -> Result<(), ConsentPurgeError> {
-    if path.as_bytes().len() > MAX_PURGE_PATH_BYTES {
+    if path.len() > MAX_PURGE_PATH_BYTES {
         return Err(ConsentPurgeError::PathTooLong {
             path: path.to_string(),
             maximum: MAX_PURGE_PATH_BYTES,
@@ -1045,7 +1063,12 @@ pub(crate) fn execute_consent_purge(
     receipt.signature = signing_key
         .sign(&consent_purge_receipt_message(&receipt)?)
         .to_bytes();
-    receipt.verify(plan, approvals, &rollback_package, &signing_key.verifying_key())?;
+    receipt.verify(
+        plan,
+        approvals,
+        &rollback_package,
+        &signing_key.verifying_key(),
+    )?;
     persist_purge_json(&transaction_directory.join("purge-receipt.json"), &receipt)?;
     journal.state = ConsentPurgeJournalStateV1::Committed;
     journal.updated_at_unix_secs = now_unix_secs;
@@ -1136,7 +1159,11 @@ pub(crate) fn verify_purge_receipt_files(
                 rollback: entry.artifact.rollback_path.clone(),
             });
         }
-        verify_exact_file(Path::new(&entry.artifact.rollback_path), &entry.artifact, true)?;
+        verify_exact_file(
+            Path::new(&entry.artifact.rollback_path),
+            &entry.artifact,
+            true,
+        )?;
         if entry.state != ConsentPurgeJournalEntryStateV1::Deleted {
             return Err(ConsentPurgeError::ReceiptIdentityMismatch);
         }
@@ -1186,13 +1213,11 @@ fn rollback_incomplete_purge(
             verify_exact_file(quarantine, &artifact, false)?;
         } else {
             copy_owner_only_exact(rollback, quarantine, &artifact)?;
-            sync_directory(
-                quarantine
-                    .parent()
-                    .ok_or_else(|| ConsentPurgeError::NonCanonicalPath {
-                        path: artifact.quarantine_path.clone(),
-                    })?,
-            )?;
+            sync_directory(quarantine.parent().ok_or_else(|| {
+                ConsentPurgeError::NonCanonicalPath {
+                    path: artifact.quarantine_path.clone(),
+                }
+            })?)?;
         }
         journal.entries[index].state = ConsentPurgeJournalEntryStateV1::Restored;
         journal.updated_at_unix_secs = now_unix_secs;
@@ -1358,12 +1383,13 @@ fn hash_file(path: &Path) -> Result<(u64, [u8; 32]), ConsentPurgeError> {
         if read == 0 {
             break;
         }
-        total = total
-            .checked_add(read as u64)
-            .ok_or_else(|| ConsentPurgeError::ArtifactTooLarge {
-                path: path.display().to_string(),
-                maximum: MAX_PURGE_ARTIFACT_BYTES,
-            })?;
+        total =
+            total
+                .checked_add(read as u64)
+                .ok_or_else(|| ConsentPurgeError::ArtifactTooLarge {
+                    path: path.display().to_string(),
+                    maximum: MAX_PURGE_ARTIFACT_BYTES,
+                })?;
         if total > MAX_PURGE_ARTIFACT_BYTES {
             return Err(ConsentPurgeError::ArtifactTooLarge {
                 path: path.display().to_string(),
@@ -1449,8 +1475,8 @@ fn append_purge_artifacts(
     output: &mut Vec<u8>,
     artifacts: &[ConsentPurgeArtifactV1],
 ) -> Result<(), ConsentPurgeError> {
-    let count = u32::try_from(artifacts.len())
-        .map_err(|_| ConsentPurgeError::EncodingLengthOverflow)?;
+    let count =
+        u32::try_from(artifacts.len()).map_err(|_| ConsentPurgeError::EncodingLengthOverflow)?;
     output.extend_from_slice(&count.to_be_bytes());
     for artifact in artifacts {
         append_purge_artifact(output, artifact)?;
@@ -1509,8 +1535,7 @@ fn sync_directory(path: &Path) -> Result<(), std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audit_ledger_store::{persist_owner_only_atomic, read_bounded_json};
-use crate::consent_retirement::{
+    use crate::consent_retirement::{
         ConsentRetirementJournalEntryStateV1, ConsentRetirementJournalEntryV1,
     };
 
@@ -1580,7 +1605,10 @@ use crate::consent_retirement::{
             candidates: vec![ConsentPurgeArtifactV1 {
                 role: ConsentRetirementArtifactRoleV1::SupersededCompleteLedger,
                 quarantine_path: "/var/lib/xenia/quarantine/tx/0000-artifact.bin".into(),
-                rollback_path: format!("/mnt/xenia-rollback/{}/0000-artifact.bin", hex::encode(purge_id)),
+                rollback_path: format!(
+                    "/mnt/xenia-rollback/{}/0000-artifact.bin",
+                    hex::encode(purge_id)
+                ),
                 byte_length: 4,
                 blake3_digest: *blake3::hash(b"data").as_bytes(),
             }],
@@ -1615,7 +1643,10 @@ use crate::consent_retirement::{
             candidates: vec![ConsentPurgeArtifactV1 {
                 role: ConsentRetirementArtifactRoleV1::SupersededCompleteLedger,
                 quarantine_path: "/var/lib/xenia/quarantine/tx/0000-artifact.bin".into(),
-                rollback_path: format!("/mnt/xenia-rollback/{}/0000-artifact.bin", hex::encode(purge_id)),
+                rollback_path: format!(
+                    "/mnt/xenia-rollback/{}/0000-artifact.bin",
+                    hex::encode(purge_id)
+                ),
                 byte_length: 4,
                 blake3_digest: *blake3::hash(b"data").as_bytes(),
             }],
@@ -1625,7 +1656,10 @@ use crate::consent_retirement::{
             expires_at_unix_secs: 80,
             signature: [0; 64],
         };
-        assert_eq!(purge.validate_shape(), Err(ConsentPurgeError::QuarantineAgeNotMet));
+        assert_eq!(
+            purge.validate_shape(),
+            Err(ConsentPurgeError::QuarantineAgeNotMet)
+        );
         purge.issued_at_unix_secs = 20 + MIN_PURGE_QUARANTINE_AGE_SECS;
         purge.expires_at_unix_secs = purge.issued_at_unix_secs + MAX_PURGE_PLAN_LIFETIME_SECS + 1;
         assert_eq!(
@@ -1651,7 +1685,10 @@ use crate::consent_retirement::{
             candidates: vec![ConsentPurgeArtifactV1 {
                 role: ConsentRetirementArtifactRoleV1::SupersededCompleteLedger,
                 quarantine_path: "/var/lib/xenia/quarantine/tx/0000-artifact.bin".into(),
-                rollback_path: format!("/mnt/xenia-rollback/{}/0000-artifact.bin", hex::encode(purge_id)),
+                rollback_path: format!(
+                    "/mnt/xenia-rollback/{}/0000-artifact.bin",
+                    hex::encode(purge_id)
+                ),
                 byte_length: 4,
                 blake3_digest: *blake3::hash(b"data").as_bytes(),
             }],
@@ -1664,11 +1701,16 @@ use crate::consent_retirement::{
         let first = LedgerSigningKey::from_bytes(&[0x72; 32]);
         let second = LedgerSigningKey::from_bytes(&[0x73; 32]);
         let mut bundle = ConsentPurgeApprovalBundleV1::new(&plan).unwrap();
-        bundle.sign_with(&plan, &first, plan.issued_at_unix_secs).unwrap();
+        bundle
+            .sign_with(&plan, &first, plan.issued_at_unix_secs)
+            .unwrap();
         assert_eq!(
             bundle.verify_quorum(
                 &plan,
-                &[first.verifying_key().to_bytes(), second.verifying_key().to_bytes()],
+                &[
+                    first.verifying_key().to_bytes(),
+                    second.verifying_key().to_bytes()
+                ],
                 2,
             ),
             Err(ConsentPurgeError::ApprovalQuorumNotMet {
@@ -1682,7 +1724,10 @@ use crate::consent_retirement::{
         bundle
             .verify_quorum(
                 &plan,
-                &[first.verifying_key().to_bytes(), second.verifying_key().to_bytes()],
+                &[
+                    first.verifying_key().to_bytes(),
+                    second.verifying_key().to_bytes(),
+                ],
                 2,
             )
             .unwrap();
@@ -1745,5 +1790,4 @@ use crate::consent_retirement::{
         assert_eq!(journal.state, ConsentPurgeJournalStateV1::RolledBack);
         assert!(rollback.exists());
     }
-
 }

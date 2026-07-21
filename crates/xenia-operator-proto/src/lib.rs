@@ -395,10 +395,7 @@ pub struct ConsentScopeV1 {
 impl ConsentScopeV1 {
     /// Construct the current screen-stream scope with selected telemetry and
     /// audio access.
-    pub const fn screen(
-        telemetry: ConsentTelemetryScope,
-        audio: ConsentAudioScope,
-    ) -> Self {
+    pub const fn screen(telemetry: ConsentTelemetryScope, audio: ConsentAudioScope) -> Self {
         Self {
             display: ConsentDisplayScope::ScreenStream,
             telemetry,
@@ -470,7 +467,6 @@ impl ConsentScopeV1 {
             self.file_transfer.description()
         )
     }
-
 }
 
 /// Versioned local policy for classifying which factual consent scopes need an
@@ -517,8 +513,7 @@ impl ConsentRiskPolicyV1 {
                 && matches!(scope.audio, ConsentAudioScope::HostDeviceCapture))
             || (self.confirm_remote_input
                 && matches!(scope.input, ConsentInputScope::RemoteInputInjection))
-            || (self.confirm_clipboard
-                && !matches!(scope.clipboard, ConsentClipboardScope::Off))
+            || (self.confirm_clipboard && !matches!(scope.clipboard, ConsentClipboardScope::Off))
             || (self.confirm_file_transfer
                 && !matches!(scope.file_transfer, ConsentFileTransferScope::Off))
     }
@@ -969,17 +964,15 @@ mod tests {
 
     #[test]
     fn consent_v3_conformance_vectors_are_stable() {
-        let fixture: ConsentConformanceFixture = serde_json::from_str(include_str!(
-            "../fixtures/consent-v3.json"
-        ))
-        .expect("consent conformance fixture parses");
+        let fixture: ConsentConformanceFixture =
+            serde_json::from_str(include_str!("../fixtures/consent-v3.json"))
+                .expect("consent conformance fixture parses");
         assert_eq!(fixture.schema, "xenia-consent-conformance-v3");
         assert!(!fixture.vectors.is_empty());
 
         for vector in fixture.vectors {
             let session_id = decode_hex::<16>(&vector.session_id_hex);
-            let session_transcript_hash =
-                decode_hex::<32>(&vector.session_transcript_hash_hex);
+            let session_transcript_hash = decode_hex::<32>(&vector.session_transcript_hash_hex);
             let action_id = decode_hex::<16>(&vector.action_id_hex);
             let token_nonce = decode_hex::<16>(&vector.token_nonce_hex);
             let offer = ConsentOfferV2::new(
@@ -1152,18 +1145,10 @@ mod tests {
             200,
         );
         let offer_digest = offer.digest();
-        let approve = consent_action_transcript(
-            ConsentAction::Approve,
-            &action_id,
-            &tn,
-            &offer_digest,
-        );
-        let revoke = consent_action_transcript(
-            ConsentAction::Revoke,
-            &action_id,
-            &tn,
-            &offer_digest,
-        );
+        let approve =
+            consent_action_transcript(ConsentAction::Approve, &action_id, &tn, &offer_digest);
+        let revoke =
+            consent_action_transcript(ConsentAction::Revoke, &action_id, &tn, &offer_digest);
         // Same session/token, different action -> different bytes (can't replay).
         assert_ne!(approve, revoke);
         assert_eq!(
@@ -1181,12 +1166,7 @@ mod tests {
         assert_eq!(&approve[approve.len() - 32..], &offer_digest);
         assert_ne!(
             approve,
-            consent_action_transcript(
-                ConsentAction::Approve,
-                &[0x44u8; 16],
-                &tn,
-                &offer_digest,
-            ),
+            consent_action_transcript(ConsentAction::Approve, &[0x44u8; 16], &tn, &offer_digest,),
             "action id must be signature-bound"
         );
     }
@@ -1204,7 +1184,10 @@ mod tests {
             minimal.summary(),
             "display: screen stream; telemetry: off; audio: off; input: off; clipboard: off; file transfer: off"
         );
-        assert_eq!(minimal.canonical_bytes().len(), CONSENT_SCOPE_DOMAIN.len() + 7);
+        assert_eq!(
+            minimal.canonical_bytes().len(),
+            CONSENT_SCOPE_DOMAIN.len() + 7
+        );
 
         let complete = ConsentScopeV1::screen_with_capabilities(
             ConsentTelemetryScope::BasicHostPerformance,
@@ -1243,20 +1226,8 @@ mod tests {
             100,
             200,
         );
-        let other_session = ConsentOfferV2::new(
-            [2u8; 16],
-            transcript_hash,
-            base.scope,
-            100,
-            200,
-        );
-        let other_transcript = ConsentOfferV2::new(
-            [1u8; 16],
-            [0x45u8; 32],
-            base.scope,
-            100,
-            200,
-        );
+        let other_session = ConsentOfferV2::new([2u8; 16], transcript_hash, base.scope, 100, 200);
+        let other_transcript = ConsentOfferV2::new([1u8; 16], [0x45u8; 32], base.scope, 100, 200);
         let other_scope = ConsentOfferV2::new(
             [1u8; 16],
             transcript_hash,
@@ -1267,13 +1238,7 @@ mod tests {
             100,
             200,
         );
-        let other_expiry = ConsentOfferV2::new(
-            [1u8; 16],
-            transcript_hash,
-            base.scope,
-            100,
-            201,
-        );
+        let other_expiry = ConsentOfferV2::new([1u8; 16], transcript_hash, base.scope, 100, 201);
         assert_ne!(base.digest(), other_session.digest());
         assert_ne!(base.digest(), other_transcript.digest());
         assert_ne!(base.digest(), other_scope.digest());

@@ -26,12 +26,12 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use xenia_ledger::{
-    CURRENT_EVIDENCE_CRYPTO_MANIFEST, Chain, ConsentKind, CryptoPolicyProfile, DowngradePolicy,
-    Ed25519EvidenceSignatureBackend, EvidenceBundleSeal, EvidenceBundleVerifyError,
-    ConsentEventRecord, EvidenceCryptoManifest, EvidencePublicKeyBinding,
-    EvidenceSignatureBackend, LedgerEntry,
-    LedgerEntryExport, LedgerError, SessionTranscriptBinding, SessionTranscriptSignature,
-    SignatureEnvelope, SignatureSuite, Verifier, VerifyError,
+    CURRENT_EVIDENCE_CRYPTO_MANIFEST, Chain, ConsentEventRecord, ConsentKind, CryptoPolicyProfile,
+    DowngradePolicy, Ed25519EvidenceSignatureBackend, EvidenceBundleSeal,
+    EvidenceBundleVerifyError, EvidenceCryptoManifest, EvidencePublicKeyBinding,
+    EvidenceSignatureBackend, LedgerEntry, LedgerEntryExport, LedgerError,
+    SessionTranscriptBinding, SessionTranscriptSignature, SignatureEnvelope, SignatureSuite,
+    Verifier, VerifyError,
 };
 use xenia_peer_core::{
     M1Permission, M1PermissionSet, M1SessionError, M1SessionMachine, M1SessionState,
@@ -129,14 +129,20 @@ impl fmt::Display for M1RuntimeError {
                 write!(f, "M1 operator authorization binding is invalid: {reason}")
             }
             Self::DuplicateAuthorizationBinding => {
-                write!(f, "M1 operator authorization binding was recorded more than once")
+                write!(
+                    f,
+                    "M1 operator authorization binding was recorded more than once"
+                )
             }
             Self::MissingRequiredAuthorizationBinding => write!(
                 f,
                 "M1 privileged flow requires an authenticated operator authorization binding"
             ),
             Self::InvalidAuthorityTermination(reason) => {
-                write!(f, "M1 consent-authority termination binding is invalid: {reason}")
+                write!(
+                    f,
+                    "M1 consent-authority termination binding is invalid: {reason}"
+                )
             }
             Self::DuplicateAuthorityTermination => write!(
                 f,
@@ -713,10 +719,7 @@ pub(crate) fn audit_evidence_verification_report_artifacts_dir(
     require_evidence_verification_report_schema(&report)?;
 
     let snapshot = read_evidence_core_snapshot(&paths)?;
-    require_evidence_report_artifacts_match_current_bundle(
-        &report.artifacts,
-        &snapshot.artifacts,
-    )?;
+    require_evidence_report_artifacts_match_current_bundle(&report.artifacts, &snapshot.artifacts)?;
     require_evidence_bundle_completion(
         &paths,
         &snapshot.binding,
@@ -842,10 +845,8 @@ pub(crate) fn verify_sealed_transcript_bound_evidence_bundle_dir_with_backend(
     ))
 }
 
-const AUTHORIZATION_BINDING_SCOPE_PREFIX_V1: &str =
-    "xenia-runtime-authorization-binding-v1:";
-const AUTHORIZATION_BINDING_SCOPE_PREFIX_V2: &str =
-    "xenia-runtime-authorization-binding-v2:";
+const AUTHORIZATION_BINDING_SCOPE_PREFIX_V1: &str = "xenia-runtime-authorization-binding-v1:";
+const AUTHORIZATION_BINDING_SCOPE_PREFIX_V2: &str = "xenia-runtime-authorization-binding-v2:";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeAuthorizationPolicy {
@@ -874,20 +875,19 @@ fn validate_authorization_binding_scope(
     expected_permissions: &str,
     event_source_id: &[u8; 32],
 ) -> Result<Option<u64>, M1RuntimeError> {
-    let (fields, binding_version) = if let Some(fields) =
-        scope.strip_prefix(AUTHORIZATION_BINDING_SCOPE_PREFIX_V2)
-    {
-        (fields, 2u8)
-    } else if let Some(fields) = scope.strip_prefix(AUTHORIZATION_BINDING_SCOPE_PREFIX_V1) {
-        // Historical bindings did not persist the host-local authorization
-        // deadline. They remain readable as unlimited grants for compatibility,
-        // but every newly written authenticated binding uses v2.
-        (fields, 1u8)
-    } else {
-        return Err(M1RuntimeError::InvalidAuthorizationBinding(
-            "unknown binding version".to_string(),
-        ));
-    };
+    let (fields, binding_version) =
+        if let Some(fields) = scope.strip_prefix(AUTHORIZATION_BINDING_SCOPE_PREFIX_V2) {
+            (fields, 2u8)
+        } else if let Some(fields) = scope.strip_prefix(AUTHORIZATION_BINDING_SCOPE_PREFIX_V1) {
+            // Historical bindings did not persist the host-local authorization
+            // deadline. They remain readable as unlimited grants for compatibility,
+            // but every newly written authenticated binding uses v2.
+            (fields, 1u8)
+        } else {
+            return Err(M1RuntimeError::InvalidAuthorizationBinding(
+                "unknown binding version".to_string(),
+            ));
+        };
     let mut fields = fields.split(';');
     let permissions = fields
         .next()
@@ -974,8 +974,7 @@ fn validate_authorization_binding_scope(
     Ok(authorization_deadline_unix_secs)
 }
 
-const AUTHORITY_TERMINATION_SCOPE_PREFIX: &str =
-    "xenia-runtime-authority-termination-v1:";
+const AUTHORITY_TERMINATION_SCOPE_PREFIX: &str = "xenia-runtime-authority-termination-v1:";
 
 fn authority_termination_scope(permissions: &str, state: ConsentSessionState) -> String {
     format!(
@@ -1036,11 +1035,11 @@ fn expected_m1_state_for_authority_termination(
             Ok(M1SessionState::Revoked)
         }
         ConsentSessionState::Failed | ConsentSessionState::Expired => Ok(M1SessionState::Failed),
-        ConsentSessionState::Pending | ConsentSessionState::Approved => Err(
-            M1RuntimeError::InvalidAuthorityTermination(
+        ConsentSessionState::Pending | ConsentSessionState::Approved => {
+            Err(M1RuntimeError::InvalidAuthorityTermination(
                 "authority state is not terminal".to_string(),
-            ),
-        ),
+            ))
+        }
     }
 }
 
@@ -1361,7 +1360,8 @@ impl M1RuntimeSession {
         if bytes.len() as u64 > MAX_PERSISTED_M1_LEDGER_BYTES {
             return Err(M1RuntimeError::PersistLimitExceeded(format!(
                 "{} serialized bytes exceeds maximum {}",
-                bytes.len(), MAX_PERSISTED_M1_LEDGER_BYTES
+                bytes.len(),
+                MAX_PERSISTED_M1_LEDGER_BYTES
             )));
         }
         write_bytes_atomic(path.as_ref(), &bytes)
@@ -1447,7 +1447,9 @@ impl M1RuntimeSession {
 
         for entry in entries {
             if entry.event.session_id != self.session_id {
-                return Err(M1RuntimeError::PersistedConsentContextMismatch("session_id"));
+                return Err(M1RuntimeError::PersistedConsentContextMismatch(
+                    "session_id",
+                ));
             }
             if entry.event.kind == ConsentKind::AuthorizationBinding {
                 if self.session.state() != M1SessionState::Active {
@@ -1471,7 +1473,9 @@ impl M1RuntimeSession {
                 return Err(M1RuntimeError::PersistedConsentContextMismatch("source_id"));
             }
             if entry.event.request_id != self.request_id {
-                return Err(M1RuntimeError::PersistedConsentContextMismatch("request_id"));
+                return Err(M1RuntimeError::PersistedConsentContextMismatch(
+                    "request_id",
+                ));
             }
             if entry.event.kind == ConsentKind::LifecycleTermination {
                 if self.authority_termination_state.is_some() {
@@ -1491,7 +1495,9 @@ impl M1RuntimeSession {
                 continue;
             }
             if entry.event.scope != self.scope {
-                return Err(M1RuntimeError::PersistedConsentContextMismatch("permission scope"));
+                return Err(M1RuntimeError::PersistedConsentContextMismatch(
+                    "permission scope",
+                ));
             }
             match entry.event.kind {
                 ConsentKind::Request => self.session.offer()?,
@@ -1641,8 +1647,10 @@ impl M1RuntimeSession {
                 (M1SessionState::Offered | M1SessionState::Active, M1SessionState::Revoked) => {
                     self.session.revoke()?;
                 }
-                (M1SessionState::Idle | M1SessionState::Offered | M1SessionState::Active,
-                    M1SessionState::Failed) => {
+                (
+                    M1SessionState::Idle | M1SessionState::Offered | M1SessionState::Active,
+                    M1SessionState::Failed,
+                ) => {
                     self.session.fail()?;
                 }
                 (current, expected) => {
@@ -1843,11 +1851,8 @@ fn read_evidence_core_snapshot(
     let manifest = serde_json::from_slice(&manifest_bytes)?;
     let entries = serde_json::from_slice(&ledger_bytes)?;
     let binding = serde_json::from_slice(&binding_bytes)?;
-    let artifacts = evidence_artifact_digests_from_bytes(
-        &manifest_bytes,
-        &ledger_bytes,
-        &binding_bytes,
-    );
+    let artifacts =
+        evidence_artifact_digests_from_bytes(&manifest_bytes, &ledger_bytes, &binding_bytes);
     Ok(EvidenceCoreSnapshot {
         manifest,
         binding,
@@ -1862,11 +1867,12 @@ fn require_evidence_bundle_completion(
     ledger_entries: usize,
     artifacts: &EvidenceArtifactDigests,
 ) -> Result<(), M1RuntimeError> {
-    let completion: EvidenceBundleCompletion = read_json(&paths.completion_marker).map_err(|err| {
-        M1RuntimeError::IncompleteEvidenceBundle(format!(
-            "missing or unreadable bundle_complete.json: {err}"
-        ))
-    })?;
+    let completion: EvidenceBundleCompletion =
+        read_json(&paths.completion_marker).map_err(|err| {
+            M1RuntimeError::IncompleteEvidenceBundle(format!(
+                "missing or unreadable bundle_complete.json: {err}"
+            ))
+        })?;
     if completion.schema != "xenia-evidence-bundle-completion-v1" {
         return Err(M1RuntimeError::IncompleteEvidenceBundle(format!(
             "unsupported completion schema {:?}",
@@ -1919,8 +1925,9 @@ fn evidence_artifact_digests_from_bytes(
 ) -> EvidenceArtifactDigests {
     let evidence_manifest_blake3 = blake3::hash(manifest).to_hex().to_string();
     let ledger_entries_blake3 = blake3::hash(ledger_entries).to_hex().to_string();
-    let session_transcript_binding_blake3 =
-        blake3::hash(session_transcript_binding).to_hex().to_string();
+    let session_transcript_binding_blake3 = blake3::hash(session_transcript_binding)
+        .to_hex()
+        .to_string();
     let artifact_set_blake3 = evidence_artifact_set_digest(
         &evidence_manifest_blake3,
         &ledger_entries_blake3,
@@ -3430,12 +3437,14 @@ mod tests {
             entries.last().unwrap().event.kind,
             ConsentKind::LifecycleTermination
         );
-        assert!(entries
-            .last()
-            .unwrap()
-            .event
-            .scope
-            .contains("state=authorization_lease_expired"));
+        assert!(
+            entries
+                .last()
+                .unwrap()
+                .event
+                .scope
+                .contains("state=authorization_lease_expired")
+        );
         M1RuntimeSession::verify_entries(&entries, &verifying_key).unwrap();
 
         let rehydrated = M1RuntimeSession::from_persisted_entries(
@@ -3680,7 +3689,9 @@ mod tests {
                 session_id,
                 request_id,
             ),
-            Err(M1RuntimeError::PersistedConsentContextMismatch("permission scope"))
+            Err(M1RuntimeError::PersistedConsentContextMismatch(
+                "permission scope"
+            ))
         ));
 
         assert!(matches!(
@@ -3691,7 +3702,9 @@ mod tests {
                 Uuid::from_bytes([9; 16]),
                 request_id,
             ),
-            Err(M1RuntimeError::PersistedConsentContextMismatch("session_id"))
+            Err(M1RuntimeError::PersistedConsentContextMismatch(
+                "session_id"
+            ))
         ));
     }
 
@@ -3716,13 +3729,7 @@ mod tests {
             Err(M1RuntimeError::MissingRequiredAuthorizationBinding)
         ));
         runtime
-            .bind_operator_authorization(
-                [0x44; 16],
-                [0x33; 32],
-                "alice",
-                [0x11; 32],
-                None,
-            )
+            .bind_operator_authorization([0x44; 16], [0x33; 32], "alice", [0x11; 32], None)
             .unwrap();
         runtime.stream_frame().unwrap();
     }
@@ -3749,13 +3756,7 @@ mod tests {
         runtime.offer().unwrap();
         runtime.grant_consent().unwrap();
         runtime
-            .bind_operator_authorization(
-                action_id,
-                [0x33; 32],
-                "alice",
-                [0x11; 32],
-                None,
-            )
+            .bind_operator_authorization(action_id, [0x33; 32], "alice", [0x11; 32], None)
             .unwrap();
         assert_eq!(
             runtime.authorization_binding_action_id(),
@@ -3801,13 +3802,7 @@ mod tests {
         runtime.offer().unwrap();
         runtime.grant_consent().unwrap();
         runtime
-            .bind_operator_authorization(
-                [0x45; 16],
-                [0x34; 32],
-                "alice",
-                [0x12; 32],
-                Some(110),
-            )
+            .bind_operator_authorization([0x45; 16], [0x34; 32], "alice", [0x12; 32], Some(110))
             .unwrap();
         assert!(runtime.ensure_authorization_binding_at(109).is_ok());
         assert!(matches!(

@@ -63,7 +63,7 @@ pub use frame::OpusAudioCodec;
 pub use frame::{
     AudioCodec, AudioCodecError, AudioJitterBuffer, AudioSampleFormat, AudioSourceCapability,
     CAPABILITIES_SCHEMA_VERSION, ClipboardCapability, ClipboardContent, FILE_TRANSFER_CHUNK_SIZE,
-    FileTransferMessage, FileTransferCapability, InputControlCapability, JitterInsert, JitterStats,
+    FileTransferCapability, FileTransferMessage, InputControlCapability, JitterInsert, JitterStats,
     PAYLOAD_TYPE_CLIPBOARD, PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST,
     PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER, PixelFormat, RawAudio, RawCapabilities, RawClipboard,
     RawFrame, RawInput, RawPcmAudioCodec, RawRekey, RawTelemetry, SyntheticAudioKind,

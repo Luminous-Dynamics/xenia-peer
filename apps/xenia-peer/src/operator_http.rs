@@ -293,10 +293,7 @@ async fn verify_handler(
 
     if state.revocations.is_revoked(&authed.operator_id) {
         tracing::warn!(operator = %authed.operator_id, "token issuance refused: operator is revoked");
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            "operator is revoked".to_string(),
-        ));
+        return Err((StatusCode::UNAUTHORIZED, "operator is revoked".to_string()));
     }
 
     let token_nonce: [u8; 16] = rand::random();
@@ -740,11 +737,7 @@ fn build_audit_extension_witness(
     }
     let after_index = usize::try_from(after_entry_count)
         .expect("entry count is already bounded by the in-memory ledger length");
-    let entries = ledger
-        .iter()
-        .skip(after_index)
-        .cloned()
-        .collect();
+    let entries = ledger.iter().skip(after_index).cloned().collect();
     Ok(AuditExtensionWitnessDto {
         schema: AUDIT_EXTENSION_WITNESS_SCHEMA.to_string(),
         base_entry_count: after_entry_count,
@@ -897,7 +890,11 @@ pub(crate) fn router(
             axum::routing::get(daemon_identity_handler),
         )
         .with_state(state)
-        .merge(Router::new().route("/auth/verify", post(verify_handler)).with_state(verify))
+        .merge(
+            Router::new()
+                .route("/auth/verify", post(verify_handler))
+                .with_state(verify),
+        )
         .merge(
             Router::new()
                 .route("/v1/audit/checkpoint", get(audit_checkpoint_handler))
@@ -2026,12 +2023,8 @@ mod tests {
         let witness = build_audit_extension_witness(&ledger, retained.entry_count, 101).unwrap();
         assert_eq!(witness.schema, AUDIT_EXTENSION_WITNESS_SCHEMA);
         assert_eq!(witness.entries.len(), 2);
-        Verifier::verify_checkpoint_extension(
-            &retained,
-            &witness.checkpoint,
-            &witness.entries,
-        )
-        .unwrap();
+        Verifier::verify_checkpoint_extension(&retained, &witness.checkpoint, &witness.entries)
+            .unwrap();
     }
 
     #[test]

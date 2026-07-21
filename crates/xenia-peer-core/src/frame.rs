@@ -1153,8 +1153,7 @@ impl RawCapabilities {
         if frame.pixel_format != PixelFormat::Capabilities {
             return Err(WireError::decode("RawFrame is not capabilities"));
         }
-        let capabilities: Self =
-            bincode::deserialize(&frame.pixels).map_err(WireError::decode)?;
+        let capabilities: Self = bincode::deserialize(&frame.pixels).map_err(WireError::decode)?;
         if capabilities.schema_version != CAPABILITIES_SCHEMA_VERSION {
             return Err(WireError::decode(format!(
                 "unsupported capabilities schema version {}",

@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 use thiserror::Error;
 
-use crate::{checkpoint_fingerprint, CheckpointError, LedgerCheckpoint, Verifier};
+use crate::{CheckpointError, LedgerCheckpoint, Verifier, checkpoint_fingerprint};
 
 /// Stable schema label for [`CheckpointWitnessBundle`].
 pub const CHECKPOINT_WITNESS_BUNDLE_SCHEMA: &str = "xenia-checkpoint-witness-bundle-v1";
@@ -99,11 +99,8 @@ impl CheckpointWitnessBundle {
             return Err(CheckpointWitnessError::DuplicateWitness);
         }
         let fingerprint = checkpoint_fingerprint(&self.checkpoint)?;
-        let message = checkpoint_witness_message(
-            &fingerprint,
-            &witness_public_key,
-            timestamp_unix_secs,
-        );
+        let message =
+            checkpoint_witness_message(&fingerprint, &witness_public_key, timestamp_unix_secs);
         self.witnesses.push(CheckpointWitnessSignature {
             witness_public_key,
             timestamp_unix_secs,
@@ -189,7 +186,10 @@ impl Verifier {
             });
         }
         Self::verify_checkpoint(&bundle.checkpoint)?;
-        let trusted = trusted_witness_keys.iter().copied().collect::<BTreeSet<_>>();
+        let trusted = trusted_witness_keys
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
         let fingerprint = checkpoint_fingerprint(&bundle.checkpoint)?;
         let mut observed = BTreeSet::new();
         for witness in &bundle.witnesses {

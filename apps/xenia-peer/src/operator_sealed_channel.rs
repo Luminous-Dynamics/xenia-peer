@@ -32,9 +32,9 @@
 
 use tokio::net::TcpListener;
 use xenia_handshake::{OperatorRekeyEpochContext, OperatorRekeyReason};
+use xenia_peer_core::HandshakeManager;
 use xenia_peer_core::handshake::perform_host_handshake_authenticating_peer;
 use xenia_peer_core::transport::Transport;
-use xenia_peer_core::HandshakeManager;
 use xenia_transport_ws::WsTransport;
 use xenia_wire::handshake_highsec::HostHandshakeHighSec;
 use xenia_wire::operator_rekey::{self, OperatorRekeyMessage};
@@ -409,14 +409,7 @@ pub(crate) async fn run_sealed_operator_endpoint(
         };
         metrics.record_connection();
         tracing::info!(peer = %peer, "sealed operator channel connection accepted");
-        match serve_sealed_operator_channel(
-            &mut transport,
-            &mut identity,
-            &policy,
-            &deps,
-        )
-        .await
-        {
+        match serve_sealed_operator_channel(&mut transport, &mut identity, &policy, &deps).await {
             // Terminal decision (Deny/Revoke): the session is decided.
             Ok(true) => {
                 metrics.record_established();
@@ -482,7 +475,7 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use std::sync::Arc;
     use tokio::net::{TcpListener, TcpStream};
-    use tokio::sync::{oneshot, Mutex as TokioMutex};
+    use tokio::sync::{Mutex as TokioMutex, oneshot};
     use uuid::Uuid;
     use xenia_handshake::ML_DSA_65_PK_LEN;
     use xenia_ledger::Chain;
@@ -568,8 +561,7 @@ mod tests {
                 ),
                 rekey_interval: None,
             };
-            serve_sealed_operator_channel(&mut t, &mut identity, &policy, &deps)
-                .await
+            serve_sealed_operator_channel(&mut t, &mut identity, &policy, &deps).await
         });
 
         // Console (viewer): handshake with the enrolled identity, then seal an
@@ -1168,8 +1160,7 @@ mod tests {
                 ),
                 rekey_interval: None,
             };
-            serve_sealed_operator_channel(&mut t, &mut identity, &policy, &deps)
-                .await
+            serve_sealed_operator_channel(&mut t, &mut identity, &policy, &deps).await
         });
 
         // Viewer: complete a valid handshake as the (revoked) enrolled operator.
