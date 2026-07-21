@@ -1429,6 +1429,7 @@ fn decode_consent_decision(
     require_operator_auth: bool,
     auth_state: &crate::operator_http::OperatorAuthState,
     session_id: &[u8; 16],
+    scope_digest: &[u8; 32],
     revocations: &crate::operator_revocations::OperatorRevocations,
 ) -> Option<DecodedConsent> {
     if !require_operator_auth {
@@ -1464,6 +1465,7 @@ fn decode_consent_decision(
         &auth_state.daemon_ml_dsa.public_key_bytes(),
         now,
         session_id,
+        scope_digest,
         &request,
     ) {
         Ok(authorized) => {
@@ -2082,6 +2084,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let consent_session_uuid = session_id;
     let consent_ledger = shared_ledger.clone();
     let consent_ledger_path = ledger_path.clone();
+    // Computed here (a pure function of the daemon's own CLI config, not
+    // handshake/runtime state) rather than down at the `m1_scope` binding
+    // below, so both consent-server branches immediately below can bind
+    // their per-action signatures to this session's actual offered scope --
+    // never trusting anything relayed back through the console/agent
+    // round-trip for that binding. Reused verbatim (not recomputed) for the
+    // M1 consent-scope offer/broadcast below, so there's exactly one source
+    // of truth for what this session's scope string is.
+    let m1_scope = m1_consent_scope(args.telemetry_level, args.audio);
+    let consent_scope_digest = xenia_operator_proto::scope_digest(&m1_scope);
 
     // Consent server. With --operator-sealed the console talks over a
     // xenia-wire-sealed operator channel (PQC confidentiality + handshake
@@ -2111,6 +2123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     require_operator_auth,
                     auth_state: consent_auth_state,
                     session_id: consent_session_id,
+                    scope_digest: consent_scope_digest,
                     session_uuid: consent_session_uuid,
                     ledger: consent_ledger,
                     ledger_path: consent_ledger_path,
@@ -2147,6 +2160,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     require_operator_auth,
                     auth_state: consent_auth_state,
                     session_id: consent_session_id,
+                    scope_digest: consent_scope_digest,
                     session_uuid: consent_session_uuid,
                     ledger: consent_ledger,
                     ledger_path: consent_ledger_path,
@@ -2191,7 +2205,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     let m1_signing_key = load_or_create_signing_key(&args.m1_consent_key_path)?;
-    let m1_scope = m1_consent_scope(args.telemetry_level, args.audio);
+    // `m1_scope` was already computed above (before the consent-server
+    // branches, so their per-action signature binding could use it) -- reuse
+    // it here rather than recomputing, so there's one source of truth.
     let m1_scope_for_log = m1_scope.clone();
     let mut m1_runtime = crate::m1_runtime::M1RuntimeSession::new(
         m1_signing_key,

@@ -198,6 +198,19 @@ pub struct SignConsentActionRequest {
     /// daemon state the daemon itself re-validates when the consent
     /// action is finally submitted over the sealed channel.
     pub session_id_hex: String,
+    /// The human-readable scope text the console displayed for this
+    /// decision (the same string the daemon broadcasts in its consent
+    /// prompt). The agent binds `xenia_operator_proto::scope_digest(scope)`
+    /// into the signed transcript, so a signature can't be replayed for a
+    /// different scope than what was actually shown -- closing the gap
+    /// where a compromised console could ask for a signature over one
+    /// `session_id` while displaying, or silently substituting, another.
+    /// Like `session_id_hex`, this is connection-scoped daemon state the
+    /// agent doesn't independently verify; unlike `session_id_hex`, the
+    /// daemon *cross-checks it* by recomputing the digest from its own
+    /// session record before trusting the returned signature (see
+    /// `xenia-peer`'s `authorize_consent_action`).
+    pub scope: String,
     /// The operator's current daemon-issued session token, verified by the
     /// agent before its `token_nonce_hex` is trusted (see
     /// [`SignedTokenDto`]).
@@ -615,6 +628,7 @@ mod tests {
             },
             action: ConsentAction::Approve,
             session_id_hex: "dd".repeat(16),
+            scope: "view screen".to_string(),
             token: test_token(),
         };
         let json = serde_json::to_string(&req).unwrap();

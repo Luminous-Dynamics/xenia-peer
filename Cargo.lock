@@ -8944,6 +8944,7 @@ dependencies = [
 name = "xenia-operator-proto"
 version = "0.0.0-m0"
 dependencies = [
+ "blake3",
  "serde",
  "serde_json",
 ]

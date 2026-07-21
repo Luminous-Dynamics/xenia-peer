@@ -25,8 +25,14 @@ use serde::{Deserialize, Serialize};
 /// possession. Bump the `-vN` suffix on any breaking transcript change.
 pub const CHALLENGE_DOMAIN: &[u8] = b"xenia-operator-auth-challenge-v1";
 
-/// Domain-separation tag for a per-consent-action signature.
-pub const CONSENT_ACTION_DOMAIN: &[u8] = b"xenia-operator-consent-action-v1";
+/// Domain-separation tag for a per-consent-action signature. Bumped to v2
+/// (from v1) when the transcript grew a `scope_digest` binding -- see
+/// [`consent_action_transcript`]'s own doc comment for why. This is a
+/// deliberate breaking change to the signed bytes: an old signer paired
+/// with a new verifier (or vice versa) must fail closed (signature just
+/// won't verify), not silently interoperate over a transcript that omits
+/// the scope commitment.
+pub const CONSENT_ACTION_DOMAIN: &[u8] = b"xenia-operator-consent-action-v2";
 
 /// Domain-separation tag for an admin's signature authorizing the revocation of
 /// another operator (the `/operator/revoke` admin action).
@@ -212,20 +218,43 @@ pub fn challenge_transcript(
 
 /// The bytes an operator signs to authorize a specific consent action. Binds
 /// the action to the exact session and token, so a captured signature can't be
-/// replayed for a different action, session, or token.
+/// replayed for a different action, session, or token. Also binds
+/// `scope_digest` (see [`scope_digest`]) so the signature commits to *what*
+/// is being approved, not just that some approval happened for
+/// `session_id` -- without this, an already-authorized signer (e.g. a
+/// compromised browser holding a live agent session) could ask for a
+/// signature over a `session_id` it merely learned of, distinct from
+/// whatever scope was actually displayed to the human. Verifiers must
+/// compute `scope_digest` from their own authoritative record of the
+/// session's scope, never from a value relayed through the same signer.
 ///
-/// Layout: `CONSENT_ACTION_DOMAIN || action.tag()(1) || session_id(16) || token_nonce(16)`.
+/// Layout: `CONSENT_ACTION_DOMAIN || action.tag()(1) || session_id(16) ||
+/// token_nonce(16) || scope_digest(32)`.
 pub fn consent_action_transcript(
     action: ConsentAction,
     session_id: &[u8; 16],
     token_nonce: &[u8; 16],
+    scope_digest: &[u8; 32],
 ) -> Vec<u8> {
-    let mut t = Vec::with_capacity(CONSENT_ACTION_DOMAIN.len() + 1 + 16 + 16);
+    let mut t = Vec::with_capacity(CONSENT_ACTION_DOMAIN.len() + 1 + 16 + 16 + 32);
     t.extend_from_slice(CONSENT_ACTION_DOMAIN);
     t.push(action.tag());
     t.extend_from_slice(session_id);
     t.extend_from_slice(token_nonce);
+    t.extend_from_slice(scope_digest);
     t
+}
+
+/// Domain-separated commitment to a consent scope string, for binding into
+/// [`consent_action_transcript`]. Both the signer (the agent, which receives
+/// the scope text from the console) and the verifier (the daemon, from its
+/// own session state) must compute this identically over the same UTF-8
+/// bytes for the signature to verify.
+pub fn scope_digest(scope: &str) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"xenia-operator-consent-scope-v1");
+    hasher.update(scope.as_bytes());
+    *hasher.finalize().as_bytes()
 }
 
 /// The bytes an Admin signs to authorize revoking `target_operator_id`. Bound to
@@ -591,9 +620,10 @@ mod tests {
     fn consent_transcript_layout_is_exact_and_action_bound() {
         let sid = [0x11u8; 16];
         let tn = [0x22u8; 16];
-        let approve = consent_action_transcript(ConsentAction::Approve, &sid, &tn);
-        let revoke = consent_action_transcript(ConsentAction::Revoke, &sid, &tn);
-        // Same session/token, different action -> different bytes (can't replay).
+        let sd = scope_digest("view screen");
+        let approve = consent_action_transcript(ConsentAction::Approve, &sid, &tn, &sd);
+        let revoke = consent_action_transcript(ConsentAction::Revoke, &sid, &tn, &sd);
+        // Same session/token/scope, different action -> different bytes (can't replay).
         assert_ne!(approve, revoke);
         assert_eq!(
             &approve[..CONSENT_ACTION_DOMAIN.len()],
@@ -601,7 +631,31 @@ mod tests {
         );
         assert_eq!(approve[CONSENT_ACTION_DOMAIN.len()], 1);
         assert_eq!(revoke[CONSENT_ACTION_DOMAIN.len()], 3);
-        assert_eq!(approve.len(), CONSENT_ACTION_DOMAIN.len() + 1 + 16 + 16);
+        assert_eq!(
+            approve.len(),
+            CONSENT_ACTION_DOMAIN.len() + 1 + 16 + 16 + 32
+        );
+    }
+
+    #[test]
+    fn consent_transcript_is_bound_to_scope() {
+        let sid = [0x11u8; 16];
+        let tn = [0x22u8; 16];
+        let screen_only = scope_digest("view screen");
+        let broad = scope_digest("view screen, inject input, transfer files");
+        assert_ne!(screen_only, broad);
+        let a = consent_action_transcript(ConsentAction::Approve, &sid, &tn, &screen_only);
+        let b = consent_action_transcript(ConsentAction::Approve, &sid, &tn, &broad);
+        // Same session/token/action, different scope -> different bytes: a
+        // signature over one scope can't be replayed as approval of another.
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn scope_digest_is_deterministic_and_content_sensitive() {
+        assert_eq!(scope_digest("view screen"), scope_digest("view screen"));
+        assert_ne!(scope_digest("view screen"), scope_digest("view screen "));
+        assert_ne!(scope_digest(""), scope_digest("view screen"));
     }
 
     #[test]

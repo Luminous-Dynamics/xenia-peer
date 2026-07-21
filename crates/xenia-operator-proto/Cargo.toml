@@ -17,3 +17,9 @@ workspace = true
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# For scope_digest() only -- consent_action_transcript_v2 needs a
+# domain-separated commitment to the scope string, and blake3 is already
+# proven wasm32-unknown-unknown-compatible elsewhere in this workspace
+# (xenia-ledger), so it doesn't compromise this crate's "compiles for wasm32"
+# constraint (see module doc comment).
+blake3 = "1.5"

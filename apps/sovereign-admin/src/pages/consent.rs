@@ -13,7 +13,7 @@
 //! permitted operator.
 
 use futures_util::{SinkExt, StreamExt};
-use gloo_net::websocket::{futures::WebSocket, Message};
+use gloo_net::websocket::{Message, futures::WebSocket};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
@@ -181,6 +181,7 @@ pub fn ConsentModal() -> impl IntoView {
                 None
             };
 
+            let scope = prompt.as_deref().map(display_scope).unwrap_or_default();
             let payload = match (&sess, session_id, &agent_session) {
                 (Some(s), Some(sid), Some(agent_session)) => {
                     match build_consent_request(
@@ -190,6 +191,7 @@ pub fn ConsentModal() -> impl IntoView {
                         s,
                         action,
                         &sid,
+                        &scope,
                     )
                     .await
                     {
