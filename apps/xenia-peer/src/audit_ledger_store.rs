@@ -22,11 +22,13 @@
 //! authenticate), and [`persist_entries_atomic`] gives callers (via
 //! `xenia_ledger::Chain::append_transactional`) a real durable-write
 //! primitive: temp file, `fsync` the data, atomic rename, `fsync` the
-//! containing directory. Skipping that last directory fsync is the most
-//! common way "atomic" file replacement code is still not actually
-//! crash-safe -- a rename can be lost on a crash even after the renamed
-//! file's own contents are durable, until the directory entry pointing at
-//! it is fsync'd too.
+//! containing directory. The on-disk format is now an explicit, magic-tagged
+//! v1 envelope with entry-count/head metadata and hard byte/entry limits;
+//! historical bare `Vec<LedgerEntry>` files remain readable and migrate on
+//! the next append. Skipping the final directory fsync is the most common way
+//! "atomic" file replacement code is still not actually crash-safe -- a rename
+//! can be lost on a crash even after the renamed file's own contents are
+//! durable, until the directory entry pointing at it is fsync'd too.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -41,6 +43,15 @@ pub(crate) enum AuditLedgerStoreError {
     /// Reading, writing, renaming, or syncing the ledger file failed.
     #[error("audit ledger I/O error: {0}")]
     Io(#[from] std::io::Error),
+    /// The persisted file exceeded the daemon's explicit resource bounds.
+    #[error("audit ledger resource limit exceeded: {0}")]
+    LimitExceeded(String),
+    /// A versioned persistence envelope used an unsupported schema.
+    #[error("unsupported audit ledger persistence schema: {0}")]
+    UnsupportedSchema(u16),
+    /// Envelope metadata did not match the authenticated entry vector.
+    #[error("audit ledger persistence metadata mismatch: {0}")]
+    MetadataMismatch(&'static str),
     /// The persisted bincode payload could not be decoded (or, when
     /// persisting, could not be encoded).
     #[error("audit ledger codec error: {0}")]
@@ -50,6 +61,37 @@ pub(crate) enum AuditLedgerStoreError {
     /// not trust it.
     #[error("persisted audit ledger failed verification: {0}")]
     Verify(#[from] VerifyError),
+}
+
+const PERSISTED_AUDIT_LEDGER_MAGIC: &[u8] = b"XENIA-AUDIT-LEDGER\0";
+const PERSISTED_AUDIT_LEDGER_SCHEMA_V1: u16 = 1;
+const PERSISTED_AUDIT_LEDGER_HEADER_LEN: usize =
+    PERSISTED_AUDIT_LEDGER_MAGIC.len() + 2 + 8 + 32;
+pub(crate) const MAX_AUDIT_LEDGER_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_AUDIT_LEDGER_ENTRIES: usize = 100_000;
+
+fn head_hash(entries: &[LedgerEntry]) -> [u8; 32] {
+    entries
+        .last()
+        .map(|entry| entry.entry_hash)
+        .unwrap_or([0u8; 32])
+}
+
+fn validate_entry_count(count: usize) -> Result<(), AuditLedgerStoreError> {
+    if count > MAX_AUDIT_LEDGER_ENTRIES {
+        return Err(AuditLedgerStoreError::LimitExceeded(format!(
+            "{count} entries exceeds maximum {MAX_AUDIT_LEDGER_ENTRIES}"
+        )));
+    }
+    Ok(())
+}
+
+fn read_u64_be(bytes: &[u8]) -> Option<u64> {
+    Some(u64::from_be_bytes(bytes.try_into().ok()?))
+}
+
+fn read_u16_be(bytes: &[u8]) -> Option<u16> {
+    Some(u16::from_be_bytes(bytes.try_into().ok()?))
 }
 
 /// Load `path` and verify every persisted entry under `signing_key` before
@@ -63,8 +105,51 @@ pub(crate) fn load_verified(
     if !path.exists() {
         return Ok(Chain::new(signing_key.clone()));
     }
+    let file_len = std::fs::metadata(path)?.len();
+    if file_len > MAX_AUDIT_LEDGER_BYTES {
+        return Err(AuditLedgerStoreError::LimitExceeded(format!(
+            "{} bytes exceeds maximum {}",
+            file_len, MAX_AUDIT_LEDGER_BYTES
+        )));
+    }
     let bytes = std::fs::read(path)?;
-    let entries: Vec<LedgerEntry> = bincode::deserialize(&bytes)?;
+    let entries = if bytes.starts_with(PERSISTED_AUDIT_LEDGER_MAGIC) {
+        if bytes.len() < PERSISTED_AUDIT_LEDGER_HEADER_LEN {
+            return Err(AuditLedgerStoreError::MetadataMismatch("truncated header"));
+        }
+        let mut offset = PERSISTED_AUDIT_LEDGER_MAGIC.len();
+        let schema_version = read_u16_be(&bytes[offset..offset + 2])
+            .ok_or(AuditLedgerStoreError::MetadataMismatch("schema_version"))?;
+        offset += 2;
+        if schema_version != PERSISTED_AUDIT_LEDGER_SCHEMA_V1 {
+            return Err(AuditLedgerStoreError::UnsupportedSchema(schema_version));
+        }
+        let entry_count = read_u64_be(&bytes[offset..offset + 8])
+            .ok_or(AuditLedgerStoreError::MetadataMismatch("entry_count"))?;
+        offset += 8;
+        let entry_count = usize::try_from(entry_count)
+            .map_err(|_| AuditLedgerStoreError::LimitExceeded("entry count overflow".into()))?;
+        validate_entry_count(entry_count)?;
+        let mut expected_head_hash = [0u8; 32];
+        expected_head_hash.copy_from_slice(&bytes[offset..offset + 32]);
+        offset += 32;
+        let entries: Vec<LedgerEntry> = bincode::deserialize(&bytes[offset..])?;
+        if entry_count != entries.len() {
+            return Err(AuditLedgerStoreError::MetadataMismatch("entry_count"));
+        }
+        if expected_head_hash != head_hash(&entries) {
+            return Err(AuditLedgerStoreError::MetadataMismatch("head_hash"));
+        }
+        entries
+    } else {
+        // Legacy releases persisted the bare bincode Vec<LedgerEntry>. Keep it
+        // readable for migration; the next successful append rewrites it in
+        // the explicit v1 envelope. The total file-size bound is applied before
+        // this compatibility decoder is reached.
+        let entries: Vec<LedgerEntry> = bincode::deserialize(&bytes)?;
+        validate_entry_count(entries.len())?;
+        entries
+    };
     Verifier::verify_chain(&entries, &signing_key.verifying_key())?;
     Ok(Chain::from_entries(entries, signing_key.clone()))
 }
@@ -78,7 +163,20 @@ pub(crate) fn persist_entries_atomic(
     path: &Path,
     entries: &[LedgerEntry],
 ) -> Result<(), AuditLedgerStoreError> {
-    let bytes = bincode::serialize(entries)?;
+    validate_entry_count(entries.len())?;
+    let payload = bincode::serialize(entries)?;
+    let mut bytes = Vec::with_capacity(PERSISTED_AUDIT_LEDGER_HEADER_LEN + payload.len());
+    bytes.extend_from_slice(PERSISTED_AUDIT_LEDGER_MAGIC);
+    bytes.extend_from_slice(&PERSISTED_AUDIT_LEDGER_SCHEMA_V1.to_be_bytes());
+    bytes.extend_from_slice(&(entries.len() as u64).to_be_bytes());
+    bytes.extend_from_slice(&head_hash(entries));
+    bytes.extend_from_slice(&payload);
+    if bytes.len() as u64 > MAX_AUDIT_LEDGER_BYTES {
+        return Err(AuditLedgerStoreError::LimitExceeded(format!(
+            "{} serialized bytes exceeds maximum {}",
+            bytes.len(), MAX_AUDIT_LEDGER_BYTES
+        )));
+    }
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -185,11 +283,106 @@ mod tests {
         chain.append(event()).unwrap();
         let entries: Vec<LedgerEntry> = chain.iter().cloned().collect();
         persist_entries_atomic(&path, &entries).unwrap();
+        let persisted_bytes = std::fs::read(&path).unwrap();
+        assert!(persisted_bytes.starts_with(PERSISTED_AUDIT_LEDGER_MAGIC));
+        let count_offset = PERSISTED_AUDIT_LEDGER_MAGIC.len() + 2;
+        assert_eq!(
+            read_u64_be(&persisted_bytes[count_offset..count_offset + 8]),
+            Some(2)
+        );
 
         let reloaded = load_verified(&path, &sk).unwrap();
         assert_eq!(reloaded.len(), 2);
         assert_eq!(reloaded.last_hash(), chain.last_hash());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn legacy_bare_vector_loads_and_migrates_on_next_persist() {
+        let dir = temp_dir("legacy");
+        let path = dir.join("consent.ledger");
+        let sk = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let mut chain = Chain::new(sk.clone());
+        chain.append(event()).unwrap();
+        let entries: Vec<LedgerEntry> = chain.iter().cloned().collect();
+        std::fs::write(&path, bincode::serialize(&entries).unwrap()).unwrap();
+
+        let loaded = load_verified(&path, &sk).unwrap();
+        assert_eq!(loaded.len(), 1);
+        let loaded_entries = loaded.iter().cloned().collect::<Vec<_>>();
+        persist_entries_atomic(&path, &loaded_entries).unwrap();
+        assert!(
+            std::fs::read(&path)
+                .unwrap()
+                .starts_with(PERSISTED_AUDIT_LEDGER_MAGIC)
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn versioned_envelope_rejects_metadata_tampering_before_chain_load() {
+        let dir = temp_dir("metadata-tamper");
+        let path = dir.join("consent.ledger");
+        let sk = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let mut chain = Chain::new(sk.clone());
+        chain.append(event()).unwrap();
+        let entries: Vec<LedgerEntry> = chain.iter().cloned().collect();
+        persist_entries_atomic(&path, &entries).unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let head_offset = PERSISTED_AUDIT_LEDGER_MAGIC.len() + 2 + 8;
+        bytes[head_offset] ^= 0xFF;
+        std::fs::write(&path, bytes).unwrap();
+        assert!(matches!(
+            load_verified(&path, &sk),
+            Err(AuditLedgerStoreError::MetadataMismatch("head_hash"))
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unsupported_envelope_schema_is_rejected_explicitly() {
+        let dir = temp_dir("unsupported-schema");
+        let path = dir.join("consent.ledger");
+        let sk = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let mut chain = Chain::new(sk.clone());
+        chain.append(event()).unwrap();
+        let entries: Vec<LedgerEntry> = chain.iter().cloned().collect();
+        persist_entries_atomic(&path, &entries).unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let schema_offset = PERSISTED_AUDIT_LEDGER_MAGIC.len();
+        bytes[schema_offset..schema_offset + 2].copy_from_slice(&2u16.to_be_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        assert!(matches!(
+            load_verified(&path, &sk),
+            Err(AuditLedgerStoreError::UnsupportedSchema(2))
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn oversized_ledger_is_refused_before_reading_or_decoding() {
+        let dir = temp_dir("oversized");
+        let path = dir.join("consent.ledger");
+        File::create(&path)
+            .unwrap()
+            .set_len(MAX_AUDIT_LEDGER_BYTES + 1)
+            .unwrap();
+        let sk = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        assert!(matches!(
+            load_verified(&path, &sk),
+            Err(AuditLedgerStoreError::LimitExceeded(_))
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn entry_count_limit_is_enforced_without_allocating_a_ledger() {
+        assert!(matches!(
+            validate_entry_count(MAX_AUDIT_LEDGER_ENTRIES + 1),
+            Err(AuditLedgerStoreError::LimitExceeded(_))
+        ));
     }
 
     #[test]
