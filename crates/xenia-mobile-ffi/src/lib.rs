@@ -287,13 +287,7 @@ pub unsafe extern "C" fn xenia_frame_free(frame: XeniaFrame) {
 /// Invalid, fabricated, or stale handles are rejected without accessing
 /// session memory.
 #[unsafe(no_mangle)]
-pub extern "C" fn xenia_send_pointer(
-    handle: u64,
-    x: f32,
-    y: f32,
-    button: u8,
-    pressed: bool,
-) {
+pub extern "C" fn xenia_send_pointer(handle: u64, x: f32, y: f32, button: u8, pressed: bool) {
     let Some(engine) = engine_for(handle) else {
         return;
     };
