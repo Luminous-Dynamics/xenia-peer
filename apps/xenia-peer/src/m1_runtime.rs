@@ -999,13 +999,23 @@ impl M1RuntimeSession {
         self.flush_new_audit_events()
     }
 
-    pub(crate) fn sync_clipboard(&mut self) -> Result<(), M1RuntimeError> {
-        self.session.sync_clipboard()?;
+    pub(crate) fn read_host_clipboard(&mut self) -> Result<(), M1RuntimeError> {
+        self.session.read_host_clipboard()?;
         self.flush_new_audit_events()
     }
 
-    pub(crate) fn transfer_file(&mut self) -> Result<(), M1RuntimeError> {
-        self.session.transfer_file()?;
+    pub(crate) fn write_host_clipboard(&mut self) -> Result<(), M1RuntimeError> {
+        self.session.write_host_clipboard()?;
+        self.flush_new_audit_events()
+    }
+
+    pub(crate) fn send_file_to_viewer(&mut self) -> Result<(), M1RuntimeError> {
+        self.session.send_file_to_viewer()?;
+        self.flush_new_audit_events()
+    }
+
+    pub(crate) fn receive_file_from_viewer(&mut self) -> Result<(), M1RuntimeError> {
+        self.session.receive_file_from_viewer()?;
         self.flush_new_audit_events()
     }
 
@@ -1028,12 +1038,20 @@ impl M1RuntimeSession {
         self.inject_input()
     }
 
-    pub(crate) fn allow_clipboard_flow(&mut self) -> Result<(), M1RuntimeError> {
-        self.sync_clipboard()
+    pub(crate) fn allow_host_clipboard_read_flow(&mut self) -> Result<(), M1RuntimeError> {
+        self.read_host_clipboard()
     }
 
-    pub(crate) fn allow_file_transfer_flow(&mut self) -> Result<(), M1RuntimeError> {
-        self.transfer_file()
+    pub(crate) fn allow_host_clipboard_write_flow(&mut self) -> Result<(), M1RuntimeError> {
+        self.write_host_clipboard()
+    }
+
+    pub(crate) fn allow_file_send_flow(&mut self) -> Result<(), M1RuntimeError> {
+        self.send_file_to_viewer()
+    }
+
+    pub(crate) fn allow_file_receive_flow(&mut self) -> Result<(), M1RuntimeError> {
+        self.receive_file_from_viewer()
     }
 
     pub(crate) fn revoke(&mut self) -> Result<(), M1RuntimeError> {

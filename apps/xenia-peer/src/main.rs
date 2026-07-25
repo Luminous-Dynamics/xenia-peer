@@ -1400,15 +1400,20 @@ fn load_or_create_host_identity_highsec(
 ///
 /// A single Approve should authorize only what the operator actually turned
 /// on: frame streaming is the daemon's core purpose and always granted, but
-/// input injection, clipboard apply, and file transfer are each unlocked only
-/// when their backing flag is enabled. This keeps an approval from silently
-/// authorizing capabilities the daemon isn't even wired to use.
+/// input injection, clipboard, and file transfer are each unlocked only when
+/// their backing flag is enabled -- and clipboard/file-transfer are each
+/// unlocked per-direction, not as one combined flag, so e.g. `--send-file`
+/// alone does not also silently authorize accepting viewer-offered files.
+/// This keeps an approval from silently authorizing capabilities the daemon
+/// isn't even wired to use.
 fn configured_permission_set(args: &Args) -> M1PermissionSet {
     M1PermissionSet {
         stream_frame: true,
         inject_input: args.input_backend != InputBackendChoice::Noop,
-        clipboard_sync: args.clipboard == ClipboardMode::Bidirectional,
-        file_transfer: args.recv_file_dir.is_some() || args.send_file.is_some(),
+        read_host_clipboard: args.clipboard != ClipboardMode::Off,
+        write_host_clipboard: args.clipboard == ClipboardMode::Bidirectional,
+        send_file_to_viewer: args.send_file.is_some(),
+        receive_file_from_viewer: args.recv_file_dir.is_some(),
     }
 }
 
@@ -2249,8 +2254,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 m1_runtime.grant_consent_scoped(granted)?;
                 info!(
                     inject_input = granted.inject_input,
-                    clipboard_sync = granted.clipboard_sync,
-                    file_transfer = granted.file_transfer,
+                    read_host_clipboard = granted.read_host_clipboard,
+                    write_host_clipboard = granted.write_host_clipboard,
+                    send_file_to_viewer = granted.send_file_to_viewer,
+                    receive_file_from_viewer = granted.receive_file_from_viewer,
                     "M1 consent granted; only the operator-enabled tiers unlocked"
                 );
             }
@@ -2308,7 +2315,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or("transfer")
             .to_string();
         let transfer_id = 1;
-        m1_runtime.lock().await.allow_file_transfer_flow()?;
+        m1_runtime.lock().await.allow_file_send_flow()?;
         let offer = xenia_peer_core::FileTransferMessage::Offer {
             transfer_id,
             name: name.clone(),
@@ -2407,7 +2414,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     {
                         let mut m1_runtime = m1_runtime.lock().await;
-                        if let Err(err) = m1_runtime.allow_clipboard_flow() {
+                        if let Err(err) = m1_runtime.allow_host_clipboard_write_flow() {
                             warn!(error = %err, "clipboard update rejected by M1 consent gate");
                             continue;
                         }
@@ -2593,6 +2600,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 && Some(&text) != last_sent_clipboard_text.as_ref()
             {
                 m1_runtime.lock().await.preflight_frame_flow()?;
+                m1_runtime.lock().await.allow_host_clipboard_read_flow()?;
                 let frame_id = session.lock().await.next_frame_id();
                 let seq = clipboard_seq;
                 clipboard_seq += 1;
@@ -2919,15 +2927,18 @@ mod consent_scope_tests {
         let granted = configured_permission_set(&args);
         assert!(granted.stream_frame);
         assert!(!granted.inject_input);
-        assert!(!granted.clipboard_sync);
-        assert!(!granted.file_transfer);
+        assert!(!granted.read_host_clipboard);
+        assert!(!granted.write_host_clipboard);
+        assert!(!granted.send_file_to_viewer);
+        assert!(!granted.receive_file_from_viewer);
     }
 
     #[test]
     fn each_enabled_capability_unlocks_exactly_its_own_tier() {
         let input = args_with(InputBackendChoice::Log, ClipboardMode::Off, None, None);
         assert!(configured_permission_set(&input).inject_input);
-        assert!(!configured_permission_set(&input).clipboard_sync);
+        assert!(!configured_permission_set(&input).read_host_clipboard);
+        assert!(!configured_permission_set(&input).write_host_clipboard);
 
         let clip = args_with(
             InputBackendChoice::Noop,
@@ -2935,24 +2946,43 @@ mod consent_scope_tests {
             None,
             None,
         );
-        assert!(configured_permission_set(&clip).clipboard_sync);
+        assert!(configured_permission_set(&clip).read_host_clipboard);
+        assert!(configured_permission_set(&clip).write_host_clipboard);
         assert!(!configured_permission_set(&clip).inject_input);
 
-        // Host-to-viewer clipboard is not a host-write grant.
+        // Host-to-viewer clipboard discloses to the viewer but is not a
+        // host-write grant: an operator who only enabled one-way disclosure
+        // must not also silently authorize the viewer writing to the host
+        // clipboard.
         let clip_one_way = args_with(
             InputBackendChoice::Noop,
             ClipboardMode::HostToViewer,
             None,
             None,
         );
-        assert!(!configured_permission_set(&clip_one_way).clipboard_sync);
+        assert!(configured_permission_set(&clip_one_way).read_host_clipboard);
+        assert!(!configured_permission_set(&clip_one_way).write_host_clipboard);
 
+        // --recv-file-dir authorizes receiving viewer-offered files, but
+        // must not also silently authorize sending host files to the viewer.
         let recv = args_with(
             InputBackendChoice::Noop,
             ClipboardMode::Off,
             Some(std::path::PathBuf::from("/tmp/inbox")),
             None,
         );
-        assert!(configured_permission_set(&recv).file_transfer);
+        assert!(configured_permission_set(&recv).receive_file_from_viewer);
+        assert!(!configured_permission_set(&recv).send_file_to_viewer);
+
+        // --send-file is the symmetric case: authorizes sending, not
+        // receiving.
+        let send = args_with(
+            InputBackendChoice::Noop,
+            ClipboardMode::Off,
+            None,
+            Some(std::path::PathBuf::from("/tmp/report.pdf")),
+        );
+        assert!(configured_permission_set(&send).send_file_to_viewer);
+        assert!(!configured_permission_set(&send).receive_file_from_viewer);
     }
 }
