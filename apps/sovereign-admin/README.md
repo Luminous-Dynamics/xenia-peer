@@ -1,4 +1,4 @@
-# xenia-admin
+# sovereign-admin
 
 Leptos CSR admin console for the Xenia remote-session stack — the operator surface of the Mycelix Sovereign suite.
 
@@ -42,7 +42,7 @@ cargo install --locked trunk
 
 ## E2E walkthrough (~3 minutes)
 
-This is the canonical "show a CISO what the product does" sequence. Every step happens in the browser; no backend, no network traffic.
+Steps 3–7 (the ledger demo) happen entirely in the browser with no backend or network traffic. **Step 2 no longer matches that description** -- Login now makes a real `did_registry::resolve_did` zome call against a live Holochain conductor (see the Status section above); this walkthrough predates that change and needs a live conductor with a registered DID to complete step 2 as written below. Devices/Governance/Monitor/Policy are still not part of this walkthrough's "real" claim.
 
 1. **Start the dev server:**
    ```sh
@@ -51,7 +51,7 @@ This is the canonical "show a CISO what the product does" sequence. Every step h
    ```
    Wait for `applying new distribution` / `✅ success` (first run ~40s release compile, subsequent runs <2s incremental).
 
-2. **Open `http://localhost:8134/login`.** Paste any DID-shaped string (e.g. `did:mycelix:z6MkFoo123Bar456Baz789Quux012LoremIpsum`). Click **Sign in**. You land on `/devices` with a mock inventory of three hosts.
+2. **Open `http://localhost:8134/login`.** Requires a running conductor at `ws://localhost:8888` (or the `window.__HC_CONDUCTOR_URL` override) with a DID actually registered in `did_registry` -- pasting an arbitrary DID-shaped string now correctly fails with "DID not found in the identity registry" rather than succeeding. On a match, you land on `/devices` with a mock inventory of three hosts (Devices itself is still not wired to anything real).
 
 3. **Navigate to `/sessions`.** The page generates a fresh Ed25519 key pair + a 5-entry consent chain (Request → Approval → Request broader → Approval → Revocation) right in your browser. The top-of-page badge reads **✓ Chain verified** and shows the operator public key in full.
 
@@ -74,7 +74,7 @@ This is the canonical "show a CISO what the product does" sequence. Every step h
 **Don't oversell:**
 
 - The Devices and Policy pages are scaffolds. Say so.
-- The Login page does not actually verify the DID. Say so.
+- Login does verify the DID for real now (a live `resolve_did` zome call) -- but that's the only real integration on this page; there's still no MFA step and no session persistence beyond `localStorage`. Say so.
 - The ledger demo uses a throwaway key pair generated on page load, not a real operator key. Say so.
 
 ## Architecture

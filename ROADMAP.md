@@ -16,7 +16,7 @@ If this file disagrees with reality, the file is wrong.
 
 | Item | Status | Notes |
 |---|---|---|
-| 38-crate workspace (grew from the original 10, see "Operator/admin-console security hardening" below) | ✅ | `xenia-peer-core`, `xenia-peer`, `xenia-viewer`, `xenia-capture`, `xenia-video`, `xenia-transport-ws`, `xenia-transport-quic`, `xenia-inject`, `xenia-handshake`, `xenia-ledger` + workspace root, plus `xenia-operator-agent`/`xenia-operator-proto`/`xenia-operator-agent-proto`/`sovereign-admin`/`xenia-capture-scrcpy` and others added since |
+| 16-member workspace (grew from the original 10, see "Operator/admin-console security hardening" below) | ✅ | `xenia-peer-core`, `xenia-peer`, `xenia-viewer`, `xenia-capture`, `xenia-video`, `xenia-transport-ws`, `xenia-transport-quic`, `xenia-inject`, `xenia-handshake`, `xenia-ledger` + workspace root, plus `xenia-operator-proto`, `xenia-operator-agent-proto`, `xenia-capture-scrcpy`, `xenia-mobile-ffi`, `sovereign-admin`, `xenia-operator-agent` added since (verified against the root `Cargo.toml`'s `[workspace.members]` list directly -- an earlier version of this row said "38", counted from a raw `find -name Cargo.toml` that also picked up the separate `fuzz/` cargo-fuzz workspace and a stray `.claude/worktrees/` checkout, neither of which are real workspace members) |
 | `flake.nix` | ✅ | H.264 + Wayland/DBus/PipeWire + libGL/libxkbcommon on LD_LIBRARY_PATH |
 | CI (GitHub Actions) | ✅ | fmt + clippy + test (ubuntu/macos/windows) + MSRV 1.94 + docs + h264 matrix |
 | ADR-001 architecture decisions | ✅ | `docs/ADR-001-m0-architecture.md` — monorepo, Wayland-exclusive, AGPL split |
