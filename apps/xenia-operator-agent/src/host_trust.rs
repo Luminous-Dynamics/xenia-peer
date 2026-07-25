@@ -653,9 +653,11 @@ mod tests {
     fn confirm_action_respects_the_store_s_noninteractive_policy() {
         let allowed_path = temp_path("confirm-action-allowed");
         let allowed = HostTrustStore::load(allowed_path.clone(), true).unwrap();
-        assert!(allowed
-            .confirm_action("Revoke?", &[("target", "op-1".to_string())])
-            .unwrap());
+        assert!(
+            allowed
+                .confirm_action("Revoke?", &[("target", "op-1".to_string())])
+                .unwrap()
+        );
         std::fs::remove_dir_all(allowed_path.parent().unwrap()).ok();
 
         let blocked_path = temp_path("confirm-action-blocked");

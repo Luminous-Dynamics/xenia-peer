@@ -281,10 +281,7 @@ async fn verify_handler(
 
     if state.revocations.is_revoked(&authed.operator_id) {
         tracing::warn!(operator = %authed.operator_id, "token issuance refused: operator is revoked");
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            "operator is revoked".to_string(),
-        ));
+        return Err((StatusCode::UNAUTHORIZED, "operator is revoked".to_string()));
     }
 
     let token_nonce: [u8; 16] = rand::random();
@@ -770,7 +767,11 @@ pub(crate) fn router(
             axum::routing::get(daemon_identity_handler),
         )
         .with_state(state)
-        .merge(Router::new().route("/auth/verify", post(verify_handler)).with_state(verify))
+        .merge(
+            Router::new()
+                .route("/auth/verify", post(verify_handler))
+                .with_state(verify),
+        )
         .merge(
             Router::new()
                 .route("/v1/audit/checkpoint", get(audit_checkpoint_handler))
