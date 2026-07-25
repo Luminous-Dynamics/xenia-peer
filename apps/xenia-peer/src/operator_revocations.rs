@@ -70,12 +70,25 @@ impl OperatorRevocations {
     }
 
     /// Re-read the backing file and replace the set atomically. Returns the new
-    /// revoked count. No-op (Ok(current count)) if there is no backing file.
+    /// revoked count. No-op (Ok(current count)) if there is no backing file
+    /// configured at all.
+    ///
+    /// Fails closed if a *previously-configured* file has since gone missing
+    /// (deleted, unmounted, bad deploy): unlike the initial [`from_file`]
+    /// load -- where "absent" legitimately means "nothing revoked yet" --
+    /// a file vanishing between loads is treated as a real error and the
+    /// current in-memory set is left untouched, never silently replaced
+    /// with an empty one. Without this, a revocation source disappearing
+    /// after a successful load would make the next SIGHUP reload silently
+    /// re-authorize every previously-revoked operator.
+    ///
+    /// [`from_file`]: Self::from_file
     pub(crate) fn reload(&self) -> std::io::Result<usize> {
         let Some(path) = &self.path else {
             return Ok(self.revoked.read().map(|s| s.len()).unwrap_or(0));
         };
-        let fresh = read_revocations(path)?;
+        let text = std::fs::read_to_string(path)?;
+        let fresh = parse_revocations(&text);
         let count = fresh.len();
         if let Ok(mut s) = self.revoked.write() {
             *s = fresh;
@@ -89,20 +102,27 @@ impl OperatorRevocations {
     }
 }
 
-/// Read a revocation file into a set of `operator_id`s. Missing file -> empty
-/// set. Blank lines and `#` comments are ignored; ids are trimmed.
+/// Read a revocation file into a set of `operator_id`s for the *initial*
+/// load. Missing file -> empty set (there is nothing to have been revoked
+/// yet). [`OperatorRevocations::reload`] deliberately does not use this --
+/// see its doc comment for why "missing" means something different there.
 fn read_revocations(path: &Path) -> std::io::Result<HashSet<String>> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
         Err(e) => return Err(e),
     };
-    Ok(text
-        .lines()
+    Ok(parse_revocations(&text))
+}
+
+/// Parse revocation-file text into a set of `operator_id`s. Blank lines and
+/// `#` comments are ignored; ids are trimmed.
+fn parse_revocations(text: &str) -> HashSet<String> {
+    text.lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .map(str::to_string)
-        .collect())
+        .collect()
 }
 
 #[cfg(test)]
@@ -147,6 +167,25 @@ mod tests {
         assert_eq!(count, 2);
         assert!(r.is_revoked("bob"));
         assert!(r.is_revoked("alice"));
+    }
+
+    #[test]
+    fn reload_fails_closed_and_keeps_prior_revocations_when_file_vanishes() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(f.path(), "alice\n").unwrap();
+        let r = OperatorRevocations::from_file(f.path()).unwrap();
+        assert!(r.is_revoked("alice"));
+
+        // The revocation source disappears (deleted, unmounted, bad deploy)
+        // between loads.
+        std::fs::remove_file(f.path()).unwrap();
+
+        let err = r.reload().unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        // The prior revocation must NOT have been silently wiped -- alice
+        // stays revoked even though the reload itself failed.
+        assert!(r.is_revoked("alice"));
+        assert_eq!(r.len(), 1);
     }
 
     #[test]
