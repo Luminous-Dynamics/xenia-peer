@@ -350,7 +350,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_authenticated_decision_is_durably_persisted_before_the_grant_resolves() {
         let daemon = SigningKey::generate(&mut rand::thread_rng());
-        let ledger = TokioMutex::new(Chain::new(daemon));
+        let ledger = TokioMutex::new(Chain::new(daemon.clone()));
         let dir = test_ledger_dir("committed");
         let ledger_path = dir.join("consent.ledger");
         let uuid = Uuid::from_u128(9);
@@ -375,9 +375,11 @@ mod tests {
         assert!(rx.await.unwrap(), "the grant must still resolve true");
 
         // The audit entry must actually be on disk, not just in memory.
-        let bytes = std::fs::read(&ledger_path).unwrap();
-        let entries: Vec<xenia_ledger::LedgerEntry> = bincode::deserialize(&bytes).unwrap();
-        assert_eq!(entries.len(), 1);
+        // Read it back through the real load path (versioned envelope,
+        // not a bare bincode Vec) rather than re-implementing the on-disk
+        // format's assumptions here.
+        let reloaded = crate::audit_ledger_store::load_verified(&ledger_path, &daemon).unwrap();
+        assert_eq!(reloaded.len(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
 

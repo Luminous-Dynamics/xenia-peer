@@ -65,8 +65,7 @@ pub(crate) enum AuditLedgerStoreError {
 
 const PERSISTED_AUDIT_LEDGER_MAGIC: &[u8] = b"XENIA-AUDIT-LEDGER\0";
 const PERSISTED_AUDIT_LEDGER_SCHEMA_V1: u16 = 1;
-const PERSISTED_AUDIT_LEDGER_HEADER_LEN: usize =
-    PERSISTED_AUDIT_LEDGER_MAGIC.len() + 2 + 8 + 32;
+const PERSISTED_AUDIT_LEDGER_HEADER_LEN: usize = PERSISTED_AUDIT_LEDGER_MAGIC.len() + 2 + 8 + 32;
 pub(crate) const MAX_AUDIT_LEDGER_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const MAX_AUDIT_LEDGER_ENTRIES: usize = 100_000;
 
@@ -174,7 +173,8 @@ pub(crate) fn persist_entries_atomic(
     if bytes.len() as u64 > MAX_AUDIT_LEDGER_BYTES {
         return Err(AuditLedgerStoreError::LimitExceeded(format!(
             "{} serialized bytes exceeds maximum {}",
-            bytes.len(), MAX_AUDIT_LEDGER_BYTES
+            bytes.len(),
+            MAX_AUDIT_LEDGER_BYTES
         )));
     }
     let parent = path
