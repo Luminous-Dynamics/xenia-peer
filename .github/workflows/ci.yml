@@ -21,7 +21,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned (was `@stable`, a rolling tag) so rustfmt's formatting rules
+      # can't drift out from under a green local `cargo fmt` between one CI
+      # run and the next -- bump deliberately, alongside a `cargo fmt --all`
+      # pass in the same commit, not silently.
+      - uses: dtolnay/rust-toolchain@1.96.0
         with:
           components: rustfmt
       - run: cargo fmt --check

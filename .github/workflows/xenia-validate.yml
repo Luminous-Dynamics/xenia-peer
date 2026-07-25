@@ -115,7 +115,12 @@ jobs:
           fi
       - name: Install Rust toolchain
         if: steps.check.outputs.exists == 'true'
-        uses: dtolnay/rust-toolchain@stable
+        # Pinned (was `@stable`) for the same reason as ci.yml's Format
+        # Check job -- this step runs `cargo fmt --all -- --check` too, so
+        # it shares the same rolling-toolchain drift risk.
+        uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt
       - name: Check xenia-wire
         if: steps.check.outputs.exists == 'true'
         run: |
