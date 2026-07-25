@@ -171,6 +171,94 @@ pub fn negotiated_session_context_hash(
     NegotiatedSessionContextV1::new(transport, capabilities).context_hash()
 }
 
+/// Failure while accepting the daemon's one authoritative capabilities frame.
+#[derive(Debug, thiserror::Error)]
+pub enum CapabilityAcceptanceError {
+    /// Capabilities were sent more than once. Even an identical second frame is
+    /// refused so the session surface cannot become a mutable control channel:
+    /// a capability change must go through a fresh handshake and consent
+    /// ceremony, never an in-band re-advertisement.
+    #[error("session capabilities were advertised more than once")]
+    DuplicateAdvertisement,
+    /// The advertised lane envelope contract is unsupported.
+    #[error(
+        "unsupported lane envelope contract: version={lane_envelope_version}, magic={lane_envelope_magic:?}"
+    )]
+    UnsupportedLaneEnvelope {
+        /// Advertised lane envelope version.
+        lane_envelope_version: u16,
+        /// Advertised lane envelope magic.
+        lane_envelope_magic: [u8; 4],
+    },
+    /// The sealed capabilities did not match the context committed during the
+    /// authenticated handshake.
+    #[error("sealed capabilities do not match the handshake context hash")]
+    ContextHashMismatch,
+    /// Canonical context encoding failed.
+    #[error("failed to encode negotiated session context: {0}")]
+    ContextEncoding(#[from] bincode::Error),
+}
+
+/// One-shot verifier for the session's immutable negotiated capabilities.
+///
+/// The first capabilities frame is checked against the current lane-envelope
+/// contract and the context hash authenticated by the handshake. Any later
+/// capabilities frame is rejected, including an apparently narrower one:
+/// capability changes need a fresh handshake and consent ceremony rather than
+/// an in-band downgrade.
+#[derive(Debug, Clone)]
+pub struct SessionCapabilityGuard {
+    expected_context_hash: Option<[u8; 32]>,
+    accepted_context_hash: Option<[u8; 32]>,
+}
+
+impl SessionCapabilityGuard {
+    /// Create a guard from the context hash carried by the handshake outcome.
+    pub const fn new(expected_context_hash: Option<[u8; 32]>) -> Self {
+        Self {
+            expected_context_hash,
+            accepted_context_hash: None,
+        }
+    }
+
+    /// Validate and permanently accept the one authoritative capabilities
+    /// frame, returning its canonical context hash.
+    pub fn accept(
+        &mut self,
+        transport: NegotiatedTransport,
+        capabilities: &RawCapabilities,
+    ) -> Result<[u8; 32], CapabilityAcceptanceError> {
+        if self.accepted_context_hash.is_some() {
+            return Err(CapabilityAcceptanceError::DuplicateAdvertisement);
+        }
+        if !capabilities.supports_current_lane_envelope() {
+            return Err(CapabilityAcceptanceError::UnsupportedLaneEnvelope {
+                lane_envelope_version: capabilities.lane_envelope_version,
+                lane_envelope_magic: capabilities.lane_envelope_magic,
+            });
+        }
+        let context_hash = negotiated_session_context_hash(transport, capabilities.clone())?;
+        if self
+            .expected_context_hash
+            .is_some_and(|expected| expected != context_hash)
+        {
+            return Err(CapabilityAcceptanceError::ContextHashMismatch);
+        }
+        self.accepted_context_hash = Some(context_hash);
+        Ok(context_hash)
+    }
+
+    /// Whether the authoritative capabilities frame has been accepted.
+    pub fn is_accepted(&self) -> bool {
+        self.accepted_context_hash.is_some()
+    }
+
+    /// Accepted canonical context hash, when available.
+    pub fn accepted_context_hash(&self) -> Option<[u8; 32]> {
+        self.accepted_context_hash
+    }
+}
+
 /// Policy controlling when repeatable session rekeys are allowed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RekeyPolicy {
@@ -1015,6 +1103,84 @@ mod tests {
             negotiated_session_context_hash(NegotiatedTransport::Tcp, capabilities).unwrap();
 
         assert_ne!(first, second);
+    }
+
+    fn test_capabilities() -> RawCapabilities {
+        RawCapabilities {
+            frame_id: 1,
+            timestamp_ms: 1_700_000_000_000,
+            audio: None,
+            video_format: crate::frame::PixelFormat::Passthrough,
+            telemetry_enabled: false,
+            input_control_enabled: false,
+            clipboard_enabled: false,
+            lane_envelope_version: crate::frame::LANE_ENVELOPE_SCHEMA_VERSION,
+            lane_envelope_magic: crate::frame::LANE_ENVELOPE_MAGIC,
+        }
+    }
+
+    #[test]
+    fn capability_guard_accepts_exactly_one_authenticated_contract() {
+        let capabilities = test_capabilities();
+        let expected =
+            negotiated_session_context_hash(NegotiatedTransport::Tcp, capabilities.clone())
+                .unwrap();
+        let mut guard = SessionCapabilityGuard::new(Some(expected));
+
+        assert_eq!(
+            guard
+                .accept(NegotiatedTransport::Tcp, &capabilities)
+                .unwrap(),
+            expected
+        );
+        assert!(guard.is_accepted());
+        assert_eq!(guard.accepted_context_hash(), Some(expected));
+        assert!(matches!(
+            guard.accept(NegotiatedTransport::Tcp, &capabilities),
+            Err(CapabilityAcceptanceError::DuplicateAdvertisement)
+        ));
+    }
+
+    #[test]
+    fn capability_guard_rejects_a_narrower_second_advertisement() {
+        let capabilities = test_capabilities();
+        let expected =
+            negotiated_session_context_hash(NegotiatedTransport::Tcp, capabilities.clone())
+                .unwrap();
+        let mut guard = SessionCapabilityGuard::new(Some(expected));
+        guard
+            .accept(NegotiatedTransport::Tcp, &capabilities)
+            .unwrap();
+
+        // Even a strictly narrower re-advertisement (fewer capabilities than
+        // originally negotiated) must be rejected, not silently accepted as
+        // a "safe" downgrade -- capability changes require a fresh handshake.
+        let mut narrower = capabilities;
+        narrower.input_control_enabled = false;
+        assert!(matches!(
+            guard.accept(NegotiatedTransport::Tcp, &narrower),
+            Err(CapabilityAcceptanceError::DuplicateAdvertisement)
+        ));
+    }
+
+    #[test]
+    fn capability_guard_rejects_context_mismatch_and_unsupported_lane_envelope() {
+        let capabilities = test_capabilities();
+        let mut mismatched = SessionCapabilityGuard::new(Some([0xAA; 32]));
+        assert!(matches!(
+            mismatched.accept(NegotiatedTransport::Tcp, &capabilities),
+            Err(CapabilityAcceptanceError::ContextHashMismatch)
+        ));
+        assert!(!mismatched.is_accepted());
+
+        let mut unsupported = capabilities;
+        unsupported.lane_envelope_version = unsupported.lane_envelope_version.saturating_add(1);
+        let mut guard = SessionCapabilityGuard::new(None);
+        assert!(matches!(
+            guard.accept(NegotiatedTransport::Tcp, &unsupported),
+            Err(CapabilityAcceptanceError::UnsupportedLaneEnvelope { .. })
+        ));
+        assert!(!guard.is_accepted());
     }
 
     #[test]
