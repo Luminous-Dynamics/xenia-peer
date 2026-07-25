@@ -4,13 +4,14 @@ Leptos CSR admin console for the Xenia remote-session stack — the operator sur
 
 ## Status
 
-**Scaffold + live ledger demo.** Four routes (`/login`, `/devices`, `/sessions`, `/policy`), `AuthState` persisted via `localStorage`. The Sessions page embeds a live `xenia-ledger` demo that generates an Ed25519 keypair + synthetic consent chain in the browser and exposes per-entry tamper buttons.
+**Real DID login + a native signer-delegation security arc; Devices/Policy are still scaffold.** Seven routes (`/`, `/login`, `/devices`, `/sessions`, `/governance`, `/monitor`, `/policy`), `AuthState` persisted via `localStorage`. The console now delegates all signing to a local `xenia-operator-agent` process — the browser never generates or holds the operator's Ed25519/ML-DSA seeds, only ephemeral session material. See `docs/security/SIGNER_DELEGATION_DESIGN.md` and `docs/security/POST_DELEGATION_HARDENING_PLAN.md` for the full arc (host-trust pinning, scope-bound consent signatures, durable audit-ledger persistence). The Sessions page still embeds the original `xenia-ledger` demo (client-generated keypair + synthetic consent chain, per-entry tamper buttons) plus a real import/verify flow for uploaded ledger exports.
 
-Real integrations pending (W1 follow-ups):
+Status by page:
 
-- **Login:** DID string-shape validation only. Real `mycelix-identity::resolve_did` via `mycelix-bridge-common` is next.
-- **Devices:** static mock rows. Real device enrollment (Holon / `symthaea-phone-embodiment`) is year-2.
-- **Sessions data:** synthetic chain only. Wiring to `xenia-peer-core`'s session registry is W1 tail-end.
+- **Login:** real — calls `did_registry::resolve_did` on a live Holochain conductor via `mycelix-leptos-client` (a pure-Rust WASM client; not the originally-planned `mycelix-bridge-common` shim). Shape-check is only client-side pre-validation before the real zome call. Still no MFA challenge step.
+- **Devices:** static mock rows. Real device enrollment (Holon / `symthaea-phone-embodiment`) is year-2, per `MYCELIX_SOVEREIGN_PLAN.md` §7.
+- **Sessions:** the ledger demo itself is client-generated/synthetic; the import+verify flow for real exported chains is real and shipped. The consent modal (approve/deny/revoke) is real, role-gated, and sends signed, token-bearing decisions.
+- **Governance / Monitor:** newer pages (proposal voting, live Athena thought-stream) added after the signer-delegation arc — not yet independently reviewed for this doc; treat as unverified until checked.
 - **Policy:** stub page listing planned controls.
 
 ## Build + run
@@ -80,29 +81,46 @@ This is the canonical "show a CISO what the product does" sequence. Every step h
 
 ```
 apps/sovereign-admin/
-├── Cargo.toml          AGPL-3.0-or-later, Leptos 0.8 CSR, xenia-ledger path dep
-├── Trunk.toml          dev server on localhost:8134
-├── index.html          Trunk entry, links main.css + the rust bin
-├── styles/main.css     Dark-theme scaffold — will be replaced with real design-system
+├── Cargo.toml           AGPL-3.0-or-later, Leptos 0.8 CSR; path deps on xenia-ledger,
+│                         xenia-operator-proto, xenia-handshake, xenia-operator-agent-proto
+├── Trunk.toml           dev server on localhost:8134
+├── index.html           Trunk entry, links main.css + the rust bin
+├── styles/main.css      Dark-theme scaffold — will be replaced with real design-system
 └── src/
-    ├── main.rs         mount_to_body
-    ├── app.rs          Router + top nav + AuthStatus
-    ├── auth.rs         AuthState signal + localStorage rehydration
+    ├── main.rs              mount_to_body
+    ├── app.rs               Router + top nav + AuthStatus (7 routes)
+    ├── auth.rs              AuthState signal + localStorage rehydration
+    ├── config.rs            DaemonConfig — single source of truth for daemon URLs
+    ├── context.rs           Leptos context plumbing (AuthState, DaemonConfig)
+    ├── agent_client.rs      browser client for the local xenia-operator-agent —
+    │                         the console no longer generates/holds operator seeds
+    ├── host_pin.rs          TOFU pinning of the daemon's sealed-channel host fingerprint
+    ├── operator_session.rs  browser half of the operator-RBAC ceremony (Step 5,
+    │                         SIGNER_DELEGATION_DESIGN.md)
+    ├── sealed_consent.rs    browser half of the PQC-sealed operator channel
+    │                         (--operator-sealed mode)
     └── pages/
-        ├── mod.rs      re-exports
-        ├── login.rs    DID-shape sign-in form (no crypto yet)
-        ├── devices.rs  mocked device inventory
-        ├── sessions.rs *** live xenia-ledger demo ***
-        └── policy.rs   planned-controls stub
+        ├── mod.rs       re-exports
+        ├── login.rs     *** real: resolve_did zome call via mycelix-leptos-client ***
+        ├── devices.rs   mocked device inventory (year-2, MYCELIX_SOVEREIGN_PLAN.md §7)
+        ├── sessions.rs  *** live xenia-ledger demo + real import/verify flow ***
+        ├── consent.rs   live approve/deny/revoke modal, role-gated, signed decisions
+        ├── governance.rs governance-proposal voting page (not independently reviewed)
+        ├── monitor.rs   live Athena thought-stream page (not independently reviewed)
+        └── policy.rs    planned-controls stub
 ```
+
+A tenth file, `src/pages/verify.rs`, exists but is not wired into `pages/mod.rs`/routing — its own view reads "Verification module under reconstruction."
 
 ## W1 follow-up checklist
 
-- [ ] Replace `LoginPage` DID-shape validation with real `resolve_did` zome call via a browser-friendly shim over `mycelix-bridge-common`. Might require publishing a small `mycelix-leptos-client` port to crates.io, since xenia-peer is not inside the monorepo.
+- [x] Replace `LoginPage` DID-shape validation with a real `resolve_did` zome call — shipped via `mycelix-leptos-client` (a pure-Rust WASM Holochain client), not the originally-planned `mycelix-bridge-common` shim.
 - [ ] Add WebAuthn / TOTP MFA challenge step on login.
 - [x] Replace `SessionsPage` synthetic chain with an import+verify flow: operator uploads a persisted ledger file (JSON) — shipped, portable `ExportedChain` shape carries the public key alongside entries, single round-trip round-tripped.
 - [ ] Wire `DevicesPage` to `xenia-peer-core`'s session registry once that lands.
 - [ ] Policy CRUD (tier thresholds, session TTL, MFA enforcement) with every mutation producing a `ConsentKind::`-tagged ledger entry so policy drift is itself auditable.
+- [x] Signer delegation: browser no longer generates/holds the operator's Ed25519/ML-DSA seeds — delegated to a native `xenia-operator-agent` process. See `docs/security/SIGNER_DELEGATION_DESIGN.md` and `docs/security/POST_DELEGATION_HARDENING_PLAN.md` for the full arc (host-trust pinning, scope-bound consent signatures, durable ledger persistence).
+- [ ] Independently review the newer `governance.rs`/`monitor.rs` pages against their backing daemon endpoints (not covered by the signer-delegation review this checklist entry references).
 
 ## License
 

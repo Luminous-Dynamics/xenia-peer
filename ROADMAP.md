@@ -16,7 +16,7 @@ If this file disagrees with reality, the file is wrong.
 
 | Item | Status | Notes |
 |---|---|---|
-| 10-crate workspace | ✅ | `xenia-peer-core`, `xenia-peer`, `xenia-viewer`, `xenia-capture`, `xenia-video`, `xenia-transport-ws`, `xenia-transport-quic`, `xenia-inject`, `xenia-handshake`, `xenia-ledger` + workspace root |
+| 38-crate workspace (grew from the original 10, see "Operator/admin-console security hardening" below) | ✅ | `xenia-peer-core`, `xenia-peer`, `xenia-viewer`, `xenia-capture`, `xenia-video`, `xenia-transport-ws`, `xenia-transport-quic`, `xenia-inject`, `xenia-handshake`, `xenia-ledger` + workspace root, plus `xenia-operator-agent`/`xenia-operator-proto`/`xenia-operator-agent-proto`/`sovereign-admin`/`xenia-capture-scrcpy` and others added since |
 | `flake.nix` | ✅ | H.264 + Wayland/DBus/PipeWire + libGL/libxkbcommon on LD_LIBRARY_PATH |
 | CI (GitHub Actions) | ✅ | fmt + clippy + test (ubuntu/macos/windows) + MSRV 1.94 + docs + h264 matrix |
 | ADR-001 architecture decisions | ✅ | `docs/ADR-001-m0-architecture.md` — monorepo, Wayland-exclusive, AGPL split |
@@ -118,6 +118,47 @@ this):
    picks it up directly; the temporary local `[patch]` override has been
    removed and `cargo build`/`cargo test`/`cargo clippy` all re-verified
    clean against the real upstream commit (`#be785343`).
+
+---
+
+## Operator/admin-console security hardening (2026-07-13 → present)
+
+A separate major workstream from the B1-B4 hard blockers above, undocumented
+in this file until now (added retroactively 2026-07-25). Full detail lives
+in two living design docs, not summarized inline here:
+
+- `docs/security/SIGNER_DELEGATION_DESIGN.md` — all 7 steps landed. Before:
+  the browser generated and held the operator's raw Ed25519/ML-DSA signing
+  seeds in memory, fetched via `GET /seeds` — any XSS in the console could
+  exfiltrate long-term identity material. After: a native
+  `apps/xenia-operator-agent` process holds all key material; the browser
+  never sees raw seeds, only ephemeral session material, via two delegation
+  tracks (A: stateless `/v1/sign/*` HTTP signing, B: agent-driven sealed
+  handshake), with an explicit confused-deputy analysis and closure.
+- `docs/security/POST_DELEGATION_HARDENING_PLAN.md` — 9-item follow-up
+  milestone, 8/9 done (item 7's bincode-to-postcard/bitcode migration
+  deliberately deferred as a pre-RC1 decision, not a gap). Closed real
+  findings from external + internal review: transactional host-trust pin
+  storage, stable per-endpoint pin scoping, deleted a legacy HMAC admin
+  path, replaced a durable pairing token with short-lived agent sessions,
+  made HTTP authorization genuinely hybrid (Ed25519 AND ML-DSA, was
+  silently Ed25519-only), a real Playwright browser-to-daemon E2E slice
+  (caught 4 previously-invisible bugs, e.g. zero CORS handling on the
+  admin router), zeroize-on-drop for handshake secrets, fuzzing bootstrap,
+  cargo-vet supply-chain audit, dudect constant-time verification,
+  operator-key recovery, systemd packaging, backup/restore, and durable
+  verified consent-ledger persistence (previously in-memory-only, lost on
+  restart).
+- Consent-action signatures are now bound to the daemon's authoritative
+  session scope (PR #98), closing a real signature-replay-across-scope gap.
+
+**Next**: `docs/roadmap/POST_RC1_HARDENING_PLAN.md` (evidence reproducibility,
+CI resilience, crates.io/public-API readiness, security/protocol hardening
+tests, release ops — still "planning," not started). Known open threads:
+rate limiting on agent endpoints (flagged repeatedly, never done), no
+log-scrubbing of key material, the daemon's own file-permission code isn't
+yet unified with the agent's `secure_file.rs`, and an independent
+`xenia-wire` protocol review once the wire format stabilizes past draft-03.
 
 ---
 
