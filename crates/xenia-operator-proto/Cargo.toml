@@ -10,6 +10,7 @@ license = "AGPL-3.0-or-later"
 repository.workspace = true
 homepage.workspace = true
 description = "Shared operator-RBAC protocol: roles, actions, and the exact signed transcripts, used by both the xenia-peer daemon and the sovereign-admin console so a signature the console produces is byte-identical to what the daemon verifies."
+publish = false
 
 [lints]
 workspace = true
