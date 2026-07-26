@@ -98,7 +98,7 @@ use xenia_operator_agent_proto::{
     SignChallengeResponse, SignConsentActionRequest, SignConsentActionResponse,
     SignReplaceKeyRequest, SignReplaceKeyResponse, SignRevokeRequest, SignRevokeResponse,
 };
-use xenia_operator_proto::{OperatorEnrollmentRecord, OperatorRole};
+use xenia_operator_proto::{ConsentAction, OperatorEnrollmentRecord, OperatorRole};
 use xenia_wire::handshake::ViewerHandshake;
 use xenia_wire::handshake_highsec::{
     ML_DSA_87_PK_LEN, ViewerHandshakeHighSec, derive_ml_dsa_87_seed_from_ed25519_secret,
@@ -651,6 +651,27 @@ async fn sign_challenge(
     }))
 }
 
+/// Whether `scope` -- the daemon-generated, digest-bound scope text from
+/// `m1_consent_scope` in `apps/xenia-peer`, never operator/console-authored
+/// free text -- describes a grant broader than pure screen viewing: input
+/// injection, clipboard access in either direction, or file transfer in
+/// either direction. Parses fixed-format substrings rather than sniffing
+/// prose: `scope` is only ever daemon-generated and bound into the signed
+/// transcript via `scope_digest`, so a compromised console cannot alter
+/// what this classifies without invalidating the signature the daemon will
+/// independently verify against its own recomputed digest -- this is safe
+/// to parse precisely because it isn't free text a console could word
+/// however it likes.
+fn scope_indicates_broad_grant(scope: &str) -> bool {
+    scope.contains("input: viewer may inject")
+        || scope.contains("clipboard: host-to-viewer disclosure")
+        || scope.contains("clipboard: viewer-to-host apply")
+        || scope.contains("clipboard: bidirectional")
+        || scope.contains("file-transfer: host-to-viewer send")
+        || scope.contains("file-transfer: viewer-to-host receive")
+        || scope.contains("file-transfer: bidirectional")
+}
+
 /// `POST /v1/sign/consent-action` -- sign a session-bound consent decision
 /// (Approve/Deny/Revoke -- see [`xenia_operator_proto::ConsentAction`];
 /// `Revoke` here means revoking a *consent grant*, e.g. ending an
@@ -665,11 +686,13 @@ async fn sign_challenge(
 /// delegated HTTP-auth key before its `token_nonce` is bound into the
 /// consent-action transcript. Per the confirmation policy, an ordinary
 /// approve/deny/consent-revoke against an already-pinned host needs no
-/// *additional* confirmation beyond the host-trust check itself -- it
-/// isn't on the design doc's mandatory-confirmation list (that list is
-/// enrollment, operator revocation, role/capability elevation, trust-root
-/// changes, and unusually broad *grants*, none of which this action shape
-/// can express).
+/// *additional* confirmation beyond the host-trust check itself -- with one
+/// exception, added after the original design: an `Approve` whose scope
+/// [`scope_indicates_broad_grant`] classifies as broad (input injection,
+/// clipboard, or file transfer) *is* now confirmed, mirroring
+/// [`sign_revoke`]'s action-specific confirmation on top of the
+/// already-pinned-host check. `Deny`/`Revoke` never need this -- they only
+/// ever reduce privilege.
 async fn sign_consent_action(
     State(state): State<Arc<AgentState>>,
     Json(req): Json<SignConsentActionRequest>,
@@ -683,10 +706,47 @@ async fn sign_consent_action(
         (status_for(agent_err.code), Json(agent_err))
     })?;
 
+    let is_broad_grant =
+        req.action == ConsentAction::Approve && scope_indicates_broad_grant(&req.scope);
+    if is_broad_grant {
+        let confirm_state = state.clone();
+        let scope_for_prompt = req.scope.clone();
+        let daemon_endpoint = normalize_daemon_endpoint(&req.common.daemon_endpoint);
+        let daemon_fingerprint_hex = hex::encode(identity.fingerprint);
+        let confirmed = tokio::task::spawn_blocking(move || {
+            confirm_state
+                .host_trust
+                .lock()
+                .expect("host-trust mutex poisoned")
+                .confirm_action(
+                    "Approve broad consent grant?",
+                    &[
+                        ("scope", scope_for_prompt),
+                        ("daemon endpoint", daemon_endpoint),
+                        ("daemon fingerprint", daemon_fingerprint_hex),
+                    ],
+                )
+        })
+        .await
+        .map_err(|_| internal_error("consent-action confirmation task panicked"))?
+        .map_err(|e| {
+            let agent_err = e.to_agent_error();
+            (status_for(agent_err.code), Json(agent_err))
+        })?;
+        if !confirmed {
+            let agent_err = AgentErrorResponse {
+                code: AgentErrorCode::ConfirmationDeclined,
+                message: "operator declined to confirm the broad consent grant".to_string(),
+            };
+            return Err((status_for(agent_err.code), Json(agent_err)));
+        }
+    }
+
     let scope_digest = xenia_operator_proto::scope_digest(&req.scope);
     tracing::info!(
         action = ?req.action,
         scope = %req.scope,
+        broad_grant_confirmed = is_broad_grant,
         "signing consent action"
     );
     let transcript = xenia_operator_proto::consent_action_transcript(
@@ -697,6 +757,17 @@ async fn sign_consent_action(
     );
     let ed_signature = state.manager.sign(&transcript);
     let ml_dsa_signature = state.manager.sign_ml_dsa(&transcript);
+
+    if is_broad_grant {
+        record_audit_event(
+            &state,
+            audit_log::AgentAuditEvent::BroadGrantConfirmed {
+                scope: req.scope.clone(),
+                daemon_endpoint: normalize_daemon_endpoint(&req.common.daemon_endpoint),
+            },
+        )
+        .await?;
+    }
 
     Ok(Json(SignConsentActionResponse {
         ed_signature_hex: hex::encode(ed_signature.to_bytes()),
@@ -2354,6 +2425,94 @@ mod tests {
         let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "body: {json}");
         assert_eq!(json["code"], "host_not_trusted");
+    }
+
+    #[tokio::test]
+    async fn sign_consent_action_narrow_scope_needs_no_confirmation_even_when_unavailable() {
+        // A pure screen-viewing scope must sail through even with
+        // confirmation unavailable -- proves scope_indicates_broad_grant
+        // correctly leaves the low-friction floor alone for the common
+        // case, not just that broad grants get gated.
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let state = test_state_with_pinned_host(
+            "secret",
+            &["http://localhost:8134"],
+            &host,
+            "highsec",
+            false,
+        );
+        let app = build_router(state);
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0x22u8; 16]);
+        let body = consent_action_request_body(
+            &cert,
+            &token,
+            serde_json::json!({"scope": "display: screen stream; telemetry: off; audio: off; \
+                 input: off; clipboard: off; file-transfer: off"}),
+        );
+        let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
+        assert_eq!(status, StatusCode::OK, "body: {json}");
+    }
+
+    #[tokio::test]
+    async fn sign_consent_action_requires_confirmation_for_a_broad_grant_even_on_a_pinned_host() {
+        // The host-trust step alone would pass here (already pinned) --
+        // proves the broad-grant confirmation is a genuinely separate gate
+        // on top of host trust, mirroring sign_revoke's own action-level
+        // confirmation.
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let state = test_state_with_pinned_host(
+            "secret",
+            &["http://localhost:8134"],
+            &host,
+            "highsec",
+            false,
+        );
+        let app = build_router(state);
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token = test_token(&http_auth, &http_auth_ml_dsa, [0x22u8; 16]);
+        let body = consent_action_request_body(
+            &cert,
+            &token,
+            serde_json::json!({"scope": "display: screen stream; telemetry: off; audio: off; \
+                 input: viewer may inject; clipboard: off; file-transfer: off"}),
+        );
+        let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
+        assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "body: {json}");
+        assert_eq!(json["code"], "confirmation_required");
+    }
+
+    #[tokio::test]
+    async fn sign_consent_action_signs_a_broad_grant_once_confirmed() {
+        let state = test_state("secret", &["http://localhost:8134"]);
+        let app = build_router(state);
+        let (host, http_auth, http_auth_ml_dsa) = test_daemon_identity();
+        let cert = test_certificate(&host, &http_auth, &http_auth_ml_dsa);
+        let token_nonce = [0x22u8; 16];
+        let token = test_token(&http_auth, &http_auth_ml_dsa, token_nonce);
+        let scope = "display: screen stream; telemetry: off; audio: off; \
+            input: off; clipboard: bidirectional; file-transfer: off";
+        let body = consent_action_request_body(&cert, &token, serde_json::json!({"scope": scope}));
+        let (status, json) = post_signed_json(app, "/v1/sign/consent-action", "secret", body).await;
+        assert_eq!(status, StatusCode::OK, "body: {json}");
+
+        let resp: SignConsentActionResponse = serde_json::from_value(json).unwrap();
+        let expected_manager = HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]);
+        let scope_digest = xenia_operator_proto::scope_digest(scope);
+        let transcript = xenia_operator_proto::consent_action_transcript(
+            xenia_operator_proto::ConsentAction::Approve,
+            &[0xddu8; 16],
+            &token_nonce,
+            &scope_digest,
+        );
+        let ed_sig_bytes: [u8; 64] = decode_fixed_hex(&resp.ed_signature_hex).unwrap();
+        let ed_sig = ed25519_dalek::Signature::from_bytes(&ed_sig_bytes);
+        HandshakeManager::verify(
+            &expected_manager.identity_public_key(),
+            &transcript,
+            &ed_sig,
+        )
+        .expect("agent's Ed25519 signature must verify over the broad-grant consent transcript");
     }
 
     /// Builds a valid `/v1/sign/revoke` body carrying `cert` and `token`,

@@ -1195,18 +1195,56 @@ fn telemetry_sample_allowed(
     }
 }
 
-fn m1_consent_scope(telemetry_level: TelemetryLevel, audio_mode: AudioMode) -> String {
-    let telemetry = match telemetry_level {
+/// Build this session's canonical, stable-format scope description --
+/// digest-bound (`scope_digest`) into the signed consent-action transcript,
+/// so this exact string (not operator/console free text -- the daemon is
+/// the only thing that ever constructs it) is what the operator-agent's
+/// broad-grant confirmation classifier (`scope_indicates_broad_grant`,
+/// `xenia-operator-agent`) parses. Every field's wording is deliberately
+/// fixed-format (`"label: value"`, `;`-joined) rather than free prose, so
+/// that parsing is a stable keyword check, not fragile string-sniffing.
+///
+/// Previously covered only display/telemetry/audio -- silently omitting
+/// input injection, clipboard, and file-transfer even though
+/// `configured_permission_set` grants them. A confirmation dialog (or any
+/// other operator-facing scope description) is only as trustworthy as the
+/// text it shows; this was incomplete regardless of whether anything reads
+/// it. Reuses `configured_permission_set` as the single source of truth for
+/// which tiers this session's CLI config actually grants, rather than a
+/// second, possibly-drifting description of the same flags.
+fn m1_consent_scope(args: &Args) -> String {
+    let telemetry = match args.telemetry_level {
         TelemetryLevel::Off => "telemetry: off",
         TelemetryLevel::Basic => "telemetry: basic host performance",
         TelemetryLevel::System => "telemetry: system identity and performance",
     };
-    let audio = match audio_mode {
+    let audio = match args.audio {
         AudioMode::Off => "audio: off",
         AudioMode::Sine | AudioMode::Noise => "audio: synthetic test signal",
         AudioMode::Capture => "audio: host device capture",
     };
-    format!("display: screen stream; {telemetry}; {audio}")
+    let granted = configured_permission_set(args);
+    let input = if granted.inject_input {
+        "input: viewer may inject"
+    } else {
+        "input: off"
+    };
+    let clipboard = match (granted.read_host_clipboard, granted.write_host_clipboard) {
+        (false, false) => "clipboard: off",
+        (true, false) => "clipboard: host-to-viewer disclosure",
+        (false, true) => "clipboard: viewer-to-host apply",
+        (true, true) => "clipboard: bidirectional",
+    };
+    let file_transfer = match (
+        granted.send_file_to_viewer,
+        granted.receive_file_from_viewer,
+    ) {
+        (false, false) => "file-transfer: off",
+        (true, false) => "file-transfer: host-to-viewer send",
+        (false, true) => "file-transfer: viewer-to-host receive",
+        (true, true) => "file-transfer: bidirectional",
+    };
+    format!("display: screen stream; {telemetry}; {audio}; {input}; {clipboard}; {file_transfer}")
 }
 
 /// Atomically create `path` at 0600 and write `bytes` -- no separate
@@ -2097,7 +2135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // round-trip for that binding. Reused verbatim (not recomputed) for the
     // M1 consent-scope offer/broadcast below, so there's exactly one source
     // of truth for what this session's scope string is.
-    let m1_scope = m1_consent_scope(args.telemetry_level, args.audio);
+    let m1_scope = m1_consent_scope(&args);
     let consent_scope_digest = xenia_operator_proto::scope_digest(&m1_scope);
 
     // Consent server. With --operator-sealed the console talks over a
@@ -2805,17 +2843,41 @@ mod audio_tests {
 
     #[test]
     fn m1_scope_names_audio_off_and_telemetry_policy() {
+        let mut args = Args::parse_from(["xenia-peer"]);
+        args.telemetry_level = TelemetryLevel::Basic;
+        args.audio = AudioMode::Off;
         assert_eq!(
-            m1_consent_scope(TelemetryLevel::Basic, AudioMode::Off),
-            "display: screen stream; telemetry: basic host performance; audio: off"
+            m1_consent_scope(&args),
+            "display: screen stream; telemetry: basic host performance; audio: off; \
+             input: off; clipboard: off; file-transfer: off"
         );
     }
 
     #[test]
     fn m1_scope_names_real_audio_capture_explicitly() {
+        let mut args = Args::parse_from(["xenia-peer"]);
+        args.telemetry_level = TelemetryLevel::System;
+        args.audio = AudioMode::Capture;
         assert_eq!(
-            m1_consent_scope(TelemetryLevel::System, AudioMode::Capture),
-            "display: screen stream; telemetry: system identity and performance; audio: host device capture"
+            m1_consent_scope(&args),
+            "display: screen stream; telemetry: system identity and performance; \
+             audio: host device capture; input: off; clipboard: off; file-transfer: off"
+        );
+    }
+
+    #[test]
+    fn m1_scope_names_input_clipboard_and_file_transfer_when_enabled() {
+        let mut args = Args::parse_from(["xenia-peer"]);
+        args.telemetry_level = TelemetryLevel::Off;
+        args.input_backend = InputBackendChoice::Log;
+        args.clipboard = ClipboardMode::Bidirectional;
+        args.recv_file_dir = Some(std::path::PathBuf::from("/tmp/inbox"));
+        args.send_file = Some(std::path::PathBuf::from("/tmp/report.pdf"));
+        assert_eq!(
+            m1_consent_scope(&args),
+            "display: screen stream; telemetry: off; audio: off; \
+             input: viewer may inject; clipboard: bidirectional; \
+             file-transfer: bidirectional"
         );
     }
 

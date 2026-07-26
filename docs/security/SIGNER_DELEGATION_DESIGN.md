@@ -107,8 +107,10 @@ whole effort is trying to improve on. Split by risk:
 
 **No per-request confirmation required:**
 - a routine `/auth` challenge;
-- an ordinary consent approve/deny through an already-unlocked agent
-  session against an already-pinned host;
+- an ordinary, narrow-scope consent approve/deny (screen viewing,
+  telemetry, audio -- no input injection, clipboard, or file transfer)
+  through an already-unlocked agent session against an already-pinned
+  host;
 - a sealed-channel reconnection to an already-pinned host.
 
 **Mandatory native confirmation:**
@@ -118,7 +120,38 @@ whole effort is trying to improve on. Split by risk:
 - operator revocation;
 - role or capability elevation;
 - recovery-key or trust-root changes;
-- any unusually durable or unusually broad consent grant.
+- **(added after the original design, see below)** any consent `Approve`
+  whose scope includes input injection, clipboard access in either
+  direction, or file transfer in either direction --
+  `xenia-operator-agent`'s `scope_indicates_broad_grant`.
+
+**Revision, broad-grant confirmation:** the original policy above put
+*every* ordinary approve/deny in the no-confirmation bucket regardless of
+what was actually being granted, reasoning only about host-identity risk
+(TOFU/rotation/enrollment/revocation), not about the *content* of a
+session-level grant. An external review pointed out the resulting gap: an
+XSS-compromised console with a valid, already-confirmed agent session
+could get input-injection/clipboard/file-transfer access silently signed
+with zero operator-visible confirmation, since none of that was on the
+mandatory list. Note this was never a spoofing gap -- `scope` is bound
+into the signed transcript via `scope_digest` and independently
+recomputed/cross-checked by the daemon from its own authoritative
+`m1_scope`, so a compromised console could never successfully substitute a
+*different* scope than what it displayed. The real gap was that the
+operator was never shown anything at all for an *honest* broad-scope
+grant. Closed by:
+1. `apps/xenia-peer`'s `m1_consent_scope` (the function that builds the
+   daemon's one canonical, digest-bound scope string) now describes
+   input/clipboard/file-transfer, not just display/telemetry/audio --
+   previously silently incomplete regardless of who read it.
+2. `xenia-operator-agent`'s `scope_indicates_broad_grant` parses that
+   *specific, daemon-generated, digest-bound* string for fixed-format
+   markers -- safe to parse precisely because, unlike arbitrary browser
+   text, a compromised console cannot alter what it says without
+   invalidating the signature the daemon will independently verify.
+3. `sign_consent_action` runs `confirm_action` (the same mechanism
+   `sign_revoke` already used) when `action == Approve` and the scope is
+   broad. `Deny`/`Revoke` are never gated -- they only reduce privilege.
 
 The confirmation screen is generated **from the agent's own parsed typed
 fields** — never from browser-supplied descriptive text, which a
@@ -215,16 +248,23 @@ not a generic one.
 `build_revoke_request()` become thin wrappers over these three endpoints.
 `OperatorIdentity` no longer needs `ed_seed`/`ml_seed` for any of them.
 
-**Residual risk, stated plainly:** an XSS bug active *during an
-authenticated operator session*, against an *already-trusted, already-
-confirmed* host, can still trigger a no-confirmation-required action (an
-ordinary Approve/Deny) the operator never actually clicked. This is not a
-regression — that same XSS bug can already do this today via the browser's
-own local signing code — but it's also not eliminated by Track A alone.
-Closing it fully would mean confirming every signature, which the
-confirmation-policy section above deliberately rejects as unworkable UX.
-The floor this design settles on: forgery is bounded to low-risk actions
-against hosts the operator has already, at some point, explicitly trusted.
+**Residual risk, stated plainly (narrowed by the broad-grant confirmation
+above):** an XSS bug active *during an authenticated operator session*,
+against an *already-trusted, already-confirmed* host, can still trigger a
+no-confirmation-required action the operator never actually clicked --
+but as of the broad-grant confirmation revision, that's now bounded to
+*narrow-scope* actions only (screen viewing, telemetry, audio, and plain
+Deny/Revoke of any scope). Anything that would grant input injection,
+clipboard, or file transfer now requires the operator to explicitly
+confirm the exact scope text, even against an already-pinned host. This is
+not a regression — that same XSS bug can already do this today via the
+browser's own local signing code — but it's also not eliminated entirely
+by Track A alone. Closing it fully would mean confirming every signature,
+which the confirmation-policy section above deliberately rejects as
+unworkable UX. The floor this design settles on: forgery is bounded to
+low-risk, narrow-scope actions against hosts the operator has already, at
+some point, explicitly trusted -- and to Deny/Revoke, which only ever
+reduce privilege.
 
 ## Track B: agent-driven sealed-channel handshake (the bigger piece)
 

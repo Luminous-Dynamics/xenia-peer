@@ -72,6 +72,15 @@ pub enum AgentAuditEvent {
         new_ed25519_pubkey_hex: String,
         daemon_endpoint: String,
     },
+    /// `POST /v1/sign/consent-action` succeeded for an `Approve` whose
+    /// scope was classified as a broad grant (input injection, clipboard,
+    /// or file-transfer beyond pure screen viewing) -- the operator
+    /// confirmed this specific scope before the agent signed it. Appended
+    /// last to preserve every existing entry's bincode discriminant.
+    BroadGrantConfirmed {
+        scope: String,
+        daemon_endpoint: String,
+    },
 }
 
 impl AgentAuditEvent {
@@ -85,6 +94,7 @@ impl AgentAuditEvent {
             Self::SessionRefreshed => "session.refreshed",
             Self::RevocationSigned { .. } => "revocation.signed",
             Self::KeyReplacementSigned { .. } => "key_replacement.signed",
+            Self::BroadGrantConfirmed { .. } => "consent_action.broad_grant_confirmed",
         }
     }
 }
