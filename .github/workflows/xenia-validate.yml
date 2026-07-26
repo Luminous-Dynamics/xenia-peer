@@ -27,6 +27,39 @@ jobs:
         run: |
           cargo test --locked -p xenia-peer --features pqc-signatures --no-fail-fast
 
+  # Tier 0 of the network-reliability testing plan: proves a real
+  # xenia-peer daemon <-> xenia-viewer session survives packet loss,
+  # latency, jitter, and reordering using network namespaces + `tc
+  # netem` -- no VM needed, cheap enough to run on every push/PR.
+  # ubuntu-latest ships iproute2 (`ip`/`tc`) and passwordless sudo for
+  # the runner user already, so no extra setup is needed beyond
+  # checkout. Building the script found and fixed three real bugs (see
+  # scripts/xenia-network-chaos-smoke.sh's own comments): a doubled
+  # path prefix, a TCP-connect probe that crashed the single-session
+  # daemon, and a "harsh" profile whose failures were a genuine finding
+  # (passthrough codec needs ~180 TCP segments/frame, so 15% loss makes
+  # nearly every frame need retransmission) rather than a script bug --
+  # dialed back to a CI-stable severity rather than hidden with a
+  # longer timeout.
+  network-chaos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: network-chaos-cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            network-chaos-cargo-${{ runner.os }}-
+      - name: Network chaos smoke test
+        run: |
+          chmod +x scripts/*.sh
+          scripts/xenia-network-chaos-smoke.sh .
+
 
   # `flake.nix` is always present in this repo, so this job runs
   # unconditionally -- it used to guard on `if: hashFiles('flake.nix') !=
