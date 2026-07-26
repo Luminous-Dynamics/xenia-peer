@@ -7,8 +7,19 @@
 //! [`xenia_peer_core::transport::Transport`] trait.
 //!
 //! Xenia envelopes are already end-to-end sealed by `xenia-wire`. This crate
-//! uses Iroh for NAT traversal, endpoint identity, multiplexing, and QUIC stream
-//! semantics; the application payload remains transport-independent.
+//! uses Iroh for endpoint identity, multiplexing, and QUIC stream semantics;
+//! the application payload remains transport-independent.
+//!
+//! **NAT traversal is not currently enabled.** [`bind_xenia_endpoint`] binds
+//! with Iroh's `presets::Minimal`, which sets up only the TLS crypto
+//! provider -- no relay, no DNS/pkarr address lookup, no STUN. Connections
+//! only succeed between endpoints with a direct, already-reachable address
+//! (same LAN, or one side publicly routable); this matches
+//! `docs/roadmap/M1_VERTICAL_SLICE_PLAN.md`'s explicit M1 non-goals ("public
+//! internet NAT traversal", "production-grade relay infrastructure"), not
+//! an oversight. Real NAT traversal would need Iroh's `presets::N0` (or a
+//! self-hosted relay) instead, plus the operational cost of depending on
+//! that relay infrastructure -- a real scope decision, not a quick fix.
 //!
 //! The transport wraps one long-lived bidirectional QUIC stream. Inside that
 //! stream it uses the same 4-byte big-endian envelope length prefix as the TCP
@@ -21,13 +32,13 @@
 use std::io;
 
 use iroh::{
+    endpoint::{presets, Connection, RecvStream, SendStream},
     Endpoint, EndpointAddr,
-    endpoint::{Connection, RecvStream, SendStream, presets},
 };
 use thiserror::Error;
 use tracing::debug;
 use xenia_peer_core::transport::{
-    MAX_ENVELOPE_BYTES, RecvEnvelope, SendEnvelope, Transport, TransportError,
+    RecvEnvelope, SendEnvelope, Transport, TransportError, MAX_ENVELOPE_BYTES,
 };
 
 /// Re-export of the Iroh crate for endpoint ownership in callers.
