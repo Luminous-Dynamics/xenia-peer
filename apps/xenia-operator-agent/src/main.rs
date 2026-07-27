@@ -81,6 +81,7 @@ mod host_trust;
 mod rate_limit;
 mod secure_file;
 
+use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -281,8 +282,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "xenia-operator-agent listening on http://127.0.0.1:{}",
         args.port
     );
-    println!("pairing token (paste into the console's agent settings once, to pair):");
-    println!("  {token}");
+    // Only print the raw secret to a real interactive terminal. If stdout
+    // isn't one (e.g. this process is running under a service supervisor
+    // like systemd, whose stdout is captured into a persistent log), an
+    // unconditional print here would defeat the whole point of never
+    // writing the pairing token anywhere the operator doesn't control (see
+    // this module's doc comment) -- the journal is a much broader read
+    // surface than the 0600 token file below. Mirrors `host_trust::confirm`'s
+    // existing `is_terminal()` gate for the same reason.
+    if std::io::stdout().is_terminal() {
+        println!("pairing token (paste into the console's agent settings once, to pair):");
+        println!("  {token}");
+    } else {
+        println!(
+            "not printing the pairing token to stdout: this isn't an interactive \
+             terminal, so it may be captured into a persistent log. Read it from \
+             the token file below instead."
+        );
+    }
     println!("token also persisted at: {}", args.token_path.display());
     println!(
         "sessions minted from it last {}s before the console must re-pair",
