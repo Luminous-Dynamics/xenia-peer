@@ -405,6 +405,94 @@ mod tests {
     }
 
     #[test]
+    fn reordered_persisted_history_is_rejected() {
+        let dir = temp_dir("reordered");
+        let path = dir.join("consent.ledger");
+        let sk = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let mut chain = Chain::new(sk.clone());
+        chain.append(event()).unwrap();
+        chain.append(event()).unwrap();
+        chain.append(event()).unwrap();
+        let mut entries: Vec<LedgerEntry> = chain.iter().cloned().collect();
+        // Swap two otherwise-genuine, individually-signed entries. Each
+        // entry still carries its own original `seq`/`prev_hash`/signature
+        // -- reordering the Vec doesn't forge anything new, it just serves
+        // history out of the order it was appended in. `Verifier::verify_chain`
+        // must still refuse it: swapping seq=0 into position 1 (behind
+        // seq=1's own entry, now at position 0) fails the sequence-continuity
+        // check before hash-link or signature verification even runs.
+        entries.swap(0, 1);
+        // Bypass persist_entries_atomic's own header (which would encode a
+        // head_hash matching this now-reordered Vec's actual last entry,
+        // masking the reorder as a metadata-consistent-but-logically-invalid
+        // file) -- write the legacy bare-Vec form directly, simulating an
+        // attacker with filesystem access reordering the persisted chain.
+        std::fs::write(&path, bincode::serialize(&entries).unwrap()).unwrap();
+
+        let err = load_verified(&path, &sk).err().unwrap();
+        assert!(
+            matches!(
+                err,
+                AuditLedgerStoreError::Verify(VerifyError::OutOfOrder { .. })
+            ),
+            "expected OutOfOrder, got {err:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn versioned_envelope_rejects_an_entry_count_that_does_not_match_the_payload() {
+        let dir = temp_dir("entry-count-tamper");
+        let path = dir.join("consent.ledger");
+        let sk = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let mut chain = Chain::new(sk.clone());
+        chain.append(event()).unwrap();
+        chain.append(event()).unwrap();
+        let entries: Vec<LedgerEntry> = chain.iter().cloned().collect();
+        persist_entries_atomic(&path, &entries).unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let count_offset = PERSISTED_AUDIT_LEDGER_MAGIC.len() + 2;
+        // Claim 3 entries in the header while the payload still only
+        // encodes 2 -- a real chain never produces this on its own; this
+        // simulates a hand-edited or corrupted file whose length metadata
+        // no longer matches what it actually contains.
+        bytes[count_offset..count_offset + 8].copy_from_slice(&3u64.to_be_bytes());
+        std::fs::write(&path, bytes).unwrap();
+
+        assert!(matches!(
+            load_verified(&path, &sk),
+            Err(AuditLedgerStoreError::MetadataMismatch("entry_count"))
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn truncated_envelope_header_is_rejected_explicitly() {
+        let dir = temp_dir("truncated-header");
+        let path = dir.join("consent.ledger");
+        let sk = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let mut chain = Chain::new(sk.clone());
+        chain.append(event()).unwrap();
+        let entries: Vec<LedgerEntry> = chain.iter().cloned().collect();
+        persist_entries_atomic(&path, &entries).unwrap();
+
+        // Truncate to just past the magic bytes -- shorter than a complete
+        // header (magic + schema_version + entry_count + head_hash), but
+        // still starting with the magic so the versioned-envelope path is
+        // the one that has to catch this, not the legacy bare-Vec decoder.
+        let bytes = std::fs::read(&path).unwrap();
+        let short = bytes[..PERSISTED_AUDIT_LEDGER_MAGIC.len() + 4].to_vec();
+        std::fs::write(&path, short).unwrap();
+
+        assert!(matches!(
+            load_verified(&path, &sk),
+            Err(AuditLedgerStoreError::MetadataMismatch("truncated header"))
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn load_verified_rejects_a_ledger_signed_by_a_different_key() {
         let dir = temp_dir("wrong-key");
         let path = dir.join("consent.ledger");
