@@ -78,6 +78,7 @@ mod audit_log;
 mod daemon_evidence;
 mod handshake_state;
 mod host_trust;
+mod rate_limit;
 mod secure_file;
 
 use std::net::SocketAddr;
@@ -108,6 +109,7 @@ use zeroize::Zeroizing;
 use daemon_evidence::{decode_fixed_hex, decode_hex_vec};
 use handshake_state::{HandshakeState, PendingSuite};
 use host_trust::HostTrustStore;
+use rate_limit::{AGENT_RATE_MAX, AGENT_RATE_WINDOW_SECS, RateLimiter};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -215,6 +217,11 @@ struct AgentState {
     /// file write.
     audit_log: StdMutex<audit_log::AgentAuditChain>,
     audit_log_path: PathBuf,
+    /// Bounds every credential-checked request (pairing-token guesses,
+    /// signing/handshake flooding) -- see `rate_limit`'s module doc
+    /// comment. Checked in `auth_and_cors_middleware`, before any
+    /// credential comparison or crypto runs.
+    rate_limiter: StdMutex<RateLimiter>,
     /// Wall-clock time this process started, for `GET /v1/health`'s
     /// `uptime_secs`.
     started_at: std::time::Instant,
@@ -295,6 +302,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         handshake_state: StdMutex::new(HandshakeState::new(handshake_state::DEFAULT_TTL)),
         audit_log: StdMutex::new(audit_log),
         audit_log_path: args.audit_log_path,
+        rate_limiter: StdMutex::new(RateLimiter::new(AGENT_RATE_MAX, AGENT_RATE_WINDOW_SECS)),
         started_at: std::time::Instant::now(),
     });
 
@@ -396,6 +404,27 @@ async fn auth_and_cors_middleware(
             origin,
             axum::response::Response::new(axum::body::Body::empty()),
         );
+    }
+
+    // Bound every credential-checked request before comparing/verifying
+    // anything -- a pairing-token guess (`/v1/pair`) or a flood of
+    // otherwise-valid-session `/v1/sign/*`/`/v1/handshake/*` calls both
+    // cost real work (a comparison at minimum, real signing/MAC-verify
+    // crypto beyond that) that shouldn't be triggerable unboundedly. One
+    // process-wide limiter for the whole authenticated surface -- see
+    // `rate_limit`'s module doc comment for why a single counter is the
+    // right granularity here.
+    if !state
+        .rate_limiter
+        .lock()
+        .expect("rate-limiter mutex poisoned")
+        .allow(unix_now_secs())
+    {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many requests; slow down",
+        )
+            .into_response();
     }
 
     if request.uri().path() == "/v1/pair" {
@@ -1557,8 +1586,24 @@ mod tests {
                 ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]),
             )),
             audit_log_path: temp_pin_store_path("audit"),
+            rate_limiter: StdMutex::new(RateLimiter::new(AGENT_RATE_MAX, AGENT_RATE_WINDOW_SECS)),
             started_at: std::time::Instant::now(),
         })
+    }
+
+    /// Like [`test_state`], but with the rate limiter's `max` overridden --
+    /// tests exercising `rate_limit` itself need a small `max` so a couple
+    /// of requests are enough to trip it, without waiting on real time or
+    /// sending 30 requests per test.
+    fn test_state_with_rate_limit(
+        token: &str,
+        allowed_origins: &[&str],
+        max: u32,
+    ) -> Arc<AgentState> {
+        let mut state = test_state_with_host_trust(token, allowed_origins, true);
+        Arc::get_mut(&mut state).unwrap().rate_limiter =
+            StdMutex::new(RateLimiter::new(max, AGENT_RATE_WINDOW_SECS));
+        state
     }
 
     /// Like [`test_state_with_host_trust`], but with `host`'s fingerprint
@@ -1608,6 +1653,7 @@ mod tests {
                 ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]),
             )),
             audit_log_path: temp_pin_store_path("audit"),
+            rate_limiter: StdMutex::new(RateLimiter::new(AGENT_RATE_MAX, AGENT_RATE_WINDOW_SECS)),
             started_at: std::time::Instant::now(),
         })
     }
@@ -1779,6 +1825,33 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "the raw pairing token must not double as a session credential"
         );
+    }
+
+    #[tokio::test]
+    async fn pairing_attempts_are_rate_limited() {
+        use tower::ServiceExt;
+        // A state that allows just one attempt per window.
+        let app = build_router(test_state_with_rate_limit(
+            "secret",
+            &["http://localhost:8134"],
+            1,
+        ));
+        let request = || {
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/pair")
+                .header("origin", "http://localhost:8134")
+                // Deliberately wrong -- the rate limiter must fire before
+                // the token comparison, so even a doomed guess consumes
+                // the one allowed attempt.
+                .header("x-agent-token", "not-the-secret")
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        let first = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(first.status(), StatusCode::UNAUTHORIZED);
+        let second = app.oneshot(request()).await.unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     // ─── session tests (`X-Agent-Session`, everything but `/v1/pair`) ───
