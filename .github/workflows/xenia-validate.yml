@@ -4,10 +4,16 @@ on:
   pull_request:
   push:
     branches: [main, master]
+  workflow_dispatch:
+  schedule:
+    # Weekly deep VM test (see network-vm job below) -- Sundays 07:00 UTC,
+    # offset an hour from xenia-wire's fuzz-deep schedule.
+    - cron: "0 7 * * 0"
 
 jobs:
   hygiene:
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v4
       - name: Script syntax
@@ -43,6 +49,7 @@ jobs:
   # longer timeout.
   network-chaos:
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v4
       - name: Cache cargo registry and build artifacts
@@ -72,6 +79,7 @@ jobs:
   # verifying the new `e2e` job below actually ran in CI.
   nix:
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v4
       - name: Install Nix
@@ -100,6 +108,7 @@ jobs:
   # browser console works against a live daemon, not a mock.
   e2e:
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v4
       - name: Install Nix
@@ -136,6 +145,7 @@ jobs:
   # later steps gate on, rather than a job-level `if:`.
   xenia-wire:
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v4
       - name: Check xenia-wire exists
@@ -161,3 +171,41 @@ jobs:
           cargo metadata --format-version 1 --no-deps >/dev/null
           cargo fmt --all -- --check
           cargo test --all-features
+
+  # Tier 1 of the network-reliability testing plan: two genuinely
+  # separate NixOS VMs (distinct kernels/network stacks, unlike Tier 0's
+  # shared-kernel network-namespace approach in network-chaos above),
+  # proving a real cross-machine session and that the daemon's identity
+  # survives a hard VM reboot rather than a mere process restart. See
+  # flake.nix's checks.network-vm for the full test script and the two
+  # real bugs found while building it.
+  #
+  # Weekly + manual-dispatch only, not every push/PR: standard
+  # GitHub-hosted runners don't expose /dev/kvm, so this nixosTest runs
+  # under QEMU's software emulation (TCG) rather than KVM-accelerated --
+  # untested here how much slower that makes it versus the ~105s
+  # test-script runtime measured locally (with KVM). Kept off the
+  # every-push path until that's known, rather than risk flaking every
+  # PR on an unverified timing assumption.
+  network-vm:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Cache cargo registry and Nix store paths
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: network-vm-cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            network-vm-cargo-${{ runner.os }}-
+      - name: Run the 2-VM network reliability test
+        run: nix build .#checks.x86_64-linux.network-vm -L
