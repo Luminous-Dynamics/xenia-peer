@@ -642,6 +642,10 @@ mod tests {
                 new_ed25519_pubkey_hex: String::new(),
                 daemon_endpoint: String::new(),
             },
+            AgentAuditEvent::BroadGrantConfirmed {
+                scope: String::new(),
+                daemon_endpoint: String::new(),
+            },
         ];
         let names: Vec<&str> = events.iter().map(|e| e.stable_name()).collect();
         let mut unique = names.clone();
@@ -650,6 +654,69 @@ mod tests {
         assert_eq!(unique.len(), names.len(), "stable names must be distinct");
         for name in names {
             assert!(name.contains('.'), "{name} should be dot-namespaced");
+        }
+    }
+
+    /// Pins the exact literal name every variant emits, mirroring
+    /// `xenia_ledger::tests::consent_kind_stable_names_are_contractual`'s
+    /// convention on the daemon side. The structural test above
+    /// (`stable_names_are_distinct_and_dot_namespaced`) would happily pass
+    /// if a variant's name were silently renamed -- distinctness and
+    /// dot-namespacing survive a rename just fine. This test exists so a
+    /// rename shows up as a diff a reviewer has to consciously accept: any
+    /// external consumer of `GET /v1/audit` (a dashboard, a SIEM rule, an
+    /// operator's own tooling) matches against these exact strings, per
+    /// `docs/roadmap/POST_RC1_HARDENING_PLAN.md` Track 4's "audit event
+    /// names remain stable" acceptance criterion.
+    #[test]
+    fn stable_names_are_contractual() {
+        let cases: [(AgentAuditEvent, &str); 7] = [
+            (
+                AgentAuditEvent::HostTrustFirstUse {
+                    daemon_endpoint: String::new(),
+                    suite: String::new(),
+                    fingerprint_hex: String::new(),
+                },
+                "host_trust.first_use",
+            ),
+            (
+                AgentAuditEvent::HostTrustRotation {
+                    daemon_endpoint: String::new(),
+                    suite: String::new(),
+                    old_fingerprint_hex: String::new(),
+                    new_fingerprint_hex: String::new(),
+                },
+                "host_trust.rotation",
+            ),
+            (AgentAuditEvent::Paired, "session.paired"),
+            (AgentAuditEvent::SessionRefreshed, "session.refreshed"),
+            (
+                AgentAuditEvent::RevocationSigned {
+                    target_operator_id: String::new(),
+                    daemon_endpoint: String::new(),
+                },
+                "revocation.signed",
+            ),
+            (
+                AgentAuditEvent::KeyReplacementSigned {
+                    target_operator_id: String::new(),
+                    new_ed25519_pubkey_hex: String::new(),
+                    daemon_endpoint: String::new(),
+                },
+                "key_replacement.signed",
+            ),
+            (
+                AgentAuditEvent::BroadGrantConfirmed {
+                    scope: String::new(),
+                    daemon_endpoint: String::new(),
+                },
+                "consent_action.broad_grant_confirmed",
+            ),
+        ];
+        for (event, expected) in cases {
+            assert_eq!(event.stable_name(), expected);
+            assert_eq!(expected, expected.to_ascii_lowercase());
+            assert!(!expected.contains(' '));
         }
     }
 }
