@@ -1,0 +1,20 @@
+[package]
+name = "xenia-secure-file"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-or-later"
+description = "TOCTOU-safe, owner-only filesystem helpers for the secret/sensitive files apps/xenia-peer and apps/xenia-operator-agent persist (identity keys, pairing tokens, host-trust pins)."
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "0.38", default-features = false, features = ["process", "std", "fs"] }
+
+[dependencies]
+rand = "0.8"
+
+[lints]
+workspace = true

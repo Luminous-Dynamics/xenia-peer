@@ -8915,7 +8915,6 @@ dependencies = [
  "ed25519-dalek 2.2.0",
  "hex",
  "rand 0.8.7",
- "rustix 0.38.44",
  "serde",
  "serde-big-array",
  "serde_json",
@@ -8927,6 +8926,7 @@ dependencies = [
  "xenia-operator-agent-proto",
  "xenia-operator-proto",
  "xenia-peer-core",
+ "xenia-secure-file",
  "xenia-wire",
  "zeroize",
 ]
@@ -8984,6 +8984,7 @@ dependencies = [
  "xenia-ledger",
  "xenia-operator-proto",
  "xenia-peer-core",
+ "xenia-secure-file",
  "xenia-transport-quic",
  "xenia-transport-ws",
  "xenia-video",
@@ -9007,6 +9008,14 @@ dependencies = [
  "tracing-subscriber",
  "xenia-handshake",
  "xenia-wire",
+]
+
+[[package]]
+name = "xenia-secure-file"
+version = "0.0.0-m0"
+dependencies = [
+ "rand 0.8.7",
+ "rustix 0.38.44",
 ]
 
 [[package]]

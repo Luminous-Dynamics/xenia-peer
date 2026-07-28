@@ -44,8 +44,7 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-
-use crate::secure_file;
+use xenia_secure_file as secure_file;
 
 /// Storage abstraction for the pin-store file. Exists so the transactional
 /// persist-then-adopt logic in [`HostTrustStore`] is unit-testable against

@@ -15,6 +15,7 @@ xenia-handshake = { path = "../../crates/xenia-handshake" }
 xenia-wire = { workspace = true, features = ["handshake"] }
 xenia-operator-proto = { workspace = true }
 xenia-operator-agent-proto = { workspace = true }
+xenia-secure-file = { path = "../../crates/xenia-secure-file" }
 axum = "0.8"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal"] }
 clap = { version = "4", features = ["derive"] }
@@ -41,15 +42,6 @@ bincode = "1"
 # serde's built-in array support doesn't cover that length. Same crate
 # `xenia-ledger` already uses for its own 64-byte `LedgerEntry::signature`.
 serde-big-array = "0.5"
-
-[target.'cfg(unix)'.dependencies]
-# `process`: safe getuid() (no unsafe code, per workspace lints) --
-# verifying an existing identity/token file is owned by this process's
-# user before trusting it. `fs`: safe openat/fstat/mkdirat/renameat --
-# descriptor-relative, O_NOFOLLOW file access in `secure_file.rs`, closing
-# the TOCTOU window a metadata-check-then-separate-open pattern leaves
-# open, without any unsafe code.
-rustix = { version = "0.38", default-features = false, features = ["process", "std", "fs"] }
 
 [dev-dependencies]
 # `ServiceExt::oneshot` for driving the axum routes in tests without

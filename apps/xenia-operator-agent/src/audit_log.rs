@@ -28,7 +28,7 @@ use serde_big_array::BigArray;
 use std::path::Path;
 use std::time::SystemTime;
 
-use crate::secure_file;
+use xenia_secure_file as secure_file;
 
 /// One trust decision this agent made. Deliberately carries only what an
 /// auditor needs to reconstruct *which* daemon/operator/session was
