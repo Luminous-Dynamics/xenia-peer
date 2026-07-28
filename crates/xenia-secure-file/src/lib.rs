@@ -152,6 +152,24 @@ mod backend {
         Ok(())
     }
 
+    /// Whether the owner check in [`open_secure_parent_dir`]/
+    /// [`open_secure_existing`] should be enforced for the process running
+    /// under `current_uid`. Root (`uid 0`) is exempt: the check exists to
+    /// stop a *lower*-privileged attacker from pre-planting a directory or
+    /// file this process would otherwise trust, but root already has
+    /// unrestricted read/write/chown access to the whole filesystem --
+    /// refusing to trust a directory root didn't create itself adds no
+    /// security there, while breaking legitimate deployments where a
+    /// state directory is provisioned by a separate, unprivileged
+    /// setup/installer step before the process itself runs as root (this
+    /// bit `apps/xenia-peer`'s own network-chaos CI smoke test: the state
+    /// directory is `mkdir`'d by the unprivileged runner user, then the
+    /// daemon runs inside a network namespace via `sudo ip netns exec`,
+    /// i.e. as root).
+    pub(super) fn owner_check_should_apply(current_uid: u32) -> bool {
+        current_uid != 0
+    }
+
     fn file_name_of(path: &Path) -> Result<&OsStr, Box<dyn std::error::Error>> {
         path.file_name()
             .ok_or_else(|| format!("{}: path has no file name", path.display()).into())
@@ -188,7 +206,7 @@ mod backend {
         )?);
         let meta = dir.metadata()?;
         let current_uid = rustix::process::getuid().as_raw();
-        if meta.uid() != current_uid {
+        if owner_check_should_apply(current_uid) && meta.uid() != current_uid {
             return Err(format!(
                 "{} is owned by uid {}, not this process's uid {current_uid} -- refusing to trust its contents",
                 parent.display(), meta.uid()
@@ -243,7 +261,7 @@ mod backend {
             return Err(format!("{file_name:?} is not a regular file").into());
         }
         let current_uid = rustix::process::getuid().as_raw();
-        if meta.uid() != current_uid {
+        if owner_check_should_apply(current_uid) && meta.uid() != current_uid {
             return Err(format!(
                 "{file_name:?} is owned by uid {}, not this process's uid {current_uid} -- refusing to use it",
                 meta.uid()
@@ -477,5 +495,20 @@ mod tests {
             Some(b"mine".to_vec())
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn owner_check_is_skipped_only_for_root() {
+        // Pure logic, independent of the actual uid this test happens to
+        // run under (CI runs it unprivileged; a real root-owned deployment
+        // is exercised by apps/xenia-peer's network-chaos smoke test, not
+        // reproducible here without actually being root).
+        assert!(
+            !backend::owner_check_should_apply(0),
+            "root must be exempt -- it already has unrestricted filesystem access"
+        );
+        assert!(backend::owner_check_should_apply(1));
+        assert!(backend::owner_check_should_apply(1001));
     }
 }
