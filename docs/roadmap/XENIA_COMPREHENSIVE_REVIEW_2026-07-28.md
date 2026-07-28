@@ -189,7 +189,61 @@ Mitigating: `MAX_ENVELOPE_BYTES` (16 MiB) bounds every read across all three
 transports, and serde's cautious `Vec` allocation blunts the classic
 length-prefix amplification. The exposure is real but not unbounded.
 
-### F5 — `scap` is pinned to a git *branch*, not a revision (Low-Medium)
+### F5 — `scap` is a **private** git dependency: the public repo cannot be built by the public, and CI's green history was a cache artifact (**High** — upgraded 2026-07-28)
+
+> **This finding was originally filed as Low-Medium ("pinned to a branch, not a
+> rev"). That was the small version of the problem.** The real issue was found
+> only when a new CI job with a *cold* cargo cache tried to fetch the
+> dependency for the first time. Recorded here as an upgrade rather than a
+> rewrite, because the mis-severity is itself the lesson: the audit was run on
+> a machine that *had* credentials, so an anonymous-access failure was
+> invisible to it.
+
+`gh api repos/Luminous-Dynamics/scap` reports **`"private": true`**.
+`crates/xenia-capture/Cargo.toml` depends on it over git. Cargo must resolve
+git sources during dependency resolution **even when the feature is off**
+(`scap` is `optional = true`, and the jobs that fail do not enable it), so:
+
+```
+Updating git repository `https://github.com/Luminous-Dynamics/scap`
+error: failed to get `scap` as a dependency of package `xenia-capture`
+  failed to authenticate when downloading repository
+```
+
+**Consequence 1 — the README's quick start is not executable by the public.**
+`git clone && cargo test --workspace` fails for anyone without access to that
+private fork. For a public, AGPL/Apache-licensed repo inviting third-party
+clients, that is a correctness problem in the contribution story, not just CI
+hygiene.
+
+**Consequence 2 — CI green was partly an artifact of warm caches.** Jobs that
+restore a `~/.cargo/git` cache never re-clone, so they pass; a job with a fresh
+cache key fails in seconds. Proven directly rather than inferred: **the exact
+same `main` workflow run (`30361403270`, commit `ec7ce79`) that concluded
+`success` at 12:59 was re-run unchanged at 20:23 and concluded `failure`**, with
+the identical `scap` authentication error. No code changed between the two.
+Every currently-green job is therefore one cache eviction (7 days idle, or the
+10 GB cap) away from the same failure.
+
+**Fix options**, in the order this review recommends them:
+
+1. **Make the fork public.** It is a fork of an MIT/Apache upstream, and it
+   exists to carry the unbounded-`mpsc`-channel memory-leak fix that
+   `ROADMAP.md`'s B2 follow-up already describes pushing to it. Nothing about
+   it appears to warrant privacy; the roadmap text reads as though it were
+   already a normal public fork. Restores public buildability and fixes all
+   five failing jobs.
+2. **Vendor the patch** — drop the fork and carry the `sync_channel(2)` fix as
+   a local patch over upstream `scap`. Removes the private dependency
+   altogether, at the cost of maintaining the patch.
+3. **Give CI a deploy key/PAT** — fixes CI only. The public still cannot build
+   the repo, so the README stays wrong. Not recommended alone.
+
+The original branch-vs-rev point still stands and should be fixed alongside
+whichever option is taken: pin `rev =` so the lockfile's guarantee is
+structural rather than incidental.
+
+### F5b — the original finding: pinned to a git *branch*, not a revision (Low-Medium)
 
 `crates/xenia-capture/Cargo.toml:34`:
 ```toml
@@ -287,11 +341,19 @@ it encodes the property, not just the patch.
    axis encoding, and rejection of out-of-range input. No live-desktop test
    required — that constraint is real and should stay respected.
 
-### Phase 4 — Hygiene (closes F5, F8)
+### Phase 0 — Unblock the build (closes F5) — **now the highest priority**
+
+0. **Resolve the private `scap` dependency** (see F5 for the three options;
+   making the fork public is recommended). This outranks everything else in
+   this plan: until it is fixed, the public cannot build the repo at all, five
+   CI jobs fail, and every currently-green job is one cache eviction from
+   failing. It also blocks any PR from going green on its own merits.
+
+### Phase 4 — Hygiene (closes F5b, F8)
 
 10. `.gitignore` the qcow2 (or move test VM images out of the tree entirely).
     **Do this first — it is one line and removes a live hazard.**
-11. Pin `scap` by `rev =` alongside the branch.
+11. Pin `scap` by `rev =` alongside the branch (F5b), whichever F5 option is taken.
 12. Consider a small `xenia-viewer-android` test lane; it is the one workspace
     member with no automated coverage at all, and it was just verified by hand
     on real hardware — a good moment to capture that as a regression.
@@ -309,7 +371,8 @@ it encodes the property, not just the patch.
 
 ## 4. Suggested order
 
-`F8` (one line) → **Phase 1** (the real work) → Phase 2 → Phases 3–4.
+`F8` (one line) → **Phase 0** (F5 — nothing else can go green until it lands) →
+**Phase 1** (the real work, now done) → Phase 2 → Phases 3–4.
 
 Phase 1 is the only phase that changes the project's security posture rather
 than its coverage. Everything else is worth doing and none of it is urgent.
