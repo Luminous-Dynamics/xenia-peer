@@ -1247,70 +1247,25 @@ fn m1_consent_scope(args: &Args) -> String {
     format!("display: screen stream; {telemetry}; {audio}; {input}; {clipboard}; {file_transfer}")
 }
 
-/// Atomically create `path` at 0600 and write `bytes` -- no separate
-/// write-then-chmod window where a raw secret sits briefly world-readable
-/// (`fs::write` creates at the ambient umask, typically 0644). Also
-/// tightens `path`'s parent directory to 0700 after creating it, since
-/// `create_dir_all` alone leaves it at the ambient umask too (typically
-/// 0755, world-listable). Mirrors two patterns that already exist
-/// elsewhere in this repo -- `audit_ledger_store.rs`'s
-/// `OpenOptions::create_new+mode` for the file, and
-/// `apps/xenia-operator-agent/src/secure_file.rs`'s parent-directory
-/// re-tightening -- applied here to close the same gap in this crate's own
-/// key-generation code. `create_new(true)` is also a correctness
-/// improvement over plain `fs::write`: it fails rather than silently
-/// overwriting if the file was created by something else between the
-/// caller's `path.exists()` check and this call.
-#[cfg(unix)]
-fn create_secret_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
-    }
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?
-        .write_all(bytes)
-}
-#[cfg(not(unix))]
-fn create_secret_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, bytes)
-}
-
 /// Load an Ed25519 signing key from `path`, or generate and persist a fresh
-/// one on first use. The persisted key file is created with owner-only (0600)
-/// permissions, and existing files are re-tightened to 0600 on load, so a
-/// signing secret is never left group/world-readable on disk.
+/// one on first use. Uses `xenia_secure_file::load_or_create_secure_file`
+/// for atomic, owner-only (`0600`) creation with no write-then-chmod window,
+/// and TOCTOU-safe reads (parent directory and leaf file both opened
+/// `O_NOFOLLOW`, checked owned by this process's uid, re-tightened to `0600`
+/// on every access) -- see that crate's module doc comment for the full
+/// reasoning. Was previously hand-rolled independently here; unified per
+/// `docs/roadmap/POST_RC1_HARDENING_PLAN.md` Track 4.
 fn load_or_create_signing_key(
     path: &std::path::Path,
 ) -> Result<SigningKey, Box<dyn std::error::Error>> {
-    #[cfg(unix)]
-    fn restrict_permissions(path: &std::path::Path) -> std::io::Result<()> {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-    }
-    #[cfg(not(unix))]
-    fn restrict_permissions(_path: &std::path::Path) -> std::io::Result<()> {
-        Ok(())
-    }
-
-    if path.exists() {
-        let key_bytes = std::fs::read(path)?;
-        let key = SigningKey::from_bytes(&key_bytes.try_into().map_err(|_| "Invalid key length")?);
-        restrict_permissions(path)?;
-        Ok(key)
-    } else {
-        let key = SigningKey::generate(&mut rand::thread_rng());
-        create_secret_file(path, &key.to_bytes())?;
-        Ok(key)
-    }
+    let key_bytes = xenia_secure_file::load_or_create_secure_file(path, || {
+        SigningKey::generate(&mut rand::thread_rng())
+            .to_bytes()
+            .to_vec()
+    })?;
+    Ok(SigningKey::from_bytes(
+        &key_bytes.try_into().map_err(|_| "Invalid key length")?,
+    ))
 }
 
 /// Load the HTTP-auth ML-DSA-65 seed from `path`, or generate and persist a
@@ -1323,27 +1278,12 @@ fn load_or_create_signing_key(
 fn load_or_create_ml_dsa_seed(
     path: &std::path::Path,
 ) -> Result<[u8; 32], Box<dyn std::error::Error>> {
-    #[cfg(unix)]
-    fn restrict_permissions(path: &std::path::Path) -> std::io::Result<()> {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-    }
-    #[cfg(not(unix))]
-    fn restrict_permissions(_path: &std::path::Path) -> std::io::Result<()> {
-        Ok(())
-    }
-
-    if path.exists() {
-        let bytes = std::fs::read(path)?;
-        restrict_permissions(path)?;
-        bytes
-            .try_into()
-            .map_err(|_| "Invalid ML-DSA seed length".into())
-    } else {
-        let seed: [u8; 32] = rand::random();
-        create_secret_file(path, &seed)?;
-        Ok(seed)
-    }
+    let bytes = xenia_secure_file::load_or_create_secure_file(path, || {
+        rand::random::<[u8; 32]>().to_vec()
+    })?;
+    bytes
+        .try_into()
+        .map_err(|_| "Invalid ML-DSA seed length".into())
 }
 
 /// Load the host's persistent signing identity from `path`, or generate and
@@ -1354,30 +1294,15 @@ fn load_or_create_ml_dsa_seed(
 fn load_or_create_host_identity(
     path: &std::path::Path,
 ) -> Result<HandshakeManager, Box<dyn std::error::Error>> {
-    #[cfg(unix)]
-    fn restrict_permissions(path: &std::path::Path) -> std::io::Result<()> {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-    }
-    #[cfg(not(unix))]
-    fn restrict_permissions(_path: &std::path::Path) -> std::io::Result<()> {
-        Ok(())
-    }
-
-    let blob: Vec<u8> = if path.exists() {
-        let bytes = std::fs::read(path)?;
-        restrict_permissions(path)?;
-        if bytes.len() != 64 {
-            return Err("host identity file must be exactly 64 bytes".into());
-        }
-        bytes
-    } else {
+    let blob = xenia_secure_file::load_or_create_secure_file(path, || {
         let mut blob = Vec::with_capacity(64);
         blob.extend_from_slice(&rand::random::<[u8; 32]>());
         blob.extend_from_slice(&rand::random::<[u8; 32]>());
-        create_secret_file(path, &blob)?;
         blob
-    };
+    })?;
+    if blob.len() != 64 {
+        return Err("host identity file must be exactly 64 bytes".into());
+    }
     let mut ed25519_secret = [0u8; 32];
     let mut ml_dsa_seed = [0u8; 32];
     ed25519_secret.copy_from_slice(&blob[..32]);
@@ -1398,30 +1323,15 @@ fn load_or_create_host_identity(
 fn load_or_create_host_identity_highsec(
     path: &std::path::Path,
 ) -> Result<xenia_wire::handshake_highsec::HostHandshakeHighSec, Box<dyn std::error::Error>> {
-    #[cfg(unix)]
-    fn restrict_permissions(path: &std::path::Path) -> std::io::Result<()> {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-    }
-    #[cfg(not(unix))]
-    fn restrict_permissions(_path: &std::path::Path) -> std::io::Result<()> {
-        Ok(())
-    }
-
-    let blob: Vec<u8> = if path.exists() {
-        let bytes = std::fs::read(path)?;
-        restrict_permissions(path)?;
-        if bytes.len() != 64 {
-            return Err("host identity file must be exactly 64 bytes".into());
-        }
-        bytes
-    } else {
+    let blob = xenia_secure_file::load_or_create_secure_file(path, || {
         let mut blob = Vec::with_capacity(64);
         blob.extend_from_slice(&rand::random::<[u8; 32]>());
         blob.extend_from_slice(&rand::random::<[u8; 32]>());
-        create_secret_file(path, &blob)?;
         blob
-    };
+    })?;
+    if blob.len() != 64 {
+        return Err("host identity file must be exactly 64 bytes".into());
+    }
     let mut ed25519_secret = [0u8; 32];
     ed25519_secret.copy_from_slice(&blob[..32]);
     let ml_dsa_seed =

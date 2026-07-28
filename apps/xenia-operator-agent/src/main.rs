@@ -61,8 +61,8 @@
 //!   and the leaf file alike -- is descriptor-relative and `O_NOFOLLOW`,
 //!   so neither a symlinked parent path component nor a symlink swapped in
 //!   for the leaf file itself can be followed, and each is also checked
-//!   owned by this process's uid. See `secure_file.rs`'s module doc comment
-//!   for the full reasoning.
+//!   owned by this process's uid. See the `xenia-secure-file` crate's
+//!   module doc comment for the full reasoning.
 //! - The seeds are held zeroize-on-drop (`zeroize::Zeroizing`) for as long
 //!   as this process holds them in memory.
 
@@ -79,7 +79,6 @@ mod daemon_evidence;
 mod handshake_state;
 mod host_trust;
 mod rate_limit;
-mod secure_file;
 
 use std::io::IsTerminal;
 use std::net::SocketAddr;
@@ -101,6 +100,7 @@ use xenia_operator_agent_proto::{
     SignReplaceKeyRequest, SignReplaceKeyResponse, SignRevokeRequest, SignRevokeResponse,
 };
 use xenia_operator_proto::{ConsentAction, OperatorEnrollmentRecord, OperatorRole};
+use xenia_secure_file::load_or_create_secure_file;
 use xenia_wire::handshake::ViewerHandshake;
 use xenia_wire::handshake_highsec::{
     ML_DSA_87_PK_LEN, ViewerHandshakeHighSec, derive_ml_dsa_87_seed_from_ed25519_secret,
@@ -1456,18 +1456,6 @@ fn load_or_create_token(path: &Path) -> Result<String, Box<dyn std::error::Error
     })?;
     Ok(String::from_utf8(bytes)?.trim().to_string())
 }
-
-/// Atomically create `path` with owner-only (`0600`) permissions set *at
-/// creation* (not chmod'd afterward -- there is no window where a racing
-/// process could open it before permissions are tightened) if it doesn't
-/// exist yet, writing `generate()`'s output and returning it. If `path`
-/// already exists, refuse to use it unless it's a regular file (not a
-/// symlink) owned by this process's user, then return its contents --
-/// closing off a symlink-swap or different-local-user substitution attack
-/// on a file this process is about to trust as key material. See
-/// `secure_file` for the implementation, shared with `host_trust`'s pin
-/// store.
-use secure_file::load_or_create_secure_file;
 
 #[cfg(test)]
 mod tests {

@@ -1,26 +1,52 @@
 // Copyright (c) 2026 Tristan Stoltz / Luminous Dynamics
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Filesystem helpers for the sensitive files this agent owns (identity,
-//! pairing token, host-trust pin store): atomic creation with owner-only
-//! (`0600`) permissions set *at creation* (never chmod'd afterward), a
-//! dedicated `0700` parent directory, and descriptor-relative, `O_NOFOLLOW`
-//! file access -- both the leaf file and its parent directory are opened
-//! via a file descriptor rather than checked-then-reopened by path, closing
-//! the TOCTOU window a `symlink_metadata()`-then-separate-`open()` pattern
-//! leaves open (an attacker swapping a regular file for a symlink between
-//! the check and the read), and rejecting an attacker-controlled *parent*
-//! directory, not just the final file. See `main.rs`'s module doc comment
-//! for why any of this matters.
+//! Filesystem helpers for the sensitive files `apps/xenia-peer` and
+//! `apps/xenia-operator-agent` persist (identity keys, pairing tokens,
+//! host-trust pins, the enrolled-operator policy): atomic creation with
+//! owner-only (`0600`) permissions set *at creation* (never chmod'd
+//! afterward), a dedicated `0700` parent directory, and descriptor-relative,
+//! `O_NOFOLLOW` file access -- both the leaf file and its parent directory
+//! are opened via a file descriptor rather than checked-then-reopened by
+//! path, closing the TOCTOU window a `symlink_metadata()`-then-separate-
+//! `open()` pattern leaves open (an attacker swapping a regular file for a
+//! symlink between the check and the read), and rejecting an
+//! attacker-controlled *parent* directory, not just the final file.
+//!
+//! **History**: originally lived only in `apps/xenia-operator-agent`
+//! (`secure_file.rs`), which was the first place this project needed
+//! TOCTOU-safe secret-file handling. `apps/xenia-peer`'s daemon
+//! independently grew its own, weaker version of the same "generate once
+//! or load existing" pattern across several key-loading functions in
+//! `main.rs` (a plain `path.exists()` check followed by a separate
+//! `std::fs::read`/chmod, not O_NOFOLLOW-protected) -- extracted here
+//! (`docs/roadmap/POST_RC1_HARDENING_PLAN.md` Track 4 / `NEXT_SESSION_PLAN_
+//! 2026-07-27.md` priority #4) so both binaries share one hardened
+//! implementation instead of drifting independently. Deliberately its own
+//! AGPL crate rather than folded into the permissively-licensed
+//! `xenia-peer-core` (Apache-2.0 OR MIT) -- this is operator-security-
+//! specific code with the same license as its only two consumers, matching
+//! the existing `xenia-operator-proto`/`xenia-operator-agent-proto`
+//! precedent rather than `xenia-peer-core`'s general-purpose scope.
+//!
+//! **Not a fit for every file-permission call site in this project**: the
+//! daemon's own atomic-write-with-fsync helpers (`operator.rs::write_atomic`,
+//! `audit_ledger_store.rs::persist_entries_atomic`, `consent_server.rs`'s
+//! equivalent) already create files at the correct mode atomically (not the
+//! chmod-after-write anti-pattern this crate exists to close) and provide
+//! `fsync`-the-data-then-the-directory crash-durability this crate's
+//! [`secure_overwrite`] does not attempt to replicate -- consolidating those
+//! into this crate would be a real behavior change (losing that durability
+//! guarantee), not a mechanical dedup, so they're deliberately left as-is.
 
 use std::path::Path;
 
 /// Load `path`'s contents if it exists and is safe to trust, or generate
 /// and atomically persist a fresh file (`0600`, no chmod-after-write
 /// window) if it doesn't exist yet, returning `generate()`'s output. For
-/// files with fixed content decided once at creation (the identity and
-/// token files) -- see [`secure_overwrite`] for files that are legitimately
-/// updated later (the host-trust pin store).
+/// files with fixed content decided once at creation (identity/token/key
+/// files) -- see [`secure_overwrite`] for files that are legitimately
+/// updated later (the host-trust pin store, the operator policy file).
 pub fn load_or_create_secure_file(
     path: &Path,
     generate: impl FnOnce() -> Vec<u8>,
@@ -29,8 +55,8 @@ pub fn load_or_create_secure_file(
 }
 
 /// Load `path`'s contents if it exists (checked safe first), or `None` if
-/// it doesn't exist yet -- the read-only half of the pin-store's
-/// load-then-maybe-[`secure_overwrite`] pattern.
+/// it doesn't exist yet -- the read-only half of a load-then-maybe-
+/// [`secure_overwrite`] pattern.
 pub fn read_secure_file_if_exists(
     path: &Path,
 ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
@@ -38,14 +64,14 @@ pub fn read_secure_file_if_exists(
 }
 
 /// Atomically replace `path`'s contents with `contents`, for a file that's
-/// legitimately updated over its lifetime (unlike the identity/token
-/// files, which are generated once and never rewritten). Writes to a fresh
-/// sibling temp file with owner-only permissions set at creation, then
-/// renames it over `path` -- `rename` is atomic within a filesystem, so
-/// there is no window where `path` holds a partially-written file, and no
-/// window where it's briefly world/group-readable. If `path` already
-/// exists, it's checked safe (regular file, owned by this process's user)
-/// before being replaced.
+/// legitimately updated over its lifetime (unlike identity/token/key files,
+/// which are generated once and never rewritten). Writes to a fresh sibling
+/// temp file with owner-only permissions set at creation, then renames it
+/// over `path` -- `rename` is atomic within a filesystem, so there is no
+/// window where `path` holds a partially-written file, and no window where
+/// it's briefly world/group-readable. If `path` already exists, it's
+/// checked safe (regular file, owned by this process's user) before being
+/// replaced.
 pub fn secure_overwrite(path: &Path, contents: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
     backend::overwrite(path, contents)
 }
@@ -126,6 +152,24 @@ mod backend {
         Ok(())
     }
 
+    /// Whether the owner check in [`open_secure_parent_dir`]/
+    /// [`open_secure_existing`] should be enforced for the process running
+    /// under `current_uid`. Root (`uid 0`) is exempt: the check exists to
+    /// stop a *lower*-privileged attacker from pre-planting a directory or
+    /// file this process would otherwise trust, but root already has
+    /// unrestricted read/write/chown access to the whole filesystem --
+    /// refusing to trust a directory root didn't create itself adds no
+    /// security there, while breaking legitimate deployments where a
+    /// state directory is provisioned by a separate, unprivileged
+    /// setup/installer step before the process itself runs as root (this
+    /// bit `apps/xenia-peer`'s own network-chaos CI smoke test: the state
+    /// directory is `mkdir`'d by the unprivileged runner user, then the
+    /// daemon runs inside a network namespace via `sudo ip netns exec`,
+    /// i.e. as root).
+    pub(super) fn owner_check_should_apply(current_uid: u32) -> bool {
+        current_uid != 0
+    }
+
     fn file_name_of(path: &Path) -> Result<&OsStr, Box<dyn std::error::Error>> {
         path.file_name()
             .ok_or_else(|| format!("{}: path has no file name", path.display()).into())
@@ -162,7 +206,7 @@ mod backend {
         )?);
         let meta = dir.metadata()?;
         let current_uid = rustix::process::getuid().as_raw();
-        if meta.uid() != current_uid {
+        if owner_check_should_apply(current_uid) && meta.uid() != current_uid {
             return Err(format!(
                 "{} is owned by uid {}, not this process's uid {current_uid} -- refusing to trust its contents",
                 parent.display(), meta.uid()
@@ -217,7 +261,7 @@ mod backend {
             return Err(format!("{file_name:?} is not a regular file").into());
         }
         let current_uid = rustix::process::getuid().as_raw();
-        if meta.uid() != current_uid {
+        if owner_check_should_apply(current_uid) && meta.uid() != current_uid {
             return Err(format!(
                 "{file_name:?} is owned by uid {}, not this process's uid {current_uid} -- refusing to use it",
                 meta.uid()
@@ -300,13 +344,12 @@ mod backend {
 mod tests {
     use super::*;
 
-    // Deliberately NOT pre-created here (unlike the old version of this
-    // helper) -- `secure_file.rs` itself is now responsible for creating
-    // its parent directory, and several new tests below assert on exactly
-    // that behavior.
+    // Deliberately NOT pre-created here -- this crate itself is responsible
+    // for creating its parent directory, and several tests below assert on
+    // exactly that behavior.
     fn temp_dir(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
-            "xenia-operator-agent-secure-file-test-{label}-{}",
+            "xenia-secure-file-test-{label}-{}",
             rand::random::<u64>()
         ))
     }
@@ -452,5 +495,20 @@ mod tests {
             Some(b"mine".to_vec())
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn owner_check_is_skipped_only_for_root() {
+        // Pure logic, independent of the actual uid this test happens to
+        // run under (CI runs it unprivileged; a real root-owned deployment
+        // is exercised by apps/xenia-peer's network-chaos smoke test, not
+        // reproducible here without actually being root).
+        assert!(
+            !backend::owner_check_should_apply(0),
+            "root must be exempt -- it already has unrestricted filesystem access"
+        );
+        assert!(backend::owner_check_should_apply(1));
+        assert!(backend::owner_check_should_apply(1001));
     }
 }

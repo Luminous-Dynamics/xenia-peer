@@ -19,6 +19,7 @@ xenia-transport-quic = { path = "../../crates/xenia-transport-quic" }
 xenia-ledger = { path = "../../crates/xenia-ledger" }
 xenia-inject = { path = "../../crates/xenia-inject" }
 xenia-operator-proto = { workspace = true }
+xenia-secure-file = { path = "../../crates/xenia-secure-file" }
 tokio-tungstenite = "0.24"
 
 xenia-wire = { workspace = true, features = ["consent", "reference-frame", "operator-rekey", "handshake"] }
