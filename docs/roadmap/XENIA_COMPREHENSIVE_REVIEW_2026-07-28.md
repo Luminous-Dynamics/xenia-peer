@@ -65,7 +65,24 @@ The README's own framing ("don't read *working, exercised end-to-end* as
 
 Ordered by severity. Every finding was verified against code, not inferred.
 
-### F1 — Pre-authentication denial of service: one idle socket bricks the daemon (High, latent-remote)
+### F1 — Pre-authentication denial of service: one idle socket bricks the daemon (High, latent-remote) — **FIXED 2026-07-28, verified**
+
+> **Status: fixed and verified by experiment**, in the same change that added
+> `THREAT_MODEL.md` §Availability. See "Verified fix" at the end of this
+> finding. The description below is retained as the record of the defect.
+>
+> **One correction to the original write-up, found by actually running it.**
+> This finding first said a stalled peer leaves the daemon "occupied". The
+> real behaviour is worse: in `accept_transport`, the `TcpListener` is a
+> *local* that drops when the function returns, so the listening socket is
+> **closed after the first accept**. A second client does not queue behind
+> the stalled one — it gets `ECONNREFUSED` (observed directly; see below).
+> The daemon serves exactly one connection *attempt* per process lifetime.
+>
+> That also means a *benign* premature disconnect was enough to end the
+> daemon's usable life, not just a malicious one — which independently
+> corroborates the note in `scripts/xenia-network-chaos-smoke.sh`'s comments
+> about "a TCP-connect probe that crashed the single-session daemon."
 
 **The daemon accepts exactly one connection, ever, and the handshake has no timeout.**
 
@@ -97,6 +114,24 @@ trivially-exploitable permanent DoS.
 Related asymmetry, same root: `operator_exposure::is_loopback_bind` guards
 `--operator-bind` with an explicit non-loopback warning (`main.rs:1598`), but
 is **never applied to `args.listen`**. The session port has no equivalent guard.
+
+**Verified fix.** A/B'd with a single binary, using
+`--handshake-timeout-secs 86400` to reproduce the pre-fix daemon exactly
+(effectively no deadline) against the shipped default:
+
+| Arm | Stalled peer attached | Real viewer result |
+|---|---|---|
+| Deadline 86400 s (= pre-fix) | yes | **denied** — `ECONNREFUSED`, daemon stuck in "Starting host-side handshake" |
+| Deadline 5 s (= fixed) | yes, *still attached* | **8/8 frames verified**, session completed |
+
+The fix is two things, and the regression test asserts both because either
+alone is insufficient: a deadline (`--handshake-timeout-secs`, default 30) and
+an accept-retry loop. A deadline *without* the retry would only convert a
+silent hang into an exit — still a denial of service an attacker triggers at
+will. Guarded by `scripts/xenia-stalled-peer-smoke.sh`, wired into
+`xenia-validate.yml` as the `stalled-peer` job on every push/PR. It asserts a
+real viewer completes a real verified session *while the stalled peer is still
+connected*, rather than merely grepping for a timeout log line.
 
 ### F2 — The threat model has no availability dimension at all (Medium — root cause of F1)
 

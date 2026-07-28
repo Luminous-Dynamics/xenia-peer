@@ -67,6 +67,34 @@ jobs:
           chmod +x scripts/*.sh
           scripts/xenia-network-chaos-smoke.sh .
 
+  # Availability regression guard (THREAT_MODEL.md §Availability, and F1 in
+  # docs/roadmap/XENIA_COMPREHENSIVE_REVIEW_2026-07-28.md): a peer that
+  # connects and never completes the handshake must not stop a legitimate
+  # viewer from getting a session. Cheaper than network-chaos above -- pure
+  # loopback, no namespaces, no sudo, no compositor -- so it runs on every
+  # push/PR too. Asserts end-to-end (a real verified viewer session while the
+  # stalled peer is still attached), not just that a timeout was logged,
+  # because a deadline without the accept-retry would still be a DoS.
+  stalled-peer:
+    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: stalled-peer-cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            stalled-peer-cargo-${{ runner.os }}-
+      - name: Stalled-peer availability smoke test
+        run: |
+          chmod +x scripts/*.sh
+          scripts/xenia-stalled-peer-smoke.sh .
+
 
   # `flake.nix` is always present in this repo, so this job runs
   # unconditionally -- it used to guard on `if: hashFiles('flake.nix') !=
