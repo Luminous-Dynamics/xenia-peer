@@ -80,29 +80,31 @@ Full reasoning: [ADR-001 §Decision 3](docs/ADR-001-m0-architecture.md).
 
 ## Status
 
-The single source of truth for what's done, blocked, and queued is
-[`ROADMAP.md`](ROADMAP.md). Short version:
+*Verified against commit [`b0ab93b`](https://github.com/Luminous-Dynamics/xenia-peer/commit/b0ab93b212d862080ae06be50ad9f23206a75a6e) on 2026-07-28.* The
+single source of truth for exact detail is [`ROADMAP.md`](ROADMAP.md) —
+this table is a compressed, reconciled summary of it (a previous
+version of this section contradicted both the box above and
+`ROADMAP.md` itself by describing real capture and the consent UI as
+still-blocked; that was stale, not a live limitation).
 
-**Live today** — TCP, WebSocket, and Iroh QUIC daemon/viewer
-transports, shared transport conformance coverage, passthrough codec
-by default, H.264 / HDC behind feature flags, and native CLI / egui
-viewer paths. The daemon sends synthetic capture frames through
-capture → encode → `xenia-wire` seal → transport, and the viewer can
-verify passthrough frames byte-for-byte. The daemon also samples host
-telemetry via `sysinfo` and sends it as sealed metadata frames on the
-same session; the GUI viewer shows the latest CPU/memory values in a
-host panel. A synthetic raw-audio lane is available for protocol
-bring-up and jitter accounting; it does not use device capture,
-playback, cpal, or Opus yet.
+| Capability | Status |
+|---|---|
+| Transports: TCP, WebSocket, Iroh QUIC | **Working, exercised end-to-end** — loopback + LAN, shared conformance suite |
+| PQC handshake (ML-KEM-768/1024 + Ed25519 + ML-DSA) | **Working, exercised end-to-end** — native and browser (WASM), cross-compat tested |
+| Screen capture (`scap`-backed) | **Working, exercised end-to-end on KDE-Wayland** (real 1920×1080, 16.76fps) — **implemented but not yet exercised** on GNOME-Wayland (blocked on an environmental GPU/virglrenderer issue in test-VM, not a code defect), wlroots, macOS, or Windows |
+| Input injection (`xdg-desktop-portal` + `uinput`) | **Working, exercised end-to-end on KDE-Wayland** (real pointer/key/touch injection, real consent dialog) — wlroots-native and Wayland-virtual backends still **planned** |
+| Consent-ceremony UI + ledger | **Working, exercised end-to-end** — real Approve/Deny flow, embedded operator console, hash-chained signed ledger |
+| Operator RBAC + PQC-sealed operator channel | **Working, exercised end-to-end** — role hierarchy, TOFU host-fingerprint pinning, live revocation |
+| H.264 codec (native + browser via WebCodecs) | **Working, exercised end-to-end** natively and in headless-Chromium; passthrough codec is the default |
+| Audio capture/playback | **Working** per T3.1 in ROADMAP — synthetic-audio lane is separate protocol-bring-up scaffolding, not the current audio status |
+| Phone-as-viewer-source (scrcpy) | **Working, exercised end-to-end** against a real Pixel 8 Pro at ~4fps sustained (H.264); passthrough/HDC codecs hit an encode-side bottleneck at that resolution |
+| X11 capture | **Explicitly out of scope** — X11's security model is incompatible with Xenia's consent-gated threat model; a community fork is the sanctioned path |
+| Clipboard, file transfer, richer transport fallback | **Planned** — see ROADMAP §"From Symthaea: carry-wholesale backlog" |
 
-**Hard blockers before real deployment** — real host capture beyond
-synthetic frames, consent-ceremony UI, and browser-viewer handshake
-wiring. See ROADMAP §"Hard blockers for real deployment".
-
-**Still-to-carry from Symthaea** — platform input backend wiring,
-clipboard, file transfer, audio, recording, and richer transport
-fallback policy. See ROADMAP §"From Symthaea: carry-wholesale
-backlog".
+None of this is a finished security story yet — see
+`docs/security/OPERATOR_SECURITY_MODEL.md` for the current threat
+model and open gaps, and don't read "working, exercised end-to-end"
+above as "audited" or "production-ready."
 
 Full VIEWER_PLAN (the parent design doc) is in the sibling repo:
 [`plans/VIEWER_PLAN.md`](https://github.com/Luminous-Dynamics/xenia-wire/blob/main/plans/VIEWER_PLAN.md).
