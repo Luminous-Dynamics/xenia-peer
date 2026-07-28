@@ -196,6 +196,17 @@ struct Args {
     #[arg(long, default_value_t = 120)]
     consent_timeout_secs: u64,
 
+    /// Seconds a connected peer has to complete the handshake before the
+    /// daemon drops it and accepts the next one.
+    ///
+    /// Availability control, not a performance knob: without a deadline here,
+    /// a peer that connects and simply never sends its handshake response
+    /// parks the daemon's single session slot forever (`read_exact` has no
+    /// deadline of its own), which is a pre-auth denial of service costing
+    /// the attacker one idle socket. See `THREAT_MODEL.md` §Availability.
+    #[arg(long, default_value_t = 30)]
+    handshake_timeout_secs: u64,
+
     #[arg(long, default_value_t = 1_000)]
     telemetry_interval_ms: u64,
 
@@ -1604,6 +1615,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    // The session listener had no exposure guard at all until 2026-07-28,
+    // only the operator surface above did. Unlike that surface this one is
+    // reachable pre-authentication by design (a viewer has to connect before
+    // it can handshake), so the warning is about availability rather than
+    // forgery: --handshake-timeout-secs is what keeps an unauthenticated peer
+    // from parking the single session slot. See THREAT_MODEL.md §Availability.
+    if !crate::operator_exposure::is_loopback_listen_addr(&args.listen) {
+        tracing::warn!(
+            listen = %args.listen,
+            handshake_timeout_secs = args.handshake_timeout_secs,
+            "session listener bound to a NON-loopback address — any host that can reach it \
+             can occupy the accept path until the handshake deadline expires. Restrict it at \
+             the network layer if this host isn't meant to accept viewers from anywhere."
+        );
+    }
+
     if args.m1_runtime_smoke {
         run_m1_runtime_smoke(
             source_id,
@@ -1976,36 +2003,97 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    let mut transport = accept_transport(&args, audio_advertisement.clone()).await?;
-    let negotiated_transport = transport.negotiated_transport();
-    let mut session = LaneSession::with_fixture(source_id, args.epoch);
-    let frame_format = codec_to_frame_format(args.codec);
-    let capabilities = session_capabilities_frame(
-        session.next_frame_id(),
-        audio_advertisement.clone(),
-        frame_format,
-        args.telemetry_level,
-        args.input_backend,
-        args.clipboard,
-    )?;
-    let negotiated_context_hash = negotiated_session_context_hash(
-        negotiated_transport,
-        xenia_peer_core::RawCapabilities::from_frame(&capabilities)?,
-    )?;
-
+    // The host identity is persistent and must be loaded exactly once, not
+    // per accept attempt -- it is the fingerprint operators pin out of band.
     let mut mgr = load_or_create_host_identity(&args.host_identity_key_path)?;
     info!(
         fingerprint = %hex::encode(mgr.identity_fingerprint()),
         path = %args.host_identity_key_path.display(),
         "host signing identity loaded; share this fingerprint out-of-band for viewer pinning"
     );
-    let handshake = perform_host_handshake_with_transcript_and_context(
-        &mut transport,
-        &mut mgr,
-        "viewer",
-        Some(negotiated_context_hash),
-    )
-    .await?;
+
+    // Accept a peer and complete its handshake, retrying until one succeeds.
+    //
+    // Both halves of this loop are load-bearing for availability, and neither
+    // is sufficient alone (THREAT_MODEL.md §Availability):
+    //
+    //   * the deadline stops a peer that connects and never sends its
+    //     handshake response from parking us forever -- `read_exact` under
+    //     `recv_envelope` has no deadline of its own;
+    //   * the retry stops that peer from consuming the daemon's single
+    //     session slot. With a deadline but no retry, a stalled peer would
+    //     just convert a silent hang into an exit, which is still a denial of
+    //     service an attacker can trigger at will with one idle socket.
+    //
+    // Per-session state (`session`, `capabilities`, and the context hash that
+    // binds them into the transcript) is rebuilt on each attempt so a failed
+    // peer cannot leave partially-advanced state behind for the next one.
+    // Re-entering `accept_transport` rebinds the listener, which is safe:
+    // mio sets SO_REUSEADDR on every TcpListener bind.
+    let handshake_deadline = Duration::from_secs(args.handshake_timeout_secs.max(1));
+    let (
+        mut transport,
+        negotiated_transport,
+        mut session,
+        frame_format,
+        capabilities,
+        negotiated_context_hash,
+        handshake,
+    ) = loop {
+        let mut transport = accept_transport(&args, audio_advertisement.clone()).await?;
+        let negotiated_transport = transport.negotiated_transport();
+        let mut session = LaneSession::with_fixture(source_id, args.epoch);
+        let frame_format = codec_to_frame_format(args.codec);
+        let capabilities = session_capabilities_frame(
+            session.next_frame_id(),
+            audio_advertisement.clone(),
+            frame_format,
+            args.telemetry_level,
+            args.input_backend,
+            args.clipboard,
+        )?;
+        let negotiated_context_hash = negotiated_session_context_hash(
+            negotiated_transport,
+            xenia_peer_core::RawCapabilities::from_frame(&capabilities)?,
+        )?;
+
+        match tokio::time::timeout(
+            handshake_deadline,
+            perform_host_handshake_with_transcript_and_context(
+                &mut transport,
+                &mut mgr,
+                "viewer",
+                Some(negotiated_context_hash),
+            ),
+        )
+        .await
+        {
+            Ok(Ok(handshake)) => {
+                break (
+                    transport,
+                    negotiated_transport,
+                    session,
+                    frame_format,
+                    capabilities,
+                    negotiated_context_hash,
+                    handshake,
+                );
+            }
+            Ok(Err(err)) => {
+                warn!(
+                    error = %err,
+                    "peer failed the handshake; dropping it and accepting the next one"
+                );
+            }
+            Err(_) => {
+                warn!(
+                    timeout_secs = args.handshake_timeout_secs,
+                    "peer did not complete the handshake before the deadline; dropping it \
+                     and accepting the next one"
+                );
+            }
+        }
+    };
     info!("Handshake successful, session key established and transcript hash computed");
 
     // Consent Ceremony: the real decision arrives over --consent-port as a

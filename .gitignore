@@ -20,3 +20,6 @@ __pycache__/
 *.py[cod]
 _archive/**/generated-cache/
 _archive/**/xenia-validate-*.log
+
+# Local test VM images (multi-GB, never committed).
+*.qcow2

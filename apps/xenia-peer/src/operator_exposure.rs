@@ -32,6 +32,28 @@ pub(crate) fn is_loopback_bind(bind: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether a full `host:port` listen address is loopback-only.
+///
+/// [`is_loopback_bind`] takes a bare host (the operator surface's
+/// `--operator-bind`), but the session listener's `--listen` carries a port
+/// too, so it needs its own entry point rather than being passed a string
+/// that would never parse as an `IpAddr`. Same fail-safe posture: anything
+/// we cannot positively identify as loopback is treated as exposed.
+pub(crate) fn is_loopback_listen_addr(addr: &str) -> bool {
+    if let Ok(sock) = addr.parse::<std::net::SocketAddr>() {
+        return sock.ip().is_loopback();
+    }
+    // Not a bare socket address (e.g. `localhost:8080`, or a bracketed IPv6
+    // literal we should still split). Strip the port and reuse the host check.
+    let host = match addr.rfind(':') {
+        // Only treat the last `:` as a port separator when it isn't part of
+        // an unbracketed IPv6 literal (which has several).
+        Some(idx) if addr.starts_with('[') || addr.matches(':').count() == 1 => &addr[..idx],
+        _ => addr,
+    };
+    is_loopback_bind(host)
+}
+
 /// Refuse to expose the operator surface beyond loopback without operator
 /// auth. Returns the operator-facing error message to abort startup with.
 pub(crate) fn validate_operator_exposure(
@@ -71,6 +93,23 @@ mod tests {
         assert!(!is_loopback_bind("::"));
         // A hostname we can't resolve here is treated as non-loopback.
         assert!(!is_loopback_bind("ops.example.org"));
+    }
+
+    #[test]
+    fn listen_addresses_with_ports_are_classified() {
+        // The session listener's default, and its exposed counterparts.
+        assert!(is_loopback_listen_addr("127.0.0.1:8080"));
+        assert!(is_loopback_listen_addr("[::1]:8080"));
+        assert!(is_loopback_listen_addr("localhost:8080"));
+        assert!(!is_loopback_listen_addr("0.0.0.0:8080"));
+        assert!(!is_loopback_listen_addr("192.168.1.10:8080"));
+        assert!(!is_loopback_listen_addr("[::]:8080"));
+        // Bare hosts still work, so the two helpers can't disagree.
+        assert!(is_loopback_listen_addr("127.0.0.1"));
+        assert!(!is_loopback_listen_addr("0.0.0.0"));
+        // An unbracketed IPv6 literal must not be mistaken for host:port and
+        // silently truncated into something that parses as loopback.
+        assert!(!is_loopback_listen_addr("2001:db8::1"));
     }
 
     #[test]
