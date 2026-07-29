@@ -994,6 +994,16 @@ impl M1RuntimeSession {
         self.flush_new_audit_events()
     }
 
+    pub(crate) fn stream_telemetry(&mut self) -> Result<(), M1RuntimeError> {
+        self.session.stream_telemetry()?;
+        self.flush_new_audit_events()
+    }
+
+    pub(crate) fn stream_audio(&mut self) -> Result<(), M1RuntimeError> {
+        self.session.stream_audio()?;
+        self.flush_new_audit_events()
+    }
+
     pub(crate) fn inject_input(&mut self) -> Result<(), M1RuntimeError> {
         self.session.inject_input()?;
         self.flush_new_audit_events()
@@ -1023,6 +1033,23 @@ impl M1RuntimeSession {
         self.stream_frame()
     }
 
+    pub(crate) fn allow_telemetry_flow(&mut self) -> Result<(), M1RuntimeError> {
+        self.stream_telemetry()
+    }
+
+    pub(crate) fn allow_audio_flow(&mut self) -> Result<(), M1RuntimeError> {
+        self.stream_audio()
+    }
+
+    /// Cheap pre-check ("is a session even active at all") run before
+    /// expensive work (polling telemetry samples, reading the audio
+    /// device) that shouldn't happen for a session that can't possibly
+    /// use the result. Intentionally coarse and shared across the frame/
+    /// telemetry/audio forward paths -- it does NOT check which
+    /// permission tier is granted, only that *some* session is active.
+    /// The real per-tier enforcement is `allow_frame_flow`/
+    /// `allow_telemetry_flow`/`allow_audio_flow`, called after the work
+    /// is done and right before the sealed envelope is actually sent.
     pub(crate) fn preflight_frame_flow(&self) -> Result<(), M1RuntimeError> {
         if self.session.state() == M1SessionState::Active {
             Ok(())
