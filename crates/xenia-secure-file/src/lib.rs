@@ -729,8 +729,18 @@ mod backend {
             let owner = current_user_sid_string()?;
             let descriptor = owner_only_security_descriptor(&owner)?;
             let attrs = security_attributes(&descriptor);
-            unsafe {
-                CreateDirectoryW(&HSTRING::from(parent), Some(&attrs))?;
+            // Match std::fs::create_dir_all's idempotency, not raw
+            // CreateDirectoryW's: two callers can both observe
+            // `!parent.exists()` and race here (this is exactly what
+            // the concurrent-racers test below exercises) -- the loser
+            // gets ERROR_ALREADY_EXISTS, which is the *expected*, benign
+            // outcome of that race, not a real failure. Whoever actually
+            // created it, both proceed to open+verify the same directory
+            // below regardless of who won.
+            match unsafe { CreateDirectoryW(&HSTRING::from(parent), Some(&attrs)) } {
+                Ok(()) => {}
+                Err(e) if e.code() == HRESULT::from_win32(ERROR_ALREADY_EXISTS.0) => {}
+                Err(e) => return Err(e.into()),
             }
         }
         let raw = unsafe {
