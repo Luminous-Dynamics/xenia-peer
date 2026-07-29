@@ -21,17 +21,37 @@ tracing.workspace = true
 # libspa on Linux) that only the nix-develop environment provides. See
 # mycelix-sovereign/docs/adr/0001-screen-capture-backend.md for the decision.
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
-# Pointing at our Luminous-Dynamics fork of scap with the Linux-engine fix
-# (two-level Frame::Video(VideoFrame::*) enum + SystemTime display_time).
-# Upstream PR: https://github.com/CapSoftware/scap/pull/183.  When the fix
-# merges and a release cuts, we can switch back to the crates.io version.
+# Points at Luminous-Dynamics/scap, a *deliberately maintained* downstream of
+# CapSoftware/scap -- not a temporary fork waiting on upstream.
+#
+# It carries three Linux-engine fixes, all offered upstream as
+# https://github.com/CapSoftware/scap/pull/183:
+#   1. two-level Frame::Video(VideoFrame::*) enum + SystemTime display_time
+#      (upstream's Linux engine does not compile against the current enum);
+#   2. a bounded internal frame channel (the unbounded one leaked ~1.44 GB of
+#      1.47 GB in a 25.76 s heaptrack repro -- see ROADMAP.md's B2 follow-up);
+#   3. PipeWire format advertisement matching what the engine can decode
+#      (RGBA was advertised with no decode arm; xBGR was decodable but never
+#      advertised -- a pre-existing upstream bug, not one PR #183 introduced).
+#
+# Maintenance policy (see that repo's README):
+#   * pin an EXACT rev, never a branch -- a mutable pin is not a pin, and a
+#     branch pin silently re-resolves on `cargo update`;
+#   * keep divergence minimal and upstream-first;
+#   * re-sync when upstream moves. It last moved 2025-08-05, which is why this
+#     downstream exists rather than us waiting for a release. Do not make
+#     Xenia's buildability depend on that repo's pace.
+#
+# The repo is public. It was briefly private, which made this public repo
+# anonymously unbuildable and made CI green only via warm caches -- see
+# docs/roadmap/XENIA_COMPREHENSIVE_REVIEW_2026-07-28.md finding F5.
 #
 # The `scap-backend` feature enables Linux PipeWire capture (xdg-desktop-
 # portal on GNOME/KDE, xdg-desktop-portal-wlr on wlroots), macOS
 # ScreenCaptureKit, Windows Graphics Capture.  Linux builds require
 # libpipewire-0.3 + libspa-0.2 + libdbus-1 dev headers, provided by
 # `nix develop` inside the xenia-peer workspace.
-scap = { git = "https://github.com/Luminous-Dynamics/scap", branch = "fix/linux-engine-two-level-frame-enum", optional = true }
+scap = { git = "https://github.com/Luminous-Dynamics/scap", rev = "0ff8e89cffb9dd41f5a2cbaa3d6c2c84f2a6ff38", optional = true }
 cpal = { version = "0.15.3", optional = true }
 
 [features]
