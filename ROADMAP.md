@@ -21,6 +21,7 @@ If this file disagrees with reality, the file is wrong.
 | CI (GitHub Actions) | ✅ | fmt + clippy + test (ubuntu/macos/windows) + MSRV 1.94 + docs + h264 matrix |
 | ADR-001 architecture decisions | ✅ | `docs/ADR-001-m0-architecture.md` — monorepo, Wayland-exclusive, AGPL split |
 | ADR-002 library licensing | ✅ | `docs/ADR-002-library-licensing.md` — all library crates Apache/MIT; binaries AGPL. Extends ADR-001. |
+| ADR-003 secure-file trust contract | ✅ | `docs/ADR-003-secure-file-trust-contract.md` — removes the implicit root ownership exemption in `xenia-secure-file`, defines the owner/symlink/ACL/atomicity/durability contract every platform backend must meet. Implementation tracked as separate follow-up items (Unix ownership fix + CI fixture, Windows ACL backend). |
 
 ### Codecs (3)
 
