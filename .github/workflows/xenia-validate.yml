@@ -120,6 +120,54 @@ jobs:
       - name: Validate inside Nix CI shell
         run: nix develop .#ci -c bash scripts/xenia-validate.sh .
 
+  # A4 of docs/roadmap/XENIA_EXPANSION_PLAN_REVIEW_2026-07-29.md.
+  #
+  # `scap-backend` is Xenia's PRIMARY capture backend per ADR-0001, and until
+  # this job existed **no workflow compiled it at all** -- the flake pins its
+  # outputHash only so the git dependency resolves, and every other job builds
+  # with the feature off. The consequences were not hypothetical: the Linux
+  # engine break and the Windows `Frame::timespan()` -> `timestamp()` break
+  # were both found by hand, months apart, by someone happening to compile it.
+  #
+  # `--all-targets` is load-bearing, not thoroughness for its own sake:
+  # `capture_bench` is an `[[example]]` gated behind
+  # `required-features = ["scap-backend"]`, so a plain `cargo check -p
+  # xenia-capture` never sees it -- and it is the one target that drives the
+  # capture API the way a real consumer does.
+  #
+  # `--no-run` builds the test binaries without executing them. That is
+  # deliberate: a headless runner has no compositor and no xdg-desktop-portal,
+  # so *running* capture would fail for environmental reasons and tell us
+  # nothing. This job proves the code compiles against real libpipewire/libspa
+  # headers; live capture validation stays manual (see ROADMAP.md B2).
+  #
+  # Needs the nix devshell for libpipewire-0.3 + libspa-0.2 + libdbus-1 dev
+  # headers; `.#ci` carries the same system libraries as `.#default`.
+  scap-backend:
+    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: scap-backend-cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            scap-backend-cargo-${{ runner.os }}-
+      - name: Compile the scap capture backend (lib + example + tests)
+        run: |
+          nix develop .#ci -c cargo test --no-run --all-targets \
+            -p xenia-capture --features scap-backend
+
   # Item 6 of docs/security/POST_DELEGATION_HARDENING_PLAN.md: the real
   # browser-driven vertical slice -- launches the actual xenia-peer daemon,
   # xenia-operator-agent, xenia-viewer, and the compiled sovereign-admin
