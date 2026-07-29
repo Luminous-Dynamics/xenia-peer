@@ -152,22 +152,23 @@ mod backend {
         Ok(())
     }
 
-    /// Whether the owner check in [`open_secure_parent_dir`]/
-    /// [`open_secure_existing`] should be enforced for the process running
-    /// under `current_uid`. Root (`uid 0`) is exempt: the check exists to
-    /// stop a *lower*-privileged attacker from pre-planting a directory or
-    /// file this process would otherwise trust, but root already has
-    /// unrestricted read/write/chown access to the whole filesystem --
-    /// refusing to trust a directory root didn't create itself adds no
-    /// security there, while breaking legitimate deployments where a
-    /// state directory is provisioned by a separate, unprivileged
-    /// setup/installer step before the process itself runs as root (this
-    /// bit `apps/xenia-peer`'s own network-chaos CI smoke test: the state
-    /// directory is `mkdir`'d by the unprivileged runner user, then the
-    /// daemon runs inside a network namespace via `sudo ip netns exec`,
-    /// i.e. as root).
-    pub(super) fn owner_check_should_apply(current_uid: u32) -> bool {
-        current_uid != 0
+    /// Whether a file/directory owned by `owner_uid` is trusted by a
+    /// process running as `current_uid`: only when they're an exact match.
+    ///
+    /// See ADR-003 (`docs/ADR-003-secure-file-trust-contract.md`) --
+    /// a prior version of this exempted `current_uid == 0` (root)
+    /// specifically, to unblock a CI topology (a network-chaos smoke test
+    /// whose daemon ran root-owned inside a network namespace, over a
+    /// state directory `mkdir`'d by an unprivileged runner user
+    /// beforehand). That exemption is deliberately removed: a privileged
+    /// process gets no special trust for filesystem state it didn't
+    /// create itself -- the CI script now drops privileges before running
+    /// the daemon instead. If a genuine need to trust state provisioned
+    /// under a *different*, explicitly known account ever arises, ADR-003
+    /// requires that to be an opt-in exception declared by the caller, not
+    /// a blanket privilege-based exemption like this one used to be.
+    pub(super) fn owner_is_trusted(owner_uid: u32, current_uid: u32) -> bool {
+        owner_uid == current_uid
     }
 
     fn file_name_of(path: &Path) -> Result<&OsStr, Box<dyn std::error::Error>> {
@@ -181,12 +182,13 @@ mod backend {
     }
 
     /// Open (or create, `0700`) `path`'s parent directory and return it as
-    /// a verified descriptor-relative anchor: owned by this process's uid,
-    /// opened `O_NOFOLLOW` so a symlinked parent path component is refused
-    /// rather than silently followed. Every other helper in this module
-    /// opens files relative to this directory, not by re-walking `path`
-    /// from scratch, so a parent-directory swap after this check can't
-    /// affect the subsequent open.
+    /// a verified descriptor-relative anchor: owned by this process's uid
+    /// (see [`owner_is_trusted`] -- applies uniformly, no exemption for
+    /// any uid), opened `O_NOFOLLOW` so a symlinked parent path component
+    /// is refused rather than silently followed. Every other helper in
+    /// this module opens files relative to this directory, not by
+    /// re-walking `path` from scratch, so a parent-directory swap after
+    /// this check can't affect the subsequent open.
     fn open_secure_parent_dir(path: &Path) -> Result<File, Box<dyn std::error::Error>> {
         let parent = path
             .parent()
@@ -206,7 +208,7 @@ mod backend {
         )?);
         let meta = dir.metadata()?;
         let current_uid = rustix::process::getuid().as_raw();
-        if owner_check_should_apply(current_uid) && meta.uid() != current_uid {
+        if !owner_is_trusted(meta.uid(), current_uid) {
             return Err(format!(
                 "{} is owned by uid {}, not this process's uid {current_uid} -- refusing to trust its contents",
                 parent.display(), meta.uid()
@@ -261,7 +263,7 @@ mod backend {
             return Err(format!("{file_name:?} is not a regular file").into());
         }
         let current_uid = rustix::process::getuid().as_raw();
-        if owner_check_should_apply(current_uid) && meta.uid() != current_uid {
+        if !owner_is_trusted(meta.uid(), current_uid) {
             return Err(format!(
                 "{file_name:?} is owned by uid {}, not this process's uid {current_uid} -- refusing to use it",
                 meta.uid()
@@ -499,16 +501,27 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn owner_check_is_skipped_only_for_root() {
+    fn no_uid_is_exempt_from_the_ownership_check() {
         // Pure logic, independent of the actual uid this test happens to
-        // run under (CI runs it unprivileged; a real root-owned deployment
-        // is exercised by apps/xenia-peer's network-chaos smoke test, not
-        // reproducible here without actually being root).
+        // run under. Regression test for ADR-003
+        // (`docs/ADR-003-secure-file-trust-contract.md`): this crate used
+        // to exempt uid 0 (root) from the ownership check entirely; that
+        // exemption is deliberately gone, so a mismatch involving uid 0
+        // must be refused exactly like any other mismatch, in both
+        // directions.
         assert!(
-            !backend::owner_check_should_apply(0),
-            "root must be exempt -- it already has unrestricted filesystem access"
+            !backend::owner_is_trusted(1000, 0),
+            "a process running as root must not get a free pass over state it doesn't own"
         );
-        assert!(backend::owner_check_should_apply(1));
-        assert!(backend::owner_check_should_apply(1001));
+        assert!(
+            !backend::owner_is_trusted(0, 1000),
+            "an unprivileged process must not be trusted with root-owned state either"
+        );
+        assert!(
+            backend::owner_is_trusted(0, 0),
+            "root trusting state root itself owns is still fine -- this isn't refusing root outright"
+        );
+        assert!(backend::owner_is_trusted(1000, 1000));
+        assert!(!backend::owner_is_trusted(1000, 1001));
     }
 }
