@@ -469,6 +469,11 @@ struct Args {
     /// `uinput` build feature and `/dev/uinput` access -- root, `input`
     /// group membership, or a udev rule); unlike `xdg-portal`, this
     /// needs no compositor, portal, or active desktop session at all.
+    /// `windows` injects via Win32 `SendInput` (requires the
+    /// `windows-sendinput` build feature; Windows only). `macos`
+    /// injects via CoreGraphics `CGEvent` (requires the
+    /// `macos-cgevent` build feature; macOS only, and triggers the
+    /// OS's own Accessibility permission prompt on first real use).
     #[arg(long, value_enum, default_value_t = InputBackendChoice::Noop)]
     input_backend: InputBackendChoice,
 
@@ -526,6 +531,10 @@ enum InputBackendChoice {
     XdgPortal,
     #[cfg(feature = "uinput")]
     Uinput,
+    #[cfg(all(feature = "windows-sendinput", target_os = "windows"))]
+    Windows,
+    #[cfg(all(feature = "macos-cgevent", target_os = "macos"))]
+    Macos,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -1090,6 +1099,32 @@ fn build_input_injector(
                     warn!(
                         error = %err,
                         "UinputInjector construction failed; input events will be discarded"
+                    );
+                    Box::new(NoopInjector)
+                }
+            }
+        }
+        #[cfg(all(feature = "windows-sendinput", target_os = "windows"))]
+        InputBackendChoice::Windows => {
+            match xenia_inject::WindowsInjector::new(screen_width, screen_height) {
+                Ok(injector) => Box::new(injector),
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        "WindowsInjector construction failed; input events will be discarded"
+                    );
+                    Box::new(NoopInjector)
+                }
+            }
+        }
+        #[cfg(all(feature = "macos-cgevent", target_os = "macos"))]
+        InputBackendChoice::Macos => {
+            match xenia_inject::MacosInjector::new(screen_width, screen_height) {
+                Ok(injector) => Box::new(injector),
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        "MacosInjector construction failed; input events will be discarded"
                     );
                     Box::new(NoopInjector)
                 }

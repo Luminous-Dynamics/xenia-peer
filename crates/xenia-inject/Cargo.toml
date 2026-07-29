@@ -30,6 +30,25 @@ tokio = { version = "1", optional = true, features = ["rt", "sync", "time"] }
 input-linux = { version = "0.7.1", optional = true }
 nix = { version = "0.29", optional = true }
 
+# SendInput backend for Windows (see src/windows.rs). Talks to user32
+# directly -- Windows has no portal/consent-dialog layer analogous to
+# xdg-desktop-portal, so this is the same trust model as `uinput`
+# (host-level access is the only gate). Microsoft's official binding,
+# feature-gated to just the two Win32 modules this backend needs.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# CGEvent backend for macOS (see src/macos.rs). Same direct-to-OS trust
+# model as `uinput`/`windows-sendinput` -- macOS's own gate is the
+# Accessibility permission the OS prompts for on first real use, not
+# anything this crate mediates.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = { version = "0.24", optional = true }
+
 [features]
 default = []
 # wlr-virtual-pointer-v1 + zwp-virtual-keyboard-v1 backend for
@@ -44,6 +63,14 @@ uinput = ["dep:input-linux", "dep:nix"]
 # no host permissions beyond the interactive consent dialog). Primary
 # backend per the xenia-capture precedent for portal-based Linux paths.
 xdg-portal = ["dep:ashpd", "dep:tokio"]
+# Win32 SendInput backend. Real mouse/keyboard injection on Windows;
+# no-op to enable on any other target (the `windows` dependency only
+# exists in the windows-target table above, and src/windows.rs is
+# additionally target_os-gated).
+windows-sendinput = ["dep:windows"]
+# CoreGraphics CGEvent backend. Real mouse/keyboard injection on macOS;
+# no-op to enable on any other target, same shape as windows-sendinput.
+macos-cgevent = ["dep:core-graphics"]
 
 [dev-dependencies]
 bincode = "1.3"

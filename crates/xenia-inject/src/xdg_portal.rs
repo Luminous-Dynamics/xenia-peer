@@ -37,23 +37,19 @@ use ashpd::desktop::remote_desktop::{DeviceType, RemoteDesktop};
 use ashpd::desktop::{PersistMode, Session};
 use ashpd::enumflags2::BitFlags;
 
-use crate::{InjectError, InputInjector};
+use crate::{InjectError, InputInjector, evdev_button_code};
 
-/// Linux evdev button codes (the portal's documented convention for
-/// `NotifyPointerButton`). See `linux/input-event-codes.h`.
-const BTN_LEFT: i32 = 0x110;
-const BTN_RIGHT: i32 = 0x111;
-const BTN_MIDDLE: i32 = 0x112;
-
+/// Linux evdev button code for `NotifyPointerButton` (the portal's
+/// documented convention). Delegates to the crate-wide canonical
+/// mapping (`lib.rs::evdev_button_code`) -- this function used to have
+/// its own formula-based implementation that disagreed with
+/// `UinputInjector`'s explicit match on button 3 (`BTN_EXTRA` instead
+/// of `BTN_SIDE`); see that function's doc comment for how it was
+/// found. Kept as a thin wrapper (rather than inlining the call at
+/// each site) so this module's two call sites don't need to know the
+/// shared function lives in the crate root.
 fn evdev_button(button: u8) -> i32 {
-    match button {
-        0 => BTN_LEFT,
-        1 => BTN_MIDDLE,
-        2 => BTN_RIGHT,
-        // Aux buttons: BTN_SIDE=0x113, BTN_EXTRA=0x114, ... follow evdev
-        // sequentially past BTN_MIDDLE.
-        n => BTN_MIDDLE + i32::from(n) - 1,
-    }
+    evdev_button_code(button) as i32
 }
 
 fn key_state(pressed: bool) -> ashpd::desktop::remote_desktop::KeyState {
@@ -62,6 +58,15 @@ fn key_state(pressed: bool) -> ashpd::desktop::remote_desktop::KeyState {
     } else {
         ashpd::desktop::remote_desktop::KeyState::Released
     }
+}
+
+/// Denormalize a `[0.0, 1.0]` coordinate into pixels against `extent`
+/// (screen width or height). Pure, so it's unit-testable without a
+/// live portal session -- pulled out of `XdgPortalInjector::denorm_x`/
+/// `denorm_y` (which just forward to this with `self.screen_width`/
+/// `self.screen_height`) for exactly that reason.
+fn denorm(v: f32, extent: u32) -> f64 {
+    f64::from(v.clamp(0.0, 1.0) * extent as f32)
 }
 
 /// One event dispatched to the portal worker thread. Pointer/touch
@@ -138,11 +143,11 @@ impl XdgPortalInjector {
     }
 
     fn denorm_x(&self, x: f32) -> f64 {
-        f64::from(x.clamp(0.0, 1.0) * self.screen_width as f32)
+        denorm(x, self.screen_width)
     }
 
     fn denorm_y(&self, y: f32) -> f64 {
-        f64::from(y.clamp(0.0, 1.0) * self.screen_height as f32)
+        denorm(y, self.screen_height)
     }
 
     fn send(&self, cmd: Command) -> Result<(), InjectError> {
@@ -310,4 +315,51 @@ async fn setup_session() -> Result<
         .response()
         .map_err(|e| format!("start rejected (operator may have declined the dialog): {e}"))?;
     Ok((proxy, session))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn evdev_button_matches_known_codes() {
+        assert_eq!(evdev_button(0), 0x110); // BTN_LEFT
+        assert_eq!(evdev_button(1), 0x112); // BTN_MIDDLE
+        assert_eq!(evdev_button(2), 0x111); // BTN_RIGHT
+    }
+
+    #[test]
+    fn evdev_button_aux_buttons_saturate_at_extra() {
+        // button 3 -> BTN_SIDE (0x113); 4 and beyond saturate at
+        // BTN_EXTRA (0x114) rather than incrementing further -- matches
+        // UinputInjector's original (correct) design, which this
+        // function now delegates to. It used to increment sequentially
+        // instead (BTN_MIDDLE + n - 1), putting button 3 at BTN_EXTRA
+        // and disagreeing with uinput's explicit match; see
+        // evdev_button_code's doc comment in lib.rs.
+        assert_eq!(evdev_button(3), 0x113);
+        assert_eq!(evdev_button(4), 0x114);
+        assert_eq!(evdev_button(5), 0x114);
+        assert_eq!(evdev_button(255), 0x114);
+    }
+
+    #[test]
+    fn key_state_maps_pressed_and_released() {
+        use ashpd::desktop::remote_desktop::KeyState;
+        assert_eq!(key_state(true), KeyState::Pressed);
+        assert_eq!(key_state(false), KeyState::Released);
+    }
+
+    #[test]
+    fn denorm_scales_by_extent() {
+        assert_eq!(denorm(0.5, 1920), 960.0);
+        assert_eq!(denorm(0.0, 1080), 0.0);
+        assert_eq!(denorm(1.0, 1080), 1080.0);
+    }
+
+    #[test]
+    fn denorm_clamps_out_of_range_inputs() {
+        assert_eq!(denorm(-1.0, 1000), 0.0);
+        assert_eq!(denorm(2.0, 1000), 1000.0);
+    }
 }

@@ -36,6 +36,8 @@
 //! | `LoggingInjector` | always available | ✅ records events for test verification |
 //! | `WaylandInputInjector` | `wayland-virtual` | 🚧 scaffold — returns Unavailable |
 //! | `UinputInjector` | `uinput` | ✅ real `/dev/uinput` virtual device: absolute pointer + keyboard + single-point touch |
+//! | `WindowsInjector` | `windows-sendinput` | ✅ real Win32 `SendInput`: absolute pointer + keyboard + single-point touch (mouse-emulated). Built + Wine-verified 2026-07-29. |
+//! | `MacosInjector` | `macos-cgevent` | ⚠️ real CoreGraphics `CGEvent` calls, written against the crate's public API and Apple's documented `kVK_*` constants, but **not compiler-verified** — no macOS SDK in this environment. |
 //!
 //! X11 injection (via XTest) is deliberately out of scope per
 //! ADR-001 Decision 2 (Wayland-only).
@@ -50,6 +52,16 @@ use thiserror::Error;
 mod xdg_portal;
 #[cfg(feature = "xdg-portal")]
 pub use xdg_portal::XdgPortalInjector;
+
+#[cfg(all(feature = "windows-sendinput", target_os = "windows"))]
+mod windows;
+#[cfg(all(feature = "windows-sendinput", target_os = "windows"))]
+pub use windows::WindowsInjector;
+
+#[cfg(all(feature = "macos-cgevent", target_os = "macos"))]
+mod macos;
+#[cfg(all(feature = "macos-cgevent", target_os = "macos"))]
+pub use macos::MacosInjector;
 
 /// Errors from an input backend.
 #[derive(Debug, Error)]
@@ -150,6 +162,39 @@ pub enum InjectedEvent {
         /// Normalized pressure in `[0.0, 1.0]`.
         pressure: f32,
     },
+}
+
+/// Canonical Linux evdev button-code mapping, shared by every backend
+/// that needs to translate an `InputEvent::Pointer.button` id (0=left,
+/// 1=middle, 2=right, 3=side, 4+=extra, saturating) into a real evdev
+/// `BTN_*` code (`linux/input-event-codes.h`). Pure integer math,
+/// unconditionally compiled (not behind any backend's feature flag) so
+/// `uinput` and `xdg-portal` can't independently drift -- which they
+/// already had: `xdg_portal::evdev_button`'s old formula-based version
+/// (`BTN_MIDDLE + n - 1`) put button 3 at `BTN_EXTRA` (0x114) instead
+/// of `BTN_SIDE` (0x113), disagreeing with `uinput`'s explicit match by
+/// one step. Found by a test written for that function, not by
+/// inspection -- the two backends had silently meant different things
+/// by "button 3" since whichever one was written second.
+///
+/// Unused (and `#[allow(dead_code)]`-marked accordingly) when neither
+/// `uinput` nor `xdg-portal` is enabled -- both optional, so a
+/// default/no-Linux-backend build has no caller. That's a real,
+/// expected combination, not a sign this function should be deleted.
+#[allow(dead_code)]
+pub(crate) fn evdev_button_code(button: u8) -> u32 {
+    const BTN_LEFT: u32 = 0x110;
+    const BTN_RIGHT: u32 = 0x111;
+    const BTN_MIDDLE: u32 = 0x112;
+    const BTN_SIDE: u32 = 0x113;
+    const BTN_EXTRA: u32 = 0x114;
+    match button {
+        0 => BTN_LEFT,
+        1 => BTN_MIDDLE,
+        2 => BTN_RIGHT,
+        3 => BTN_SIDE,
+        _ => BTN_EXTRA,
+    }
 }
 
 /// Platform-agnostic input-injection interface. `Send` so the
@@ -551,6 +596,32 @@ impl UinputInjector {
     }
 }
 
+/// Denormalize a `[0.0, 1.0]` coordinate into `uinput`'s registered
+/// `ABS_X`/`ABS_Y` range. Pure, so it's unit-testable without opening
+/// `/dev/uinput`.
+#[cfg(feature = "uinput")]
+fn uinput_abs(v: f32) -> i32 {
+    (v.clamp(0.0, 1.0) * UINPUT_ABS_MAX as f32) as i32
+}
+
+/// Map a `xenia_inject::InputEvent::Pointer.button` id (0=left,
+/// 1=middle, 2=right, 3=side, 4+=extra) to a raw evdev `BTN_*` code.
+/// Matches `XdgPortalInjector::evdev_button` (see `xdg_portal.rs`).
+/// Pure, so it's unit-testable without opening `/dev/uinput`.
+#[cfg(feature = "uinput")]
+fn uinput_button_code(button: u8) -> u16 {
+    evdev_button_code(button) as u16
+}
+
+/// Map a touch `phase` (0=down, 1=motion, anything else=up) to
+/// whether `BTN_TOUCH` should read pressed. Matches
+/// `XdgPortalInjector`'s phase convention. Pure, so it's
+/// unit-testable without opening `/dev/uinput`.
+#[cfg(feature = "uinput")]
+fn uinput_touch_down(phase: u8) -> bool {
+    phase != 2 && phase != 255
+}
+
 #[cfg(feature = "uinput")]
 impl InputInjector for UinputInjector {
     fn inject_pointer(
@@ -560,25 +631,16 @@ impl InputInjector for UinputInjector {
         button: u8,
         pressed: bool,
     ) -> Result<(), InjectError> {
-        use input_linux::sys::{
-            ABS_X, ABS_Y, BTN_EXTRA, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, BTN_SIDE, EV_ABS, EV_KEY,
-        };
+        use input_linux::sys::{ABS_X, ABS_Y, EV_ABS, EV_KEY};
 
-        let abs_x = (x.clamp(0.0, 1.0) * UINPUT_ABS_MAX as f32) as i32;
-        let abs_y = (y.clamp(0.0, 1.0) * UINPUT_ABS_MAX as f32) as i32;
-        // Matches XdgPortalInjector's evdev_button mapping (see
-        // xdg_portal.rs): 0=left, 1=middle, 2=right, 3+ aux buttons.
-        let btn_code = match button {
-            0 => BTN_LEFT,
-            1 => BTN_MIDDLE,
-            2 => BTN_RIGHT,
-            3 => BTN_SIDE,
-            _ => BTN_EXTRA,
-        };
         self.emit(&[
-            (EV_ABS as u16, ABS_X as u16, abs_x),
-            (EV_ABS as u16, ABS_Y as u16, abs_y),
-            (EV_KEY as u16, btn_code as u16, i32::from(pressed)),
+            (EV_ABS as u16, ABS_X as u16, uinput_abs(x)),
+            (EV_ABS as u16, ABS_Y as u16, uinput_abs(y)),
+            (
+                EV_KEY as u16,
+                uinput_button_code(button),
+                i32::from(pressed),
+            ),
         ])
     }
 
@@ -607,15 +669,14 @@ impl InputInjector for UinputInjector {
                     .into(),
             ));
         }
-        let abs_x = (x.clamp(0.0, 1.0) * UINPUT_ABS_MAX as f32) as i32;
-        let abs_y = (y.clamp(0.0, 1.0) * UINPUT_ABS_MAX as f32) as i32;
-        // Phase convention matches XdgPortalInjector: 0=down, 1=motion,
-        // anything else=up.
-        let touch_down = phase != 2 && phase != 255;
         self.emit(&[
-            (EV_ABS as u16, ABS_X as u16, abs_x),
-            (EV_ABS as u16, ABS_Y as u16, abs_y),
-            (EV_KEY as u16, BTN_TOUCH as u16, i32::from(touch_down)),
+            (EV_ABS as u16, ABS_X as u16, uinput_abs(x)),
+            (EV_ABS as u16, ABS_Y as u16, uinput_abs(y)),
+            (
+                EV_KEY as u16,
+                BTN_TOUCH as u16,
+                i32::from(uinput_touch_down(phase)),
+            ),
         ])
     }
 
@@ -744,5 +805,44 @@ mod tests {
             let decoded: InputEvent = bincode::deserialize(&bytes).unwrap();
             assert_eq!(*original, decoded);
         }
+    }
+
+    #[cfg(feature = "uinput")]
+    #[test]
+    fn uinput_abs_scales_and_clamps() {
+        assert_eq!(uinput_abs(0.0), 0);
+        assert_eq!(uinput_abs(1.0), UINPUT_ABS_MAX);
+        assert_eq!(uinput_abs(0.5), UINPUT_ABS_MAX / 2);
+        assert_eq!(uinput_abs(-1.0), 0);
+        assert_eq!(uinput_abs(2.0), UINPUT_ABS_MAX);
+    }
+
+    #[cfg(feature = "uinput")]
+    #[test]
+    fn uinput_button_code_matches_xdg_portal_convention() {
+        use input_linux::sys::{BTN_EXTRA, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, BTN_SIDE};
+        // Same 0=left/1=middle/2=right/3=side/4+=extra convention as
+        // XdgPortalInjector's evdev_button (xdg_portal.rs) -- two
+        // independent backends must agree on what a viewer's button id
+        // means, or switching --input-backend changes behavior.
+        assert_eq!(uinput_button_code(0), BTN_LEFT as u16);
+        assert_eq!(uinput_button_code(1), BTN_MIDDLE as u16);
+        assert_eq!(uinput_button_code(2), BTN_RIGHT as u16);
+        assert_eq!(uinput_button_code(3), BTN_SIDE as u16);
+        assert_eq!(uinput_button_code(4), BTN_EXTRA as u16);
+        assert_eq!(uinput_button_code(255), BTN_EXTRA as u16);
+    }
+
+    #[cfg(feature = "uinput")]
+    #[test]
+    fn uinput_touch_down_matches_phase_convention() {
+        assert!(uinput_touch_down(0)); // down
+        assert!(uinput_touch_down(1)); // motion (stays down)
+        assert!(!uinput_touch_down(2)); // up
+        assert!(!uinput_touch_down(255)); // cancel
+        // Any other phase value defaults to "down" -- matches the
+        // permissive `phase != 2 && phase != 255` implementation, not
+        // an exhaustive enum.
+        assert!(uinput_touch_down(42));
     }
 }
