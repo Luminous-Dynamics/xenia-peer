@@ -300,7 +300,7 @@
             # Cargo.lock alone doesn't give Nix a fixed-output-derivation
             # hash for it, even though scap-backend isn't enabled here.
             outputHashes = {
-              "scap-0.1.0-beta.1" = "sha256-MDZnYIOgqbvCcRhsdyY4NhYlMFjzEsyZdEDCzoMB4y4=";
+              "scap-0.1.0-beta.1" = "sha256-r6QlXBJMVaBrVFi2ATBC8jinPNug6LFRvPmbLT3rJX0=";
             };
           };
           nativeBuildInputs = commonNativeBuildInputs ++ [ pkgs.makeWrapper ];
@@ -326,7 +326,7 @@
             # Cargo.lock alone doesn't give Nix a fixed-output-derivation
             # hash for it, even though scap-backend isn't enabled here.
             outputHashes = {
-              "scap-0.1.0-beta.1" = "sha256-MDZnYIOgqbvCcRhsdyY4NhYlMFjzEsyZdEDCzoMB4y4=";
+              "scap-0.1.0-beta.1" = "sha256-r6QlXBJMVaBrVFi2ATBC8jinPNug6LFRvPmbLT3rJX0=";
             };
           };
           nativeBuildInputs = commonNativeBuildInputs ++ [ pkgs.makeWrapper ];
