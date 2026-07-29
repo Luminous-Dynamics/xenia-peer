@@ -1,9 +1,38 @@
 # Review + amendments: Xenia Improvement and Expansion Plan
 
 **Status:** Review of the proposed expansion plan, with four amendments and a
-scoping recommendation.
+scoping recommendation. **Partly executed already — see the status table
+below.**
 **Companion to:** `XENIA_COMPREHENSIVE_REVIEW_2026-07-28.md` (the audit whose
-findings this review draws on).
+findings this review draws on) and
+`docs/security/XENIA_SECURITY_INVARIANTS.md` (which now carries amendments
+1–3 as live invariants 9–11).
+
+---
+
+## Execution status
+
+Concurrent work landed several of these while this document was being
+written. Recorded here so the analysis below is read as history where it has
+already been acted on, rather than as an open proposal.
+
+| Item | Status |
+|---|---|
+| **A1** — invariant 9, availability of the authorization path | ✅ **adopted** into `docs/security/XENIA_SECURITY_INVARIANTS.md`; the underlying defect (F1) was fixed in #106 |
+| **A2** — invariant 10, a verification signal must not claim more than it exercised | ✅ **adopted**; no automated guard yet (the doc's own open items say so) |
+| **A3** — invariant 11, one fact, one source of truth | ✅ **adopted**, with the corrected "complete set" wording |
+| **A4** — Phase 0, `scap-backend` compile coverage | ❌ **still open.** Zero `scap-backend` mentions across all six workflows on `main`. This remains the highest-value cheap fix in this document |
+| **C1** — telemetry/audio ride `StreamFrame` | ✅ **fixed** in #110: `StreamTelemetry` and `StreamAudio` are now real `M1Permission` variants (6 → 8 capabilities), and the invariants doc added **invariant 12** generalizing it |
+| **C2** — state machine as an extension of 7 existing states | ⬜ not started |
+| **C3** — scope immediate work to Phase 0 + first three artifacts | ⬜ advisory |
+| **C4** — §7 consent redesign needs human validation | ⬜ advisory; unchanged |
+| **F4** (from the 2026-07-28 audit) — fuzz the wire decode path | ✅ **landed** in #109 (`fuzz_wire_decode` + first real fuzz CI job) |
+
+Invariant 12 — *"a consent grant authorizes exactly the tiers it names, never a
+superset"* — was **not** proposed here; it was derived from C1 by the session
+that fixed it, and it correctly distinguishes itself from invariant 11
+(description-vs-*enforcement* drift, rather than two descriptions drifting).
+It is a better generalization of that finding than the one this document made.
 
 ---
 
