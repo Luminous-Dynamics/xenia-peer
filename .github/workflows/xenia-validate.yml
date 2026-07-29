@@ -237,3 +237,52 @@ jobs:
             network-vm-cargo-${{ runner.os }}-
       - name: Run the 2-VM network reliability test
         run: nix build .#checks.x86_64-linux.network-vm -L
+
+  # Coverage-guided fuzzing over fuzz/'s three targets (see fuzz/README.md):
+  # fuzz_agent_request and fuzz_evidence_verify (xenia-operator-agent's
+  # attacker-facing DTOs) plus fuzz_wire_decode (xenia-peer-core's
+  # attacker-controlled decode surface: HandshakeMessage -- the pre-auth
+  # handshake enum -- plus RawFrame/RawInput/TransportAdvertisement/
+  # RawCapabilities). Weekly + manual-dispatch only, same reasoning as
+  # network-vm above: this is deliberately bounded (5 min/target, not
+  # continuous), added because the fuzz crate existed but had never
+  # actually been wired into CI anywhere -- this workflow's own schedule
+  # comment referenced "xenia-wire's fuzz-deep schedule" without this repo
+  # having an equivalent job of its own.
+  fuzz:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          # fuzz/Cargo.lock is gitignored (see fuzz/.gitignore -- standard
+          # cargo-fuzz convention, deliberately unpinned) so it won't exist
+          # in a fresh checkout to hash. fuzz/Cargo.toml plus the workspace
+          # Cargo.lock (fuzz's path deps live in the main workspace) is the
+          # closest available proxy for "fuzz's dependency set changed."
+          key: fuzz-cargo-${{ runner.os }}-${{ hashFiles('fuzz/Cargo.toml', 'Cargo.lock') }}
+          restore-keys: |
+            fuzz-cargo-${{ runner.os }}-
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Fuzz fuzz_agent_request
+        run: cd fuzz && cargo +nightly fuzz run fuzz_agent_request -- -max_total_time=300
+      - name: Fuzz fuzz_evidence_verify
+        run: cd fuzz && cargo +nightly fuzz run fuzz_evidence_verify -- -max_total_time=300
+      - name: Fuzz fuzz_wire_decode
+        run: cd fuzz && cargo +nightly fuzz run fuzz_wire_decode -- -max_total_time=300
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore

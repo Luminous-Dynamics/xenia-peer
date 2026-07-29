@@ -19,10 +19,13 @@ cargo-fuzz = true
 libfuzzer-sys = { version = "0.4", features = ["arbitrary-derive"] }
 serde_json = "1"
 hex = "0.4"
+bincode = "1"
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
 xenia-operator-agent-proto = { path = "../crates/xenia-operator-agent-proto" }
 xenia-operator-proto = { path = "../crates/xenia-operator-proto" }
 xenia-handshake = { path = "../crates/xenia-handshake" }
+xenia-peer-core = { path = "../crates/xenia-peer-core" }
+xenia-wire = "0.2.0-alpha.9"
 
 [[bin]]
 name = "fuzz_agent_request"
@@ -34,6 +37,13 @@ bench = false
 [[bin]]
 name = "fuzz_evidence_verify"
 path = "fuzz_targets/fuzz_evidence_verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_wire_decode"
+path = "fuzz_targets/fuzz_wire_decode.rs"
 test = false
 doc = false
 bench = false
