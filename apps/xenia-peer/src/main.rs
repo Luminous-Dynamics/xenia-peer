@@ -507,6 +507,15 @@ struct Args {
     /// this is also a memory-use cap, not just a policy knob.
     #[arg(long, default_value_t = 200 * 1024 * 1024)]
     file_transfer_max_bytes: u64,
+
+    /// Write logs to this file, in addition to stdout. If unset AND
+    /// stdout isn't a terminal (e.g. launched by double-clicking the
+    /// binary on Windows rather than from a console), falls back to
+    /// `xenia-peer.log` next to the executable -- otherwise nothing
+    /// durable would capture a crash or early error. Explicit stdout
+    /// logging still happens either way; this only adds a file.
+    #[arg(long)]
+    log_file: Option<std::path::PathBuf>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -1630,11 +1639,70 @@ fn raw_audio_from_capture_frame(
         Err("captured audio frame did not satisfy RawAudio v0.1 validation".into())
     }
 }
+
+/// Set up tracing, always to stdout and optionally also to a file.
+///
+/// `explicit` is `--log-file`, if given. If not given AND stdout isn't a
+/// terminal (the double-click-launch case on Windows, where nothing would
+/// otherwise capture a crash or early error), falls back to
+/// `xenia-peer.log` next to the running executable. If a terminal is
+/// attached and `--log-file` wasn't passed, logging stays stdout-only --
+/// unchanged from before this option existed.
+///
+/// Returns the non-blocking writer's flush guard; the caller must hold it
+/// for the whole process lifetime (dropping it early stops the file
+/// writer from flushing).
+fn init_tracing(
+    explicit: Option<&std::path::Path>,
+) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    use std::io::IsTerminal;
+    use tracing_subscriber::fmt::writer::MakeWriterExt;
+
+    let resolved = explicit.map(std::path::PathBuf::from).or_else(|| {
+        if std::io::stdout().is_terminal() {
+            None
+        } else {
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|dir| dir.join("xenia-peer.log")))
+        }
+    });
+
+    let Some(path) = resolved else {
+        tracing_subscriber::fmt::init();
+        return None;
+    };
+
+    let file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(err) => {
+            eprintln!(
+                "warning: failed to open log file {} ({err}); logging to stdout only",
+                path.display()
+            );
+            tracing_subscriber::fmt::init();
+            return None;
+        }
+    };
+    let (non_blocking, guard) = tracing_appender::non_blocking(file);
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stdout.and(non_blocking))
+        .init();
+    Some(guard)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
-
     let args = Args::parse();
+    // Held for main()'s whole lifetime -- dropping it early would stop the
+    // non-blocking file writer from flushing. `_` alone would drop it
+    // immediately after this statement.
+    let _log_guard = init_tracing(args.log_file.as_deref());
+
     let source_id = parse_source_id(&args.source_id_hex)?;
 
     // Fail closed before doing any work: never expose the operator surface to
