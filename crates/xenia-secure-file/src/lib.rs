@@ -79,29 +79,121 @@ pub fn secure_overwrite(path: &Path, contents: &[u8]) -> Result<(), Box<dyn std:
 #[cfg(unix)]
 mod backend {
     use super::*;
-    use rustix::fs::{CWD, Mode, OFlags, openat, renameat};
+    use rustix::fs::{AtFlags, CWD, Mode, OFlags, linkat, openat, renameat, unlinkat};
     use std::ffi::OsStr;
     use std::fs::File;
     use std::io::{Read, Write};
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
+    /// Generate-or-load, publishing the freshly generated content
+    /// atomically and without ever clobbering a concurrently-created
+    /// destination.
+    ///
+    /// The naive version of this (create the final file `O_EXCL`, then
+    /// `write_all` the generated content straight into it) has a real gap:
+    /// if this process is killed, panics, or hits an I/O error between that
+    /// creation and finishing the write, the final path still exists --
+    /// its mere presence is what a *future* call uses to decide "already
+    /// generated, load rather than regenerate" -- so a future caller would
+    /// silently load a truncated/partial secret instead of either the real
+    /// one or a fresh generation. This version never creates content at the
+    /// final path directly: it writes into a throwaway sibling temp file
+    /// first, `fsync`s it, and only then publishes -- so the final path
+    /// only ever comes into existence already complete.
+    ///
+    /// "Publishing" also isn't a plain `rename`: two processes can both
+    /// pass the initial "doesn't exist yet" check (e.g. two fresh daemon
+    /// instances racing to generate the same identity key on first boot).
+    /// A plain `rename` would let whichever one finishes last silently
+    /// overwrite the other's already-published value -- exactly the kind
+    /// of TOCTOU this crate otherwise closes. [`publish_if_absent`]
+    /// resolves that race atomically instead: at most one racer's content
+    /// ever becomes `file_name`, and every other racer reads back and
+    /// returns *that* winning content rather than its own.
     pub(super) fn load_or_create(
         path: &Path,
         generate: impl FnOnce() -> Vec<u8>,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let dir = open_secure_parent_dir(path)?;
         let file_name = file_name_of(path)?;
-        match secure_create_new(&dir, file_name) {
-            Ok(mut file) => {
-                let contents = generate();
-                file.write_all(&contents)?;
+
+        match open_secure_existing(&dir, file_name) {
+            Ok(mut existing) => {
+                let mut contents = Vec::new();
+                existing.read_to_end(&mut contents)?;
+                return Ok(contents);
+            }
+            Err(e) if is_not_found(e.as_ref()) => {}
+            Err(e) => return Err(e),
+        }
+
+        let contents = generate();
+        let tmp_name_string = format!(
+            ".{}.tmp-{}",
+            file_name.to_str().unwrap_or("secure-create"),
+            rand::random::<u64>()
+        );
+        let tmp_name = OsStr::new(&tmp_name_string);
+        {
+            let mut tmp = secure_create_new(&dir, tmp_name)?;
+            tmp.write_all(&contents)?;
+            tmp.sync_all()?;
+        }
+
+        match publish_if_absent(&dir, tmp_name, file_name) {
+            Ok(true) => {
+                // We published: `file_name` now durably holds our content.
+                // Sync the directory entry itself, not just the file's
+                // data -- without this, a crash right after `linkat` could
+                // still lose the *link*, even though the data it points to
+                // was already fsync'd above.
+                dir.sync_all()?;
                 Ok(contents)
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let mut file = open_secure_existing(&dir, file_name)?;
-                let mut contents = Vec::new();
-                file.read_to_end(&mut contents)?;
-                Ok(contents)
+            Ok(false) => {
+                // Someone else won the race; `publish_if_absent` has
+                // already cleaned up our tmp file. Return *their*
+                // content, which may differ from ours (e.g. two processes
+                // independently generating a random identity key -- only
+                // one value is ever the real one).
+                let mut winner = open_secure_existing(&dir, file_name)?;
+                let mut winner_contents = Vec::new();
+                winner.read_to_end(&mut winner_contents)?;
+                Ok(winner_contents)
+            }
+            Err(e) => {
+                // Best-effort cleanup so a failed publish doesn't leave an
+                // orphaned tmp file behind. The publish error is what
+                // matters here, not this cleanup's own result.
+                let _ = unlinkat(&dir, tmp_name, AtFlags::empty());
+                Err(e.into())
+            }
+        }
+    }
+
+    /// Publish `tmp_name` (already a complete, fsync'd file in `dir`) to
+    /// `file_name` in the same `dir`, iff `file_name` doesn't already
+    /// exist. Returns `Ok(true)` if this call published (`file_name` now
+    /// holds `tmp_name`'s content; `tmp_name` itself no longer exists) or
+    /// `Ok(false)` if `file_name` already existed (this call's `tmp_name`
+    /// has been removed; the caller should read the pre-existing
+    /// `file_name` instead -- it does not touch that file's content).
+    ///
+    /// Implemented as link-then-unlink, not `rename`: `rename` would
+    /// silently *replace* `file_name` if another racer already published
+    /// it, which is exactly the clobber this exists to prevent. `link` is
+    /// specified to fail atomically with `EEXIST` if the destination
+    /// already exists -- of any number of callers racing this function for
+    /// the same `dir`/`file_name`, exactly one ever succeeds.
+    fn publish_if_absent(dir: &File, tmp_name: &OsStr, file_name: &OsStr) -> std::io::Result<bool> {
+        match linkat(dir, tmp_name, dir, file_name, AtFlags::empty()) {
+            Ok(()) => {
+                unlinkat(dir, tmp_name, AtFlags::empty())?;
+                Ok(true)
+            }
+            Err(e) if e == rustix::io::Errno::EXIST => {
+                unlinkat(dir, tmp_name, AtFlags::empty())?;
+                Ok(false)
             }
             Err(e) => Err(e.into()),
         }
@@ -272,6 +364,108 @@ mod backend {
         // (defense in depth), via the fd -- no separate path-based chmod.
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         Ok(file)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn temp_dir(label: &str) -> std::path::PathBuf {
+            std::env::temp_dir().join(format!(
+                "xenia-secure-file-backend-test-{label}-{}",
+                rand::random::<u64>()
+            ))
+        }
+
+        /// Direct, deterministic exercise of both `publish_if_absent`
+        /// branches -- the genuine race between two callers is covered
+        /// separately (multi-threaded, through the public API) in the
+        /// crate-level test module; this is the precise, reproducible unit
+        /// test of the primitive that race relies on.
+        #[test]
+        fn publish_if_absent_wins_when_the_destination_is_free() {
+            let dir_path = temp_dir("publish-wins");
+            std::fs::create_dir_all(&dir_path).unwrap();
+            let dir = open_secure_parent_dir(&dir_path.join("f")).unwrap();
+            let file_name = OsStr::new("f");
+            let tmp_name = OsStr::new(".f.tmp-1");
+            {
+                let mut tmp = secure_create_new(&dir, tmp_name).unwrap();
+                tmp.write_all(b"winner").unwrap();
+                tmp.sync_all().unwrap();
+            }
+
+            let published = publish_if_absent(&dir, tmp_name, file_name).unwrap();
+            assert!(published, "an unclaimed destination must be won");
+            assert_eq!(std::fs::read(dir_path.join("f")).unwrap(), b"winner");
+            assert!(
+                !dir_path.join(".f.tmp-1").exists(),
+                "the tmp file must be gone after a successful publish, not left as a second link"
+            );
+            std::fs::remove_dir_all(&dir_path).ok();
+        }
+
+        #[test]
+        fn publish_if_absent_loses_without_touching_the_existing_winner() {
+            let dir_path = temp_dir("publish-loses");
+            std::fs::create_dir_all(&dir_path).unwrap();
+            let dir = open_secure_parent_dir(&dir_path.join("f")).unwrap();
+            let file_name = OsStr::new("f");
+
+            // Simulate "someone else already published" directly.
+            std::fs::write(dir_path.join("f"), b"already-here").unwrap();
+
+            let tmp_name = OsStr::new(".f.tmp-2");
+            {
+                let mut tmp = secure_create_new(&dir, tmp_name).unwrap();
+                tmp.write_all(b"loser").unwrap();
+                tmp.sync_all().unwrap();
+            }
+
+            let published = publish_if_absent(&dir, tmp_name, file_name).unwrap();
+            assert!(
+                !published,
+                "an already-occupied destination must not be won"
+            );
+            assert_eq!(
+                std::fs::read(dir_path.join("f")).unwrap(),
+                b"already-here",
+                "the pre-existing winner's content must be untouched, not clobbered"
+            );
+            assert!(
+                !dir_path.join(".f.tmp-2").exists(),
+                "the losing caller's own tmp file must still be cleaned up"
+            );
+            std::fs::remove_dir_all(&dir_path).ok();
+        }
+
+        /// The exact guarantee this whole design exists for: a caller that
+        /// writes into the tmp file but never reaches (or never completes)
+        /// the publish step -- modeling a crash, panic, or I/O error at
+        /// that point -- must leave no trace at the *final* path. A future
+        /// `load_or_create` call must see "doesn't exist yet" and generate
+        /// fresh, not load a file that was never actually published.
+        #[test]
+        fn a_write_that_never_reaches_publish_leaves_no_final_path_file() {
+            let dir_path = temp_dir("crash-before-publish");
+            std::fs::create_dir_all(&dir_path).unwrap();
+            let dir = open_secure_parent_dir(&dir_path.join("f")).unwrap();
+            let file_name = OsStr::new("f");
+            let tmp_name = OsStr::new(".f.tmp-3");
+            {
+                let mut tmp = secure_create_new(&dir, tmp_name).unwrap();
+                tmp.write_all(b"never-published").unwrap();
+                tmp.sync_all().unwrap();
+                // Deliberately no `publish_if_absent` call here.
+            }
+
+            let result = open_secure_existing(&dir, file_name);
+            assert!(
+                is_not_found(result.unwrap_err().as_ref()),
+                "the final path must not exist until an explicit publish succeeds"
+            );
+            std::fs::remove_dir_all(&dir_path).ok();
+        }
     }
 }
 
@@ -510,5 +704,76 @@ mod tests {
         );
         assert!(backend::owner_check_should_apply(1));
         assert!(backend::owner_check_should_apply(1001));
+    }
+
+    /// Adversarial, real-concurrency exercise of `load_or_create_secure_file`
+    /// against the exact race PR 2 closes: many real OS threads all seeing
+    /// "doesn't exist yet" and racing to generate + publish distinct
+    /// content for the same path, via the public API end-to-end (not a
+    /// direct call into `publish_if_absent`). A `Barrier` maximizes actual
+    /// contention at the publish step rather than relying on incidental
+    /// scheduling luck.
+    ///
+    /// Properties that must hold regardless of which thread wins:
+    /// - every thread's return value is identical (there is exactly one
+    ///   true winner; nobody observes their own losing content as if it
+    ///   had been accepted);
+    /// - the file on disk matches that same value, byte for byte -- never
+    ///   a mix, truncation, or corruption from two writers touching it;
+    /// - the winning value is one of the N candidates, not something else;
+    /// - no `.tmp-` files are left behind once every racer has finished.
+    #[test]
+    #[cfg(unix)]
+    fn concurrent_load_or_create_never_corrupts_or_double_publishes() {
+        use std::sync::{Arc, Barrier};
+
+        const RACERS: usize = 12;
+        let dir = temp_dir("concurrent-race");
+        let path = Arc::new(dir.join("f"));
+        let barrier = Arc::new(Barrier::new(RACERS));
+
+        let handles: Vec<_> = (0..RACERS)
+            .map(|i| {
+                let path = Arc::clone(&path);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    load_or_create_secure_file(&path, move || format!("candidate-{i}").into_bytes())
+                        .unwrap()
+                })
+            })
+            .collect();
+
+        let results: Vec<Vec<u8>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let winner = results[0].clone();
+        for (i, result) in results.iter().enumerate() {
+            assert_eq!(
+                result, &winner,
+                "racer {i} observed a different winning value than the rest -- \
+                 the race let more than one value through"
+            );
+        }
+        assert!(
+            (0..RACERS)
+                .map(|i| format!("candidate-{i}").into_bytes())
+                .any(|candidate| candidate == winner),
+            "the winning content must be one of the real candidates, not corrupted data"
+        );
+        assert_eq!(
+            std::fs::read(path.as_ref()).unwrap(),
+            winner,
+            "the file on disk must match what every racer agreed was published"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "leftover temp files after the race settled: {leftovers:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
