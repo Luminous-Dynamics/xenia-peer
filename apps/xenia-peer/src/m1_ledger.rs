@@ -37,6 +37,8 @@ pub(crate) fn disposition_for_m1_event(event: M1AuditEvent) -> M1LedgerDispositi
         M1AuditEvent::ConsentRevoked => M1LedgerDisposition::Record(ConsentKind::Revocation),
         M1AuditEvent::SessionFailed => M1LedgerDisposition::Record(ConsentKind::Violation),
         M1AuditEvent::FrameStreamed
+        | M1AuditEvent::TelemetryStreamed
+        | M1AuditEvent::AudioStreamed
         | M1AuditEvent::InputInjected
         | M1AuditEvent::HostClipboardRead
         | M1AuditEvent::HostClipboardWritten

@@ -32,6 +32,26 @@ pub enum M1SessionState {
 pub enum M1Permission {
     /// Permission to stream a captured frame on the forward path.
     StreamFrame,
+    /// Permission to stream host telemetry (performance metrics, and at
+    /// `TelemetryLevel::System`, hostname/OS identity) to the viewer.
+    /// Independent of [`StreamFrame`] -- a grant that only permits
+    /// viewing the screen must not also silently disclose host identity
+    /// or performance data. See `docs/roadmap/
+    /// XENIA_EXPANSION_PLAN_REVIEW_2026-07-29.md`'s "one real gap found"
+    /// note: this tier didn't exist before, so every telemetry frame
+    /// rode on `StreamFrame` alone.
+    ///
+    /// [`StreamFrame`]: Self::StreamFrame
+    StreamTelemetry,
+    /// Permission to stream host audio (synthetic test signal or real
+    /// device capture, per `AudioMode`) to the viewer. Independent of
+    /// [`StreamFrame`] for the same reason as [`StreamTelemetry`] -- at
+    /// `AudioMode::Capture` this is a live microphone, a materially
+    /// different privacy commitment than "can see the screen."
+    ///
+    /// [`StreamFrame`]: Self::StreamFrame
+    /// [`StreamTelemetry`]: Self::StreamTelemetry
+    StreamAudio,
     /// Permission to inject viewer input on the reverse path.
     InjectInput,
     /// Permission to disclose host clipboard contents to the viewer
@@ -67,6 +87,10 @@ pub enum M1Permission {
 pub struct M1PermissionSet {
     /// Forward-path frame streaming.
     pub stream_frame: bool,
+    /// Forward-path telemetry streaming.
+    pub stream_telemetry: bool,
+    /// Forward-path audio streaming.
+    pub stream_audio: bool,
     /// Reverse-path input injection.
     pub inject_input: bool,
     /// Forward-path host-clipboard disclosure to the viewer.
@@ -86,6 +110,8 @@ impl M1PermissionSet {
     pub fn all() -> Self {
         Self {
             stream_frame: true,
+            stream_telemetry: true,
+            stream_audio: true,
             inject_input: true,
             read_host_clipboard: true,
             write_host_clipboard: true,
@@ -98,6 +124,8 @@ impl M1PermissionSet {
     pub fn contains(&self, permission: M1Permission) -> bool {
         match permission {
             M1Permission::StreamFrame => self.stream_frame,
+            M1Permission::StreamTelemetry => self.stream_telemetry,
+            M1Permission::StreamAudio => self.stream_audio,
             M1Permission::InjectInput => self.inject_input,
             M1Permission::ReadHostClipboard => self.read_host_clipboard,
             M1Permission::WriteHostClipboard => self.write_host_clipboard,
@@ -118,6 +146,10 @@ pub enum M1AuditEvent {
     ConsentDenied,
     /// A frame was allowed through the active session.
     FrameStreamed,
+    /// A telemetry batch was allowed through the active session.
+    TelemetryStreamed,
+    /// An audio frame was allowed through the active session.
+    AudioStreamed,
     /// An input event was allowed through the active session.
     InputInjected,
     /// Host clipboard contents were disclosed to the viewer.
@@ -319,6 +351,28 @@ impl M1SessionMachine {
         Ok(())
     }
 
+    /// Record that one telemetry batch was allowed through the forward
+    /// path. Gated separately from [`stream_frame`] -- see
+    /// [`M1Permission::StreamTelemetry`]'s doc comment.
+    ///
+    /// [`stream_frame`]: Self::stream_frame
+    pub fn stream_telemetry(&mut self) -> Result<(), M1SessionError> {
+        self.require_active(M1Permission::StreamTelemetry)?;
+        self.audit.push(M1AuditEvent::TelemetryStreamed);
+        Ok(())
+    }
+
+    /// Record that one audio frame was allowed through the forward path.
+    /// Gated separately from [`stream_frame`] -- see
+    /// [`M1Permission::StreamAudio`]'s doc comment.
+    ///
+    /// [`stream_frame`]: Self::stream_frame
+    pub fn stream_audio(&mut self) -> Result<(), M1SessionError> {
+        self.require_active(M1Permission::StreamAudio)?;
+        self.audit.push(M1AuditEvent::AudioStreamed);
+        Ok(())
+    }
+
     /// Record that one input event was allowed through the reverse path.
     pub fn inject_input(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::InjectInput)?;
@@ -431,6 +485,74 @@ mod tests {
         assert_eq!(
             session.receive_file_from_viewer().unwrap_err(),
             denied(M1Permission::ReceiveFileFromViewer)
+        );
+        assert_eq!(
+            session.stream_telemetry().unwrap_err(),
+            denied(M1Permission::StreamTelemetry)
+        );
+        assert_eq!(
+            session.stream_audio().unwrap_err(),
+            denied(M1Permission::StreamAudio)
+        );
+    }
+
+    /// A screen-view-only grant must not silently also authorize
+    /// telemetry or audio streaming -- the real gap this pair of tiers
+    /// closes (see `M1Permission::StreamTelemetry`'s doc comment). Before
+    /// this fix, every telemetry/audio frame rode on
+    /// `M1Permission::StreamFrame` alone, so this exact scenario would
+    /// have wrongly authorized both.
+    #[test]
+    fn stream_frame_grant_does_not_authorize_telemetry_or_audio() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+        session
+            .grant_consent_scoped(M1PermissionSet {
+                stream_frame: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        session.stream_frame().unwrap();
+        assert_eq!(
+            session.stream_telemetry().unwrap_err(),
+            M1SessionError::PermissionDenied {
+                state: M1SessionState::Active,
+                permission: M1Permission::StreamTelemetry,
+            }
+        );
+        assert_eq!(
+            session.stream_audio().unwrap_err(),
+            M1SessionError::PermissionDenied {
+                state: M1SessionState::Active,
+                permission: M1Permission::StreamAudio,
+            }
+        );
+    }
+
+    /// The converse: granting only telemetry/audio must not authorize
+    /// viewing the screen either -- these three forward-path tiers are
+    /// fully independent, not a hierarchy.
+    #[test]
+    fn telemetry_and_audio_grant_does_not_authorize_stream_frame() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+        session
+            .grant_consent_scoped(M1PermissionSet {
+                stream_telemetry: true,
+                stream_audio: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        session.stream_telemetry().unwrap();
+        session.stream_audio().unwrap();
+        assert_eq!(
+            session.stream_frame().unwrap_err(),
+            M1SessionError::PermissionDenied {
+                state: M1SessionState::Active,
+                permission: M1Permission::StreamFrame,
+            }
         );
     }
 

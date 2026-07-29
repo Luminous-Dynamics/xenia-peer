@@ -1368,6 +1368,8 @@ fn load_or_create_host_identity_highsec(
 fn configured_permission_set(args: &Args) -> M1PermissionSet {
     M1PermissionSet {
         stream_frame: true,
+        stream_telemetry: args.telemetry_level != TelemetryLevel::Off,
+        stream_audio: args.audio != AudioMode::Off,
         inject_input: args.input_backend != InputBackendChoice::Noop,
         read_host_clipboard: args.clipboard != ClipboardMode::Off,
         write_host_clipboard: args.clipboard == ClipboardMode::Bidirectional,
@@ -2592,7 +2594,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     .into_frame()?;
                     let envelope = session.lock().await.seal_frame(&telemetry_frame)?;
-                    m1_runtime.lock().await.allow_frame_flow()?;
+                    m1_runtime.lock().await.allow_telemetry_flow()?;
                     send_half.send_envelope(&envelope).await?;
                     sent_telemetry += 1;
                     last_telemetry_sent = std::time::Instant::now();
@@ -2617,7 +2619,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let frame_id = session.lock().await.next_frame_id();
                 let audio_frame = raw_audio.into_frame(frame_id)?;
                 let envelope = session.lock().await.seal_frame(&audio_frame)?;
-                m1_runtime.lock().await.allow_frame_flow()?;
+                m1_runtime.lock().await.allow_audio_flow()?;
                 send_half.send_envelope(&envelope).await?;
                 epoch_state.record_audio_frame(envelope.len());
                 sent_audio += 1;
