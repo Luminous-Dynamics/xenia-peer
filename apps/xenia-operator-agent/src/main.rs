@@ -79,6 +79,7 @@ mod daemon_evidence;
 mod handshake_state;
 mod host_trust;
 mod rate_limit;
+mod redacted_secret;
 
 use std::io::IsTerminal;
 use std::net::SocketAddr;
@@ -111,6 +112,7 @@ use daemon_evidence::{decode_fixed_hex, decode_hex_vec};
 use handshake_state::{HandshakeState, PendingSuite};
 use host_trust::HostTrustStore;
 use rate_limit::{AGENT_RATE_MAX, AGENT_RATE_WINDOW_SECS, RateLimiter};
+use redacted_secret::RedactedSecret;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -192,12 +194,14 @@ struct AgentState {
     /// The raw, file-persisted pairing token -- accepted only on
     /// `POST /v1/pair` (see `agent_session`'s module doc comment). Every
     /// other route requires `session_mac_key` to verify an
-    /// `X-Agent-Session` header instead.
-    token: String,
+    /// `X-Agent-Session` header instead. Redacted so a stray `{:?}` on this
+    /// struct (or a future derived `Debug`) can't print it.
+    token: RedactedSecret<String>,
     /// Derived from `token` once at startup (`agent_session::session_mac_key`).
     /// Cached rather than recomputed per-request; stable across restarts
-    /// since it's deterministic in the persisted `token`.
-    session_mac_key: [u8; 32],
+    /// since it's deterministic in the persisted `token`. Redacted for the
+    /// same reason as `token` above.
+    session_mac_key: RedactedSecret<[u8; 32]>,
     /// Lifetime of a freshly minted or refreshed session, in seconds.
     session_ttl_secs: u64,
     allowed_origins: Vec<String>,
@@ -243,7 +247,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (ed25519_secret, ml_dsa_seed) = load_or_create_identity_seeds(&args.identity_path)?;
     let manager = HandshakeManager::from_identity_seeds(ed25519_secret, ml_dsa_seed);
-    let token = load_or_create_token(&args.token_path)?;
+    let token = RedactedSecret::new(load_or_create_token(&args.token_path)?);
     let host_trust = HostTrustStore::load(
         args.pin_store_path.clone(),
         args.allow_noninteractive_privileged_confirmation,
@@ -292,7 +296,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // existing `is_terminal()` gate for the same reason.
     if std::io::stdout().is_terminal() {
         println!("pairing token (paste into the console's agent settings once, to pair):");
-        println!("  {token}");
+        println!("  {}", token.expose_secret());
     } else {
         println!(
             "not printing the pairing token to stdout: this isn't an interactive \
@@ -306,7 +310,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.session_ttl_secs
     );
 
-    let session_mac_key = agent_session::session_mac_key(&token);
+    let session_mac_key =
+        RedactedSecret::new(agent_session::session_mac_key(token.expose_secret()));
     let state = Arc::new(AgentState {
         manager,
         ed25519_secret: Zeroizing::new(ed25519_secret),
@@ -431,17 +436,38 @@ async fn auth_and_cors_middleware(
     // process-wide limiter for the whole authenticated surface -- see
     // `rate_limit`'s module doc comment for why a single counter is the
     // right granularity here.
-    if !state
-        .rate_limiter
-        .lock()
-        .expect("rate-limiter mutex poisoned")
-        .allow(unix_now_secs())
-    {
-        return (
+    //
+    // From here on, every early return goes through `cors_headers` -- the
+    // Origin has already been confirmed allowed above, so unlike the
+    // disallowed-origin branch, withholding CORS headers on these responses
+    // buys no security: it just makes a rate limit or an auth failure show
+    // up to the console's JS as an opaque CORS error instead of the real
+    // 429/401. (Previously these early returns skipped `cors_headers`
+    // entirely -- fixed here.)
+    let now = unix_now_secs();
+    let retry_after_secs = {
+        let mut limiter = state
+            .rate_limiter
+            .lock()
+            .expect("rate-limiter mutex poisoned");
+        if limiter.allow(now) {
+            None
+        } else {
+            Some(limiter.retry_after_secs(now))
+        }
+    };
+    if let Some(retry_after_secs) = retry_after_secs {
+        let mut response = (
             StatusCode::TOO_MANY_REQUESTS,
             "too many requests; slow down",
         )
             .into_response();
+        if let Ok(value) = HeaderValue::from_str(&retry_after_secs.to_string()) {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, value);
+        }
+        return cors_headers(origin, response);
     }
 
     if request.uri().path() == "/v1/pair" {
@@ -449,16 +475,23 @@ async fn auth_and_cors_middleware(
             .get("x-agent-token")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        if !constant_time_eq(presented.as_bytes(), state.token.as_bytes()) {
-            return (StatusCode::UNAUTHORIZED, "missing or invalid X-Agent-Token").into_response();
+        if !constant_time_eq(presented.as_bytes(), state.token.expose_secret().as_bytes()) {
+            return cors_headers(
+                origin,
+                (StatusCode::UNAUTHORIZED, "missing or invalid X-Agent-Token").into_response(),
+            );
         }
     } else {
         let presented = headers
             .get("x-agent-session")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        if let Err(e) = agent_session::verify(&state.session_mac_key, unix_now_secs(), presented) {
-            return (StatusCode::UNAUTHORIZED, e.message()).into_response();
+        if let Err(e) = agent_session::verify(state.session_mac_key.expose_secret(), now, presented)
+        {
+            return cors_headers(
+                origin,
+                (StatusCode::UNAUTHORIZED, e.message()).into_response(),
+            );
         }
     }
 
@@ -526,7 +559,7 @@ async fn refresh_handler(
 /// event that implies. See [`agent_session`]'s module doc comment.
 fn mint_session_inner(state: &AgentState) -> AgentSessionToken {
     agent_session::mint(
-        &state.session_mac_key,
+        state.session_mac_key.expose_secret(),
         unix_now_secs(),
         state.session_ttl_secs,
     )
@@ -1579,9 +1612,9 @@ mod tests {
             manager: HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]),
             ed25519_secret: Zeroizing::new([1u8; 32]),
             ml_dsa_seed: Zeroizing::new([2u8; 32]),
-            session_mac_key: agent_session::session_mac_key(token),
+            session_mac_key: RedactedSecret::new(agent_session::session_mac_key(token)),
             session_ttl_secs: agent_session::DEFAULT_SESSION_TTL_SECS,
-            token: token.to_string(),
+            token: RedactedSecret::new(token.to_string()),
             allowed_origins: allowed_origins.iter().map(|s| s.to_string()).collect(),
             host_trust: StdMutex::new(
                 HostTrustStore::load(pin_store_path, allow_noninteractive_privileged).unwrap(),
@@ -1646,9 +1679,9 @@ mod tests {
             manager: HandshakeManager::from_identity_seeds([1u8; 32], [2u8; 32]),
             ed25519_secret: Zeroizing::new([1u8; 32]),
             ml_dsa_seed: Zeroizing::new([2u8; 32]),
-            session_mac_key: agent_session::session_mac_key(token),
+            session_mac_key: RedactedSecret::new(agent_session::session_mac_key(token)),
             session_ttl_secs: agent_session::DEFAULT_SESSION_TTL_SECS,
-            token: token.to_string(),
+            token: RedactedSecret::new(token.to_string()),
             allowed_origins: allowed_origins.iter().map(|s| s.to_string()).collect(),
             host_trust: StdMutex::new(
                 HostTrustStore::load(pin_store_path, allow_noninteractive_privileged).unwrap(),
@@ -1857,6 +1890,138 @@ mod tests {
         assert_eq!(first.status(), StatusCode::UNAUTHORIZED);
         let second = app.oneshot(request()).await.unwrap();
         assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// A rejection for an *allowed* origin must still carry CORS headers --
+    /// otherwise the console's `fetch()` sees an opaque CORS failure instead
+    /// of the real 401, and the operator has no way to tell "wrong token"
+    /// from "the agent is unreachable." Only a *disallowed* origin should
+    /// ever get a response with no `Access-Control-Allow-Origin`.
+    #[tokio::test]
+    async fn auth_failure_response_for_an_allowed_origin_is_browser_readable() {
+        use tower::ServiceExt;
+        let app = build_router(test_state("secret", &["http://localhost:8134"]));
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/pair")
+            .header("origin", "http://localhost:8134")
+            .header("x-agent-token", "not-the-secret")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .expect("an allowed-origin 401 must still carry CORS headers"),
+            "http://localhost:8134"
+        );
+    }
+
+    /// Same property as above, but for the session-credential path (every
+    /// route other than `/v1/pair`) rather than the pairing-token path.
+    #[tokio::test]
+    async fn session_auth_failure_response_for_an_allowed_origin_is_browser_readable() {
+        use tower::ServiceExt;
+        let app = build_router(test_state("secret", &["http://localhost:8134"]));
+        let req = axum::http::Request::builder()
+            .uri("/identity")
+            .header("origin", "http://localhost:8134")
+            .header("x-agent-session", "not-a-real-session")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .expect("an allowed-origin 401 must still carry CORS headers"),
+            "http://localhost:8134"
+        );
+    }
+
+    /// A disallowed origin must NOT get CORS headers on its rejection --
+    /// unlike the two tests above, granting it `Access-Control-Allow-Origin`
+    /// here would actually let that origin's JS read the response, defeating
+    /// the whole allowlist.
+    #[tokio::test]
+    async fn disallowed_origin_response_carries_no_cors_headers() {
+        use tower::ServiceExt;
+        let app = build_router(test_state("secret", &["http://localhost:8134"]));
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/pair")
+            .header("origin", "http://evil.example")
+            .header("x-agent-token", "secret")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(
+            resp.headers()
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none()
+        );
+    }
+
+    /// A rate-limited response for an allowed origin must be browser-readable
+    /// (same reasoning as the auth-failure tests above) and must carry a
+    /// `Retry-After` so the console can back off intelligently instead of
+    /// hammering the agent again immediately.
+    #[tokio::test]
+    async fn rate_limited_response_is_browser_readable_with_retry_after() {
+        use tower::ServiceExt;
+        let app = build_router(test_state_with_rate_limit(
+            "secret",
+            &["http://localhost:8134"],
+            1,
+        ));
+        let request = || {
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/pair")
+                .header("origin", "http://localhost:8134")
+                .header("x-agent-token", "secret")
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        let first = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let second = app.oneshot(request()).await.unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            second
+                .headers()
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .expect("an allowed-origin 429 must still carry CORS headers"),
+            "http://localhost:8134"
+        );
+        let retry_after: u64 = second
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .expect("a 429 must carry Retry-After")
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(
+            retry_after > 0 && retry_after <= AGENT_RATE_WINDOW_SECS,
+            "retry_after={retry_after} should be within the rate limiter's own window"
+        );
+    }
+
+    /// Regression test for the redaction guarantee itself: if a future
+    /// change swaps `RedactedSecret`'s `Debug` impl for a derived one, or
+    /// replaces the field type with a plain `String`/`[u8; 32]`, this fails
+    /// loudly instead of silently reintroducing a secret-in-logs footgun.
+    #[test]
+    fn agent_state_secrets_are_never_exposed_via_debug() {
+        let state = test_state("super-secret-pairing-token-xyz", &["http://localhost:8134"]);
+        let token_debug = format!("{:?}", state.token);
+        let mac_key_debug = format!("{:?}", state.session_mac_key);
+        assert!(!token_debug.contains("super-secret-pairing-token-xyz"));
+        assert_eq!(token_debug, "RedactedSecret(..)");
+        assert_eq!(mac_key_debug, "RedactedSecret(..)");
     }
 
     // ─── session tests (`X-Agent-Session`, everything but `/v1/pair`) ───
