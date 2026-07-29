@@ -79,7 +79,7 @@ pub fn secure_overwrite(path: &Path, contents: &[u8]) -> Result<(), Box<dyn std:
 #[cfg(unix)]
 mod backend {
     use super::*;
-    use rustix::fs::{AtFlags, CWD, Mode, OFlags, linkat, openat, renameat, unlinkat};
+    use rustix::fs::{linkat, openat, renameat, unlinkat, AtFlags, Mode, OFlags, CWD};
     use std::ffi::OsStr;
     use std::fs::File;
     use std::io::{Read, Write};
@@ -482,31 +482,30 @@ mod backend {
     #![allow(unsafe_code)]
 
     use super::*;
-    use std::ffi::{OsStr, c_void};
+    use std::ffi::{c_void, OsStr};
     use std::fs::File;
     use std::io::{Read, Write};
     use std::os::windows::io::FromRawHandle;
+    use windows::core::{HRESULT, HSTRING, PWSTR};
     use windows::Win32::Foundation::{
-        CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, HANDLE, HLOCAL,
-        LocalFree,
+        CloseHandle, LocalFree, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, HANDLE,
+        HLOCAL,
     };
     use windows::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
         GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
     };
     use windows::Win32::Security::{
-        GetTokenInformation, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-        SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        GetTokenInformation, TokenUser, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+        SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
     };
     use windows::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW, CreateHardLinkW,
-        DeleteFileW, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
-        FILE_GENERIC_WRITE, FILE_SHARE_MODE, FILE_SHARE_READ, GetFileInformationByHandle,
-        OPEN_EXISTING,
+        CreateDirectoryW, CreateFileW, CreateHardLinkW, DeleteFileW, GetFileInformationByHandle,
+        BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_MODE, FILE_SHARE_READ, OPEN_EXISTING,
     };
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-    use windows::core::{HRESULT, HSTRING, PWSTR};
 
     /// RAII close for a raw `HANDLE` that hasn't (yet) been handed off to
     /// a `std::fs::File`. On the success path, ownership is transferred
@@ -530,9 +529,9 @@ mod backend {
     struct OwnedSecurityDescriptor(PSECURITY_DESCRIPTOR);
     impl Drop for OwnedSecurityDescriptor {
         fn drop(&mut self) {
-            if !self.0.0.is_null() {
+            if !self.0 .0.is_null() {
                 unsafe {
-                    let _ = LocalFree(Some(HLOCAL(self.0.0)));
+                    let _ = LocalFree(Some(HLOCAL(self.0 .0)));
                 }
             }
         }
@@ -634,7 +633,7 @@ mod backend {
     fn security_attributes(descriptor: &OwnedSecurityDescriptor) -> SECURITY_ATTRIBUTES {
         SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: descriptor.0.0,
+            lpSecurityDescriptor: descriptor.0 .0,
             bInheritHandle: false.into(),
         }
     }
@@ -783,12 +782,22 @@ mod backend {
     }
 
     /// Open `path` if it exists and is safe to trust: not a reparse point,
-    /// owned by the current user.
+    /// owned by the current user. Read-only -- every caller of this
+    /// function only ever reads the returned `File` (`read_to_end`), so
+    /// this requests only `FILE_GENERIC_READ`. Requesting write access it
+    /// never used was a real bug, not just an unnecessary permission: with
+    /// only `FILE_SHARE_READ` granted, a second concurrent opener also
+    /// requesting write access collides with `ERROR_SHARING_VIOLATION` --
+    /// exactly what happens when multiple losing racers in
+    /// `load_or_create`'s `publish_if_absent` `Ok(false)` branch all call
+    /// this on the same winning file at once. Multiple simultaneous
+    /// read-only opens, each both requesting and sharing only read access,
+    /// don't conflict.
     fn open_secure_existing(path: &Path) -> Result<File, Box<dyn std::error::Error>> {
         let raw = unsafe {
             CreateFileW(
                 &HSTRING::from(path),
-                FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0,
+                FILE_GENERIC_READ.0,
                 FILE_SHARE_READ,
                 None,
                 OPEN_EXISTING,
@@ -1288,12 +1297,12 @@ mod tests {
     // `unsafe_code = "deny"` lint (see that module's own `#![allow(unsafe_code)]`).
     #[allow(unsafe_code)]
     fn dacl_grants_only_the_current_user() {
+        use windows::core::HSTRING;
         use windows::Win32::Foundation::HANDLE;
         use windows::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
         use windows::Win32::Security::{
             ACL, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSID,
         };
-        use windows::core::HSTRING;
 
         let dir = temp_dir("win-dacl");
         let path = dir.join("f");
