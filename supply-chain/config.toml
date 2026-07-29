@@ -496,8 +496,16 @@ criteria = "safe-to-deploy"
 version = "0.23.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.core-graphics]]
+version = "0.24.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.core-graphics-helmer-fork]]
 version = "0.24.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.core-graphics-types]]
+version = "0.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.coreaudio-rs]]

@@ -176,6 +176,12 @@ pub enum InjectedEvent {
 /// one step. Found by a test written for that function, not by
 /// inspection -- the two backends had silently meant different things
 /// by "button 3" since whichever one was written second.
+///
+/// Unused (and `#[allow(dead_code)]`-marked accordingly) when neither
+/// `uinput` nor `xdg-portal` is enabled -- both optional, so a
+/// default/no-Linux-backend build has no caller. That's a real,
+/// expected combination, not a sign this function should be deleted.
+#[allow(dead_code)]
 pub(crate) fn evdev_button_code(button: u8) -> u32 {
     const BTN_LEFT: u32 = 0x110;
     const BTN_RIGHT: u32 = 0x111;
@@ -566,7 +572,7 @@ impl UinputInjector {
     /// Write a batch of raw `(type_, code, value)` events followed by a
     /// `SYN_REPORT`, so the kernel/compositor applies them atomically.
     fn emit(&self, events: &[(u16, u16, i32)]) -> Result<(), InjectError> {
-        use input_linux::sys::{input_event, EV_SYN, SYN_REPORT};
+        use input_linux::sys::{EV_SYN, SYN_REPORT, input_event};
 
         let mut raw_events: Vec<input_event> = events
             .iter()
@@ -834,9 +840,9 @@ mod tests {
         assert!(uinput_touch_down(1)); // motion (stays down)
         assert!(!uinput_touch_down(2)); // up
         assert!(!uinput_touch_down(255)); // cancel
-                                          // Any other phase value defaults to "down" -- matches the
-                                          // permissive `phase != 2 && phase != 255` implementation, not
-                                          // an exhaustive enum.
+        // Any other phase value defaults to "down" -- matches the
+        // permissive `phase != 2 && phase != 255` implementation, not
+        // an exhaustive enum.
         assert!(uinput_touch_down(42));
     }
 }

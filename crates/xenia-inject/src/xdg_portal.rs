@@ -32,12 +32,12 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use ashpd::WindowIdentifier;
 use ashpd::desktop::remote_desktop::{DeviceType, RemoteDesktop};
 use ashpd::desktop::{PersistMode, Session};
 use ashpd::enumflags2::BitFlags;
-use ashpd::WindowIdentifier;
 
-use crate::{evdev_button_code, InjectError, InputInjector};
+use crate::{InjectError, InputInjector, evdev_button_code};
 
 /// Linux evdev button code for `NotifyPointerButton` (the portal's
 /// documented convention). Delegates to the crate-wide canonical
