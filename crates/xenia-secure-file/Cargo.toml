@@ -13,6 +13,22 @@ publish = false
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "0.38", default-features = false, features = ["process", "std", "fs"] }
 
+# Real ACL/reparse-point-aware backend (see src/lib.rs's `#[cfg(windows)]
+# mod backend`). Same crate `xenia-inject` already depends on for its
+# Win32 SendInput backend (crates/xenia-inject/Cargo.toml) -- Microsoft's
+# official binding, feature-gated to just the modules this backend needs,
+# not the lower-level `windows-sys` (kept consistent with the existing
+# project convention rather than introducing a second Windows FFI style).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+    "Win32_System_Memory",
+] }
+
 [dependencies]
 rand = "0.8"
 

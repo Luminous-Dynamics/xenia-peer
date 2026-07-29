@@ -9779,6 +9779,7 @@ version = "0.0.0-m0"
 dependencies = [
  "rand 0.8.7",
  "rustix 0.38.44",
+ "windows 0.62.2",
 ]
 
 [[package]]
