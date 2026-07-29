@@ -63,6 +63,14 @@ xdg-portal = ["xenia-inject/xdg-portal"]
 # needs root, `input` group membership, or a udev rule granting
 # /dev/uinput access. Off by default.
 uinput = ["xenia-inject/uinput"]
+# Win32 SendInput input-injection backend (--input-backend windows).
+# Windows only; no portal/consent-dialog layer to wait on, same trust
+# model as uinput. Off by default.
+windows-sendinput = ["xenia-inject/windows-sendinput"]
+# CoreGraphics CGEvent input-injection backend (--input-backend macos).
+# macOS only; triggers the OS's own Accessibility permission prompt on
+# first real use. Off by default.
+macos-cgevent = ["xenia-inject/macos-cgevent"]
 # Viewer/daemon protocol path for real host audio capture. Requires
 # system audio headers on Linux; off by default.
 audio-capture = ["xenia-capture/audio-cpal"]
