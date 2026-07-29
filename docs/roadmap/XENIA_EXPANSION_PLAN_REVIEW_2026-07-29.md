@@ -116,7 +116,7 @@ prevent in the product.
 
 ## Amendment 3 — Add an invariant against split sources of truth
 
-A single defect class recurred **three times in one day**, in three unrelated
+A single defect class recurred **four times in one day**, in unrelated
 subsystems:
 
 1. **Advertised vs. decodable formats.** scap's Linux engine advertised
@@ -131,22 +131,45 @@ subsystems:
    bump invalidates the hashes, and only the `nix` job notices — after the
    fact. **This recurred within minutes**, when a concurrent session bumped the
    rev and left the hashes stale.
-3. **README claims vs. branch content.** After publication, scap's `main` was
+3. **Cargo pin vs. cargo-vet exemption.** `supply-chain/config.toml` keys its
+   scap exemption by *exact revision* too, so the same bump left it naming the
+   old rev and failed both the `nix` and `RC1 Review` jobs with
+   `missing ["safe-to-deploy"]`.
+4. **README claims vs. branch content.** After publication, scap's `main` was
    upstream-identical while the fixes lived only on a branch — so the repo's
    own README described fixes that a fresh clone did not contain.
 
-In every case the fix was the same shape: **make one of the two the derived
-one.**
+In every case the fix was the same shape: **make one of them the derived one.**
+
+### Correction to this amendment's own first draft
+
+This amendment originally said "two hand-maintained lists" and listed three
+instances. **The real count for the dependency pin alone is three artifacts**
+(`Cargo.toml`/`Cargo.lock`, `flake.nix` ×2, `supply-chain/config.toml`), and
+item 3 above was discovered only when CI failed *after* this document was
+written.
+
+That is not a cosmetic correction, because it invalidates the guard the first
+draft proposed. "Assert the flake hashes match the locked rev" would have
+sailed straight past the cargo-vet exemption — a third artifact, in a different
+file, checked by a different tool, failing in a different job.
+
+The corrected conclusion is stronger: **enumerate every artifact keyed to a
+given fact and derive them from one place**, rather than pairwise-checking
+whichever two happen to come to mind. A review arguing that split sources of
+truth drift silently, which itself undercounted them, is its own evidence for
+the invariant.
 
 ### Proposed invariant 11
 
 > **11. One fact, one source of truth.**
 >
-> Where two artifacts must agree — advertised vs. handled capabilities,
-> declared vs. enforced permissions, a dependency pinned in two build systems,
-> documentation vs. the thing it documents — one must be derived from the
-> other, or a check must assert their equality. Two hand-maintained lists of
-> the same fact will drift, and the drift will be silent.
+> Where artifacts must agree — advertised vs. handled capabilities, declared
+> vs. enforced permissions, a dependency pinned across build and supply-chain
+> tooling, documentation vs. the thing it documents — all but one must be
+> derived, or a check must assert their equality **across the complete set**.
+> Independently maintained copies of one fact will drift, the drift will be
+> silent, and the set is usually larger than it first appears.
 
 This is directly load-bearing for the plan's own §3 and §12: a capability
 matrix that is *documented* in one place and *enforced* in another is precisely
@@ -270,17 +293,89 @@ dark patterns survive.
 
 ---
 
+## Appendix — upstream PR #183 became structurally orphaned
+
+Recorded here because it changes how the upstream contribution path works, and
+because the reasoning error is worth keeping.
+
+### Verified chronology
+
+| Time (UTC) | Event |
+|---|---|
+| 2026-04-19 10:24:21 | `Luminous-Dynamics/scap` created |
+| 2026-04-19 10:27:07 | `CapSoftware/scap#183` opened from it — 3 minutes later |
+| *(before publication)* | repo already reports `fork: false`, `parent: null`, while #183 still shows 18 commits and `mergeable: true` |
+| 2026-07-29 00:00:34 | `68ab39b` (format-negotiation fix) pushed |
+| 2026-07-29 00:00:38 | **#183 closed**, 4 seconds later, recorded under the repo owner's account |
+| after | cross-repo compare returns `404`; reopen returns `422 — "state cannot be changed. The repository may be missing relevant data."` |
+
+### What is and isn't established
+
+**Established:** the network association between the two repositories is gone,
+the PR is structurally orphaned rather than merely closed, and it cannot be
+reopened by any API call.
+
+**Not established:** that making the repository public *caused* the
+detachment. `parent: null` was already true **before** publication, so the
+repository was already detached while the PR still displayed as healthy. The
+likeliest reading is that the push forced GitHub to recompute an
+already-orphaned relationship. Publication may have participated in a pending
+network transition; the evidence does not show it created the detachment.
+
+### The reasoning error worth keeping
+
+Before publishing, `fork: false, parent: null` was read as *reassurance* —
+"not a fork, so there is no upstream coupling to disturb." That is exactly
+backwards. **A head repository of an open upstream PR reporting no parent is an
+anomaly**: the PR depended on a relationship the API said did not exist. The
+correct response was to investigate before any operation touching that
+repository, not to treat the missing relationship as an all-clear.
+
+Generalized: *the absence of an expected relationship is evidence of a problem,
+not evidence of safety.*
+
+### Impact: none to Xenia, none to the work
+
+No code and no review history was lost. Every commit remains on
+`Luminous-Dynamics/scap` (branch head `0ff8e89c`, also merged to `main`), and
+#183's full discussion — including maintainer review — stays readable as a
+closed PR. Xenia pins the downstream repo, which is public and working.
+
+### Planned upstream resubmission
+
+Rebuild three reviewable branches from upstream `main` rather than replaying 18
+commits mechanically, from a genuine personal fork of `CapSoftware/scap`:
+
+- **PR A — Linux correctness baseline:** two-level `Frame::Video(VideoFrame::…)`
+  repair, `SystemTime` migration, corrected advertised formats, shared
+  negotiation source of truth, and the regression tests proving every
+  advertised format has a decode arm. Including the invariant is what turns
+  this from "it compiles now" into "this class of failure cannot silently
+  recur."
+- **PR B — bounded delivery:** `sync_channel`, `SyncSender` propagation,
+  non-blocking `try_send`, explicit `Full` vs. `Disconnected` semantics, and
+  platform compilation evidence.
+- **PR C — lifecycle/state hardening:** stale-state fixes, preferably replacing
+  the process-wide Linux statics with per-instance state rather than only
+  boundary resets, plus drop-without-stop and second-capturer regression tests.
+
+#183 remains the complete discovery and review record and should be referenced,
+not reproduced.
+
+---
+
 ## Summary of proposed changes
 
 | # | Change | Grounded in |
 |---|---|---|
 | A1 | Add invariant 9: availability of the authorization path | F1 — one idle socket denied all service; threat model had zero availability coverage |
 | A2 | Add invariant 10: a verification signal must not claim more than it exercised | three false greens, incl. an unchanged CI run going success → failure |
-| A3 | Add invariant 11: one fact, one source of truth | three drift instances in one day, one recurring within minutes |
+| A3 | Add invariant 11: one fact, one source of truth, checked across the **complete** set | four drift instances in one day; the dependency rev alone is pinned in three artifacts |
 | A4 | Insert Phase 0 before the assurance programme | `scap-backend` has no CI compile coverage on any platform |
 | C1 | Reframe §3 as 6 → ~17 migration; fix the telemetry/audio enforcement gap first | `M1Permission` already exists and is direction-split |
 | C2 | Reframe §4 as extending 7 existing states | `M1SessionState` already exists with tests |
 | C3 | Scope the immediate work to Phase 0 + invariants + capabilities + state machine | plan is years at current staffing |
 | C4 | Mark §7 as requiring human validation | consent quality is not code-reviewable |
+| C5 | Record #183's structural orphaning + the upstream resubmission plan | see appendix |
 
 Everything else in the plan I would adopt as written.
