@@ -2009,7 +2009,7 @@ version = "1.0.6"
 criteria = "safe-to-deploy"
 
 [[exemptions.scap]]
-version = "0.1.0-beta.1@git:58b6a62d0b7cf07f3fcd6f276288ffea90d09fc4"
+version = "0.1.0-beta.1@git:0ff8e89cffb9dd41f5a2cbaa3d6c2c84f2a6ff38"
 criteria = "safe-to-deploy"
 
 [[exemptions.schannel]]
