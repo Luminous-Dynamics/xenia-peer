@@ -300,3 +300,29 @@ jobs:
           name: xenia-launcher-macos-app
           path: target/release/xenia-launcher-macos.zip
           if-no-files-found: error
+
+  # xenia-secure-file's #[cfg(windows)] backend (real Win32 ACL/reparse-
+  # point/ownership handling -- see docs/ADR-003-secure-file-trust-
+  # contract.md) has no other job that ever compiles it: every job above
+  # runs on ubuntu-latest, so `cfg(windows)` code -- including its own
+  # `#[cfg(windows)]` tests -- was previously never built or executed
+  # anywhere in this project's CI, despite depending on a real Windows
+  # security-API surface no amount of Linux-side testing can validate.
+  # A native `windows-latest` runner needs no cross-compilation toolchain
+  # (unlike local verification via `cargo-xwin`, which only proves the
+  # code compiles against the real API, not that it behaves correctly) --
+  # this is the actual gate for that backend's DACL/reparse-point/
+  # ownership behavior. Scoped to just this crate, not the full
+  # workspace: the other consumers (xenia-peer, xenia-operator-agent,
+  # xenia-capture-scrcpy) pull in ffmpeg/nix-flake-only dependencies not
+  # available on a plain windows-latest runner, matching the same
+  # exclusion the msrv job above already makes for the same reason.
+  windows:
+    name: xenia-secure-file (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked -p xenia-secure-file
+      - run: cargo clippy --locked -p xenia-secure-file --all-targets -- -D warnings
