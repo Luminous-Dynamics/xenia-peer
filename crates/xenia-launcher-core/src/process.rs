@@ -413,12 +413,22 @@ mod tests {
         let identity_path = identity_path();
         #[cfg(unix)]
         let binary = resolve_test_binary("sleep");
+        // ping, not timeout.exe: timeout.exe requires a real interactive
+        // console (checks stdin's console mode) and exits almost
+        // immediately with "Input redirection is not supported" when run
+        // as a redirected child process, exactly how tokio::process::Command
+        // spawns it -- confirmed the hard way via a real windows-latest CI
+        // failure (it made every test using it flaky/broken there, despite
+        // working fine interactively). ping has no such requirement.
         #[cfg(windows)]
-        let binary = PathBuf::from("C:\\Windows\\System32\\timeout.exe");
+        let binary = PathBuf::from("C:\\Windows\\System32\\PING.EXE");
         #[cfg(unix)]
         let args = vec!["30".into()];
+        // -n 31: ~31 echoes at the default 1s interval, ~30s total --
+        // long enough that every test below finishes well before it would
+        // exit on its own.
         #[cfg(windows)]
-        let args = vec!["/T".into(), "30".into(), "/NOBREAK".into()];
+        let args = vec!["-n".into(), "31".into(), "127.0.0.1".into()];
 
         let mut process = DaemonProcess::spawn(&binary, &args, &identity_path)
             .await
@@ -524,11 +534,11 @@ mod tests {
         #[cfg(unix)]
         let binary = resolve_test_binary("sleep");
         #[cfg(windows)]
-        let binary = PathBuf::from("C:\\Windows\\System32\\timeout.exe");
+        let binary = PathBuf::from("C:\\Windows\\System32\\PING.EXE");
         #[cfg(unix)]
         let args = vec!["30".into()];
         #[cfg(windows)]
-        let args = vec!["/T".into(), "30".into(), "/NOBREAK".into()];
+        let args = vec!["-n".into(), "31".into(), "127.0.0.1".into()];
 
         let spawned = DaemonProcess::spawn(&binary, &args, &identity_path)
             .await
@@ -551,11 +561,11 @@ mod tests {
         #[cfg(unix)]
         let real_binary = resolve_test_binary("sleep");
         #[cfg(windows)]
-        let real_binary = PathBuf::from("C:\\Windows\\System32\\timeout.exe");
+        let real_binary = PathBuf::from("C:\\Windows\\System32\\PING.EXE");
         #[cfg(unix)]
         let args = vec!["30".into()];
         #[cfg(windows)]
-        let args = vec!["/T".into(), "30".into(), "/NOBREAK".into()];
+        let args = vec!["-n".into(), "31".into(), "127.0.0.1".into()];
 
         let spawned = DaemonProcess::spawn(&real_binary, &args, &identity_path)
             .await
