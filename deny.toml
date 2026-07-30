@@ -50,6 +50,11 @@ allow = [
   "OFL-1.1",
   "CDLA-Permissive-2.0",
   "LicenseRef-UFL-1.0",
+  # target-lexicon (pulled transitively via xenia-launcher-windows's Linux
+  # tray-icon/muda GTK backend: atk-sys -> system-deps -> target-lexicon)
+  # is Apache-2.0 plus the LLVM exception, a strictly more permissive
+  # variant of an already-allowed license, not a new/different one.
+  "Apache-2.0 WITH LLVM-exception",
 ]
 
 [licenses.private]
