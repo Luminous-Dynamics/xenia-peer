@@ -488,8 +488,8 @@ mod backend {
     use std::os::windows::io::FromRawHandle;
     use windows::core::{HRESULT, HSTRING, PWSTR};
     use windows::Win32::Foundation::{
-        CloseHandle, LocalFree, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, HANDLE,
-        HLOCAL,
+        CloseHandle, LocalFree, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND,
+        ERROR_SHARING_VIOLATION, ERROR_SUCCESS, HANDLE, HLOCAL,
     };
     use windows::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -781,6 +781,51 @@ mod backend {
         Ok(unsafe { File::from_raw_handle(raw.0 as _) })
     }
 
+    /// Bounded retry for `ERROR_SHARING_VIOLATION` specifically -- a
+    /// well-documented, expected-to-be-transient condition on Windows even
+    /// for two opens that both request/grant only read access: NTFS's own
+    /// internal bookkeeping during a metadata operation on the same file
+    /// name (here, `CreateHardLinkW` publishing it) can briefly conflict
+    /// with an unrelated concurrent open, independent of either side's
+    /// declared share mode. This is exactly the scenario
+    /// `load_or_create`'s losing racers hit: they call
+    /// [`open_secure_existing`] on the file the winner is *in the middle
+    /// of* publishing. Retrying after a short backoff -- rather than
+    /// failing the whole `load_or_create` call over a transient condition
+    /// -- is Microsoft's own standard guidance for `ERROR_SHARING_VIOLATION`.
+    /// 5 attempts / ~100ms total ceiling: generous for a same-machine,
+    /// same-process race that resolves within microseconds once the
+    /// winner's publish completes, not tuned for e.g. a real antivirus
+    /// scanner holding a lock for longer.
+    fn open_read_only_retrying_sharing_violation(path: &Path) -> windows::core::Result<HANDLE> {
+        const MAX_ATTEMPTS: u32 = 5;
+        let mut delay = std::time::Duration::from_millis(5);
+        for attempt in 1..=MAX_ATTEMPTS {
+            match unsafe {
+                CreateFileW(
+                    &HSTRING::from(path),
+                    FILE_GENERIC_READ.0,
+                    FILE_SHARE_READ,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_FLAG_OPEN_REPARSE_POINT,
+                    None,
+                )
+            } {
+                Ok(handle) => return Ok(handle),
+                Err(e)
+                    if attempt < MAX_ATTEMPTS
+                        && e.code() == HRESULT::from_win32(ERROR_SHARING_VIOLATION.0) =>
+                {
+                    std::thread::sleep(delay);
+                    delay *= 2;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!("loop always returns on its final attempt")
+    }
+
     /// Open `path` if it exists and is safe to trust: not a reparse point,
     /// owned by the current user. Read-only -- every caller of this
     /// function only ever reads the returned `File` (`read_to_end`), so
@@ -792,19 +837,11 @@ mod backend {
     /// `load_or_create`'s `publish_if_absent` `Ok(false)` branch all call
     /// this on the same winning file at once. Multiple simultaneous
     /// read-only opens, each both requesting and sharing only read access,
-    /// don't conflict.
+    /// don't conflict on their own declared access -- but see
+    /// [`open_read_only_retrying_sharing_violation`] for the remaining,
+    /// separate transient-conflict source this alone didn't close.
     fn open_secure_existing(path: &Path) -> Result<File, Box<dyn std::error::Error>> {
-        let raw = unsafe {
-            CreateFileW(
-                &HSTRING::from(path),
-                FILE_GENERIC_READ.0,
-                FILE_SHARE_READ,
-                None,
-                OPEN_EXISTING,
-                FILE_FLAG_OPEN_REPARSE_POINT,
-                None,
-            )?
-        };
+        let raw = open_read_only_retrying_sharing_violation(path)?;
         let handle = OwnedHandle(raw);
         refuse_if_reparse_point(handle.0)?;
         check_owned_by_current_user(handle.0)?;
