@@ -1,0 +1,50 @@
+[package]
+name = "xenia-launcher-windows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-or-later"
+description = "Minimal native Windows tray shell for xenia-launcher-core: system tray icon + menu, a small settings window, balloon notifications, and start-at-login integration. Windows-only -- see docs/roadmap for why this isn't Tauri yet."
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[[bin]]
+name = "xenia-launcher"
+path = "src/main.rs"
+
+[dependencies]
+xenia-launcher-core = { path = "../../crates/xenia-launcher-core" }
+xenia-secure-file = { path = "../../crates/xenia-secure-file" }
+tokio = { workspace = true, features = ["process", "fs", "rt", "net", "rt-multi-thread"] }
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+
+# System tray icon + context menu. Real Win32 event-loop integration
+# (verified against this crate's actual source, not guessed -- see the
+# module doc comments in src/tray.rs for the specific APIs this relies on).
+tray-icon = "0.24"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Console",
+    "Win32_System_Registry",
+    "Win32_System_LibraryLoader",
+    # RegCreateKeyExW is gated behind this feature (confirmed via the real
+    # windows-0.62.2 source: it's cfg'd out of Win32_System_Registry
+    # without it).
+    "Win32_Security",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_UI_Controls",
+    "Win32_Graphics_Gdi",
+] }
+
+[lints]
+workspace = true
