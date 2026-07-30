@@ -323,6 +323,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked -p xenia-secure-file
       - run: cargo clippy --locked -p xenia-secure-file --all-targets -- -D warnings
