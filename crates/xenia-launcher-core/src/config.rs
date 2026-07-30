@@ -256,8 +256,9 @@ mod tests {
 
     #[test]
     fn to_args_derives_state_paths_from_the_single_state_dir_root() {
+        let state_dir = PathBuf::from("state-root").join("profile-a");
         let cfg = DaemonConfig {
-            state_dir: PathBuf::from("/tmp/profile-a"),
+            state_dir: state_dir.clone(),
             ..DaemonConfig::default()
         };
         let args = cfg.to_args();
@@ -265,11 +266,16 @@ mod tests {
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        assert!(joined.contains(&"/tmp/profile-a/operator.key".to_string()));
-        assert!(joined.contains(&"/tmp/profile-a/consent.ledger".to_string()));
-        assert!(joined.contains(&"/tmp/profile-a/consent-ledger.key".to_string()));
-        assert!(joined.contains(&"/tmp/profile-a/host-identity.key".to_string()));
-        assert!(joined.contains(&"/tmp/profile-a/operator-http-ml-dsa.key".to_string()));
+        // Built via Path::join (like to_args itself), not a hardcoded
+        // forward-slash string -- the whole point is to prove the derived
+        // path is correct on this platform's own separator, not to assert
+        // one particular separator.
+        let expect = |file: &str| state_dir.join(file).to_string_lossy().into_owned();
+        assert!(joined.contains(&expect("operator.key")));
+        assert!(joined.contains(&expect("consent.ledger")));
+        assert!(joined.contains(&expect("consent-ledger.key")));
+        assert!(joined.contains(&expect("host-identity.key")));
+        assert!(joined.contains(&expect("operator-http-ml-dsa.key")));
     }
 
     #[test]

@@ -319,11 +319,17 @@ fn identity_still_matches(identity: &ProcessIdentity) -> IdentityCheck {
         return IdentityCheck::NotRunning;
     }
     let actual = PathBuf::from(String::from_utf16_lossy(&buf[..len as usize]));
-    let expected = identity
-        .binary_path
-        .canonicalize()
-        .unwrap_or_else(|_| identity.binary_path.clone());
-    if actual == expected {
+    // Deliberately NOT canonicalize()'d, unlike the Unix side: on Windows
+    // that adds the `\\?\` verbatim-path prefix (a real, confirmed bug --
+    // it made a genuinely-identical path compare as a mismatch), while
+    // `QueryFullProcessImageNameW(PROCESS_NAME_WIN32)` always returns a
+    // plain win32-format path with no such prefix. `identity.binary_path`
+    // is already absolute and non-symlinked in real usage (it comes from
+    // `discovery::discover`, which resolves an explicit installed path,
+    // never a relative or symlinked one), so a raw comparison is both
+    // correct and simpler than the canonicalize+fallback dance this
+    // replaced.
+    if actual == identity.binary_path {
         IdentityCheck::Alive
     } else {
         IdentityCheck::Mismatch {
