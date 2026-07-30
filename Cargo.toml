@@ -15,6 +15,7 @@ members = [
     "crates/xenia-ledger",
     "crates/xenia-mobile-ffi",
     "crates/xenia-secure-file",
+    "crates/xenia-launcher-core",
     "apps/sovereign-admin",
     "apps/xenia-operator-agent",
 ]
@@ -36,6 +37,7 @@ default-members = [
     "crates/xenia-ledger",
     "crates/xenia-mobile-ffi",
     "crates/xenia-secure-file",
+    "crates/xenia-launcher-core",
     "apps/xenia-operator-agent",
 ]
 resolver = "2"
