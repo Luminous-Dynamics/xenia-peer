@@ -157,6 +157,27 @@ jobs:
           name: xenia-launcher-windows-msi
           path: target/wix/*.msi
           if-no-files-found: error
+      # Real headless startup smoke test: launch the actual release binary
+      # and confirm it's still running (not crashed) after a real startup
+      # window, rather than only proving it compiles and unit-tests pass.
+      # windows-latest runners have a real interactive desktop session (the
+      # same reason Electron/Tauri E2E suites work here), so this exercises
+      # real tray-icon/Win32-window creation, not a stub.
+      - name: Headless startup smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./target/release/xenia-launcher.exe > launcher.log 2>&1 &
+          PID=$!
+          sleep 5
+          if ! kill -0 "$PID" 2>/dev/null; then
+            echo "FAIL: xenia-launcher.exe was not still running after 5s"
+            cat launcher.log
+            exit 1
+          fi
+          echo "OK: xenia-launcher.exe still running after 5s (pid $PID)"
+          cat launcher.log
+          taskkill //F //PID "$PID" || true
 
   # xenia-launcher-linux is the native Linux tray shell -- item 8 (Linux
   # half) of the launcher plan, mirroring xenia-launcher-windows's
@@ -194,6 +215,24 @@ jobs:
           name: xenia-launcher-linux-deb
           path: target/debian/*.deb
           if-no-files-found: error
+      # Real end-to-end smoke test: install the .deb into a CLEAN container
+      # (nothing but its own declared Depends:, no -dev headers this job
+      # itself needed to build it) and confirm the binary actually stays
+      # running. This job's own environment already has libappindicator3-dev
+      # installed above, which would mask a real bug found by hand
+      # 2026-07-31: tray-icon dlopen()s libappindicator at runtime, so
+      # dpkg-shlibdeps' $auto detection can't see it, and without it
+      # actually installed the app doesn't lose its tray icon gracefully --
+      # it panics. See scripts/xenia-launcher-linux-smoke-test.sh and
+      # docs/packaging/README.md for the full story.
+      - name: Install in a clean container and smoke-test
+        run: |
+          set -euo pipefail
+          DEB=$(ls target/debian/*.deb)
+          docker run --rm \
+            -v "$PWD/$DEB:/pkg/xenia-launcher.deb:ro" \
+            -v "$PWD/scripts/xenia-launcher-linux-smoke-test.sh:/smoke-test.sh:ro" \
+            ubuntu:24.04 bash /smoke-test.sh /pkg/xenia-launcher.deb
 
   # xenia-launcher-macos is the native macOS tray shell -- item 8 (macOS
   # half) of the launcher plan. Unlike Windows (cargo-xwin cross-compiles
@@ -225,6 +264,27 @@ jobs:
       # double-click on a fresh machine.
       - name: Build release binary
         run: cargo build --locked --release -p xenia-launcher-macos
+      # Real headless startup smoke test, run against the bare binary
+      # (before bundling) -- this is the FIRST point anywhere in this
+      # effort where the generated Objective-C runtime calls (NSApplication,
+      # the AppKit tray/menu-bar setup) actually execute rather than only
+      # type-checking. macos-latest runners have a real logged-in GUI
+      # session (the same reason Xcode UI tests work here).
+      - name: Headless startup smoke test
+        run: |
+          set -euo pipefail
+          ./target/release/xenia-launcher > launcher.log 2>&1 &
+          PID=$!
+          sleep 5
+          if ! kill -0 "$PID" 2>/dev/null; then
+            echo "FAIL: xenia-launcher was not still running after 5s"
+            cat launcher.log
+            exit 1
+          fi
+          echo "OK: xenia-launcher still running after 5s (pid $PID)"
+          cat launcher.log
+          kill -TERM "$PID"
+          wait "$PID" || true
       - name: Assemble .app bundle
         run: |
           set -euo pipefail

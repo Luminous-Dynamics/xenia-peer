@@ -55,7 +55,15 @@ workspace = true
 # reflects what the binary genuinely links against rather than a guess.
 [package.metadata.deb]
 maintainer = "Tristan Stoltz"
-depends = "$auto"
+# $auto misses libappindicator: tray-icon's Linux backend dlopen()s it at
+# runtime (libappindicator-sys) rather than dynamically linking it, so
+# dpkg-shlibdeps -- which only sees the binary's actual link-time NEEDED
+# entries -- can't detect it. Confirmed the hard way (2026-07-31): running
+# the built binary without either library installed doesn't just lose the
+# tray icon, it panics and takes the whole process down
+# (libappindicator-sys unwraps a failed dlopen). Listed explicitly so apt
+# always pulls one of the two package names in use across distros.
+depends = "$auto, libappindicator3-1 | libayatana-appindicator3-1"
 section = "net"
 priority = "optional"
 extended-description = """\
