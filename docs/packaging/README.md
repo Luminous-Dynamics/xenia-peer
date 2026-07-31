@@ -92,6 +92,12 @@ infrastructure is funded and wired in.
   install time. Can be added later by hand-editing the `.wxs` file.
 - Installs the `xenia-launcher.exe` binary plus an optional PATH-variable
   feature (unchecked by default in the installer's feature tree).
+- **CI now runs a real headless startup smoke test** (2026-07-31): launches
+  the actual release binary on the `windows-latest` runner's real
+  interactive desktop session and confirms it's still running after 5s,
+  not just that it compiled. Doesn't replace a human clicking through the
+  installer/tray UI, but does prove the binary starts and doesn't
+  immediately crash on a real Windows machine.
 
 ## Linux (`.deb`)
 
@@ -116,18 +122,34 @@ infrastructure is funded and wired in.
   so the real ubuntu-latest CI job (which apt-installs the actual `-dev`
   packages first) is the authoritative check that auto-detection resolves
   real Debian package names.
-- **Confirmed on real CI**: `Depends: libc6 (>= 2.39), libgdk-pixbuf-2.0-0
-  (>= 2.22.0), libglib2.0-0t64 (>= 2.54.0), libgtk-3-0t64 (>= 3.21.5),
-  libxdo3 (>= 1:3.20130104.1)`. Notably absent: `libappindicator3-1` /
-  `libayatana-appindicator3-1`, even though `tray-icon`'s Linux backend
-  depends on `libappindicator` at the Cargo level. `dpkg-shlibdeps` only
-  sees libraries the binary is actually link-time-linked against, so the
-  most likely explanation is `libappindicator` (or `tray-icon`'s use of
-  it) loads it via `dlopen` at runtime rather than linking it directly --
-  plausible but not independently confirmed by reading `tray-icon`'s
-  source in this pass. Worth keeping in mind if a machine without
-  libappindicator installed shows degraded (or missing) tray icon
-  behavior: the `.deb`'s dependency list won't have pulled it in.
+- **Real bug found and fixed, 2026-07-31**: the earlier version of this doc
+  flagged `libappindicator3-1`/`libayatana-appindicator3-1` as suspiciously
+  absent from `$auto`'s detected `Depends:` and guessed `dlopen` as the
+  likely cause. Confirmed the hard way: built the release binary, ran it
+  under a real Xvfb + D-Bus session with the library deliberately absent --
+  it doesn't degrade to no-tray-icon, it **panics and kills the whole
+  process** (`libappindicator-sys` unwraps a failed `dlopen`). Re-ran with
+  the library present: clean startup, no panic. Root cause confirmed:
+  `tray-icon`'s Linux backend really does `dlopen` libappindicator at
+  runtime rather than linking it, invisible to `dpkg-shlibdeps`.
+  **Fix**: `depends = "$auto, libappindicator3-1 | libayatana-appindicator3-1"`
+  in `Cargo.toml` -- forces apt to always install one of the two package
+  names in use across distros. Verified end-to-end: built the `.deb`
+  inside a real `ubuntu:24.04` container (mirroring the CI job exactly, to
+  get a portable binary rather than one linked against this NixOS dev
+  machine's own dynamic linker), installed it into a **separate, clean**
+  `ubuntu:24.04` container with nothing but the package's own declared
+  dependencies, and confirmed the binary starts and stays running. `Depends:`
+  now reads `libappindicator3-1 | libayatana-appindicator3-1, libc6 (>=
+  2.39), libgdk-pixbuf-2.0-0 (>= 2.22.0), libglib2.0-0t64 (>= 2.54.0),
+  libgtk-3-0t64 (>= 3.21.5), libxdo3 (>= 1:3.20130104.1)`.
+- **CI now runs this same clean-container smoke test on every build**
+  (`scripts/xenia-launcher-linux-smoke-test.sh`, wired into the
+  `linux-launcher` job) -- the `linux-launcher` job's own environment
+  already has `libappindicator3-dev` installed to build against, which
+  would have masked this exact bug if the smoke test ran there directly;
+  running it against a separately-installed `.deb` in a fresh container is
+  what makes it a real regression test.
 
 ## macOS (`.app`, zipped)
 
@@ -159,3 +181,14 @@ infrastructure is funded and wired in.
   from the bundle, to confirm or correct this.
 - No custom icon (`CFBundleIconFile` omitted) -- same "no real product art
   yet" reasoning as the Linux `.desktop` entry.
+- **CI now runs a real headless startup smoke test** (2026-07-31), against
+  the bare binary before bundling: launches it on the `macos-latest`
+  runner's real logged-in GUI session and confirms it's still running
+  after 5s. This is the first point anywhere in this effort where the
+  generated Objective-C runtime calls (`NSApplication`, the AppKit
+  tray/menu-bar setup) actually execute rather than only type-checking
+  under `cargo check --target x86_64-apple-darwin`. Doesn't touch the
+  `UNUserNotificationCenter` question above (notifications are never sent
+  at startup) or prove the bundle's own behavior specifically (the smoke
+  test runs the bare binary, not the assembled `.app`) -- both remain real
+  gaps for hands-on testing.
