@@ -27,10 +27,28 @@ certificate (Authenticode) in this project's infrastructure. An unsigned
 installer will trigger a Microsoft SmartScreen "Windows protected your PC"
 warning on a fresh machine -- the installer still works if the user clicks
 "More info" -> "Run anyway," but this is a real, disclosed rough edge, not
-something `cargo wix` or CI can paper over. Fixing this needs an actual
-purchased certificate (or enrollment in Microsoft's free-for-open-source
-Trusted Signing program) wired into the CI job via `cargo wix sign` or
-`signtool`.
+something `cargo wix` or CI can paper over.
+
+A real *free* path exists and was researched (not just assumed) 2026-07-31:
+the [SignPath Foundation's open-source program](https://signpath.io/solutions/open-source-community)
+signs qualifying OSS projects for free, holding the private key on its own
+HSM rather than handing it to the project. Confirmed eligibility criteria
+(via `signpath.org/terms.html`): an OSI-approved license without commercial
+dual-licensing (AGPL-3.0-or-later qualifies), no malware, actively
+maintained, functionality documented on a download page, and -- the one real
+gap today -- **the project must already have released software in the form
+that needs signing**; a from-source `cargo wix`/`cargo deb` build with no
+GitHub Release or version above `0.0.0-m0` likely doesn't clear that bar
+yet. Confirmed CI integration mechanics (via `docs.signpath.io/trusted-build-systems/github`):
+a single `SIGNPATH_API_TOKEN` secret, the
+`signpath/github-action-submit-signing-request` action submitting an
+already-uploaded `actions/upload-artifact` artifact for signing and
+downloading the signed result back -- no private key material ever touches
+this project's own CI. Applying is a real, externally-visible action
+(project name/description handed to a third party) and hasn't been done --
+worth doing once there's an actual release to point the application at.
+Azure Trusted Signing (~$10/month) remains a cheaper-than-a-cert fallback if
+SignPath eligibility doesn't pan out.
 
 **macOS**: the `.app` bundle is unsigned and unnotarized. Gatekeeper will
 refuse to open it via a normal double-click on a fresh machine -- the user
@@ -46,7 +64,10 @@ OS-level Gatekeeper/SmartScreen equivalent for local installation (`sudo dpkg
 -i` just works). A real APT repository would want GPG-signed
 `Release`/`Packages` files, but that's a distribution-infrastructure concern
 distinct from the package itself, and not required for someone to install
-the `.deb` directly.
+the `.deb` directly. Groundwork for that (key-generation and repo-build
+tooling, verified end-to-end against a real `apt` client) exists in
+`docs/packaging/apt-repo.md` -- not wired up or hosted anywhere yet, since
+standing up a real repo is a separate hosting decision.
 
 **Bottom line**: these are real, working, CI-verified installers -- not
 placeholders -- but they are not yet suitable for wide, unsuspecting-user
