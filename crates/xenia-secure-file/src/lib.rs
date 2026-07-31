@@ -471,7 +471,503 @@ mod backend {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+mod backend {
+    // Real Win32 security-descriptor/handle FFI has no safe-Rust
+    // equivalent in this ecosystem (unlike the Unix backend, where
+    // `rustix` provides fully safe wrappers around the equivalent POSIX
+    // calls) -- see ADR-003 (`docs/ADR-003-secure-file-trust-contract.md`)
+    // for why this module exists at all. Scoped to just this module, not
+    // the workspace-wide lint.
+    #![allow(unsafe_code)]
+
+    use super::*;
+    use std::ffi::{OsStr, c_void};
+    use std::fs::File;
+    use std::io::{Read, Write};
+    use std::os::windows::io::FromRawHandle;
+    use windows::Win32::Foundation::{
+        CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_SHARING_VIOLATION,
+        ERROR_SUCCESS, HANDLE, HLOCAL, LocalFree,
+    };
+    use windows::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
+    };
+    use windows::Win32::Security::{
+        GetTokenInformation, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+        SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    };
+    use windows::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW, CreateHardLinkW,
+        DeleteFileW, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+        FILE_GENERIC_WRITE, FILE_SHARE_MODE, FILE_SHARE_READ, GetFileInformationByHandle,
+        OPEN_EXISTING,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows::core::{HRESULT, HSTRING, PWSTR};
+
+    /// RAII close for a raw `HANDLE` that hasn't (yet) been handed off to
+    /// a `std::fs::File`. On the success path, ownership is transferred
+    /// to a `File` via `std::mem::forget` on this guard -- see
+    /// [`open_secure_existing`].
+    struct OwnedHandle(HANDLE);
+    impl Drop for OwnedHandle {
+        fn drop(&mut self) {
+            if !self.0.is_invalid() {
+                unsafe {
+                    let _ = CloseHandle(self.0);
+                }
+            }
+        }
+    }
+
+    /// RAII free for a security descriptor allocated by
+    /// `ConvertStringSecurityDescriptorToSecurityDescriptorW` or returned
+    /// (into) by `GetSecurityInfo` -- both document `LocalFree` as the
+    /// caller's responsibility.
+    struct OwnedSecurityDescriptor(PSECURITY_DESCRIPTOR);
+    impl Drop for OwnedSecurityDescriptor {
+        fn drop(&mut self) {
+            if !self.0.0.is_null() {
+                unsafe {
+                    let _ = LocalFree(Some(HLOCAL(self.0.0)));
+                }
+            }
+        }
+    }
+
+    /// A `WIN32_ERROR`-returning call (not the `windows_core::Result`
+    /// convention most of this module's other calls use -- `GetSecurityInfo`
+    /// predates that convention and still returns the raw code) converted
+    /// into a real error, not just an opaque status integer.
+    fn check_win32(status: windows::Win32::Foundation::WIN32_ERROR) -> windows::core::Result<()> {
+        if status == ERROR_SUCCESS {
+            Ok(())
+        } else {
+            Err(windows::core::Error::from_hresult(HRESULT::from_win32(
+                status.0,
+            )))
+        }
+    }
+
+    /// The current process's user SID, as a string (`S-1-5-...`). Compared
+    /// as a string against a file/directory's owner SID string in
+    /// [`check_owned_by_current_user`] rather than via `EqualSid` -- one
+    /// well-tested OS conversion call instead of hand-walking `SID` byte
+    /// layout, and it makes a mismatch error message directly useful (both
+    /// SIDs print in it), matching the Unix backend's error messages,
+    /// which print the uid.
+    fn current_user_sid_string() -> windows::core::Result<String> {
+        unsafe {
+            let mut raw_token = HANDLE::default();
+            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw_token)?;
+            let token = OwnedHandle(raw_token);
+
+            let mut len: u32 = 0;
+            // Deliberately ignored: this first call is expected to fail
+            // with ERROR_INSUFFICIENT_BUFFER; its only purpose is to
+            // report the real required size into `len`.
+            let _ = GetTokenInformation(token.0, TokenUser, None, 0, &mut len);
+            let mut buf = vec![0u8; len as usize];
+            GetTokenInformation(
+                token.0,
+                TokenUser,
+                Some(buf.as_mut_ptr().cast::<c_void>()),
+                len,
+                &mut len,
+            )?;
+            // Safety: `buf` was sized by the probe call above and filled by
+            // this same GetTokenInformation call for `TokenUser`, whose
+            // output is always a `TOKEN_USER` (a `SID_AND_ATTRIBUTES`)
+            // immediately followed by the SID's own bytes it points into.
+            let token_user = &*(buf.as_ptr().cast::<TOKEN_USER>());
+            sid_to_string(token_user.User.Sid)
+        }
+    }
+
+    /// # Safety
+    /// `sid` must point to a valid `SID` for the duration of this call.
+    unsafe fn sid_to_string(sid: PSID) -> windows::core::Result<String> {
+        let mut sid_str = PWSTR::null();
+        unsafe {
+            ConvertSidToStringSidW(sid, &mut sid_str)?;
+        }
+        let result = unsafe { sid_str.to_string() }
+            .map_err(|_| windows::core::Error::from(windows::Win32::Foundation::E_UNEXPECTED));
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(sid_str.0.cast())));
+        }
+        result
+    }
+
+    /// Build an owner-only security descriptor: the current user owns the
+    /// object, and the DACL grants that same user -- and no one else,
+    /// deliberately no inherited or `Everyone`/`Authenticated Users`/
+    /// `Administrators`-blanket entries -- full control. Via SDDL
+    /// (`ConvertStringSecurityDescriptorToSecurityDescriptorW`) rather than
+    /// hand-building an `ACL`/`ACE` byte layout: the string form is the
+    /// same well-documented format `icacls`/PowerShell's `Get-Acl` produce
+    /// and consume, and keeps this crate's unsafe surface to one OS
+    /// conversion call instead of manual struct-and-buffer-size math.
+    fn owner_only_security_descriptor(
+        owner_sid: &str,
+    ) -> windows::core::Result<OwnedSecurityDescriptor> {
+        // O: owner. D:PAI(...) DACL, Protected (not inherited from the
+        // parent) + Auto-Inherited-flag-set (matches what Explorer/icacls
+        // produce for an explicitly-set DACL). One ACE: (A)llow, (FA)
+        // File-All-access, to the owner SID -- and nothing else.
+        let sddl = HSTRING::from(format!("O:{owner_sid}D:PAI(A;;FA;;;{owner_sid})"));
+        let mut psd = PSECURITY_DESCRIPTOR::default();
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                &sddl,
+                SDDL_REVISION_1,
+                &mut psd,
+                None,
+            )?;
+        }
+        Ok(OwnedSecurityDescriptor(psd))
+    }
+
+    fn security_attributes(descriptor: &OwnedSecurityDescriptor) -> SECURITY_ATTRIBUTES {
+        SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0.0,
+            bInheritHandle: false.into(),
+        }
+    }
+
+    /// Refuse `handle` if it resolves to a reparse point (symlink,
+    /// junction, or any other reparse tag) -- the Windows analogue of the
+    /// Unix backend's `O_NOFOLLOW`. `handle` must have been opened with
+    /// `FILE_FLAG_OPEN_REPARSE_POINT` (below) so opening it in the first
+    /// place didn't already silently traverse a symlink/junction.
+    fn refuse_if_reparse_point(handle: HANDLE) -> Result<(), Box<dyn std::error::Error>> {
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        unsafe {
+            GetFileInformationByHandle(handle, &mut info)?;
+        }
+        if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+            return Err("refusing to use a symlink or junction for sensitive material".into());
+        }
+        Ok(())
+    }
+
+    /// Check `handle`'s owner SID matches the current process's user --
+    /// see ADR-003 (`docs/ADR-003-secure-file-trust-contract.md`): applies
+    /// uniformly, including to an elevated/`Administrators` process, the
+    /// same way the Unix backend's uid check applies uniformly including
+    /// to root.
+    fn check_owned_by_current_user(handle: HANDLE) -> Result<(), Box<dyn std::error::Error>> {
+        let mut owner = PSID::default();
+        let mut psd = PSECURITY_DESCRIPTOR::default();
+        let status = unsafe {
+            GetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                Some(&mut owner),
+                None,
+                None,
+                None,
+                Some(&mut psd),
+            )
+        };
+        check_win32(status)?;
+        let _owned = OwnedSecurityDescriptor(psd);
+
+        let owner_string = unsafe { sid_to_string(owner) }?;
+        let current = current_user_sid_string()?;
+        if owner_string != current {
+            return Err(format!(
+                "owned by {owner_string}, not this process's user {current} -- refusing to trust it"
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    fn file_name_of(path: &Path) -> Result<&OsStr, Box<dyn std::error::Error>> {
+        path.file_name()
+            .ok_or_else(|| format!("{}: path has no file name", path.display()).into())
+    }
+
+    fn is_not_found(e: &(dyn std::error::Error + 'static)) -> bool {
+        e.downcast_ref::<windows::core::Error>()
+            .is_some_and(|we| we.code() == HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0))
+            || e.downcast_ref::<std::io::Error>()
+                .is_some_and(|io_err| io_err.kind() == std::io::ErrorKind::NotFound)
+    }
+
+    /// Create (owner-only ACL, if missing) and verify `path`'s parent
+    /// directory: not a reparse point, owned by the current user.
+    ///
+    /// **Known gap, disclosed rather than silently accepted**: unlike the
+    /// Unix backend, this does NOT hold the parent directory open as a
+    /// descriptor-relative anchor for subsequent operations. Win32's
+    /// `CreateFileW` has no equivalent of `openat`'s dirfd-relative opens
+    /// -- that requires the NT native API's `NtCreateFile` with an
+    /// `OBJECT_ATTRIBUTES.RootDirectory`, an unstable, semi-documented
+    /// surface this crate deliberately does not reach for; a
+    /// disproportionate risk increase, especially unverifiable-by-this-
+    /// author-locally, for what it would close. This backend instead
+    /// re-resolves the leaf file's full path from scratch in
+    /// [`secure_create_new`]/[`open_secure_existing`], each independently
+    /// checked (reparse-point refusal + ownership) but not connected by a
+    /// single held-open anchor -- a narrower TOCTOU window than Unix's
+    /// zero-window guarantee (an attacker with write access to an
+    /// ancestor directory could still swap a path component between this
+    /// check and the leaf open), not a fully equivalent one. See ADR-003.
+    fn open_secure_parent_dir(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        if !parent.exists() {
+            let owner = current_user_sid_string()?;
+            let descriptor = owner_only_security_descriptor(&owner)?;
+            let attrs = security_attributes(&descriptor);
+            // Match std::fs::create_dir_all's idempotency, not raw
+            // CreateDirectoryW's: two callers can both observe
+            // `!parent.exists()` and race here (this is exactly what
+            // the concurrent-racers test below exercises) -- the loser
+            // gets ERROR_ALREADY_EXISTS, which is the *expected*, benign
+            // outcome of that race, not a real failure. Whoever actually
+            // created it, both proceed to open+verify the same directory
+            // below regardless of who won.
+            match unsafe { CreateDirectoryW(&HSTRING::from(parent), Some(&attrs)) } {
+                Ok(()) => {}
+                Err(e) if e.code() == HRESULT::from_win32(ERROR_ALREADY_EXISTS.0) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        let raw = unsafe {
+            CreateFileW(
+                &HSTRING::from(parent),
+                FILE_GENERIC_READ.0,
+                FILE_SHARE_READ,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                None,
+            )?
+        };
+        let handle = OwnedHandle(raw);
+        refuse_if_reparse_point(handle.0)?;
+        check_owned_by_current_user(handle.0)?;
+        Ok(())
+    }
+
+    /// Create `path` fresh (fails if it already exists -- the Windows
+    /// analogue of `O_CREAT|O_EXCL`), with the owner-only ACL set *at
+    /// creation* via `lpSecurityAttributes`, never a separate ACL-tightening
+    /// call afterward.
+    fn secure_create_new(path: &Path) -> Result<File, Box<dyn std::error::Error>> {
+        let owner = current_user_sid_string()?;
+        let descriptor = owner_only_security_descriptor(&owner)?;
+        let attrs = security_attributes(&descriptor);
+        let raw = unsafe {
+            CreateFileW(
+                &HSTRING::from(path),
+                FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0,
+                FILE_SHARE_MODE(0),
+                Some(&attrs),
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL,
+                None,
+            )?
+        };
+        Ok(unsafe { File::from_raw_handle(raw.0 as _) })
+    }
+
+    /// Bounded retry for `ERROR_SHARING_VIOLATION` specifically -- a
+    /// well-documented, expected-to-be-transient condition on Windows even
+    /// for two opens that both request/grant only read access: NTFS's own
+    /// internal bookkeeping during a metadata operation on the same file
+    /// name (here, `CreateHardLinkW` publishing it) can briefly conflict
+    /// with an unrelated concurrent open, independent of either side's
+    /// declared share mode. This is exactly the scenario
+    /// `load_or_create`'s losing racers hit: they call
+    /// [`open_secure_existing`] on the file the winner is *in the middle
+    /// of* publishing. Retrying after a short backoff -- rather than
+    /// failing the whole `load_or_create` call over a transient condition
+    /// -- is Microsoft's own standard guidance for `ERROR_SHARING_VIOLATION`.
+    /// 5 attempts / ~100ms total ceiling: generous for a same-machine,
+    /// same-process race that resolves within microseconds once the
+    /// winner's publish completes, not tuned for e.g. a real antivirus
+    /// scanner holding a lock for longer.
+    fn open_read_only_retrying_sharing_violation(path: &Path) -> windows::core::Result<HANDLE> {
+        const MAX_ATTEMPTS: u32 = 5;
+        let mut delay = std::time::Duration::from_millis(5);
+        for attempt in 1..=MAX_ATTEMPTS {
+            match unsafe {
+                CreateFileW(
+                    &HSTRING::from(path),
+                    FILE_GENERIC_READ.0,
+                    FILE_SHARE_READ,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_FLAG_OPEN_REPARSE_POINT,
+                    None,
+                )
+            } {
+                Ok(handle) => return Ok(handle),
+                Err(e)
+                    if attempt < MAX_ATTEMPTS
+                        && e.code() == HRESULT::from_win32(ERROR_SHARING_VIOLATION.0) =>
+                {
+                    std::thread::sleep(delay);
+                    delay *= 2;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!("loop always returns on its final attempt")
+    }
+
+    /// Open `path` if it exists and is safe to trust: not a reparse point,
+    /// owned by the current user. Read-only -- every caller of this
+    /// function only ever reads the returned `File` (`read_to_end`), so
+    /// this requests only `FILE_GENERIC_READ`. Requesting write access it
+    /// never used was a real bug, not just an unnecessary permission: with
+    /// only `FILE_SHARE_READ` granted, a second concurrent opener also
+    /// requesting write access collides with `ERROR_SHARING_VIOLATION` --
+    /// exactly what happens when multiple losing racers in
+    /// `load_or_create`'s `publish_if_absent` `Ok(false)` branch all call
+    /// this on the same winning file at once. Multiple simultaneous
+    /// read-only opens, each both requesting and sharing only read access,
+    /// don't conflict on their own declared access -- but see
+    /// [`open_read_only_retrying_sharing_violation`] for the remaining,
+    /// separate transient-conflict source this alone didn't close.
+    fn open_secure_existing(path: &Path) -> Result<File, Box<dyn std::error::Error>> {
+        let raw = open_read_only_retrying_sharing_violation(path)?;
+        let handle = OwnedHandle(raw);
+        refuse_if_reparse_point(handle.0)?;
+        check_owned_by_current_user(handle.0)?;
+        // Ownership transfers to the File below; OwnedHandle must not also
+        // close it (it already ran its checks above -- this is the
+        // success path, its only remaining job was the close-on-error
+        // Drop, which no longer applies).
+        let owned_raw = handle.0;
+        std::mem::forget(handle);
+        Ok(unsafe { File::from_raw_handle(owned_raw.0 as _) })
+    }
+
+    /// Publish `tmp_path` (already a complete file) to `final_path`, iff
+    /// `final_path` doesn't already exist -- the Windows analogue of the
+    /// Unix backend's `publish_if_absent` (see that function's doc comment
+    /// for the full non-replacing-publish rationale). `CreateHardLinkW` is
+    /// the direct Windows counterpart of POSIX `link()`: it fails with
+    /// `ERROR_ALREADY_EXISTS` if the destination is already there, rather
+    /// than silently replacing it the way `MoveFileExW` with
+    /// `MOVEFILE_REPLACE_EXISTING` (or a plain rename) would.
+    fn publish_if_absent(tmp_path: &Path, final_path: &Path) -> windows::core::Result<bool> {
+        unsafe {
+            match CreateHardLinkW(&HSTRING::from(final_path), &HSTRING::from(tmp_path), None) {
+                Ok(()) => {
+                    DeleteFileW(&HSTRING::from(tmp_path))?;
+                    Ok(true)
+                }
+                Err(e) if e.code() == HRESULT::from_win32(ERROR_ALREADY_EXISTS.0) => {
+                    DeleteFileW(&HSTRING::from(tmp_path))?;
+                    Ok(false)
+                }
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    pub(super) fn load_or_create(
+        path: &Path,
+        generate: impl FnOnce() -> Vec<u8>,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        open_secure_parent_dir(path)?;
+
+        match open_secure_existing(path) {
+            Ok(mut existing) => {
+                let mut contents = Vec::new();
+                existing.read_to_end(&mut contents)?;
+                return Ok(contents);
+            }
+            Err(e) if is_not_found(e.as_ref()) => {}
+            Err(e) => return Err(e),
+        }
+
+        let contents = generate();
+        let tmp_path = path.with_file_name(format!(
+            ".{}.tmp-{}",
+            file_name_of(path)?.to_str().unwrap_or("secure-create"),
+            rand::random::<u64>()
+        ));
+        {
+            let mut tmp = secure_create_new(&tmp_path)?;
+            tmp.write_all(&contents)?;
+            tmp.sync_all()?;
+        }
+
+        match publish_if_absent(&tmp_path, path) {
+            Ok(true) => Ok(contents),
+            Ok(false) => {
+                let mut winner = open_secure_existing(path)?;
+                let mut winner_contents = Vec::new();
+                winner.read_to_end(&mut winner_contents)?;
+                Ok(winner_contents)
+            }
+            Err(e) => {
+                let _ = unsafe { DeleteFileW(&HSTRING::from(tmp_path.as_path())) };
+                Err(e.into())
+            }
+        }
+    }
+
+    pub(super) fn read_if_exists(
+        path: &Path,
+    ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
+        open_secure_parent_dir(path)?;
+        match open_secure_existing(path) {
+            Ok(mut file) => {
+                let mut contents = Vec::new();
+                file.read_to_end(&mut contents)?;
+                Ok(Some(contents))
+            }
+            Err(e) if is_not_found(e.as_ref()) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub(super) fn overwrite(
+        path: &Path,
+        contents: &[u8],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        open_secure_parent_dir(path)?;
+        match open_secure_existing(path) {
+            Ok(_) => {}
+            Err(e) if is_not_found(e.as_ref()) => {}
+            Err(e) => return Err(e),
+        }
+        let tmp_path = path.with_file_name(format!(
+            ".{}.tmp-{}",
+            file_name_of(path)?.to_str().unwrap_or("secure-overwrite"),
+            rand::random::<u64>()
+        ));
+        {
+            let mut tmp = secure_create_new(&tmp_path)?;
+            tmp.write_all(contents)?;
+            tmp.sync_all()?;
+        }
+        // Unlike `publish_if_absent`, this is expected to replace existing
+        // content -- `secure_overwrite`'s whole contract, unlike
+        // `load_or_create`'s first-writer-wins. `std::fs::rename` maps to
+        // `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` on Windows,
+        // matching the Unix backend's `renameat` for the same "this file
+        // legitimately changes over its lifetime" case.
+        std::fs::rename(&tmp_path, path)?;
+        Ok(())
+    }
+}
+#[cfg(not(any(unix, windows)))]
 mod backend {
     use super::*;
 
@@ -773,6 +1269,161 @@ mod tests {
                 .any(|candidate| candidate == winner),
             "the winning content must be one of the real candidates, not corrupted data"
         );
+        assert_eq!(
+            std::fs::read(path.as_ref()).unwrap(),
+            winner,
+            "the file on disk must match what every racer agreed was published"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "leftover temp files after the race settled: {leftovers:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ─── Windows-specific tests ──────────────────────────────────────────
+    //
+    // These exercise the real ACL/reparse-point-aware Win32 backend
+    // (see ADR-003, `docs/ADR-003-secure-file-trust-contract.md`) and can
+    // only meaningfully run on real Windows -- they're gated `#[cfg(windows)]`
+    // so they compile and execute for real on this project's `windows-latest`
+    // CI runner, not just under cross-compilation.
+
+    #[test]
+    #[cfg(windows)]
+    fn symlinked_leaf_file_is_refused_on_windows() {
+        let dir = temp_dir("win-symlink-leaf");
+        std::fs::create_dir_all(&dir).unwrap();
+        let real_target = dir.join("attacker-target");
+        std::fs::write(&real_target, b"not yours").unwrap();
+        let path = dir.join("f");
+        // Requires Developer Mode or an elevated process to create without
+        // SeCreateSymbolicLinkPrivilege -- both true of this project's
+        // `windows-latest` GitHub Actions runner. If symlink creation
+        // itself fails in some other CI environment, skip rather than
+        // false-fail on an unrelated permission gap.
+        if std::os::windows::fs::symlink_file(&real_target, &path).is_err() {
+            eprintln!(
+                "skipping symlinked_leaf_file_is_refused_on_windows: \
+                 this process can't create symlinks (no Developer Mode / \
+                 SeCreateSymbolicLinkPrivilege)"
+            );
+            std::fs::remove_dir_all(&dir).ok();
+            return;
+        }
+
+        let result = read_secure_file_if_exists(&path);
+        assert!(
+            result.is_err(),
+            "a symlinked leaf must be refused, not transparently followed"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    // This test independently re-checks the real on-disk DACL via its own
+    // separate Win32 call path (see the doc comment below) rather than
+    // trusting the crate's own internal view -- doing that needs the same
+    // raw Win32 FFI the crate's `#[cfg(windows)] mod backend` uses, so it
+    // gets the same narrow, justified exception to the workspace's
+    // `unsafe_code = "deny"` lint (see that module's own `#![allow(unsafe_code)]`).
+    #[allow(unsafe_code)]
+    fn dacl_grants_only_the_current_user() {
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+        use windows::Win32::Security::{
+            ACL, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSID,
+        };
+        use windows::core::HSTRING;
+
+        let dir = temp_dir("win-dacl");
+        let path = dir.join("f");
+        load_or_create_secure_file(&path, || b"secret".to_vec()).unwrap();
+
+        // Read the real on-disk DACL back via GetNamedSecurityInfoW (a
+        // separate, independent Win32 call path from whatever the crate
+        // used to set it -- this is checking the actual persisted state,
+        // not re-deriving what the crate thinks it did).
+        let mut owner = PSID::default();
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut psd = windows::Win32::Security::PSECURITY_DESCRIPTOR::default();
+        let status = unsafe {
+            GetNamedSecurityInfoW(
+                &HSTRING::from(path.as_path()),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                Some(&mut owner),
+                None,
+                Some(&mut dacl),
+                None,
+                &mut psd,
+            )
+        };
+        assert_eq!(
+            status,
+            windows::Win32::Foundation::ERROR_SUCCESS,
+            "GetNamedSecurityInfoW failed with {status:?}"
+        );
+        assert!(
+            !dacl.is_null(),
+            "file must have an explicit DACL, not a null (everyone-allowed) one"
+        );
+        let ace_count = unsafe { (*dacl).AceCount };
+        assert_eq!(
+            ace_count, 1,
+            "expected exactly one ACE (the owner-only grant this crate sets), found {ace_count}"
+        );
+        let _ = HANDLE::default(); // silence unused-import if GetNamedSecurityInfoW signature changes
+        unsafe {
+            let _ = windows::Win32::Foundation::LocalFree(Some(
+                windows::Win32::Foundation::HLOCAL(psd.0),
+            ));
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Adversarial, real-concurrency exercise of
+    /// `load_or_create_secure_file` on Windows -- the same property PR
+    /// #115 (Unix) proved via `publish_if_absent`'s link-then-unlink, here
+    /// via `CreateHardLinkW`'s equivalent non-replacing-publish guarantee.
+    #[test]
+    #[cfg(windows)]
+    fn concurrent_load_or_create_never_corrupts_or_double_publishes_on_windows() {
+        use std::sync::{Arc, Barrier};
+
+        const RACERS: usize = 12;
+        let dir = temp_dir("win-concurrent-race");
+        let path = Arc::new(dir.join("f"));
+        let barrier = Arc::new(Barrier::new(RACERS));
+
+        let handles: Vec<_> = (0..RACERS)
+            .map(|i| {
+                let path = Arc::clone(&path);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    load_or_create_secure_file(&path, move || format!("candidate-{i}").into_bytes())
+                        .unwrap()
+                })
+            })
+            .collect();
+
+        let results: Vec<Vec<u8>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let winner = results[0].clone();
+        for (i, result) in results.iter().enumerate() {
+            assert_eq!(
+                result, &winner,
+                "racer {i} observed a different winning value than the rest -- \
+                 the race let more than one value through"
+            );
+        }
         assert_eq!(
             std::fs::read(path.as_ref()).unwrap(),
             winner,
