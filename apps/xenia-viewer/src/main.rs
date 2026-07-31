@@ -1351,15 +1351,38 @@ fn parse_source_id(hex: &str) -> Result<[u8; 8], String> {
 
 // ─── Main entry: split CLI vs GUI paths ────────────────────────────
 
+/// Candidate log-file paths to try opening, in priority order. See
+/// `apps/xenia-peer/src/main.rs`'s identical helper for the full rationale
+/// (found via a real CI failure, not hypothesized: `checks.network-vm`
+/// runs these binaries straight from a read-only `/nix/store` path, which
+/// the single-fallback version of this function silently degraded all the
+/// way to stdout-only against).
+fn log_file_candidates(
+    explicit: Option<&std::path::Path>,
+    stdout_is_terminal: bool,
+    exe_dir: Option<&std::path::Path>,
+    temp_dir: &std::path::Path,
+    file_name: &str,
+) -> Vec<std::path::PathBuf> {
+    if let Some(p) = explicit {
+        return vec![p.to_path_buf()];
+    }
+    if stdout_is_terminal {
+        return Vec::new();
+    }
+    [
+        exe_dir.map(|dir| dir.join(file_name)),
+        Some(temp_dir.join(file_name)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 /// Set up tracing, always to stdout (with the existing `RUST_LOG`-or-
-/// `info` env filter) and optionally also to a file.
-///
-/// `explicit` is `--log-file`, if given. If not given AND stdout isn't a
-/// terminal (the double-click-launch / desktop-shortcut `--gui` case,
-/// where nothing would otherwise capture a crash or early error), falls
-/// back to `xenia-viewer.log` next to the running executable. If a
-/// terminal is attached and `--log-file` wasn't passed, logging stays
-/// stdout-only -- unchanged from before this option existed.
+/// `info` env filter) and optionally also to a file. See
+/// [`log_file_candidates`] for the fallback chain `explicit = None`
+/// resolves to.
 ///
 /// Returns the non-blocking writer's flush guard; the caller must hold it
 /// for the whole process lifetime (dropping it early stops the file
@@ -1375,39 +1398,44 @@ fn init_tracing(
             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
     };
 
-    let resolved = explicit.map(std::path::PathBuf::from).or_else(|| {
-        if std::io::stdout().is_terminal() {
-            None
-        } else {
-            std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|dir| dir.join("xenia-viewer.log")))
-        }
-    });
+    let candidates = log_file_candidates(
+        explicit,
+        std::io::stdout().is_terminal(),
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+            .as_deref(),
+        &std::env::temp_dir(),
+        "xenia-viewer.log",
+    );
 
-    let Some(path) = resolved else {
+    let mut failed = Vec::new();
+    let mut opened = None;
+    for path in candidates {
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(file) => {
+                opened = Some(file);
+                break;
+            }
+            Err(err) => failed.push(format!("{} ({err})", path.display())),
+        }
+    }
+
+    let Some(file) = opened else {
+        if !failed.is_empty() {
+            eprintln!(
+                "warning: could not open a log file, tried: {}; logging to stdout only",
+                failed.join("; ")
+            );
+        }
         tracing_subscriber::fmt()
             .with_env_filter(env_filter())
             .init();
         return None;
-    };
-
-    let file = match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        Ok(file) => file,
-        Err(err) => {
-            eprintln!(
-                "warning: failed to open log file {} ({err}); logging to stdout only",
-                path.display()
-            );
-            tracing_subscriber::fmt()
-                .with_env_filter(env_filter())
-                .init();
-            return None;
-        }
     };
     let (non_blocking, guard) = tracing_appender::non_blocking(file);
     tracing_subscriber::fmt()
@@ -1415,6 +1443,72 @@ fn init_tracing(
         .with_writer(std::io::stdout.and(non_blocking))
         .init();
     Some(guard)
+}
+
+#[cfg(test)]
+mod log_file_candidate_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_path_is_the_only_candidate_regardless_of_terminal_or_dirs() {
+        let explicit = std::path::Path::new("/explicit/path.log");
+        for stdout_is_terminal in [true, false] {
+            let got = log_file_candidates(
+                Some(explicit),
+                stdout_is_terminal,
+                Some(std::path::Path::new("/exe/dir")),
+                std::path::Path::new("/tmp"),
+                "xenia-viewer.log",
+            );
+            assert_eq!(got, vec![explicit.to_path_buf()]);
+        }
+    }
+
+    #[test]
+    fn terminal_attached_with_no_explicit_path_yields_no_candidates() {
+        let got = log_file_candidates(
+            None,
+            true,
+            Some(std::path::Path::new("/exe/dir")),
+            std::path::Path::new("/tmp"),
+            "xenia-viewer.log",
+        );
+        assert!(
+            got.is_empty(),
+            "a terminal-attached run must stay stdout-only"
+        );
+    }
+
+    #[test]
+    fn no_terminal_tries_exe_dir_then_temp_dir_in_order() {
+        let got = log_file_candidates(
+            None,
+            false,
+            Some(std::path::Path::new("/exe/dir")),
+            std::path::Path::new("/tmp"),
+            "xenia-viewer.log",
+        );
+        assert_eq!(
+            got,
+            vec![
+                std::path::PathBuf::from("/exe/dir/xenia-viewer.log"),
+                std::path::PathBuf::from("/tmp/xenia-viewer.log"),
+            ],
+            "exe-dir candidate must be tried before the temp-dir fallback"
+        );
+    }
+
+    #[test]
+    fn no_terminal_and_no_exe_dir_still_falls_back_to_temp_dir() {
+        let got = log_file_candidates(
+            None,
+            false,
+            None,
+            std::path::Path::new("/tmp"),
+            "xenia-viewer.log",
+        );
+        assert_eq!(got, vec![std::path::PathBuf::from("/tmp/xenia-viewer.log")]);
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
