@@ -51,10 +51,23 @@ VETH_VIEWER="xchaos-v0"
 DAEMON_IP="10.99.0.1"
 VIEWER_IP="10.99.0.2"
 LISTEN_PORT=17890
+# `ip netns exec` only needs root to enter the namespace (setns() requires
+# CAP_SYS_ADMIN); the daemon itself has no need to keep running as root
+# afterward. Captured once here so run_profile() can drop to this
+# invoking user via `setpriv` right before exec'ing the daemon --
+# xenia-secure-file's ownership check no longer exempts uid 0 (ADR-003,
+# docs/ADR-003-secure-file-trust-contract.md), so a root-owned daemon
+# process would otherwise fail to trust its own state directory, which
+# this script's unprivileged `mkdir -p` naturally leaves owned by the
+# user computed below.
+INVOKING_UID="$(id -u)"
+INVOKING_GID="$(id -g)"
 
 require_tools() {
   local missing=()
-  for tool in ip tc sudo; do
+  # setpriv (util-linux) drops the daemon to an unprivileged uid/gid
+  # before it runs inside the namespace -- see run_profile()'s comment.
+  for tool in ip tc sudo setpriv; do
     command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
   done
   if [[ ${#missing[@]} -gt 0 ]]; then
@@ -174,19 +187,21 @@ run_profile() {
   local label="$1" timeout_secs="$2" frames="${3:-8}"
   local peer_log="$LOG_DIR/${label}-peer.log"
   local viewer_log="$LOG_DIR/${label}-viewer.log"
-  # The daemon runs as root inside its netns (sudo ip netns exec), so
-  # everything it writes -- state dir included -- is root-owned. Scope it
-  # under $LOG_DIR (already wiped wholesale at script start, and never the
-  # repo working tree) rather than the default relative xenia-peer-state/,
-  # which would otherwise leave root-owned cruft in the repo root that a
-  # plain `rm -rf` from an unprivileged shell can't even remove.
+  # The daemon drops to $INVOKING_UID/$INVOKING_GID before it execs (see
+  # the top-of-file comment), so its state dir is owned by this
+  # unprivileged user like any other run of this script would produce --
+  # scoped under $LOG_DIR (already wiped wholesale at script start, and
+  # never the repo working tree) purely for tidiness, not because it needs
+  # special cleanup privileges anymore.
   local state_dir="$LOG_DIR/${label}-state"
   mkdir -p "$state_dir"
   rm -f "$peer_log" "$viewer_log"
 
   echo "=== profile: $label ===" >&2
 
-  sudo ip netns exec "$DAEMON_NS" env RUST_LOG="${RUST_LOG:-info}" "$PEER_BIN" \
+  sudo ip netns exec "$DAEMON_NS" \
+    setpriv --reuid="$INVOKING_UID" --regid="$INVOKING_GID" --clear-groups \
+    env RUST_LOG="${RUST_LOG:-info}" "$PEER_BIN" \
     --transport tcp \
     --listen "${DAEMON_IP}:${LISTEN_PORT}" \
     --admin-port 0 \
