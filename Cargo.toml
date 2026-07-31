@@ -16,11 +16,14 @@ members = [
     "crates/xenia-mobile-ffi",
     "crates/xenia-secure-file",
     "crates/xenia-launcher-core",
+    "apps/xenia-launcher-windows",
     "apps/sovereign-admin",
     "apps/xenia-operator-agent",
 ]
-# sovereign-admin is a wasm32-unknown-unknown CSR bin; keep it out of
-# host-only cargo check/build invocations.
+# sovereign-admin is a wasm32-unknown-unknown CSR bin; xenia-launcher-windows
+# is Windows-only (target-gated `windows` crate dependency, unconditional
+# Win32 API usage in its own source) -- keep both out of host-only
+# cargo check/build invocations on other platforms.
 default-members = [
     "crates/xenia-peer-core",
     "crates/xenia-operator-proto",

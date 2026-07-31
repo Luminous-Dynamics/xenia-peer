@@ -57,12 +57,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94
       - uses: Swatinem/rust-cache@v2
-      # `xenia-capture-scrcpy` depends on ffmpeg (only available via the flake)
-      # and `sovereign-admin` is a wasm32 target; both are excluded here so MSRV
+      # `xenia-capture-scrcpy` depends on ffmpeg (only available via the flake),
+      # `sovereign-admin` is a wasm32 target, and `xenia-launcher-windows` is
+      # Windows-only (unconditional Win32 API usage, no `windows` crate
+      # available on this Linux runner); all three are excluded here so MSRV
       # validates the minimum toolchain on the portable host crates without
-      # pulling ffmpeg. The scrcpy/wasm crates' toolchain is covered by
-      # flake-checks / the wasm job.
-      - run: cargo build --locked --all-targets --workspace --exclude xenia-capture-scrcpy --exclude sovereign-admin
+      # pulling ffmpeg or a Windows target. Their own toolchains are covered
+      # by flake-checks / the wasm job / the windows-latest jobs respectively.
+      - run: cargo build --locked --all-targets --workspace --exclude xenia-capture-scrcpy --exclude sovereign-admin --exclude xenia-launcher-windows
 
   # Feature builds that need extra system libraries also take them from the
   # flake (ffmpeg for h264, ALSA/Opus for audio) instead of apt-get.
@@ -108,3 +110,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked -p xenia-launcher-core
       - run: cargo clippy --locked -p xenia-launcher-core --all-targets -- -D warnings
+
+  # xenia-launcher-windows is the native Windows tray shell built on top of
+  # xenia-launcher-core -- unconditional (not #[cfg(windows)]-gated) Win32
+  # API usage throughout, so it can only build on this runner, same
+  # reasoning as windows-launcher-core just above.
+  windows-launcher-windows:
+    name: xenia-launcher-windows (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked -p xenia-launcher-windows
+      - run: cargo clippy --locked -p xenia-launcher-windows --all-targets -- -D warnings

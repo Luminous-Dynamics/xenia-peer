@@ -164,6 +164,14 @@ criteria = "safe-to-deploy"
 version = "0.3.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.atk]]
+version = "0.18.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.atk-sys]]
+version = "0.18.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.atomic-waker]]
 version = "1.1.2"
 criteria = "safe-to-deploy"
@@ -280,6 +288,14 @@ criteria = "safe-to-deploy"
 version = "1.12.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.cairo-rs]]
+version = "0.18.5"
+criteria = "safe-to-deploy"
+
+[[exemptions.cairo-sys-rs]]
+version = "0.18.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.calloop]]
 version = "0.13.0"
 criteria = "safe-to-deploy"
@@ -314,10 +330,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.cfg_aliases]]
 version = "0.1.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.cfg_aliases]]
-version = "0.2.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.chacha20]]
@@ -496,16 +508,8 @@ criteria = "safe-to-deploy"
 version = "0.23.2"
 criteria = "safe-to-deploy"
 
-[[exemptions.core-graphics]]
-version = "0.24.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.core-graphics-helmer-fork]]
 version = "0.24.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.core-graphics-types]]
-version = "0.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.coreaudio-rs]]
@@ -654,6 +658,14 @@ criteria = "safe-to-deploy"
 
 [[exemptions.digest]]
 version = "0.11.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.dirs]]
+version = "4.0.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.dirs-sys]]
+version = "0.3.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.dispatch]]
@@ -808,6 +820,10 @@ criteria = "safe-to-deploy"
 version = "7.1.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.field-offset]]
+version = "0.3.6"
+criteria = "safe-to-deploy"
+
 [[exemptions.find-msvc-tools]]
 version = "0.1.9"
 criteria = "safe-to-deploy"
@@ -876,6 +892,22 @@ criteria = "safe-to-deploy"
 version = "0.3.33"
 criteria = "safe-to-deploy"
 
+[[exemptions.gdk]]
+version = "0.18.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.gdk-pixbuf]]
+version = "0.18.5"
+criteria = "safe-to-deploy"
+
+[[exemptions.gdk-pixbuf-sys]]
+version = "0.18.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.gdk-sys]]
+version = "0.18.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.generator]]
 version = "0.8.9"
 criteria = "safe-to-deploy"
@@ -904,8 +936,28 @@ criteria = "safe-to-deploy"
 version = "0.5.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.gio]]
+version = "0.18.4"
+criteria = "safe-to-deploy"
+
+[[exemptions.gio-sys]]
+version = "0.18.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.gl_generator]]
 version = "0.14.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.glib]]
+version = "0.18.5"
+criteria = "safe-to-deploy"
+
+[[exemptions.glib-macros]]
+version = "0.18.5"
+criteria = "safe-to-deploy"
+
+[[exemptions.glib-sys]]
+version = "0.18.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.glob]]
@@ -952,6 +1004,10 @@ criteria = "safe-to-deploy"
 version = "0.6.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.gobject-sys]]
+version = "0.18.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.gpu-alloc]]
 version = "0.6.2"
 criteria = "safe-to-deploy"
@@ -966,6 +1022,18 @@ criteria = "safe-to-deploy"
 
 [[exemptions.gpu-descriptor-types]]
 version = "0.2.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.gtk]]
+version = "0.18.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.gtk-sys]]
+version = "0.18.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.gtk3-macros]]
+version = "0.18.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.guardian]]
@@ -1220,6 +1288,10 @@ criteria = "safe-to-deploy"
 version = "0.3.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.keyboard-types]]
+version = "0.7.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.khronos-egl]]
 version = "6.0.0"
 criteria = "safe-to-deploy"
@@ -1276,12 +1348,24 @@ criteria = "safe-to-deploy"
 version = "0.8.7"
 criteria = "safe-to-deploy"
 
+[[exemptions.libappindicator]]
+version = "0.9.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.libappindicator-sys]]
+version = "0.9.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.libc]]
 version = "0.2.186"
 criteria = "safe-to-deploy"
 
 [[exemptions.libdbus-sys]]
 version = "0.2.7"
+criteria = "safe-to-deploy"
+
+[[exemptions.libloading]]
+version = "0.7.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.libloading]]
@@ -1298,6 +1382,14 @@ criteria = "safe-to-deploy"
 
 [[exemptions.libspa-sys]]
 version = "0.8.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.libxdo]]
+version = "0.6.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.libxdo-sys]]
+version = "0.11.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.linux-raw-sys]]
@@ -1410,6 +1502,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.moxcms]]
 version = "0.8.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.muda]]
+version = "0.19.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.mycelix-leptos-client]]
@@ -1680,6 +1776,14 @@ criteria = "safe-to-deploy"
 version = "0.25.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.pango]]
+version = "0.18.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.pango-sys]]
+version = "0.18.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.papaya]]
 version = "0.2.4"
 criteria = "safe-to-deploy"
@@ -1813,7 +1917,19 @@ version = "0.2.37"
 criteria = "safe-to-deploy"
 
 [[exemptions.proc-macro-crate]]
+version = "1.3.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.proc-macro-crate]]
+version = "2.0.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.proc-macro-crate]]
 version = "3.5.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.proc-macro-error]]
+version = "1.0.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.proc-macro-utils]]
@@ -1918,6 +2034,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.redox_syscall]]
 version = "0.9.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.redox_users]]
+version = "0.5.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.regex]]
@@ -2369,7 +2489,7 @@ version = "0.13.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.toml]]
-version = "0.8.23"
+version = "0.8.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.toml]]
@@ -2377,7 +2497,7 @@ version = "1.1.3+spec-1.1.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.toml_datetime]]
-version = "0.6.11"
+version = "0.6.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.toml_datetime]]
@@ -2385,7 +2505,11 @@ version = "1.1.1+spec-1.1.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.toml_edit]]
-version = "0.22.27"
+version = "0.19.15"
+criteria = "safe-to-deploy"
+
+[[exemptions.toml_edit]]
+version = "0.20.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.toml_edit]]
@@ -2430,6 +2554,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.tracing-subscriber]]
 version = "0.3.23"
+criteria = "safe-to-deploy"
+
+[[exemptions.tray-icon]]
+version = "0.24.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree_magic_mini]]
@@ -2925,7 +3053,7 @@ version = "0.30.13"
 criteria = "safe-to-deploy"
 
 [[exemptions.winnow]]
-version = "0.7.15"
+version = "0.5.40"
 criteria = "safe-to-deploy"
 
 [[exemptions.winnow]]
@@ -2950,6 +3078,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.ws_stream_wasm]]
 version = "0.7.5"
+criteria = "safe-to-deploy"
+
+[[exemptions.x11]]
+version = "2.21.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.x11-dl]]
