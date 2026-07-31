@@ -63,19 +63,29 @@
 #![warn(rust_2018_idioms)]
 #![deny(unsafe_code)]
 
+mod archive;
 mod binding;
 mod chain;
 mod checkpoint;
+mod compaction;
 mod entry;
 mod errors;
 mod hash;
+mod key_transition;
 mod policy;
 mod seal;
 mod signature;
 mod verify;
+mod witness;
 
 #[cfg(test)]
 mod tests;
+
+pub use archive::{
+    LEDGER_ARCHIVE_SEGMENT_SCHEMA, LedgerArchiveError, LedgerArchiveSegment,
+    MAX_LEDGER_ARCHIVE_SEGMENT_ENTRIES, MAX_LEDGER_ARCHIVE_SEQUENCE_SEGMENTS,
+    ledger_archive_segment_digest, ledger_archive_sequence_digest,
+};
 
 pub use binding::{
     EVIDENCE_PUBLIC_KEY_BINDING_SCHEMA, EVIDENCE_PUBLIC_KEY_FINGERPRINT_ALGORITHM,
@@ -92,7 +102,13 @@ pub use binding::{
 pub use chain::Chain;
 
 pub use checkpoint::{
-    CheckpointError, LEDGER_CHECKPOINT_SCHEMA, LedgerCheckpoint, checkpoint_message,
+    CheckpointContinuityError, CheckpointError, CheckpointFreshnessPolicy,
+    LEDGER_CHECKPOINT_SCHEMA, LedgerCheckpoint, checkpoint_fingerprint, checkpoint_message,
+};
+
+pub use compaction::{
+    LEDGER_COMPACTION_MANIFEST_SCHEMA, LedgerCompactionError, LedgerCompactionManifest,
+    ledger_compaction_manifest_message,
 };
 
 pub use entry::{
@@ -103,6 +119,11 @@ pub use entry::{
 pub use entry::{
     MlDsa65EvidenceChain, MlDsa87EvidenceChain, MlDsaEvidenceChain, new_ml_dsa_65_evidence_chain,
     new_ml_dsa_87_evidence_chain,
+};
+
+pub use key_transition::{
+    LEDGER_KEY_TRANSITION_SCHEMA, LedgerKeyTransition, LedgerKeyTransitionError,
+    ledger_key_transition_message,
 };
 
 pub use errors::{EvidenceBundleVerifyError, LedgerError, TransactionalAppendError, VerifyError};
@@ -127,6 +148,10 @@ pub use signature::{
 #[cfg(feature = "pqc-signatures")]
 pub use signature::{
     MlDsa65EvidenceSignatureBackend, MlDsa87EvidenceSignatureBackend, PQC_SIGNATURE_BACKEND_STATUS,
+};
+pub use witness::{
+    CHECKPOINT_WITNESS_BUNDLE_SCHEMA, CheckpointWitnessBundle, CheckpointWitnessError,
+    CheckpointWitnessSignature, MAX_CHECKPOINT_WITNESSES, checkpoint_witness_message,
 };
 
 pub use verify::Verifier;

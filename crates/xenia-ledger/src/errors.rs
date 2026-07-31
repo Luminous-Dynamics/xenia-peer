@@ -20,6 +20,10 @@ pub enum LedgerError {
     /// An entry was pushed but could not be read back from the chain.
     #[error("ledger append invariant failed: pushed entry missing")]
     AppendInvariant,
+
+    /// The compacted-prefix entry count plus resident entries exceeded `u64`.
+    #[error("ledger sequence number overflow")]
+    SequenceOverflow,
 }
 
 /// Why [`crate::Chain::append_transactional`] failed to commit an entry.
