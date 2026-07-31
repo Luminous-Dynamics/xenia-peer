@@ -19,6 +19,7 @@ members = [
     "crates/xenia-launcher-shell",
     "apps/xenia-launcher-windows",
     "apps/xenia-launcher-linux",
+    "apps/xenia-launcher-macos",
     "apps/sovereign-admin",
     "apps/xenia-operator-agent",
 ]
@@ -26,11 +27,13 @@ members = [
 # is Windows-only (target-gated `windows` crate dependency, unconditional
 # Win32 API usage in its own source); xenia-launcher-shell and
 # xenia-launcher-linux both depend on tray-icon's Linux backend, which needs
-# GTK3/libappindicator system dev headers a bare host doesn't have -- keep
-# all four out of host-only cargo check/build invocations on other
-# platforms/without those system libs. Each has its own dedicated CI job
-# that provides what it needs (windows-latest runner, or apt-get'd GTK3 on
-# ubuntu-latest).
+# GTK3/libappindicator system dev headers a bare host doesn't have;
+# xenia-launcher-macos is macOS-only (target-gated `objc2`/AppKit
+# dependencies, unconditional Objective-C message-send usage in its own
+# source) -- keep all five out of host-only cargo check/build invocations
+# on other platforms/without those system libs. Each has its own dedicated
+# CI job that provides what it needs (windows-latest runner, apt-get'd GTK3
+# on ubuntu-latest, or a real macos-latest runner).
 default-members = [
     "crates/xenia-peer-core",
     "crates/xenia-operator-proto",

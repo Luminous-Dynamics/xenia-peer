@@ -1672,6 +1672,10 @@ criteria = "safe-to-deploy"
 version = "0.2.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.objc2-cloud-kit]]
+version = "0.3.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.objc2-contacts]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
@@ -1680,12 +1684,32 @@ criteria = "safe-to-deploy"
 version = "0.2.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.objc2-core-data]]
+version = "0.3.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.objc2-core-image]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.objc2-core-image]]
+version = "0.3.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.objc2-core-location]]
 version = "0.2.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.objc2-core-location]]
+version = "0.3.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.objc2-core-text]]
+version = "0.3.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.objc2-core-video]]
+version = "0.3.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.objc2-core-wlan]]
@@ -1734,6 +1758,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.objc2-user-notifications]]
 version = "0.2.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.objc2-user-notifications]]
+version = "0.3.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.oboe]]

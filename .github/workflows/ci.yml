@@ -60,15 +60,18 @@ jobs:
       # `xenia-capture-scrcpy` depends on ffmpeg (only available via the flake),
       # `sovereign-admin` is a wasm32 target, `xenia-launcher-windows` is
       # Windows-only (unconditional Win32 API usage, no `windows` crate
-      # available on this Linux runner), and `xenia-launcher-shell`/
+      # available on this Linux runner), `xenia-launcher-shell`/
       # `xenia-launcher-linux` need GTK3/libappindicator system dev headers
-      # this plain runner doesn't have (tray-icon's Linux backend); all five
-      # are excluded here so MSRV validates the minimum toolchain on the
-      # portable host crates without pulling ffmpeg, a Windows target, or
-      # GTK dev headers. Their own toolchains are covered by flake-checks /
-      # the wasm job / the windows-latest jobs / the linux-launcher job
-      # respectively.
-      - run: cargo build --locked --all-targets --workspace --exclude xenia-capture-scrcpy --exclude sovereign-admin --exclude xenia-launcher-windows --exclude xenia-launcher-shell --exclude xenia-launcher-linux
+      # this plain runner doesn't have (tray-icon's Linux backend), and
+      # `xenia-launcher-macos` is macOS-only (unconditional Objective-C
+      # message-send usage, no Apple SDK/objc2 available on this Linux
+      # runner); all six are excluded here so MSRV validates the minimum
+      # toolchain on the portable host crates without pulling ffmpeg, a
+      # Windows target, GTK dev headers, or a macOS SDK. Their own
+      # toolchains are covered by flake-checks / the wasm job / the
+      # windows-latest jobs / the linux-launcher job / the macos-launcher
+      # job respectively.
+      - run: cargo build --locked --all-targets --workspace --exclude xenia-capture-scrcpy --exclude sovereign-admin --exclude xenia-launcher-windows --exclude xenia-launcher-shell --exclude xenia-launcher-linux --exclude xenia-launcher-macos
 
   # Feature builds that need extra system libraries also take them from the
   # flake (ffmpeg for h264, ALSA/Opus for audio) instead of apt-get.
@@ -153,3 +156,26 @@ jobs:
           sudo apt-get install -y libgtk-3-dev libxdo-dev libappindicator3-dev
       - run: cargo test --locked -p xenia-launcher-shell -p xenia-launcher-linux
       - run: cargo clippy --locked -p xenia-launcher-shell -p xenia-launcher-linux --all-targets -- -D warnings
+
+  # xenia-launcher-macos is the native macOS tray shell -- item 8 (macOS
+  # half) of the launcher plan. Unlike Windows (cargo-xwin cross-compiles
+  # against a freely redistributable MSVC subset) or Linux (builds
+  # natively, just needs GTK headers), there is no freely-redistributable
+  # way to get a real Apple SDK/linker on a non-Mac host -- this crate was
+  # developed and iterated entirely against `cargo check --target
+  # x86_64-apple-darwin` (type-check only, no link -- see the crate's own
+  # module doc comments for exactly what that does and doesn't verify).
+  # This job, on a real macos-latest runner with a real Xcode/SDK, is the
+  # FIRST point in this whole effort where the code actually links and
+  # runs its test suite for real.
+  macos-launcher:
+    name: xenia-launcher-macos (macos-latest)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked -p xenia-launcher-macos
+      - run: cargo clippy --locked -p xenia-launcher-macos --all-targets -- -D warnings
