@@ -40,6 +40,11 @@ serde_json = "1"
 hex = "0.4"
 bincode = "1"
 serde = { version = "1", features = ["derive"] }
+# serde's derive has no native support for arrays over 32 elements; the
+# consent-ledger maintenance ceremony modules (consent_purge*.rs,
+# consent_retirement.rs, consent_compaction.rs, consent_final_destruction.rs)
+# serialize/deserialize [u8; 64] Ed25519 signature fields and need this helper.
+serde-big-array = "0.5"
 chrono.workspace = true
 blake3 = "1.5"
 reqwest = { version = "0.13", features = ["json"] }

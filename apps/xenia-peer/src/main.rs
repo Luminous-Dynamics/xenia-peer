@@ -55,6 +55,31 @@ use xenia_capture::ScapCapture;
 
 mod admin_ui;
 mod audit_ledger_store;
+// Consent-ledger maintenance ceremony modules ported from PR #99 (Phase 1 of
+// a 4-phase re-derivation onto current main). Landed but NOT wired into the
+// CLI dispatch yet -- that's Phase 2. Each is
+// self-contained (verified: zero references to the scope-binding consent-
+// action types or to m1_runtime.rs) and carries its own inline unit tests,
+// so `#[allow(dead_code)]` here is scoped to "nothing calls this yet," not
+// "this is unreviewed" -- see each module's own doc comment.
+#[allow(dead_code)]
+mod consent_artifact_paths;
+#[allow(dead_code)]
+mod consent_compaction;
+#[allow(dead_code)]
+mod consent_final_destruction;
+#[allow(dead_code)]
+mod consent_ledger_persistence;
+#[allow(dead_code)]
+mod consent_maintenance;
+#[allow(dead_code)]
+mod consent_purge;
+#[allow(dead_code)]
+mod consent_purge_custody;
+#[allow(dead_code)]
+mod consent_purge_retention;
+#[allow(dead_code)]
+mod consent_retirement;
 mod consent_server;
 mod evidence_verifier;
 mod file_transfer;
@@ -404,6 +429,605 @@ struct Args {
     /// complete. Smokes should point this at a temporary path.
     #[arg(long, default_value = "xenia-peer-state/consent.ledger")]
     consent_ledger_path: std::path::PathBuf,
+
+    /// Activated compacted consent-ledger state to use for normal daemon
+    /// startup instead of `--consent-ledger-path`. The file contains the
+    /// signed compaction cutover, archived replay/terminal indexes, current
+    /// signed head, and resident suffix. It is fully verified before admin,
+    /// consent, or viewer listeners are opened.
+    #[arg(long, value_name = "FILE")]
+    consent_ledger_compacted_state: Option<std::path::PathBuf>,
+
+    /// Verify a compacted snapshot against its cold archive, atomically
+    /// materialize an activated compacted state at FILE, and exit. This is the
+    /// only operation that may create the initial active-state envelope;
+    /// normal startup never trusts an unactivated snapshot directly.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "consent_ledger_activation_snapshot",
+        conflicts_with_all = [
+            "advance_consent_ledger_checkpoint",
+            "export_consent_ledger_archive_segment",
+            "export_consent_ledger_compaction_bundle",
+            "verify_consent_ledger_compaction_bundle",
+            "export_consent_ledger_compacted_snapshot",
+            "verify_consent_ledger_compacted_snapshot",
+            "advance_consent_ledger_compacted_state_pin",
+            "export_consent_ledger_compaction_gc_certificate",
+            "verify_consent_ledger_compaction_gc_certificate"
+        ]
+    )]
+    activate_consent_ledger_compacted_state: Option<std::path::PathBuf>,
+
+    /// Compacted snapshot input for
+    /// `--activate-consent-ledger-compacted-state`.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "activate_consent_ledger_compacted_state"
+    )]
+    consent_ledger_activation_snapshot: Option<std::path::PathBuf>,
+
+    /// Detailed cold archive segment used to verify compacted-state
+    /// activation. Repeat in chronological order from genesis.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "activate_consent_ledger_compacted_state"
+    )]
+    consent_ledger_activation_archive_segment: Vec<std::path::PathBuf>,
+
+    /// Independently retained signed compacted-state pin. During normal
+    /// compacted startup, the active state must equal or cryptographically
+    /// extend this pin before any listener opens.
+    #[arg(long, value_name = "FILE", requires = "consent_ledger_compacted_state")]
+    trusted_consent_ledger_compacted_state_pin: Option<std::path::PathBuf>,
+
+    /// Atomically create or advance an independently retained compacted-state
+    /// pin and exit. An existing pin is overwritten only after the current
+    /// active state proves append-only extension from it.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "consent_ledger_compacted_state",
+        conflicts_with_all = [
+            "activate_consent_ledger_compacted_state",
+            "export_consent_ledger_compaction_gc_certificate",
+            "verify_consent_ledger_compaction_gc_certificate"
+        ]
+    )]
+    advance_consent_ledger_compacted_state_pin: Option<std::path::PathBuf>,
+
+    /// Cold archive segment used to certify or verify compaction
+    /// garbage-collection readiness. Repeat in chronological order from
+    /// genesis. The certificate is non-destructive and never deletes files.
+    #[arg(long, value_name = "FILE")]
+    consent_ledger_gc_archive_segment: Vec<std::path::PathBuf>,
+
+    /// Export a signed, non-destructive garbage-collection readiness
+    /// certificate and exit. Requires an activated compacted state, a retained
+    /// state pin, and the complete cold archive represented by the activation.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires_all = [
+            "consent_ledger_compacted_state",
+            "trusted_consent_ledger_compacted_state_pin"
+        ],
+        conflicts_with_all = [
+            "activate_consent_ledger_compacted_state",
+            "verify_consent_ledger_compaction_gc_certificate"
+        ]
+    )]
+    export_consent_ledger_compaction_gc_certificate: Option<std::path::PathBuf>,
+
+    /// Verify a signed garbage-collection readiness certificate and exit. This
+    /// is a read-only proof check; no live or archived artifact is removed.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires_all = [
+            "consent_ledger_compacted_state",
+            "trusted_consent_ledger_compacted_state_pin"
+        ],
+        conflicts_with_all = [
+            "activate_consent_ledger_compacted_state",
+            "export_consent_ledger_compaction_gc_certificate"
+        ]
+    )]
+    verify_consent_ledger_compaction_gc_certificate: Option<std::path::PathBuf>,
+
+    /// Signed GC-readiness certificate used as a prerequisite for explicit
+    /// retirement planning or quarantine. This is an input artifact, not the
+    /// read-only verification operation above.
+    #[arg(long, value_name = "FILE")]
+    consent_retirement_gc_certificate: Option<std::path::PathBuf>,
+
+    /// Export a short-lived, ledger-signed plan for exact superseded artifact
+    /// bytes. No file is moved or deleted by this operation.
+    #[arg(long, value_name = "FILE")]
+    export_consent_retirement_plan: Option<std::path::PathBuf>,
+
+    /// Existing canonical directory under which a unique quarantine
+    /// transaction directory will be created.
+    #[arg(long, value_name = "DIR")]
+    consent_retirement_quarantine_root: Option<std::path::PathBuf>,
+
+    /// Superseded complete consent ledger to include in the retirement plan.
+    /// Repeat only when multiple independently named complete-ledger copies are
+    /// intentionally being retired.
+    #[arg(long, value_name = "FILE")]
+    consent_retirement_complete_ledger_candidate: Vec<std::path::PathBuf>,
+
+    /// Superseded compaction-preflight bundle candidate. Repeat as needed.
+    #[arg(long, value_name = "FILE")]
+    consent_retirement_compaction_bundle_candidate: Vec<std::path::PathBuf>,
+
+    /// Superseded compacted snapshot candidate. Repeat as needed.
+    #[arg(long, value_name = "FILE")]
+    consent_retirement_compacted_snapshot_candidate: Vec<std::path::PathBuf>,
+
+    /// Maximum validity of a newly exported retirement plan.
+    #[arg(long, default_value_t = 3600)]
+    consent_retirement_plan_lifetime_secs: u64,
+
+    /// Signed retirement plan input for approval, quarantine, recovery, or
+    /// receipt verification.
+    #[arg(long, value_name = "FILE")]
+    consent_retirement_plan_input: Option<std::path::PathBuf>,
+
+    /// Ledger Ed25519 public key used by independent retirement or purge
+    /// approval, recovery, and receipt-verification operations. These
+    /// operations do not require access to the ledger private key.
+    #[arg(long, value_name = "HEX")]
+    consent_retirement_ledger_public_key_hex: Option<String>,
+
+    /// Add one independent retention-key approval to the approval bundle and
+    /// exit. The key must already exist; this operation never generates it.
+    #[arg(long)]
+    sign_consent_retirement_plan: bool,
+
+    /// Existing 32-byte Ed25519 witness seed used only by the one-shot
+    /// retirement approval operation.
+    #[arg(long, value_name = "FILE")]
+    consent_retirement_witness_key: Option<std::path::PathBuf>,
+
+    /// Retirement approval bundle input/output. The signing operation creates
+    /// or appends to it; quarantine and recovery treat it as read-only.
+    #[arg(long, value_name = "FILE")]
+    consent_retirement_approval_bundle: Option<std::path::PathBuf>,
+
+    /// Trusted independent retirement witness public key, as 64 hex
+    /// characters. Repeat to configure the accepted trust set.
+    #[arg(long, value_name = "HEX")]
+    trusted_consent_retirement_witness_key_hex: Vec<String>,
+
+    /// Minimum number of distinct trusted retirement approvals required.
+    #[arg(long)]
+    trusted_consent_retirement_witness_quorum: Option<usize>,
+
+    /// Execute the signed plan by moving exact verified bytes into quarantine.
+    /// No unlink is performed; a signed receipt and crash journal are written.
+    #[arg(long)]
+    quarantine_consent_retirement: bool,
+
+    /// Recover one interrupted quarantine transaction. A valid signed receipt
+    /// finalizes commit; otherwise moved files are restored from the journal.
+    #[arg(long, value_name = "FILE")]
+    recover_consent_retirement_journal: Option<std::path::PathBuf>,
+
+    /// Verify a signed quarantine receipt and rehash every quarantined file.
+    #[arg(long, value_name = "FILE")]
+    verify_consent_retirement_receipt: Option<std::path::PathBuf>,
+
+    /// Export a short-lived ledger-signed purge plan for exact aged
+    /// quarantine bytes. This operation does not unlink anything.
+    #[arg(long, value_name = "FILE")]
+    export_consent_purge_plan: Option<std::path::PathBuf>,
+
+    /// Existing private directory that will retain the complete rollback
+    /// package after quarantine bytes are removed.
+    #[arg(long, value_name = "DIR")]
+    consent_purge_rollback_root: Option<std::path::PathBuf>,
+
+    /// Minimum age of the signed quarantine receipt before a purge plan may be
+    /// issued. The protocol minimum is 24 hours.
+    #[arg(long, default_value_t = 7 * 24 * 60 * 60)]
+    consent_purge_min_quarantine_age_secs: u64,
+
+    /// Maximum validity of a newly exported purge plan.
+    #[arg(long, default_value_t = 3600)]
+    consent_purge_plan_lifetime_secs: u64,
+
+    /// Original signed retirement plan that created the quarantine receipt.
+    #[arg(long, value_name = "FILE")]
+    consent_purge_retirement_plan_input: Option<std::path::PathBuf>,
+
+    /// Original independent retirement approval bundle.
+    #[arg(long, value_name = "FILE")]
+    consent_purge_retirement_approval_bundle: Option<std::path::PathBuf>,
+
+    /// Signed quarantine receipt whose exact files are eligible for purge.
+    #[arg(long, value_name = "FILE")]
+    consent_purge_quarantine_receipt: Option<std::path::PathBuf>,
+
+    /// Signed purge plan input for approval, execution, recovery, or receipt
+    /// verification.
+    #[arg(long, value_name = "FILE")]
+    consent_purge_plan_input: Option<std::path::PathBuf>,
+
+    /// Add one independent purge-key approval and exit. This operation does not
+    /// access the ledger private key.
+    #[arg(long)]
+    sign_consent_purge_plan: bool,
+
+    /// Existing 32-byte Ed25519 seed used only for one purge approval.
+    #[arg(long, value_name = "FILE")]
+    consent_purge_witness_key: Option<std::path::PathBuf>,
+
+    /// Purge approval bundle input/output.
+    #[arg(long, value_name = "FILE")]
+    consent_purge_approval_bundle: Option<std::path::PathBuf>,
+
+    /// Trusted independent purge witness public key, as 64 hex characters.
+    #[arg(long, value_name = "HEX")]
+    trusted_consent_purge_witness_key_hex: Vec<String>,
+
+    /// Minimum number of distinct trusted purge approvals required.
+    #[arg(long)]
+    trusted_consent_purge_witness_quorum: Option<usize>,
+
+    /// Create and fsync a complete rollback package, then remove the exact
+    /// quarantine files under a crash-audited journal.
+    #[arg(long)]
+    execute_consent_purge: bool,
+
+    /// Recover an interrupted purge. Without a valid signed receipt, missing
+    /// quarantine files are restored from the retained rollback package.
+    #[arg(long, value_name = "FILE")]
+    recover_consent_purge_journal: Option<std::path::PathBuf>,
+
+    /// Verify a signed purge receipt, the retained rollback package, and the
+    /// absence of every purged quarantine file.
+    #[arg(long, value_name = "FILE")]
+    verify_consent_purge_receipt: Option<std::path::PathBuf>,
+
+    /// Export a ledger-signed obligation to retain the exact purge rollback
+    /// package and its recovery metadata through a fixed deadline.
+    #[arg(long, value_name = "FILE")]
+    export_consent_purge_retention_certificate: Option<std::path::PathBuf>,
+
+    /// Retention period beginning at purge completion. The protocol minimum is
+    /// 24 hours; the operational default is 30 days.
+    #[arg(long, default_value_t = 30 * 24 * 60 * 60)]
+    consent_purge_retention_secs: u64,
+
+    /// Signed purge receipt used to create the retention certificate.
+    #[arg(long, value_name = "FILE")]
+    consent_purge_receipt_input: Option<std::path::PathBuf>,
+
+    /// Ledger-signed purge-retention certificate input.
+    #[arg(long, value_name = "FILE")]
+    consent_purge_retention_certificate_input: Option<std::path::PathBuf>,
+
+    /// Add one independent observation to the retention-witness bundle.
+    #[arg(long)]
+    sign_consent_purge_retention_certificate: bool,
+
+    /// Existing 32-byte Ed25519 seed used only to witness a retention
+    /// certificate. The key must be distinct from ledger and purge witnesses.
+    #[arg(long, value_name = "FILE")]
+    consent_purge_retention_witness_key: Option<std::path::PathBuf>,
+
+    /// Retention-witness bundle input/output.
+    #[arg(long, value_name = "FILE")]
+    consent_purge_retention_witness_bundle: Option<std::path::PathBuf>,
+
+    /// Trusted independent retention-witness public key. Repeat to configure
+    /// the accepted trust set.
+    #[arg(long, value_name = "HEX")]
+    trusted_consent_purge_retention_witness_key_hex: Vec<String>,
+
+    /// Minimum number of distinct trusted retention witnesses required.
+    #[arg(long)]
+    trusted_consent_purge_retention_witness_quorum: Option<usize>,
+
+    /// Export one compact ledger-signed anchor joining the retention
+    /// certificate, witness quorum, and exact protected-file inventory.
+    #[arg(long, value_name = "FILE")]
+    export_consent_purge_retention_anchor: Option<std::path::PathBuf>,
+
+    /// Verify an externally retained purge-retention anchor and rehash every
+    /// protected rollback-package file.
+    #[arg(long, value_name = "FILE")]
+    verify_consent_purge_retention_anchor: Option<std::path::PathBuf>,
+
+    /// Existing path that a future cleanup proposal wants to select. Repeat
+    /// during anchor verification to prove every candidate is disjoint from
+    /// the protected rollback package and all of its parent aliases.
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "verify_consent_purge_retention_anchor"
+    )]
+    consent_purge_retention_candidate_check: Vec<std::path::PathBuf>,
+
+    /// Existing retention anchor used as the immutable base for renewal,
+    /// custody, or final-destruction readiness operations.
+    #[arg(long, value_name = "FILE")]
+    consent_purge_retention_anchor_input: Option<std::path::PathBuf>,
+
+    /// Versioned monotonic retention-renewal chain input/output.
+    #[arg(long, value_name = "FILE")]
+    consent_purge_retention_renewal_chain: Option<std::path::PathBuf>,
+
+    /// Append one ledger-signed retention renewal and exit.
+    #[arg(long, value_name = "FILE")]
+    export_consent_purge_retention_renewal: Option<std::path::PathBuf>,
+
+    /// Additional seconds beyond the current effective retention deadline.
+    #[arg(long, default_value_t = 30 * 24 * 60 * 60)]
+    consent_purge_retention_renewal_secs: u64,
+
+    /// Add one independently signed custody attestation and exit.
+    #[arg(long)]
+    sign_consent_purge_custody: bool,
+
+    /// Existing 32-byte Ed25519 seed for one custody attestation.
+    #[arg(long, value_name = "FILE")]
+    consent_purge_custody_key: Option<std::path::PathBuf>,
+
+    /// Custody bundle input/output.
+    #[arg(long, value_name = "FILE")]
+    consent_purge_custody_bundle: Option<std::path::PathBuf>,
+
+    /// Custody assertion class: offline-media, remote-vault, or
+    /// hardware-protected. This is an assertion by the custodian, not hardware
+    /// attestation performed by Xenia.
+    #[arg(long, value_name = "CLASS")]
+    consent_purge_custody_class: Option<String>,
+
+    /// Opaque custodian locator whose domain-separated digest is signed.
+    #[arg(long, value_name = "LOCATOR")]
+    consent_purge_custody_locator: Option<String>,
+
+    /// Stable non-zero 128-bit replica identifier as 32 hex characters.
+    #[arg(long, value_name = "HEX")]
+    consent_purge_custody_replica_id_hex: Option<String>,
+
+    /// Custodian availability interval beginning at observation time.
+    #[arg(long, default_value_t = 90 * 24 * 60 * 60)]
+    consent_purge_custody_available_secs: u64,
+
+    /// Trusted independent custody public key. Repeat to configure the trust
+    /// set used by final-destruction planning.
+    #[arg(long, value_name = "HEX")]
+    trusted_consent_purge_custody_key_hex: Vec<String>,
+
+    /// Minimum distinct trusted custody attestations required.
+    #[arg(long)]
+    trusted_consent_purge_custody_quorum: Option<usize>,
+
+    /// Export a short-lived ledger-signed plan covering the complete protected
+    /// rollback inventory. This operation does not delete anything.
+    #[arg(long, value_name = "FILE")]
+    export_consent_final_destruction_plan: Option<std::path::PathBuf>,
+
+    /// Maximum validity of a newly exported final-destruction plan.
+    #[arg(long, default_value_t = 3600)]
+    consent_final_destruction_plan_lifetime_secs: u64,
+
+    /// Signed final-destruction plan input.
+    #[arg(long, value_name = "FILE")]
+    consent_final_destruction_plan_input: Option<std::path::PathBuf>,
+
+    /// Add one independent final-destruction approval and exit.
+    #[arg(long)]
+    sign_consent_final_destruction_plan: bool,
+
+    /// Existing 32-byte Ed25519 seed used only for final-destruction approval.
+    #[arg(long, value_name = "FILE")]
+    consent_final_destruction_witness_key: Option<std::path::PathBuf>,
+
+    /// Final-destruction approval bundle input/output.
+    #[arg(long, value_name = "FILE")]
+    consent_final_destruction_approval_bundle: Option<std::path::PathBuf>,
+
+    /// Trusted independent final-destruction witness public key.
+    #[arg(long, value_name = "HEX")]
+    trusted_consent_final_destruction_witness_key_hex: Vec<String>,
+
+    /// Minimum distinct final-destruction approvals required.
+    #[arg(long)]
+    trusted_consent_final_destruction_witness_quorum: Option<usize>,
+
+    /// Export a ledger-signed readiness artifact after all checks pass. This
+    /// operation remains authorization-only and performs no deletion.
+    #[arg(long, value_name = "FILE")]
+    export_consent_final_destruction_readiness: Option<std::path::PathBuf>,
+
+    /// Verify a retained final-destruction readiness artifact using only public
+    /// keys and prerequisite evidence.
+    #[arg(long, value_name = "FILE")]
+    verify_consent_final_destruction_readiness: Option<std::path::PathBuf>,
+
+    /// Independently retained signed checkpoint that the current consent
+    /// ledger must contain as an exact prefix. Store this outside the daemon
+    /// state directory or backup set being restored; otherwise an attacker can
+    /// roll back the ledger and its local checkpoint together.
+    #[arg(long, value_name = "FILE")]
+    trusted_consent_ledger_checkpoint: Option<std::path::PathBuf>,
+
+    /// Dual-signed old-key/new-key transition authorizing the currently loaded
+    /// ledger as a fresh successor epoch to
+    /// `--trusted-consent-ledger-checkpoint`. Without this artifact, retained
+    /// checkpoints must be exact prefixes under the current ledger key.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "trusted_consent_ledger_checkpoint",
+        conflicts_with = "trusted_consent_ledger_witness_bundle"
+    )]
+    trusted_consent_ledger_key_transition: Option<std::path::PathBuf>,
+
+    /// Independently countersigned checkpoint bundle. The embedded checkpoint
+    /// must be an exact prefix of the current ledger and satisfy the configured
+    /// distinct trusted-witness quorum.
+    #[arg(
+        long,
+        value_name = "FILE",
+        conflicts_with = "trusted_consent_ledger_checkpoint"
+    )]
+    trusted_consent_ledger_witness_bundle: Option<std::path::PathBuf>,
+
+    /// Trusted Ed25519 checkpoint-witness public key, encoded as 64 lowercase
+    /// or uppercase hexadecimal characters. Repeat once per independent
+    /// witness key.
+    #[arg(
+        long,
+        value_name = "HEX",
+        requires = "trusted_consent_ledger_witness_bundle"
+    )]
+    trusted_consent_ledger_witness_key_hex: Vec<String>,
+
+    /// Minimum number of distinct trusted countersignatures required in the
+    /// retained witness bundle. Defaults to one when a bundle is supplied.
+    #[arg(
+        long,
+        value_name = "N",
+        requires = "trusted_consent_ledger_witness_bundle"
+    )]
+    trusted_consent_ledger_witness_quorum: Option<usize>,
+
+    /// Optional maximum age, in seconds, for a direct retained checkpoint or
+    /// witnessed checkpoint. Key-transition anchors are historical by design
+    /// and cannot be combined with this freshness SLA.
+    #[arg(long, value_name = "SECONDS")]
+    trusted_consent_ledger_checkpoint_max_age_secs: Option<u64>,
+
+    /// Maximum positive clock skew accepted for retained checkpoint timestamps.
+    #[arg(long, default_value_t = 300, value_name = "SECONDS")]
+    trusted_consent_ledger_checkpoint_max_future_skew_secs: u64,
+
+    /// Atomically create or advance an independently stored consent-ledger
+    /// checkpoint and exit. An existing checkpoint is overwritten only when
+    /// the current verified ledger contains it as an exact prefix.
+    #[arg(
+        long,
+        value_name = "FILE",
+        conflicts_with = "export_consent_ledger_archive_segment"
+    )]
+    advance_consent_ledger_checkpoint: Option<std::path::PathBuf>,
+
+    /// Export a bounded, verifiable JSON archive segment and exit. This does
+    /// not truncate the live ledger. Compaction preflight bundles can now bind
+    /// replay/recovery state, but live pruning remains intentionally disabled.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "consent_ledger_archive_base_checkpoint",
+        conflicts_with = "advance_consent_ledger_checkpoint"
+    )]
+    export_consent_ledger_archive_segment: Option<std::path::PathBuf>,
+
+    /// Signed checkpoint immediately before the first entry to include in
+    /// `--export-consent-ledger-archive-segment`.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "export_consent_ledger_archive_segment"
+    )]
+    consent_ledger_archive_base_checkpoint: Option<std::path::PathBuf>,
+
+    /// Export a non-destructive compaction preflight bundle and exit. The
+    /// bundle embeds one or more verified archive segments, a deterministic
+    /// replay/recovery summary, and a ledger-signed manifest binding both to
+    /// the current live ledger head. No live entries are deleted.
+    #[arg(
+        long,
+        value_name = "FILE",
+        conflicts_with_all = [
+            "advance_consent_ledger_checkpoint",
+            "export_consent_ledger_archive_segment",
+            "verify_consent_ledger_compaction_bundle"
+        ]
+    )]
+    export_consent_ledger_compaction_bundle: Option<std::path::PathBuf>,
+
+    /// Verifiable archive segment to include in the compaction preflight
+    /// bundle. Repeat in chronological order. The first segment must begin at
+    /// genesis and the archived prefix must contain only completed ceremonies.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "export_consent_ledger_compaction_bundle"
+    )]
+    consent_ledger_compaction_archive_segment: Vec<std::path::PathBuf>,
+
+    /// Verify an existing compaction preflight bundle against the complete
+    /// current consent ledger and exit. This is a read-only verification gate.
+    #[arg(
+        long,
+        value_name = "FILE",
+        conflicts_with_all = [
+            "advance_consent_ledger_checkpoint",
+            "export_consent_ledger_archive_segment",
+            "export_consent_ledger_compaction_bundle"
+        ]
+    )]
+    verify_consent_ledger_compaction_bundle: Option<std::path::PathBuf>,
+
+    /// Export a minimal, non-destructive compacted restore snapshot and exit.
+    /// The snapshot contains the authenticated recovery summary and only the
+    /// live suffix after the archived boundary; the detailed archive remains a
+    /// separate cold-storage artifact.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "consent_ledger_compaction_bundle_input",
+        conflicts_with_all = [
+            "advance_consent_ledger_checkpoint",
+            "export_consent_ledger_archive_segment",
+            "export_consent_ledger_compaction_bundle",
+            "verify_consent_ledger_compaction_bundle",
+            "verify_consent_ledger_compacted_snapshot"
+        ]
+    )]
+    export_consent_ledger_compacted_snapshot: Option<std::path::PathBuf>,
+
+    /// Previously verified compaction preflight bundle used to derive
+    /// `--export-consent-ledger-compacted-snapshot`.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "export_consent_ledger_compacted_snapshot"
+    )]
+    consent_ledger_compaction_bundle_input: Option<std::path::PathBuf>,
+
+    /// Verify a compacted restore snapshot against its detailed archive
+    /// segments and exit. No live ledger file is replaced.
+    #[arg(
+        long,
+        value_name = "FILE",
+        conflicts_with_all = [
+            "advance_consent_ledger_checkpoint",
+            "export_consent_ledger_archive_segment",
+            "export_consent_ledger_compaction_bundle",
+            "verify_consent_ledger_compaction_bundle",
+            "export_consent_ledger_compacted_snapshot"
+        ]
+    )]
+    verify_consent_ledger_compacted_snapshot: Option<std::path::PathBuf>,
+
+    /// Detailed archive segment required to verify a compacted restore
+    /// snapshot. Repeat in chronological order from genesis.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "verify_consent_ledger_compacted_snapshot"
+    )]
+    consent_ledger_compacted_snapshot_archive_segment: Vec<std::path::PathBuf>,
 
     /// M1 consent-ledger signing key path. Signs the consent grant/deny/revoke
     /// boundary events; generated on first run with owner-only (0600)
