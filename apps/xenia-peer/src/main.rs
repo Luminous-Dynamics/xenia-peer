@@ -56,8 +56,8 @@ use xenia_capture::ScapCapture;
 mod admin_ui;
 mod audit_ledger_store;
 // Consent-ledger maintenance ceremony modules ported from PR #99 (Phase 1 of
-// the re-derivation plan at /home/tstoltz/.claude/plans/snuggly-mixing-hennessy.md).
-// Landed but NOT wired into the CLI dispatch yet -- that's Phase 2. Each is
+// a 4-phase re-derivation onto current main). Landed but NOT wired into the
+// CLI dispatch yet -- that's Phase 2. Each is
 // self-contained (verified: zero references to the scope-binding consent-
 // action types or to m1_runtime.rs) and carries its own inline unit tests,
 // so `#[allow(dead_code)]` here is scoped to "nothing calls this yet," not

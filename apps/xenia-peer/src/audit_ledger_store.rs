@@ -38,8 +38,9 @@
 // tested prerequisites the consent-ledger maintenance ceremony modules
 // (`consent_purge*.rs`, `consent_retirement.rs`, `consent_compaction.rs`,
 // `consent_final_destruction.rs`) depend on, ported ahead of their own CLI
-// wiring -- see /home/tstoltz/.claude/plans/snuggly-mixing-hennessy.md
-// Phase 1 vs Phase 2. Nothing calls them yet; that's Phase 2's job.
+// wiring, as part of a 4-phase re-derivation of PR #99's consent-ledger
+// maintenance subsystem (Phase 1 vs Phase 2). Nothing calls them yet;
+// that's Phase 2's job.
 #![allow(dead_code)]
 
 use std::fs::{File, OpenOptions};
