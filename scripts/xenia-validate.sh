@@ -220,15 +220,16 @@ check_cargo_dir() {
     [[ -f Cargo.lock ]] && locked_flag=(--locked)
     # xenia-launcher-windows is Windows-only: unconditional Win32 API usage
     # (won't even compile without the `windows` crate, which is
-    # target-gated to cfg(windows)), plus a Linux tray-icon backend that
-    # needs GTK/glib system libraries this runner doesn't have. Exclude it
-    # from a bare host `cargo check`/`test --no-run` here, same reasoning
-    # as the MSRV job's explicit --exclude (its own windows-latest CI job
-    # covers it for real). Only applies when this workspace actually has
-    # that member -- xenia-wire's own separate workspace doesn't.
+    # target-gated to cfg(windows)). xenia-launcher-shell/xenia-launcher-linux
+    # need GTK3/libappindicator/libxdo system dev headers (tray-icon's Linux
+    # backend) this runner doesn't have. Exclude all three from a bare host
+    # `cargo check`/`test --no-run` here, same reasoning as the MSRV job's
+    # explicit --exclude (their own windows-latest / linux-launcher CI jobs
+    # cover them for real). Only applies when this workspace actually has
+    # those members -- xenia-wire's own separate workspace doesn't.
     local exclude_flags=()
     if [[ -f apps/xenia-launcher-windows/Cargo.toml ]]; then
-      exclude_flags=(--exclude xenia-launcher-windows)
+      exclude_flags=(--exclude xenia-launcher-windows --exclude xenia-launcher-shell --exclude xenia-launcher-linux)
     fi
     cargo metadata --format-version 1 --no-deps >/dev/null
     cargo fmt --all -- --check

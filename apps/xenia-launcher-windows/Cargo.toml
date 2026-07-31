@@ -15,18 +15,18 @@ name = "xenia-launcher"
 path = "src/main.rs"
 
 [dependencies]
+# The platform-agnostic protocol/worker/tray/config plumbing lives in
+# xenia-launcher-shell now, shared with xenia-launcher-linux -- see that
+# crate's own doc comment for exactly what moved there and why.
+xenia-launcher-shell = { path = "../../crates/xenia-launcher-shell" }
 xenia-launcher-core = { path = "../../crates/xenia-launcher-core" }
-xenia-secure-file = { path = "../../crates/xenia-secure-file" }
-tokio = { workspace = true, features = ["process", "fs", "rt", "net", "rt-multi-thread"] }
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-serde = { version = "1", features = ["derive"] }
-serde_json.workspace = true
 
-# System tray icon + context menu. Real Win32 event-loop integration
-# (verified against this crate's actual source, not guessed -- see the
-# module doc comments in src/tray.rs for the specific APIs this relies on).
+# Directly referenced for tray_icon::menu::MenuEvent/TrayIconEvent's event
+# receivers in main.rs's tick loop, even though tray.rs's own construction
+# logic now lives in xenia-launcher-shell.
 tray-icon = "0.24"
 
 [target.'cfg(windows)'.dependencies]

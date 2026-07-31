@@ -12,7 +12,8 @@
 //! balloon-notification icon, and the settings window when open); a
 //! separate worker thread owns a tokio runtime and is the only place that
 //! touches `xenia_launcher_core`'s async APIs. The two talk over plain
-//! `std::sync::mpsc` channels -- see `protocol.rs` and `worker.rs`.
+//! `std::sync::mpsc` channels -- see `xenia_launcher_shell`'s `protocol`
+//! and `worker` modules, shared with `xenia-launcher-linux`.
 //!
 //! **What's verified and what isn't**: every Win32/`tray-icon`/`muda` API
 //! used across this app was checked against the real, cached crate source
@@ -36,15 +37,10 @@
 // relax anything for any other crate.
 #![allow(unsafe_code)]
 
-mod config_store;
 mod notify;
-mod protocol;
 mod settings_window;
 mod startup;
-mod tray;
-mod worker;
 
-use protocol::{Command, Event};
 use std::sync::mpsc::{self, Receiver, Sender};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -55,6 +51,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WNDCLASSEXW, WS_OVERLAPPED,
 };
 use windows::core::HSTRING;
+use xenia_launcher_shell::protocol::{Command, Event};
+use xenia_launcher_shell::{config_store, tray, worker};
 
 const HIDDEN_CLASS_NAME: &str = "XeniaLauncherHiddenWindow";
 const POLL_TIMER_ID: usize = 1;
@@ -77,7 +75,7 @@ fn main() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let profile_dir = protocol::default_profile_dir();
+    let profile_dir = xenia_launcher_shell::protocol::default_profile_dir();
     if let Err(e) = std::fs::create_dir_all(&profile_dir) {
         tracing::error!(error = %e, path = %profile_dir.display(), "couldn't create the profile directory");
         return;

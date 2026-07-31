@@ -45,10 +45,8 @@ mod tests {
 
     #[test]
     fn load_or_default_returns_defaults_when_nothing_is_saved_yet() {
-        let dir = std::env::temp_dir().join(format!(
-            "xenia-launcher-windows-test-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("xenia-launcher-shell-test-{}", std::process::id()));
         let config = load_or_default(&dir);
         assert_eq!(config, DaemonConfig::default());
     }
@@ -56,7 +54,7 @@ mod tests {
     #[test]
     fn save_then_load_round_trips() {
         let dir = std::env::temp_dir().join(format!(
-            "xenia-launcher-windows-test-roundtrip-{}",
+            "xenia-launcher-shell-test-roundtrip-{}",
             std::process::id()
         ));
         let config = DaemonConfig {

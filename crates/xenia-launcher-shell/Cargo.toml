@@ -1,0 +1,27 @@
+[package]
+name = "xenia-launcher-shell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-or-later"
+description = "Platform-agnostic GUI-shell plumbing shared by every native Xenia launcher (Windows/Linux/macOS): the command/event protocol, the worker thread that drives xenia-launcher-core, the cross-platform tray-icon/muda tray + menu, and config persistence. The settings window, system notifications, and start-at-login integration are NOT here -- each platform's launcher crate owns those with its own real native APIs."
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+xenia-launcher-core = { path = "../xenia-launcher-core" }
+xenia-secure-file = { path = "../xenia-secure-file" }
+tokio = { workspace = true, features = ["process", "fs", "rt", "net", "rt-multi-thread"] }
+tracing.workspace = true
+serde_json.workspace = true
+
+# System tray icon + context menu. Real event-loop integration (verified
+# against this crate's actual source, not guessed -- see this module's own
+# doc comments for the specific APIs relied on). Cross-platform: handles
+# the Windows/Linux(GTK)/macOS backend differences internally.
+tray-icon = "0.24"
+
+[lints]
+workspace = true
