@@ -21,6 +21,8 @@ xenia-wire = { workspace = true, features = ["consent", "reference-frame"] }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Non-blocking file writer for --log-file (see init_tracing in main.rs).
+tracing-appender = "0.2"
 clap = { version = "4", features = ["derive"] }
 thiserror.workspace = true
 bincode = "1"

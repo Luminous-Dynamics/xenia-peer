@@ -27,6 +27,8 @@ tokio = { workspace = true }
 tokio-util = "0.7"
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Non-blocking file writer for --log-file (see init_tracing in main.rs).
+tracing-appender = "0.2"
 clap = { version = "4", features = ["derive"] }
 thiserror.workspace = true
 ed25519-dalek = { version = "2", features = ["rand_core"] }

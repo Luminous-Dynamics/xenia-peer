@@ -507,6 +507,15 @@ struct Args {
     /// this is also a memory-use cap, not just a policy knob.
     #[arg(long, default_value_t = 200 * 1024 * 1024)]
     file_transfer_max_bytes: u64,
+
+    /// Write logs to this file, in addition to stdout. If unset AND
+    /// stdout isn't a terminal (e.g. launched by double-clicking the
+    /// binary on Windows rather than from a console), falls back to
+    /// `xenia-peer.log` next to the executable -- otherwise nothing
+    /// durable would capture a crash or early error. Explicit stdout
+    /// logging still happens either way; this only adds a file.
+    #[arg(long)]
+    log_file: Option<std::path::PathBuf>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -1630,11 +1639,186 @@ fn raw_audio_from_capture_frame(
         Err("captured audio frame did not satisfy RawAudio v0.1 validation".into())
     }
 }
+
+/// Candidate log-file paths to try opening, in priority order.
+///
+/// An explicit `--log-file` is never substituted -- a path the user asked
+/// for that fails to open is a configuration error worth surfacing, not
+/// something to silently relocate. Otherwise, if stdout is a terminal, no
+/// candidates at all (unchanged pre-existing stdout-only behavior). If
+/// stdout isn't a terminal (the double-click-launch case, where nothing
+/// would otherwise capture a crash or early error): first, next to the
+/// running executable (the common per-user/unzipped-install case); then
+/// the OS temp dir, which is a fallback and not the first choice only
+/// because it's a shared, less discoverable location.
+///
+/// The temp-dir fallback exists because "next to the executable" alone
+/// silently defeats this feature's whole purpose in a real, common
+/// deployment shape: installed to a location the running process can't
+/// write to (an unelevated install under `Program Files`, a distro
+/// package's `/usr/bin`, this project's own Nix store build, any
+/// immutable-filesystem deployment). Found by hand 2026-07-31 via a real
+/// CI failure, not hypothesized: `checks.network-vm` runs `xenia-peer`
+/// straight from a read-only `/nix/store` path, and the single-fallback
+/// version of this function degraded all the way to stdout-only there --
+/// exactly the "nothing captures it" scenario `--log-file` exists to
+/// prevent, and no-terminal-attached to boot, so stdout output would have
+/// gone nowhere either.
+fn log_file_candidates(
+    explicit: Option<&std::path::Path>,
+    stdout_is_terminal: bool,
+    exe_dir: Option<&std::path::Path>,
+    temp_dir: &std::path::Path,
+    file_name: &str,
+) -> Vec<std::path::PathBuf> {
+    if let Some(p) = explicit {
+        return vec![p.to_path_buf()];
+    }
+    if stdout_is_terminal {
+        return Vec::new();
+    }
+    [
+        exe_dir.map(|dir| dir.join(file_name)),
+        Some(temp_dir.join(file_name)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// Set up tracing, always to stdout and optionally also to a file. See
+/// [`log_file_candidates`] for the fallback chain `explicit = None`
+/// resolves to.
+///
+/// Returns the non-blocking writer's flush guard; the caller must hold it
+/// for the whole process lifetime (dropping it early stops the file
+/// writer from flushing).
+fn init_tracing(
+    explicit: Option<&std::path::Path>,
+) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    use std::io::IsTerminal;
+    use tracing_subscriber::fmt::writer::MakeWriterExt;
+
+    let candidates = log_file_candidates(
+        explicit,
+        std::io::stdout().is_terminal(),
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+            .as_deref(),
+        &std::env::temp_dir(),
+        "xenia-peer.log",
+    );
+
+    let mut failed = Vec::new();
+    let mut opened = None;
+    for path in candidates {
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(file) => {
+                opened = Some(file);
+                break;
+            }
+            Err(err) => failed.push(format!("{} ({err})", path.display())),
+        }
+    }
+
+    let Some(file) = opened else {
+        if !failed.is_empty() {
+            eprintln!(
+                "warning: could not open a log file, tried: {}; logging to stdout only",
+                failed.join("; ")
+            );
+        }
+        tracing_subscriber::fmt::init();
+        return None;
+    };
+    let (non_blocking, guard) = tracing_appender::non_blocking(file);
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stdout.and(non_blocking))
+        .init();
+    Some(guard)
+}
+
+#[cfg(test)]
+mod log_file_candidate_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_path_is_the_only_candidate_regardless_of_terminal_or_dirs() {
+        let explicit = std::path::Path::new("/explicit/path.log");
+        for stdout_is_terminal in [true, false] {
+            let got = log_file_candidates(
+                Some(explicit),
+                stdout_is_terminal,
+                Some(std::path::Path::new("/exe/dir")),
+                std::path::Path::new("/tmp"),
+                "xenia-peer.log",
+            );
+            assert_eq!(got, vec![explicit.to_path_buf()]);
+        }
+    }
+
+    #[test]
+    fn terminal_attached_with_no_explicit_path_yields_no_candidates() {
+        let got = log_file_candidates(
+            None,
+            true,
+            Some(std::path::Path::new("/exe/dir")),
+            std::path::Path::new("/tmp"),
+            "xenia-peer.log",
+        );
+        assert!(
+            got.is_empty(),
+            "a terminal-attached run must stay stdout-only"
+        );
+    }
+
+    #[test]
+    fn no_terminal_tries_exe_dir_then_temp_dir_in_order() {
+        let got = log_file_candidates(
+            None,
+            false,
+            Some(std::path::Path::new("/exe/dir")),
+            std::path::Path::new("/tmp"),
+            "xenia-peer.log",
+        );
+        assert_eq!(
+            got,
+            vec![
+                std::path::PathBuf::from("/exe/dir/xenia-peer.log"),
+                std::path::PathBuf::from("/tmp/xenia-peer.log"),
+            ],
+            "exe-dir candidate must be tried before the temp-dir fallback"
+        );
+    }
+
+    #[test]
+    fn no_terminal_and_no_exe_dir_still_falls_back_to_temp_dir() {
+        // current_exe()/its parent can fail to resolve in principle -- the
+        // temp-dir fallback must not depend on it succeeding.
+        let got = log_file_candidates(
+            None,
+            false,
+            None,
+            std::path::Path::new("/tmp"),
+            "xenia-peer.log",
+        );
+        assert_eq!(got, vec![std::path::PathBuf::from("/tmp/xenia-peer.log")]);
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
-
     let args = Args::parse();
+    // Held for main()'s whole lifetime -- dropping it early would stop the
+    // non-blocking file writer from flushing. `_` alone would drop it
+    // immediately after this statement.
+    let _log_guard = init_tracing(args.log_file.as_deref());
+
     let source_id = parse_source_id(&args.source_id_hex)?;
 
     // Fail closed before doing any work: never expose the operator surface to
