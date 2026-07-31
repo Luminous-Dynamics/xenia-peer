@@ -1,0 +1,90 @@
+[package]
+name = "xenia-launcher-macos"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-or-later"
+description = "Minimal native macOS tray shell for xenia-launcher-core: system tray icon + menu, a small AppKit settings window, UserNotifications-based desktop notifications, and a LaunchAgent for start-at-login. Item 8 (macOS half) of the launcher plan -- mirrors xenia-launcher-windows/xenia-launcher-linux's architecture, sharing its platform-agnostic plumbing via xenia-launcher-shell. Unverifiable locally beyond `cargo check --target x86_64-apple-darwin` (no Apple SDK/osxcross on the build host) -- see this app's module doc comments."
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[[bin]]
+name = "xenia-launcher"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+xenia-launcher-shell = { path = "../../crates/xenia-launcher-shell" }
+xenia-launcher-core = { path = "../../crates/xenia-launcher-core" }
+xenia-secure-file = { path = "../../crates/xenia-secure-file" }
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Directly referenced for tray_icon::menu::MenuEvent/TrayIconEvent's event
+# receivers in main.rs's tick loop, even though tray.rs's own construction
+# logic lives in xenia-launcher-shell.
+tray-icon = "0.24"
+
+# The settings window and app/timer setup, built directly on objc2's
+# AppKit bindings (already a transitive dependency via tray-icon's own
+# macOS backend). Real API verified against the cached objc2-app-kit
+# 0.3.2 / objc2-foundation 0.3.2 / objc2 0.6.4 source -- and, critically,
+# against objc2's own real `examples/hello_world_app.rs`, a complete
+# working NSApplication+NSWindow program -- before use. These are pure
+# auto-generated Rust FFI bindings (unlike notify-rust's
+# mac-notification-sys, see notify.rs), so they type-check locally via
+# `cargo check --target x86_64-apple-darwin` without needing a real
+# Apple SDK -- confirmed empirically before committing to this design.
+objc2 = "0.6"
+block2 = "0.6"
+objc2-app-kit = { version = "0.3", features = [
+    "std",
+    "NSApplication",
+    "NSRunningApplication",
+    "NSResponder",
+    "NSWindow",
+    "NSGraphics",
+    "NSView",
+    "NSTextField",
+    "NSControl",
+    "NSButton",
+    "NSButtonCell",
+    "NSCell",
+    "NSStackView",
+    "NSColor",
+    "NSFont",
+    "NSText",
+] }
+objc2-foundation = { version = "0.3", features = [
+    "std",
+    "NSString",
+    "NSGeometry",
+    "NSNotification",
+    "NSObjCRuntime",
+    "NSTimer",
+    "NSDate",
+    "NSArray",
+    "block2",
+] }
+
+# Desktop notifications via the UserNotifications framework directly
+# (not notify-rust -- its macOS backend, mac-notification-sys, has a
+# build.rs that compiles real Objective-C source with macOS-specific
+# compiler flags, which fails outright without a real Apple SDK/
+# osxcross; these objc2-* bindings are pure Rust FFI with no C
+# compilation step, so they're the only macOS notification path this
+# session can actually type-check before pushing to CI).
+objc2-user-notifications = { version = "0.3", features = [
+    "std",
+    "UNNotification",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationTrigger",
+    "UNUserNotificationCenter",
+    "block2",
+] }
+
+[lints]
+workspace = true

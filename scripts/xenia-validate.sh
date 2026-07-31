@@ -222,14 +222,17 @@ check_cargo_dir() {
     # (won't even compile without the `windows` crate, which is
     # target-gated to cfg(windows)). xenia-launcher-shell/xenia-launcher-linux
     # need GTK3/libappindicator/libxdo system dev headers (tray-icon's Linux
-    # backend) this runner doesn't have. Exclude all three from a bare host
-    # `cargo check`/`test --no-run` here, same reasoning as the MSRV job's
-    # explicit --exclude (their own windows-latest / linux-launcher CI jobs
-    # cover them for real). Only applies when this workspace actually has
-    # those members -- xenia-wire's own separate workspace doesn't.
+    # backend) this runner doesn't have. xenia-launcher-macos is macOS-only
+    # (unconditional Objective-C message-send usage, no Apple SDK/objc2 on
+    # this runner). Exclude all four from a bare host `cargo check`/
+    # `test --no-run` here, same reasoning as the MSRV job's explicit
+    # --exclude (their own windows-latest / linux-launcher / macos-launcher
+    # CI jobs cover them for real). Only applies when this workspace
+    # actually has those members -- xenia-wire's own separate workspace
+    # doesn't.
     local exclude_flags=()
     if [[ -f apps/xenia-launcher-windows/Cargo.toml ]]; then
-      exclude_flags=(--exclude xenia-launcher-windows --exclude xenia-launcher-shell --exclude xenia-launcher-linux)
+      exclude_flags=(--exclude xenia-launcher-windows --exclude xenia-launcher-shell --exclude xenia-launcher-linux --exclude xenia-launcher-macos)
     fi
     cargo metadata --format-version 1 --no-deps >/dev/null
     cargo fmt --all -- --check
