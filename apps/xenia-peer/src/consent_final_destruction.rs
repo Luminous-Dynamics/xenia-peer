@@ -883,6 +883,35 @@ mod tests {
         ));
     }
 
+    /// Regression test for the quorum-count comparison in `verify_quorum`
+    /// (distinct from `destruction_approval_is_bound_to_exact_plan`, which
+    /// only ever exercises quorum == 1). One trusted approval must not
+    /// satisfy a quorum of two; a second, distinct trusted approval must.
+    #[test]
+    fn final_destruction_approval_quorum_requires_the_configured_threshold() {
+        let subject = subject();
+        let (_, custody_bundle) = custody(&subject);
+        let ledger_key = LedgerSigningKey::from_bytes(&[41u8; 32]);
+        let plan = signed_plan(&ledger_key, &subject, &custody_bundle);
+        let first = LedgerSigningKey::from_bytes(&[42u8; 32]);
+        let second = LedgerSigningKey::from_bytes(&[43u8; 32]);
+        let trusted = [
+            first.verifying_key().to_bytes(),
+            second.verifying_key().to_bytes(),
+        ];
+        let mut approvals = ConsentFinalDestructionApprovalBundleV1::new(&plan).unwrap();
+        approvals.sign_with(&plan, &first, 20_100).unwrap();
+        assert_eq!(
+            approvals.verify_quorum(&plan, &trusted, 2),
+            Err(ConsentFinalDestructionError::ApprovalQuorumNotMet {
+                observed: 1,
+                required: 2,
+            })
+        );
+        approvals.sign_with(&plan, &second, 20_101).unwrap();
+        approvals.verify_quorum(&plan, &trusted, 2).unwrap();
+    }
+
     #[test]
     fn readiness_is_authorization_only_and_expires_with_plan() {
         let subject = subject();
