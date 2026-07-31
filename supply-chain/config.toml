@@ -2396,6 +2396,11 @@ criteria = "safe-to-deploy"
 version = "0.28.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.symlink]]
+version = "0.1.0"
+criteria = "safe-to-deploy"
+notes = "Tiny transitive dep of tracing-appender (used for log-file rotation), pulled in by PR #113's --log-file feature. Trivial symlink-creation helper, no unsafe, no network/fs-outside-declared-path behavior beyond what its name says."
+
 [[exemptions.syn]]
 version = "1.0.109"
 criteria = "safe-to-deploy"
@@ -2583,6 +2588,11 @@ criteria = "safe-to-deploy"
 [[exemptions.tracing]]
 version = "0.1.44"
 criteria = "safe-to-deploy"
+
+[[exemptions.tracing-appender]]
+version = "0.2.5"
+criteria = "safe-to-deploy"
+notes = "Official tokio-rs/tracing ecosystem crate (same publishers as already-vetted tracing/tracing-subscriber). Non-blocking file writer + rotation for PR #113's --log-file feature."
 
 [[exemptions.tracing-attributes]]
 version = "0.1.31"
