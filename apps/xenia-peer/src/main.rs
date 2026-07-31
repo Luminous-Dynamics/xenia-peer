@@ -64,6 +64,11 @@ mod audit_ledger_store;
 // "this is unreviewed" -- see each module's own doc comment.
 #[allow(dead_code)]
 mod consent_artifact_paths;
+// Phase 3 of the re-derivation: a real end-to-end test driving the full
+// operator sequence through these same ceremony functions. See the
+// module's own doc comment.
+#[cfg(test)]
+mod consent_ceremony_end_to_end_tests;
 #[allow(dead_code)]
 mod consent_compaction;
 #[allow(dead_code)]
