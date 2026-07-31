@@ -69,6 +69,15 @@ impl RateLimiter {
             false
         }
     }
+
+    /// Seconds remaining until the current window resets, for a
+    /// `Retry-After` header. Only meaningful called with the same `now`
+    /// immediately after `allow(now)` returned `false` -- purely a read of
+    /// existing state, doesn't affect `allow`'s own behavior.
+    pub(crate) fn retry_after_secs(&self, now: u64) -> u64 {
+        self.window_secs
+            .saturating_sub(now.saturating_sub(self.window_start))
+    }
 }
 
 #[cfg(test)]
@@ -101,5 +110,23 @@ mod tests {
         let mut limiter = RateLimiter::new(0, 60);
         assert!(!limiter.allow(0));
         assert!(!limiter.allow(1_000));
+    }
+
+    #[test]
+    fn retry_after_counts_down_to_the_window_reset() {
+        let mut limiter = RateLimiter::new(1, 60);
+        // `window_start` defaults to 0 and this first `now` (0) doesn't
+        // clear the `>= window_secs` reset threshold in `allow`, so the
+        // window opens at 0, not at this call's timestamp -- matches
+        // `resets_once_the_window_elapses` above, which anchors the same
+        // way for the same reason.
+        assert!(limiter.allow(0));
+        // Window opened at 0, resets at 60.
+        assert_eq!(limiter.retry_after_secs(0), 60);
+        assert_eq!(limiter.retry_after_secs(30), 30);
+        assert_eq!(limiter.retry_after_secs(59), 1);
+        // Never negative, even past the reset instant.
+        assert_eq!(limiter.retry_after_secs(60), 0);
+        assert_eq!(limiter.retry_after_secs(1_000), 0);
     }
 }
