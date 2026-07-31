@@ -1539,3 +1539,476 @@ fn full_pqc_sealed_bundle_can_verify_with_ml_dsa() {
     )
     .unwrap();
 }
+
+#[test]
+fn checkpoint_monotonicity_detects_rollback_and_same_height_fork() {
+    let signing_key = SigningKey::from_bytes(&[31u8; 32]);
+    let mut chain = Chain::new(signing_key);
+    chain.append(sample_event(ConsentKind::Request)).unwrap();
+    let first = chain.sign_checkpoint(100);
+    chain.append(sample_event(ConsentKind::Approval)).unwrap();
+    let second = chain.sign_checkpoint(101);
+
+    Verifier::verify_checkpoint_monotonic(&first, &second).unwrap();
+
+    let mut rollback = first.clone();
+    rollback.timestamp_unix_secs = 102;
+    let message = checkpoint_message(
+        rollback.entry_count,
+        &rollback.head_hash,
+        &rollback.ledger_public_key,
+        rollback.timestamp_unix_secs,
+    );
+    rollback.signature = SigningKey::from_bytes(&[31u8; 32])
+        .sign(&message)
+        .to_bytes();
+    assert!(matches!(
+        Verifier::verify_checkpoint_monotonic(&second, &rollback),
+        Err(CheckpointContinuityError::EntryCountRegressed { .. })
+    ));
+
+    let mut fork_chain = Chain::new(SigningKey::from_bytes(&[31u8; 32]));
+    fork_chain
+        .append(sample_event(ConsentKind::Denial))
+        .unwrap();
+    let fork = fork_chain.sign_checkpoint(101);
+    assert!(matches!(
+        Verifier::verify_checkpoint_monotonic(&first, &fork),
+        Err(CheckpointContinuityError::ForkAtSameHeight { entry_count: 1 })
+    ));
+}
+
+#[test]
+fn retained_checkpoint_must_be_an_exact_prefix_of_the_ledger() {
+    let signing_key = SigningKey::from_bytes(&[32u8; 32]);
+    let verifying_key = signing_key.verifying_key();
+    let mut chain = Chain::new(signing_key);
+    chain.append(sample_event(ConsentKind::Request)).unwrap();
+    let retained = chain.sign_checkpoint(100);
+    chain.append(sample_event(ConsentKind::Approval)).unwrap();
+    let entries = chain.into_entries();
+
+    Verifier::verify_checkpoint_prefix(&retained, &entries, &verifying_key).unwrap();
+
+    let older_entries = entries[..0].to_vec();
+    assert!(matches!(
+        Verifier::verify_checkpoint_prefix(&retained, &older_entries, &verifying_key),
+        Err(CheckpointContinuityError::CheckpointAheadOfLedger { .. })
+            | Err(CheckpointContinuityError::Ledger(_))
+    ));
+}
+
+#[test]
+fn checkpoint_extension_requires_every_intervening_signed_entry() {
+    let signing_key = SigningKey::from_bytes(&[33u8; 32]);
+    let mut chain = Chain::new(signing_key);
+    chain.append(sample_event(ConsentKind::Request)).unwrap();
+    let retained = chain.sign_checkpoint(100);
+    chain.append(sample_event(ConsentKind::Approval)).unwrap();
+    chain.append(sample_event(ConsentKind::Revocation)).unwrap();
+    let candidate = chain.sign_checkpoint(101);
+    let entries = chain.into_entries();
+    let suffix = &entries[retained.entry_count as usize..];
+
+    Verifier::verify_checkpoint_extension(&retained, &candidate, suffix).unwrap();
+    assert!(matches!(
+        Verifier::verify_checkpoint_extension(&retained, &candidate, &suffix[..1]),
+        Err(CheckpointContinuityError::ExtensionLengthMismatch { .. })
+    ));
+
+    let mut tampered = suffix.to_vec();
+    tampered[0].event.scope.push_str(" tampered");
+    assert!(matches!(
+        Verifier::verify_checkpoint_extension(&retained, &candidate, &tampered),
+        Err(CheckpointContinuityError::SuffixEntryHashMismatch { .. })
+    ));
+}
+
+#[test]
+fn ledger_key_transition_requires_both_epoch_keys() {
+    use crate::{LedgerKeyTransition, Verifier};
+    use ed25519_dalek::SigningKey;
+
+    let old = SigningKey::from_bytes(&[41u8; 32]);
+    let new = SigningKey::from_bytes(&[42u8; 32]);
+    let mut old_chain = crate::Chain::new(old.clone());
+    old_chain
+        .append(sample_event(ConsentKind::Request))
+        .unwrap();
+    let previous = old_chain.sign_checkpoint(100);
+    let transition = LedgerKeyTransition::sign(previous.clone(), &old, &new, 101).unwrap();
+
+    Verifier::verify_ledger_key_transition(&transition).unwrap();
+
+    let mut tampered = transition.clone();
+    tampered.new_key_signature[0] ^= 0x80;
+    assert!(Verifier::verify_ledger_key_transition(&tampered).is_err());
+}
+
+#[test]
+fn ledger_key_transition_rejects_same_key_and_predated_handover() {
+    use crate::{LedgerKeyTransition, LedgerKeyTransitionError};
+    use ed25519_dalek::SigningKey;
+
+    let old = SigningKey::from_bytes(&[45u8; 32]);
+    let new = SigningKey::from_bytes(&[46u8; 32]);
+    let chain = crate::Chain::new(old.clone());
+    let previous = chain.sign_checkpoint(100);
+
+    assert!(matches!(
+        LedgerKeyTransition::sign(previous.clone(), &old, &old, 101),
+        Err(LedgerKeyTransitionError::KeyUnchanged)
+    ));
+    assert!(matches!(
+        LedgerKeyTransition::sign(previous, &old, &new, 99),
+        Err(LedgerKeyTransitionError::TransitionPredatesCheckpoint)
+    ));
+}
+
+#[test]
+fn ledger_key_transition_authorizes_a_fresh_successor_epoch() {
+    use crate::{LedgerKeyTransition, Verifier};
+    use ed25519_dalek::SigningKey;
+
+    let old = SigningKey::from_bytes(&[43u8; 32]);
+    let new = SigningKey::from_bytes(&[44u8; 32]);
+    let mut old_chain = crate::Chain::new(old.clone());
+    old_chain
+        .append(sample_event(ConsentKind::Request))
+        .unwrap();
+    let previous = old_chain.sign_checkpoint(100);
+    let transition = LedgerKeyTransition::sign(previous.clone(), &old, &new, 101).unwrap();
+
+    let mut successor = crate::Chain::new(new);
+    successor
+        .append(sample_event(ConsentKind::Request))
+        .unwrap();
+    let candidate = successor.sign_checkpoint(102);
+    let entries = successor.iter().cloned().collect::<Vec<_>>();
+
+    Verifier::verify_ledger_key_successor(&previous, &transition, &candidate, &entries).unwrap();
+}
+
+#[test]
+fn checkpoint_witness_bundle_requires_distinct_trusted_quorum() {
+    use crate::{CheckpointWitnessBundle, Verifier};
+    use ed25519_dalek::SigningKey;
+
+    let ledger_key = SigningKey::from_bytes(&[51u8; 32]);
+    let witness_a = SigningKey::from_bytes(&[52u8; 32]);
+    let witness_b = SigningKey::from_bytes(&[53u8; 32]);
+    let mut chain = crate::Chain::new(ledger_key);
+    chain.append(sample_event(ConsentKind::Request)).unwrap();
+    let mut bundle = CheckpointWitnessBundle::new(chain.sign_checkpoint(100)).unwrap();
+    bundle.sign_with(&witness_a, 101).unwrap();
+    bundle.sign_with(&witness_b, 102).unwrap();
+
+    let trusted = [
+        witness_a.verifying_key().to_bytes(),
+        witness_b.verifying_key().to_bytes(),
+    ];
+    Verifier::verify_checkpoint_witness_quorum(&bundle, &trusted, 2).unwrap();
+    assert!(Verifier::verify_checkpoint_witness_quorum(&bundle, &trusted, 3).is_err());
+}
+
+#[test]
+fn checkpoint_witness_bundle_enforces_the_signature_bound() {
+    use crate::{CheckpointWitnessBundle, CheckpointWitnessError, MAX_CHECKPOINT_WITNESSES};
+    use ed25519_dalek::SigningKey;
+
+    let ledger_key = SigningKey::from_bytes(&[57u8; 32]);
+    let chain = crate::Chain::new(ledger_key);
+    let mut bundle = CheckpointWitnessBundle::new(chain.sign_checkpoint(100)).unwrap();
+    for seed in 1..=MAX_CHECKPOINT_WITNESSES {
+        let witness = SigningKey::from_bytes(&[seed as u8; 32]);
+        bundle.sign_with(&witness, 101).unwrap();
+    }
+    let extra = SigningKey::from_bytes(&[65u8; 32]);
+    assert!(matches!(
+        bundle.sign_with(&extra, 101),
+        Err(CheckpointWitnessError::TooManyWitnesses { .. })
+    ));
+}
+
+#[test]
+fn checkpoint_witness_bundle_rejects_tampering_and_untrusted_keys() {
+    use crate::{CheckpointWitnessBundle, Verifier};
+    use ed25519_dalek::SigningKey;
+
+    let ledger_key = SigningKey::from_bytes(&[54u8; 32]);
+    let witness = SigningKey::from_bytes(&[55u8; 32]);
+    let other = SigningKey::from_bytes(&[56u8; 32]);
+    let chain = crate::Chain::new(ledger_key);
+    let mut bundle = CheckpointWitnessBundle::new(chain.sign_checkpoint(100)).unwrap();
+    bundle.sign_with(&witness, 101).unwrap();
+
+    assert!(Verifier::verify_checkpoint_witness_quorum(
+        &bundle,
+        &[other.verifying_key().to_bytes()],
+        1,
+    )
+    .is_err());
+
+    bundle.witnesses[0].signature[0] ^= 0x40;
+    assert!(
+        Verifier::verify_checkpoint_witness_quorum(
+            &bundle,
+            &[witness.verifying_key().to_bytes()],
+            1,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn archive_segment_proves_every_entry_between_checkpoints() {
+    use crate::{LedgerArchiveSegment, Verifier};
+    use ed25519_dalek::SigningKey;
+
+    let key = SigningKey::from_bytes(&[61u8; 32]);
+    let mut chain = crate::Chain::new(key);
+    let base = chain.sign_checkpoint(100);
+    chain.append(sample_event(ConsentKind::Request)).unwrap();
+    chain.append(sample_event(ConsentKind::Approval)).unwrap();
+    let segment = LedgerArchiveSegment::from_chain(&chain, base, 101).unwrap();
+
+    assert_eq!(segment.entries.len(), 2);
+    Verifier::verify_ledger_archive_segment(&segment).unwrap();
+}
+
+#[test]
+fn archive_segment_rejects_missing_or_tampered_entries() {
+    use crate::{LedgerArchiveSegment, Verifier};
+    use ed25519_dalek::SigningKey;
+
+    let key = SigningKey::from_bytes(&[62u8; 32]);
+    let mut chain = crate::Chain::new(key);
+    let base = chain.sign_checkpoint(100);
+    chain.append(sample_event(ConsentKind::Request)).unwrap();
+    chain.append(sample_event(ConsentKind::Approval)).unwrap();
+    let segment = LedgerArchiveSegment::from_chain(&chain, base, 101).unwrap();
+
+    let mut missing = segment.clone();
+    missing.entries.pop();
+    assert!(Verifier::verify_ledger_archive_segment(&missing).is_err());
+
+    let mut tampered = segment;
+    tampered.segment_digest[0] ^= 0x20;
+    assert!(Verifier::verify_ledger_archive_segment(&tampered).is_err());
+}
+
+#[test]
+fn archive_sequence_digest_commits_to_ordered_verified_segments() {
+    let key = SigningKey::from_bytes(&[63u8; 32]);
+    let mut chain = crate::Chain::new(key);
+    let genesis = chain.sign_checkpoint(100);
+    chain.append(sample_event(ConsentKind::Request)).unwrap();
+    let first = LedgerArchiveSegment::from_chain(&chain, genesis, 101).unwrap();
+
+    chain.append(sample_event(ConsentKind::Approval)).unwrap();
+    let second =
+        LedgerArchiveSegment::from_chain(&chain, first.terminal_checkpoint.clone(), 102).unwrap();
+    let segments = vec![first.clone(), second.clone()];
+
+    let digest = ledger_archive_sequence_digest(&segments).unwrap();
+    assert_eq!(digest, ledger_archive_sequence_digest(&segments).unwrap());
+
+    let reordered = vec![second, first];
+    assert!(ledger_archive_sequence_digest(&reordered).is_err());
+    assert_eq!(
+        ledger_archive_sequence_digest(&[]),
+        Err(LedgerArchiveError::EmptySequence)
+    );
+}
+
+#[test]
+fn archive_sequence_verifier_enforces_segment_bound_before_walking() {
+    let too_many = vec![
+        LedgerArchiveSegment {
+            schema: LEDGER_ARCHIVE_SEGMENT_SCHEMA.to_string(),
+            base_checkpoint: crate::Chain::new(SigningKey::from_bytes(&[64u8; 32]))
+                .sign_checkpoint(100),
+            entries: Vec::new(),
+            terminal_checkpoint: crate::Chain::new(SigningKey::from_bytes(&[64u8; 32]))
+                .sign_checkpoint(100),
+            segment_digest: [0u8; 32],
+        };
+        MAX_LEDGER_ARCHIVE_SEQUENCE_SEGMENTS + 1
+    ];
+    assert!(matches!(
+        Verifier::verify_ledger_archive_sequence(&too_many),
+        Err(LedgerArchiveError::TooManySegments { .. })
+    ));
+}
+
+#[test]
+fn compaction_manifest_binds_archive_recovery_and_live_head() {
+    let key = SigningKey::from_bytes(&[65u8; 32]);
+    let mut chain = crate::Chain::new(key);
+    chain.append(sample_event(ConsentKind::Request)).unwrap();
+    let archived = chain.sign_checkpoint(101);
+    chain.append(sample_event(ConsentKind::Approval)).unwrap();
+
+    let manifest = chain
+        .sign_compaction_manifest(archived, [0xA1; 32], [0xB2; 32], 102)
+        .unwrap();
+    let entries = chain.iter().cloned().collect::<Vec<_>>();
+    Verifier::verify_ledger_compaction_manifest_against_entries(
+        &manifest,
+        &entries,
+        &SigningKey::from_bytes(&[65u8; 32]).verifying_key(),
+    )
+    .unwrap();
+
+    let mut tampered = manifest;
+    tampered.recovery_summary_digest[0] ^= 0x01;
+    assert_eq!(
+        Verifier::verify_ledger_compaction_manifest(&tampered),
+        Err(LedgerCompactionError::BadSignature)
+    );
+}
+
+#[test]
+fn compaction_manifest_refuses_regressed_or_forked_current_heads() {
+    let key = SigningKey::from_bytes(&[66u8; 32]);
+    let mut chain = crate::Chain::new(key.clone());
+    chain.append(sample_event(ConsentKind::Request)).unwrap();
+    let older_current = chain.sign_checkpoint(102);
+    chain.append(sample_event(ConsentKind::Approval)).unwrap();
+    let newer_archive = chain.sign_checkpoint(101);
+
+    let regressed = LedgerCompactionManifest {
+        schema: LEDGER_COMPACTION_MANIFEST_SCHEMA.to_string(),
+        archived_through_checkpoint: newer_archive,
+        current_checkpoint: older_current,
+        archive_sequence_digest: [0xA1; 32],
+        recovery_summary_digest: [0xB2; 32],
+        timestamp_unix_secs: 102,
+        signature: [0u8; 64],
+    };
+    assert_eq!(
+        Verifier::verify_ledger_compaction_manifest(&regressed),
+        Err(LedgerCompactionError::CurrentBeforeArchive)
+    );
+
+    let mut left = crate::Chain::new(key.clone());
+    left.append(sample_event(ConsentKind::Request)).unwrap();
+    let archived = left.sign_checkpoint(100);
+    let mut right = crate::Chain::new(key);
+    right.append(sample_event(ConsentKind::Denial)).unwrap();
+    let current = right.sign_checkpoint(101);
+    let forked = LedgerCompactionManifest {
+        schema: LEDGER_COMPACTION_MANIFEST_SCHEMA.to_string(),
+        archived_through_checkpoint: archived,
+        current_checkpoint: current,
+        archive_sequence_digest: [0xA1; 32],
+        recovery_summary_digest: [0xB2; 32],
+        timestamp_unix_secs: 101,
+        signature: [0u8; 64],
+    };
+    assert_eq!(
+        Verifier::verify_ledger_compaction_manifest(&forked),
+        Err(LedgerCompactionError::ForkAtArchiveBoundary)
+    );
+}
+
+#[test]
+fn compaction_manifest_refuses_placeholders_and_unrelated_boundaries() {
+    let key = SigningKey::from_bytes(&[66u8; 32]);
+    let mut chain = crate::Chain::new(key);
+    chain.append(sample_event(ConsentKind::Request)).unwrap();
+
+    assert_eq!(
+        chain.sign_compaction_manifest(chain.sign_checkpoint(100), [0u8; 32], [0xB2; 32], 101,),
+        Err(LedgerCompactionError::EmptyDigest {
+            field: "archive_sequence",
+        })
+    );
+
+    let other = crate::Chain::new(SigningKey::from_bytes(&[67u8; 32]));
+    assert!(
+        chain
+            .sign_compaction_manifest(other.sign_checkpoint(100), [0xA1; 32], [0xB2; 32], 101,)
+            .is_err()
+    );
+}
+
+#[test]
+fn checkpoint_freshness_rejects_stale_and_future_anchors() {
+    use crate::{CheckpointFreshnessPolicy, Verifier};
+    use ed25519_dalek::SigningKey;
+
+    let chain = crate::Chain::new(SigningKey::from_bytes(&[63u8; 32]));
+    let checkpoint = chain.sign_checkpoint(100);
+    let policy = CheckpointFreshnessPolicy {
+        max_age_secs: Some(20),
+        max_future_skew_secs: 5,
+    };
+    Verifier::verify_checkpoint_freshness(&checkpoint, 120, policy).unwrap();
+    assert!(Verifier::verify_checkpoint_freshness(&checkpoint, 121, policy).is_err());
+
+    let future = chain.sign_checkpoint(126);
+    assert!(Verifier::verify_checkpoint_freshness(&future, 120, policy).is_err());
+}
+
+#[test]
+fn checkpoint_suffix_chain_preserves_absolute_sequence_frontier() {
+    let key = SigningKey::from_bytes(&[68u8; 32]);
+    let public_key = key.verifying_key();
+    let mut complete = crate::Chain::new(key.clone());
+    complete.append(sample_event(ConsentKind::Request)).unwrap();
+    let base = complete.sign_checkpoint(100);
+    complete
+        .append(sample_event(ConsentKind::Approval))
+        .unwrap();
+    let terminal = complete.sign_checkpoint(101);
+    let suffix = complete.iter().skip(1).cloned().collect::<Vec<_>>();
+
+    Verifier::verify_checkpoint_extension(&base, &terminal, &suffix).unwrap();
+    let mut compacted = crate::Chain::from_checkpoint_suffix(base.clone(), suffix, key);
+    assert_eq!(compacted.entry_count(), 2);
+    assert_eq!(compacted.resident_len(), 1);
+    assert_eq!(compacted.base_checkpoint(), Some(&base));
+    assert_eq!(compacted.last_hash(), terminal.head_hash);
+
+    let appended = compacted
+        .append(sample_event(ConsentKind::Revocation))
+        .unwrap();
+    assert_eq!(appended.seq, 2);
+    assert_eq!(appended.prev_hash, terminal.head_hash);
+    assert_eq!(compacted.entry_count(), 3);
+    assert_eq!(compacted.resident_len(), 2);
+    Verifier::verify_checkpoint_extension(
+        compacted.base_checkpoint().unwrap(),
+        &compacted.sign_checkpoint(102),
+        &compacted.iter().cloned().collect::<Vec<_>>(),
+    )
+    .unwrap();
+    assert_eq!(
+        compacted.sign_checkpoint(102).ledger_public_key,
+        public_key.to_bytes()
+    );
+}
+
+#[test]
+fn transactional_chain_callback_observes_compacted_anchor_and_rolls_back() {
+    let key = SigningKey::from_bytes(&[69u8; 32]);
+    let complete = crate::Chain::new(key.clone());
+    let base = complete.sign_checkpoint(100);
+    let mut compacted = crate::Chain::from_checkpoint_suffix(base, Vec::new(), key);
+
+    let result =
+        compacted.append_transactional_chain(sample_event(ConsentKind::Request), |candidate| {
+            assert_eq!(candidate.entry_count(), 1);
+            assert_eq!(candidate.resident_len(), 1);
+            assert!(candidate.base_checkpoint().is_some());
+            Err("disk full")
+        });
+    assert!(matches!(
+        result,
+        Err(crate::TransactionalAppendError::Persist("disk full"))
+    ));
+    assert_eq!(compacted.entry_count(), 0);
+    assert_eq!(compacted.resident_len(), 0);
+    assert!(compacted.base_checkpoint().is_some());
+}
