@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Xenia Launcher
+Comment=Tray launcher for the Xenia remote-support daemon
+Exec=xenia-launcher
+Terminal=false
+Categories=Network;RemoteAccess;Utility;
+StartupNotify=false
+NoDisplay=false

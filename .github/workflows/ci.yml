@@ -133,6 +133,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked -p xenia-launcher-windows
       - run: cargo clippy --locked -p xenia-launcher-windows --all-targets -- -D warnings
+      # Real MSI installer via cargo-wix. windows-latest runner images ship
+      # WiX Toolset v3 preinstalled (candle.exe/light.exe on PATH, the WIX
+      # env var set) -- if that assumption is ever wrong, this step fails
+      # loudly rather than silently skipping packaging.
+      #
+      # UNSIGNED: this repo has no purchased Windows code-signing
+      # certificate. An unsigned .msi will trigger SmartScreen warnings on
+      # a real user's machine -- disclosed, not fixed, until that
+      # infrastructure exists. See docs/packaging/README.md.
+      - run: cargo install cargo-wix --locked
+      - run: cargo wix -p xenia-launcher-windows --nocapture
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xenia-launcher-windows-msi
+          path: target/wix/*.msi
+          if-no-files-found: error
 
   # xenia-launcher-linux is the native Linux tray shell -- item 8 (Linux
   # half) of the launcher plan, mirroring xenia-launcher-windows's
@@ -156,6 +172,20 @@ jobs:
           sudo apt-get install -y libgtk-3-dev libxdo-dev libappindicator3-dev
       - run: cargo test --locked -p xenia-launcher-shell -p xenia-launcher-linux
       - run: cargo clippy --locked -p xenia-launcher-shell -p xenia-launcher-linux --all-targets -- -D warnings
+      # Real .deb package via cargo-deb. `depends = "$auto"` in that
+      # crate's Cargo.toml resolves runtime library deps (GTK3/
+      # libappindicator/libxdo) via dpkg-shlibdeps against the real
+      # apt-installed -dev packages above -- verified locally this comes
+      # back empty on NixOS (Nix store libs aren't in dpkg's shlibs
+      # database), so this ubuntu-latest run is the authoritative check
+      # that auto-detection actually resolves real package names here.
+      - run: cargo install cargo-deb --locked
+      - run: cargo deb -p xenia-launcher-linux -v
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xenia-launcher-linux-deb
+          path: target/debian/*.deb
+          if-no-files-found: error
 
   # xenia-launcher-macos is the native macOS tray shell -- item 8 (macOS
   # half) of the launcher plan. Unlike Windows (cargo-xwin cross-compiles
@@ -179,3 +209,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked -p xenia-launcher-macos
       - run: cargo clippy --locked -p xenia-launcher-macos --all-targets -- -D warnings
+      # Real .app bundle, assembled by hand (no cargo-bundle/cargo-packager
+      # dependency -- a bundle is just a directory structure + Info.plist,
+      # no tool is strictly needed). UNSIGNED and UNNOTARIZED -- see
+      # docs/packaging/README.md for why, and for the real, disclosed
+      # consequence: Gatekeeper will refuse to open this via a normal
+      # double-click on a fresh machine.
+      - name: Build release binary
+        run: cargo build --locked --release -p xenia-launcher-macos
+      - name: Assemble .app bundle
+        run: |
+          set -euo pipefail
+          APP="target/release/Xenia Launcher.app"
+          mkdir -p "$APP/Contents/MacOS"
+          cp apps/xenia-launcher-macos/packaging/Info.plist "$APP/Contents/Info.plist"
+          cp target/release/xenia-launcher "$APP/Contents/MacOS/xenia-launcher"
+          chmod +x "$APP/Contents/MacOS/xenia-launcher"
+          cd target/release
+          zip -r -y xenia-launcher-macos.zip "Xenia Launcher.app"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xenia-launcher-macos-app
+          path: target/release/xenia-launcher-macos.zip
+          if-no-files-found: error

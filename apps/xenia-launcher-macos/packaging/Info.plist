@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Xenia Launcher</string>
+    <key>CFBundleDisplayName</key>
+    <string>Xenia Launcher</string>
+    <key>CFBundleIdentifier</key>
+    <string>net.mycelix.xenia.launcher</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.0.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleExecutable</key>
+    <string>xenia-launcher</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <!-- Background/accessory app: no Dock icon, no menu bar, no app
+         switcher entry. This is the packaged app equivalent of the
+         NSApplicationActivationPolicy::Accessory call main.rs already
+         makes at runtime (see src/main.rs). Keeping both isn't harmful:
+         LSUIElement takes effect before the app's own code runs at all,
+         so it's the more correct mechanism for a bundled app; the
+         runtime call stays as a fallback for anyone who ever runs the
+         raw executable outside the bundle. -->
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright (C) 2026 Tristan Stoltz / Luminous Dynamics</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>

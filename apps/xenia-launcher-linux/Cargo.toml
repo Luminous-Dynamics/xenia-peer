@@ -46,3 +46,25 @@ notify-rust = "4"
 
 [lints]
 workspace = true
+
+# `cargo deb` packaging (see docs/packaging/README.md). Runtime deps are
+# auto-detected from the built binary's actual dynamic linking via `$auto`
+# -- deliberately not hand-listing package names, since the real
+# GTK3/libappindicator package name varies by distro (e.g.
+# libappindicator3-1 vs libayatana-appindicator3-1), and auto-detection
+# reflects what the binary genuinely links against rather than a guess.
+[package.metadata.deb]
+maintainer = "Tristan Stoltz"
+depends = "$auto"
+section = "net"
+priority = "optional"
+extended-description = """\
+Minimal native Linux tray shell for xenia-launcher-core: system tray icon \
++ menu, a small GTK settings window, desktop notifications, and XDG \
+autostart integration."""
+assets = [
+    # target/release path is special -- cargo-deb replaces it with the
+    # real target dir path (see cargo-deb's own README on this).
+    { source = "target/release/xenia-launcher", dest = "usr/bin/", mode = "755" },
+    { source = "packaging/xenia-launcher.desktop", dest = "usr/share/applications/", mode = "644" },
+]
