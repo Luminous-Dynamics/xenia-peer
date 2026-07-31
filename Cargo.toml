@@ -16,14 +16,21 @@ members = [
     "crates/xenia-mobile-ffi",
     "crates/xenia-secure-file",
     "crates/xenia-launcher-core",
+    "crates/xenia-launcher-shell",
     "apps/xenia-launcher-windows",
+    "apps/xenia-launcher-linux",
     "apps/sovereign-admin",
     "apps/xenia-operator-agent",
 ]
 # sovereign-admin is a wasm32-unknown-unknown CSR bin; xenia-launcher-windows
 # is Windows-only (target-gated `windows` crate dependency, unconditional
-# Win32 API usage in its own source) -- keep both out of host-only
-# cargo check/build invocations on other platforms.
+# Win32 API usage in its own source); xenia-launcher-shell and
+# xenia-launcher-linux both depend on tray-icon's Linux backend, which needs
+# GTK3/libappindicator system dev headers a bare host doesn't have -- keep
+# all four out of host-only cargo check/build invocations on other
+# platforms/without those system libs. Each has its own dedicated CI job
+# that provides what it needs (windows-latest runner, or apt-get'd GTK3 on
+# ubuntu-latest).
 default-members = [
     "crates/xenia-peer-core",
     "crates/xenia-operator-proto",

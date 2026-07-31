@@ -128,6 +128,10 @@ criteria = "safe-to-deploy"
 version = "2.5.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.async-executor]]
+version = "1.14.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.async-io]]
 version = "2.6.0"
 criteria = "safe-to-deploy"
@@ -1432,6 +1436,10 @@ criteria = "safe-to-deploy"
 version = "0.3.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.mac-notification-sys]]
+version = "0.6.15"
+criteria = "safe-to-deploy"
+
 [[exemptions.mach2]]
 version = "0.4.3"
 criteria = "safe-to-deploy"
@@ -1602,6 +1610,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.noq-udp]]
 version = "1.0.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.notify-rust]]
+version = "4.18.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.ntapi]]
@@ -2404,6 +2416,10 @@ criteria = "safe-to-deploy"
 version = "0.12.16"
 criteria = "safe-to-deploy"
 
+[[exemptions.tauri-winrt-notification]]
+version = "0.7.3"
+criteria = "safe-to-deploy"
+
 [[exemptions.tempfile]]
 version = "3.27.0"
 criteria = "safe-to-deploy"
@@ -2956,6 +2972,10 @@ criteria = "safe-to-deploy"
 version = "0.2.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.windows-version]]
+version = "0.1.7"
+criteria = "safe-to-deploy"
+
 [[exemptions.windows_aarch64_gnullvm]]
 version = "0.42.2"
 criteria = "safe-to-deploy"
@@ -3144,12 +3164,24 @@ criteria = "safe-to-deploy"
 version = "4.4.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.zbus]]
+version = "5.18.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.zbus_macros]]
 version = "4.4.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.zbus_macros]]
+version = "5.18.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.zbus_names]]
 version = "3.0.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.zbus_names]]
+version = "4.3.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.zerocopy]]
@@ -3196,10 +3228,22 @@ criteria = "safe-to-deploy"
 version = "4.2.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.zvariant]]
+version = "5.13.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.zvariant_derive]]
 version = "4.2.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.zvariant_derive]]
+version = "5.13.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.zvariant_utils]]
 version = "2.1.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.zvariant_utils]]
+version = "3.5.0"
 criteria = "safe-to-deploy"

@@ -3,11 +3,14 @@
 
 //! System tray icon + context menu, built on the real `tray-icon`/`muda`
 //! public API (verified against those crates' actual source before use,
-//! not guessed).
+//! not guessed). Fully cross-platform: `tray-icon`/`muda` handle the
+//! Windows/Linux (GTK)/macOS backend differences internally, so this
+//! module has no `#[cfg(...)]` splits of its own.
 //!
 //! Per `tray-icon`'s own documented platform requirement, the tray icon
-//! must be created on the same thread that later pumps the Win32 message
-//! loop -- see `main.rs`, which does both on the GUI thread.
+//! must be created on the same thread that later pumps the platform's
+//! native GUI event loop -- see each launcher's own `main.rs`, which does
+//! both on the GUI thread.
 
 use crate::protocol::DaemonStatus;
 use tray_icon::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -103,7 +106,7 @@ fn tooltip_suffix(status: &DaemonStatus) -> String {
 }
 
 /// A plain, solid-color square icon generated in-process rather than
-/// embedding a `.ico` binary asset -- adequate for a v1 tray icon
+/// embedding a `.ico`/`.png` binary asset -- adequate for a v1 tray icon
 /// (distinguishable in the tray, no asset pipeline to maintain) without
 /// pretending to be real product art.
 fn placeholder_icon() -> Icon {

@@ -1,0 +1,48 @@
+[package]
+name = "xenia-launcher-linux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-or-later"
+description = "Minimal native Linux tray shell for xenia-launcher-core: system tray icon + menu, a small GTK settings window, desktop notifications, and XDG autostart integration. Item 8 (Linux half) of the launcher plan -- mirrors xenia-launcher-windows's architecture, sharing its platform-agnostic plumbing via xenia-launcher-shell."
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[[bin]]
+name = "xenia-launcher"
+path = "src/main.rs"
+
+[dependencies]
+xenia-launcher-shell = { path = "../../crates/xenia-launcher-shell" }
+xenia-launcher-core = { path = "../../crates/xenia-launcher-core" }
+xenia-secure-file = { path = "../../crates/xenia-secure-file" }
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Directly referenced for tray_icon::menu::MenuEvent/TrayIconEvent's event
+# receivers in main.rs's tick loop, even though tray.rs's own construction
+# logic lives in xenia-launcher-shell.
+tray-icon = "0.24"
+
+# The settings window, built directly on gtk-rs (already a transitive
+# dependency via tray-icon's own Linux backend -- see that crate's
+# README -- so this adds no new system library requirement). Real API
+# verified against the cached gtk-0.18.2/glib-0.18.5 source before use,
+# same discipline as xenia-launcher-windows's raw Win32 calls -- except
+# gtk-rs's bindings are actually safe Rust, so nothing in this crate
+# needs `unsafe`.
+gtk = "0.18"
+glib = "0.18"
+
+# Desktop notifications via the freedesktop D-Bus Notifications spec.
+# Default features use zbus (pure Rust, no libdbus system dependency at
+# build time) -- only needs a running D-Bus session at runtime to
+# actually deliver a notification, same "best-effort, log on failure"
+# posture as xenia-launcher-windows's balloon notifications.
+notify-rust = "4"
+
+[lints]
+workspace = true
