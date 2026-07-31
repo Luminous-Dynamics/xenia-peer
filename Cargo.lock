@@ -8896,6 +8896,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "xenia-launcher-core"
+version = "0.0.0-m0"
+dependencies = [
+ "rustix 0.38.44",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "windows 0.62.2",
+ "xenia-secure-file",
+]
+
+[[package]]
 name = "xenia-ledger"
 version = "0.0.0-m0"
 dependencies = [

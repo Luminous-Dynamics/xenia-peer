@@ -89,3 +89,22 @@ jobs:
             cargo test  --locked -p xenia-peer-core --features opus
             cargo check --locked -p xenia-peer      --features audio-opus
             cargo check --locked -p xenia-viewer    --features audio-opus'
+
+  # xenia-launcher-core has real #[cfg(windows)] process/security code
+  # (OpenProcess, QueryFullProcessImageNameW, GenerateConsoleCtrlEvent,
+  # TerminateProcess) that a Linux-only CI matrix would never build or run
+  # -- same lesson as xenia-secure-file's own windows-latest job. Scoped to
+  # just this crate for the same reason that job is: its heavier
+  # workspace-mates need ffmpeg/nix-flake-only deps a plain windows-latest
+  # runner doesn't have.
+  windows-launcher-core:
+    name: xenia-launcher-core (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked -p xenia-launcher-core
+      - run: cargo clippy --locked -p xenia-launcher-core --all-targets -- -D warnings

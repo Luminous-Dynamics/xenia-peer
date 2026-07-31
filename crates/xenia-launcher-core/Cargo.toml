@@ -1,0 +1,47 @@
+[package]
+name = "xenia-launcher-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "Apache-2.0 OR MIT"
+description = "Platform-neutral supervisor core for a local Xenia launcher: typed daemon configuration, process lifecycle (spawn/health/graceful-stop/force-kill), log subscription, and explicit-path binary discovery. No UI -- see docs/roadmap for the native shell(s) built on top of this."
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+# Deliberately no HTTP client crate (reqwest/hyper) for the /health probe
+# below -- it's one unauthenticated GET against a fixed loopback endpoint
+# with a small JSON body and no redirects/chunked-encoding/TLS to handle,
+# so a ~40-line hand-rolled HTTP/1.1 request over a plain TcpStream (see
+# health.rs) keeps this crate's dependency surface -- and therefore its
+# Windows cross-compile surface -- meaningfully smaller. In particular it
+# structurally avoids ever depending on a TLS backend (native-tls/rustls
+# -> aws-lc-sys), which this session's own PR #118 hit real cross-compile
+# friction with under this project's local toolchain (unrelated crate,
+# same dependency class) -- not a risk worth taking on for a loopback-only
+# health check that will never need HTTPS.
+xenia-secure-file = { path = "../xenia-secure-file" }
+tokio = { workspace = true, features = ["process", "fs", "rt", "net"] }
+tokio-stream = "0.1"
+thiserror.workspace = true
+tracing.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "0.38", default-features = false, features = ["process", "std"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Console",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
