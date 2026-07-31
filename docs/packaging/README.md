@@ -95,6 +95,18 @@ infrastructure is funded and wired in.
   so the real ubuntu-latest CI job (which apt-installs the actual `-dev`
   packages first) is the authoritative check that auto-detection resolves
   real Debian package names.
+- **Confirmed on real CI**: `Depends: libc6 (>= 2.39), libgdk-pixbuf-2.0-0
+  (>= 2.22.0), libglib2.0-0t64 (>= 2.54.0), libgtk-3-0t64 (>= 3.21.5),
+  libxdo3 (>= 1:3.20130104.1)`. Notably absent: `libappindicator3-1` /
+  `libayatana-appindicator3-1`, even though `tray-icon`'s Linux backend
+  depends on `libappindicator` at the Cargo level. `dpkg-shlibdeps` only
+  sees libraries the binary is actually link-time-linked against, so the
+  most likely explanation is `libappindicator` (or `tray-icon`'s use of
+  it) loads it via `dlopen` at runtime rather than linking it directly --
+  plausible but not independently confirmed by reading `tray-icon`'s
+  source in this pass. Worth keeping in mind if a machine without
+  libappindicator installed shows degraded (or missing) tray icon
+  behavior: the `.deb`'s dependency list won't have pulled it in.
 
 ## macOS (`.app`, zipped)
 

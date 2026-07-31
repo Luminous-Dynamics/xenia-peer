@@ -143,7 +143,15 @@ jobs:
       # a real user's machine -- disclosed, not fixed, until that
       # infrastructure exists. See docs/packaging/README.md.
       - run: cargo install cargo-wix --locked
-      - run: cargo wix -p xenia-launcher-windows --nocapture
+      # Windows Installer's ProductVersion field must be purely numeric
+      # (Major.Minor.Build); the workspace's real version, 0.0.0-m0, has
+      # a non-numeric prerelease tag ("m0") that WiX can't convert --
+      # confirmed by a real CI failure, not assumed. --install-version
+      # overrides just the installer's version string (Add/Remove
+      # Programs display, upgrade detection) without touching the crate's
+      # actual Cargo.toml version. 0.0.0 accurately reflects that nothing
+      # has shipped yet; revisit once real version numbers exist.
+      - run: cargo wix -p xenia-launcher-windows --nocapture --install-version 0.0.0
       - uses: actions/upload-artifact@v4
         with:
           name: xenia-launcher-windows-msi
