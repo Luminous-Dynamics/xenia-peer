@@ -15,7 +15,6 @@
 //! decision is a signed, role-authorized action attributed in the ledger; with
 //! it off, legacy plaintext `Approve`/`Deny`/`Revoke`.
 
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -25,6 +24,7 @@ use tokio::sync::{Mutex, oneshot};
 use uuid::Uuid;
 use xenia_ledger::Chain;
 
+use crate::consent_ledger_persistence::ConsentLedgerPersister;
 use crate::operator_auth::ConsentAction;
 use crate::operator_http::OperatorAuthState;
 
@@ -44,16 +44,22 @@ pub(crate) enum ConsentFollowup {
 /// sealed operator channel, so the decision semantics live in one tested place.
 ///
 /// An authenticated decision's audit entry must be durably persisted
-/// (`ledger_path`) before the decision itself takes effect -- if persistence
-/// fails, the decision is refused (the grant is left unresolved, which the
-/// caller observes as a closed channel) rather than silently applying a
-/// privileged action with no durable record of who authorized it.
+/// (`ledger_persister`) before the decision itself takes effect -- if
+/// persistence fails, the decision is refused (the grant is left unresolved,
+/// which the caller observes as a closed channel) rather than silently
+/// applying a privileged action with no durable record of who authorized it.
+///
+/// Takes the whole [`Chain`] frontier (`append_transactional_chain`, not
+/// `append_transactional`) rather than just the newly-appended entries --
+/// `ConsentLedgerPersister::persist` needs the complete chain (including any
+/// compacted-state anchor) to serialize either on-disk format correctly; see
+/// `consent_ledger_persistence`'s module doc comment.
 pub(crate) async fn apply_consent_decision(
     decoded: crate::DecodedConsent,
     grant_tx: &mut Option<oneshot::Sender<bool>>,
     revoked: &AtomicBool,
     ledger: &Mutex<Chain>,
-    ledger_path: &Path,
+    ledger_persister: &dyn ConsentLedgerPersister,
     session_uuid: Uuid,
 ) -> ConsentFollowup {
     // Attribute an authenticated decision in the tamper-evident ledger --
@@ -67,9 +73,7 @@ pub(crate) async fn apply_consent_decision(
         let mut chain = ledger.lock().await;
         let committed = tokio::task::block_in_place(|| {
             chain
-                .append_transactional(event, |entries| {
-                    crate::audit_ledger_store::persist_entries_atomic(ledger_path, entries)
-                })
+                .append_transactional_chain(event, |chain| ledger_persister.persist(chain))
                 .map(|_entry| ())
         });
         drop(chain);
@@ -123,9 +127,10 @@ pub(crate) struct ConsentServer {
     pub(crate) session_uuid: Uuid,
     /// The tamper-evident consent ledger.
     pub(crate) ledger: Arc<Mutex<Chain>>,
-    /// Durable path `ledger`'s entries are atomically persisted to on every
-    /// authenticated append -- see [`apply_consent_decision`].
-    pub(crate) ledger_path: Arc<std::path::PathBuf>,
+    /// Persister `ledger` is atomically written through on every
+    /// authenticated append -- plain or compacted-state format, chosen at
+    /// daemon startup; see [`apply_consent_decision`].
+    pub(crate) ledger_persister: crate::consent_ledger_persistence::SharedConsentLedgerPersister,
     /// Resolves the initial grant exactly once (Approve → true, Deny → false).
     pub(crate) grant_tx: oneshot::Sender<bool>,
     /// Set true on a Revoke so the main send loop tears the session down.
@@ -146,7 +151,7 @@ impl ConsentServer {
             scope_digest,
             session_uuid,
             ledger,
-            ledger_path,
+            ledger_persister,
             grant_tx,
             revoked,
             revocations,
@@ -194,7 +199,7 @@ impl ConsentServer {
                     &mut grant_tx,
                     &revoked,
                     &ledger,
-                    &ledger_path,
+                    ledger_persister.as_ref(),
                     session_uuid,
                 )
                 .await
@@ -243,7 +248,11 @@ mod tests {
             // `require_operator_auth: false`, the legacy plaintext path
             // that never appends to the ledger (see
             // `apply_consent_decision`'s doc comment).
-            ledger_path: Arc::new(std::env::temp_dir().join("xenia-consent-server-test.ledger")),
+            ledger_persister: Arc::new(
+                crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
+                    std::env::temp_dir().join("xenia-consent-server-test.ledger"),
+                ),
+            ),
             grant_tx,
             revoked,
             revocations: crate::operator_revocations::OperatorRevocations::empty(),
@@ -269,7 +278,10 @@ mod tests {
         let uuid = Uuid::from_u128(2);
         // Never actually written -- every decision below has
         // `authorized: None` (the legacy plaintext path never appends).
-        let ledger_path = std::env::temp_dir().join("xenia-consent-server-test-decisions.ledger");
+        let ledger_persister =
+            crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
+                std::env::temp_dir().join("xenia-consent-server-test-decisions.ledger"),
+            );
 
         // Approve -> grant true, keep serving, no revoke.
         let (tx, rx) = oneshot::channel();
@@ -283,7 +295,7 @@ mod tests {
             &mut tx,
             &revoked,
             &ledger,
-            &ledger_path,
+            &ledger_persister,
             uuid,
         )
         .await;
@@ -302,7 +314,7 @@ mod tests {
             &mut tx2,
             &revoked,
             &ledger,
-            &ledger_path,
+            &ledger_persister,
             uuid,
         )
         .await;
@@ -321,7 +333,7 @@ mod tests {
             &mut tx3,
             &revoked2,
             &ledger,
-            &ledger_path,
+            &ledger_persister,
             uuid,
         )
         .await;
@@ -353,6 +365,10 @@ mod tests {
         let ledger = TokioMutex::new(Chain::new(daemon.clone()));
         let dir = test_ledger_dir("committed");
         let ledger_path = dir.join("consent.ledger");
+        let ledger_persister =
+            crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
+                ledger_path.clone(),
+            );
         let uuid = Uuid::from_u128(9);
 
         let (tx, rx) = oneshot::channel();
@@ -366,7 +382,7 @@ mod tests {
             &mut tx,
             &revoked,
             &ledger,
-            &ledger_path,
+            &ledger_persister,
             uuid,
         )
         .await;
@@ -389,6 +405,8 @@ mod tests {
         let ledger = TokioMutex::new(Chain::new(daemon));
         let dir = test_ledger_dir("refused");
         let ledger_path = dir.join("consent.ledger");
+        let ledger_persister =
+            crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(ledger_path);
         let uuid = Uuid::from_u128(10);
 
         // Make the destination directory unwritable so persistence fails.
@@ -408,7 +426,7 @@ mod tests {
                 &mut tx,
                 &revoked,
                 &ledger,
-                &ledger_path,
+                &ledger_persister,
                 uuid,
             )
             .await;

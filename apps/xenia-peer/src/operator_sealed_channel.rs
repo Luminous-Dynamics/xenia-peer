@@ -202,9 +202,9 @@ pub(crate) struct SealedConsentDeps {
     pub(crate) scope_digest: [u8; 32],
     pub(crate) session_uuid: uuid::Uuid,
     pub(crate) ledger: std::sync::Arc<tokio::sync::Mutex<xenia_ledger::Chain>>,
-    /// Durable path `ledger`'s entries are atomically persisted to on every
+    /// Persister `ledger` is atomically written through on every
     /// authenticated append -- see `consent_server::apply_consent_decision`.
-    pub(crate) ledger_path: std::sync::Arc<std::path::PathBuf>,
+    pub(crate) ledger_persister: crate::consent_ledger_persistence::SharedConsentLedgerPersister,
     pub(crate) revoked: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Live operator revocation list. Consulted after the handshake authenticates
     /// the peer, so a compromised operator is refused without a daemon restart.
@@ -377,7 +377,7 @@ pub(crate) async fn serve_sealed_operator_channel<T: Transport>(
                     grant_tx,
                     &deps.revoked,
                     &deps.ledger,
-                    &deps.ledger_path,
+                    deps.ledger_persister.as_ref(),
                     deps.session_uuid,
                 )
                 .await
@@ -559,8 +559,10 @@ mod tests {
                 scope_digest: [0u8; 32],
                 session_uuid: Uuid::from_u128(3),
                 ledger,
-                ledger_path: std::sync::Arc::new(
-                    std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+                ledger_persister: std::sync::Arc::new(
+                    crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
+                        std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+                    ),
                 ),
                 revoked: revoked_daemon,
                 revocations: crate::operator_revocations::OperatorRevocations::empty(),
@@ -647,8 +649,10 @@ mod tests {
             scope_digest: [0u8; 32],
             session_uuid: Uuid::from_u128(21),
             ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
-            ledger_path: std::sync::Arc::new(
-                std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+            ledger_persister: std::sync::Arc::new(
+                crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
+                    std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+                ),
             ),
             revoked: revoked.clone(),
             revocations: crate::operator_revocations::OperatorRevocations::empty(),
@@ -742,8 +746,10 @@ mod tests {
             scope_digest: [0u8; 32],
             session_uuid: Uuid::from_u128(41),
             ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
-            ledger_path: std::sync::Arc::new(
-                std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+            ledger_persister: std::sync::Arc::new(
+                crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
+                    std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+                ),
             ),
             revoked: revoked.clone(),
             revocations: crate::operator_revocations::OperatorRevocations::empty(),
@@ -889,8 +895,10 @@ mod tests {
             scope_digest: [0u8; 32],
             session_uuid: Uuid::from_u128(51),
             ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
-            ledger_path: std::sync::Arc::new(
-                std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+            ledger_persister: std::sync::Arc::new(
+                crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
+                    std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+                ),
             ),
             revoked: revoked.clone(),
             revocations: crate::operator_revocations::OperatorRevocations::empty(),
@@ -1001,8 +1009,10 @@ mod tests {
             scope_digest: [0u8; 32],
             session_uuid: Uuid::from_u128(61),
             ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
-            ledger_path: std::sync::Arc::new(
-                std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+            ledger_persister: std::sync::Arc::new(
+                crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
+                    std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+                ),
             ),
             revoked: Arc::new(AtomicBool::new(false)),
             revocations: crate::operator_revocations::OperatorRevocations::empty(),
@@ -1108,8 +1118,10 @@ mod tests {
             scope_digest: [0u8; 32],
             session_uuid: Uuid::from_u128(71),
             ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
-            ledger_path: std::sync::Arc::new(
-                std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+            ledger_persister: std::sync::Arc::new(
+                crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
+                    std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+                ),
             ),
             revoked: Arc::new(AtomicBool::new(false)),
             revocations: crate::operator_revocations::OperatorRevocations::empty(),
@@ -1197,8 +1209,10 @@ mod tests {
                 scope_digest: [0u8; 32],
                 session_uuid: Uuid::from_u128(31),
                 ledger: Arc::new(TokioMutex::new(Chain::new(daemon))),
-                ledger_path: std::sync::Arc::new(
-                    std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+                ledger_persister: std::sync::Arc::new(
+                    crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
+                        std::env::temp_dir().join("xenia-sealed-channel-test.ledger"),
+                    ),
                 ),
                 revoked: Arc::new(AtomicBool::new(false)),
                 revocations,

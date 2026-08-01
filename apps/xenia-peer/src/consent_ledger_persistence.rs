@@ -53,27 +53,49 @@ impl ConsentLedgerPersister for CompleteConsentLedgerPersister {
     }
 }
 
-/// Persistence for an activated compacted ledger. The immutable activation
-/// envelope is retained and combined with the chain's latest resident suffix
-/// on each transactional append.
+/// Persistence for an activated compacted ledger. The activation envelope
+/// advances (a new signed generation) on each transactional append.
+///
+/// `persist` takes `&self`, matching [`ConsentLedgerPersister`]'s trait
+/// signature, but the envelope itself is genuinely mutable across calls --
+/// wrapped in a `Mutex` rather than held by value. Found by hand
+/// 2026-08-01: constructing this once and calling `persist` twice (the real
+/// shape of daemon-startup compacted-mode boot, where one persister is
+/// reused for the whole process lifetime, not a fresh one per append) with
+/// the envelope held by value silently re-derives `generation` from the
+/// same stale base every time -- the *data* written is still always
+/// correct (`advance_from_chain` takes the live `chain: &Chain` fresh each
+/// call, not an incremental delta), but `generation` never advances past
+/// its first real bump, which would defeat the rollback-detection purpose
+/// `generation`/`previous_state_digest` exist for on a real multi-append
+/// daemon lifetime. Locking and updating the in-memory envelope after each
+/// successful disk write closes that gap.
 pub(crate) struct CompactedConsentLedgerPersister {
     path: PathBuf,
-    activation: ConsentCompactedActiveStateV1,
+    activation: std::sync::Mutex<ConsentCompactedActiveStateV1>,
 }
 
 impl CompactedConsentLedgerPersister {
     pub(crate) fn new(path: PathBuf, activation: ConsentCompactedActiveStateV1) -> Self {
-        Self { path, activation }
+        Self {
+            path,
+            activation: std::sync::Mutex::new(activation),
+        }
     }
 }
 
 impl ConsentLedgerPersister for CompactedConsentLedgerPersister {
     fn persist(&self, chain: &Chain) -> Result<(), AuditLedgerStoreError> {
-        let next = self
+        let mut activation = self
             .activation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let next = activation
             .advance_from_chain(chain, unix_now_secs())
             .map_err(AuditLedgerStoreError::CompactedState)?;
-        persist_compacted_active_state_atomic(&self.path, &next)
+        persist_compacted_active_state_atomic(&self.path, &next)?;
+        *activation = next;
+        Ok(())
     }
 }
 
@@ -217,6 +239,76 @@ mod tests {
         let (_, reloaded) = load_compacted_active_state(&path, &key).unwrap();
         assert_eq!(reloaded.chain.entry_count(), 3);
         assert_eq!(reloaded.chain.resident_len(), 2);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Regression test for a real bug found by hand 2026-08-01: a
+    /// `CompactedConsentLedgerPersister` constructed once and reused across
+    /// multiple real appends (the actual shape of a long-running daemon
+    /// process, not a fresh persister per append) used to silently
+    /// re-derive `generation` from the same construction-time snapshot every
+    /// call, so it never advanced past its first real bump even though the
+    /// persisted entry data was always correct. Two real `persist()` calls
+    /// must produce two genuinely different (monotonically increasing)
+    /// generations.
+    #[test]
+    fn compacted_persister_advances_generation_across_repeated_persist_calls() {
+        let dir = std::env::temp_dir().join(format!(
+            "xenia-compacted-ledger-persister-generation-{}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("consent.compacted.json");
+        let key = SigningKey::from_bytes(&[0x74; 32]);
+        let mut complete = Chain::new(key.clone());
+        let genesis = complete.sign_checkpoint(200);
+        complete.append(event()).unwrap();
+        let archive = vec![LedgerArchiveSegment::from_chain(&complete, genesis, 201).unwrap()];
+        let bundle = ConsentCompactionBundleV1::build(&complete, archive.clone(), 202).unwrap();
+        let entries = complete.iter().cloned().collect::<Vec<_>>();
+        let snapshot =
+            ConsentCompactedSnapshotV1::build(&bundle, &entries, &key.verifying_key()).unwrap();
+        let active =
+            ConsentCompactedActiveStateV1::activate(snapshot, &archive, &key, 203).unwrap();
+        persist_compacted_active_state_atomic(&path, &active).unwrap();
+
+        let (activation, mut restored) = load_compacted_active_state(&path, &key).unwrap();
+        let initial_generation = activation.generation;
+        let persister = CompactedConsentLedgerPersister::new(path.clone(), activation);
+
+        restored
+            .chain
+            .append(ConsentEventRecord {
+                source_id: [0x14; 32],
+                session_id: Uuid::from_u128(7),
+                request_id: Uuid::from_u128(8),
+                kind: ConsentKind::Denial,
+                scope: "screen".into(),
+            })
+            .unwrap();
+        persister.persist(&restored.chain).unwrap();
+        let (after_first, _) = load_compacted_active_state(&path, &key).unwrap();
+
+        restored
+            .chain
+            .append(ConsentEventRecord {
+                source_id: [0x15; 32],
+                session_id: Uuid::from_u128(9),
+                request_id: Uuid::from_u128(10),
+                kind: ConsentKind::Denial,
+                scope: "screen".into(),
+            })
+            .unwrap();
+        persister.persist(&restored.chain).unwrap();
+        let (after_second, reloaded) = load_compacted_active_state(&path, &key).unwrap();
+
+        assert_eq!(after_first.generation, initial_generation + 1);
+        assert_eq!(
+            after_second.generation,
+            initial_generation + 2,
+            "generation must advance on every real persist call, not just the first"
+        );
+        assert_eq!(reloaded.chain.entry_count(), 3);
         std::fs::remove_dir_all(dir).ok();
     }
 }
