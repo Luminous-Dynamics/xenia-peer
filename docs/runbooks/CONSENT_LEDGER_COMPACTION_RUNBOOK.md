@@ -294,13 +294,11 @@ retirement planning -> quarantine -> purge planning -> purge execution ->
 retention certification -> witnessed retention renewal -> custody
 attestation -> final-destruction *readiness* (never actual deletion --
 `consent_final_destruction.rs`'s own module doc comment states this
-explicitly, and it was adversarially verified in #129). That ceremony has
-its own large flag surface (`--export-consent-retirement-plan`,
-`--export-consent-purge-plan`, `--export-consent-purge-retention-certificate`,
-`--export-consent-purge-custody-*`, `--verify-consent-final-destruction-readiness`,
-and more) and deserves its own runbook if it's ever put into real use. It
-is out of scope here; nothing in this document requires it, and completing
-this runbook's Steps 1-7 does not start it.
+explicitly, and it was adversarially verified in #129). That ceremony now
+has its own runbook:
+[`CONSENT_LEDGER_RETIREMENT_PURGE_RUNBOOK.md`](CONSENT_LEDGER_RETIREMENT_PURGE_RUNBOOK.md).
+It is out of scope here; nothing in this document requires it, and
+completing this runbook's Steps 1-7 does not start it.
 
 ## Quick reference
 
