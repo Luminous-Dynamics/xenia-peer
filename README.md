@@ -324,6 +324,9 @@ Do not report security issues via public GitHub issues.
 
 For the audit claim boundary, see
 [`docs/security/LEDGER_VERIFICATION_BOUNDARY.md`](docs/security/LEDGER_VERIFICATION_BOUNDARY.md).
+To compact a growing consent ledger and cut a daemon over to boot from the
+compacted state, see
+[`docs/runbooks/CONSENT_LEDGER_COMPACTION_RUNBOOK.md`](docs/runbooks/CONSENT_LEDGER_COMPACTION_RUNBOOK.md).
 
 ## Relationship to Track A
 
