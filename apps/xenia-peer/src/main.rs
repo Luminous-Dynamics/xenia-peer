@@ -5445,6 +5445,168 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         (ledger, persister)
     };
+    let compacted_state_loaded = args.consent_ledger_compacted_state.is_some();
+
+    // --- ledger_continuity (Phase B) ---
+    // Independent-checkpoint continuity verification and the two
+    // compacted-mode mutual-exclusion guards PR #99 paired with the
+    // daemon-startup persister-mode switch (Phase A). Adapted rather than
+    // ported verbatim -- PR #99 threaded these through its
+    // `ConsentDecisionService`/`consent_authority.rs` refactor, which
+    // doesn't exist on current `main`; nothing here needs it, since these
+    // checks only read `ledger`/`compacted_state_loaded`/`args`. Runs
+    // unconditionally (whether or not a one-shot maintenance operation is
+    // also requested below) and fails closed via `?` -- a startup with a
+    // continuity anchor configured that the current ledger doesn't satisfy
+    // must never silently proceed.
+    if compacted_state_loaded && args.trusted_consent_ledger_key_transition.is_some() {
+        return Err(
+            "--trusted-consent-ledger-key-transition is not yet supported with an activated \
+             compacted ledger; retain the complete successor epoch or use a same-key \
+             checkpoint/witness anchor"
+                .into(),
+        );
+    }
+    let complete_ledger_operation_requested = args.export_consent_ledger_archive_segment.is_some()
+        || args.export_consent_ledger_compaction_bundle.is_some()
+        || args.verify_consent_ledger_compaction_bundle.is_some()
+        || args.export_consent_ledger_compacted_snapshot.is_some();
+    if compacted_state_loaded && complete_ledger_operation_requested {
+        return Err(
+            "archive and compaction-preflight operations currently require a complete \
+             genesis-based consent ledger; activated compacted state supports normal append, \
+             checkpoint, witness, and runtime paths only"
+                .into(),
+        );
+    }
+    let checkpoint_freshness = xenia_ledger::CheckpointFreshnessPolicy {
+        max_age_secs: args.trusted_consent_ledger_checkpoint_max_age_secs,
+        max_future_skew_secs: args.trusted_consent_ledger_checkpoint_max_future_skew_secs,
+    };
+    let continuity_anchor_configured = args.trusted_consent_ledger_checkpoint.is_some()
+        || args.trusted_consent_ledger_witness_bundle.is_some();
+    if args
+        .trusted_consent_ledger_checkpoint_max_age_secs
+        .is_some()
+        && !continuity_anchor_configured
+    {
+        return Err(
+            "--trusted-consent-ledger-checkpoint-max-age-secs requires a retained checkpoint or \
+             witness bundle"
+                .into(),
+        );
+    }
+    if args
+        .trusted_consent_ledger_checkpoint_max_age_secs
+        .is_some()
+        && args.trusted_consent_ledger_key_transition.is_some()
+    {
+        return Err(
+            "--trusted-consent-ledger-checkpoint-max-age-secs cannot be used with a historical \
+             key-transition anchor"
+                .into(),
+        );
+    }
+    if let Some(bundle_path) = args.trusted_consent_ledger_witness_bundle.as_deref() {
+        if args.trusted_consent_ledger_witness_key_hex.is_empty() {
+            return Err(
+                "--trusted-consent-ledger-witness-bundle requires at least one \
+                 --trusted-consent-ledger-witness-key-hex"
+                    .into(),
+            );
+        }
+        let trusted_witness_keys = args
+            .trusted_consent_ledger_witness_key_hex
+            .iter()
+            .map(|value| parse_ed25519_public_key_hex(value))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| -> Box<dyn std::error::Error> {
+                format!("invalid trusted checkpoint witness key: {err}").into()
+            })?;
+        let quorum = args.trusted_consent_ledger_witness_quorum.unwrap_or(1);
+        if quorum == 0 {
+            return Err("checkpoint witness quorum must be greater than zero".into());
+        }
+        if quorum > trusted_witness_keys.len() {
+            return Err(format!(
+                "checkpoint witness quorum {quorum} exceeds {} configured trusted witness keys",
+                trusted_witness_keys.len()
+            )
+            .into());
+        }
+        let bundle = audit_ledger_store::verify_retained_witness_bundle(
+            bundle_path,
+            &ledger,
+            &signing_key.verifying_key(),
+            &trusted_witness_keys,
+            quorum,
+            unix_now_secs(),
+            checkpoint_freshness,
+        )
+        .map_err(|err| -> Box<dyn std::error::Error> {
+            format!(
+                "current consent ledger does not satisfy --trusted-consent-ledger-witness-bundle \
+                 {}: {err}",
+                bundle_path.display()
+            )
+            .into()
+        })?;
+        info!(
+            bundle = %bundle_path.display(),
+            retained_entries = bundle.checkpoint.entry_count,
+            current_entries = ledger.len(),
+            witness_quorum = quorum,
+            "witnessed consent-ledger checkpoint verified"
+        );
+    } else if let Some(checkpoint_path) = args.trusted_consent_ledger_checkpoint.as_deref() {
+        if let Some(transition_path) = args.trusted_consent_ledger_key_transition.as_deref() {
+            let transition = audit_ledger_store::verify_retained_key_successor(
+                checkpoint_path,
+                transition_path,
+                &ledger,
+                &signing_key.verifying_key(),
+                unix_now_secs(),
+            )
+            .map_err(|err| -> Box<dyn std::error::Error> {
+                format!(
+                    "current consent ledger is not an authorized successor of checkpoint {} via \
+                     transition {}: {err}",
+                    checkpoint_path.display(),
+                    transition_path.display()
+                )
+                .into()
+            })?;
+            info!(
+                checkpoint = %checkpoint_path.display(),
+                transition = %transition_path.display(),
+                previous_entries = transition.previous_checkpoint.entry_count,
+                current_entries = ledger.len(),
+                "dual-signed consent-ledger key succession verified"
+            );
+        } else {
+            let checkpoint = audit_ledger_store::verify_retained_checkpoint_with_policy(
+                checkpoint_path,
+                &ledger,
+                &signing_key.verifying_key(),
+                unix_now_secs(),
+                checkpoint_freshness,
+            )
+            .map_err(|err| -> Box<dyn std::error::Error> {
+                format!(
+                    "current consent ledger does not extend --trusted-consent-ledger-checkpoint \
+                     {}: {err}",
+                    checkpoint_path.display()
+                )
+                .into()
+            })?;
+            info!(
+                checkpoint = %checkpoint_path.display(),
+                retained_entries = checkpoint.entry_count,
+                current_entries = ledger.len(),
+                "retained consent-ledger checkpoint verified as an exact prefix"
+            );
+        }
+    }
 
     // --- ledger_maintenance_live_ledger (Phase 4) ---
     // The remaining five ledger-maintenance operations, which genuinely
