@@ -73,7 +73,6 @@ mod consent_ceremony_end_to_end_tests;
 mod consent_compaction;
 #[allow(dead_code)]
 mod consent_final_destruction;
-#[allow(dead_code)]
 mod consent_ledger_persistence;
 #[allow(dead_code)]
 mod consent_maintenance;
@@ -5358,21 +5357,94 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // refuses startup rather than being silently trusted or discarded.
     // See `audit_ledger_store`'s module doc comment for the two gaps this
     // closes (no persistence at all, and an unverified reload path).
-    let ledger_path = std::sync::Arc::new(args.consent_ledger_path.clone());
-    let ledger = audit_ledger_store::load_verified(&ledger_path, &signing_key).map_err(
-        |err| -> Box<dyn std::error::Error> {
-            format!(
-                "failed to load --consent-ledger-path {}: {err}",
-                ledger_path.display()
-            )
-            .into()
-        },
-    )?;
-    info!(
-        path = %ledger_path.display(),
-        entries = ledger.len(),
-        "consent ledger loaded and verified"
-    );
+    //
+    // Daemon-startup compacted-state persister mode: `--consent-ledger
+    // -compacted-state` swaps both halves of ledger persistence for the
+    // whole rest of the process, not just this load -- `ledger_persister`
+    // is threaded into `ConsentServer`/`SealedConsentDeps` below and is
+    // what every live consent decision actually persists through (see
+    // `consent_server::apply_consent_decision`). This mirrors PR #99's own
+    // design (its `main.rs` staged the same choice through a `(Chain,
+    // SharedConsentLedgerPersister, ..., bool)` tuple), adapted to this
+    // codebase's simpler runtime: current `main` has no `ConsentDecisionService`
+    // /`consent_authority.rs` indirection, so there are no historical replay/
+    // terminal-session indexes to thread through here -- `into_parts()`'s
+    // archived-index halves are intentionally dropped.
+    let (ledger, ledger_persister): (
+        xenia_ledger::Chain,
+        consent_ledger_persistence::SharedConsentLedgerPersister,
+    ) = if let Some(path) = args.consent_ledger_compacted_state.as_deref() {
+        let (active, restored) =
+            consent_ledger_persistence::load_compacted_active_state(path, &signing_key).map_err(
+                |err| -> Box<dyn std::error::Error> {
+                    format!(
+                        "failed to load --consent-ledger-compacted-state {}: {err}",
+                        path.display()
+                    )
+                    .into()
+                },
+            )?;
+        if let Some(pin_path) = args.trusted_consent_ledger_compacted_state_pin.as_deref() {
+            let pin: consent_compaction::ConsentCompactedStatePinV1 =
+                audit_ledger_store::read_bounded_json(
+                    pin_path,
+                    audit_ledger_store::MAX_CONTINUITY_ARTIFACT_BYTES,
+                    "trusted compacted-state pin",
+                )
+                .map_err(|err| -> Box<dyn std::error::Error> {
+                    format!(
+                        "failed to load --trusted-consent-ledger-compacted-state-pin {}: {err}",
+                        pin_path.display()
+                    )
+                    .into()
+                })?;
+            pin.verify_against_state(&active, &signing_key.verifying_key())
+                .map_err(|err| -> Box<dyn std::error::Error> {
+                    format!(
+                        "current compacted consent-ledger state does not satisfy \
+                             --trusted-consent-ledger-compacted-state-pin {}: {err}",
+                        pin_path.display()
+                    )
+                    .into()
+                })?;
+        }
+        let (chain, _archived_replay_action_ids, _archived_terminal_sessions) =
+            restored.into_parts();
+        info!(
+            path = %path.display(),
+            entries = chain.len(),
+            "compacted consent ledger loaded and verified"
+        );
+        let persister: consent_ledger_persistence::SharedConsentLedgerPersister =
+            std::sync::Arc::new(
+                consent_ledger_persistence::CompactedConsentLedgerPersister::new(
+                    path.to_path_buf(),
+                    active,
+                ),
+            );
+        (chain, persister)
+    } else {
+        let ledger = audit_ledger_store::load_verified(&args.consent_ledger_path, &signing_key)
+            .map_err(|err| -> Box<dyn std::error::Error> {
+                format!(
+                    "failed to load --consent-ledger-path {}: {err}",
+                    args.consent_ledger_path.display()
+                )
+                .into()
+            })?;
+        info!(
+            path = %args.consent_ledger_path.display(),
+            entries = ledger.len(),
+            "consent ledger loaded and verified"
+        );
+        let persister: consent_ledger_persistence::SharedConsentLedgerPersister =
+            std::sync::Arc::new(
+                consent_ledger_persistence::CompleteConsentLedgerPersister::new(
+                    args.consent_ledger_path.clone(),
+                ),
+            );
+        (ledger, persister)
+    };
 
     // --- ledger_maintenance_live_ledger (Phase 4) ---
     // The remaining five ledger-maintenance operations, which genuinely
@@ -5983,7 +6055,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let consent_session_id = *session_id.as_bytes();
     let consent_session_uuid = session_id;
     let consent_ledger = shared_ledger.clone();
-    let consent_ledger_path = ledger_path.clone();
+    let consent_ledger_persister = ledger_persister.clone();
     // Computed here (a pure function of the daemon's own CLI config, not
     // handshake/runtime state) rather than down at the `m1_scope` binding
     // below, so both consent-server branches immediately below can bind
@@ -6026,7 +6098,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     scope_digest: consent_scope_digest,
                     session_uuid: consent_session_uuid,
                     ledger: consent_ledger,
-                    ledger_path: consent_ledger_path,
+                    ledger_persister: consent_ledger_persister,
                     revoked: revoked_for_consent,
                     revocations: revocations.clone(),
                     rekey_interval: (args.operator_rekey_interval_secs > 0)
@@ -6063,7 +6135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     scope_digest: consent_scope_digest,
                     session_uuid: consent_session_uuid,
                     ledger: consent_ledger,
-                    ledger_path: consent_ledger_path,
+                    ledger_persister: consent_ledger_persister,
                     grant_tx: consent_decision_tx,
                     revoked: revoked_for_consent,
                     revocations: revocations.clone(),

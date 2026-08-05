@@ -107,6 +107,85 @@ mod tests {
         (key, active, pin, certificate, archive)
     }
 
+    /// Phase A hand-verification, kept as permanent coverage: drives two
+    /// real consent decisions through the actual `apply_consent_decision`
+    /// (the same function `ConsentServer`/`SealedConsentDeps` call in
+    /// production) against a real `CompactedConsentLedgerPersister` -- the
+    /// exact function/persister pairing the daemon-startup compacted-mode
+    /// switch wires up -- and reloads the on-disk file after each to
+    /// confirm it genuinely advances. This is what caught a real bug: the
+    /// persister used to silently stop advancing `generation` after the
+    /// first real append (fixed in `consent_ledger_persistence.rs`, see
+    /// that file's own regression test for the isolated repro).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn compacted_boot_mode_persists_two_real_consent_decisions_through_apply_consent_decision()
+     {
+        let (key, active, _pin, _cert, _archive) = compaction_prerequisites();
+        let workdir = tempfile::tempdir().unwrap();
+        let path = workdir.path().join("compacted-state.json");
+        crate::consent_ledger_persistence::persist_compacted_active_state_atomic(&path, &active)
+            .unwrap();
+        let (loaded_active, restored) =
+            crate::consent_ledger_persistence::load_compacted_active_state(&path, &key).unwrap();
+        let initial_entry_count = restored.chain.entry_count();
+        let initial_generation = loaded_active.generation;
+
+        let persister = crate::consent_ledger_persistence::CompactedConsentLedgerPersister::new(
+            path.clone(),
+            loaded_active,
+        );
+        let ledger = tokio::sync::Mutex::new(restored.chain);
+        let authorized = crate::operator_auth::AuthorizedConsentAction {
+            action: crate::operator_auth::ConsentAction::Approve,
+            operator_id: "e2e-operator".to_string(),
+            role: crate::operator::OperatorRole::Admin,
+            ed25519_pubkey: [0x22; 32],
+        };
+        let session_uuid = uuid::Uuid::from_u128(999);
+
+        for expected_generation in [initial_generation + 1, initial_generation + 2] {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let mut tx = Some(tx);
+            let revoked = std::sync::atomic::AtomicBool::new(false);
+            let outcome = crate::consent_server::apply_consent_decision(
+                crate::DecodedConsent {
+                    action: crate::operator_auth::ConsentAction::Approve,
+                    authorized: Some(authorized.clone()),
+                },
+                &mut tx,
+                &revoked,
+                &ledger,
+                &persister,
+                session_uuid,
+            )
+            .await;
+            assert!(matches!(
+                outcome,
+                crate::consent_server::ConsentFollowup::KeepServing
+            ));
+            assert!(rx.await.unwrap(), "grant must resolve true on Approve");
+
+            let (reloaded_active, reloaded_restored) =
+                crate::consent_ledger_persistence::load_compacted_active_state(&path, &key)
+                    .unwrap();
+            assert_eq!(
+                reloaded_restored.chain.entry_count(),
+                ledger.lock().await.entry_count(),
+                "the on-disk compacted state must match the live in-memory chain after every append"
+            );
+            assert_eq!(
+                reloaded_active.generation, expected_generation,
+                "generation must advance on every real append, not just the first"
+            );
+        }
+
+        assert_eq!(
+            ledger.lock().await.entry_count(),
+            initial_entry_count + 2,
+            "both decisions must have actually appended"
+        );
+    }
+
     /// Drives the full operator sequence for real: every step calls the
     /// same `pub(crate)` function `main.rs`'s CLI dispatch calls, with a
     /// synthetic but internally consistent timeline (see module doc).
