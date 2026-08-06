@@ -1842,6 +1842,112 @@ fn archive_sequence_verifier_enforces_segment_bound_before_walking() {
 }
 
 #[test]
+fn anchored_chain_archive_segment_continues_directly_from_its_own_base_checkpoint() {
+    use crate::{LedgerArchiveSegment, Verifier};
+
+    // Round 1: a genesis-based chain, archived once via `from_chain`.
+    let key = SigningKey::from_bytes(&[70u8; 32]);
+    let mut complete = crate::Chain::new(key.clone());
+    let genesis = complete.sign_checkpoint(100);
+    complete.append(sample_event(ConsentKind::Request)).unwrap();
+    complete
+        .append(sample_event(ConsentKind::Approval))
+        .unwrap();
+    let first_round = LedgerArchiveSegment::from_chain(&complete, genesis, 101).unwrap();
+
+    // Round 2: an anchored-suffix chain picking up exactly where round 1
+    // left off -- the shape a daemon booted from `--consent-ledger-compacted-state`
+    // actually has (`Chain::from_checkpoint_suffix`), not a complete chain.
+    let mut anchored = crate::Chain::from_checkpoint_suffix(
+        first_round.terminal_checkpoint.clone(),
+        Vec::new(),
+        key,
+    );
+    anchored.append(sample_event(ConsentKind::Request)).unwrap();
+    anchored
+        .append(sample_event(ConsentKind::Approval))
+        .unwrap();
+    anchored
+        .append(sample_event(ConsentKind::Revocation))
+        .unwrap();
+
+    let second_round = LedgerArchiveSegment::from_anchored_chain(&anchored, 102).unwrap();
+
+    assert_eq!(second_round.entries.len(), 3);
+    assert_eq!(
+        second_round.base_checkpoint, first_round.terminal_checkpoint,
+        "the second round's base must be exactly the first round's terminal checkpoint"
+    );
+    Verifier::verify_ledger_archive_segment(&second_round).unwrap();
+
+    // The whole point: this two-round sequence must chain together as one
+    // continuous, verifiable archive -- exactly the artifact
+    // `--activate-consent-ledger-compacted-state`'s repeatable
+    // `--consent-ledger-activation-archive-segment` already expects
+    // ("Repeat in chronological order from genesis").
+    let sequence = vec![first_round, second_round];
+    Verifier::verify_ledger_archive_sequence(&sequence).unwrap();
+    ledger_archive_sequence_digest(&sequence).unwrap();
+}
+
+#[test]
+fn anchored_chain_archive_segment_rejects_a_non_anchored_complete_chain() {
+    use crate::LedgerArchiveSegment;
+
+    let key = SigningKey::from_bytes(&[71u8; 32]);
+    let mut complete = crate::Chain::new(key);
+    complete.append(sample_event(ConsentKind::Request)).unwrap();
+
+    assert_eq!(
+        LedgerArchiveSegment::from_anchored_chain(&complete, 100),
+        Err(LedgerArchiveError::ChainNotAnchored)
+    );
+}
+
+#[test]
+fn anchored_chain_archive_segment_rejects_an_empty_resident_suffix() {
+    use crate::LedgerArchiveSegment;
+
+    let key = SigningKey::from_bytes(&[72u8; 32]);
+    let seed = crate::Chain::new(key.clone());
+    let checkpoint = seed.sign_checkpoint(100);
+    // Anchored, but nothing has happened since -- there is genuinely
+    // nothing new to archive yet.
+    let anchored = crate::Chain::from_checkpoint_suffix(checkpoint, Vec::new(), key);
+
+    assert_eq!(
+        LedgerArchiveSegment::from_anchored_chain(&anchored, 101),
+        Err(LedgerArchiveError::EmptyResidentSuffix)
+    );
+}
+
+#[test]
+fn anchored_chain_archive_segment_rejects_tampering_the_same_way_from_chain_does() {
+    use crate::{LedgerArchiveSegment, Verifier};
+
+    let key = SigningKey::from_bytes(&[73u8; 32]);
+    let mut complete = crate::Chain::new(key.clone());
+    let genesis = complete.sign_checkpoint(100);
+    complete.append(sample_event(ConsentKind::Request)).unwrap();
+    let first_round = LedgerArchiveSegment::from_chain(&complete, genesis, 101).unwrap();
+
+    let mut anchored =
+        crate::Chain::from_checkpoint_suffix(first_round.terminal_checkpoint, Vec::new(), key);
+    anchored
+        .append(sample_event(ConsentKind::Approval))
+        .unwrap();
+    let second_round = LedgerArchiveSegment::from_anchored_chain(&anchored, 102).unwrap();
+
+    let mut tampered = second_round.clone();
+    tampered.entries.pop();
+    assert!(Verifier::verify_ledger_archive_segment(&tampered).is_err());
+
+    let mut digest_tampered = second_round;
+    digest_tampered.segment_digest[0] ^= 0x20;
+    assert!(Verifier::verify_ledger_archive_segment(&digest_tampered).is_err());
+}
+
+#[test]
 fn compaction_manifest_binds_archive_recovery_and_live_head() {
     let key = SigningKey::from_bytes(&[65u8; 32]);
     let mut chain = crate::Chain::new(key);

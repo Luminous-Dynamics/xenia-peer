@@ -138,6 +138,68 @@ impl LedgerArchiveSegment {
             segment_digest,
         })
     }
+
+    /// Export the resident suffix of an anchored-suffix `chain` (one loaded
+    /// from a compacted state, `chain.base_checkpoint()` is `Some`) as a
+    /// fresh archive segment continuing directly from that anchor -- the
+    /// primitive a second (or Nth) compaction round needs, which `from_chain`
+    /// cannot provide.
+    ///
+    /// `from_chain` accepts an externally supplied, not-yet-trusted
+    /// `base_checkpoint` and must first prove it is a genuine prefix of the
+    /// *complete* chain via [`Verifier::verify_checkpoint_prefix`] -- an
+    /// absolute-position check against `chain.iter()`, which only works when
+    /// `chain.iter()` really does hold every entry since genesis. For an
+    /// anchored-suffix chain, `chain.iter()` holds only the resident suffix
+    /// (see `Chain::from_checkpoint_suffix`'s doc comment), so that same
+    /// absolute-position check would be meaningless -- or panic outright if
+    /// naively applied. This constructor sidesteps the problem rather than
+    /// working around it: `chain.base_checkpoint()` is already cryptographically
+    /// trusted (it was verified once, when the compacted state was loaded),
+    /// so there is nothing left to prove about it. What remains -- proving
+    /// the resident suffix genuinely extends that trusted anchor -- is
+    /// exactly [`Verifier::verify_checkpoint_extension`], the same relative,
+    /// suffix-indexed check `from_chain` already uses for its own final
+    /// continuity proof, reused here verbatim rather than reimplemented.
+    ///
+    /// The returned segment's `base_checkpoint` is always exactly
+    /// `chain.base_checkpoint()`. Chaining multiple compaction rounds'
+    /// segments into one archive sequence therefore requires no special
+    /// handling: [`Verifier::verify_ledger_archive_sequence`]'s adjacency
+    /// check (`segment[i].terminal_checkpoint == segment[i+1].base_checkpoint`)
+    /// is satisfied automatically, because the anchored chain's own base
+    /// checkpoint is, by construction, the previous round's terminal
+    /// checkpoint.
+    pub fn from_anchored_chain(
+        chain: &Chain,
+        terminal_timestamp_unix_secs: u64,
+    ) -> Result<Self, LedgerArchiveError> {
+        let base_checkpoint = chain
+            .base_checkpoint()
+            .cloned()
+            .ok_or(LedgerArchiveError::ChainNotAnchored)?;
+        let entries = chain.iter().cloned().collect::<Vec<_>>();
+        if entries.is_empty() {
+            return Err(LedgerArchiveError::EmptyResidentSuffix);
+        }
+        if entries.len() > MAX_LEDGER_ARCHIVE_SEGMENT_ENTRIES {
+            return Err(LedgerArchiveError::TooManyEntries {
+                count: entries.len(),
+                maximum: MAX_LEDGER_ARCHIVE_SEGMENT_ENTRIES,
+            });
+        }
+        let terminal_checkpoint = chain.sign_checkpoint(terminal_timestamp_unix_secs);
+        Verifier::verify_checkpoint_extension(&base_checkpoint, &terminal_checkpoint, &entries)?;
+        let segment_digest =
+            ledger_archive_segment_digest(&base_checkpoint, &entries, &terminal_checkpoint)?;
+        Ok(Self {
+            schema: LEDGER_ARCHIVE_SEGMENT_SCHEMA.to_string(),
+            base_checkpoint,
+            entries,
+            terminal_checkpoint,
+            segment_digest,
+        })
+    }
 }
 
 /// Why an archive segment was rejected.
@@ -189,6 +251,17 @@ pub enum LedgerArchiveError {
         /// Index of the first segment in the mismatched adjacent pair.
         index: usize,
     },
+    /// [`LedgerArchiveSegment::from_anchored_chain`] was called on a
+    /// non-anchored (complete, genesis-based) chain -- use
+    /// [`LedgerArchiveSegment::from_chain`] instead.
+    #[error("cannot export an anchored-chain archive segment: this chain has no base checkpoint")]
+    ChainNotAnchored,
+    /// [`LedgerArchiveSegment::from_anchored_chain`] was called on an
+    /// anchored chain with an empty resident suffix -- nothing new has
+    /// happened since the last compaction round, so there is nothing to
+    /// archive.
+    #[error("cannot export an anchored-chain archive segment: the resident suffix is empty")]
+    EmptyResidentSuffix,
 }
 
 impl Verifier {
