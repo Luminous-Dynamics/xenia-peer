@@ -5787,8 +5787,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .into()
             })?;
         let entries = ledger.iter().cloned().collect::<Vec<_>>();
+        // `anchor` is `None` here, not a placeholder: this operation is
+        // still guarded to only run against a complete, genesis-based
+        // `--consent-ledger-path` chain (see the `complete_ledger_operation_requested`
+        // guard above), so `entries` really is absolute from true genesis.
+        // See `consent_compaction::local_suffix_start`'s doc comment for why
+        // this parameter exists at all.
         bundle
-            .verify_against_live_ledger(&entries, &signing_key.verifying_key())
+            .verify_against_live_ledger(&entries, &signing_key.verifying_key(), None)
             .map_err(|err| -> Box<dyn std::error::Error> {
                 format!(
                     "consent ledger compaction bundle {} failed verification: {err}",
@@ -5836,10 +5842,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .into()
             })?;
         let entries = ledger.iter().cloned().collect::<Vec<_>>();
+        // See the identical comment on the verify-compaction-bundle branch
+        // above: this operation is guarded to complete-chain-only, so
+        // `anchor: None` reflects real current behavior, not a stub.
         let snapshot = consent_compaction::ConsentCompactedSnapshotV1::build(
             &bundle,
             &entries,
             &signing_key.verifying_key(),
+            None,
         )
         .map_err(|err| -> Box<dyn std::error::Error> {
             format!("consent compacted snapshot export failed: {err}").into()

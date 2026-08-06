@@ -97,7 +97,8 @@ mod tests {
         let bundle = ConsentCompactionBundleV1::build(&complete, archive.clone(), 102).unwrap();
         let entries = complete.iter().cloned().collect::<Vec<_>>();
         let snapshot =
-            ConsentCompactedSnapshotV1::build(&bundle, &entries, &key.verifying_key()).unwrap();
+            ConsentCompactedSnapshotV1::build(&bundle, &entries, &key.verifying_key(), None)
+                .unwrap();
         let active =
             ConsentCompactedActiveStateV1::activate(snapshot, &archive, &key, 103).unwrap();
         let pin = ConsentCompactedStatePinV1::sign_for_state(&active, &key, 104).unwrap();

@@ -102,6 +102,10 @@ pub enum LedgerCompactionError {
     /// The archived or current checkpoint did not match the supplied ledger.
     #[error("ledger compaction continuity failure: {0}")]
     Continuity(#[from] CheckpointContinuityError),
+    /// A checkpoint's `entry_count` was smaller than the anchored chain's own
+    /// base checkpoint -- it cannot describe a suffix of this chain at all.
+    #[error("ledger compaction checkpoint entry count precedes this chain's own anchor")]
+    CheckpointPrecedesAnchor,
 }
 
 impl Verifier {
@@ -165,15 +169,68 @@ impl Verifier {
             .map_err(|_| LedgerCompactionError::BadSignature)
     }
 
-    /// Verify the manifest and prove both checkpoints against the supplied full ledger.
+    /// Verify the manifest and prove both checkpoints against a supplied
+    /// entries slice.
+    ///
+    /// `anchor` is `None` when `entries` is a complete, genesis-based ledger
+    /// (the original, and still the common, case) and `Some(base)` when
+    /// `entries` is only the resident suffix of an anchored-suffix chain (a
+    /// second-or-later compaction round) -- `base` must be that chain's own
+    /// `base_checkpoint()`. See `Chain::sign_compaction_manifest`'s doc
+    /// comment for why the absolute-position check this function used
+    /// unconditionally before cannot be reused as-is for that case.
     pub fn verify_ledger_compaction_manifest_against_entries(
         manifest: &LedgerCompactionManifest,
         entries: &[LedgerEntry],
         public_key: &VerifyingKey,
+        anchor: Option<&LedgerCheckpoint>,
     ) -> Result<(), LedgerCompactionError> {
         Self::verify_ledger_compaction_manifest(manifest)?;
-        Self::verify_checkpoint_prefix(&manifest.archived_through_checkpoint, entries, public_key)?;
-        Self::verify_checkpoint_prefix(&manifest.current_checkpoint, entries, public_key)?;
+        match anchor {
+            Some(base) => {
+                Self::verify_checkpoint_extends_anchor(
+                    base,
+                    &manifest.archived_through_checkpoint,
+                    entries,
+                )?;
+                Self::verify_checkpoint_extends_anchor(
+                    base,
+                    &manifest.current_checkpoint,
+                    entries,
+                )?;
+            }
+            None => {
+                Self::verify_checkpoint_prefix(
+                    &manifest.archived_through_checkpoint,
+                    entries,
+                    public_key,
+                )?;
+                Self::verify_checkpoint_prefix(&manifest.current_checkpoint, entries, public_key)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Prove `checkpoint` is a genuine extension of `base` over the first
+    /// `checkpoint.entry_count - base.entry_count` entries of `entries` --
+    /// the anchored-chain counterpart of `verify_checkpoint_prefix`, shared
+    /// by `sign_compaction_manifest` and
+    /// `verify_ledger_compaction_manifest_against_entries`.
+    fn verify_checkpoint_extends_anchor(
+        base: &LedgerCheckpoint,
+        checkpoint: &LedgerCheckpoint,
+        entries: &[LedgerEntry],
+    ) -> Result<(), LedgerCompactionError> {
+        let relative_len = checkpoint
+            .entry_count
+            .checked_sub(base.entry_count)
+            .ok_or(LedgerCompactionError::CheckpointPrecedesAnchor)?;
+        let relative_len = usize::try_from(relative_len)
+            .map_err(|_| LedgerCompactionError::CheckpointPrecedesAnchor)?;
+        let suffix = entries
+            .get(..relative_len)
+            .ok_or(LedgerCompactionError::CheckpointPrecedesAnchor)?;
+        Self::verify_checkpoint_extension(base, checkpoint, suffix)?;
         Ok(())
     }
 }
@@ -199,7 +256,33 @@ impl Chain {
         }
         let public_key = self.signing_key.verifying_key();
         let entries = self.iter().cloned().collect::<Vec<_>>();
-        Verifier::verify_checkpoint_prefix(&archived_through_checkpoint, &entries, &public_key)?;
+        // `verify_checkpoint_prefix` proves `archived_through_checkpoint` is a
+        // valid prefix of `entries` by walking `entries` from absolute
+        // position 0 -- correct only when `entries` really does hold every
+        // entry since true genesis (a complete chain). For an anchored-suffix
+        // chain (a second-or-later compaction round), `entries` holds only
+        // the resident suffix, so that same absolute check is meaningless.
+        // `verify_checkpoint_extension` is the already-proven relative
+        // sibling (see `LedgerArchiveSegment::from_anchored_chain`'s doc
+        // comment for the same reasoning): it proves `archived_through_checkpoint`
+        // is a genuine extension of this chain's own trusted anchor, over
+        // exactly as much of the resident suffix as that checkpoint claims.
+        match self.base_checkpoint() {
+            Some(base) => {
+                Verifier::verify_checkpoint_extends_anchor(
+                    base,
+                    &archived_through_checkpoint,
+                    &entries,
+                )?;
+            }
+            None => {
+                Verifier::verify_checkpoint_prefix(
+                    &archived_through_checkpoint,
+                    &entries,
+                    &public_key,
+                )?;
+            }
+        }
         if timestamp_unix_secs < archived_through_checkpoint.timestamp_unix_secs {
             return Err(LedgerCompactionError::ManifestPredatesArchive);
         }

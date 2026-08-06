@@ -529,9 +529,59 @@ impl ConsentRecoverySummaryV1 {
     }
 }
 
+/// Translate an absolute (from-true-genesis) entry count into a local index
+/// into a possibly-resident-only entries slice.
+///
+/// `archived_entry_count` (a [`ConsentRecoverySummaryV1`]'s own field) always
+/// counts from true genesis, because [`LedgerCheckpoint::entry_count`] is
+/// itself always absolute (`Chain::entry_count()` returns
+/// `base_entry_count + resident.len()`, never just `resident.len()`) --
+/// confirmed by reading `Chain::sign_checkpoint`/`entry_count`, not assumed.
+/// But the `entries` slice a caller passes to `verify_suffix_compatibility`/
+/// `ConsentCompactedSnapshotV1::build` is NOT always absolute: for a
+/// complete (genesis-based) chain it holds every entry, so `anchor` is
+/// `None` and this is a no-op; for an anchored-suffix chain (a
+/// second-or-later compaction round, `Chain::from_checkpoint_suffix`)
+/// `chain.iter()` -- and therefore `entries` -- holds only the resident
+/// suffix, so every absolute count must first have the already-archived
+/// prefix length subtracted before it can index into that slice. Getting
+/// this wrong doesn't misbehave quietly: `entries.get(archived_entry_count..)`
+/// against a 5-element resident-only slice with an absolute
+/// `archived_entry_count` of 1005 returns `None` (or, pre-Phase-0, could be
+/// handed to code that indexes rather than slices and panics outright) --
+/// this function exists so that class of bug has exactly one place to be
+/// correct.
+///
+/// Takes the anchor as a full `LedgerCheckpoint` (not just its
+/// `entry_count`) rather than a bare offset so that the SAME checkpoint
+/// object always drives both the slicing arithmetic here and the
+/// cryptographic extension proof in `Chain::sign_compaction_manifest` /
+/// `Verifier::verify_ledger_compaction_manifest_against_entries` -- a bare
+/// `u64` offset could accidentally be computed from a different, wrong
+/// checkpoint without either side noticing.
+fn local_suffix_start(
+    absolute_entry_count: u64,
+    anchor: Option<&LedgerCheckpoint>,
+) -> Result<usize, ConsentRecoveryError> {
+    let absolute = usize::try_from(absolute_entry_count)
+        .map_err(|_| ConsentRecoveryError::ArchivedEntryCountOverflow)?;
+    let offset = match anchor {
+        Some(checkpoint) => usize::try_from(checkpoint.entry_count)
+            .map_err(|_| ConsentRecoveryError::ArchivedEntryCountOverflow)?,
+        None => 0,
+    };
+    absolute
+        .checked_sub(offset)
+        .ok_or(ConsentRecoveryError::SummaryMismatch)
+}
+
 impl ConsentCompactionBundleV1 {
-    /// Build and sign a preflight bundle from verified archive segments and the
-    /// current complete live ledger. This operation never mutates the ledger.
+    /// Build and sign a preflight bundle from verified archive segments and
+    /// `chain`'s current entries -- either every entry since true genesis
+    /// (a complete chain) or, for a second-or-later compaction round, every
+    /// entry since the last cutover (an anchored-suffix chain,
+    /// `chain.base_checkpoint().is_some()`). This operation never mutates
+    /// the ledger.
     pub(crate) fn build(
         chain: &Chain,
         archive_segments: Vec<LedgerArchiveSegment>,
@@ -551,16 +601,22 @@ impl ConsentCompactionBundleV1 {
             manifest,
         };
         let entries = chain.iter().cloned().collect::<Vec<_>>();
-        bundle.verify_suffix_compatibility(&entries)?;
+        bundle.verify_suffix_compatibility(&entries, chain.base_checkpoint())?;
         Ok(bundle)
     }
 
-    /// Verify the archive, recovery summary, signed manifest, and current live
-    /// ledger as one indivisible preflight statement.
+    /// Verify the archive, recovery summary, signed manifest, and a supplied
+    /// entries slice as one indivisible preflight statement.
+    ///
+    /// `anchor` is `None` when `entries` is a complete, genesis-based
+    /// ledger, or `Some` of the anchored chain's own `base_checkpoint()`
+    /// when `entries` is an anchored chain's resident suffix. See
+    /// [`local_suffix_start`].
     pub(crate) fn verify_against_live_ledger(
         &self,
         entries: &[LedgerEntry],
         public_key: &VerifyingKey,
+        anchor: Option<&LedgerCheckpoint>,
     ) -> Result<(), ConsentRecoveryError> {
         if self.schema != CONSENT_COMPACTION_BUNDLE_SCHEMA {
             return Err(ConsentRecoveryError::UnsupportedBundleSchema {
@@ -582,18 +638,19 @@ impl ConsentCompactionBundleV1 {
             &self.manifest,
             entries,
             public_key,
+            anchor,
         )?;
-        self.verify_suffix_compatibility(entries)
+        self.verify_suffix_compatibility(entries, anchor)
     }
 
     fn verify_suffix_compatibility(
         &self,
         entries: &[LedgerEntry],
+        anchor: Option<&LedgerCheckpoint>,
     ) -> Result<(), ConsentRecoveryError> {
-        let archived_entry_count = usize::try_from(self.recovery_summary.archived_entry_count)
-            .map_err(|_| ConsentRecoveryError::ArchivedEntryCountOverflow)?;
+        let local_start = local_suffix_start(self.recovery_summary.archived_entry_count, anchor)?;
         let suffix = entries
-            .get(archived_entry_count..)
+            .get(local_start..)
             .ok_or(ConsentRecoveryError::SummaryMismatch)?;
         verify_recovery_suffix_compatibility(&self.recovery_summary, suffix)
     }
@@ -601,17 +658,19 @@ impl ConsentCompactionBundleV1 {
 
 impl ConsentCompactedSnapshotV1 {
     /// Build a minimal suffix snapshot from a fully verified preflight bundle
-    /// and the complete live ledger. This operation does not mutate storage.
+    /// and a supplied entries slice. This operation does not mutate storage.
+    /// See [`ConsentCompactionBundleV1::verify_against_live_ledger`] for what
+    /// `anchor` means and when it must be `Some`.
     pub(crate) fn build(
         bundle: &ConsentCompactionBundleV1,
         entries: &[LedgerEntry],
         public_key: &VerifyingKey,
+        anchor: Option<&LedgerCheckpoint>,
     ) -> Result<Self, ConsentRecoveryError> {
-        bundle.verify_against_live_ledger(entries, public_key)?;
-        let archived_entry_count = usize::try_from(bundle.recovery_summary.archived_entry_count)
-            .map_err(|_| ConsentRecoveryError::ArchivedEntryCountOverflow)?;
+        bundle.verify_against_live_ledger(entries, public_key, anchor)?;
+        let local_start = local_suffix_start(bundle.recovery_summary.archived_entry_count, anchor)?;
         let suffix_entries = entries
-            .get(archived_entry_count..)
+            .get(local_start..)
             .ok_or(ConsentRecoveryError::SummaryMismatch)?
             .to_vec();
         if suffix_entries.len() > MAX_CONSENT_COMPACTED_SUFFIX_ENTRIES {
@@ -1579,6 +1638,7 @@ mod tests {
             .verify_against_live_ledger(
                 &entries,
                 &SigningKey::from_bytes(&[0x44; 32]).verifying_key(),
+                None,
             )
             .unwrap();
     }
@@ -1595,6 +1655,7 @@ mod tests {
             bundle.verify_against_live_ledger(
                 &entries,
                 &SigningKey::from_bytes(&[0x44; 32]).verifying_key(),
+                None,
             ),
             Err(ConsentRecoveryError::ManifestArchiveMismatch)
         );
@@ -1645,7 +1706,8 @@ mod tests {
             .unwrap();
         let bundle = ConsentCompactionBundleV1::build(&chain, segments.clone(), 102).unwrap();
         let entries = chain.iter().cloned().collect::<Vec<_>>();
-        let snapshot = ConsentCompactedSnapshotV1::build(&bundle, &entries, &public_key).unwrap();
+        let snapshot =
+            ConsentCompactedSnapshotV1::build(&bundle, &entries, &public_key, None).unwrap();
 
         snapshot.verify(&segments, &public_key).unwrap();
         assert_eq!(snapshot.suffix_entries.len(), 1);
@@ -1674,7 +1736,7 @@ mod tests {
         let bundle = ConsentCompactionBundleV1::build(&chain, segments.clone(), 102).unwrap();
         let entries = chain.iter().cloned().collect::<Vec<_>>();
         let mut snapshot =
-            ConsentCompactedSnapshotV1::build(&bundle, &entries, &public_key).unwrap();
+            ConsentCompactedSnapshotV1::build(&bundle, &entries, &public_key, None).unwrap();
         snapshot.suffix_entries[0].entry_hash[0] ^= 1;
         snapshot.snapshot_digest = consent_compacted_snapshot_digest(&snapshot).unwrap();
 
@@ -1682,6 +1744,81 @@ mod tests {
             snapshot.verify(&segments, &public_key),
             Err(ConsentRecoveryError::Continuity(_))
         ));
+    }
+
+    #[test]
+    fn second_compaction_round_builds_and_activates_from_an_anchored_chain() {
+        // Round 1: an ordinary complete-chain compaction, exactly like every
+        // other test in this module -- genesis through 3 entries.
+        let segments = complete_archive();
+        let key = SigningKey::from_bytes(&[0x44; 32]);
+        let public_key = key.verifying_key();
+        let complete = Chain::from_entries(segments[0].entries.clone(), key.clone());
+        let bundle_1 = ConsentCompactionBundleV1::build(&complete, segments.clone(), 102).unwrap();
+        let entries_1 = complete.iter().cloned().collect::<Vec<_>>();
+        let snapshot_1 =
+            ConsentCompactedSnapshotV1::build(&bundle_1, &entries_1, &public_key, None).unwrap();
+        let active_1 =
+            ConsentCompactedActiveStateV1::activate(snapshot_1, &segments, &key, 103).unwrap();
+
+        // Boot as a daemon actually would: an anchored-suffix chain picking
+        // up exactly where round 1 left off, then some real activity.
+        let mut anchored = active_1
+            .activation_snapshot
+            .restore_state(&segments, &key)
+            .unwrap()
+            .chain;
+        anchored
+            .append(event(4, 6, ConsentKind::Request, [0x40; 32]))
+            .unwrap();
+        anchored
+            .append(event(4, 7, ConsentKind::Approval, [0x40; 32]))
+            .unwrap();
+        anchored
+            .append(event(4, 8, ConsentKind::Revocation, [0x40; 32]))
+            .unwrap();
+
+        // Round 2: this is the whole point of this test -- prove the
+        // anchor-aware fix actually lets a second round work end to end,
+        // not just that `from_anchored_chain` alone verifies in isolation
+        // (Phase 0's test) or that `anchor: None` didn't regress anything
+        // (every other test in this file).
+        let segment_2 = LedgerArchiveSegment::from_anchored_chain(&anchored, 104).unwrap();
+        assert_eq!(segment_2.base_checkpoint, segments[0].terminal_checkpoint);
+        let full_archive = vec![segments[0].clone(), segment_2];
+
+        let anchor = anchored.base_checkpoint().cloned().unwrap();
+        assert_eq!(
+            anchor.entry_count, 3,
+            "round 1 archived 3 entries; that's how many precede round 2's resident suffix"
+        );
+        let bundle_2 =
+            ConsentCompactionBundleV1::build(&anchored, full_archive.clone(), 105).unwrap();
+        let entries_2 = anchored.iter().cloned().collect::<Vec<_>>();
+        let snapshot_2 =
+            ConsentCompactedSnapshotV1::build(&bundle_2, &entries_2, &public_key, Some(&anchor))
+                .unwrap();
+
+        // Everything archived so far (3 + 3 = 6) now equals the total
+        // entry count -- nothing should be left resident.
+        assert_eq!(snapshot_2.recovery_summary.archived_entry_count, 6);
+        assert!(
+            snapshot_2.suffix_entries.is_empty(),
+            "round 2 archived the entire resident suffix; nothing should remain"
+        );
+        snapshot_2.verify(&full_archive, &public_key).unwrap();
+
+        // Activating round 2 must work exactly like round 1 did, and the
+        // resulting chain must be anchored at round 2's own terminal
+        // checkpoint with a genuinely empty resident suffix.
+        let active_2 =
+            ConsentCompactedActiveStateV1::activate(snapshot_2, &full_archive, &key, 106).unwrap();
+        let restored_2 = active_2
+            .activation_snapshot
+            .restore_state(&full_archive, &key)
+            .unwrap();
+        assert_eq!(restored_2.chain.entry_count(), 6);
+        assert_eq!(restored_2.chain.resident_len(), 0);
     }
 
     #[test]
@@ -1695,7 +1832,8 @@ mod tests {
         let bundle = ConsentCompactionBundleV1::build(&chain, segments.clone(), 102).unwrap();
         let entries = chain.iter().cloned().collect::<Vec<_>>();
         let snapshot =
-            ConsentCompactedSnapshotV1::build(&bundle, &entries, &key.verifying_key()).unwrap();
+            ConsentCompactedSnapshotV1::build(&bundle, &entries, &key.verifying_key(), None)
+                .unwrap();
 
         let mut restored = snapshot.restore_state(&segments, &key).unwrap();
         assert!(restored.archived_replay_action_ids.contains(&[2u8; 16]));
@@ -1718,7 +1856,8 @@ mod tests {
         let bundle = ConsentCompactionBundleV1::build(&chain, segments.clone(), 102).unwrap();
         let entries = chain.iter().cloned().collect::<Vec<_>>();
         let snapshot =
-            ConsentCompactedSnapshotV1::build(&bundle, &entries, &key.verifying_key()).unwrap();
+            ConsentCompactedSnapshotV1::build(&bundle, &entries, &key.verifying_key(), None)
+                .unwrap();
         let wrong_key = SigningKey::from_bytes(&[0x99; 32]);
 
         assert_eq!(
@@ -1736,7 +1875,7 @@ mod tests {
         let bundle = ConsentCompactionBundleV1::build(&chain, segments.clone(), 102).unwrap();
         let entries = chain.iter().cloned().collect::<Vec<_>>();
         let mut snapshot =
-            ConsentCompactedSnapshotV1::build(&bundle, &entries, &public_key).unwrap();
+            ConsentCompactedSnapshotV1::build(&bundle, &entries, &public_key, None).unwrap();
         snapshot.recovery_summary.summary_digest[0] ^= 1;
         snapshot.snapshot_digest = consent_compacted_snapshot_digest(&snapshot).unwrap();
 
@@ -1759,7 +1898,8 @@ mod tests {
         let bundle = ConsentCompactionBundleV1::build(&chain, segments.clone(), 102).unwrap();
         let entries = chain.iter().cloned().collect::<Vec<_>>();
         let snapshot =
-            ConsentCompactedSnapshotV1::build(&bundle, &entries, &key.verifying_key()).unwrap();
+            ConsentCompactedSnapshotV1::build(&bundle, &entries, &key.verifying_key(), None)
+                .unwrap();
         let active =
             ConsentCompactedActiveStateV1::activate(snapshot, &segments, &key, 103).unwrap();
         active.verify(&key.verifying_key()).unwrap();
@@ -1785,7 +1925,8 @@ mod tests {
         let bundle = ConsentCompactionBundleV1::build(&chain, segments.clone(), 102).unwrap();
         let entries = chain.iter().cloned().collect::<Vec<_>>();
         let snapshot =
-            ConsentCompactedSnapshotV1::build(&bundle, &entries, &key.verifying_key()).unwrap();
+            ConsentCompactedSnapshotV1::build(&bundle, &entries, &key.verifying_key(), None)
+                .unwrap();
         let mut active =
             ConsentCompactedActiveStateV1::activate(snapshot, &segments, &key, 103).unwrap();
         active.archived_replay_action_ids.push([0xEE; 16]);
@@ -1807,7 +1948,8 @@ mod tests {
         let bundle = ConsentCompactionBundleV1::build(&chain, segments.clone(), 102).unwrap();
         let entries = chain.iter().cloned().collect::<Vec<_>>();
         let snapshot =
-            ConsentCompactedSnapshotV1::build(&bundle, &entries, &key.verifying_key()).unwrap();
+            ConsentCompactedSnapshotV1::build(&bundle, &entries, &key.verifying_key(), None)
+                .unwrap();
         let mut active =
             ConsentCompactedActiveStateV1::activate(snapshot, &segments, &key, 103).unwrap();
         active.resident_entries[0].entry_hash[0] ^= 1;
@@ -1827,7 +1969,8 @@ mod tests {
         let bundle = ConsentCompactionBundleV1::build(&chain, segments.clone(), 102).unwrap();
         let entries = chain.iter().cloned().collect::<Vec<_>>();
         let snapshot =
-            ConsentCompactedSnapshotV1::build(&bundle, &entries, &key.verifying_key()).unwrap();
+            ConsentCompactedSnapshotV1::build(&bundle, &entries, &key.verifying_key(), None)
+                .unwrap();
         let mut active =
             ConsentCompactedActiveStateV1::activate(snapshot, &segments, &key, 103).unwrap();
 
@@ -1871,7 +2014,8 @@ mod tests {
         let bundle = ConsentCompactionBundleV1::build(&chain, segments.clone(), 102).unwrap();
         let entries = chain.iter().cloned().collect::<Vec<_>>();
         let snapshot =
-            ConsentCompactedSnapshotV1::build(&bundle, &entries, &key.verifying_key()).unwrap();
+            ConsentCompactedSnapshotV1::build(&bundle, &entries, &key.verifying_key(), None)
+                .unwrap();
         let active =
             ConsentCompactedActiveStateV1::activate(snapshot, &segments, &key, 103).unwrap();
         let pin = ConsentCompactedStatePinV1::sign_for_state(&active, &key, 104).unwrap();
@@ -1908,7 +2052,8 @@ mod tests {
         let bundle = ConsentCompactionBundleV1::build(&chain, segments.clone(), 102).unwrap();
         let entries = chain.iter().cloned().collect::<Vec<_>>();
         let snapshot =
-            ConsentCompactedSnapshotV1::build(&bundle, &entries, &key.verifying_key()).unwrap();
+            ConsentCompactedSnapshotV1::build(&bundle, &entries, &key.verifying_key(), None)
+                .unwrap();
         let active =
             ConsentCompactedActiveStateV1::activate(snapshot, &segments, &key, 103).unwrap();
         let pin = ConsentCompactedStatePinV1::sign_for_state(&active, &key, 104).unwrap();
