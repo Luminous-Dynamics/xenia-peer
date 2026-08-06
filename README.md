@@ -327,6 +327,8 @@ For the audit claim boundary, see
 To compact a growing consent ledger and cut a daemon over to boot from the
 compacted state, see
 [`docs/runbooks/CONSENT_LEDGER_COMPACTION_RUNBOOK.md`](docs/runbooks/CONSENT_LEDGER_COMPACTION_RUNBOOK.md).
+To actually retire, quarantine, and purge superseded ledger artifacts, see
+[`docs/runbooks/CONSENT_LEDGER_RETIREMENT_PURGE_RUNBOOK.md`](docs/runbooks/CONSENT_LEDGER_RETIREMENT_PURGE_RUNBOOK.md).
 
 ## Relationship to Track A
 
