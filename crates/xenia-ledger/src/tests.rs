@@ -1963,6 +1963,7 @@ fn compaction_manifest_binds_archive_recovery_and_live_head() {
         &manifest,
         &entries,
         &SigningKey::from_bytes(&[65u8; 32]).verifying_key(),
+        None,
     )
     .unwrap();
 
