@@ -15,6 +15,7 @@ members = [
     "crates/xenia-ledger",
     "crates/xenia-mobile-ffi",
     "crates/xenia-secure-file",
+    "crates/xenia-zk-protocol",
     "crates/xenia-launcher-core",
     "crates/xenia-launcher-shell",
     "apps/xenia-launcher-windows",
@@ -50,6 +51,7 @@ default-members = [
     "crates/xenia-ledger",
     "crates/xenia-mobile-ffi",
     "crates/xenia-secure-file",
+    "crates/xenia-zk-protocol",
     "crates/xenia-launcher-core",
     "apps/xenia-operator-agent",
 ]
