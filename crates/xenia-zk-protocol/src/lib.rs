@@ -31,6 +31,12 @@ pub const PROOF_ENVELOPE_AUTH_DOMAIN: &[u8] = b"XENIA:ProofEnvelope:Auth:v3";
 pub const VERIFIER_ID_DOMAIN: &[u8] = b"XENIA:ProofVerifierId:v1";
 /// Domain separator used when deriving a parameter-set identity from bytes.
 pub const PARAMETER_SET_ID_DOMAIN: &[u8] = b"XENIA:ProofParameterSetId:v1";
+/// Domain separator for canonical public-input digests.
+pub const PUBLIC_INPUTS_DOMAIN: &[u8] = b"XENIA:ProofPublicInputs:v1";
+/// Domain separator for verifier-issued challenge bindings carried in `nonce`.
+pub const CHALLENGE_NONCE_DOMAIN: &[u8] = b"XENIA:ProofChallengeNonce:v1";
+/// Domain separator for public-key fingerprints used as signer-key identifiers.
+pub const SIGNER_KEY_ID_DOMAIN: &[u8] = b"XENIA:ProofSignerKeyId:v1";
 
 const MAX_STATEMENT_COMPONENT_BYTES: usize = 64;
 
@@ -49,6 +55,12 @@ pub enum ProtocolError {
     InvalidStatementVersion,
     #[error("identifier value 0 is reserved")]
     ReservedIdentifier,
+    #[error("verifier challenge entropy cannot be all zero")]
+    ZeroChallengeEntropy,
+    #[error("challenge audience cannot be empty")]
+    EmptyChallengeAudience,
+    #[error("signer public key cannot be empty")]
+    EmptySignerPublicKey,
 }
 
 /// Backend-neutral statement identity.
@@ -233,7 +245,11 @@ pub struct ProofEnvelopeV3 {
     pub verifier_id: VerifierId,
     pub parameter_set_id: ParameterSetId,
     pub timestamp_unix_seconds: u64,
+    /// Verifier-issued challenge binding. New protocols should derive this with
+    /// [`derive_challenge_nonce`] so audience/session context is replay-bound.
     pub nonce: [u8; 32],
+    /// Digest of canonical statement public inputs. New protocols should derive
+    /// this with [`public_inputs_digest`].
     pub public_inputs_hash: [u8; 32],
     pub proof: Vec<u8>,
     /// Digest of typed authenticated extension claims. Use [`empty_extensions_digest`]
@@ -280,10 +296,7 @@ impl ProofEnvelopeV3 {
         let mut hasher = Sha256::new();
         hasher.update(PROOF_ENVELOPE_BODY_DOMAIN);
         hasher.update(self.protocol_version.to_le_bytes());
-        append_hash_len_prefixed(&mut hasher, self.statement.ecosystem.as_bytes());
-        append_hash_len_prefixed(&mut hasher, self.statement.application.as_bytes());
-        append_hash_len_prefixed(&mut hasher, self.statement.purpose.as_bytes());
-        hasher.update(self.statement.version.to_le_bytes());
+        append_statement_id(&mut hasher, &self.statement);
         hasher.update(self.proof_system.wire_id().to_le_bytes());
         hasher.update(self.verifier_id.0);
         hasher.update(self.parameter_set_id.0);
@@ -314,9 +327,77 @@ impl ProofEnvelopeV3 {
     }
 }
 
+/// Canonical digest of public inputs for a statement.
+///
+/// The protocol does not define application serialization; callers must provide
+/// the statement's canonical public-input bytes. Binding the statement identity
+/// here prevents the same byte encoding from being silently reused as another
+/// statement's public inputs.
+pub fn public_inputs_digest(
+    statement: &StatementId,
+    canonical_public_inputs: &[u8],
+) -> Result<[u8; 32], ProtocolError> {
+    statement.validate()?;
+    let mut hasher = Sha256::new();
+    hasher.update(PUBLIC_INPUTS_DOMAIN);
+    append_statement_id(&mut hasher, statement);
+    append_hash_len_prefixed(&mut hasher, canonical_public_inputs);
+    Ok(hasher.finalize().into())
+}
+
+/// Derive the 32-byte verifier challenge binding carried in `ProofEnvelopeV3::nonce`.
+///
+/// `verifier_random` must be fresh unpredictable verifier-provided entropy.
+/// `audience` identifies the relying party/service and `session_context` binds
+/// any additional channel/session/purpose data chosen by that relying party.
+pub fn derive_challenge_nonce(
+    statement: &StatementId,
+    audience: &[u8],
+    session_context: &[u8],
+    verifier_random: &[u8; 32],
+) -> Result<[u8; 32], ProtocolError> {
+    statement.validate()?;
+    if audience.is_empty() {
+        return Err(ProtocolError::EmptyChallengeAudience);
+    }
+    if verifier_random == &[0; 32] {
+        return Err(ProtocolError::ZeroChallengeEntropy);
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(CHALLENGE_NONCE_DOMAIN);
+    append_statement_id(&mut hasher, statement);
+    append_hash_len_prefixed(&mut hasher, audience);
+    append_hash_len_prefixed(&mut hasher, session_context);
+    hasher.update(verifier_random);
+    Ok(hasher.finalize().into())
+}
+
+/// Derive the canonical key identifier used by `ProofAuthentication`.
+pub fn signer_key_id(
+    suite: AuthenticationSuiteId,
+    public_key_bytes: &[u8],
+) -> Result<[u8; 32], ProtocolError> {
+    if public_key_bytes.is_empty() {
+        return Err(ProtocolError::EmptySignerPublicKey);
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(SIGNER_KEY_ID_DOMAIN);
+    hasher.update(suite.wire_id().to_le_bytes());
+    append_hash_len_prefixed(&mut hasher, public_key_bytes);
+    Ok(hasher.finalize().into())
+}
+
 /// Canonical digest representing an empty set of extension claims.
 pub fn empty_extensions_digest() -> [u8; 32] {
     Sha256::digest(b"XENIA:ProofEnvelope:Extensions:Empty:v1").into()
+}
+
+fn append_statement_id(hasher: &mut Sha256, statement: &StatementId) {
+    append_hash_len_prefixed(hasher, statement.ecosystem.as_bytes());
+    append_hash_len_prefixed(hasher, statement.application.as_bytes());
+    append_hash_len_prefixed(hasher, statement.purpose.as_bytes());
+    hasher.update(statement.version.to_le_bytes());
 }
 
 fn append_hash_len_prefixed(hasher: &mut Sha256, value: &[u8]) {
@@ -374,6 +455,53 @@ mod tests {
         let mut changed = envelope;
         changed.extensions_digest[0] ^= 1;
         assert_ne!(baseline, changed.body_digest().unwrap());
+    }
+
+    #[test]
+    fn public_inputs_digest_is_statement_bound() {
+        let a = StatementId::try_new("XENIA", "Access", "CapabilityPossession", 1).unwrap();
+        let b = StatementId::try_new("XENIA", "Access", "DeviceEnrollment", 1).unwrap();
+        let bytes = b"canonical-public-inputs";
+        assert_ne!(
+            public_inputs_digest(&a, bytes).unwrap(),
+            public_inputs_digest(&b, bytes).unwrap()
+        );
+    }
+
+    #[test]
+    fn challenge_nonce_binds_audience_session_and_statement() {
+        let statement = StatementId::try_new("XENIA", "Access", "CapabilityPossession", 1).unwrap();
+        let entropy = [0xA5; 32];
+        let baseline = derive_challenge_nonce(&statement, b"service-a", b"session-1", &entropy).unwrap();
+        assert_ne!(
+            baseline,
+            derive_challenge_nonce(&statement, b"service-b", b"session-1", &entropy).unwrap()
+        );
+        assert_ne!(
+            baseline,
+            derive_challenge_nonce(&statement, b"service-a", b"session-2", &entropy).unwrap()
+        );
+        let other = StatementId::try_new("XENIA", "Access", "DeviceEnrollment", 1).unwrap();
+        assert_ne!(
+            baseline,
+            derive_challenge_nonce(&other, b"service-a", b"session-1", &entropy).unwrap()
+        );
+        assert_eq!(
+            derive_challenge_nonce(&statement, b"service-a", b"session-1", &[0; 32]),
+            Err(ProtocolError::ZeroChallengeEntropy)
+        );
+    }
+
+    #[test]
+    fn signer_key_id_binds_suite_and_public_key() {
+        let key = [0x42; 32];
+        let ml = signer_key_id(AuthenticationSuiteId::ML_DSA_65_FIPS204, &key).unwrap();
+        let ed = signer_key_id(AuthenticationSuiteId::ED25519, &key).unwrap();
+        assert_ne!(ml, ed);
+        assert_ne!(
+            ml,
+            signer_key_id(AuthenticationSuiteId::ML_DSA_65_FIPS204, &[0x43; 32]).unwrap()
+        );
     }
 
     #[test]
