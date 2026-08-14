@@ -27,6 +27,8 @@ LIBRARY_CRATES = {
     "xenia-transport-ws",
     "xenia-transport-quic",
     "xenia-inject",
+    "xenia-zk-protocol",
+    "xenia-zk-legacy-mycelix",
 }
 KNOWN_XENIA_CRATES = {WIRE_CRATE, *WIRE_SUPPORT_CRATES, *APP_CRATES, *LIBRARY_CRATES}
 

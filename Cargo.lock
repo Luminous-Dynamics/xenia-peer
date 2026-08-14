@@ -9891,6 +9891,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "xenia-zk-legacy-mycelix"
+version = "0.0.0-m0"
+dependencies = [
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "xenia-zk-protocol"
+version = "0.0.0-m0"
+dependencies = [
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "xkbcommon-dl"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
