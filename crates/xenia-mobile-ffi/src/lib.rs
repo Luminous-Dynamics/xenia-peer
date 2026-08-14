@@ -31,15 +31,16 @@ use engine::{FileTransferEvent, MobileCodec, SessionState, ViewerEngine};
 /// every connected session's background task runs on it. Matches
 /// `xenia-viewer`'s own pattern (one runtime alongside the GUI event
 /// loop), just process-lifetime instead of per-window.
-fn runtime() -> &'static tokio::runtime::Runtime {
-    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+fn runtime() -> Option<&'static tokio::runtime::Runtime> {
+    static RT: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
     RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()
-            .expect("failed to start xenia-mobile-ffi tokio runtime")
+            .ok()
     })
+    .as_ref()
 }
 
 /// Process-local registry for active viewer sessions. Registry ids are never
@@ -144,8 +145,11 @@ pub unsafe extern "C" fn xenia_connect(
         XENIA_CODEC_H264 => MobileCodec::H264,
         _ => MobileCodec::Passthrough,
     };
+    let Some(runtime) = runtime() else {
+        return 0;
+    };
     let engine = ViewerEngine::connect(
-        runtime().handle(),
+        runtime.handle(),
         host_port,
         codec,
         recv_dir,

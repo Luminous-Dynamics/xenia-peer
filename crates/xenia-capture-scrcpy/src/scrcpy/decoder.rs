@@ -66,6 +66,8 @@ pub enum DecodeError {
     /// ffmpeg returned an error from any of init / send_packet /
     /// receive_frame / swscale.
     Ffmpeg(ffmpeg::Error),
+    /// Decoder state lost its scaler after the rebuild path completed.
+    ScalerUnavailable,
 }
 
 impl std::fmt::Display for DecodeError {
@@ -75,6 +77,9 @@ impl std::fmt::Display for DecodeError {
                 write!(f, "ffmpeg HEVC decoder not found in this build")
             }
             DecodeError::Ffmpeg(e) => write!(f, "ffmpeg error: {e}"),
+            DecodeError::ScalerUnavailable => {
+                write!(f, "ffmpeg scaler unavailable after decoder reconfiguration")
+            }
         }
     }
 }
@@ -246,7 +251,10 @@ impl HevcDecoder {
             });
         }
 
-        let scaler = self.scaler.as_mut().expect("scaler set above");
+        let scaler = self
+            .scaler
+            .as_mut()
+            .ok_or(DecodeError::ScalerUnavailable)?;
 
         let mut rgba_frame = ffmpeg::frame::Video::empty();
         scaler.ctx.run(yuv, &mut rgba_frame)?;

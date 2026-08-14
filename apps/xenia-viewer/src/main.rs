@@ -494,7 +494,10 @@ impl AudioPlaybackSink for DeviceAudioSink {
         }
 
         let adapted = adapt_audio_samples(frame, self.output_sample_rate_hz, self.output_channels);
-        let mut queue = self.queue.lock().expect("audio queue poisoned");
+        let Ok(mut queue) = self.queue.lock() else {
+            self.stats.rejected = self.stats.rejected.saturating_add(1);
+            return;
+        };
         for sample in adapted {
             if queue.len() >= Self::MAX_BUFFERED_SAMPLES {
                 queue.pop_front();
@@ -576,7 +579,10 @@ fn adapt_audio_samples(
 
 #[cfg(feature = "audio-output")]
 fn fill_output_i16(data: &mut [i16], queue: &Arc<Mutex<VecDeque<i16>>>) {
-    let mut queue = queue.lock().expect("audio queue poisoned");
+    let Ok(mut queue) = queue.lock() else {
+        data.fill(0);
+        return;
+    };
     for sample in data {
         *sample = queue.pop_front().unwrap_or(0);
     }
@@ -584,7 +590,10 @@ fn fill_output_i16(data: &mut [i16], queue: &Arc<Mutex<VecDeque<i16>>>) {
 
 #[cfg(feature = "audio-output")]
 fn fill_output_f32(data: &mut [f32], queue: &Arc<Mutex<VecDeque<i16>>>) {
-    let mut queue = queue.lock().expect("audio queue poisoned");
+    let Ok(mut queue) = queue.lock() else {
+        data.fill(0.0);
+        return;
+    };
     for sample in data {
         *sample = f32::from(queue.pop_front().unwrap_or(0)) / f32::from(i16::MAX);
     }
@@ -592,7 +601,10 @@ fn fill_output_f32(data: &mut [f32], queue: &Arc<Mutex<VecDeque<i16>>>) {
 
 #[cfg(feature = "audio-output")]
 fn fill_output_u16(data: &mut [u16], queue: &Arc<Mutex<VecDeque<i16>>>) {
-    let mut queue = queue.lock().expect("audio queue poisoned");
+    let Ok(mut queue) = queue.lock() else {
+        data.fill(32_768);
+        return;
+    };
     for sample in data {
         let signed = i32::from(queue.pop_front().unwrap_or(0));
         *sample = (signed + 32_768) as u16;
