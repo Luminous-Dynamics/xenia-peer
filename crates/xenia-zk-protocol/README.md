@@ -27,6 +27,11 @@ public input. A backend whose circuit/program does not constrain the challenge
 is not suitable for a freshness-sensitive statement. Replay-tolerant statements
 must opt into the explicitly named `static_public_inputs_digest` helper instead.
 
+Application-specific metadata uses typed `ExtensionClaim`s. Xenia hashes claim
+values with their canonical claim identity, sorts the claim set before hashing,
+and rejects duplicate claim types. Applications therefore do not need to invent
+their own ordering/delimiter convention for the envelope's `extensions_digest`.
+
 ## Ownership rule
 
 > Xenia proves and verifies. Applications define what is worth proving.

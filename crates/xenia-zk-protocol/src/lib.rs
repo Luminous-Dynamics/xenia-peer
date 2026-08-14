@@ -43,6 +43,12 @@ pub const PUBLIC_INPUTS_DOMAIN: &[u8] = b"XENIA:ProofPublicInputs:ChallengeBound
 pub const CHALLENGE_NONCE_DOMAIN: &[u8] = b"XENIA:ProofChallengeNonce:v1";
 /// Domain separator for public-key fingerprints used as signer-key identifiers.
 pub const SIGNER_KEY_ID_DOMAIN: &[u8] = b"XENIA:ProofSignerKeyId:v1";
+/// Domain separator for one typed extension value digest.
+pub const EXTENSION_VALUE_DOMAIN: &[u8] = b"XENIA:ProofExtensionValue:v1";
+/// Domain separator for a canonical non-empty set of extension claims.
+pub const EXTENSIONS_SET_DOMAIN: &[u8] = b"XENIA:ProofEnvelope:Extensions:Set:v1";
+/// Maximum number of typed extension claims accepted by the canonical helper.
+pub const MAX_EXTENSION_CLAIMS: usize = 64;
 
 const MAX_STATEMENT_COMPONENT_BYTES: usize = 64;
 
@@ -69,6 +75,12 @@ pub enum ProtocolError {
     EmptyChallengeAudience,
     #[error("signer public key cannot be empty")]
     EmptySignerPublicKey,
+    #[error("extension value digest cannot be all zero")]
+    ZeroExtensionValueDigest,
+    #[error("duplicate extension claim type {claim_type}")]
+    DuplicateExtensionClaim { claim_type: String },
+    #[error("too many extension claims: {actual} > {limit}")]
+    TooManyExtensionClaims { actual: usize, limit: usize },
 }
 
 /// Backend-neutral statement identity.
@@ -274,6 +286,42 @@ pub struct ProofAuthentication {
     pub signature: Vec<u8>,
 }
 
+/// One application-defined, authenticated extension claim.
+///
+/// The claim type uses the same canonical namespace grammar as proof statements,
+/// while the value is represented only by a domain-separated digest. Keeping the
+/// raw extension encoding outside the envelope avoids turning the protocol crate
+/// into an application schema registry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionClaim {
+    claim_type: StatementId,
+    value_digest: [u8; 32],
+}
+
+impl ExtensionClaim {
+    pub fn try_new(
+        claim_type: StatementId,
+        value_digest: [u8; 32],
+    ) -> Result<Self, ProtocolError> {
+        claim_type.validate()?;
+        if value_digest == [0; 32] {
+            return Err(ProtocolError::ZeroExtensionValueDigest);
+        }
+        Ok(Self {
+            claim_type,
+            value_digest,
+        })
+    }
+
+    pub fn claim_type(&self) -> &StatementId {
+        &self.claim_type
+    }
+
+    pub const fn value_digest(&self) -> [u8; 32] {
+        self.value_digest
+    }
+}
+
 /// Canonical v3 proof envelope.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProofEnvelopeV3 {
@@ -451,6 +499,64 @@ pub fn signer_key_id(
     Ok(hasher.finalize().into())
 }
 
+/// Digest the canonical bytes of one typed extension value.
+///
+/// Binding the claim type here prevents the same application bytes from being
+/// relabeled as a different authenticated extension type.
+pub fn extension_value_digest(
+    claim_type: &StatementId,
+    canonical_value: &[u8],
+) -> Result<[u8; 32], ProtocolError> {
+    claim_type.validate()?;
+    let mut hasher = Sha256::new();
+    hasher.update(EXTENSION_VALUE_DOMAIN);
+    append_statement_id(&mut hasher, claim_type);
+    append_hash_len_prefixed(&mut hasher, canonical_value);
+    Ok(hasher.finalize().into())
+}
+
+/// Canonical digest of a set of typed extension claims.
+///
+/// Claims are sorted by canonical claim identity before hashing, so callers do
+/// not accidentally create different envelope digests solely because map/list
+/// iteration order changed. Duplicate claim types are rejected rather than
+/// adopting ambiguous "first wins" or "last wins" semantics.
+pub fn extensions_digest(claims: &[ExtensionClaim]) -> Result<[u8; 32], ProtocolError> {
+    if claims.is_empty() {
+        return Ok(empty_extensions_digest());
+    }
+    if claims.len() > MAX_EXTENSION_CLAIMS {
+        return Err(ProtocolError::TooManyExtensionClaims {
+            actual: claims.len(),
+            limit: MAX_EXTENSION_CLAIMS,
+        });
+    }
+
+    let mut ordered: Vec<&ExtensionClaim> = claims.iter().collect();
+    ordered.sort_by(|left, right| {
+        left.claim_type
+            .canonical_text()
+            .cmp(&right.claim_type.canonical_text())
+    });
+
+    for pair in ordered.windows(2) {
+        if pair[0].claim_type == pair[1].claim_type {
+            return Err(ProtocolError::DuplicateExtensionClaim {
+                claim_type: pair[0].claim_type.canonical_text(),
+            });
+        }
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(EXTENSIONS_SET_DOMAIN);
+    hasher.update((ordered.len() as u64).to_le_bytes());
+    for claim in ordered {
+        append_statement_id(&mut hasher, &claim.claim_type);
+        hasher.update(claim.value_digest);
+    }
+    Ok(hasher.finalize().into())
+}
+
 /// Canonical digest representing an empty set of extension claims.
 pub fn empty_extensions_digest() -> [u8; 32] {
     Sha256::digest(b"XENIA:ProofEnvelope:Extensions:Empty:v1").into()
@@ -591,6 +697,31 @@ mod tests {
     }
 
     #[test]
+    fn extension_digest_is_typed_order_independent_and_duplicate_safe() {
+        let energy = StatementId::try_new("XENIA", "Evidence", "EnergyMeasurement", 1).unwrap();
+        let session = StatementId::try_new("XENIA", "Access", "SessionBinding", 1).unwrap();
+        let energy_digest = extension_value_digest(&energy, b"42mJ").unwrap();
+        let session_digest = extension_value_digest(&session, b"session-7").unwrap();
+        assert_ne!(energy_digest, extension_value_digest(&session, b"42mJ").unwrap());
+
+        let energy_claim = ExtensionClaim::try_new(energy.clone(), energy_digest).unwrap();
+        let session_claim = ExtensionClaim::try_new(session, session_digest).unwrap();
+        assert_eq!(
+            extensions_digest(&[energy_claim.clone(), session_claim.clone()]).unwrap(),
+            extensions_digest(&[session_claim, energy_claim.clone()]).unwrap()
+        );
+        assert!(matches!(
+            extensions_digest(&[energy_claim.clone(), energy_claim]),
+            Err(ProtocolError::DuplicateExtensionClaim { .. })
+        ));
+    }
+
+    #[test]
+    fn empty_extensions_helper_matches_canonical_set_helper() {
+        assert_eq!(extensions_digest(&[]).unwrap(), empty_extensions_digest());
+    }
+
+    #[test]
     fn helper_derivations_have_stable_golden_vectors() {
         let statement = StatementId::try_new("XENIA", "Access", "CapabilityPossession", 1).unwrap();
         assert_eq!(
@@ -616,6 +747,14 @@ mod tests {
                 &signer_key_id(AuthenticationSuiteId::ML_DSA_65_FIPS204, &[0x42; 32]).unwrap()
             ),
             "c58668a376948a0a6688ae3b7457b3e5ca0f4727ffdea6c56a564d2cc202ea75"
+        );
+
+        let claim_type = StatementId::try_new("XENIA", "Evidence", "EnergyMeasurement", 1).unwrap();
+        let value_digest = extension_value_digest(&claim_type, b"42mJ").unwrap();
+        let claim = ExtensionClaim::try_new(claim_type, value_digest).unwrap();
+        assert_eq!(
+            hex_lower(&extensions_digest(&[claim]).unwrap()),
+            "dcb196488f9224473db5ca719a2643bf57f871937eed2e1135b5d4e152e14974"
         );
     }
 

@@ -79,6 +79,9 @@ if source_path.is_file():
         "pub struct ProofEnvelopeV3",
         "public_inputs_hash",
         "extensions_digest",
+        "pub struct ExtensionClaim",
+        "pub fn extension_value_digest",
+        "pub fn extensions_digest",
         "authentication_digest",
     ):
         require(fragment in source, f"V3 protocol invariant missing: {fragment}")
@@ -87,6 +90,7 @@ if source_path.is_file():
     require_test(source, "v3_golden_body_and_authentication_digests_are_stable")
     require_test(source, "authentication_digest_binds_suite_and_signer")
     require_test(source, "public_inputs_digest_is_challenge_bound")
+    require_test(source, "extension_digest_is_typed_order_independent_and_duplicate_safe")
 
     for forbidden in (
         "MYCELIX:AuthenticatedProof",
