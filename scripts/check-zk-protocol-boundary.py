@@ -87,6 +87,22 @@ if policy_path.is_file():
     ):
         require(fragment in policy, f"fail-closed policy invariant missing: {fragment}")
 
+
+workspace_manifest = root / "Cargo.toml"
+if workspace_manifest.is_file():
+    with workspace_manifest.open("rb") as handle:
+        workspace = tomllib.load(handle).get("workspace", {})
+    members = set(workspace.get("members", []))
+    defaults = set(workspace.get("default-members", []))
+    require("crates/xenia-zk-legacy-mycelix" in members, "legacy Mycelix adapter must be an explicit workspace member")
+    require("crates/xenia-zk-legacy-mycelix" not in defaults, "legacy Mycelix adapter must remain opt-in, not a default member")
+
+legacy_manifest = root / "crates" / "xenia-zk-legacy-mycelix" / "Cargo.toml"
+if legacy_manifest.is_file():
+    with legacy_manifest.open("rb") as handle:
+        legacy = tomllib.load(handle)
+    require("xenia-zk-protocol" not in legacy.get("dependencies", {}), "legacy adapter must not create a V3 dependency cycle")
+
 if failures:
     print("ZK protocol boundary check FAILED", file=sys.stderr)
     for failure in failures:

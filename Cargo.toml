@@ -16,6 +16,7 @@ members = [
     "crates/xenia-mobile-ffi",
     "crates/xenia-secure-file",
     "crates/xenia-zk-protocol",
+    "crates/xenia-zk-legacy-mycelix",
     "crates/xenia-launcher-core",
     "crates/xenia-launcher-shell",
     "apps/xenia-launcher-windows",
