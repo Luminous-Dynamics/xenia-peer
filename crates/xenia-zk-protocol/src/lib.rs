@@ -16,6 +16,7 @@
 //!   crate never auto-detects or silently falls back to a legacy protocol.
 
 pub mod policy;
+pub mod verification;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

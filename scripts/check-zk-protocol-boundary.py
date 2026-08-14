@@ -38,10 +38,12 @@ def require_test(source: str, name: str) -> None:
 manifest_path = crate / "Cargo.toml"
 source_path = crate / "src" / "lib.rs"
 policy_path = crate / "src" / "policy.rs"
+verification_path = crate / "src" / "verification.rs"
 
 require(manifest_path.is_file(), "xenia-zk-protocol/Cargo.toml missing")
 require(source_path.is_file(), "xenia-zk-protocol/src/lib.rs missing")
 require(policy_path.is_file(), "xenia-zk-protocol/src/policy.rs missing")
+require(verification_path.is_file(), "xenia-zk-protocol/src/verification.rs missing")
 
 if manifest_path.is_file():
     with manifest_path.open("rb") as handle:
@@ -115,6 +117,20 @@ if policy_path.is_file():
     ):
         require(fragment in policy, f"fail-closed policy invariant missing: {fragment}")
 
+
+if verification_path.is_file():
+    verification = verification_path.read_text(encoding="utf-8")
+    for fragment in (
+        "pub trait ProofBackendVerifier",
+        "pub trait ProofAuthenticationVerifier",
+        "pub struct ProofVerifiedEnvelope",
+        "pub struct FullyVerifiedEnvelope",
+        "public_inputs_digest",
+        "BackendVerifierMismatch",
+        "AuthenticationRejected",
+        "pub fn verify_envelope",
+    ):
+        require(fragment in verification, f"verification typestate invariant missing: {fragment}")
 
 workspace_manifest = root / "Cargo.toml"
 if workspace_manifest.is_file():
