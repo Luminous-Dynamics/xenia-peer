@@ -105,6 +105,13 @@ if policy_path.is_file():
         "envelope.public_inputs_hash == [0; 32]",
         "required_authentication_suites",
         "DuplicateAuthentication",
+        "pub struct VerificationContract",
+        "ContractVerifierMismatch",
+        "ContractParameterSetMismatch",
+        "ContractNonceMismatch",
+        "ContractPublicInputsMismatch",
+        "AuthenticationQuorumNotMet",
+        "validate_envelope_against_contract",
     ):
         require(fragment in policy, f"fail-closed policy invariant missing: {fragment}")
 

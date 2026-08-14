@@ -11,13 +11,83 @@ use std::collections::HashSet;
 use thiserror::Error;
 
 use crate::{
-    AuthenticationSuiteId, PROOF_ENVELOPE_PROTOCOL_VERSION, ProofEnvelopeV3, ProofSystemId,
-    ProtocolError,
+    AuthenticationSuiteId, PROOF_ENVELOPE_PROTOCOL_VERSION, ParameterSetId, ProofEnvelopeV3,
+    ProofSystemId, ProtocolError, StatementId, VerifierId,
 };
 
 pub const DEFAULT_MAX_PROOF_BYTES: usize = 512 * 1024;
 pub const DEFAULT_MAX_SIGNATURE_BYTES: usize = 16 * 1024;
 pub const DEFAULT_MAX_AUTHENTICATION_ENTRIES: usize = 4;
+
+/// Exact local verifier binding for a statement.
+///
+/// The envelope is untrusted input; these values come from local configuration,
+/// a compiled statement registry, or another authenticated policy source. A
+/// verifier must never accept the envelope's own `verifier_id` or parameter set
+/// as authority for what program is allowed to prove a statement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProofVerificationBinding {
+    pub statement: StatementId,
+    pub proof_system: ProofSystemId,
+    pub verifier_id: VerifierId,
+    pub parameter_set_id: ParameterSetId,
+    /// Verifier-issued challenge/context binding expected for this proof instance.
+    pub nonce: [u8; 32],
+    /// Digest of the canonical public inputs expected by the relying application.
+    pub public_inputs_hash: [u8; 32],
+}
+
+/// Authentication trust requirement for an accepted proof envelope.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthenticationRequirement {
+    pub suite: AuthenticationSuiteId,
+    /// Locally trusted signer-key identifiers for this suite.
+    pub trusted_signer_key_ids: Vec<[u8; 32]>,
+    /// Number of distinct trusted signers required for this suite.
+    pub min_distinct_signers: usize,
+}
+
+/// Application acceptance contract for a single proof statement instance.
+///
+/// Structural validation is intentionally insufficient for authorization. This
+/// contract pins the exact verifier and trust roots that the relying application
+/// expects before expensive cryptographic verification is attempted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerificationContract {
+    pub binding: ProofVerificationBinding,
+    pub authentication: Vec<AuthenticationRequirement>,
+}
+
+impl VerificationContract {
+    pub fn single_signer(
+        binding: ProofVerificationBinding,
+        suite: AuthenticationSuiteId,
+        signer_key_id: [u8; 32],
+    ) -> Self {
+        Self {
+            binding,
+            authentication: vec![AuthenticationRequirement {
+                suite,
+                trusted_signer_key_ids: vec![signer_key_id],
+                min_distinct_signers: 1,
+            }],
+        }
+    }
+}
+
+/// Envelope that has passed both structural policy and an exact local
+/// [`VerificationContract`]. This still does **not** mean the proof or signatures
+/// have been cryptographically verified.
+#[derive(Clone, Copy, Debug)]
+pub struct ContractValidatedEnvelope<'a> {
+    envelope: &'a ProofEnvelopeV3,
+}
+
+impl<'a> ContractValidatedEnvelope<'a> {
+    pub fn envelope(self) -> &'a ProofEnvelopeV3 {
+        self.envelope
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct EnvelopePolicy {
@@ -84,6 +154,32 @@ pub enum EnvelopeValidationError {
     DuplicateAuthentication { suite: u16 },
     #[error("required authentication suite {0} is missing")]
     MissingAuthenticationSuite(u16),
+    #[error("proof-system identifier 0 is reserved")]
+    ReservedProofSystem,
+    #[error("authentication-suite identifier 0 is reserved")]
+    ReservedAuthenticationSuite,
+    #[error("statement identifier does not match the local verification contract")]
+    ContractStatementMismatch,
+    #[error("proof system does not match the local verification contract")]
+    ContractProofSystemMismatch,
+    #[error("verifier/program identifier does not match the local verification contract")]
+    ContractVerifierMismatch,
+    #[error("parameter-set identifier does not match the local verification contract")]
+    ContractParameterSetMismatch,
+    #[error("proof challenge/nonce does not match the local verification contract")]
+    ContractNonceMismatch,
+    #[error("public-input digest does not match the local verification contract")]
+    ContractPublicInputsMismatch,
+    #[error("authentication contract contains an invalid requirement for suite {suite}")]
+    InvalidAuthenticationRequirement { suite: u16 },
+    #[error("authentication entry is not trusted by the local verification contract")]
+    UntrustedAuthentication,
+    #[error("authentication suite {suite} has {actual} trusted signers; {required} required")]
+    AuthenticationQuorumNotMet {
+        suite: u16,
+        required: usize,
+        actual: usize,
+    },
 }
 
 /// Validate v3 structure and local acceptance policy without verifying cryptography.
@@ -103,6 +199,9 @@ pub fn validate_envelope(
         .statement
         .validate()
         .map_err(EnvelopeValidationError::Statement)?;
+    if envelope.proof_system.wire_id() == 0 {
+        return Err(EnvelopeValidationError::ReservedProofSystem);
+    }
 
     if envelope.proof.is_empty() {
         return Err(EnvelopeValidationError::EmptyProof);
@@ -152,6 +251,9 @@ pub fn validate_envelope(
 
     let mut seen = HashSet::new();
     for authentication in &envelope.authentication {
+        if authentication.suite.wire_id() == 0 {
+            return Err(EnvelopeValidationError::ReservedAuthenticationSuite);
+        }
         if authentication.signer_key_id == [0; 32] {
             return Err(EnvelopeValidationError::ZeroSignerKeyId);
         }
@@ -188,6 +290,87 @@ pub fn validate_envelope(
     Ok(())
 }
 
+/// Validate an envelope against both generic resource policy and an exact local
+/// verification contract.
+///
+/// Passing this function still does not establish cryptographic proof validity or
+/// signature validity. It establishes that the untrusted envelope names exactly the
+/// statement/verifier/parameters/challenge/public inputs and trusted signer IDs the
+/// relying application intended to verify.
+pub fn validate_envelope_against_contract<'a>(
+    envelope: &'a ProofEnvelopeV3,
+    policy: &EnvelopePolicy,
+    contract: &VerificationContract,
+    now_unix_seconds: u64,
+) -> Result<ContractValidatedEnvelope<'a>, EnvelopeValidationError> {
+    validate_envelope(envelope, policy, now_unix_seconds)?;
+
+    let expected = &contract.binding;
+    if envelope.statement != expected.statement {
+        return Err(EnvelopeValidationError::ContractStatementMismatch);
+    }
+    if envelope.proof_system != expected.proof_system {
+        return Err(EnvelopeValidationError::ContractProofSystemMismatch);
+    }
+    if envelope.verifier_id != expected.verifier_id {
+        return Err(EnvelopeValidationError::ContractVerifierMismatch);
+    }
+    if envelope.parameter_set_id != expected.parameter_set_id {
+        return Err(EnvelopeValidationError::ContractParameterSetMismatch);
+    }
+    if envelope.nonce != expected.nonce {
+        return Err(EnvelopeValidationError::ContractNonceMismatch);
+    }
+    if envelope.public_inputs_hash != expected.public_inputs_hash {
+        return Err(EnvelopeValidationError::ContractPublicInputsMismatch);
+    }
+
+    let mut trusted_entries = HashSet::new();
+    for requirement in &contract.authentication {
+        if requirement.suite.wire_id() == 0
+            || requirement.min_distinct_signers == 0
+            || requirement.trusted_signer_key_ids.len() < requirement.min_distinct_signers
+            || requirement
+                .trusted_signer_key_ids
+                .iter()
+                .any(|key_id| *key_id == [0; 32])
+        {
+            return Err(EnvelopeValidationError::InvalidAuthenticationRequirement {
+                suite: requirement.suite.wire_id(),
+            });
+        }
+
+        let trusted: HashSet<[u8; 32]> =
+            requirement.trusted_signer_key_ids.iter().copied().collect();
+        let actual: HashSet<[u8; 32]> = envelope
+            .authentication
+            .iter()
+            .filter(|entry| entry.suite == requirement.suite && trusted.contains(&entry.signer_key_id))
+            .map(|entry| entry.signer_key_id)
+            .collect();
+        if actual.len() < requirement.min_distinct_signers {
+            return Err(EnvelopeValidationError::AuthenticationQuorumNotMet {
+                suite: requirement.suite.wire_id(),
+                required: requirement.min_distinct_signers,
+                actual: actual.len(),
+            });
+        }
+        for key_id in actual {
+            trusted_entries.insert((requirement.suite.wire_id(), key_id));
+        }
+    }
+
+    // Reject authentication material that is not named by the local contract.
+    // Extra self-selected signatures must not be mistaken for additional trust.
+    for entry in &envelope.authentication {
+        if !trusted_entries.contains(&(entry.suite.wire_id(), entry.signer_key_id)) {
+            return Err(EnvelopeValidationError::UntrustedAuthentication);
+        }
+    }
+
+    Ok(ContractValidatedEnvelope { envelope })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +398,80 @@ mod tests {
             signature: vec![0x66; 128],
         });
         envelope
+    }
+
+    fn valid_contract() -> VerificationContract {
+        VerificationContract::single_signer(
+            ProofVerificationBinding {
+                statement: StatementId::try_new("XENIA", "Access", "CapabilityPossession", 1)
+                    .unwrap(),
+                proof_system: ProofSystemId::MIDEN,
+                verifier_id: VerifierId([0x11; 32]),
+                parameter_set_id: ParameterSetId([0x22; 32]),
+                nonce: [0x33; 32],
+                public_inputs_hash: [0x44; 32],
+            },
+            AuthenticationSuiteId::ML_DSA_65_FIPS204,
+            [0x55; 32],
+        )
+    }
+
+    #[test]
+    fn exact_contract_passes() {
+        let envelope = valid_envelope();
+        let validated = validate_envelope_against_contract(
+            &envelope,
+            &EnvelopePolicy::default(),
+            &valid_contract(),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(validated.envelope(), &envelope);
+    }
+
+    #[test]
+    fn self_selected_verifier_is_rejected() {
+        let mut envelope = valid_envelope();
+        envelope.verifier_id = VerifierId([0x99; 32]);
+        assert_eq!(
+            validate_envelope_against_contract(
+                &envelope,
+                &EnvelopePolicy::default(),
+                &valid_contract(),
+                NOW,
+            ),
+            Err(EnvelopeValidationError::ContractVerifierMismatch)
+        );
+    }
+
+    #[test]
+    fn statement_relabeling_is_rejected() {
+        let mut envelope = valid_envelope();
+        envelope.statement = StatementId::try_new("XENIA", "Access", "DifferentClaim", 1).unwrap();
+        assert_eq!(
+            validate_envelope_against_contract(
+                &envelope,
+                &EnvelopePolicy::default(),
+                &valid_contract(),
+                NOW,
+            ),
+            Err(EnvelopeValidationError::ContractStatementMismatch)
+        );
+    }
+
+    #[test]
+    fn self_selected_signer_is_rejected_even_with_required_suite() {
+        let mut envelope = valid_envelope();
+        envelope.authentication[0].signer_key_id = [0x99; 32];
+        assert!(matches!(
+            validate_envelope_against_contract(
+                &envelope,
+                &EnvelopePolicy::default(),
+                &valid_contract(),
+                NOW,
+            ),
+            Err(EnvelopeValidationError::AuthenticationQuorumNotMet { .. })
+        ));
     }
 
     #[test]
