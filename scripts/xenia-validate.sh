@@ -38,6 +38,16 @@ else
   warn "python3 not found; skipping Python script syntax checks"
 fi
 
+# Archive hygiene is security-sensitive enough to keep a negative regression
+# suite in the normal validation path. It is pure shell/tar and does not need a
+# Rust toolchain, so contaminated archive acceptance is caught even on light
+# review hosts.
+if [[ -x scripts/check-source-archive-negative.sh ]]; then
+  run scripts/check-source-archive-negative.sh .
+else
+  warn "scripts/check-source-archive-negative.sh not found or not executable"
+fi
+
 if [[ -x scripts/check-xenia-policy.py ]]; then
   if command -v python3 >/dev/null 2>&1; then
     run python3 scripts/check-xenia-policy.py .

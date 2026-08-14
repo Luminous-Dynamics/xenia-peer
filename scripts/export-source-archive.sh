@@ -37,6 +37,29 @@ mkdir -p "$(dirname "$out")"
 root_abs="$(cd "$root" && pwd)"
 archive_root_name="${XENIA_ARCHIVE_ROOT_NAME:-xenia-peer}"
 
+# Refuse to silently package around live runtime secrets. The tar exclusions
+# below are defense in depth against a race or a manually-added state path;
+# this preflight is the operator-visible signal that the working tree itself
+# needs cleanup before a release artifact is produced. Agent worktrees and
+# historical/archive directories are intentionally outside this check because
+# they are excluded wholesale from the source artifact.
+secret_hits="$(
+  cd "$root_abs"
+  find . \
+    -path './.git' -prune -o \
+    -path './.claude' -prune -o \
+    -path './_archive' -prune -o \
+    -type d \( -name target -o -name dist -o -name pkg -o -name node_modules \) -prune -o \
+    -type d \( -name xenia-peer-state -o -name xenia-operator-agent-state \) -print -prune -o \
+    -type f \( -name '.env' -o -name '.env.*' -o -name '*.key' -o -name '*.pem' -o -name '*.p12' -o -name '*.pfx' -o -name '*.sqlite' -o -name '*.db' -o -name '*.ledger' \) -print
+)"
+if [[ -n "$secret_hits" ]]; then
+  echo "error: refusing source export while runtime secret/state files are present:" >&2
+  printf '%s\n' "$secret_hits" | sed 's/^/  /' >&2
+  echo "move/delete the runtime state or export from a clean checkout" >&2
+  exit 1
+fi
+
 # Use deterministic tar metadata and gzip without embedded filename/timestamp.
 # The stable top-level directory keeps archives reproducible across local clone
 # paths as long as the source tree content is identical.
@@ -67,6 +90,15 @@ tar -C "$root_abs" \
   --exclude='./*.zip' \
   --exclude='./.claude' \
   --exclude='./*/.claude' \
+  --exclude='*/xenia-peer-state/*' \
+  --exclude='*/xenia-operator-agent-state/*' \
+  --exclude='*.key' \
+  --exclude='*.pem' \
+  --exclude='*.p12' \
+  --exclude='*.pfx' \
+  --exclude='*.sqlite' \
+  --exclude='*.db' \
+  --exclude='*.ledger' \
   --exclude='./.DS_Store' \
   --exclude='./docs/release/evidence/RC1_SOURCE_ARCHIVE_CHECKSUMS.md' \
   --exclude='./docs/release/evidence/rc1-source-archive-checksums.json' \
