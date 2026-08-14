@@ -245,6 +245,12 @@ pub enum EvidenceSignatureBackendError {
     /// Signature verification failed.
     #[error("bad signature")]
     BadSignature,
+    /// The selected signature suite has no fixed-length backend parameters.
+    #[error("signature suite {suite:?} is not supported by this fixed-length backend")]
+    UnsupportedSuite {
+        /// Suite that cannot be handled by this backend.
+        suite: SignatureSuite,
+    },
 }
 
 /// ML-DSA-65 evidence-signature backend enabled by the `pqc-signatures` feature.
@@ -303,10 +309,10 @@ fn verify_ml_dsa<P: MlDsaParams>(
 ) -> Result<(), EvidenceSignatureBackendError> {
     let expected_public_key_len = suite
         .fixed_public_key_len()
-        .expect("ML-DSA key length pinned");
+        .ok_or(EvidenceSignatureBackendError::UnsupportedSuite { suite })?;
     let expected_signature_len = suite
         .fixed_signature_len()
-        .expect("ML-DSA signature length pinned");
+        .ok_or(EvidenceSignatureBackendError::UnsupportedSuite { suite })?;
 
     if public_key.len() != expected_public_key_len {
         return Err(EvidenceSignatureBackendError::BadPublicKeyLength {

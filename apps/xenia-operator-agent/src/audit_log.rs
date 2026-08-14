@@ -124,6 +124,7 @@ pub struct AgentAuditEntry {
 #[derive(Debug)]
 pub enum AuditLogError {
     Codec(bincode::Error),
+    Invariant(&'static str),
 }
 
 impl std::fmt::Display for AuditLogError {
@@ -132,6 +133,7 @@ impl std::fmt::Display for AuditLogError {
             AuditLogError::Codec(e) => {
                 write!(f, "audit log entry hash preimage failed to serialize: {e}")
             }
+            AuditLogError::Invariant(message) => write!(f, "audit log invariant failed: {message}"),
         }
     }
 }
@@ -332,7 +334,9 @@ impl AgentAuditChain {
             entry_hash,
             signature,
         });
-        Ok(self.entries.last().expect("append: entry was just pushed"))
+        self.entries
+            .last()
+            .ok_or(AuditLogError::Invariant("pushed entry is missing"))
     }
 
     /// Append a new event, persist the resulting entry list via `persist`,
@@ -350,10 +354,11 @@ impl AgentAuditChain {
             self.entries.pop();
             return Err(TransactionalAppendError::Persist(err));
         }
-        Ok(self
-            .entries
-            .last()
-            .expect("append_transactional: entry was just pushed and persist succeeded"))
+        self.entries.last().ok_or_else(|| {
+            TransactionalAppendError::Audit(AuditLogError::Invariant(
+                "persisted entry is missing after transactional append",
+            ))
+        })
     }
 }
 
