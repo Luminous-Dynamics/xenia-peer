@@ -150,6 +150,7 @@ fn validate_component(value: &str, component: &'static str) -> Result<(), Protoc
 /// This identifies the proof technology, **not** the circuit/program. Exact
 /// verifier identity is carried separately by [`VerifierId`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "u16", into = "u16")]
 pub struct ProofSystemId(u16);
 
 impl ProofSystemId {
@@ -171,8 +172,23 @@ impl ProofSystemId {
     }
 }
 
+impl TryFrom<u16> for ProofSystemId {
+    type Error = ProtocolError;
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        Self::from_wire_id(value)
+    }
+}
+
+impl From<ProofSystemId> for u16 {
+    fn from(value: ProofSystemId) -> Self {
+        value.wire_id()
+    }
+}
+
 /// Stable authentication-suite identifier. Implementations live outside this crate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "u16", into = "u16")]
 pub struct AuthenticationSuiteId(u16);
 
 impl AuthenticationSuiteId {
@@ -189,6 +205,20 @@ impl AuthenticationSuiteId {
 
     pub const fn wire_id(self) -> u16 {
         self.0
+    }
+}
+
+impl TryFrom<u16> for AuthenticationSuiteId {
+    type Error = ProtocolError;
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        Self::from_wire_id(value)
+    }
+}
+
+impl From<AuthenticationSuiteId> for u16 {
+    fn from(value: AuthenticationSuiteId) -> Self {
+        value.wire_id()
     }
 }
 
@@ -501,6 +531,37 @@ mod tests {
         assert_ne!(
             ml,
             signer_key_id(AuthenticationSuiteId::ML_DSA_65_FIPS204, &[0x43; 32]).unwrap()
+        );
+    }
+
+    #[test]
+    fn helper_derivations_have_stable_golden_vectors() {
+        let statement = StatementId::try_new("XENIA", "Access", "CapabilityPossession", 1).unwrap();
+        assert_eq!(
+            hex_lower(&public_inputs_digest(&statement, b"canonical-public-inputs").unwrap()),
+            "05828844e869d0e7c25090db611a7e8fe4a83d338da053622d21ef67afc7cc66"
+        );
+        assert_eq!(
+            hex_lower(
+                &derive_challenge_nonce(&statement, b"service-a", b"session-1", &[0xA5; 32])
+                    .unwrap()
+            ),
+            "b9eee4287767cbf3195678982fa75984356a317390d66f8c58c3d204fe532689"
+        );
+        assert_eq!(
+            hex_lower(
+                &signer_key_id(AuthenticationSuiteId::ML_DSA_65_FIPS204, &[0x42; 32]).unwrap()
+            ),
+            "c58668a376948a0a6688ae3b7457b3e5ca0f4727ffdea6c56a564d2cc202ea75"
+        );
+    }
+
+    #[test]
+    fn reserved_wire_identifiers_are_rejected_by_construction() {
+        assert_eq!(ProofSystemId::try_from(0), Err(ProtocolError::ReservedIdentifier));
+        assert_eq!(
+            AuthenticationSuiteId::try_from(0),
+            Err(ProtocolError::ReservedIdentifier)
         );
     }
 

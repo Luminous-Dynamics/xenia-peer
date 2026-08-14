@@ -78,7 +78,7 @@ impl VerificationContract {
 /// Envelope that has passed both structural policy and an exact local
 /// [`VerificationContract`]. This still does **not** mean the proof or signatures
 /// have been cryptographically verified.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ContractValidatedEnvelope<'a> {
     envelope: &'a ProofEnvelopeV3,
 }
@@ -326,8 +326,10 @@ pub fn validate_envelope_against_contract<'a>(
     }
 
     let mut trusted_entries = HashSet::new();
+    let mut seen_requirement_suites = HashSet::new();
     for requirement in &contract.authentication {
-        if requirement.suite.wire_id() == 0
+        if !seen_requirement_suites.insert(requirement.suite.wire_id())
+            || requirement.suite.wire_id() == 0
             || requirement.min_distinct_signers == 0
             || requirement.trusted_signer_key_ids.len() < requirement.min_distinct_signers
             || requirement
