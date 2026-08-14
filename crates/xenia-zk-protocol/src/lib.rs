@@ -377,7 +377,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn v3_golden_body_and_authentication_digests_are_stable() {
         let envelope = sample_envelope();
         let body = envelope.body_digest().unwrap();
@@ -405,6 +404,7 @@ mod tests {
         out
     }
 
+    #[test]
     fn authentication_digest_binds_suite_and_signer() {
         let envelope = sample_envelope();
         let key_a = [0xA1; 32];

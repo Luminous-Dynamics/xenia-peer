@@ -17,6 +17,24 @@ def require(condition: bool, message: str) -> None:
         failures.append(message)
 
 
+def reject_duplicate_test_attributes(path: pathlib.Path) -> None:
+    if not path.is_file():
+        return
+    lines = path.read_text(encoding="utf-8").splitlines()
+    previous_test = False
+    for lineno, line in enumerate(lines, 1):
+        is_test = line.strip() == "#[test]"
+        if is_test and previous_test:
+            failures.append(f"{path.relative_to(root)}:{lineno}: duplicate adjacent #[test] attributes")
+        previous_test = is_test
+
+
+def require_test(source: str, name: str) -> None:
+    import re
+    pattern = re.compile(rf"(?m)^\s*#\[test\]\s*\n\s*fn\s+{re.escape(name)}\s*\(")
+    require(bool(pattern.search(source)), f"protocol regression test is not executable: {name}")
+
+
 manifest_path = crate / "Cargo.toml"
 source_path = crate / "src" / "lib.rs"
 policy_path = crate / "src" / "policy.rs"
@@ -64,6 +82,9 @@ if source_path.is_file():
         require(fragment in source, f"V3 protocol invariant missing: {fragment}")
 
     # The generic protocol core must not absorb legacy/domain ownership.
+    require_test(source, "v3_golden_body_and_authentication_digests_are_stable")
+    require_test(source, "authentication_digest_binds_suite_and_signer")
+
     for forbidden in (
         "MYCELIX:AuthenticatedProof",
         "ZTML:",
@@ -102,6 +123,9 @@ if legacy_manifest.is_file():
     with legacy_manifest.open("rb") as handle:
         legacy = tomllib.load(handle)
     require("xenia-zk-protocol" not in legacy.get("dependencies", {}), "legacy adapter must not create a V3 dependency cycle")
+
+for rust_source in crate.rglob("*.rs"):
+    reject_duplicate_test_attributes(rust_source)
 
 if failures:
     print("ZK protocol boundary check FAILED", file=sys.stderr)
