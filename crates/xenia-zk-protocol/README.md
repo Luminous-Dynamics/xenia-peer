@@ -24,8 +24,9 @@ auto-detects or falls back to v2.
 For challenge-response statements, the canonical public-input digest binds the
 verifier challenge and backend adapters receive that challenge as an explicit
 public input. A backend whose circuit/program does not constrain the challenge
-is not suitable for a freshness-sensitive statement. Replay-tolerant statements
-must opt into the explicitly named `static_public_inputs_digest` helper instead.
+is not suitable for V3 verification. V3 intentionally provides no challenge-free
+public-input digest helper; noninteractive use cases still bind an explicit
+context nonce into the verified relation.
 
 Application-specific metadata uses typed `ExtensionClaim`s. Xenia hashes claim
 values with their canonical claim identity, sorts the claim set before hashing,

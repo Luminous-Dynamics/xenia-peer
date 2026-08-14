@@ -32,11 +32,6 @@ pub const PROOF_ENVELOPE_AUTH_DOMAIN: &[u8] = b"XENIA:ProofEnvelope:Auth:v3";
 pub const VERIFIER_ID_DOMAIN: &[u8] = b"XENIA:ProofVerifierId:v1";
 /// Domain separator used when deriving a parameter-set identity from bytes.
 pub const PARAMETER_SET_ID_DOMAIN: &[u8] = b"XENIA:ProofParameterSetId:v1";
-/// Domain separator for legacy/static canonical public-input digests.
-///
-/// New challenge-response protocols should use [`public_inputs_digest`], which
-/// additionally binds the verifier-issued challenge carried in the envelope.
-pub const STATIC_PUBLIC_INPUTS_DOMAIN: &[u8] = b"XENIA:ProofPublicInputs:v1";
 /// Domain separator for challenge-bound canonical public-input digests.
 pub const PUBLIC_INPUTS_DOMAIN: &[u8] = b"XENIA:ProofPublicInputs:ChallengeBound:v1";
 /// Domain separator for verifier-issued challenge bindings carried in `nonce`.
@@ -336,8 +331,7 @@ pub struct ProofEnvelopeV3 {
     pub nonce: [u8; 32],
     /// Digest of canonical statement public inputs and the verifier challenge.
     /// New challenge-response protocols should derive this with
-    /// [`public_inputs_digest`]. Statements that intentionally permit replay
-    /// must opt into [`static_public_inputs_digest`] explicitly.
+    /// [`public_inputs_digest`]. V3 deliberately has no challenge-free helper.
     pub public_inputs_hash: [u8; 32],
     pub proof: Vec<u8>,
     /// Digest of typed authenticated extension claims. Use [`empty_extensions_digest`]
@@ -435,23 +429,6 @@ pub fn public_inputs_digest(
     hasher.update(PUBLIC_INPUTS_DOMAIN);
     append_statement_id(&mut hasher, statement);
     hasher.update(challenge_nonce);
-    append_hash_len_prefixed(&mut hasher, canonical_public_inputs);
-    Ok(hasher.finalize().into())
-}
-
-/// Canonical digest for a statement whose proof is intentionally independent of
-/// verifier challenge/freshness.
-///
-/// This helper is deliberately named `static_*` to make replay tolerance visible
-/// at call sites. Do not use it for challenge-response or possession proofs.
-pub fn static_public_inputs_digest(
-    statement: &StatementId,
-    canonical_public_inputs: &[u8],
-) -> Result<[u8; 32], ProtocolError> {
-    statement.validate()?;
-    let mut hasher = Sha256::new();
-    hasher.update(STATIC_PUBLIC_INPUTS_DOMAIN);
-    append_statement_id(&mut hasher, statement);
     append_hash_len_prefixed(&mut hasher, canonical_public_inputs);
     Ok(hasher.finalize().into())
 }
@@ -652,15 +629,6 @@ mod tests {
     }
 
     #[test]
-    fn static_public_inputs_are_an_explicit_replay_tolerant_opt_in() {
-        let statement = StatementId::try_new("XENIA", "Archive", "HistoricalAttestation", 1).unwrap();
-        assert_eq!(
-            static_public_inputs_digest(&statement, b"canonical-public-inputs").unwrap(),
-            static_public_inputs_digest(&statement, b"canonical-public-inputs").unwrap()
-        );
-    }
-
-    #[test]
     fn challenge_nonce_binds_audience_session_and_statement() {
         let statement = StatementId::try_new("XENIA", "Access", "CapabilityPossession", 1).unwrap();
         let entropy = [0xA5; 32];
@@ -730,10 +698,6 @@ mod tests {
                     .unwrap()
             ),
             "743950938990948d062f90b83e986d2c27f45904fe6528bf08e09e463498733d"
-        );
-        assert_eq!(
-            hex_lower(&static_public_inputs_digest(&statement, b"canonical-public-inputs").unwrap()),
-            "05828844e869d0e7c25090db611a7e8fe4a83d338da053622d21ef67afc7cc66"
         );
         assert_eq!(
             hex_lower(
