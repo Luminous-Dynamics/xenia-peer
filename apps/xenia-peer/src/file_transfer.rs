@@ -16,7 +16,9 @@ use tokio::sync::Mutex as AsyncMutex;
 use tracing::{info, warn};
 
 use xenia_peer_core::transport::SendEnvelope;
-use xenia_peer_core::{FILE_TRANSFER_CHUNK_SIZE, FileTransferMessage, LaneSession};
+use xenia_peer_core::{
+    FILE_TRANSFER_CHUNK_SIZE, FileTransferMessage, LaneSession, persist_received_file,
+};
 
 use crate::AnySendHalf;
 use crate::m1_runtime::M1RuntimeSession;
@@ -263,20 +265,20 @@ pub(crate) async fn handle_envelope(
                 return Ok(());
             };
             let actual_hash = *blake3::hash(&transfer.buffer).as_bytes();
-            let ok = actual_hash == transfer.expected_hash;
-            if ok {
+            let hash_ok = actual_hash == transfer.expected_hash;
+            let mut delivery_ok = false;
+            if hash_ok {
                 if let Err(err) = m1_runtime.lock().await.allow_file_receive_flow() {
                     warn!(error = %err, "completed file transfer rejected by M1 consent gate; not written");
-                    return Ok(());
-                }
-                if let Some(recv_file_dir) = config.recv_file_dir {
+                } else if let Some(recv_file_dir) = config.recv_file_dir {
                     let dest = recv_file_dir.join(&transfer.name);
-                    match std::fs::write(&dest, &transfer.buffer) {
+                    match persist_received_file(&dest, &transfer.buffer) {
                         Ok(()) => {
-                            info!(transfer_id, path = %dest.display(), bytes = transfer.buffer.len(), "file transfer verified and written")
+                            delivery_ok = true;
+                            info!(transfer_id, path = %dest.display(), bytes = transfer.buffer.len(), "file transfer verified and persisted")
                         }
                         Err(err) => {
-                            warn!(transfer_id, error = %err, "verified file failed to write to disk")
+                            warn!(transfer_id, error = %err, "verified file was not persisted")
                         }
                     }
                 } else {
@@ -291,7 +293,10 @@ pub(crate) async fn handle_envelope(
                     "file transfer failed BLAKE3 verification, not written"
                 );
             }
-            let verified = FileTransferMessage::Verified { transfer_id, ok };
+            let verified = FileTransferMessage::Verified {
+                transfer_id,
+                ok: delivery_ok,
+            };
             let envelope = session
                 .lock()
                 .await

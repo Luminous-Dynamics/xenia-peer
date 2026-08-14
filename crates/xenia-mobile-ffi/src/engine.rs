@@ -35,6 +35,7 @@ use xenia_peer_core::transport::{RecvEnvelope, SendEnvelope, TcpTransport};
 use xenia_peer_core::{
     ClipboardContent, FILE_TRANSFER_CHUNK_SIZE, FileTransferMessage,
     PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST, PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER, RawClipboard,
+    persist_received_file,
 };
 use xenia_peer_core::{
     HandshakeManager, LaneSession, RekeyPolicy, SessionEpochState, derive_negotiated_context_key,
@@ -1091,15 +1092,15 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
                 match recv_dir {
                     Some(dir) => {
                         let dest = dir.join(&transfer.name);
-                        match std::fs::write(&dest, &transfer.buffer) {
+                        match persist_received_file(&dest, &transfer.buffer) {
                             Ok(()) => info!(
                                 transfer_id,
                                 path = %dest.display(),
                                 bytes = transfer.buffer.len(),
-                                "file transfer verified and written"
+                                "file transfer verified and persisted"
                             ),
                             Err(err) => {
-                                warn!(transfer_id, error = %err, "verified file failed to write to disk");
+                                warn!(transfer_id, error = %err, "verified file was not persisted");
                                 local_ok = false;
                                 detail = err.to_string();
                             }
@@ -1134,16 +1135,15 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
                 },
             )
             .await;
-            // The wire reply's `ok` reflects only the hash comparison
-            // (matching `xenia-viewer`'s exact protocol behavior) even
-            // though the local `Done` event above also folds in
-            // whether the disk write itself succeeded.
+            // `Verified.ok` is a delivery receipt, not merely an integrity
+            // bit: the sender may report success only after the receiver both
+            // verified the hash and persisted the file locally.
             if let Err(err) = seal_and_send(
                 session,
                 send_half,
                 FileTransferMessage::Verified {
                     transfer_id,
-                    ok: hash_ok,
+                    ok: local_ok,
                 },
             )
             .await

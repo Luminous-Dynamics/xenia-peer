@@ -279,12 +279,14 @@ pub enum FileTransferMessage {
         /// Matches the `Offer`'s `transfer_id`.
         transfer_id: u64,
     },
-    /// Receiver reports whether the reassembled file's BLAKE3 hash matched
-    /// the `Offer`'s.
+    /// Receiver reports whether the reassembled file passed integrity
+    /// verification and was successfully persisted at the receive destination.
     Verified {
         /// Matches the `Offer`'s `transfer_id`.
         transfer_id: u64,
-        /// Whether the reassembled file's hash matched.
+        /// `true` only when the whole-file hash matched and local persistence
+        /// completed successfully; `false` means the sender must not report
+        /// durable delivery success.
         ok: bool,
     },
 }

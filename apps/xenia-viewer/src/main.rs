@@ -45,6 +45,7 @@ use xenia_peer_core::transport::{
 use xenia_peer_core::{
     AudioCodec, AudioJitterBuffer, ClipboardContent, HandshakeManager, LaneSession,
     RawPcmAudioCodec, RekeyPolicy, SessionEpochState, derive_negotiated_context_key,
+    persist_received_file,
 };
 use xenia_transport_quic::{
     QuicRecvHalf, QuicSendHalf, QuicTransport, bind_xenia_endpoint, decode_endpoint_addr,
@@ -932,16 +933,18 @@ async fn handle_file_transfer_message(
                 return Ok(());
             };
             let actual_hash = *blake3::hash(&transfer.buffer).as_bytes();
-            let ok = actual_hash == transfer.expected_hash;
-            if ok {
+            let hash_ok = actual_hash == transfer.expected_hash;
+            let mut delivery_ok = false;
+            if hash_ok {
                 if let Some(recv_file_dir) = recv_file_dir {
                     let dest = recv_file_dir.join(&transfer.name);
-                    match std::fs::write(&dest, &transfer.buffer) {
+                    match persist_received_file(&dest, &transfer.buffer) {
                         Ok(()) => {
-                            info!(transfer_id, path = %dest.display(), bytes = transfer.buffer.len(), "file transfer verified and written")
+                            delivery_ok = true;
+                            info!(transfer_id, path = %dest.display(), bytes = transfer.buffer.len(), "file transfer verified and persisted")
                         }
                         Err(err) => {
-                            warn!(transfer_id, error = %err, "verified file failed to write to disk")
+                            warn!(transfer_id, error = %err, "verified file was not persisted")
                         }
                     }
                 } else {
@@ -956,7 +959,10 @@ async fn handle_file_transfer_message(
                     "file transfer failed BLAKE3 verification, not written"
                 );
             }
-            let verified = xenia_peer_core::FileTransferMessage::Verified { transfer_id, ok };
+            let verified = xenia_peer_core::FileTransferMessage::Verified {
+                transfer_id,
+                ok: delivery_ok,
+            };
             let envelope = session
                 .lock()
                 .await
