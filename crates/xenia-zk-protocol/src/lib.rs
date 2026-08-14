@@ -15,6 +15,8 @@
 //! - Legacy Mycelix v2 parsing belongs in a separate compatibility adapter. This
 //!   crate never auto-detects or silently falls back to a legacy protocol.
 
+pub mod policy;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -47,8 +49,6 @@ pub enum ProtocolError {
     InvalidStatementVersion,
     #[error("identifier value 0 is reserved")]
     ReservedIdentifier,
-    #[error("variable-length transcript component exceeds u32 framing")]
-    TranscriptComponentTooLarge,
 }
 
 /// Backend-neutral statement identity.
@@ -193,7 +193,7 @@ impl VerifierId {
         Self(hasher.finalize().into())
     }
 
-    pub const fn is_zero(self) -> bool {
+    pub fn is_zero(self) -> bool {
         self.0 == [0; 32]
     }
 }
@@ -210,7 +210,7 @@ impl ParameterSetId {
         Self(hasher.finalize().into())
     }
 
-    pub const fn is_zero(self) -> bool {
+    pub fn is_zero(self) -> bool {
         self.0 == [0; 32]
     }
 }
@@ -320,10 +320,7 @@ pub fn empty_extensions_digest() -> [u8; 32] {
 }
 
 fn append_hash_len_prefixed(hasher: &mut Sha256, value: &[u8]) {
-    // SHA-256's input API cannot fail, so values larger than u32::MAX receive a
-    // sentinel length. Public constructors/policies should reject such values;
-    // this helper never truncates the bytes themselves.
-    let len = u32::try_from(value.len()).unwrap_or(u32::MAX);
+    let len = u64::try_from(value.len()).unwrap_or(u64::MAX);
     hasher.update(len.to_le_bytes());
     hasher.update(value);
 }
