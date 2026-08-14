@@ -270,10 +270,11 @@
 
         formatter = pkgs.nixpkgs-fmt;
 
-        # Nix-hermetic builds of the two host binaries, default features
-        # only (no h264/audio-capture/scap/xdg-portal/uinput -- matches
-        # what the existing GitHub Actions `network-chaos`/e2e jobs already
-        # exercise via plain `cargo build`). Exist primarily so nixosTest
+        # Nix-hermetic builds of the host binaries, default features only
+        # (no h264/audio-capture/scap/xdg-portal/uinput). The public
+        # `packages.xenia-peer` intentionally excludes `preprod-fixtures`;
+        # the VM-only variant below enables it for scripted consent setup.
+        # These packages exist primarily so nixosTest
         # VMs (see checks.network-vm-nat below) have something real to
         # install as a systemPackage -- Nix VMs are hermetic and can't see
         # a host `target/release` the way a bare CI runner can. `doCheck`
@@ -305,16 +306,26 @@
           };
           nativeBuildInputs = commonNativeBuildInputs ++ [ pkgs.makeWrapper ];
           buildInputs = mediaAndPlatformInputs;
-          # preprod-fixtures gates `--m1-preprod-auto-consent`, needed so a
-          # scripted VM test can complete a session without a human
-          # clicking through the real consent UI.
-          cargoBuildFlags = [ "--package" "xenia-peer" "--features" "preprod-fixtures" ];
+          # Production-facing package: do not compile pre-production consent
+          # bypass fixtures into the ordinary `.#xenia-peer` artifact.
+          cargoBuildFlags = [ "--package" "xenia-peer" ];
           doCheck = false;
           postFixup = ''
             wrapProgram $out/bin/xenia-peer --prefix LD_LIBRARY_PATH : "${runtimeLibraryPath}"
           '';
-          meta.description = "Xenia daemon binary, Nix-packaged (default features + preprod-fixtures). Built for nixosTest Tier 1 VM scenarios.";
+          meta.description = "Xenia daemon binary, Nix-packaged with production-facing default features only.";
         };
+
+        # Test-only package. `preprod-fixtures` gates
+        # `--m1-preprod-auto-consent`, which scripted VM tests need because
+        # there is no human available to approve the real consent ceremony.
+        # Keeping this as a separately named output prevents a normal
+        # `nix build .#xenia-peer` from compiling the bypass capability in.
+        packages.xenia-peer-preprod = packages.xenia-peer.overrideAttrs (_old: {
+          pname = "xenia-peer-preprod";
+          cargoBuildFlags = [ "--package" "xenia-peer" "--features" "preprod-fixtures" ];
+          meta.description = "Xenia daemon test package with pre-production consent fixtures; for nixosTest only.";
+        });
 
         packages.xenia-viewer = pkgs.rustPlatform.buildRustPackage {
           pname = "xenia-viewer";
@@ -420,7 +431,7 @@
                 { address = "192.168.1.1"; prefixLength = 24; }
               ];
               networking.firewall.allowedTCPPorts = [ 17890 ];
-              environment.systemPackages = [ self.packages.${system}.xenia-peer ];
+              environment.systemPackages = [ self.packages.${system}.xenia-peer-preprod ];
             };
             viewerNode = { ... }: {
               virtualisation.vlans = [ 1 ];
