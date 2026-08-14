@@ -446,10 +446,10 @@ async fn auth_and_cors_middleware(
     // entirely -- fixed here.)
     let now = unix_now_secs();
     let retry_after_secs = {
-        let mut limiter = state
-            .rate_limiter
-            .lock()
-            .expect("rate-limiter mutex poisoned");
+        let mut limiter = match lock_agent_state(&state.rate_limiter, "rate limiter") {
+            Ok(limiter) => limiter,
+            Err(err) => return cors_headers(origin, err.into_response()),
+        };
         if limiter.allow(now) {
             None
         } else {
@@ -588,7 +588,9 @@ struct IdentityResponse {
     enrollment_record_json: String,
 }
 
-async fn get_identity(State(state): State<Arc<AgentState>>) -> Json<IdentityResponse> {
+async fn get_identity(
+    State(state): State<Arc<AgentState>>,
+) -> Result<Json<IdentityResponse>, AgentHttpError> {
     let ml_dsa_87_seed = xenia_wire::handshake_highsec::derive_ml_dsa_87_seed_from_ed25519_secret(
         &state.ed25519_secret,
     );
@@ -596,7 +598,7 @@ async fn get_identity(State(state): State<Arc<AgentState>>) -> Json<IdentityResp
         &state.ed25519_secret[..],
         &ml_dsa_87_seed,
     )
-    .expect("32-byte seeds always produce a valid high-security identity");
+    .map_err(|err| internal_error(format!("failed to derive high-security identity: {err}")))?;
 
     let record = OperatorEnrollmentRecord {
         operator_id: "your-operator-id".to_string(),
@@ -606,13 +608,13 @@ async fn get_identity(State(state): State<Arc<AgentState>>) -> Json<IdentityResp
         role: OperatorRole::Viewer,
     };
 
-    Json(IdentityResponse {
+    Ok(Json(IdentityResponse {
         ed25519_pubkey_hex: hex::encode(state.manager.identity_public_key_bytes()),
         ml_dsa_pubkey_hex: hex::encode(state.manager.ml_dsa_public_key_bytes()),
         ml_dsa_87_pubkey_hex: hex::encode(highsec.ml_dsa_public_key_bytes()),
         fingerprint_hex: hex::encode(state.manager.identity_fingerprint()),
         enrollment_record_json: record.to_json_string(),
-    })
+    }))
 }
 
 /// Response body for `GET /v1/health`. Deliberately minimal: a liveness
@@ -660,14 +662,16 @@ struct AgentAuditExportDto {
 /// the same `X-Agent-Session` requirement `auth_and_cors_middleware`
 /// already applies to every route but `/v1/pair` -- no separate
 /// authorization check needed here.
-async fn get_audit_log(State(state): State<Arc<AgentState>>) -> Json<AgentAuditExportDto> {
-    let chain = state.audit_log.lock().expect("audit-log mutex poisoned");
+async fn get_audit_log(
+    State(state): State<Arc<AgentState>>,
+) -> Result<Json<AgentAuditExportDto>, AgentHttpError> {
+    let chain = lock_agent_state(&state.audit_log, "audit log")?;
     let checkpoint = chain.sign_checkpoint(unix_now_secs());
     let entries = chain.entries().to_vec();
-    Json(AgentAuditExportDto {
+    Ok(Json(AgentAuditExportDto {
         entries,
         checkpoint,
-    })
+    }))
 }
 
 /// `POST /v1/sign/challenge` -- sign the daemon's `/auth/challenge` nonce
@@ -792,26 +796,19 @@ async fn sign_consent_action(
         let scope_for_prompt = req.scope.clone();
         let daemon_endpoint = normalize_daemon_endpoint(&req.common.daemon_endpoint);
         let daemon_fingerprint_hex = hex::encode(identity.fingerprint);
-        let confirmed = tokio::task::spawn_blocking(move || {
-            confirm_state
-                .host_trust
-                .lock()
-                .expect("host-trust mutex poisoned")
-                .confirm_action(
-                    "Approve broad consent grant?",
-                    &[
-                        ("scope", scope_for_prompt),
-                        ("daemon endpoint", daemon_endpoint),
-                        ("daemon fingerprint", daemon_fingerprint_hex),
-                    ],
-                )
+        let confirmed = tokio::task::spawn_blocking(move || -> Result<bool, AgentHttpError> {
+            let mut trust = lock_agent_state(&confirm_state.host_trust, "host trust")?;
+            map_host_trust_result(trust.confirm_action(
+                "Approve broad consent grant?",
+                &[
+                    ("scope", scope_for_prompt),
+                    ("daemon endpoint", daemon_endpoint),
+                    ("daemon fingerprint", daemon_fingerprint_hex),
+                ],
+            ))
         })
         .await
-        .map_err(|_| internal_error("consent-action confirmation task panicked"))?
-        .map_err(|e| {
-            let agent_err = e.to_agent_error();
-            (status_for(agent_err.code), Json(agent_err))
-        })?;
+        .map_err(|_| internal_error("consent-action confirmation task panicked"))??;
         if !confirmed {
             let agent_err = AgentErrorResponse {
                 code: AgentErrorCode::ConfirmationDeclined,
@@ -885,27 +882,20 @@ async fn sign_revoke(
     let daemon_endpoint = normalize_daemon_endpoint(&req.common.daemon_endpoint);
     let daemon_fingerprint_hex = hex::encode(identity.fingerprint);
     let suite = req.common.suite.clone();
-    let confirmed = tokio::task::spawn_blocking(move || {
-        confirm_state
-            .host_trust
-            .lock()
-            .expect("host-trust mutex poisoned")
-            .confirm_action(
-                "Revoke operator enrollment?",
-                &[
-                    ("target operator id", target),
-                    ("daemon endpoint", daemon_endpoint),
-                    ("daemon fingerprint", daemon_fingerprint_hex),
-                    ("suite", suite),
-                ],
-            )
+    let confirmed = tokio::task::spawn_blocking(move || -> Result<bool, AgentHttpError> {
+        let mut trust = lock_agent_state(&confirm_state.host_trust, "host trust")?;
+        map_host_trust_result(trust.confirm_action(
+            "Revoke operator enrollment?",
+            &[
+                ("target operator id", target),
+                ("daemon endpoint", daemon_endpoint),
+                ("daemon fingerprint", daemon_fingerprint_hex),
+                ("suite", suite),
+            ],
+        ))
     })
     .await
-    .map_err(|_| internal_error("revoke confirmation task panicked"))?
-    .map_err(|e| {
-        let agent_err = e.to_agent_error();
-        (status_for(agent_err.code), Json(agent_err))
-    })?;
+    .map_err(|_| internal_error("revoke confirmation task panicked"))??;
     if !confirmed {
         let agent_err = AgentErrorResponse {
             code: AgentErrorCode::ConfirmationDeclined,
@@ -979,28 +969,21 @@ async fn sign_replace_key(
     let daemon_fingerprint_hex = hex::encode(identity.fingerprint);
     let suite = req.common.suite.clone();
     let new_ed25519_pubkey_hex = req.new_ed25519_pubkey_hex.clone();
-    let confirmed = tokio::task::spawn_blocking(move || {
-        confirm_state
-            .host_trust
-            .lock()
-            .expect("host-trust mutex poisoned")
-            .confirm_action(
-                "Replace operator enrollment key?",
-                &[
-                    ("target operator id", target),
-                    ("new Ed25519 public key", new_ed25519_pubkey_hex),
-                    ("daemon endpoint", daemon_endpoint),
-                    ("daemon fingerprint", daemon_fingerprint_hex),
-                    ("suite", suite),
-                ],
-            )
+    let confirmed = tokio::task::spawn_blocking(move || -> Result<bool, AgentHttpError> {
+        let mut trust = lock_agent_state(&confirm_state.host_trust, "host trust")?;
+        map_host_trust_result(trust.confirm_action(
+            "Replace operator enrollment key?",
+            &[
+                ("target operator id", target),
+                ("new Ed25519 public key", new_ed25519_pubkey_hex),
+                ("daemon endpoint", daemon_endpoint),
+                ("daemon fingerprint", daemon_fingerprint_hex),
+                ("suite", suite),
+            ],
+        ))
     })
     .await
-    .map_err(|_| internal_error("key-replacement confirmation task panicked"))?
-    .map_err(|e| {
-        let agent_err = e.to_agent_error();
-        (status_for(agent_err.code), Json(agent_err))
-    })?;
+    .map_err(|_| internal_error("key-replacement confirmation task panicked"))??;
     if !confirmed {
         let agent_err = AgentErrorResponse {
             code: AgentErrorCode::ConfirmationDeclined,
@@ -1103,10 +1086,7 @@ async fn handshake_begin(
 
     let daemon_endpoint = normalize_daemon_endpoint(&req.common.daemon_endpoint);
     let handshake_id = {
-        let mut hs = state
-            .handshake_state
-            .lock()
-            .expect("handshake-state mutex poisoned");
+        let mut hs = lock_agent_state(&state.handshake_state, "handshake state")?;
         hs.purge_expired();
         hs.begin(&origin, pending, daemon_endpoint.clone())
             .map_err(|e| bad_request(e.message()))?
@@ -1155,10 +1135,7 @@ async fn handshake_finish(
         .ok_or_else(|| bad_request("host_finalize_hex must be valid hex"))?;
 
     let taken = {
-        let mut hs = state
-            .handshake_state
-            .lock()
-            .expect("handshake-state mutex poisoned");
+        let mut hs = lock_agent_state(&state.handshake_state, "handshake state")?;
         hs.take(&handshake_id, &origin)
             .map_err(|e| bad_request(e.not_found_message()))?
     };
@@ -1318,19 +1295,14 @@ async fn check_host_trust_fingerprint(
     let host_alias_owned = host_alias.to_string();
     let suite_owned = suite.to_string();
     let check_state = state.clone();
-    let outcome = tokio::task::spawn_blocking(move || {
-        check_state
-            .host_trust
-            .lock()
-            .expect("host-trust mutex poisoned")
-            .check(&host_alias_owned, &suite_owned, fingerprint)
-    })
+    let outcome = tokio::task::spawn_blocking(
+        move || -> Result<host_trust::PinOutcome, AgentHttpError> {
+            let mut trust = lock_agent_state(&check_state.host_trust, "host trust")?;
+            map_host_trust_result(trust.check(&host_alias_owned, &suite_owned, fingerprint))
+        },
+    )
     .await
-    .map_err(|_| internal_error("host-trust check task panicked"))?
-    .map_err(|e| {
-        let agent_err = e.to_agent_error();
-        (status_for(agent_err.code), Json(agent_err))
-    })?;
+    .map_err(|_| internal_error("host-trust check task panicked"))??;
 
     // First-use and rotation are trust *decisions* worth a durable
     // record; `Matched` is the steady-state case and would otherwise
@@ -1376,12 +1348,9 @@ async fn check_host_trust_fingerprint(
         let rollback_state = state.clone();
         let host_alias_owned = host_alias.to_string();
         let suite_owned = suite.to_string();
-        let _ = tokio::task::spawn_blocking(move || {
-            rollback_state
-                .host_trust
-                .lock()
-                .expect("host-trust mutex poisoned")
-                .forget(&host_alias_owned, &suite_owned)
+        let _ = tokio::task::spawn_blocking(move || -> Result<(), AgentHttpError> {
+            let mut trust = lock_agent_state(&rollback_state.host_trust, "host trust")?;
+            map_host_trust_result(trust.forget(&host_alias_owned, &suite_owned))
         })
         .await;
         return Err(err);
@@ -1410,6 +1379,29 @@ fn internal_error(message: impl Into<String>) -> (StatusCode, Json<AgentErrorRes
     )
 }
 
+type AgentHttpError = (StatusCode, Json<AgentErrorResponse>);
+
+/// Acquire process-local security state without turning a poisoned mutex into
+/// a process abort. Poison means a previous holder panicked while mutating the
+/// state, so privileged operations fail closed with a typed internal error.
+fn lock_agent_state<'a, T>(
+    mutex: &'a StdMutex<T>,
+    name: &'static str,
+) -> Result<std::sync::MutexGuard<'a, T>, AgentHttpError> {
+    mutex
+        .lock()
+        .map_err(|_| internal_error(format!("{name} state is unavailable after a panic")))
+}
+
+fn map_host_trust_result<T>(
+    result: Result<T, host_trust::HostTrustError>,
+) -> Result<T, AgentHttpError> {
+    result.map_err(|err| {
+        let agent_err = err.to_agent_error();
+        (status_for(agent_err.code), Json(agent_err))
+    })
+}
+
 /// Durably append `event` to this agent's audit trail before the caller's
 /// action is considered complete -- fails closed, matching the daemon's
 /// own consent-ledger discipline (item 9: "if persistence fails, the
@@ -1424,20 +1416,17 @@ async fn record_audit_event(
 ) -> Result<(), (StatusCode, Json<AgentErrorResponse>)> {
     let event_name = event.stable_name();
     let task_state = state.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut chain = task_state
-            .audit_log
-            .lock()
-            .expect("audit-log mutex poisoned");
+    tokio::task::spawn_blocking(move || -> Result<(), AgentHttpError> {
+        let mut chain = lock_agent_state(&task_state.audit_log, "audit log")?;
         chain
             .append_transactional(event, |entries| {
                 audit_log::persist(&task_state.audit_log_path, entries)
             })
             .map(|_entry| ())
+            .map_err(|err| internal_error(format!("failed to durably record audit event: {err}")))
     })
     .await
-    .map_err(|_| internal_error("audit log append task panicked"))?
-    .map_err(|e| internal_error(format!("failed to durably record audit event: {e}")))?;
+    .map_err(|_| internal_error("audit log append task panicked"))??;
     tracing::info!(event = event_name, "audit event recorded");
     Ok(())
 }
