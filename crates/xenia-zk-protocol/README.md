@@ -10,8 +10,8 @@ to make cryptographic confusion difficult by assigning explicit identities to:
 - the proof system;
 - the exact verifier program/AIR/image;
 - the parameter set;
-- the public-input digest;
-- the nonce and timestamp;
+- the challenge-bound public-input digest;
+- the verifier challenge and timestamp;
 - authenticated extension claims; and
 - each authentication suite + signer key.
 
@@ -20,6 +20,12 @@ to make cryptographic confusion difficult by assigning explicit identities to:
 New proofs use `XENIA:ProofEnvelope:Body:v3`. Legacy Mycelix v2 envelopes retain
 their historical transcript bytes in a separate compatibility adapter. V3 never
 auto-detects or falls back to v2.
+
+For challenge-response statements, the canonical public-input digest binds the
+verifier challenge and backend adapters receive that challenge as an explicit
+public input. A backend whose circuit/program does not constrain the challenge
+is not suitable for a freshness-sensitive statement. Replay-tolerant statements
+must opt into the explicitly named `static_public_inputs_digest` helper instead.
 
 ## Ownership rule
 

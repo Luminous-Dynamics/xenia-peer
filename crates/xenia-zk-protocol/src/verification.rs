@@ -17,6 +17,19 @@ use crate::{
     },
 };
 
+/// Public values that a challenge-response verifier must bind into the proof
+/// relation.
+///
+/// The envelope digest binds these values together, but that alone is not
+/// sufficient: the backend verifier must also verify a circuit/program whose
+/// public-input relation includes `challenge_nonce`. Otherwise an old proof can
+/// be re-enveloped under a fresh challenge by an authenticated holder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChallengeBoundPublicInputs<'a> {
+    pub challenge_nonce: &'a [u8; 32],
+    pub canonical_application_inputs: &'a [u8],
+}
+
 /// Backend adapter for one exact statement verifier/program and parameter set.
 ///
 /// Implementations should be narrow: one adapter instance identifies exactly the
@@ -27,8 +40,10 @@ pub trait ProofBackendVerifier {
     fn parameter_set_id(&self) -> ParameterSetId;
 
     /// Verify backend-specific proof bytes against the statement's canonical
-    /// public-input bytes. Return `false` for any malformed or invalid proof.
-    fn verify(&self, proof: &[u8], canonical_public_inputs: &[u8]) -> bool;
+    /// application inputs **and** verifier-issued challenge. Return `false` for
+    /// malformed/invalid proofs or when the verifier program does not bind the
+    /// supplied challenge as public input.
+    fn verify(&self, proof: &[u8], public_inputs: ChallengeBoundPublicInputs<'_>) -> bool;
 }
 
 /// Signature/authentication adapter for one exact suite and signer key.
@@ -100,7 +115,11 @@ pub fn verify_backend_proof<'a>(
     backend: &dyn ProofBackendVerifier,
 ) -> Result<ProofVerifiedEnvelope<'a>, CryptographicVerificationError> {
     let envelope = validated.envelope();
-    let digest = public_inputs_digest(&envelope.statement, canonical_public_inputs)
+    let digest = public_inputs_digest(
+        &envelope.statement,
+        &envelope.nonce,
+        canonical_public_inputs,
+    )
         .map_err(|_| CryptographicVerificationError::PublicInputsMismatch)?;
     if digest != envelope.public_inputs_hash {
         return Err(CryptographicVerificationError::PublicInputsMismatch);
@@ -114,7 +133,13 @@ pub fn verify_backend_proof<'a>(
     if backend.parameter_set_id() != envelope.parameter_set_id {
         return Err(CryptographicVerificationError::BackendParameterSetMismatch);
     }
-    if !backend.verify(&envelope.proof, canonical_public_inputs) {
+    if !backend.verify(
+        &envelope.proof,
+        ChallengeBoundPublicInputs {
+            challenge_nonce: &envelope.nonce,
+            canonical_application_inputs: canonical_public_inputs,
+        },
+    ) {
         return Err(CryptographicVerificationError::ProofRejected);
     }
 
@@ -210,8 +235,11 @@ mod tests {
             ParameterSetId([0x22; 32])
         }
 
-        fn verify(&self, proof: &[u8], public_inputs: &[u8]) -> bool {
-            self.accept && proof == [1, 2, 3] && public_inputs == PUBLIC_INPUTS
+        fn verify(&self, proof: &[u8], public_inputs: ChallengeBoundPublicInputs<'_>) -> bool {
+            self.accept
+                && proof == [1, 2, 3]
+                && public_inputs.challenge_nonce == &[0x33; 32]
+                && public_inputs.canonical_application_inputs == PUBLIC_INPUTS
         }
     }
 
@@ -236,7 +264,8 @@ mod tests {
 
     fn fixture() -> (ProofEnvelopeV3, VerificationContract) {
         let statement = StatementId::try_new("XENIA", "Access", "CapabilityPossession", 1).unwrap();
-        let public_inputs_hash = public_inputs_digest(&statement, PUBLIC_INPUTS).unwrap();
+        let public_inputs_hash =
+            public_inputs_digest(&statement, &[0x33; 32], PUBLIC_INPUTS).unwrap();
         let mut envelope = ProofEnvelopeV3::new_unsigned(
             statement.clone(),
             ProofSystemId::MIDEN,
@@ -309,6 +338,32 @@ mod tests {
         assert_eq!(
             verify_backend_proof(validated, b"different-inputs", &backend),
             Err(CryptographicVerificationError::PublicInputsMismatch)
+        );
+    }
+
+    #[test]
+    fn fresh_challenge_cannot_be_re_enveloped_without_backend_binding() {
+        let (mut envelope, mut contract) = fixture();
+        envelope.nonce = [0x44; 32];
+        envelope.public_inputs_hash =
+            public_inputs_digest(&envelope.statement, &envelope.nonce, PUBLIC_INPUTS).unwrap();
+        contract.proof.nonce = envelope.nonce;
+        contract.proof.public_inputs_hash = envelope.public_inputs_hash;
+
+        let backend = FakeBackend {
+            accept: true,
+            verifier_id: VerifierId([0x11; 32]),
+        };
+        let validated = validate_envelope_against_contract(
+            &envelope,
+            &EnvelopePolicy::default(),
+            &contract,
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_backend_proof(validated, PUBLIC_INPUTS, &backend),
+            Err(CryptographicVerificationError::ProofRejected)
         );
     }
 

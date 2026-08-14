@@ -32,8 +32,13 @@ pub const PROOF_ENVELOPE_AUTH_DOMAIN: &[u8] = b"XENIA:ProofEnvelope:Auth:v3";
 pub const VERIFIER_ID_DOMAIN: &[u8] = b"XENIA:ProofVerifierId:v1";
 /// Domain separator used when deriving a parameter-set identity from bytes.
 pub const PARAMETER_SET_ID_DOMAIN: &[u8] = b"XENIA:ProofParameterSetId:v1";
-/// Domain separator for canonical public-input digests.
-pub const PUBLIC_INPUTS_DOMAIN: &[u8] = b"XENIA:ProofPublicInputs:v1";
+/// Domain separator for legacy/static canonical public-input digests.
+///
+/// New challenge-response protocols should use [`public_inputs_digest`], which
+/// additionally binds the verifier-issued challenge carried in the envelope.
+pub const STATIC_PUBLIC_INPUTS_DOMAIN: &[u8] = b"XENIA:ProofPublicInputs:v1";
+/// Domain separator for challenge-bound canonical public-input digests.
+pub const PUBLIC_INPUTS_DOMAIN: &[u8] = b"XENIA:ProofPublicInputs:ChallengeBound:v1";
 /// Domain separator for verifier-issued challenge bindings carried in `nonce`.
 pub const CHALLENGE_NONCE_DOMAIN: &[u8] = b"XENIA:ProofChallengeNonce:v1";
 /// Domain separator for public-key fingerprints used as signer-key identifiers.
@@ -58,6 +63,8 @@ pub enum ProtocolError {
     ReservedIdentifier,
     #[error("verifier challenge entropy cannot be all zero")]
     ZeroChallengeEntropy,
+    #[error("proof public inputs require a non-zero verifier challenge")]
+    ZeroChallengeNonce,
     #[error("challenge audience cannot be empty")]
     EmptyChallengeAudience,
     #[error("signer public key cannot be empty")]
@@ -279,8 +286,10 @@ pub struct ProofEnvelopeV3 {
     /// Verifier-issued challenge binding. New protocols should derive this with
     /// [`derive_challenge_nonce`] so audience/session context is replay-bound.
     pub nonce: [u8; 32],
-    /// Digest of canonical statement public inputs. New protocols should derive
-    /// this with [`public_inputs_digest`].
+    /// Digest of canonical statement public inputs and the verifier challenge.
+    /// New challenge-response protocols should derive this with
+    /// [`public_inputs_digest`]. Statements that intentionally permit replay
+    /// must opt into [`static_public_inputs_digest`] explicitly.
     pub public_inputs_hash: [u8; 32],
     pub proof: Vec<u8>,
     /// Digest of typed authenticated extension claims. Use [`empty_extensions_digest`]
@@ -358,19 +367,42 @@ impl ProofEnvelopeV3 {
     }
 }
 
-/// Canonical digest of public inputs for a statement.
+/// Canonical challenge-bound digest of public inputs for a statement.
 ///
 /// The protocol does not define application serialization; callers must provide
-/// the statement's canonical public-input bytes. Binding the statement identity
-/// here prevents the same byte encoding from being silently reused as another
-/// statement's public inputs.
+/// the statement's canonical public-input bytes. Binding both statement identity
+/// and the verifier-issued challenge prevents an otherwise-valid proof from being
+/// re-enveloped under a fresh challenge without the backend proving the fresh
+/// challenge-bound public-input relation.
 pub fn public_inputs_digest(
+    statement: &StatementId,
+    challenge_nonce: &[u8; 32],
+    canonical_public_inputs: &[u8],
+) -> Result<[u8; 32], ProtocolError> {
+    statement.validate()?;
+    if challenge_nonce == &[0; 32] {
+        return Err(ProtocolError::ZeroChallengeNonce);
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(PUBLIC_INPUTS_DOMAIN);
+    append_statement_id(&mut hasher, statement);
+    hasher.update(challenge_nonce);
+    append_hash_len_prefixed(&mut hasher, canonical_public_inputs);
+    Ok(hasher.finalize().into())
+}
+
+/// Canonical digest for a statement whose proof is intentionally independent of
+/// verifier challenge/freshness.
+///
+/// This helper is deliberately named `static_*` to make replay tolerance visible
+/// at call sites. Do not use it for challenge-response or possession proofs.
+pub fn static_public_inputs_digest(
     statement: &StatementId,
     canonical_public_inputs: &[u8],
 ) -> Result<[u8; 32], ProtocolError> {
     statement.validate()?;
     let mut hasher = Sha256::new();
-    hasher.update(PUBLIC_INPUTS_DOMAIN);
+    hasher.update(STATIC_PUBLIC_INPUTS_DOMAIN);
     append_statement_id(&mut hasher, statement);
     append_hash_len_prefixed(&mut hasher, canonical_public_inputs);
     Ok(hasher.finalize().into())
@@ -493,9 +525,32 @@ mod tests {
         let a = StatementId::try_new("XENIA", "Access", "CapabilityPossession", 1).unwrap();
         let b = StatementId::try_new("XENIA", "Access", "DeviceEnrollment", 1).unwrap();
         let bytes = b"canonical-public-inputs";
+        let challenge = [0xA5; 32];
         assert_ne!(
-            public_inputs_digest(&a, bytes).unwrap(),
-            public_inputs_digest(&b, bytes).unwrap()
+            public_inputs_digest(&a, &challenge, bytes).unwrap(),
+            public_inputs_digest(&b, &challenge, bytes).unwrap()
+        );
+    }
+
+    #[test]
+    fn public_inputs_digest_is_challenge_bound() {
+        let statement = StatementId::try_new("XENIA", "Access", "CapabilityPossession", 1).unwrap();
+        let bytes = b"canonical-public-inputs";
+        let first = public_inputs_digest(&statement, &[0xA5; 32], bytes).unwrap();
+        let second = public_inputs_digest(&statement, &[0xA6; 32], bytes).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            public_inputs_digest(&statement, &[0; 32], bytes),
+            Err(ProtocolError::ZeroChallengeNonce)
+        );
+    }
+
+    #[test]
+    fn static_public_inputs_are_an_explicit_replay_tolerant_opt_in() {
+        let statement = StatementId::try_new("XENIA", "Archive", "HistoricalAttestation", 1).unwrap();
+        assert_eq!(
+            static_public_inputs_digest(&statement, b"canonical-public-inputs").unwrap(),
+            static_public_inputs_digest(&statement, b"canonical-public-inputs").unwrap()
         );
     }
 
@@ -539,7 +594,14 @@ mod tests {
     fn helper_derivations_have_stable_golden_vectors() {
         let statement = StatementId::try_new("XENIA", "Access", "CapabilityPossession", 1).unwrap();
         assert_eq!(
-            hex_lower(&public_inputs_digest(&statement, b"canonical-public-inputs").unwrap()),
+            hex_lower(
+                &public_inputs_digest(&statement, &[0xA5; 32], b"canonical-public-inputs")
+                    .unwrap()
+            ),
+            "743950938990948d062f90b83e986d2c27f45904fe6528bf08e09e463498733d"
+        );
+        assert_eq!(
+            hex_lower(&static_public_inputs_digest(&statement, b"canonical-public-inputs").unwrap()),
             "05828844e869d0e7c25090db611a7e8fe4a83d338da053622d21ef67afc7cc66"
         );
         assert_eq!(

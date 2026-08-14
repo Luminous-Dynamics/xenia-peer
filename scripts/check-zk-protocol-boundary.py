@@ -86,6 +86,7 @@ if source_path.is_file():
     # The generic protocol core must not absorb legacy/domain ownership.
     require_test(source, "v3_golden_body_and_authentication_digests_are_stable")
     require_test(source, "authentication_digest_binds_suite_and_signer")
+    require_test(source, "public_inputs_digest_is_challenge_bound")
 
     for forbidden in (
         "MYCELIX:AuthenticatedProof",
@@ -122,6 +123,7 @@ if verification_path.is_file():
     verification = verification_path.read_text(encoding="utf-8")
     for fragment in (
         "pub trait ProofBackendVerifier",
+        "pub struct ChallengeBoundPublicInputs",
         "pub trait ProofAuthenticationVerifier",
         "pub struct ProofVerifiedEnvelope",
         "pub struct FullyVerifiedEnvelope",
@@ -129,8 +131,10 @@ if verification_path.is_file():
         "BackendVerifierMismatch",
         "AuthenticationRejected",
         "pub fn verify_envelope",
+        "challenge_nonce: &envelope.nonce",
     ):
         require(fragment in verification, f"verification typestate invariant missing: {fragment}")
+    require_test(verification, "fresh_challenge_cannot_be_re_enveloped_without_backend_binding")
 
 workspace_manifest = root / "Cargo.toml"
 if workspace_manifest.is_file():
