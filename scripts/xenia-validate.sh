@@ -38,6 +38,10 @@ else
   warn "python3 not found; skipping Python script syntax checks"
 fi
 
+if [[ -d scripts/tests ]] && command -v python3 >/dev/null 2>&1; then
+  run python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+fi
+
 # Archive hygiene is security-sensitive enough to keep a negative regression
 # suite in the normal validation path. It is pure shell/tar and does not need a
 # Rust toolchain, so contaminated archive acceptance is caught even on light

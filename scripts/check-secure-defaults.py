@@ -20,6 +20,8 @@ import sys
 import tomllib
 from typing import Any
 
+from xenia_scan_scope import iter_repo_files
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -118,14 +120,15 @@ def iter_files(root: Path, data: dict[str, Any]) -> list[Path]:
     exclude_dirs = set(scanner.get("exclude_dirs", []))
     exclude_files = set(scanner.get("exclude_files", []))
     paths: list[Path] = []
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
+    for path in iter_repo_files(
+        root,
+        suffixes=source_exts | doc_exts,
+        skip_parts=exclude_dirs,
+    ):
         rel = path.relative_to(root).as_posix()
         if should_exclude(path.relative_to(root), rel, exclude_dirs, exclude_files):
             continue
-        if path.suffix in source_exts or path.suffix in doc_exts:
-            paths.append(path)
+        paths.append(path)
     return paths
 
 
@@ -155,8 +158,6 @@ def scan(root: Path, data: dict[str, Any]) -> list[Finding]:
             for pattern in hard_patterns:
                 if pattern in line:
                     severity = "warning" if is_doc else "hard"
-                    if severity == "warning" and is_reviewed_warning(rel, pattern, line, reviewed_warnings):
-                        continue
                     if severity == "warning" and is_reviewed_warning(rel, pattern, line, reviewed_warnings):
                         continue
                     findings.append(Finding(severity, rel, idx, pattern, stripped[:180]))

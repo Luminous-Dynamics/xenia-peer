@@ -1,0 +1,90 @@
+from __future__ import annotations
+
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from xenia_scan_scope import cfg_test_only_lines, iter_repo_files
+
+
+class ScanScopeTests(unittest.TestCase):
+    def test_git_scope_includes_untracked_work_but_not_ignored_agent_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            (root / ".gitignore").write_text(".claude/\nxenia-peer-state/\n")
+            (root / "src").mkdir()
+            (root / "src" / "tracked.rs").write_text("fn tracked() {}\n")
+            subprocess.run(
+                ["git", "-C", str(root), "add", ".gitignore", "src/tracked.rs"],
+                check=True,
+            )
+            (root / "src" / "untracked.rs").write_text("fn untracked() {}\n")
+            ignored = root / ".claude" / "worktrees" / "copy" / "src"
+            ignored.mkdir(parents=True)
+            (ignored / "duplicate.rs").write_text("fn duplicate() { panic!() }\n")
+            state = root / "xenia-peer-state"
+            state.mkdir()
+            (state / "generated.rs").write_text("fn generated() { panic!() }\n")
+
+            paths = {
+                path.relative_to(root).as_posix()
+                for path in iter_repo_files(
+                    root,
+                    suffixes={".rs"},
+                    skip_parts={".git", ".claude", "xenia-peer-state"},
+                )
+            }
+            self.assertEqual(paths, {"src/tracked.rs", "src/untracked.rs"})
+
+    def test_filesystem_fallback_uses_same_skip_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            (root / "src" / "main.rs").write_text("fn main() {}\n")
+            ignored = root / ".claude" / "worktrees"
+            ignored.mkdir(parents=True)
+            (ignored / "copy.rs").write_text("panic!()\n")
+
+            paths = {
+                path.relative_to(root).as_posix()
+                for path in iter_repo_files(
+                    root,
+                    suffixes={".rs"},
+                    skip_parts={".claude"},
+                )
+            }
+            self.assertEqual(paths, {"src/main.rs"})
+
+    def test_cfg_test_mask_does_not_hide_runtime_tail(self) -> None:
+        lines = [
+            "#[cfg(test)]",
+            "use crate::test_support::Fixture;",
+            "fn runtime_before() { value.unwrap(); }",
+            '#[cfg(any(feature = "capture", test))]',
+            "use crate::capture::Frame;",
+            "fn runtime_middle() { value.expect(\"runtime\"); }",
+            "#[cfg(test)]",
+            "mod tests {",
+            "    #[test]",
+            "    fn smoke() { value.unwrap(); }",
+            "}",
+            "fn runtime_after() { value.unwrap(); }",
+        ]
+
+        masked = cfg_test_only_lines(lines)
+        self.assertTrue({1, 2}.issubset(masked))
+        self.assertTrue({7, 8, 9, 10, 11}.issubset(masked))
+        self.assertNotIn(3, masked)
+        self.assertNotIn(4, masked)
+        self.assertNotIn(5, masked)
+        self.assertNotIn(6, masked)
+        self.assertNotIn(12, masked)
+
+
+if __name__ == "__main__":
+    unittest.main()

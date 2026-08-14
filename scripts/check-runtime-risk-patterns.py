@@ -13,7 +13,19 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-SKIP_PARTS = {".git", "_archive", "target", "dist", "pkg", "node_modules"}
+from xenia_scan_scope import cfg_test_only_lines, iter_repo_files
+
+SKIP_PARTS = {
+    ".git",
+    ".claude",
+    "_archive",
+    "target",
+    "dist",
+    "pkg",
+    "node_modules",
+    "xenia-peer-state",
+    "xenia-operator-agent-state",
+}
 TEST_PARTS = {"tests", "benches", "examples"}
 PATTERNS = {
     "panic": re.compile(r"\bpanic!\s*\("),
@@ -54,20 +66,9 @@ def is_test_or_example(path: Path) -> bool:
     return False
 
 
-def first_cfg_test_line(lines: list[str]) -> int | None:
-    for line_no, line in enumerate(lines, start=1):
-        stripped = line.strip()
-        if stripped.startswith("#[cfg(") and "test" in stripped:
-            return line_no
-    return None
-
-
 def iter_rust_files(root: Path):
-    for path in root.rglob("*.rs"):
-        rel = path.relative_to(root)
-        if set(rel.parts) & SKIP_PARTS:
-            continue
-        yield path, rel
+    for path in iter_repo_files(root, suffixes={".rs"}, skip_parts=SKIP_PARTS):
+        yield path, path.relative_to(root)
 
 
 def main() -> int:
@@ -91,12 +92,12 @@ def main() -> int:
             lines = path.read_text(encoding="utf-8").splitlines()
         except UnicodeDecodeError:
             continue
-        cfg_test_from = first_cfg_test_line(lines)
+        test_only_lines = cfg_test_only_lines(lines)
         for line_no, line in enumerate(lines, start=1):
             stripped = line.strip()
             if stripped.startswith("//"):
                 continue
-            line_runtime_source = runtime_source and not (cfg_test_from is not None and line_no >= cfg_test_from)
+            line_runtime_source = runtime_source and line_no not in test_only_lines
             for kind, pattern in PATTERNS.items():
                 if pattern.search(line):
                     findings.append(Finding(rel, line_no, kind, stripped, line_runtime_source))
