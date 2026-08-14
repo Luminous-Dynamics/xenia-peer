@@ -174,6 +174,14 @@ fi
 
 # Cargo path/boundary checks are cheap and catch the most common migration
 # mistakes before cargo metadata tries to resolve the whole workspace.
+if [[ -x scripts/check-zk-protocol-boundary.py ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    run python3 scripts/check-zk-protocol-boundary.py .
+  else
+    warn "python3 not found; skipping ZK protocol boundary check"
+  fi
+fi
+
 if [[ -x scripts/check-cargo-boundaries.py ]]; then
   if command -v python3 >/dev/null 2>&1; then
     run python3 scripts/check-cargo-boundaries.py .

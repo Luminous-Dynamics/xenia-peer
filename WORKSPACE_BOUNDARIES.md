@@ -11,6 +11,7 @@ active source.
 |---|---|---|
 | `xenia-wire/` | Byte-level sealed-envelope protocol, normative spec, test vectors, fuzz targets, cross-language validation material. | Product UIs, daemon state, build output, app-specific transport policy. |
 | `xenia-peer/crates/*` or extracted crate dirs | Reusable libraries: peer core, capture, video, handshake, ledger, transports, injection. | Runnable UI apps, tarballs, migration scratch scripts, `target/`. |
+| `xenia-zk-protocol` | Backend-neutral proof statement/verifier/parameter identities and canonical proof-envelope transcripts. | Mycelix/Holochain semantics, proving backends, circuits, signing key implementations, implicit legacy fallback. |
 | `xenia-peer/apps/*` or app crate dirs | Runnable binaries/UIs: daemon, native viewer, web viewer, sovereign admin. | Protocol test vectors, reusable core logic that belongs in crates. |
 | `_archive/YYYY-MM-DD-*` | Historical tarballs, migration artifacts, superseded scripts, frozen audit snapshots. | Anything imported by the active Cargo workspace. |
 
@@ -39,6 +40,7 @@ xenia/
       xenia-transport-ws/
       xenia-transport-quic/
       xenia-inject/
+      xenia-zk-protocol/
     apps/
       xenia-peer/
       xenia-viewer/

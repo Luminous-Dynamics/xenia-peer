@@ -377,6 +377,34 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn v3_golden_body_and_authentication_digests_are_stable() {
+        let envelope = sample_envelope();
+        let body = envelope.body_digest().unwrap();
+        assert_eq!(
+            hex_lower(&body),
+            "7472f4d0abf4d2c22cbfe7f95d66738fa377f3fb0d1b197b43a0f79cf0756230"
+        );
+
+        let auth = envelope
+            .authentication_digest(AuthenticationSuiteId::ML_DSA_65_FIPS204, &[0xA1; 32])
+            .unwrap();
+        assert_eq!(
+            hex_lower(&auth),
+            "4622614d73d684cffa98eccc087a526ec1b943349d4253a4b0b50f53f8cfec9d"
+        );
+    }
+
+    fn hex_lower(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for &byte in bytes {
+            out.push(HEX[(byte >> 4) as usize] as char);
+            out.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        out
+    }
+
     fn authentication_digest_binds_suite_and_signer() {
         let envelope = sample_envelope();
         let key_a = [0xA1; 32];
