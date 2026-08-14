@@ -772,6 +772,9 @@ struct IncomingTransfer {
     buffer: Vec<u8>,
 }
 
+/// Bound resident memory held by accepted but incomplete inbound transfers.
+const MAX_CONCURRENT_INCOMING_TRANSFERS: usize = 8;
+
 /// Reduce a wire-provided filename to a bare basename with no path
 /// separators, mirroring `xenia-peer`'s identically-named helper -- see
 /// its doc comment for why.
@@ -808,19 +811,25 @@ async fn handle_file_transfer_message(
             size,
             blake3_hash,
         } => {
-            let (accept, reason) = match (recv_file_dir, sanitize_transfer_filename(&name)) {
+            let (safe_name, reason) = match (recv_file_dir, sanitize_transfer_filename(&name)) {
                 (None, _) => (
-                    false,
+                    None,
                     "file transfer is disabled on this viewer".to_string(),
                 ),
-                (Some(_), None) => (false, "unusable filename".to_string()),
+                (Some(_), None) => (None, "unusable filename".to_string()),
                 (Some(_), Some(_)) if size > max_bytes => {
-                    (false, format!("file exceeds {max_bytes}-byte cap"))
+                    (None, format!("file exceeds {max_bytes}-byte cap"))
                 }
-                (Some(_), Some(_)) => (true, String::new()),
+                (Some(_), Some(_)) if incoming.len() >= MAX_CONCURRENT_INCOMING_TRANSFERS => (
+                    None,
+                    format!(
+                        "too many concurrent transfers (max {MAX_CONCURRENT_INCOMING_TRANSFERS})"
+                    ),
+                ),
+                (Some(_), Some(safe_name)) => (Some(safe_name), String::new()),
             };
-            if accept {
-                let safe_name = sanitize_transfer_filename(&name).expect("checked above");
+            let accept = safe_name.is_some();
+            if let Some(safe_name) = safe_name {
                 incoming.insert(
                     transfer_id,
                     IncomingTransfer {
@@ -925,16 +934,21 @@ async fn handle_file_transfer_message(
             let actual_hash = *blake3::hash(&transfer.buffer).as_bytes();
             let ok = actual_hash == transfer.expected_hash;
             if ok {
-                let dest = recv_file_dir
-                    .expect("incoming transfer only exists when recv_file_dir is set")
-                    .join(&transfer.name);
-                match std::fs::write(&dest, &transfer.buffer) {
-                    Ok(()) => {
-                        info!(transfer_id, path = %dest.display(), bytes = transfer.buffer.len(), "file transfer verified and written")
+                if let Some(recv_file_dir) = recv_file_dir {
+                    let dest = recv_file_dir.join(&transfer.name);
+                    match std::fs::write(&dest, &transfer.buffer) {
+                        Ok(()) => {
+                            info!(transfer_id, path = %dest.display(), bytes = transfer.buffer.len(), "file transfer verified and written")
+                        }
+                        Err(err) => {
+                            warn!(transfer_id, error = %err, "verified file failed to write to disk")
+                        }
                     }
-                    Err(err) => {
-                        warn!(transfer_id, error = %err, "verified file failed to write to disk")
-                    }
+                } else {
+                    warn!(
+                        transfer_id,
+                        "verified incoming transfer has no receive directory; not written"
+                    );
                 }
             } else {
                 warn!(

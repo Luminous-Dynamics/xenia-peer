@@ -269,17 +269,21 @@ pub(crate) async fn handle_envelope(
                     warn!(error = %err, "completed file transfer rejected by M1 consent gate; not written");
                     return Ok(());
                 }
-                let dest = config
-                    .recv_file_dir
-                    .expect("incoming transfer only exists when recv_file_dir is set")
-                    .join(&transfer.name);
-                match std::fs::write(&dest, &transfer.buffer) {
-                    Ok(()) => {
-                        info!(transfer_id, path = %dest.display(), bytes = transfer.buffer.len(), "file transfer verified and written")
+                if let Some(recv_file_dir) = config.recv_file_dir {
+                    let dest = recv_file_dir.join(&transfer.name);
+                    match std::fs::write(&dest, &transfer.buffer) {
+                        Ok(()) => {
+                            info!(transfer_id, path = %dest.display(), bytes = transfer.buffer.len(), "file transfer verified and written")
+                        }
+                        Err(err) => {
+                            warn!(transfer_id, error = %err, "verified file failed to write to disk")
+                        }
                     }
-                    Err(err) => {
-                        warn!(transfer_id, error = %err, "verified file failed to write to disk")
-                    }
+                } else {
+                    warn!(
+                        transfer_id,
+                        "verified incoming transfer has no receive directory; not written"
+                    );
                 }
             } else {
                 warn!(

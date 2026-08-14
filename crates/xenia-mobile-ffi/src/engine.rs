@@ -872,22 +872,22 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
             size,
             blake3_hash,
         } => {
-            let (accept, reason) = match (recv_dir, sanitize_transfer_filename(&name)) {
+            let (safe_name, reason) = match (recv_dir, sanitize_transfer_filename(&name)) {
                 (None, _) => (
-                    false,
+                    None,
                     "file transfer is disabled on this viewer".to_string(),
                 ),
-                (Some(_), None) => (false, "unusable filename".to_string()),
+                (Some(_), None) => (None, "unusable filename".to_string()),
                 (Some(_), Some(_)) if size > max_bytes => {
-                    (false, format!("file exceeds {max_bytes}-byte cap"))
+                    (None, format!("file exceeds {max_bytes}-byte cap"))
                 }
                 (Some(_), Some(_)) if incoming.len() >= MAX_CONCURRENT_INCOMING_TRANSFERS => {
-                    (false, "too many concurrent incoming transfers".to_string())
+                    (None, "too many concurrent incoming transfers".to_string())
                 }
-                (Some(_), Some(_)) => (true, String::new()),
+                (Some(_), Some(safe_name)) => (Some(safe_name), String::new()),
             };
-            if accept {
-                let safe_name = sanitize_transfer_filename(&name).expect("checked above");
+            let accept = safe_name.is_some();
+            if let Some(safe_name) = safe_name {
                 incoming.insert(
                     transfer_id,
                     IncomingTransfer {
@@ -1011,7 +1011,11 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
                 .is_some_and(|t| t.transfer_id == transfer_id)
             {
                 warn!(transfer_id, reason, "outgoing transfer rejected by peer");
-                let name = outgoing.take().expect("checked is_some_and above").name;
+                let Some(transfer) = outgoing.take() else {
+                    warn!(transfer_id, "outgoing transfer disappeared before rejection handling");
+                    return;
+                };
+                let name = transfer.name;
                 push_ft_event(
                     shared,
                     FileTransferEvent::Done {
@@ -1040,10 +1044,11 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
                     transfer_id,
                     "chunk exceeds offered file size; dropping transfer"
                 );
-                let name = incoming
-                    .remove(&transfer_id)
-                    .expect("just matched via get_mut")
-                    .name;
+                let Some(dropped) = incoming.remove(&transfer_id) else {
+                    warn!(transfer_id, "incoming transfer disappeared during overrun handling");
+                    return;
+                };
+                let name = dropped.name;
                 push_ft_event(
                     shared,
                     FileTransferEvent::Done {
@@ -1152,7 +1157,11 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
                 .is_some_and(|t| t.transfer_id == transfer_id)
             {
                 info!(transfer_id, ok, "outgoing transfer verification result");
-                let name = outgoing.take().expect("checked is_some_and above").name;
+                let Some(transfer) = outgoing.take() else {
+                    warn!(transfer_id, "outgoing transfer disappeared before verification handling");
+                    return;
+                };
+                let name = transfer.name;
                 push_ft_event(
                     shared,
                     FileTransferEvent::Done {

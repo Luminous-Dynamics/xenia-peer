@@ -2148,7 +2148,9 @@ fn build_audio_source(
     Ok(match mode {
         AudioMode::Off => None,
         AudioMode::Sine | AudioMode::Noise => {
-            let kind = synthetic_audio_kind(mode).expect("synthetic audio mode should map to kind");
+            let Some(kind) = synthetic_audio_kind(mode) else {
+                return Err("synthetic audio mode did not resolve to a source kind".into());
+            };
             Some(DaemonAudioSource::Synthetic(SyntheticAudioSource::new(
                 1, kind,
             )))
@@ -4966,10 +4968,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ledger-maintenance operations that genuinely need the live ledger
     // are wired further below, right after it loads.
     if let Some(output_path) = args.activate_consent_ledger_compacted_state.as_deref() {
-        let snapshot_path = args
-            .consent_ledger_activation_snapshot
-            .as_deref()
-            .expect("clap requires an activation snapshot");
+        let Some(snapshot_path) = args.consent_ledger_activation_snapshot.as_deref() else {
+            return Err(
+                "--activate-consent-ledger-compacted-state requires \
+                 --consent-ledger-activation-snapshot"
+                    .into(),
+            );
+        };
         if args.consent_ledger_activation_archive_segment.is_empty() {
             return Err(
                 "--activate-consent-ledger-compacted-state requires at least one \
@@ -5083,10 +5088,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(pin_path) = args.advance_consent_ledger_compacted_state_pin.as_deref() {
-        let state_path = args
-            .consent_ledger_compacted_state
-            .as_deref()
-            .expect("clap requires compacted state for pin advancement");
+        let Some(state_path) = args.consent_ledger_compacted_state.as_deref() else {
+            return Err(
+                "--advance-consent-ledger-compacted-state-pin requires \
+                 --consent-ledger-compacted-state"
+                    .into(),
+            );
+        };
         if pin_path == state_path {
             return Err("compacted-state pin path must differ from the active-state path".into());
         }
@@ -5149,14 +5157,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .verify_consent_ledger_compaction_gc_certificate
             .is_some()
     {
-        let state_path = args
-            .consent_ledger_compacted_state
-            .as_deref()
-            .expect("clap requires compacted state for GC certification");
-        let pin_path = args
-            .trusted_consent_ledger_compacted_state_pin
-            .as_deref()
-            .expect("clap requires compacted-state pin for GC certification");
+        let Some(state_path) = args.consent_ledger_compacted_state.as_deref() else {
+            return Err(
+                "consent-ledger GC certification requires --consent-ledger-compacted-state"
+                    .into(),
+            );
+        };
+        let Some(pin_path) = args.trusted_consent_ledger_compacted_state_pin.as_deref() else {
+            return Err(
+                "consent-ledger GC certification requires \
+                 --trusted-consent-ledger-compacted-state-pin"
+                    .into(),
+            );
+        };
         let (active, _) = crate::consent_ledger_persistence::load_compacted_active_state(
             state_path,
             &signing_key,
@@ -5215,10 +5228,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
 
-        let certificate_path = args
+        let Some(certificate_path) = args
             .verify_consent_ledger_compaction_gc_certificate
             .as_deref()
-            .expect("checked GC certificate verification mode");
+        else {
+            return Err("GC certificate verification mode requires a certificate path".into());
+        };
         let certificate: consent_compaction::ConsentCompactionGcCertificateV1 =
             audit_ledger_store::read_bounded_json(
                 certificate_path,
@@ -5636,10 +5651,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(output_path) = args.export_consent_ledger_archive_segment.as_deref() {
-        let base_path = args
-            .consent_ledger_archive_base_checkpoint
-            .as_deref()
-            .expect("clap requires an archive base checkpoint");
+        let Some(base_path) = args.consent_ledger_archive_base_checkpoint.as_deref() else {
+            return Err(
+                "--export-consent-ledger-archive-segment requires \
+                 --consent-ledger-archive-base-checkpoint"
+                    .into(),
+            );
+        };
         let segment = audit_ledger_store::export_archive_segment_atomic(
             output_path,
             base_path,
@@ -5824,10 +5842,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(output_path) = args.export_consent_ledger_compacted_snapshot.as_deref() {
-        let bundle_path = args
-            .consent_ledger_compaction_bundle_input
-            .as_deref()
-            .expect("clap requires a compaction bundle input");
+        let Some(bundle_path) = args.consent_ledger_compaction_bundle_input.as_deref() else {
+            return Err(
+                "--export-consent-ledger-compacted-snapshot requires \
+                 --consent-ledger-compaction-bundle-input"
+                    .into(),
+            );
+        };
         let bundle =
             audit_ledger_store::read_bounded_json::<consent_compaction::ConsentCompactionBundleV1>(
                 bundle_path,
@@ -6797,7 +6818,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             encoder = Some(make_encoder(args.codec, params)?);
         }
-        let encoder = encoder.as_mut().expect("encoder built above");
+        let Some(encoder) = encoder.as_mut() else {
+            return Err("video encoder was unavailable after capture initialization".into());
+        };
 
         let captured_at = now_ms();
         let packets = encoder.encode(&pixels, captured_at)?;
