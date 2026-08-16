@@ -9891,6 +9891,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "xenia-zk-auth"
+version = "0.0.0-m0"
+dependencies = [
+ "ed25519-dalek",
+ "ml-dsa",
+ "thiserror 1.0.69",
+ "xenia-zk-protocol",
+]
+
+[[package]]
 name = "xenia-zk-codec"
 version = "0.0.0-m0"
 dependencies = [

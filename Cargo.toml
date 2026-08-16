@@ -17,6 +17,7 @@ members = [
     "crates/xenia-secure-file",
     "crates/xenia-zk-protocol",
     "crates/xenia-zk-codec",
+    "crates/xenia-zk-auth",
     "crates/xenia-zk-legacy-mycelix",
     "crates/xenia-launcher-core",
     "crates/xenia-launcher-shell",
@@ -55,6 +56,7 @@ default-members = [
     "crates/xenia-secure-file",
     "crates/xenia-zk-protocol",
     "crates/xenia-zk-codec",
+    "crates/xenia-zk-auth",
     "crates/xenia-launcher-core",
     "apps/xenia-operator-agent",
 ]
