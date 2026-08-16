@@ -39,9 +39,9 @@ use iroh::{
 use thiserror::Error;
 use tracing::debug;
 use xenia_peer_core::transport::{
-    MAX_ENVELOPE_BYTES, QUIC_PROTOCOL_ID, RECEIVE_ENVELOPE_TIMEOUT_MS, RecvEnvelope,
-    SEND_STALL_TIMEOUT_MS, SendEnvelope, Transport, TransportError, TransportKind,
-    TransportProfileV1,
+    MAX_ENVELOPE_BYTES, QUIC_CONNECT_TIMEOUT_MS, QUIC_PROTOCOL_ID, QUIC_STREAM_OPEN_TIMEOUT_MS,
+    RECEIVE_ENVELOPE_TIMEOUT_MS, RecvEnvelope, SEND_STALL_TIMEOUT_MS, SendEnvelope, Transport,
+    TransportError, TransportKind, TransportProfileV1,
 };
 
 /// Re-export of the Iroh crate for endpoint ownership in callers.
@@ -138,10 +138,16 @@ impl QuicTransport {
         endpoint: &Endpoint,
         addr: impl Into<EndpointAddr>,
     ) -> Result<Self, TransportError> {
-        let conn = endpoint
-            .connect(addr, XENIA_QUIC_ALPN)
-            .await
-            .map_err(|e| TransportError::from(QuicError::Connect(e.to_string())))?;
+        let conn = tokio::time::timeout(
+            Duration::from_millis(QUIC_CONNECT_TIMEOUT_MS),
+            endpoint.connect(addr, XENIA_QUIC_ALPN),
+        )
+        .await
+        .map_err(|_| TransportError::TimedOut {
+            operation: "quic_connect",
+            timeout_ms: QUIC_CONNECT_TIMEOUT_MS,
+        })?
+        .map_err(|e| TransportError::from(QuicError::Connect(e.to_string())))?;
         Self::open(conn).await
     }
 
@@ -151,32 +157,59 @@ impl QuicTransport {
             .accept()
             .await
             .ok_or_else(|| TransportError::from(QuicError::EndpointClosed))?;
-        let conn = incoming
-            .await
-            .map_err(|e| TransportError::from(QuicError::Accept(e.to_string())))?;
+        let conn = tokio::time::timeout(
+            Duration::from_millis(QUIC_CONNECT_TIMEOUT_MS),
+            incoming,
+        )
+        .await
+        .map_err(|_| TransportError::TimedOut {
+            operation: "quic_accept_connection",
+            timeout_ms: QUIC_CONNECT_TIMEOUT_MS,
+        })?
+        .map_err(|e| TransportError::from(QuicError::Accept(e.to_string())))?;
         Self::accept_stream(conn).await
     }
 
     /// Open a new bidirectional stream on an established connection.
     pub async fn open(conn: Connection) -> Result<Self, TransportError> {
-        let (mut send, recv) = conn
-            .open_bi()
-            .await
-            .map_err(|e| TransportError::from(QuicError::Stream(e.to_string())))?;
-        send.write_all(STREAM_PREFACE)
-            .await
-            .map_err(|e| TransportError::from(QuicError::Io(e.to_string())))?;
-        debug!("iroh quic stream opened");
-        Ok(Self::new(conn, send, recv))
+        tokio::time::timeout(
+            Duration::from_millis(QUIC_STREAM_OPEN_TIMEOUT_MS),
+            async move {
+                let (mut send, recv) = conn
+                    .open_bi()
+                    .await
+                    .map_err(|e| TransportError::from(QuicError::Stream(e.to_string())))?;
+                send.write_all(STREAM_PREFACE)
+                    .await
+                    .map_err(|e| TransportError::from(QuicError::Io(e.to_string())))?;
+                debug!("iroh quic stream opened");
+                Ok(Self::new(conn, send, recv))
+            },
+        )
+        .await
+        .map_err(|_| TransportError::TimedOut {
+            operation: "quic_open_stream",
+            timeout_ms: QUIC_STREAM_OPEN_TIMEOUT_MS,
+        })?
     }
 
     /// Accept the next bidirectional stream on an established connection.
     pub async fn accept_stream(conn: Connection) -> Result<Self, TransportError> {
-        let (send, recv) = conn
-            .accept_bi()
-            .await
-            .map_err(|e| TransportError::from(QuicError::Stream(e.to_string())))?;
-        Self::accept_stream_pair(conn, send, recv).await
+        tokio::time::timeout(
+            Duration::from_millis(QUIC_STREAM_OPEN_TIMEOUT_MS),
+            async move {
+                let (send, recv) = conn
+                    .accept_bi()
+                    .await
+                    .map_err(|e| TransportError::from(QuicError::Stream(e.to_string())))?;
+                Self::accept_stream_pair(conn, send, recv).await
+            },
+        )
+        .await
+        .map_err(|_| TransportError::TimedOut {
+            operation: "quic_accept_stream",
+            timeout_ms: QUIC_STREAM_OPEN_TIMEOUT_MS,
+        })?
     }
 
     /// Gracefully finish the sending side of the transport stream.

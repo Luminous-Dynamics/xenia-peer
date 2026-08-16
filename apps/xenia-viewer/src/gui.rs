@@ -332,7 +332,7 @@ pub struct ViewerApp {
     recent_frame_instants: std::collections::VecDeque<std::time::Instant>,
     // Input capture (mouse / keyboard -> daemon). `None` means input
     // is disabled client-side (no channel was wired up).
-    input_tx: Option<tokio::sync::mpsc::UnboundedSender<InputEvent>>,
+    input_tx: Option<tokio::sync::mpsc::Sender<InputEvent>>,
     // On-screen rect of the last-rendered frame image, used to
     // normalize pointer coordinates and to ignore pointer activity
     // over the status bar / side panels.
@@ -349,7 +349,7 @@ impl ViewerApp {
         config: ViewerConfig,
         audio_rx: Option<mpsc::Receiver<RawAudio>>,
         audio_sink: Box<dyn AudioPlaybackSink>,
-        input_tx: Option<tokio::sync::mpsc::UnboundedSender<InputEvent>>,
+        input_tx: Option<tokio::sync::mpsc::Sender<InputEvent>>,
     ) -> Self {
         Self {
             slot,
@@ -387,13 +387,23 @@ impl ViewerApp {
         Some((x, y))
     }
 
-    /// Send one captured input event to the network task, if input
-    /// capture is wired up. Silently drops on a closed channel (the
-    /// network side already ended; the GUI keeps rendering
-    /// independently until the window closes).
-    fn send_input(&self, event: InputEvent) {
+    /// Enqueue lossy pointer motion without blocking the GUI. Saturation drops
+    /// the newest motion sample; a later sample supersedes it spatially.
+    fn send_lossy_input(&self, event: InputEvent) {
         if let Some(tx) = &self.input_tx {
-            let _ = tx.send(event);
+            let _ = tx.try_send(event);
+        }
+    }
+
+    /// Enqueue a state transition with bounded backpressure. Key/button
+    /// press/release events must not be silently discarded under saturation,
+    /// because doing so can leave remote input logically stuck. This runs only
+    /// on eframe's synchronous GUI thread; the network sender itself has V12's
+    /// finite send-stall timeout, so a disconnected/stalled receiver eventually
+    /// closes this channel instead of allowing unbounded memory growth.
+    fn send_stateful_input(&self, event: InputEvent) {
+        if let Some(tx) = &self.input_tx {
+            let _ = tx.blocking_send(event);
         }
     }
 
@@ -444,7 +454,7 @@ impl ViewerApp {
         {
             self.last_pointer_pos = Some(pos);
             if let Some((x, y)) = self.normalize_in_image(pos) {
-                self.send_input(InputEvent::Pointer {
+                self.send_lossy_input(InputEvent::Pointer {
                     x,
                     y,
                     button: 0,
@@ -458,7 +468,7 @@ impl ViewerApp {
             let Some((x, y)) = self.normalize_in_image(pos) else {
                 continue;
             };
-            self.send_input(InputEvent::Pointer {
+            self.send_stateful_input(InputEvent::Pointer {
                 x,
                 y,
                 button: pointer_button_id(button),
@@ -470,7 +480,7 @@ impl ViewerApp {
             let Some(code) = egui_key_to_evdev(key) else {
                 continue;
             };
-            self.send_input(InputEvent::Key {
+            self.send_stateful_input(InputEvent::Key {
                 code,
                 pressed,
                 modifiers: modifiers_bitmask(&modifiers),

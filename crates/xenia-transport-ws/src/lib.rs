@@ -60,7 +60,8 @@ use tracing::debug;
 
 use xenia_peer_core::transport::{
     MAX_ENVELOPE_BYTES, RECEIVE_ENVELOPE_TIMEOUT_MS, RecvEnvelope, SEND_STALL_TIMEOUT_MS,
-    SendEnvelope, Transport, TransportError, TransportKind, TransportProfileV1,
+    SendEnvelope, Transport, TransportError, TransportKind, TransportPreSessionProfileV1,
+    TransportProfileV1, WEBSOCKET_UPGRADE_TIMEOUT_MS,
 };
 
 /// Exact RFC 6455 subprotocol token for the current Xenia WebSocket profile.
@@ -161,9 +162,18 @@ impl WsTransport {
             SEC_WEBSOCKET_PROTOCOL,
             HeaderValue::from_static(XENIA_WEBSOCKET_SUBPROTOCOL),
         );
-        let (ws, _resp) = connect_async_with_config(request, Some(websocket_config()), true)
-            .await
-            .map_err(|e| TransportError::from(WsError::from(e)))?;
+        let timeout_ms =
+            TransportPreSessionProfileV1::current(TransportKind::WebSocket).connect_timeout_ms;
+        let (ws, _resp) = tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            connect_async_with_config(request, Some(websocket_config()), true),
+        )
+        .await
+        .map_err(|_| TransportError::TimedOut {
+            operation: "websocket_connect_upgrade",
+            timeout_ms,
+        })?
+        .map_err(|e| TransportError::from(WsError::from(e)))?;
         debug!(url = %url, subprotocol = XENIA_WEBSOCKET_SUBPROTOCOL, "websocket client connected");
         Ok(Self {
             inner: WsInner::Client(ws),
@@ -186,12 +196,31 @@ impl WsTransport {
 
     /// Upgrade an already-accepted TCP stream into a WebSocket transport.
     pub async fn accept_stream(stream: TcpStream) -> Result<Self, TransportError> {
-        let ws = accept_hdr_async_with_config(
+        Self::accept_stream_with_timeout(
             stream,
-            accept_xenia_subprotocol,
-            Some(websocket_config()),
+            Duration::from_millis(WEBSOCKET_UPGRADE_TIMEOUT_MS),
         )
         .await
+    }
+
+    async fn accept_stream_with_timeout(
+        stream: TcpStream,
+        timeout: Duration,
+    ) -> Result<Self, TransportError> {
+        let timeout_ms = timeout.as_millis().try_into().unwrap_or(u64::MAX);
+        let ws = tokio::time::timeout(
+            timeout,
+            accept_hdr_async_with_config(
+                stream,
+                accept_xenia_subprotocol,
+                Some(websocket_config()),
+            ),
+        )
+        .await
+        .map_err(|_| TransportError::TimedOut {
+            operation: "websocket_server_upgrade",
+            timeout_ms,
+        })?
         .map_err(|e| TransportError::from(WsError::from(e)))?;
         Ok(Self {
             inner: WsInner::Server(ws),
@@ -528,6 +557,26 @@ mod tests {
         let too_large = vec![0u8; MAX_ENVELOPE_BYTES as usize + 1];
         let _ = client.send(Message::Binary(too_large)).await;
         assert!(server.await.unwrap().is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stalled_server_upgrade_can_be_bounded_before_session() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+        let (stream, _) = listener.accept().await.unwrap();
+        let _client = client.await.unwrap();
+
+        let err = WsTransport::accept_stream_with_timeout(stream, Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            TransportError::TimedOut {
+                operation: "websocket_server_upgrade",
+                ..
+            }
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

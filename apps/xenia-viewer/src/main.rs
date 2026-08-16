@@ -1638,10 +1638,12 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
     let negotiated_transport = transport.negotiated_transport();
     let transport_profile = transport.transport_profile();
+    let pre_session_profile = transport.pre_session_profile();
     let availability_profile = transport.availability_profile();
-    let mut pending_surface = Some(PendingSessionSurface::new_with_availability(
+    let mut pending_surface = Some(PendingSessionSurface::new_with_profiles(
         handshake.negotiated_context_hash,
         transport_profile.clone(),
+        pre_session_profile,
         availability_profile,
     )?);
     let mut authenticated_surface: Option<AuthenticatedSessionSurface> = None;
@@ -1863,6 +1865,11 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
 // ─── GUI path ──────────────────────────────────────────────────────
 
+/// Maximum number of viewer input events buffered between the synchronous GUI
+/// thread and the authenticated network sender. Pointer motion is lossy under
+/// saturation; state transitions use bounded backpressure.
+const DESKTOP_INPUT_QUEUE_CAP: usize = 256;
+
 fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let slot = FrameSlot::new();
     let config = ViewerConfig {
@@ -1873,11 +1880,11 @@ fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let audio_sink = ViewerAudioSink::new(args.play_audio, args.audio_output_device.as_deref())
         .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
     let (audio_tx, audio_rx) = mpsc::sync_channel(64);
-    // Captured pointer/keyboard events flow GUI thread -> network
-    // task. `UnboundedSender::send` is a sync method, so the egui
-    // thread can call it directly without needing to be inside an
-    // async context.
-    let (input_tx, input_rx) = tokio::sync::mpsc::unbounded_channel::<xenia_inject::InputEvent>();
+    // Captured pointer/keyboard events flow GUI thread -> network task through
+    // a bounded queue. The GUI distinguishes lossy pointer motion from
+    // stateful key/button transitions when selecting overflow behavior.
+    let (input_tx, input_rx) =
+        tokio::sync::mpsc::channel::<xenia_inject::InputEvent>(DESKTOP_INPUT_QUEUE_CAP);
 
     // Spawn the receive/decode pipeline on a dedicated tokio thread.
     // eframe wants to own the main thread; tokio runs beside it.
@@ -1926,7 +1933,7 @@ async fn gui_receive_loop(
     args: Args,
     slot: Arc<FrameSlot>,
     audio_tx: mpsc::SyncSender<RawAudio>,
-    mut input_rx: tokio::sync::mpsc::UnboundedReceiver<xenia_inject::InputEvent>,
+    mut input_rx: tokio::sync::mpsc::Receiver<xenia_inject::InputEvent>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let source_id = parse_source_id(&args.source_id_hex)
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
@@ -1955,6 +1962,7 @@ async fn gui_receive_loop(
     session.install_schedule(&handshake.key_schedule);
     let negotiated_transport = transport.negotiated_transport();
     let transport_profile = transport.transport_profile();
+    let pre_session_profile = transport.pre_session_profile();
     let availability_profile = transport.availability_profile();
 
     // Split the transport so captured input can be sent concurrently
@@ -2098,9 +2106,10 @@ async fn gui_receive_loop(
     let mut audio_sink: Box<dyn AudioPlaybackSink + Send> =
         Box::new(ChannelAudioSink::new(audio_tx));
     let mut pending_surface = Some(
-        PendingSessionSurface::new_with_availability(
+        PendingSessionSurface::new_with_profiles(
             handshake.negotiated_context_hash,
             transport_profile.clone(),
+            pre_session_profile,
             availability_profile,
         )
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?,

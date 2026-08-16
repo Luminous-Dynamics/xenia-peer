@@ -139,6 +139,81 @@ impl TransportProfileV1 {
 }
 
 
+/// Stable schema label for pre-session resource/deadline policy. These
+/// semantics are enforced before the cryptographic handshake can authenticate
+/// the peer, then committed into the post-handshake session context so both
+/// endpoints can prove which unauthenticated resource policy was in force.
+pub const TRANSPORT_PRE_SESSION_PROFILE_SCHEMA: &str = "xenia-transport-pre-session-profile-v1";
+
+/// Maximum time allowed for a TCP/WebSocket carrier connection attempt.
+pub const TCP_CONNECT_TIMEOUT_MS: u64 = 10_000;
+/// Maximum total time allowed for the client-side WebSocket connect + HTTP
+/// upgrade operation. `tokio-tungstenite` exposes those phases as one future.
+pub const WEBSOCKET_CONNECT_UPGRADE_TIMEOUT_MS: u64 = 20_000;
+/// Maximum time an already-accepted TCP stream may spend in the WebSocket HTTP
+/// upgrade before the unauthenticated peer is dropped.
+pub const WEBSOCKET_UPGRADE_TIMEOUT_MS: u64 = 10_000;
+/// Maximum time allowed for a QUIC connection handshake.
+pub const QUIC_CONNECT_TIMEOUT_MS: u64 = 15_000;
+/// Maximum time allowed to open/accept the one logical Xenia QUIC stream and
+/// validate its profile preface.
+pub const QUIC_STREAM_OPEN_TIMEOUT_MS: u64 = 10_000;
+
+/// Pre-authentication resource/deadline policy for carrier establishment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransportPreSessionProfileV1 {
+    /// Stable profile schema.
+    pub schema: String,
+    /// Carrier whose pre-session behavior is described.
+    pub kind: TransportKind,
+    /// Client-side carrier connection establishment budget. Zero means the
+    /// carrier has no distinct connect phase in this profile.
+    pub connect_timeout_ms: u64,
+    /// Protocol-upgrade budget after a base carrier exists. For the WebSocket
+    /// client this is represented by the combined connect+upgrade ceiling.
+    pub protocol_upgrade_timeout_ms: u64,
+    /// Logical application-stream establishment/preface budget.
+    pub logical_stream_open_timeout_ms: u64,
+}
+
+impl TransportPreSessionProfileV1 {
+    /// Return Xenia's exact current pre-session policy for `kind`.
+    pub fn current(kind: TransportKind) -> Self {
+        let (connect_timeout_ms, protocol_upgrade_timeout_ms, logical_stream_open_timeout_ms) =
+            match kind {
+                TransportKind::Tcp => (TCP_CONNECT_TIMEOUT_MS, 0, 0),
+                TransportKind::WebSocket => (
+                    WEBSOCKET_CONNECT_UPGRADE_TIMEOUT_MS,
+                    WEBSOCKET_UPGRADE_TIMEOUT_MS,
+                    0,
+                ),
+                TransportKind::Quic => (QUIC_CONNECT_TIMEOUT_MS, 0, QUIC_STREAM_OPEN_TIMEOUT_MS),
+            };
+        Self {
+            schema: TRANSPORT_PRE_SESSION_PROFILE_SCHEMA.to_string(),
+            kind,
+            connect_timeout_ms,
+            protocol_upgrade_timeout_ms,
+            logical_stream_open_timeout_ms,
+        }
+    }
+
+    /// Return true only for the exact currently-supported pre-session profile.
+    pub fn is_current_supported_profile(&self) -> bool {
+        self == &Self::current(self.kind)
+    }
+
+    /// Canonical bincode-v1 bytes used only for authenticated context hashing.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
+        bincode::serialize(self)
+    }
+
+    /// BLAKE3-256 digest of the canonical pre-session profile.
+    pub fn profile_hash(&self) -> Result<[u8; 32], bincode::Error> {
+        Ok(*blake3::hash(&self.canonical_bytes()?).as_bytes())
+    }
+}
+
 /// Stable schema label for the transport availability profile committed into
 /// the authenticated session context.
 pub const TRANSPORT_AVAILABILITY_PROFILE_SCHEMA: &str = "xenia-transport-availability-profile-v1";
@@ -233,7 +308,8 @@ pub enum TransportError {
     TimedOut {
         /// Stable operation label suitable for logs/evidence.
         operation: &'static str,
-        /// Deadline from the authenticated availability profile.
+        /// Deadline from the applicable pre-session or authenticated
+        /// availability profile.
         timeout_ms: u64,
     },
 }
@@ -257,6 +333,12 @@ pub trait Transport {
     /// authenticated session context. Implementations must return the profile
     /// that actually describes the connection they carry.
     fn transport_profile(&self) -> TransportProfileV1;
+
+    /// Exact unauthenticated carrier-establishment policy that was enforced
+    /// before this transport reached the cryptographic handshake.
+    fn pre_session_profile(&self) -> TransportPreSessionProfileV1 {
+        TransportPreSessionProfileV1::current(self.transport_profile().kind)
+    }
 
     /// Exact failure/liveness semantics bound into the authenticated session
     /// context. Current carriers use one shared policy but the carrier kind is
@@ -380,7 +462,16 @@ impl TcpTransport {
 
     /// Convenience constructor: connect to a server address.
     pub async fn connect(addr: &str) -> Result<Self, TransportError> {
-        let stream = TcpStream::connect(addr).await?;
+        let timeout_ms = TransportPreSessionProfileV1::current(TransportKind::Tcp).connect_timeout_ms;
+        let stream = tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            TcpStream::connect(addr),
+        )
+        .await
+        .map_err(|_| TransportError::TimedOut {
+            operation: "tcp_connect",
+            timeout_ms,
+        })??;
         stream.set_nodelay(true)?;
         Ok(Self::new(stream))
     }
@@ -500,6 +591,21 @@ mod tests {
         assert_ne!(
             TransportAvailabilityProfileV1::current(TransportKind::Tcp).profile_hash().unwrap(),
             TransportAvailabilityProfileV1::current(TransportKind::Quic).profile_hash().unwrap(),
+        );
+    }
+
+    #[test]
+    fn pre_session_profiles_are_exact_and_carrier_bound() {
+        for kind in [TransportKind::Tcp, TransportKind::WebSocket, TransportKind::Quic] {
+            let profile = TransportPreSessionProfileV1::current(kind);
+            assert!(profile.is_current_supported_profile());
+            let mut changed = profile.clone();
+            changed.connect_timeout_ms = changed.connect_timeout_ms.saturating_add(1);
+            assert!(!changed.is_current_supported_profile());
+        }
+        assert_ne!(
+            TransportPreSessionProfileV1::current(TransportKind::Tcp).profile_hash().unwrap(),
+            TransportPreSessionProfileV1::current(TransportKind::Quic).profile_hash().unwrap(),
         );
     }
 
