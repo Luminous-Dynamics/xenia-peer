@@ -160,8 +160,10 @@ includes:
 5. process/network enforcement in Nixward using Xenia identities/capabilities,
    without moving IP routing into Xenia itself;
 6. bounded application producer queues with lane-specific overflow semantics;
-   V13 closes the desktop input queue first, while richer media/control queue
-   policy remains future work.
+   V13 closes the desktop input queue and V14 separates pointer motion from
+   pointer-button state while freezing finite semantic producer policies for
+   current presentation/input queues. Clipboard/file-command and encoded-host
+   producer policy still remain future work.
 
 The architectural rule is: **move downward only when doing so makes an Xenia
 security invariant enforceable. Do not move downward merely to own more of the

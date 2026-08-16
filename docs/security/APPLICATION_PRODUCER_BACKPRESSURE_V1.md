@@ -15,9 +15,8 @@ The network sender remains gated behind `AuthenticatedSessionSurface` and its
 actual transport send is bounded by V12's 15-second send-stall deadline. A
 closed/stalled network task therefore cannot drive unbounded queue memory.
 
-This pass does not claim the same fine-grained policy for the mobile input API.
-Mobile was already bounded, but its current pointer event shape uses
-`button=0, pressed=false` for both motion and left-button release, so lossiness
-cannot be classified safely from the serialized event alone. A future input
-schema should separate pointer motion from button transitions before applying
-this exact policy there.
+V13 originally left mobile on the ambiguous legacy pointer shape. V14 closes
+that gap by appending explicit `PointerMove` and `PointerButton` input variants
+without changing the historical bincode indices of legacy Pointer/Key/Touch.
+Current Android UI/JNI/native paths use the explicit forms; the legacy pointer
+entry point remains only as a compatibility shim.
