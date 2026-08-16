@@ -24,6 +24,63 @@ pub const ED25519_SIGNATURE_BYTES: usize = 64;
 pub const ML_DSA_65_PUBLIC_KEY_BYTES: usize = 1952;
 pub const ML_DSA_65_SIGNATURE_BYTES: usize = 3309;
 
+
+pub const MAX_AUTHENTICATION_VERIFIERS_V1: usize = 64;
+
+/// Bounded, ambiguity-free collection of canonical authentication verifiers.
+///
+/// The registry owns no authorization policy: callers still decide which signer
+/// identities are trusted for a particular protocol action. Its job is narrower:
+/// guarantee that an exact `(suite, signer_key_id)` lookup resolves to at most
+/// one cryptographic verifier and that untrusted configuration cannot grow the
+/// verifier set without bound.
+pub struct AuthenticationVerifierRegistryV1 {
+    verifiers: Vec<Box<dyn ProofAuthenticationVerifier>>,
+}
+
+impl AuthenticationVerifierRegistryV1 {
+    pub fn try_new(
+        verifiers: Vec<Box<dyn ProofAuthenticationVerifier>>,
+    ) -> Result<Self, AuthenticationAdapterError> {
+        if verifiers.len() > MAX_AUTHENTICATION_VERIFIERS_V1 {
+            return Err(AuthenticationAdapterError::TooManyVerifiers {
+                actual: verifiers.len(),
+                limit: MAX_AUTHENTICATION_VERIFIERS_V1,
+            });
+        }
+        for (index, verifier) in verifiers.iter().enumerate() {
+            let identity = (verifier.suite().wire_id(), verifier.signer_key_id());
+            if verifiers[..index].iter().any(|existing| {
+                (existing.suite().wire_id(), existing.signer_key_id()) == identity
+            }) {
+                return Err(AuthenticationAdapterError::DuplicateVerifierIdentity);
+            }
+        }
+        Ok(Self { verifiers })
+    }
+
+    pub fn len(&self) -> usize {
+        self.verifiers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.verifiers.is_empty()
+    }
+
+    pub fn find_exact(
+        &self,
+        suite: AuthenticationSuiteId,
+        signer_key_id: [u8; 32],
+    ) -> Option<&dyn ProofAuthenticationVerifier> {
+        self.verifiers
+            .iter()
+            .find(|verifier| {
+                verifier.suite() == suite && verifier.signer_key_id() == signer_key_id
+            })
+            .map(|verifier| verifier.as_ref())
+    }
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum AuthenticationAdapterError {
     #[error("invalid Ed25519 public key encoding")]
@@ -34,6 +91,10 @@ pub enum AuthenticationAdapterError {
     InvalidMlDsa65PublicKey,
     #[error("failed to derive canonical signer key id")]
     SignerKeyId,
+    #[error("too many authentication verifiers: {actual} > {limit}")]
+    TooManyVerifiers { actual: usize, limit: usize },
+    #[error("authentication verifier registry contains a duplicate suite/key identity")]
+    DuplicateVerifierIdentity,
 }
 
 /// Concrete Ed25519 verifier for Xenia's canonical authentication digest.
@@ -181,6 +242,26 @@ mod tests {
         assert!(matches!(
             MlDsa65AuthenticationVerifier::try_from_public_key_bytes(&[0u8; 32]),
             Err(AuthenticationAdapterError::InvalidMlDsa65PublicKeyLength { .. })
+        ));
+    }
+
+
+    #[test]
+    fn verifier_registry_rejects_duplicate_identity_and_supports_exact_lookup() {
+        let signing = SigningKey::from_bytes(&[0x24; 32]);
+        let public = signing.verifying_key().to_bytes();
+        let first = Ed25519AuthenticationVerifier::try_from_public_key_bytes(&public).unwrap();
+        let id = first.signer_key_id();
+        let registry = AuthenticationVerifierRegistryV1::try_new(vec![Box::new(first)]).unwrap();
+        assert_eq!(registry.len(), 1);
+        assert!(registry.find_exact(AuthenticationSuiteId::ED25519, id).is_some());
+        assert!(registry.find_exact(AuthenticationSuiteId::ML_DSA_65_FIPS204, id).is_none());
+
+        let a = Ed25519AuthenticationVerifier::try_from_public_key_bytes(&public).unwrap();
+        let b = Ed25519AuthenticationVerifier::try_from_public_key_bytes(&public).unwrap();
+        assert!(matches!(
+            AuthenticationVerifierRegistryV1::try_new(vec![Box::new(a), Box::new(b)]),
+            Err(AuthenticationAdapterError::DuplicateVerifierIdentity)
         ));
     }
 }
