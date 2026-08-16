@@ -41,3 +41,12 @@ A circuit is not eligible for a future `xenia-zk-primitives` crate merely becaus
 it is mathematically generic. It must have adversarial soundness tests showing
 that verifier constraints enforce the advertised statement for a malicious
 prover.
+## Pre-deserialization resource boundary
+
+Untrusted serialized proof envelopes should be passed through
+`bound_envelope_frame_before_deserialization()` **before** a Serde/JSON/bincode/CBOR
+decoder is invoked. The default raw-frame ceiling is 1 MiB and is separately
+configurable from the decoded proof, signature, and public-input ceilings. This
+prevents a decoder from allocating an attacker-selected oversized `Vec` before the
+ordinary `EnvelopePolicy` checks get a chance to run. Format-specific decoding stays
+application-owned; the protocol crate only supplies the bounded-frame typestate.

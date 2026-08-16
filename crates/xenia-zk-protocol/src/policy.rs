@@ -18,6 +18,8 @@ use crate::{
 pub const DEFAULT_MAX_PROOF_BYTES: usize = 512 * 1024;
 pub const DEFAULT_MAX_SIGNATURE_BYTES: usize = 16 * 1024;
 pub const DEFAULT_MAX_AUTHENTICATION_ENTRIES: usize = 4;
+/// Maximum encoded envelope frame accepted before any Serde/deserializer allocation.
+pub const DEFAULT_MAX_ENCODED_ENVELOPE_BYTES: usize = 1024 * 1024;
 /// Maximum canonical application-public-input bytes hashed and handed to a backend by default.
 pub const DEFAULT_MAX_PUBLIC_INPUT_BYTES: usize = 256 * 1024;
 
@@ -104,12 +106,31 @@ impl<'a> ContractValidatedEnvelope<'a> {
     }
 }
 
+/// Raw encoded envelope bytes that passed the pre-deserialization resource ceiling.
+///
+/// Decoding integrations should accept this wrapper rather than an arbitrary byte
+/// slice so large untrusted frames are rejected before Serde, bincode, JSON, CBOR,
+/// or another decoder can allocate attacker-controlled vectors. This wrapper does
+/// not validate the encoded format itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoundedEnvelopeFrame<'a> {
+    bytes: &'a [u8],
+}
+
+impl<'a> BoundedEnvelopeFrame<'a> {
+    pub const fn as_bytes(self) -> &'a [u8] {
+        self.bytes
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct EnvelopePolicy {
     pub protocol_version: u32,
     pub max_proof_bytes: usize,
     pub max_signature_bytes: usize,
     pub max_authentication_entries: usize,
+    /// Bounds the raw serialized frame before any envelope deserialization occurs.
+    pub max_encoded_envelope_bytes: usize,
     /// Bounds hashing/backend work for caller-supplied canonical application inputs.
     pub max_public_input_bytes: usize,
     pub max_age_seconds: u64,
@@ -127,6 +148,7 @@ impl Default for EnvelopePolicy {
             max_proof_bytes: DEFAULT_MAX_PROOF_BYTES,
             max_signature_bytes: DEFAULT_MAX_SIGNATURE_BYTES,
             max_authentication_entries: DEFAULT_MAX_AUTHENTICATION_ENTRIES,
+            max_encoded_envelope_bytes: DEFAULT_MAX_ENCODED_ENVELOPE_BYTES,
             max_public_input_bytes: DEFAULT_MAX_PUBLIC_INPUT_BYTES,
             max_age_seconds: 60 * 60,
             max_future_skew_seconds: 5 * 60,
@@ -142,6 +164,10 @@ pub enum EnvelopeValidationError {
     ProtocolVersion { expected: u32, actual: u32 },
     #[error("invalid statement identifier: {0}")]
     Statement(ProtocolError),
+    #[error("encoded proof-envelope frame is empty")]
+    EmptyEncodedEnvelope,
+    #[error("encoded proof-envelope frame is too large: {actual} > {limit}")]
+    EncodedEnvelopeTooLarge { actual: usize, limit: usize },
     #[error("proof payload is empty")]
     EmptyProof,
     #[error("proof payload is too large: {actual} > {limit}")]
@@ -202,6 +228,25 @@ pub enum EnvelopeValidationError {
         required: usize,
         actual: usize,
     },
+}
+
+/// Apply the transport/resource ceiling **before** deserializing an untrusted
+/// proof envelope. The returned typestate can be passed to a format-specific
+/// decoder by the owning application.
+pub fn bound_envelope_frame_before_deserialization<'a>(
+    encoded: &'a [u8],
+    policy: &EnvelopePolicy,
+) -> Result<BoundedEnvelopeFrame<'a>, EnvelopeValidationError> {
+    if encoded.is_empty() {
+        return Err(EnvelopeValidationError::EmptyEncodedEnvelope);
+    }
+    if encoded.len() > policy.max_encoded_envelope_bytes {
+        return Err(EnvelopeValidationError::EncodedEnvelopeTooLarge {
+            actual: encoded.len(),
+            limit: policy.max_encoded_envelope_bytes,
+        });
+    }
+    Ok(BoundedEnvelopeFrame { bytes: encoded })
 }
 
 /// Validate v3 structure and local acceptance policy without verifying cryptography.
@@ -551,6 +596,27 @@ mod tests {
         assert_eq!(
             validate_envelope(&envelope, &EnvelopePolicy::default(), NOW),
             Err(EnvelopeValidationError::ZeroExtensionsDigest)
+        );
+    }
+
+    #[test]
+    fn encoded_envelope_is_bounded_before_deserialization() {
+        let policy = EnvelopePolicy {
+            max_encoded_envelope_bytes: 8,
+            ..EnvelopePolicy::default()
+        };
+        let bounded = bound_envelope_frame_before_deserialization(b"12345678", &policy).unwrap();
+        assert_eq!(bounded.as_bytes(), b"12345678");
+        assert_eq!(
+            bound_envelope_frame_before_deserialization(b"123456789", &policy),
+            Err(EnvelopeValidationError::EncodedEnvelopeTooLarge {
+                actual: 9,
+                limit: 8,
+            })
+        );
+        assert_eq!(
+            bound_envelope_frame_before_deserialization(b"", &policy),
+            Err(EnvelopeValidationError::EmptyEncodedEnvelope)
         );
     }
 
