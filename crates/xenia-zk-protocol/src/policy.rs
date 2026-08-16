@@ -123,6 +123,30 @@ impl<'a> BoundedEnvelopeFrame<'a> {
     }
 }
 
+/// Failure while enforcing the raw-frame resource boundary and then invoking an
+/// application-owned decoder. Keeping the frame-policy failure distinct from the
+/// format decoder's own error prevents callers from accidentally retrying an
+/// oversized frame through a different parser path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoundedEnvelopeDecodeError<E> {
+    Frame(EnvelopeValidationError),
+    Decode(E),
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for BoundedEnvelopeDecodeError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Frame(error) => write!(f, "proof-envelope frame rejected before decoding: {error}"),
+            Self::Decode(error) => write!(f, "proof-envelope decoding failed: {error}"),
+        }
+    }
+}
+
+impl<E> std::error::Error for BoundedEnvelopeDecodeError<E>
+where
+    E: std::error::Error + 'static,
+{}
+
 #[derive(Clone, Debug)]
 pub struct EnvelopePolicy {
     pub protocol_version: u32,
@@ -247,6 +271,26 @@ pub fn bound_envelope_frame_before_deserialization<'a>(
         });
     }
     Ok(BoundedEnvelopeFrame { bytes: encoded })
+}
+
+/// Enforce the raw-frame ceiling and only then invoke an application-owned
+/// deserializer. This is the preferred integration surface for untrusted network
+/// bytes because the decoder closure is never called for an empty or oversized
+/// frame. The closure receives the bounded typestate rather than the original
+/// byte slice, making the required ordering explicit in the call graph without
+/// forcing this backend-neutral crate to depend on a particular serialization
+/// format.
+pub fn decode_bounded_envelope_with<E, F>(
+    encoded: &[u8],
+    policy: &EnvelopePolicy,
+    decoder: F,
+) -> Result<ProofEnvelopeV3, BoundedEnvelopeDecodeError<E>>
+where
+    F: FnOnce(BoundedEnvelopeFrame<'_>) -> Result<ProofEnvelopeV3, E>,
+{
+    let bounded = bound_envelope_frame_before_deserialization(encoded, policy)
+        .map_err(BoundedEnvelopeDecodeError::Frame)?;
+    decoder(bounded).map_err(BoundedEnvelopeDecodeError::Decode)
 }
 
 /// Validate v3 structure and local acceptance policy without verifying cryptography.
@@ -617,6 +661,54 @@ mod tests {
         assert_eq!(
             bound_envelope_frame_before_deserialization(b"", &policy),
             Err(EnvelopeValidationError::EmptyEncodedEnvelope)
+        );
+    }
+
+    #[test]
+    fn bounded_decode_never_invokes_parser_for_oversized_input() {
+        use std::cell::Cell;
+
+        let policy = EnvelopePolicy {
+            max_encoded_envelope_bytes: 4,
+            ..EnvelopePolicy::default()
+        };
+        let called = Cell::new(false);
+        let result = decode_bounded_envelope_with(b"12345", &policy, |_bounded| {
+            called.set(true);
+            Ok::<_, &'static str>(valid_envelope())
+        });
+
+        assert!(!called.get());
+        assert_eq!(
+            result,
+            Err(BoundedEnvelopeDecodeError::Frame(
+                EnvelopeValidationError::EncodedEnvelopeTooLarge { actual: 5, limit: 4 }
+            ))
+        );
+    }
+
+    #[test]
+    fn bounded_decode_passes_only_the_checked_frame_to_parser() {
+        let policy = EnvelopePolicy {
+            max_encoded_envelope_bytes: 8,
+            ..EnvelopePolicy::default()
+        };
+        let decoded = decode_bounded_envelope_with(b"12345678", &policy, |bounded| {
+            assert_eq!(bounded.as_bytes(), b"12345678");
+            Ok::<_, &'static str>(valid_envelope())
+        })
+        .unwrap();
+        assert_eq!(decoded, valid_envelope());
+    }
+
+    #[test]
+    fn bounded_decode_preserves_decoder_errors_without_retrying() {
+        let policy = EnvelopePolicy::default();
+        assert_eq!(
+            decode_bounded_envelope_with(b"malformed", &policy, |_bounded| {
+                Err::<ProofEnvelopeV3, _>("malformed envelope")
+            }),
+            Err(BoundedEnvelopeDecodeError::Decode("malformed envelope"))
         );
     }
 

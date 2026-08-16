@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+
+- `xenia-zk-protocol` now provides `decode_bounded_envelope_with`, a format-neutral
+  decode entry point that enforces the raw proof-envelope size ceiling before an
+  application-owned parser is invoked. Oversized or empty frames never reach the
+  decoder closure, and decoder errors remain distinct from frame-policy failures.
+
 ## [0.0.0-m0] — 2026-04-18
 
 Initial milestone. Workspace scaffold + `xenia-peer-core` crate with

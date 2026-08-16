@@ -50,3 +50,14 @@ configurable from the decoded proof, signature, and public-input ceilings. This
 prevents a decoder from allocating an attacker-selected oversized `Vec` before the
 ordinary `EnvelopePolicy` checks get a chance to run. Format-specific decoding stays
 application-owned; the protocol crate only supplies the bounded-frame typestate.
+
+### Preferred decode integration
+
+For untrusted bytes, prefer `decode_bounded_envelope_with(...)` over manually
+calling the raw bound helper followed by a parser. The decoder closure is not
+invoked until the frame has passed the configured raw-size ceiling, and it
+receives a `BoundedEnvelopeFrame` rather than the original slice. This does not
+make a format parser safe against all algorithmic-complexity attacks, but it
+makes the required size-check-before-deserialization ordering explicit and
+unit-testable without coupling this crate to JSON, CBOR, bincode, or another
+specific codec.

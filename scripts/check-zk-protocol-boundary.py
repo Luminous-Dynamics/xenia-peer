@@ -123,6 +123,8 @@ if policy_path.is_file():
         "DEFAULT_MAX_ENCODED_ENVELOPE_BYTES",
         "pub struct BoundedEnvelopeFrame",
         "bound_envelope_frame_before_deserialization",
+        "pub fn decode_bounded_envelope_with",
+        "BoundedEnvelopeDecodeError",
         "EncodedEnvelopeTooLarge",
         "ZeroExtensionsDigest",
         "AuthenticationQuorumNotMet",
@@ -131,6 +133,8 @@ if policy_path.is_file():
         require(fragment in policy, f"fail-closed policy invariant missing: {fragment}")
     require_test(policy, "zero_extensions_digest_is_rejected_as_noncanonical")
     require_test(policy, "encoded_envelope_is_bounded_before_deserialization")
+    require_test(policy, "bounded_decode_never_invokes_parser_for_oversized_input")
+    require_test(policy, "bounded_decode_passes_only_the_checked_frame_to_parser")
 
 
 if verification_path.is_file():
