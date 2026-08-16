@@ -45,7 +45,7 @@ internal object NativeBindings {
     @JvmStatic external fun sendKey(handle: Long, code: Int, pressed: Boolean, modifiers: Int)
     @JvmStatic external fun pollClipboard(handle: Long): String?
     @JvmStatic external fun sendClipboard(handle: Long, text: String?)
-    @JvmStatic external fun sendFile(handle: Long, name: String, data: ByteArray)
+    @JvmStatic external fun sendFile(handle: Long, name: String, data: ByteArray): Boolean
     @JvmStatic external fun pollFileTransferEvent(handle: Long): ByteArray?
     @JvmStatic external fun disconnect(handle: Long)
 }

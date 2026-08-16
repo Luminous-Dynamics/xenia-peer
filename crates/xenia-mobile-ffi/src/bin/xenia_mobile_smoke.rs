@@ -85,8 +85,13 @@ fn main() {
                 .unwrap_or("test-file")
                 .to_string();
             println!("sending file: {name} ({} bytes)", data.len());
-            engine.send_file(name, data);
-            file_sent = true;
+            match engine.send_file(name, data) {
+                Ok(()) => file_sent = true,
+                Err(err) => {
+                    eprintln!("failed to enqueue file transfer: {err:?}");
+                    std::process::exit(1);
+                }
+            }
         }
 
         while let Some(event) = engine.poll_file_transfer_event() {

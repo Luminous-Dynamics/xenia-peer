@@ -25,7 +25,9 @@ use std::ffi::{CStr, CString, c_char};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use engine::{FileTransferEvent, MobileCodec, SessionState, ViewerEngine};
+use engine::{
+    FileTransferEnqueueError, FileTransferEvent, MobileCodec, SessionState, ViewerEngine,
+};
 
 /// One shared multi-thread tokio runtime for the process lifetime —
 /// every connected session's background task runs on it. Matches
@@ -411,20 +413,68 @@ pub unsafe extern "C" fn xenia_send_clipboard(handle: u64, text: *const c_char) 
     }
 }
 
-/// Offer `data` (`data_len` bytes) to the host under `name`. The
-/// caller must have already read the whole file into memory (e.g. via
-/// Android's `ContentResolver` against a Storage Access Framework
-/// `Uri`, since arbitrary user-picked files aren't necessarily
-/// reachable by a plain filesystem path). Only one outgoing transfer
-/// is in flight at a time -- calling this while one is already active
-/// surfaces a failed [`XeniaFileTransferEvent`] (kind
-/// [`XENIA_FT_EVENT_DONE`], `ok == false`) rather than queuing a
-/// second one.
+/// Immediate return codes from [`xenia_try_send_file`].
+pub const XENIA_SEND_FILE_OK: i32 = 0;
+/// The C arguments were invalid (null name / invalid data pointer).
+pub const XENIA_SEND_FILE_INVALID_ARGUMENT: i32 = 1;
+/// The supplied session handle is stale or unknown.
+pub const XENIA_SEND_FILE_INVALID_HANDLE: i32 = 2;
+/// The bounded user-command queue is full; no command was silently dropped.
+pub const XENIA_SEND_FILE_QUEUE_FULL: i32 = 3;
+/// The background session task has already closed its command receiver.
+pub const XENIA_SEND_FILE_SESSION_CLOSED: i32 = 4;
+
+/// Try to offer `data` (`data_len` bytes) to the host under `name`.
+///
+/// Unlike the historical [`xenia_send_file`] wrapper, this V15 API returns an
+/// explicit enqueue result so UI code can distinguish acceptance from local
+/// queue saturation or session teardown. A successful enqueue still does not
+/// mean the remote peer accepted the transfer; that later result arrives via
+/// [`XeniaFileTransferEvent`].
 ///
 /// # Safety
 /// `name` must be a valid NUL-terminated C string pointer, live for the
-/// duration of this call. `data` must be a valid pointer to `data_len` readable bytes,
-/// live for the duration of this call (it is copied, not retained).
+/// duration of this call. `data` must be a valid pointer to `data_len` readable
+/// bytes, live for the duration of this call (it is copied, not retained).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenia_try_send_file(
+    handle: u64,
+    name: *const c_char,
+    data: *const u8,
+    data_len: usize,
+) -> i32 {
+    if name.is_null() || (data.is_null() && data_len > 0) {
+        return XENIA_SEND_FILE_INVALID_ARGUMENT;
+    }
+    let Some(engine) = engine_for(handle) else {
+        return XENIA_SEND_FILE_INVALID_HANDLE;
+    };
+    // SAFETY: caller contract above guarantees a valid NUL-terminated string
+    // for the duration of this call.
+    let Ok(name) = (unsafe { CStr::from_ptr(name) }).to_str() else {
+        return XENIA_SEND_FILE_INVALID_ARGUMENT;
+    };
+    // SAFETY: caller contract above guarantees `data_len` readable bytes for
+    // the duration of this call; this copies them out.
+    let bytes = if data_len == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(data, data_len) }.to_vec()
+    };
+    match engine.send_file(name.to_owned(), bytes) {
+        Ok(()) => XENIA_SEND_FILE_OK,
+        Err(FileTransferEnqueueError::QueueFull) => XENIA_SEND_FILE_QUEUE_FULL,
+        Err(FileTransferEnqueueError::SessionClosed) => XENIA_SEND_FILE_SESSION_CLOSED,
+    }
+}
+
+/// Legacy fire-and-forget file enqueue retained for C ABI compatibility.
+///
+/// New callers should use [`xenia_try_send_file`] so a local enqueue failure is
+/// not mistaken for a successfully initiated transfer.
+///
+/// # Safety
+/// Same pointer/lifetime requirements as [`xenia_try_send_file`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn xenia_send_file(
     handle: u64,
@@ -432,25 +482,8 @@ pub unsafe extern "C" fn xenia_send_file(
     data: *const u8,
     data_len: usize,
 ) {
-    if name.is_null() || (data.is_null() && data_len > 0) {
-        return;
-    }
-    let Some(engine) = engine_for(handle) else {
-        return;
-    };
-    // SAFETY: caller contract above guarantees a valid NUL-terminated
-    // string for the duration of this call.
-    let Ok(name) = (unsafe { CStr::from_ptr(name) }).to_str() else {
-        return;
-    };
-    // SAFETY: caller contract above guarantees `data_len` readable
-    // bytes for the duration of this call; this copies them out.
-    let bytes = if data_len == 0 {
-        Vec::new()
-    } else {
-        unsafe { std::slice::from_raw_parts(data, data_len) }.to_vec()
-    };
-    engine.send_file(name.to_owned(), bytes);
+    // SAFETY: this compatibility wrapper forwards the caller contract verbatim.
+    let _ = unsafe { xenia_try_send_file(handle, name, data, data_len) };
 }
 
 /// Event kinds for [`XeniaFileTransferEvent::kind`].
@@ -610,6 +643,10 @@ mod tests {
             xenia_send_touch(0, 0, 0.5, 0.5, 0, 1.0);
             xenia_send_key(0, 30, true, 0);
             let name = CString::new("test.txt").unwrap();
+            assert_eq!(
+                xenia_try_send_file(0, name.as_ptr(), std::ptr::null(), 0),
+                XENIA_SEND_FILE_INVALID_HANDLE
+            );
             xenia_send_file(0, name.as_ptr(), std::ptr::null(), 0);
             let empty_ft = xenia_poll_file_transfer_event(0);
             assert_eq!(empty_ft.kind, XENIA_FT_EVENT_NONE);

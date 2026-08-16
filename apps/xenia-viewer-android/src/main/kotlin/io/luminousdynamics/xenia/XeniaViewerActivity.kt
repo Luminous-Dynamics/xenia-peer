@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.provider.OpenableColumns
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -277,7 +278,13 @@ private fun ViewerScreen(session: XeniaSession, onPickFile: ((Uri) -> Unit) -> U
                         onPickFile { uri ->
                             coroutineScope.launch {
                                 val picked = withContext(Dispatchers.IO) { readPickedFile(context, uri) }
-                                if (picked != null) session.sendFile(picked.first, picked.second)
+                                if (picked != null && !session.sendFile(picked.first, picked.second)) {
+                                    Toast.makeText(
+                                        context,
+                                        "File transfer queue is busy or the session disconnected",
+                                        Toast.LENGTH_SHORT,
+                                    ).show()
+                                }
                             }
                         }
                     },

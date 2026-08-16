@@ -21,6 +21,9 @@ pub enum ProducerOverflowPolicy {
     CoalesceLatest,
     /// Apply bounded backpressure rather than silently losing the state change.
     Backpressure,
+    /// Reject the producer action explicitly; the caller decides whether to
+    /// retry, surface an error, or fail the session.
+    Reject,
 }
 
 /// Reviewable queue/slot policy for one semantic producer class.
@@ -77,6 +80,22 @@ pub const DESKTOP_AUDIO_PLAYBACK_V1: ProducerFlowPolicyV1 = ProducerFlowPolicyV1
     overflow: ProducerOverflowPolicy::DropNewest,
 };
 
+
+/// Mobile outbound clipboard state is latest-value state, not a history.
+pub const MOBILE_CLIPBOARD_OUTBOUND_V1: ProducerFlowPolicyV1 = ProducerFlowPolicyV1 {
+    name: "mobile-clipboard-outbound",
+    capacity: 1,
+    overflow: ProducerOverflowPolicy::CoalesceLatest,
+};
+
+/// User-triggered mobile file-transfer commands are rare correctness-sensitive
+/// actions. Queue saturation is surfaced explicitly instead of dropping them.
+pub const MOBILE_FILE_TRANSFER_COMMAND_V1: ProducerFlowPolicyV1 = ProducerFlowPolicyV1 {
+    name: "mobile-file-transfer-command",
+    capacity: 2,
+    overflow: ProducerOverflowPolicy::Reject,
+};
+
 /// Mobile file-transfer UI notifications retain the newest bounded history.
 pub const MOBILE_FILE_TRANSFER_EVENTS_V1: ProducerFlowPolicyV1 = ProducerFlowPolicyV1 {
     name: "mobile-file-transfer-events",
@@ -104,6 +123,8 @@ mod tests {
             MOBILE_VIDEO_PRESENTATION_V1,
             DESKTOP_TELEMETRY_PRESENTATION_V1,
             DESKTOP_AUDIO_PLAYBACK_V1,
+            MOBILE_CLIPBOARD_OUTBOUND_V1,
+            MOBILE_FILE_TRANSFER_COMMAND_V1,
             MOBILE_FILE_TRANSFER_EVENTS_V1,
         ] {
             assert!(policy.capacity > 0);

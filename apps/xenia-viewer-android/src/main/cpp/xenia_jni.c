@@ -61,7 +61,7 @@ void xenia_send_key(uint64_t handle, uint32_t code, uint8_t pressed, uint8_t mod
 char *xenia_poll_clipboard(uint64_t handle);
 void  xenia_send_clipboard(uint64_t handle, const char *text);
 
-void xenia_send_file(uint64_t handle, const char *name, const uint8_t *data, size_t data_len);
+int32_t xenia_try_send_file(uint64_t handle, const char *name, const uint8_t *data, size_t data_len);
 
 typedef struct {
     int32_t  kind;
@@ -227,27 +227,30 @@ Java_io_luminousdynamics_xenia_NativeBindings_sendClipboard(JNIEnv *env, jclass 
     (*env)->ReleaseStringUTFChars(env, text, cstr);
 }
 
-JNIEXPORT void JNICALL
+JNIEXPORT jboolean JNICALL
 Java_io_luminousdynamics_xenia_NativeBindings_sendFile(JNIEnv *env, jclass clazz,
                                                         jlong handle, jstring name,
                                                         jbyteArray data) {
     (void)clazz;
     if (name == NULL || data == NULL) {
-        return;
+        return JNI_FALSE;
     }
     const char *nameStr = (*env)->GetStringUTFChars(env, name, NULL);
     if (nameStr == NULL) {
-        return;
+        return JNI_FALSE;
     }
     jsize len = (*env)->GetArrayLength(env, data);
     jbyte *bytes = (*env)->GetByteArrayElements(env, data, NULL);
     if (bytes == NULL) {
         (*env)->ReleaseStringUTFChars(env, name, nameStr);
-        return;
+        return JNI_FALSE;
     }
-    xenia_send_file((uint64_t)handle, nameStr, (const uint8_t *)bytes, (size_t)len);
+    int32_t status = xenia_try_send_file(
+        (uint64_t)handle, nameStr, (const uint8_t *)bytes, (size_t)len
+    );
     (*env)->ReleaseByteArrayElements(env, data, bytes, JNI_ABORT);
     (*env)->ReleaseStringUTFChars(env, name, nameStr);
+    return status == 0 ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jbyteArray JNICALL

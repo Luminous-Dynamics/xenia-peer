@@ -96,8 +96,11 @@ const _: [(); FRAME_QUEUE_CAP] =
 const INPUT_QUEUE_CAP: usize = 256;
 const _: [(); INPUT_QUEUE_CAP] =
     [(); xenia_peer_core::producer_flow::INPUT_STATE_TRANSITION_V1.capacity];
-/// Bound on buffered viewer-to-host clipboard updates.
-const CLIPBOARD_QUEUE_CAP: usize = 16;
+/// Outbound clipboard is latest-value state. `watch` retains one pending
+/// value and coalesces intermediate updates while the network sender is busy.
+const CLIPBOARD_SLOT_CAP: usize = 1;
+const _: [(); CLIPBOARD_SLOT_CAP] =
+    [(); xenia_peer_core::producer_flow::MOBILE_CLIPBOARD_OUTBOUND_V1.capacity];
 /// Bound on queued file-transfer UI events (offers/progress/done). A UI
 /// that stops polling only loses stale progress ticks, not correctness --
 /// the underlying transfer state machine doesn't live in this queue.
@@ -110,6 +113,8 @@ const _: [(); FILE_TRANSFER_EVENT_QUEUE_CAP] =
 /// flight at a time anyway (mirrors `xenia-viewer`'s `--send-file`,
 /// which supports exactly one transfer per run).
 const FILE_TRANSFER_CMD_QUEUE_CAP: usize = 2;
+const _: [(); FILE_TRANSFER_CMD_QUEUE_CAP] =
+    [(); xenia_peer_core::producer_flow::MOBILE_FILE_TRANSFER_COMMAND_V1.capacity];
 /// Caps how many incoming transfers can be simultaneously buffered in
 /// memory. Lower than the daemon's own `MAX_CONCURRENT_INCOMING_TRANSFERS`
 /// (8) since phones have tighter RAM budgets than desktop hosts.
@@ -181,6 +186,15 @@ enum FileTransferCommand {
     SendFile { name: String, data: Vec<u8> },
 }
 
+/// Immediate result of trying to enqueue a user-triggered file transfer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileTransferEnqueueError {
+    /// The fixed command queue is full. No command was silently discarded.
+    QueueFull,
+    /// The background session task has ended and no longer accepts commands.
+    SessionClosed,
+}
+
 /// Reduce a wire-provided filename to a bare basename with no path
 /// separators, exactly mirroring `xenia-peer`/`xenia-viewer`'s
 /// identically-named helper -- see their doc comments for why (a
@@ -215,7 +229,7 @@ struct Shared {
 pub struct ViewerEngine {
     shared: Arc<Shared>,
     input_tx: mpsc::Sender<InputEvent>,
-    clipboard_tx: mpsc::Sender<ClipboardContent>,
+    clipboard_tx: watch::Sender<Option<ClipboardContent>>,
     ft_cmd_tx: mpsc::Sender<FileTransferCommand>,
     _task: tokio::task::JoinHandle<()>,
 }
@@ -254,12 +268,12 @@ impl ViewerEngine {
                 FILE_TRANSFER_EVENT_QUEUE_CAP,
             )),
         });
-        // Bounded so a stalled network task can't let viewer-generated input
-        // and clipboard events accumulate without limit. These carry UI
-        // actions that outpace the wire during a stall; dropping the oldest
-        // excess (via `try_send` in the send_* methods) is the right backpressure.
+        // Input uses a bounded event queue; outbound clipboard is state-like
+        // and therefore uses a one-value watch slot so stale intermediate
+        // clipboard contents cannot accumulate. User-triggered file commands
+        // use a small bounded queue whose rejection is surfaced explicitly.
         let (input_tx, input_rx) = mpsc::channel(INPUT_QUEUE_CAP);
-        let (clipboard_tx, clipboard_rx) = mpsc::channel(CLIPBOARD_QUEUE_CAP);
+        let (clipboard_tx, clipboard_rx) = watch::channel(None);
         let (ft_cmd_tx, ft_cmd_rx) = mpsc::channel(FILE_TRANSFER_CMD_QUEUE_CAP);
         let shared_for_task = Arc::clone(&shared);
         let task = rt.spawn(run_session(
@@ -317,7 +331,7 @@ impl ViewerEngine {
             Some(t) => ClipboardContent::Text(t),
             None => ClipboardContent::Cleared,
         };
-        let _ = self.clipboard_tx.try_send(content);
+        self.clipboard_tx.send_replace(Some(content));
     }
 
     /// Enqueue a state transition with bounded backpressure. Mobile UI APIs are
@@ -391,10 +405,21 @@ impl ViewerEngine {
     /// Only one outgoing transfer is in flight at a time -- calling
     /// this while one is already active surfaces a `Done { ok: false
     /// }` event rather than queuing a second one.
-    pub fn send_file(&self, name: String, data: Vec<u8>) {
-        let _ = self
+    pub fn send_file(
+        &self,
+        name: String,
+        data: Vec<u8>,
+    ) -> Result<(), FileTransferEnqueueError> {
+        match self
             .ft_cmd_tx
-            .try_send(FileTransferCommand::SendFile { name, data });
+            .try_send(FileTransferCommand::SendFile { name, data })
+        {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(FileTransferEnqueueError::QueueFull),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(FileTransferEnqueueError::SessionClosed)
+            }
+        }
     }
 
     /// Pop the oldest queued file-transfer event, if any.
@@ -419,7 +444,7 @@ async fn run_session(
     codec: MobileCodec,
     shared: Arc<Shared>,
     input_rx: mpsc::Receiver<InputEvent>,
-    clipboard_rx: mpsc::Receiver<ClipboardContent>,
+    clipboard_rx: watch::Receiver<Option<ClipboardContent>>,
     ft_cmd_rx: mpsc::Receiver<FileTransferCommand>,
     recv_dir: Option<PathBuf>,
     max_file_bytes: u64,
@@ -450,7 +475,7 @@ async fn run_session_inner(
     codec: MobileCodec,
     shared: &Arc<Shared>,
     mut input_rx: mpsc::Receiver<InputEvent>,
-    mut clipboard_rx: mpsc::Receiver<ClipboardContent>,
+    mut clipboard_rx: watch::Receiver<Option<ClipboardContent>>,
     mut ft_cmd_rx: mpsc::Receiver<FileTransferCommand>,
     recv_dir: Option<PathBuf>,
     max_file_bytes: u64,
@@ -539,7 +564,13 @@ async fn run_session_inner(
                     return;
                 }
             }
-            while let Some(content) = clipboard_rx.recv().await {
+            loop {
+                if clipboard_rx.changed().await.is_err() {
+                    return;
+                }
+                let Some(content) = clipboard_rx.borrow_and_update().clone() else {
+                    continue;
+                };
                 let envelope = {
                     let mut session = session.lock().await;
                     match session.seal_clipboard_event(content) {
@@ -1328,10 +1359,9 @@ mod tests {
             None,
             DEFAULT_TEST_MAX_FILE_BYTES,
         );
-        // The outbound clipboard task isn't spawned until the
-        // handshake completes -- sending before then should just
-        // queue harmlessly on the unbounded channel, not panic or
-        // block.
+        // The outbound clipboard task isn't spawned until the handshake
+        // completes. The one-value watch slot should retain only the latest
+        // state without growing a stale clipboard backlog.
         engine.send_clipboard(Some("hello".to_string()));
         engine.send_clipboard(None);
     }
@@ -1353,7 +1383,8 @@ mod tests {
         // Mirrors `send_clipboard_before_any_connection_progress_does_not_panic`:
         // the file-transfer command isn't drained until the handshake
         // completes -- sending before then must just queue harmlessly.
-        engine.send_file("test.txt".to_string(), vec![1, 2, 3]);
+        let result = engine.send_file("test.txt".to_string(), vec![1, 2, 3]);
+        assert!(result.is_ok() || result == Err(FileTransferEnqueueError::SessionClosed));
     }
 
     #[test]

@@ -250,8 +250,8 @@ class XeniaSession(
      * `FilePickerBridge` -- Storage Access Framework `Uri`s aren't
      * plain filesystem paths). Only one outgoing transfer is in
      * flight at a time; see [fileTransferEvents] for progress/result. */
-    fun sendFile(name: String, data: ByteArray) {
-        if (handle != 0L) NativeBindings.sendFile(handle, name, data)
+    fun sendFile(name: String, data: ByteArray): Boolean {
+        return handle != 0L && NativeBindings.sendFile(handle, name, data)
     }
 
     fun disconnect() {
