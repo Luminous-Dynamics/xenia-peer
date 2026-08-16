@@ -164,6 +164,9 @@ fn button_types(button: u8) -> (CGEventType, CGEventType, CGMouseButton) {
 pub struct MacosInjector {
     screen_width: u32,
     screen_height: u32,
+    /// Bitset of pointer buttons currently held by this backend. Used only to
+    /// select CoreGraphics drag event types for pure pointer motion.
+    pressed_buttons: u8,
 }
 
 impl MacosInjector {
@@ -181,6 +184,7 @@ impl MacosInjector {
         Ok(Self {
             screen_width,
             screen_height,
+            pressed_buttons: 0,
         })
     }
 
@@ -211,7 +215,21 @@ impl MacosInjector {
 }
 
 impl InputInjector for MacosInjector {
-    fn inject_pointer(
+    fn inject_pointer_move(&mut self, x: f32, y: f32) -> Result<(), InjectError> {
+        let point = self.point(x, y);
+        let (event_type, button) = if self.pressed_buttons & (1 << 0) != 0 {
+            (CGEventType::LeftMouseDragged, CGMouseButton::Left)
+        } else if self.pressed_buttons & (1 << 2) != 0 {
+            (CGEventType::RightMouseDragged, CGMouseButton::Right)
+        } else if self.pressed_buttons != 0 {
+            (CGEventType::OtherMouseDragged, CGMouseButton::Center)
+        } else {
+            (CGEventType::MouseMoved, CGMouseButton::Left)
+        };
+        self.post_mouse(event_type, point, button)
+    }
+
+    fn inject_pointer_button(
         &mut self,
         x: f32,
         y: f32,
@@ -220,7 +238,14 @@ impl InputInjector for MacosInjector {
     ) -> Result<(), InjectError> {
         let point = self.point(x, y);
         let (down, up, cg_button) = button_types(button);
-        self.post_mouse(if pressed { down } else { up }, point, cg_button)
+        self.post_mouse(if pressed { down } else { up }, point, cg_button)?;
+        let bit = 1u8 << button.min(7);
+        if pressed {
+            self.pressed_buttons |= bit;
+        } else {
+            self.pressed_buttons &= !bit;
+        }
+        Ok(())
     }
 
     fn inject_key(&mut self, code: u32, pressed: bool, _modifiers: u8) -> Result<(), InjectError> {

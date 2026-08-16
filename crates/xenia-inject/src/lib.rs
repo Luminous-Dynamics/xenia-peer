@@ -45,6 +45,8 @@
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -163,13 +165,34 @@ pub enum InputEvent {
 /// A recorded injection — useful for `LoggingInjector` + tests.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InjectedEvent {
-    /// Pointer event with denormalized (pixel) coordinates.
+    /// Legacy combined pointer event with denormalized coordinates.
+    ///
+    /// Kept for direct calls to [`InputInjector::inject_pointer`]. Current
+    /// `PointerMove`/`PointerButton` dispatch uses the explicit variants below.
     Pointer {
         /// Screen x in pixels.
         screen_x: i32,
         /// Screen y in pixels.
         screen_y: i32,
         /// Button id (see [`InputEvent::Pointer::button`]).
+        button: u8,
+        /// Press / release.
+        pressed: bool,
+    },
+    /// Pure pointer motion; does not imply any button transition.
+    PointerMove {
+        /// Screen x in pixels.
+        screen_x: i32,
+        /// Screen y in pixels.
+        screen_y: i32,
+    },
+    /// Pointer-button transition at a denormalized position.
+    PointerButton {
+        /// Screen x in pixels.
+        screen_x: i32,
+        /// Screen y in pixels.
+        screen_y: i32,
+        /// Button id.
         button: u8,
         /// Press / release.
         pressed: bool,
@@ -235,14 +258,32 @@ pub(crate) fn evdev_button_code(button: u8) -> u32 {
 /// daemon's receive-and-inject loop can own it on a dedicated
 /// task.
 pub trait InputInjector: Send {
-    /// Inject a pointer event. `x` / `y` are in `[0.0, 1.0]`.
-    fn inject_pointer(
+    /// Move the pointer without changing any button state.
+    fn inject_pointer_move(&mut self, x: f32, y: f32) -> Result<(), InjectError>;
+
+    /// Apply one pointer-button state transition at `x` / `y`.
+    fn inject_pointer_button(
         &mut self,
         x: f32,
         y: f32,
         button: u8,
         pressed: bool,
     ) -> Result<(), InjectError>;
+
+    /// Legacy combined pointer operation.
+    ///
+    /// Historical callers used this for both motion and button transitions.
+    /// V15 keeps the method for source compatibility, but current
+    /// [`InputEvent::PointerMove`] dispatch never calls it.
+    fn inject_pointer(
+        &mut self,
+        x: f32,
+        y: f32,
+        button: u8,
+        pressed: bool,
+    ) -> Result<(), InjectError> {
+        self.inject_pointer_button(x, y, button, pressed)
+    }
 
     /// Inject a keyboard event.
     fn inject_key(&mut self, code: u32, pressed: bool, modifiers: u8) -> Result<(), InjectError>;
@@ -269,15 +310,13 @@ pub trait InputInjector: Send {
                     button,
                     pressed,
                 } => self.inject_pointer(*x, *y, *button, *pressed)?,
-                InputEvent::PointerMove { x, y } => {
-                    self.inject_pointer(*x, *y, 0, false)?
-                }
+                InputEvent::PointerMove { x, y } => self.inject_pointer_move(*x, *y)?,
                 InputEvent::PointerButton {
                     x,
                     y,
                     button,
                     pressed,
-                } => self.inject_pointer(*x, *y, *button, *pressed)?,
+                } => self.inject_pointer_button(*x, *y, *button, *pressed)?,
                 InputEvent::Key {
                     code,
                     pressed,
@@ -299,6 +338,189 @@ pub trait InputInjector: Send {
     fn backend_name(&self) -> &str;
 }
 
+/// Result of best-effort release/cancel of session-owned injected state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InputReleaseReport {
+    /// Number of release/cancel operations attempted.
+    pub attempted: usize,
+    /// Number successfully delivered to the backend.
+    pub released: usize,
+    /// Number that failed and remain tracked for a later retry/drop attempt.
+    pub failed: usize,
+}
+
+/// Session-scoped injector that remembers successful press/down transitions.
+///
+/// A remote session can disappear after a key/button/touch down but before its
+/// matching release reaches the host. This wrapper records only transitions
+/// that the backend successfully accepted, and can deterministically unwind
+/// them when the session terminates. [`Drop`] performs a final best-effort
+/// unwind as a safety net; callers should still invoke [`Self::release_all`]
+/// explicitly so failures can be logged.
+pub struct SessionInputInjector {
+    inner: Box<dyn InputInjector>,
+    pressed_keys: BTreeMap<u32, u8>,
+    pressed_buttons: BTreeMap<u8, (f32, f32)>,
+    active_touches: BTreeMap<u8, (f32, f32, f32)>,
+}
+
+impl SessionInputInjector {
+    /// Wrap one concrete injection backend for the lifetime of a session.
+    pub fn new(inner: Box<dyn InputInjector>) -> Self {
+        Self {
+            inner,
+            pressed_keys: BTreeMap::new(),
+            pressed_buttons: BTreeMap::new(),
+            active_touches: BTreeMap::new(),
+        }
+    }
+
+    /// Number of currently tracked press/down states.
+    pub fn active_state_count(&self) -> usize {
+        self.pressed_keys.len() + self.pressed_buttons.len() + self.active_touches.len()
+    }
+
+    /// Best-effort release of every session-owned key/button/touch state.
+    ///
+    /// Successful releases are removed immediately. Failed releases remain
+    /// tracked so a subsequent call (including the drop fallback) can retry.
+    pub fn release_all(&mut self) -> InputReleaseReport {
+        let mut report = InputReleaseReport::default();
+
+        let touches: Vec<_> = self
+            .active_touches
+            .iter()
+            .map(|(&index, &(x, y, pressure))| (index, x, y, pressure))
+            .collect();
+        for (index, x, y, pressure) in touches {
+            report.attempted += 1;
+            match self.inner.inject_touch(index, x, y, 3, pressure) {
+                Ok(()) => {
+                    self.active_touches.remove(&index);
+                    report.released += 1;
+                }
+                Err(_) => report.failed += 1,
+            }
+        }
+
+        let buttons: Vec<_> = self
+            .pressed_buttons
+            .iter()
+            .map(|(&button, &(x, y))| (button, x, y))
+            .collect();
+        for (button, x, y) in buttons {
+            report.attempted += 1;
+            match self.inner.inject_pointer_button(x, y, button, false) {
+                Ok(()) => {
+                    self.pressed_buttons.remove(&button);
+                    report.released += 1;
+                }
+                Err(_) => report.failed += 1,
+            }
+        }
+
+        let keys: Vec<_> = self
+            .pressed_keys
+            .iter()
+            .map(|(&code, &modifiers)| (code, modifiers))
+            .collect();
+        for (code, modifiers) in keys {
+            report.attempted += 1;
+            match self.inner.inject_key(code, false, modifiers) {
+                Ok(()) => {
+                    self.pressed_keys.remove(&code);
+                    report.released += 1;
+                }
+                Err(_) => report.failed += 1,
+            }
+        }
+
+        report
+    }
+}
+
+impl Drop for SessionInputInjector {
+    fn drop(&mut self) {
+        let _ = self.release_all();
+    }
+}
+
+impl InputInjector for SessionInputInjector {
+    fn inject_pointer_move(&mut self, x: f32, y: f32) -> Result<(), InjectError> {
+        self.inner.inject_pointer_move(x, y)?;
+        for position in self.pressed_buttons.values_mut() {
+            *position = (x, y);
+        }
+        Ok(())
+    }
+
+    fn inject_pointer_button(
+        &mut self,
+        x: f32,
+        y: f32,
+        button: u8,
+        pressed: bool,
+    ) -> Result<(), InjectError> {
+        self.inner.inject_pointer_button(x, y, button, pressed)?;
+        if pressed {
+            self.pressed_buttons.insert(button, (x, y));
+        } else {
+            self.pressed_buttons.remove(&button);
+        }
+        Ok(())
+    }
+
+    fn inject_pointer(
+        &mut self,
+        x: f32,
+        y: f32,
+        button: u8,
+        pressed: bool,
+    ) -> Result<(), InjectError> {
+        self.inner.inject_pointer(x, y, button, pressed)?;
+        if pressed {
+            self.pressed_buttons.insert(button, (x, y));
+        } else {
+            self.pressed_buttons.remove(&button);
+        }
+        Ok(())
+    }
+
+    fn inject_key(&mut self, code: u32, pressed: bool, modifiers: u8) -> Result<(), InjectError> {
+        self.inner.inject_key(code, pressed, modifiers)?;
+        if pressed {
+            self.pressed_keys.insert(code, modifiers);
+        } else {
+            self.pressed_keys.remove(&code);
+        }
+        Ok(())
+    }
+
+    fn inject_touch(
+        &mut self,
+        index: u8,
+        x: f32,
+        y: f32,
+        phase: u8,
+        pressure: f32,
+    ) -> Result<(), InjectError> {
+        self.inner.inject_touch(index, x, y, phase, pressure)?;
+        match phase {
+            0 | 1 => {
+                self.active_touches.insert(index, (x, y, pressure));
+            }
+            _ => {
+                self.active_touches.remove(&index);
+            }
+        }
+        Ok(())
+    }
+
+    fn backend_name(&self) -> &str {
+        self.inner.backend_name()
+    }
+}
+
 // ───────────────────────── NoopInjector ────────────────────────────
 
 /// Silently drops every event. Useful for view-only sessions and
@@ -307,7 +529,10 @@ pub trait InputInjector: Send {
 pub struct NoopInjector;
 
 impl InputInjector for NoopInjector {
-    fn inject_pointer(
+    fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
+        Ok(())
+    }
+    fn inject_pointer_button(
         &mut self,
         _x: f32,
         _y: f32,
@@ -372,6 +597,30 @@ impl LoggingInjector {
 }
 
 impl InputInjector for LoggingInjector {
+    fn inject_pointer_move(&mut self, x: f32, y: f32) -> Result<(), InjectError> {
+        self.events.push(InjectedEvent::PointerMove {
+            screen_x: self.denorm_x(x),
+            screen_y: self.denorm_y(y),
+        });
+        Ok(())
+    }
+
+    fn inject_pointer_button(
+        &mut self,
+        x: f32,
+        y: f32,
+        button: u8,
+        pressed: bool,
+    ) -> Result<(), InjectError> {
+        self.events.push(InjectedEvent::PointerButton {
+            screen_x: self.denorm_x(x),
+            screen_y: self.denorm_y(y),
+            button,
+            pressed,
+        });
+        Ok(())
+    }
+
     fn inject_pointer(
         &mut self,
         x: f32,
@@ -450,7 +699,12 @@ impl WaylandInputInjector {
 
 #[cfg(feature = "wayland-virtual")]
 impl InputInjector for WaylandInputInjector {
-    fn inject_pointer(
+    fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
+        Err(InjectError::Unavailable(
+            "wayland-virtual backend not yet implemented".into(),
+        ))
+    }
+    fn inject_pointer_button(
         &mut self,
         _x: f32,
         _y: f32,
@@ -656,18 +910,26 @@ fn uinput_button_code(button: u8) -> u16 {
     evdev_button_code(button) as u16
 }
 
-/// Map a touch `phase` (0=down, 1=motion, anything else=up) to
-/// whether `BTN_TOUCH` should read pressed. Matches
-/// `XdgPortalInjector`'s phase convention. Pure, so it's
-/// unit-testable without opening `/dev/uinput`.
+/// Map a touch `phase` (0=down, 1=motion, 2=up, 3=cancel) to whether
+/// `BTN_TOUCH` should read pressed. Unknown phases fail closed as released.
+/// Pure, so it's unit-testable without opening `/dev/uinput`.
 #[cfg(feature = "uinput")]
 fn uinput_touch_down(phase: u8) -> bool {
-    phase != 2 && phase != 255
+    matches!(phase, 0 | 1)
 }
 
 #[cfg(feature = "uinput")]
 impl InputInjector for UinputInjector {
-    fn inject_pointer(
+    fn inject_pointer_move(&mut self, x: f32, y: f32) -> Result<(), InjectError> {
+        use input_linux::sys::{ABS_X, ABS_Y, EV_ABS};
+
+        self.emit(&[
+            (EV_ABS as u16, ABS_X as u16, uinput_abs(x)),
+            (EV_ABS as u16, ABS_Y as u16, uinput_abs(y)),
+        ])
+    }
+
+    fn inject_pointer_button(
         &mut self,
         x: f32,
         y: f32,
@@ -817,8 +1079,8 @@ mod tests {
         log.process_events(&events).unwrap();
         assert_eq!(log.events.len(), 5);
         assert!(matches!(log.events[0], InjectedEvent::Pointer { .. }));
-        assert!(matches!(log.events[1], InjectedEvent::Pointer { .. }));
-        assert!(matches!(log.events[2], InjectedEvent::Pointer { .. }));
+        assert!(matches!(log.events[1], InjectedEvent::PointerMove { .. }));
+        assert!(matches!(log.events[2], InjectedEvent::PointerButton { .. }));
         assert!(matches!(
             log.events[3],
             InjectedEvent::Key {
@@ -828,6 +1090,66 @@ mod tests {
             }
         ));
         assert!(matches!(log.events[4], InjectedEvent::Touch { .. }));
+    }
+
+    #[test]
+    fn pointer_move_never_dispatches_a_button_transition() {
+        let mut log = LoggingInjector::new(100, 100);
+        log.process_events(&[InputEvent::PointerMove { x: 0.25, y: 0.75 }])
+            .unwrap();
+        assert_eq!(
+            log.events,
+            vec![InjectedEvent::PointerMove {
+                screen_x: 25,
+                screen_y: 75,
+            }]
+        );
+    }
+
+    #[test]
+    fn session_injector_tracks_latest_drag_position_for_teardown_release() {
+        let mut injector = SessionInputInjector::new(Box::new(NoopInjector));
+        injector
+            .inject_pointer_button(0.1, 0.2, 0, true)
+            .unwrap();
+        injector.inject_pointer_move(0.8, 0.9).unwrap();
+        assert_eq!(injector.pressed_buttons.get(&0), Some(&(0.8, 0.9)));
+    }
+
+    #[test]
+    fn session_injector_releases_pressed_state_on_teardown() {
+        let mut injector = SessionInputInjector::new(Box::new(NoopInjector));
+        injector
+            .process_events(&[
+                InputEvent::PointerMove { x: 0.1, y: 0.2 },
+                InputEvent::PointerButton {
+                    x: 0.1,
+                    y: 0.2,
+                    button: 0,
+                    pressed: true,
+                },
+                InputEvent::Key {
+                    code: 30,
+                    pressed: true,
+                    modifiers: 0,
+                },
+                InputEvent::Touch {
+                    index: 0,
+                    x: 0.5,
+                    y: 0.5,
+                    phase: 0,
+                    pressure: 1.0,
+                },
+            ])
+            .unwrap();
+
+        // Pure motion carries no held state. Button/key/touch-down do.
+        assert_eq!(injector.active_state_count(), 3);
+        let report = injector.release_all();
+        assert_eq!(report.attempted, 3);
+        assert_eq!(report.released, 3);
+        assert_eq!(report.failed, 0);
+        assert_eq!(injector.active_state_count(), 0);
     }
 
     #[test]
@@ -898,10 +1220,8 @@ mod tests {
         assert!(uinput_touch_down(0)); // down
         assert!(uinput_touch_down(1)); // motion (stays down)
         assert!(!uinput_touch_down(2)); // up
-        assert!(!uinput_touch_down(255)); // cancel
-        // Any other phase value defaults to "down" -- matches the
-        // permissive `phase != 2 && phase != 255` implementation, not
-        // an exhaustive enum.
-        assert!(uinput_touch_down(42));
+        assert!(!uinput_touch_down(3)); // cancel
+        assert!(!uinput_touch_down(255)); // unknown/fail-closed
+        assert!(!uinput_touch_down(42));
     }
 }

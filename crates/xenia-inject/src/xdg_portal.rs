@@ -75,7 +75,11 @@ fn denorm(v: f32, extent: u32) -> f64 {
 /// `LoggingInjector`'s convention) so the worker only ever deals in f64
 /// pixel space.
 enum Command {
-    Pointer {
+    PointerMove {
+        x: f64,
+        y: f64,
+    },
+    PointerButton {
         x: f64,
         y: f64,
         button: u8,
@@ -167,14 +171,21 @@ impl Drop for XdgPortalInjector {
 }
 
 impl InputInjector for XdgPortalInjector {
-    fn inject_pointer(
+    fn inject_pointer_move(&mut self, x: f32, y: f32) -> Result<(), InjectError> {
+        self.send(Command::PointerMove {
+            x: self.denorm_x(x),
+            y: self.denorm_y(y),
+        })
+    }
+
+    fn inject_pointer_button(
         &mut self,
         x: f32,
         y: f32,
         button: u8,
         pressed: bool,
     ) -> Result<(), InjectError> {
-        self.send(Command::Pointer {
+        self.send(Command::PointerButton {
             x: self.denorm_x(x),
             y: self.denorm_y(y),
             button,
@@ -236,7 +247,17 @@ fn portal_worker(rx: mpsc::Receiver<Command>, ready_tx: mpsc::Sender<Result<(), 
         while let Ok(cmd) = rx.recv() {
             match cmd {
                 Command::Shutdown => break,
-                Command::Pointer {
+                Command::PointerMove { x, y } => {
+                    let (dx, dy) = match last_pointer {
+                        Some((lx, ly)) => (x - lx, y - ly),
+                        None => (0.0, 0.0),
+                    };
+                    last_pointer = Some((x, y));
+                    if dx != 0.0 || dy != 0.0 {
+                        let _ = proxy.notify_pointer_motion(&session, dx, dy).await;
+                    }
+                }
+                Command::PointerButton {
                     x,
                     y,
                     button,

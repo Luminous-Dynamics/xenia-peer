@@ -11,7 +11,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use xenia_inject::{InputInjector, LoggingInjector, NoopInjector};
+use xenia_inject::{InputInjector, LoggingInjector, NoopInjector, SessionInputInjector};
 
 use ed25519_dalek::SigningKey;
 #[cfg(any(feature = "audio-capture", test))]
@@ -6532,7 +6532,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // task start -- a view-only session (`--input-backend
             // noop`, the default) never triggers `XdgPortalInjector`'s
             // consent dialog because it's simply never built.
-            let mut injector: Option<Box<dyn InputInjector>> = None;
+            let mut injector: Option<SessionInputInjector> = None;
             loop {
                 let envelope = match recv_half.recv_envelope().await {
                     Ok(envelope) => envelope,
@@ -6631,8 +6631,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let width = screen_dims.0.load(Ordering::Relaxed);
                 let height = screen_dims.1.load(Ordering::Relaxed);
-                let injector = injector
-                    .get_or_insert_with(|| build_input_injector(input_backend, width, height));
+                let injector = injector.get_or_insert_with(|| {
+                    SessionInputInjector::new(build_input_injector(input_backend, width, height))
+                });
                 match injector.process_events(std::slice::from_ref(&event)) {
                     Ok(()) => {
                         info!(
@@ -6648,6 +6649,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "input injection failed"
                         );
                     }
+                }
+            }
+
+            if let Some(injector) = injector.as_mut() {
+                let report = injector.release_all();
+                if report.attempted > 0 {
+                    info!(
+                        attempted = report.attempted,
+                        released = report.released,
+                        failed = report.failed,
+                        backend = injector.backend_name(),
+                        "released session-owned injected input state during teardown"
+                    );
+                }
+                if report.failed > 0 {
+                    warn!(
+                        failed = report.failed,
+                        backend = injector.backend_name(),
+                        "some injected input state could not be released during teardown"
+                    );
                 }
             }
         });
