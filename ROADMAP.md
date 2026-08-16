@@ -61,6 +61,8 @@ If this file disagrees with reality, the file is wrong.
 | `xenia-peer` on desktop | CLI | tcp / ws / quic | all three | ✅ loopback + LAN; QUIC smoke verified with passthrough |
 | `xenia-peer` on desktop | egui `--gui` | tcp / ws / quic | all three | ✅ visually verifiable; QUIC path uses same receive loop |
 | `xenia-peer` on desktop | browser (phone or desktop) | ws | passthrough | ⚠️ V10 `/0` path was live; V11 `/1` requires the companion `xenia-wire` browser subprotocol/profile migration |
+
+**Transport/session V12:** authenticated availability semantics are now implemented in native Xenia. `NegotiatedSessionContextV3` binds the live carrier profile plus an exact availability profile (15s send-stall, 120s complete-envelope receive, 3s graceful-close, no synthetic application keepalive, carrier control traffic does not reset application liveness). TCP/WS/QUIC operations fail closed on the bounded deadlines. Browser `/1` companion migration remains a separate `xenia-wire` task; V12 does not claim it is closed.
 | `xenia-peer` on desktop | browser (phone or desktop) | ws | h264 | ❌ needs WebCodecs wiring |
 | `xenia-peer` on desktop | browser (phone or desktop) | ws | hdc | ❌ needs bincode+grayscale decoder in WASM (~50 LOC) |
 | **Phone → desktop** (phone as daemon) | desktop viewer | any | any | ❌ needs phone-side daemon port |
