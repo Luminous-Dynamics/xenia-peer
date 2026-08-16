@@ -1,0 +1,48 @@
+{
+  "vector": "xenia-transport-availability-v1",
+  "status": "language-neutral compatibility fixture; SHA-256 is fixture integrity, while Xenia runtime profile_hash uses BLAKE3-256",
+  "encoding_notes": [
+    "bincode 1.x default fixed-width little-endian encoding",
+    "String length is u64 little-endian",
+    "TransportKind serde enum variant index is u32 little-endian: Tcp=0, WebSocket=1, Quic=2",
+    "u64 timeout fields are little-endian; bool false is 0x00"
+  ],
+  "profiles": [
+    {
+      "kind": "tcp",
+      "serde_variant_index": 0,
+      "schema": "xenia-transport-availability-profile-v1",
+      "send_stall_timeout_ms": 15000,
+      "receive_envelope_timeout_ms": 120000,
+      "graceful_close_timeout_ms": 3000,
+      "application_keepalive_interval_ms": 0,
+      "carrier_keepalive_resets_application_idle": false,
+      "bincode_v1_fixedint_little_endian_hex": "270000000000000078656e69612d7472616e73706f72742d617661696c6162696c6974792d70726f66696c652d763100000000983a000000000000c0d4010000000000b80b000000000000000000000000000000",
+      "sha256_of_bincode_bytes": "aa23d4d96e2031447bfe8027f061010bbdf3590a10b4b3b8bac9201e44ee7071"
+    },
+    {
+      "kind": "websocket",
+      "serde_variant_index": 1,
+      "schema": "xenia-transport-availability-profile-v1",
+      "send_stall_timeout_ms": 15000,
+      "receive_envelope_timeout_ms": 120000,
+      "graceful_close_timeout_ms": 3000,
+      "application_keepalive_interval_ms": 0,
+      "carrier_keepalive_resets_application_idle": false,
+      "bincode_v1_fixedint_little_endian_hex": "270000000000000078656e69612d7472616e73706f72742d617661696c6162696c6974792d70726f66696c652d763101000000983a000000000000c0d4010000000000b80b000000000000000000000000000000",
+      "sha256_of_bincode_bytes": "0618bdcfe7d031f4311586c5c22af057b591deddba07cee0b2ec827bb095c43e"
+    },
+    {
+      "kind": "quic",
+      "serde_variant_index": 2,
+      "schema": "xenia-transport-availability-profile-v1",
+      "send_stall_timeout_ms": 15000,
+      "receive_envelope_timeout_ms": 120000,
+      "graceful_close_timeout_ms": 3000,
+      "application_keepalive_interval_ms": 0,
+      "carrier_keepalive_resets_application_idle": false,
+      "bincode_v1_fixedint_little_endian_hex": "270000000000000078656e69612d7472616e73706f72742d617661696c6162696c6974792d70726f66696c652d763102000000983a000000000000c0d4010000000000b80b000000000000000000000000000000",
+      "sha256_of_bincode_bytes": "a81a6f6cbe3f83539f338f443ba862527776730ae4b33210c2c5f579c57edfe0"
+    }
+  ]
+}
