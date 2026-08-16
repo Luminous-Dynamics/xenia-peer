@@ -4,6 +4,8 @@ from collections import deque
 
 # Historical bincode enum positions must remain stable; V14 appends explicit
 # pointer semantics instead of reordering the first three deployed variants.
+INPUT_EVENT_SCHEMA_VERSION=2
+assert INPUT_EVENT_SCHEMA_VERSION == 2
 indices={'legacy_pointer':0,'key':1,'touch':2,'pointer_move':3,'pointer_button':4}
 assert indices['legacy_pointer']==0 and indices['key']==1 and indices['touch']==2
 assert indices['pointer_move'] > indices['touch']

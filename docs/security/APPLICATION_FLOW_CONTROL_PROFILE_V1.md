@@ -15,6 +15,8 @@ V14 appends:
 3. `PointerMove`
 4. `PointerButton`
 
+The sealed session capabilities now also carry `input_event_schema_version = 2`. `PendingSessionSurface` rejects any other version before exposing an authenticated application surface, and because `RawCapabilities` is part of the negotiated context hash the schema version is transcript-bound rather than a local convention.
+
 Appending rather than replacing/reordering preserves the bincode discriminants of historical `Pointer`, `Key`, and `Touch` payloads. New desktop and Android producers emit only the explicit pointer forms. The ambiguous legacy mobile/C ABI remains for compatibility but is no longer used by the current Android UI.
 
 The semantic consequence is important: `PointerButton { pressed: false }` is unambiguously a release, while `PointerMove` is unambiguously a supersedable sample. Queue overflow policy can therefore be chosen from meaning rather than guessing from `button=0, pressed=false`.

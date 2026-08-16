@@ -10,6 +10,8 @@ def read(rel):
         fail.append(f'missing {rel}'); return ''
     return p.read_text(encoding='utf-8')
 inject=read('crates/xenia-inject/src/lib.rs')
+frame=read('crates/xenia-peer-core/src/frame.rs')
+handshake=read('crates/xenia-peer-core/src/handshake.rs')
 flow=read('crates/xenia-peer-core/src/producer_flow.rs')
 lib=read('crates/xenia-peer-core/src/lib.rs')
 viewer=read('apps/xenia-viewer/src/main.rs')
@@ -39,6 +41,11 @@ checks=[
  (flow,'pub const MOBILE_VIDEO_PRESENTATION_V1','mobile video policy'),
  (flow,'pub const DESKTOP_AUDIO_PLAYBACK_V1','audio policy'),
  (inject,'pub const MAX_BINCODE_INPUT_EVENT_BYTES: usize = 256','input parser ceiling'),
+ (frame,'pub const INPUT_EVENT_SCHEMA_VERSION: u16 = 2','input schema version'),
+ (frame,'pub input_event_schema_version: u16','capability input schema field'),
+ (frame,'supports_current_input_event_schema','input schema support predicate'),
+ (handshake,'UnsupportedInputEventSchema','fail-closed input schema rejection'),
+ (handshake,'capabilities.supports_current_input_event_schema()','capability schema enforcement'),
  (peer,'input.payload.len() > xenia_inject::MAX_BINCODE_INPUT_EVENT_BYTES','host input parser ceiling enforcement'),
  (gui,'InputEvent::PointerMove { x, y }','desktop explicit motion'),
  (gui,'InputEvent::PointerButton {','desktop explicit button'),
@@ -67,6 +74,7 @@ if 'session.sendPointer(' in android:
     fail.append('current Android UI still uses ambiguous sendPointer compatibility API')
 try:
     vec=json.loads(vec_text)
+    if vec.get('input_event_schema_version') != 2: fail.append('V14 input schema version drift')
     expected_indices={'legacy_pointer':0,'key':1,'touch':2,'pointer_move':3,'pointer_button':4}
     if vec.get('input_event_bincode_variant_indices') != expected_indices:
         fail.append('V14 input-event index vector drift')
