@@ -83,6 +83,7 @@ pub enum ProtocolError {
 /// Display form is `{ecosystem}:{application}:{purpose}:v{version}`, while the
 /// signed transcript length-prefixes each text component independently.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StatementId {
     ecosystem: String,
     application: String,
@@ -299,6 +300,7 @@ impl ParameterSetId {
 
 /// Authentication over the canonical v3 proof body.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProofAuthentication {
     pub suite: AuthenticationSuiteId,
     /// Hash/fingerprint of the verifying key selected by the surrounding trust policy.
@@ -344,6 +346,7 @@ impl ExtensionClaim {
 
 /// Canonical v3 proof envelope.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProofEnvelopeV3 {
     pub protocol_version: u32,
     pub statement: StatementId,

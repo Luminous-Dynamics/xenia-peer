@@ -86,6 +86,7 @@ if source_path.is_file():
         "AUTHENTICATION_SUITE_REGISTRY_V1",
         "AUTHENTICATION_SUITE_REGISTRY_V1_SHA256",
         'b"XENIA:AuthenticationSuiteRegistry:v1\\n1=ed25519\\n2=ml-dsa-65-fips204\\n"',
+        "#[serde(deny_unknown_fields)]",
     ):
         require(fragment in source, f"V3 protocol invariant missing: {fragment}")
 
@@ -95,6 +96,7 @@ if source_path.is_file():
     require_test(source, "public_inputs_digest_is_challenge_bound")
     require_test(source, "extension_digest_is_typed_order_independent_and_duplicate_safe")
     require_test(source, "authentication_suite_registry_is_frozen")
+    require(source.count("verifier_random: &[u8; 32]") >= 1, "challenge nonce helper lost verifier randomness binding")
 
     for forbidden in (
         "MYCELIX:AuthenticatedProof",
