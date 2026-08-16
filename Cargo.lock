@@ -9891,6 +9891,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "xenia-zk-codec"
+version = "0.0.0-m0"
+dependencies = [
+ "serde_json",
+ "thiserror 1.0.69",
+ "xenia-zk-protocol",
+]
+
+[[package]]
 name = "xenia-zk-legacy-mycelix"
 version = "0.0.0-m0"
 dependencies = [

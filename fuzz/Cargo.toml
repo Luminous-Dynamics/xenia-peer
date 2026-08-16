@@ -25,6 +25,8 @@ xenia-operator-agent-proto = { path = "../crates/xenia-operator-agent-proto" }
 xenia-operator-proto = { path = "../crates/xenia-operator-proto" }
 xenia-handshake = { path = "../crates/xenia-handshake" }
 xenia-peer-core = { path = "../crates/xenia-peer-core" }
+xenia-zk-protocol = { path = "../crates/xenia-zk-protocol" }
+xenia-zk-codec = { path = "../crates/xenia-zk-codec" }
 xenia-wire = "0.2.0-alpha.9"
 
 [[bin]]
@@ -44,6 +46,13 @@ bench = false
 [[bin]]
 name = "fuzz_wire_decode"
 path = "fuzz_targets/fuzz_wire_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_zk_envelope_codec"
+path = "fuzz_targets/fuzz_zk_envelope_codec.rs"
 test = false
 doc = false
 bench = false
