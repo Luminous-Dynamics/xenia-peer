@@ -36,7 +36,7 @@ If this file disagrees with reality, the file is wrong.
 | Transport | Crate | Status |
 |---|---|---|
 | TCP length-prefix | `xenia-peer-core::transport::TcpTransport` | ✅ daemon/viewer baseline; conformance-tested; explicit fallback |
-| WebSocket (binary frames) | `xenia-transport-ws` | ✅ daemon/viewer baseline; conformance-tested; selected by `auto` for `ws://...` |
+| WebSocket (binary frames) | `xenia-transport-ws` | ✅ native daemon/viewer profile `/1`; exact `xenia.transport.websocket.v1` subprotocol + carrier-native receive ceiling; browser client needs the companion `/1` subprotocol migration |
 | Iroh QUIC | `xenia-transport-quic` | ✅ daemon/viewer CLI wired; conformance-tested; auto-discovered from `host:port` when daemon advertises it |
 
 ### Transport improvement plan
@@ -60,7 +60,7 @@ If this file disagrees with reality, the file is wrong.
 |---|---|---|---|---|
 | `xenia-peer` on desktop | CLI | tcp / ws / quic | all three | ✅ loopback + LAN; QUIC smoke verified with passthrough |
 | `xenia-peer` on desktop | egui `--gui` | tcp / ws / quic | all three | ✅ visually verifiable; QUIC path uses same receive loop |
-| `xenia-peer` on desktop | browser (phone or desktop) | ws | passthrough | ✅ |
+| `xenia-peer` on desktop | browser (phone or desktop) | ws | passthrough | ⚠️ V10 `/0` path was live; V11 `/1` requires the companion `xenia-wire` browser subprotocol/profile migration |
 | `xenia-peer` on desktop | browser (phone or desktop) | ws | h264 | ❌ needs WebCodecs wiring |
 | `xenia-peer` on desktop | browser (phone or desktop) | ws | hdc | ❌ needs bincode+grayscale decoder in WASM (~50 LOC) |
 | **Phone → desktop** (phone as daemon) | desktop viewer | any | any | ❌ needs phone-side daemon port |

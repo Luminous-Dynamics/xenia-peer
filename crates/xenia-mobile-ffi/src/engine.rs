@@ -23,13 +23,13 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, watch};
 use tracing::{info, warn};
 
 use xenia_inject::InputEvent;
 use xenia_peer_core::frame::{PixelFormat as FramePixelFormat, RawCapabilities, RawRekey};
 use xenia_peer_core::handshake::{
-    negotiated_session_context_hash, perform_viewer_handshake_with_transcript,
+    AuthenticatedSessionSurface, PendingSessionSurface, perform_viewer_handshake_with_transcript,
 };
 use xenia_peer_core::transport::{RecvEnvelope, SendEnvelope, TcpTransport, Transport};
 use xenia_peer_core::{
@@ -439,6 +439,7 @@ async fn run_session_inner(
     let (send_half, mut recv_half) = transport.split();
     let session = Arc::new(Mutex::new(session));
     let send_half = Arc::new(Mutex::new(send_half));
+    let (surface_ready_tx, surface_ready_rx) = watch::channel(false);
 
     // Outbound input-event sender task: mirrors xenia-viewer's GUI
     // input loop exactly (bincode-serialize -> seal_input_event ->
@@ -446,7 +447,13 @@ async fn run_session_inner(
     {
         let session = Arc::clone(&session);
         let send_half = Arc::clone(&send_half);
+        let mut surface_ready = surface_ready_rx.clone();
         tokio::spawn(async move {
+            while !*surface_ready.borrow() {
+                if surface_ready.changed().await.is_err() {
+                    return;
+                }
+            }
             while let Some(event) = input_rx.recv().await {
                 let payload = match bincode::serialize(&event) {
                     Ok(bytes) => bytes,
@@ -480,7 +487,13 @@ async fn run_session_inner(
     {
         let session = Arc::clone(&session);
         let send_half = Arc::clone(&send_half);
+        let mut surface_ready = surface_ready_rx.clone();
         tokio::spawn(async move {
+            while !*surface_ready.borrow() {
+                if surface_ready.changed().await.is_err() {
+                    return;
+                }
+            }
             while let Some(content) = clipboard_rx.recv().await {
                 let envelope = {
                     let mut session = session.lock().await;
@@ -517,7 +530,11 @@ async fn run_session_inner(
         MobileCodec::H264 => FramePixelFormat::H264,
     };
 
-    let mut capabilities_received = false;
+    let mut pending_surface = Some(
+        PendingSessionSurface::new(handshake.negotiated_context_hash, transport_profile.clone())
+            .map_err(|e| e.to_string())?,
+    );
+    let mut authenticated_surface: Option<AuthenticatedSessionSurface> = None;
     let mut epoch_state = SessionEpochState::new(handshake.transcript_hash, RekeyPolicy::smoke());
 
     // File-transfer state, owned exclusively by this loop (unlike
@@ -535,6 +552,10 @@ async fn run_session_inner(
         let envelope = tokio::select! {
             biased;
             Some(cmd) = ft_cmd_rx.recv() => {
+                if authenticated_surface.is_none() {
+                    warn!("ignoring file-transfer command before authenticated session surface");
+                    continue;
+                }
                 handle_file_transfer_command(
                     cmd,
                     &session,
@@ -563,6 +584,9 @@ async fn run_session_inner(
             Some(PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST)
                 | Some(PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER)
         ) {
+            let _authenticated_surface = authenticated_surface
+                .as_ref()
+                .ok_or("daemon sent file-transfer payload before sealed capabilities")?;
             let message = {
                 let mut session = session.lock().await;
                 match session.open_file_transfer_message(&envelope) {
@@ -598,32 +622,32 @@ async fn run_session_inner(
             }
         };
 
-        if raw_frame.pixel_format == FramePixelFormat::Telemetry {
-            continue;
-        }
         if raw_frame.pixel_format == FramePixelFormat::Capabilities {
+            if authenticated_surface.is_some() {
+                return Err("daemon advertised sealed capabilities more than once".into());
+            }
             let capabilities =
                 RawCapabilities::from_frame(&raw_frame).map_err(|e| e.to_string())?;
-            let negotiated_context_hash =
-                negotiated_session_context_hash(&transport_profile, capabilities.clone())
-                    .map_err(|e| e.to_string())?;
-            if let Some(expected_hash) = handshake.negotiated_context_hash
-                && expected_hash != negotiated_context_hash
-            {
-                return Err("sealed capabilities do not match handshake context hash".into());
-            }
-            if !capabilities.supports_current_lane_envelope() {
-                return Err("daemon advertised unsupported lane envelope version".into());
-            }
+            let pending = pending_surface
+                .take()
+                .ok_or("missing pending session surface before capabilities")?;
+            let surface = pending
+                .authenticate_capabilities(capabilities)
+                .map_err(|e| e.to_string())?;
+            let negotiated_context_hash = surface.context_hash();
             let _negotiated_context_key =
                 derive_negotiated_context_key(&handshake.key_schedule, &negotiated_context_hash);
-            capabilities_received = true;
+            info!(video_format = ?surface.capabilities().video_format, "mobile viewer capabilities accepted");
+            authenticated_surface = Some(surface);
+            let _ = surface_ready_tx.send(true);
             *shared.state.lock().await = SessionState::Connected;
-            info!(video_format = ?capabilities.video_format, "mobile viewer capabilities accepted");
             continue;
         }
-        if !capabilities_received {
-            return Err("daemon sent media before sealed session capabilities".into());
+        let _authenticated_surface = authenticated_surface
+            .as_ref()
+            .ok_or("daemon sent media before sealed session capabilities")?;
+        if raw_frame.pixel_format == FramePixelFormat::Telemetry {
+            continue;
         }
         if raw_frame.pixel_format == FramePixelFormat::Rekey {
             let RawRekey::Proposal {

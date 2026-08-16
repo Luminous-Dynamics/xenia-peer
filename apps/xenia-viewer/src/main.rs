@@ -37,7 +37,8 @@ use xenia_peer_core::frame::{
     RawTelemetry, audio_flags,
 };
 use xenia_peer_core::handshake::{
-    NegotiatedTransport, SessionCapabilityGuard, perform_viewer_handshake_with_transcript,
+    AuthenticatedSessionSurface, NegotiatedTransport, PendingSessionSurface,
+    perform_viewer_handshake_with_transcript,
 };
 use xenia_peer_core::transport::{
     RecvEnvelope, SendEnvelope, TcpRecvHalf, TcpSendHalf, TcpTransport, Transport, TransportError,
@@ -1605,9 +1606,10 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut session = LaneSession::with_fixture(source_id, args.epoch);
     session.install_schedule(&handshake.key_schedule);
 
-    if args.send_synthetic_input && args.send_synthetic_input_after_frames == 0 {
-        send_synthetic_input(&mut transport, &mut session).await?;
-    }
+    // A requested frame-0 synthetic input is held until the one sealed
+    // capability contract has authenticated the application surface.
+    let mut send_initial_synthetic_input =
+        args.send_synthetic_input && args.send_synthetic_input_after_frames == 0;
 
     let mut decoder = make_decoder(args.codec)?;
     let expected_frame_fmt = codec_to_frame_format(args.codec);
@@ -1636,7 +1638,11 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
     let negotiated_transport = transport.negotiated_transport();
     let transport_profile = transport.transport_profile();
-    let mut capability_guard = SessionCapabilityGuard::new(handshake.negotiated_context_hash);
+    let mut pending_surface = Some(PendingSessionSurface::new(
+        handshake.negotiated_context_hash,
+        transport_profile.clone(),
+    )?);
+    let mut authenticated_surface: Option<AuthenticatedSessionSurface> = None;
     let mut epoch_state = SessionEpochState::new(handshake.transcript_hash, RekeyPolicy::smoke());
     loop {
         if frame_limit != 0 && received >= frame_limit {
@@ -1659,9 +1665,15 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             }
         };
         if raw_frame.pixel_format == FramePixelFormat::Capabilities {
+            if authenticated_surface.is_some() {
+                return Err("daemon advertised sealed capabilities more than once".into());
+            }
             let capabilities = RawCapabilities::from_frame(&raw_frame)?;
-            let negotiated_context_hash =
-                capability_guard.accept(&transport_profile, &capabilities)?;
+            let pending = pending_surface
+                .take()
+                .ok_or("missing pending session surface before capabilities")?;
+            let surface = pending.authenticate_capabilities(capabilities)?;
+            let negotiated_context_hash = surface.context_hash();
             let _negotiated_context_key =
                 derive_negotiated_context_key(&handshake.key_schedule, &negotiated_context_hash);
             info!(
@@ -1669,23 +1681,30 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 context_hash = ?negotiated_context_hash,
                 "negotiated session context accepted"
             );
-            let negotiated_audio_codec =
-                choose_audio_codec_from_capabilities(args.audio_codec, &capabilities)
-                    .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+            let negotiated_audio_codec = choose_audio_codec_from_capabilities(
+                args.audio_codec,
+                surface.capabilities(),
+            )
+            .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
             audio_codec = make_audio_codec(negotiated_audio_codec)
                 .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
             info!(
                 audio_codec = audio_codec.name(),
-                video_format = ?capabilities.video_format,
-                telemetry_enabled = capabilities.telemetry_enabled,
-                input_control_enabled = capabilities.input_control_enabled,
+                video_format = ?surface.capabilities().video_format,
+                telemetry_enabled = surface.capabilities().telemetry_enabled,
+                input_control_enabled = surface.capabilities().input_control_enabled,
                 "sealed session capabilities applied"
             );
+            authenticated_surface = Some(surface);
+            if send_initial_synthetic_input {
+                send_synthetic_input(&mut transport, &mut session).await?;
+                send_initial_synthetic_input = false;
+            }
             continue;
         }
-        if !capability_guard.is_accepted() {
-            return Err("daemon sent session payload before sealed capabilities".into());
-        }
+        let _authenticated_surface = authenticated_surface
+            .as_ref()
+            .ok_or("daemon sent session payload before sealed capabilities")?;
         if raw_frame.pixel_format == FramePixelFormat::Telemetry {
             let _ = decode_telemetry_frame(&raw_frame);
             continue;
@@ -1945,11 +1964,20 @@ async fn gui_receive_loop(
     let (send_half, mut recv_half) = transport.split();
     let session = Arc::new(tokio::sync::Mutex::new(session));
     let send_half = Arc::new(tokio::sync::Mutex::new(send_half));
+    // User-driven outbound application payloads remain parked until the
+    // authenticated capability surface is established below.
+    let (surface_ready_tx, surface_ready_rx) = tokio::sync::watch::channel(false);
 
     {
         let session = Arc::clone(&session);
         let send_half = Arc::clone(&send_half);
+        let mut surface_ready = surface_ready_rx.clone();
         tokio::spawn(async move {
+            while !*surface_ready.borrow() {
+                if surface_ready.changed().await.is_err() {
+                    return;
+                }
+            }
             while let Some(event) = input_rx.recv().await {
                 let payload = match bincode::serialize(&event) {
                     Ok(bytes) => bytes,
@@ -1979,8 +2007,14 @@ async fn gui_receive_loop(
     if args.clipboard == ClipboardMode::Bidirectional {
         let session = Arc::clone(&session);
         let send_half = Arc::clone(&send_half);
+        let mut surface_ready = surface_ready_rx.clone();
         let poll_interval = Duration::from_millis(args.clipboard_interval_ms.max(1));
         tokio::spawn(async move {
+            while !*surface_ready.borrow() {
+                if surface_ready.changed().await.is_err() {
+                    return;
+                }
+            }
             let mut last_sent: Option<String> = None;
             loop {
                 tokio::time::sleep(poll_interval).await;
@@ -2060,7 +2094,11 @@ async fn gui_receive_loop(
     );
     let mut audio_sink: Box<dyn AudioPlaybackSink + Send> =
         Box::new(ChannelAudioSink::new(audio_tx));
-    let mut capability_guard = SessionCapabilityGuard::new(handshake.negotiated_context_hash);
+    let mut pending_surface = Some(
+        PendingSessionSurface::new(handshake.negotiated_context_hash, transport_profile.clone())
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?,
+    );
+    let mut authenticated_surface: Option<AuthenticatedSessionSurface> = None;
     let mut epoch_state = SessionEpochState::new(handshake.transcript_hash, RekeyPolicy::smoke());
     loop {
         if frame_limit != 0 && received >= frame_limit {
@@ -2084,9 +2122,9 @@ async fn gui_receive_loop(
             Some(xenia_peer_core::PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST)
                 | Some(xenia_peer_core::PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER)
         ) {
-            if !capability_guard.is_accepted() {
-                return Err("daemon sent file-transfer payload before sealed capabilities".into());
-            }
+            let _authenticated_surface = authenticated_surface
+                .as_ref()
+                .ok_or("daemon sent file-transfer payload before sealed capabilities")?;
             let message = match session.lock().await.open_file_transfer_message(&envelope) {
                 Ok(message) => message,
                 Err(err) => {
@@ -2115,12 +2153,19 @@ async fn gui_receive_loop(
             }
         };
         if raw_frame.pixel_format == FramePixelFormat::Capabilities {
+            if authenticated_surface.is_some() {
+                return Err("daemon advertised sealed capabilities more than once".into());
+            }
             let capabilities = RawCapabilities::from_frame(&raw_frame).map_err(
                 |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
             )?;
-            let negotiated_context_hash = capability_guard
-                .accept(&transport_profile, &capabilities)
+            let pending = pending_surface
+                .take()
+                .ok_or("missing pending session surface before capabilities")?;
+            let surface = pending
+                .authenticate_capabilities(capabilities)
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+            let negotiated_context_hash = surface.context_hash();
             let _negotiated_context_key =
                 derive_negotiated_context_key(&handshake.key_schedule, &negotiated_context_hash);
             info!(
@@ -2128,23 +2173,27 @@ async fn gui_receive_loop(
                 context_hash = ?negotiated_context_hash,
                 "negotiated session context accepted"
             );
-            let negotiated_audio_codec =
-                choose_audio_codec_from_capabilities(args.audio_codec, &capabilities)?;
+            let negotiated_audio_codec = choose_audio_codec_from_capabilities(
+                args.audio_codec,
+                surface.capabilities(),
+            )?;
             audio_codec = make_audio_codec(negotiated_audio_codec).map_err(
                 |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
             )?;
             info!(
                 audio_codec = audio_codec.name(),
-                video_format = ?capabilities.video_format,
-                telemetry_enabled = capabilities.telemetry_enabled,
-                input_control_enabled = capabilities.input_control_enabled,
+                video_format = ?surface.capabilities().video_format,
+                telemetry_enabled = surface.capabilities().telemetry_enabled,
+                input_control_enabled = surface.capabilities().input_control_enabled,
                 "sealed session capabilities applied"
             );
+            authenticated_surface = Some(surface);
+            let _ = surface_ready_tx.send(true);
             continue;
         }
-        if !capability_guard.is_accepted() {
-            return Err("daemon sent session payload before sealed capabilities".into());
-        }
+        let _authenticated_surface = authenticated_surface
+            .as_ref()
+            .ok_or("daemon sent session payload before sealed capabilities")?;
         if raw_frame.pixel_format == FramePixelFormat::Telemetry {
             if let Some(telemetry) = decode_telemetry_frame(&raw_frame) {
                 slot.put_telemetry(telemetry);

@@ -9,6 +9,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
+- WebSocket transport profile `/1` now requires the exact RFC 6455 subprotocol
+  `xenia.transport.websocket.v1` and configures tungstenite message/frame
+  ceilings at the carrier boundary before Xenia envelope parsing.
+- Session applications now prefer a consuming `PendingSessionSurface` →
+  `AuthenticatedSessionSurface` transition; the legacy boolean capability guard is removed. Desktop/mobile input, clipboard,
+  file-transfer, media, telemetry, and rekey handling cannot cross the preferred
+  application surface until the sealed capabilities contract is authenticated.
+- Frame-0 synthetic viewer input is deferred until the authenticated session
+  surface exists; duplicate capability advertisements remain fail-closed.
+
 - `xenia-zk-protocol` now provides `decode_bounded_envelope_with`, a format-neutral
   decode entry point that enforces the raw proof-envelope size ceiling before an
   application-owned parser is invoked. Oversized or empty frames never reach the

@@ -98,11 +98,10 @@ large. Hybrid handshake messages are far smaller, so V10 adds a separate 16 KiB
 handshake ceiling and checks it **before bincode deserialization**.
 
 This protects the handshake parser from accepting media-sized unauthenticated
-objects. It is not a substitute for pre-allocation limits in every carrier:
-TCP/QUIC already reject the general length prefix before allocating; WebSocket
-libraries may allocate a received WebSocket message before Xenia sees it. A
-future transport-hardening pass should configure carrier-native frame/message
-limits wherever the underlying library exposes them.
+objects. V11 additionally configures the WebSocket carrier's native message and
+frame ceilings before tungstenite assembles an application message, while the
+Xenia envelope check remains as defense in depth. TCP/QUIC continue to reject
+the general length prefix before allocating the declared envelope body.
 
 ## Security properties supplied by lower layers
 
@@ -123,14 +122,14 @@ Xenia capability.
 Extensions should preserve the ownership boundary above. High-value future work
 includes:
 
-1. carrier-native receive ceilings for WebSocket and QUIC/TCP handshake phases;
-2. explicit WebSocket subprotocol negotiation tied to the transport profile;
-3. versioned QUIC profile migration with ALPN downgrade tests;
-4. optional multiple QUIC streams only through a new profile that also binds
+1. versioned QUIC profile migration with ALPN downgrade tests;
+2. carrier-native handshake-phase ceilings below the general envelope ceiling
+   where the QUIC/TCP implementations can enforce them before buffering;
+3. optional multiple QUIC streams only through a new profile that also binds
    lane-to-stream mapping and replay/order semantics;
-5. timeout/idle/keepalive policy binding where those values are security- or
+4. timeout/idle/keepalive policy binding where those values are security- or
    availability-relevant;
-6. process/network enforcement in Nixward using Xenia identities/capabilities,
+5. process/network enforcement in Nixward using Xenia identities/capabilities,
    without moving IP routing into Xenia itself.
 
 The architectural rule is: **move downward only when doing so makes an Xenia

@@ -242,12 +242,6 @@ pub fn negotiated_session_context_hash(
 /// Failure while accepting the daemon's one authoritative capabilities frame.
 #[derive(Debug, thiserror::Error)]
 pub enum CapabilityAcceptanceError {
-    /// Capabilities were sent more than once. Even an identical second frame is
-    /// refused so the session surface cannot become a mutable control channel:
-    /// a capability change must go through a fresh handshake and consent
-    /// ceremony, never an in-band re-advertisement.
-    #[error("session capabilities were advertised more than once")]
-    DuplicateAdvertisement,
     /// The advertised lane envelope contract is unsupported.
     #[error(
         "unsupported lane envelope contract: version={lane_envelope_version}, magic={lane_envelope_magic:?}"
@@ -267,63 +261,85 @@ pub enum CapabilityAcceptanceError {
     Context(#[from] NegotiatedSessionContextError),
 }
 
-/// One-shot verifier for the session's immutable negotiated capabilities.
-///
-/// The first capabilities frame is checked against the current lane-envelope
-/// contract and the context hash authenticated by the handshake. Any later
-/// capabilities frame is rejected, including an apparently narrower one:
-/// capability changes need a fresh handshake and consent ceremony rather than
-/// an in-band downgrade.
-#[derive(Debug, Clone)]
-pub struct SessionCapabilityGuard {
+/// Pre-capability session surface. This type intentionally cannot expose an
+/// authenticated application payload surface. It is consumed exactly once by
+/// [`PendingSessionSurface::authenticate_capabilities`].
+#[derive(Debug)]
+pub struct PendingSessionSurface {
     expected_context_hash: Option<[u8; 32]>,
-    accepted_context_hash: Option<[u8; 32]>,
+    transport_profile: TransportProfileV1,
 }
 
-impl SessionCapabilityGuard {
-    /// Create a guard from the context hash carried by the handshake outcome.
-    pub const fn new(expected_context_hash: Option<[u8; 32]>) -> Self {
-        Self {
-            expected_context_hash,
-            accepted_context_hash: None,
+impl PendingSessionSurface {
+    /// Create the pending surface immediately after the cryptographic handshake.
+    pub fn new(
+        expected_context_hash: Option<[u8; 32]>,
+        transport_profile: TransportProfileV1,
+    ) -> Result<Self, CapabilityAcceptanceError> {
+        if !transport_profile.is_current_supported_profile() {
+            return Err(CapabilityAcceptanceError::Context(
+                NegotiatedSessionContextError::UnsupportedTransportProfile(transport_profile.kind),
+            ));
         }
+        Ok(Self {
+            expected_context_hash,
+            transport_profile,
+        })
     }
 
-    /// Validate and permanently accept the one authoritative capabilities
-    /// frame, returning its canonical context hash.
-    pub fn accept(
-        &mut self,
-        transport_profile: &TransportProfileV1,
-        capabilities: &RawCapabilities,
-    ) -> Result<[u8; 32], CapabilityAcceptanceError> {
-        if self.accepted_context_hash.is_some() {
-            return Err(CapabilityAcceptanceError::DuplicateAdvertisement);
-        }
+    /// Consume the pending state and produce the only type that represents a
+    /// capability-authenticated application surface.
+    pub fn authenticate_capabilities(
+        self,
+        capabilities: RawCapabilities,
+    ) -> Result<AuthenticatedSessionSurface, CapabilityAcceptanceError> {
         if !capabilities.supports_current_lane_envelope() {
             return Err(CapabilityAcceptanceError::UnsupportedLaneEnvelope {
                 lane_envelope_version: capabilities.lane_envelope_version,
                 lane_envelope_magic: capabilities.lane_envelope_magic,
             });
         }
-        let context_hash = negotiated_session_context_hash(transport_profile, capabilities.clone())?;
+        let context_hash =
+            negotiated_session_context_hash(&self.transport_profile, capabilities.clone())?;
         if self
             .expected_context_hash
             .is_some_and(|expected| expected != context_hash)
         {
             return Err(CapabilityAcceptanceError::ContextHashMismatch);
         }
-        self.accepted_context_hash = Some(context_hash);
-        Ok(context_hash)
+        Ok(AuthenticatedSessionSurface {
+            context_hash,
+            transport_profile: self.transport_profile,
+            capabilities,
+        })
+    }
+}
+
+/// Capability-authenticated session surface. Application payload handling
+/// should require a reference to this type, not a boolean such as
+/// `capabilities_received`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedSessionSurface {
+    context_hash: [u8; 32],
+    transport_profile: TransportProfileV1,
+    capabilities: RawCapabilities,
+}
+
+impl AuthenticatedSessionSurface {
+    /// Canonical context hash authenticated by the handshake and the one sealed
+    /// capabilities frame.
+    pub const fn context_hash(&self) -> [u8; 32] {
+        self.context_hash
     }
 
-    /// Whether the authoritative capabilities frame has been accepted.
-    pub fn is_accepted(&self) -> bool {
-        self.accepted_context_hash.is_some()
+    /// Exact transport profile bound to this authenticated surface.
+    pub fn transport_profile(&self) -> &TransportProfileV1 {
+        &self.transport_profile
     }
 
-    /// Accepted canonical context hash, when available.
-    pub fn accepted_context_hash(&self) -> Option<[u8; 32]> {
-        self.accepted_context_hash
+    /// Immutable authenticated capabilities for the lifetime of the surface.
+    pub fn capabilities(&self) -> &RawCapabilities {
+        &self.capabilities
     }
 }
 
@@ -1211,67 +1227,29 @@ mod tests {
     }
 
     #[test]
-    fn capability_guard_accepts_exactly_one_authenticated_contract() {
+    fn pending_surface_consumes_into_authenticated_surface() {
         let capabilities = test_capabilities();
-        let expected =
-            negotiated_session_context_hash(&TransportProfileV1::current(TransportKind::Tcp), capabilities.clone())
-                .unwrap();
-        let mut guard = SessionCapabilityGuard::new(Some(expected));
+        let profile = TransportProfileV1::current(TransportKind::Tcp);
+        let expected = negotiated_session_context_hash(&profile, capabilities.clone()).unwrap();
+        let pending = PendingSessionSurface::new(Some(expected), profile.clone()).unwrap();
+        let authenticated = pending.authenticate_capabilities(capabilities.clone()).unwrap();
 
-        assert_eq!(
-            guard
-                .accept(&TransportProfileV1::current(TransportKind::Tcp), &capabilities)
-                .unwrap(),
-            expected
-        );
-        assert!(guard.is_accepted());
-        assert_eq!(guard.accepted_context_hash(), Some(expected));
-        assert!(matches!(
-            guard.accept(&TransportProfileV1::current(TransportKind::Tcp), &capabilities),
-            Err(CapabilityAcceptanceError::DuplicateAdvertisement)
-        ));
+        assert_eq!(authenticated.context_hash(), expected);
+        assert_eq!(authenticated.transport_profile(), &profile);
+        assert_eq!(authenticated.capabilities(), &capabilities);
     }
 
     #[test]
-    fn capability_guard_rejects_a_narrower_second_advertisement() {
-        let capabilities = test_capabilities();
-        let expected =
-            negotiated_session_context_hash(&TransportProfileV1::current(TransportKind::Tcp), capabilities.clone())
-                .unwrap();
-        let mut guard = SessionCapabilityGuard::new(Some(expected));
-        guard
-            .accept(&TransportProfileV1::current(TransportKind::Tcp), &capabilities)
-            .unwrap();
-
-        // Even a strictly narrower re-advertisement (fewer capabilities than
-        // originally negotiated) must be rejected, not silently accepted as
-        // a "safe" downgrade -- capability changes require a fresh handshake.
-        let mut narrower = capabilities;
-        narrower.input_control_enabled = false;
+    fn pending_surface_rejects_mismatched_context_before_surface_exists() {
+        let pending = PendingSessionSurface::new(
+            Some([0xA5; 32]),
+            TransportProfileV1::current(TransportKind::Tcp),
+        )
+        .unwrap();
         assert!(matches!(
-            guard.accept(&TransportProfileV1::current(TransportKind::Tcp), &narrower),
-            Err(CapabilityAcceptanceError::DuplicateAdvertisement)
-        ));
-    }
-
-    #[test]
-    fn capability_guard_rejects_context_mismatch_and_unsupported_lane_envelope() {
-        let capabilities = test_capabilities();
-        let mut mismatched = SessionCapabilityGuard::new(Some([0xAA; 32]));
-        assert!(matches!(
-            mismatched.accept(&TransportProfileV1::current(TransportKind::Tcp), &capabilities),
+            pending.authenticate_capabilities(test_capabilities()),
             Err(CapabilityAcceptanceError::ContextHashMismatch)
         ));
-        assert!(!mismatched.is_accepted());
-
-        let mut unsupported = capabilities;
-        unsupported.lane_envelope_version = unsupported.lane_envelope_version.saturating_add(1);
-        let mut guard = SessionCapabilityGuard::new(None);
-        assert!(matches!(
-            guard.accept(&TransportProfileV1::current(TransportKind::Tcp), &unsupported),
-            Err(CapabilityAcceptanceError::UnsupportedLaneEnvelope { .. })
-        ));
-        assert!(!guard.is_accepted());
     }
 
     #[test]
