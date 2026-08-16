@@ -186,6 +186,7 @@ where
         telemetry_enabled: true,
         input_control_enabled: false,
         clipboard_enabled: false,
+        input_event_schema_version: xenia_peer_core::frame::INPUT_EVENT_SCHEMA_VERSION,
         lane_envelope_version: xenia_peer_core::frame::LANE_ENVELOPE_SCHEMA_VERSION,
         lane_envelope_magic: xenia_peer_core::frame::LANE_ENVELOPE_MAGIC,
     };

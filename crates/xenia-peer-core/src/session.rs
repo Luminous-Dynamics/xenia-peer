@@ -1060,6 +1060,7 @@ mod tests {
             telemetry_enabled: true,
             input_control_enabled: false,
             clipboard_enabled: false,
+            input_event_schema_version: crate::frame::INPUT_EVENT_SCHEMA_VERSION,
             lane_envelope_version: crate::frame::LANE_ENVELOPE_SCHEMA_VERSION,
             lane_envelope_magic: crate::frame::LANE_ENVELOPE_MAGIC,
         };

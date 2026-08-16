@@ -429,6 +429,12 @@ pub fn negotiated_session_context_hash_with_profiles(
 /// Failure while accepting the daemon's one authoritative capabilities frame.
 #[derive(Debug, thiserror::Error)]
 pub enum CapabilityAcceptanceError {
+    /// The advertised application input-event schema is unsupported.
+    #[error("unsupported input-event schema version: {input_event_schema_version}")]
+    UnsupportedInputEventSchema {
+        /// Advertised input-event schema version.
+        input_event_schema_version: u16,
+    },
     /// The advertised lane envelope contract is unsupported.
     #[error(
         "unsupported lane envelope contract: version={lane_envelope_version}, magic={lane_envelope_magic:?}"
@@ -535,6 +541,11 @@ impl PendingSessionSurface {
         self,
         capabilities: RawCapabilities,
     ) -> Result<AuthenticatedSessionSurface, CapabilityAcceptanceError> {
+        if !capabilities.supports_current_input_event_schema() {
+            return Err(CapabilityAcceptanceError::UnsupportedInputEventSchema {
+                input_event_schema_version: capabilities.input_event_schema_version,
+            });
+        }
         if !capabilities.supports_current_lane_envelope() {
             return Err(CapabilityAcceptanceError::UnsupportedLaneEnvelope {
                 lane_envelope_version: capabilities.lane_envelope_version,
@@ -1491,6 +1502,7 @@ mod tests {
             telemetry_enabled: false,
             input_control_enabled: false,
             clipboard_enabled: false,
+            input_event_schema_version: crate::frame::INPUT_EVENT_SCHEMA_VERSION,
             lane_envelope_version: crate::frame::LANE_ENVELOPE_SCHEMA_VERSION,
             lane_envelope_magic: crate::frame::LANE_ENVELOPE_MAGIC,
         };
@@ -1514,6 +1526,7 @@ mod tests {
             telemetry_enabled: false,
             input_control_enabled: false,
             clipboard_enabled: false,
+            input_event_schema_version: crate::frame::INPUT_EVENT_SCHEMA_VERSION,
             lane_envelope_version: crate::frame::LANE_ENVELOPE_SCHEMA_VERSION,
             lane_envelope_magic: crate::frame::LANE_ENVELOPE_MAGIC,
         };
@@ -1528,6 +1541,25 @@ mod tests {
     }
 
     #[test]
+    fn negotiated_session_context_hash_binds_input_event_schema_version() {
+        let mut capabilities = test_capabilities();
+        let first = negotiated_session_context_hash(
+            &TransportProfileV1::current(TransportKind::Tcp),
+            capabilities.clone(),
+        )
+        .unwrap();
+        capabilities.input_event_schema_version = capabilities
+            .input_event_schema_version
+            .saturating_add(1);
+        let second = negotiated_session_context_hash(
+            &TransportProfileV1::current(TransportKind::Tcp),
+            capabilities,
+        )
+        .unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[test]
     fn negotiated_session_context_hash_binds_lane_envelope_version() {
         let mut capabilities = RawCapabilities {
             frame_id: 1,
@@ -1537,6 +1569,7 @@ mod tests {
             telemetry_enabled: false,
             input_control_enabled: false,
             clipboard_enabled: false,
+            input_event_schema_version: crate::frame::INPUT_EVENT_SCHEMA_VERSION,
             lane_envelope_version: crate::frame::LANE_ENVELOPE_SCHEMA_VERSION,
             lane_envelope_magic: crate::frame::LANE_ENVELOPE_MAGIC,
         };
@@ -1559,6 +1592,7 @@ mod tests {
             telemetry_enabled: false,
             input_control_enabled: false,
             clipboard_enabled: false,
+            input_event_schema_version: crate::frame::INPUT_EVENT_SCHEMA_VERSION,
             lane_envelope_version: crate::frame::LANE_ENVELOPE_SCHEMA_VERSION,
             lane_envelope_magic: crate::frame::LANE_ENVELOPE_MAGIC,
         }
@@ -1579,6 +1613,22 @@ mod tests {
             &TransportAvailabilityProfileV1::current(TransportKind::Tcp),
         );
         assert_eq!(authenticated.capabilities(), &capabilities);
+    }
+
+    #[test]
+    fn pending_surface_rejects_unsupported_input_event_schema() {
+        let mut capabilities = test_capabilities();
+        capabilities.input_event_schema_version =
+            crate::frame::INPUT_EVENT_SCHEMA_VERSION.saturating_add(1);
+        let pending = PendingSessionSurface::new(
+            None,
+            TransportProfileV1::current(TransportKind::Tcp),
+        )
+        .unwrap();
+        assert!(matches!(
+            pending.authenticate_capabilities(capabilities),
+            Err(CapabilityAcceptanceError::UnsupportedInputEventSchema { .. })
+        ));
     }
 
     #[test]

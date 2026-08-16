@@ -1586,6 +1586,7 @@ fn session_capabilities_frame(
         telemetry_enabled: telemetry_level != TelemetryLevel::Off,
         input_control_enabled: input_backend != InputBackendChoice::Noop,
         clipboard_enabled: clipboard != ClipboardMode::Off,
+        input_event_schema_version: xenia_peer_core::frame::INPUT_EVENT_SCHEMA_VERSION,
         lane_envelope_version: xenia_peer_core::frame::LANE_ENVELOPE_SCHEMA_VERSION,
         lane_envelope_magic: xenia_peer_core::frame::LANE_ENVELOPE_MAGIC,
     }
