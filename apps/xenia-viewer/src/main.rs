@@ -85,6 +85,16 @@ struct ConnectedTransport {
 }
 
 impl Transport for AnyTransport {
+    fn transport_profile(&self) -> xenia_peer_core::transport::TransportProfileV1 {
+        match self {
+            AnyTransport::Tcp(t) | AnyTransport::PreloadedTcp { transport: t, .. } => {
+                t.transport_profile()
+            }
+            AnyTransport::Ws(t) => t.transport_profile(),
+            AnyTransport::Quic { transport, .. } => transport.transport_profile(),
+        }
+    }
+
     async fn send_envelope(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
         match self {
             AnyTransport::Tcp(t) => t.send_envelope(bytes).await,
@@ -112,11 +122,7 @@ impl Transport for AnyTransport {
 
 impl AnyTransport {
     fn negotiated_transport(&self) -> NegotiatedTransport {
-        match self {
-            AnyTransport::Tcp(_) | AnyTransport::PreloadedTcp { .. } => NegotiatedTransport::Tcp,
-            AnyTransport::Ws(_) => NegotiatedTransport::WebSocket,
-            AnyTransport::Quic { .. } => NegotiatedTransport::Quic,
-        }
+        self.transport_profile().kind
     }
 
     async fn close(&mut self) -> Result<(), TransportError> {
@@ -1629,6 +1635,7 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut audio_sink = ViewerAudioSink::new(args.play_audio, args.audio_output_device.as_deref())
         .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
     let negotiated_transport = transport.negotiated_transport();
+    let transport_profile = transport.transport_profile();
     let mut capability_guard = SessionCapabilityGuard::new(handshake.negotiated_context_hash);
     let mut epoch_state = SessionEpochState::new(handshake.transcript_hash, RekeyPolicy::smoke());
     loop {
@@ -1654,7 +1661,7 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         if raw_frame.pixel_format == FramePixelFormat::Capabilities {
             let capabilities = RawCapabilities::from_frame(&raw_frame)?;
             let negotiated_context_hash =
-                capability_guard.accept(negotiated_transport, &capabilities)?;
+                capability_guard.accept(&transport_profile, &capabilities)?;
             let _negotiated_context_key =
                 derive_negotiated_context_key(&handshake.key_schedule, &negotiated_context_hash);
             info!(
@@ -1926,6 +1933,7 @@ async fn gui_receive_loop(
     let mut session = LaneSession::with_fixture(source_id, args.epoch);
     session.install_schedule(&handshake.key_schedule);
     let negotiated_transport = transport.negotiated_transport();
+    let transport_profile = transport.transport_profile();
 
     // Split the transport so captured input can be sent concurrently
     // with the frame-receive loop below. `session` and the send half
@@ -2111,7 +2119,7 @@ async fn gui_receive_loop(
                 |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
             )?;
             let negotiated_context_hash = capability_guard
-                .accept(negotiated_transport, &capabilities)
+                .accept(&transport_profile, &capabilities)
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
             let _negotiated_context_key =
                 derive_negotiated_context_key(&handshake.key_schedule, &negotiated_context_hash);

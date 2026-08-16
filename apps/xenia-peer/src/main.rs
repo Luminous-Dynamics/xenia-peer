@@ -1231,6 +1231,14 @@ enum AutoAcceptedTransport {
 }
 
 impl Transport for AnyTransport {
+    fn transport_profile(&self) -> xenia_peer_core::transport::TransportProfileV1 {
+        match self {
+            AnyTransport::Tcp(t) => t.transport_profile(),
+            AnyTransport::Ws(t) => t.transport_profile(),
+            AnyTransport::Quic { transport, .. } => transport.transport_profile(),
+        }
+    }
+
     async fn send_envelope(
         &mut self,
         bytes: &[u8],
@@ -1254,11 +1262,7 @@ impl Transport for AnyTransport {
 
 impl AnyTransport {
     fn negotiated_transport(&self) -> NegotiatedTransport {
-        match self {
-            AnyTransport::Tcp(_) => NegotiatedTransport::Tcp,
-            AnyTransport::Ws(_) => NegotiatedTransport::WebSocket,
-            AnyTransport::Quic { .. } => NegotiatedTransport::Quic,
-        }
+        self.transport_profile().kind
     }
 
     /// Split into independently-owned send/recv halves so a dedicated
@@ -6166,6 +6170,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ) = loop {
         let mut transport = accept_transport(&args, audio_advertisement.clone()).await?;
         let negotiated_transport = transport.negotiated_transport();
+        let transport_profile = transport.transport_profile();
         let mut session = LaneSession::with_fixture(source_id, args.epoch);
         let frame_format = codec_to_frame_format(args.codec);
         let capabilities = session_capabilities_frame(
@@ -6177,7 +6182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.clipboard,
         )?;
         let negotiated_context_hash = negotiated_session_context_hash(
-            negotiated_transport,
+            &transport_profile,
             xenia_peer_core::RawCapabilities::from_frame(&capabilities)?,
         )?;
 

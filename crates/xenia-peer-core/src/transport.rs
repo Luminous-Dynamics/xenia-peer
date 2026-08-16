@@ -17,10 +17,121 @@
 
 use std::io;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+
+
+/// Maximum encoded handshake message accepted before deserialization. The
+/// current ML-KEM-768 + Ed25519 + ML-DSA-65 exchange is well below this.
+pub const MAX_HANDSHAKE_ENVELOPE_BYTES: u32 = 16 * 1024;
+
+/// Stable schema label for the transport profile committed into the
+/// authenticated session context.
+pub const TRANSPORT_PROFILE_SCHEMA: &str = "xenia-transport-profile-v1";
+
+/// Stable Xenia-over-TCP protocol identifier for the current framing.
+pub const TCP_PROTOCOL_ID: &str = "xenia/transport/tcp/0";
+/// Stable Xenia-over-WebSocket protocol identifier for the current framing.
+pub const WEBSOCKET_PROTOCOL_ID: &str = "xenia/transport/websocket/0";
+/// Stable Xenia-over-QUIC protocol identifier. This intentionally matches
+/// the QUIC ALPN used by `xenia-transport-quic`.
+pub const QUIC_PROTOCOL_ID: &str = "xenia/transport/quic/0";
+
+/// The concrete carrier used for a Xenia session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransportKind {
+    /// Raw TCP byte stream.
+    Tcp,
+    /// Binary WebSocket messages.
+    WebSocket,
+    /// One ordered Iroh QUIC bidirectional stream.
+    Quic,
+}
+
+/// Envelope-boundary semantics exposed by a transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EnvelopeFramingV1 {
+    /// Four-byte big-endian length prefix followed by exactly one envelope.
+    U32BeLengthPrefix,
+    /// Exactly one Xenia envelope per binary WebSocket message.
+    WebSocketBinaryMessage,
+}
+
+/// Canonical Layer-4/5 transport contract authenticated by the Xenia
+/// handshake. The profile intentionally describes *semantics*, not socket
+/// addresses or ephemeral connection identifiers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransportProfileV1 {
+    /// Stable profile schema.
+    pub schema: String,
+    /// Concrete carrier.
+    pub kind: TransportKind,
+    /// Stable Xenia protocol identifier for the carrier profile.
+    pub protocol_id: String,
+    /// Protocol revision within `protocol_id`. Current deployed profiles are 0.
+    pub protocol_version: u16,
+    /// How sealed envelope boundaries are preserved.
+    pub framing: EnvelopeFramingV1,
+    /// Hard transport envelope ceiling.
+    pub max_envelope_bytes: u32,
+    /// Smaller unauthenticated handshake parser ceiling.
+    pub max_handshake_envelope_bytes: u32,
+    /// Whether the carrier preserves reliable delivery while connected.
+    pub reliable: bool,
+    /// Whether the carrier preserves envelope order on the Xenia logical stream.
+    pub ordered: bool,
+    /// Number of logical Xenia envelope streams used by the current profile.
+    /// The current TCP, WebSocket, and QUIC profiles all intentionally expose
+    /// one ordered stream to the session layer.
+    pub logical_streams: u16,
+}
+
+impl TransportProfileV1 {
+    /// Return Xenia's current exact transport profile for `kind`.
+    pub fn current(kind: TransportKind) -> Self {
+        let (protocol_id, framing) = match kind {
+            TransportKind::Tcp => (TCP_PROTOCOL_ID, EnvelopeFramingV1::U32BeLengthPrefix),
+            TransportKind::WebSocket => (
+                WEBSOCKET_PROTOCOL_ID,
+                EnvelopeFramingV1::WebSocketBinaryMessage,
+            ),
+            TransportKind::Quic => (QUIC_PROTOCOL_ID, EnvelopeFramingV1::U32BeLengthPrefix),
+        };
+        Self {
+            schema: TRANSPORT_PROFILE_SCHEMA.to_string(),
+            kind,
+            protocol_id: protocol_id.to_string(),
+            protocol_version: 0,
+            framing,
+            max_envelope_bytes: MAX_ENVELOPE_BYTES,
+            max_handshake_envelope_bytes: MAX_HANDSHAKE_ENVELOPE_BYTES,
+            reliable: true,
+            ordered: true,
+            logical_streams: 1,
+        }
+    }
+
+    /// Canonical bincode-v1 representation used only as input to authenticated
+    /// transcript/context hashing.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
+        bincode::serialize(self)
+    }
+
+    /// BLAKE3-256 digest of the canonical transport profile.
+    pub fn profile_hash(&self) -> Result<[u8; 32], bincode::Error> {
+        Ok(*blake3::hash(&self.canonical_bytes()?).as_bytes())
+    }
+
+    /// Return true only for an exact currently-supported profile. This is a
+    /// fail-closed downgrade/ambiguity check: changing framing, limits, stream
+    /// semantics, or the protocol identifier requires a new explicit profile.
+    pub fn is_current_supported_profile(&self) -> bool {
+        self == &Self::current(self.kind)
+    }
+}
 
 /// Maximum envelope size this transport will accept. Guards against
 /// a malicious peer sending a length prefix that would cause the
@@ -61,6 +172,11 @@ pub enum TransportError {
 /// and `QuicTransport` (`xenia-transport-quic`).
 #[allow(async_fn_in_trait)]
 pub trait Transport {
+    /// Exact Layer-4/5 transport profile whose semantics are bound into the
+    /// authenticated session context. Implementations must return the profile
+    /// that actually describes the connection they carry.
+    fn transport_profile(&self) -> TransportProfileV1;
+
     /// Send a single sealed envelope.
     async fn send_envelope(&mut self, bytes: &[u8]) -> Result<(), TransportError>;
 
@@ -163,6 +279,10 @@ impl TcpTransport {
 }
 
 impl Transport for TcpTransport {
+    fn transport_profile(&self) -> TransportProfileV1 {
+        TransportProfileV1::current(TransportKind::Tcp)
+    }
+
     async fn send_envelope(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
         write_envelope(&mut self.stream, bytes).await
     }
@@ -187,5 +307,46 @@ pub struct TcpRecvHalf(OwnedReadHalf);
 impl RecvEnvelope for TcpRecvHalf {
     async fn recv_envelope(&mut self) -> Result<Vec<u8>, TransportError> {
         read_envelope(&mut self.0).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_transport_profiles_are_distinct_and_canonical() {
+        let tcp = TransportProfileV1::current(TransportKind::Tcp);
+        let ws = TransportProfileV1::current(TransportKind::WebSocket);
+        let quic = TransportProfileV1::current(TransportKind::Quic);
+
+        assert!(tcp.is_current_supported_profile());
+        assert!(ws.is_current_supported_profile());
+        assert!(quic.is_current_supported_profile());
+        assert_ne!(tcp.profile_hash().unwrap(), ws.profile_hash().unwrap());
+        assert_ne!(tcp.profile_hash().unwrap(), quic.profile_hash().unwrap());
+        assert_ne!(ws.profile_hash().unwrap(), quic.profile_hash().unwrap());
+    }
+
+    #[test]
+    fn profile_mutations_are_not_silently_current() {
+        let base = TransportProfileV1::current(TransportKind::Quic);
+
+        let mut changed = base.clone();
+        changed.protocol_version = changed.protocol_version.saturating_add(1);
+        assert!(!changed.is_current_supported_profile());
+
+        let mut changed = base.clone();
+        changed.max_envelope_bytes = changed.max_envelope_bytes.saturating_sub(1);
+        assert!(!changed.is_current_supported_profile());
+
+        let mut changed = base.clone();
+        changed.max_handshake_envelope_bytes =
+            changed.max_handshake_envelope_bytes.saturating_sub(1);
+        assert!(!changed.is_current_supported_profile());
+
+        let mut changed = base.clone();
+        changed.logical_streams = 2;
+        assert!(!changed.is_current_supported_profile());
     }
 }

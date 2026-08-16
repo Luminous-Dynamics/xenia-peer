@@ -50,7 +50,8 @@ use tokio_tungstenite::{WebSocketStream, accept_async, connect_async};
 use tracing::debug;
 
 use xenia_peer_core::transport::{
-    MAX_ENVELOPE_BYTES, RecvEnvelope, SendEnvelope, Transport, TransportError,
+    MAX_ENVELOPE_BYTES, RecvEnvelope, SendEnvelope, Transport, TransportError, TransportKind,
+    TransportProfileV1,
 };
 
 /// Errors specific to the WebSocket transport. Coerced into
@@ -211,6 +212,10 @@ fn interpret_recv(
 }
 
 impl Transport for WsTransport {
+    fn transport_profile(&self) -> TransportProfileV1 {
+        TransportProfileV1::current(TransportKind::WebSocket)
+    }
+
     async fn send_envelope(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
         ensure_envelope_size(bytes.len())?;
         self.send_msg(Message::Binary(bytes.to_vec()))

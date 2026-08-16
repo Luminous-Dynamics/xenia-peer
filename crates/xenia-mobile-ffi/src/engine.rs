@@ -29,9 +29,9 @@ use tracing::{info, warn};
 use xenia_inject::InputEvent;
 use xenia_peer_core::frame::{PixelFormat as FramePixelFormat, RawCapabilities, RawRekey};
 use xenia_peer_core::handshake::{
-    NegotiatedTransport, negotiated_session_context_hash, perform_viewer_handshake_with_transcript,
+    negotiated_session_context_hash, perform_viewer_handshake_with_transcript,
 };
-use xenia_peer_core::transport::{RecvEnvelope, SendEnvelope, TcpTransport};
+use xenia_peer_core::transport::{RecvEnvelope, SendEnvelope, TcpTransport, Transport};
 use xenia_peer_core::{
     ClipboardContent, FILE_TRANSFER_CHUNK_SIZE, FileTransferMessage,
     PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST, PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER, RawClipboard,
@@ -434,7 +434,7 @@ async fn run_session_inner(
     // This engine only ever dials TCP (see module doc); WS/QUIC are a
     // possible fast-follow but would need their own `Transport` impl
     // wired in here.
-    let negotiated_transport = NegotiatedTransport::Tcp;
+    let transport_profile = transport.transport_profile();
 
     let (send_half, mut recv_half) = transport.split();
     let session = Arc::new(Mutex::new(session));
@@ -605,7 +605,7 @@ async fn run_session_inner(
             let capabilities =
                 RawCapabilities::from_frame(&raw_frame).map_err(|e| e.to_string())?;
             let negotiated_context_hash =
-                negotiated_session_context_hash(negotiated_transport, capabilities.clone())
+                negotiated_session_context_hash(&transport_profile, capabilities.clone())
                     .map_err(|e| e.to_string())?;
             if let Some(expected_hash) = handshake.negotiated_context_hash
                 && expected_hash != negotiated_context_hash

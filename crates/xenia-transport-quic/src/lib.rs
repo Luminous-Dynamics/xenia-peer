@@ -38,14 +38,15 @@ use iroh::{
 use thiserror::Error;
 use tracing::debug;
 use xenia_peer_core::transport::{
-    MAX_ENVELOPE_BYTES, RecvEnvelope, SendEnvelope, Transport, TransportError,
+    MAX_ENVELOPE_BYTES, QUIC_PROTOCOL_ID, RecvEnvelope, SendEnvelope, Transport, TransportError,
+    TransportKind, TransportProfileV1,
 };
 
 /// Re-export of the Iroh crate for endpoint ownership in callers.
 pub use iroh;
 
 /// ALPN used by the Xenia QUIC transport.
-pub const XENIA_QUIC_ALPN: &[u8] = b"xenia/transport/quic/0";
+pub const XENIA_QUIC_ALPN: &[u8] = QUIC_PROTOCOL_ID.as_bytes();
 
 const STREAM_PREFACE: &[u8; 8] = b"XENIAQ0\0";
 const ADDR_PREFIX: &str = "iroh:";
@@ -281,6 +282,10 @@ async fn read_envelope(recv: &mut RecvStream) -> Result<Vec<u8>, TransportError>
 }
 
 impl Transport for QuicTransport {
+    fn transport_profile(&self) -> TransportProfileV1 {
+        TransportProfileV1::current(TransportKind::Quic)
+    }
+
     async fn send_envelope(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
         write_envelope(&mut self.send, bytes).await
     }
