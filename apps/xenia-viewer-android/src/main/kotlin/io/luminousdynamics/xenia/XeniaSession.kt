@@ -215,11 +215,20 @@ class XeniaSession(
         if (handle != 0L) NativeBindings.sendTouch(handle, 0, x, y, phase, 1.0f)
     }
 
-    /** Send a normalized mouse-style pointer event (used by precision/
-     * trackpad mode -- see `ViewerScreen`). `button` 0=left/1=middle/
-     * 2=right; motion-only events use `button=0, pressed=false`. */
+    /** Legacy ambiguous pointer API retained for older native callers. New UI
+     * code must use [sendPointerMove] or [sendPointerButton]. */
     fun sendPointer(x: Float, y: Float, button: Int, pressed: Boolean) {
         if (handle != 0L) NativeBindings.sendPointer(handle, x, y, button, pressed)
+    }
+
+    /** Send pointer motion with no button-state transition. */
+    fun sendPointerMove(x: Float, y: Float) {
+        if (handle != 0L) NativeBindings.sendPointerMove(handle, x, y)
+    }
+
+    /** Send an explicit pointer-button press/release transition. */
+    fun sendPointerButton(x: Float, y: Float, button: Int, pressed: Boolean) {
+        if (handle != 0L) NativeBindings.sendPointerButton(handle, x, y, button, pressed)
     }
 
     /** Send a key event. `code` is an evdev/Linux keycode (see

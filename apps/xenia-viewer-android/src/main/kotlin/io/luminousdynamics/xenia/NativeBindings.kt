@@ -39,6 +39,8 @@ internal object NativeBindings {
     @JvmStatic external fun lastError(handle: Long): String?
     @JvmStatic external fun pollFrame(handle: Long): ByteArray?
     @JvmStatic external fun sendPointer(handle: Long, x: Float, y: Float, button: Int, pressed: Boolean)
+    @JvmStatic external fun sendPointerMove(handle: Long, x: Float, y: Float)
+    @JvmStatic external fun sendPointerButton(handle: Long, x: Float, y: Float, button: Int, pressed: Boolean)
     @JvmStatic external fun sendTouch(handle: Long, index: Int, x: Float, y: Float, phase: Int, pressure: Float)
     @JvmStatic external fun sendKey(handle: Long, code: Int, pressed: Boolean, modifiers: Int)
     @JvmStatic external fun pollClipboard(handle: Long): String?

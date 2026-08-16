@@ -77,6 +77,13 @@ pub enum InjectError {
     Backend(String),
 }
 
+/// Maximum serialized `InputEvent` payload accepted by the daemon before
+/// application-level bincode decoding. Every current event is fixed-size and
+/// far smaller than this; the ceiling prevents an authenticated peer from
+/// turning the generic 16 MiB session-envelope allowance into an unnecessarily
+/// large input-parser workload.
+pub const MAX_BINCODE_INPUT_EVENT_BYTES: usize = 256;
+
 /// Normalized input events flowing viewer → daemon.
 ///
 /// This enum mirrors Symthaea's `rdp_protocol::InputEvent`. A
@@ -123,6 +130,33 @@ pub enum InputEvent {
         /// Normalized pressure in `[0.0, 1.0]`, or `0.0` if the
         /// device doesn't report pressure.
         pressure: f32,
+    },
+    /// Pointer motion with no button-state transition.
+    ///
+    /// Added after the original variants so bincode discriminants for the
+    /// legacy `Pointer`, `Key`, and `Touch` variants remain stable. New
+    /// producers should prefer this over the ambiguous legacy `Pointer`
+    /// encoding with `button=0, pressed=false`.
+    PointerMove {
+        /// Normalized x in `[0.0, 1.0]`.
+        x: f32,
+        /// Normalized y in `[0.0, 1.0]`.
+        y: f32,
+    },
+    /// Pointer-button state transition at the supplied pointer position.
+    ///
+    /// Unlike the legacy `Pointer` variant, `pressed=false` here always means
+    /// an actual release and can therefore receive lossless/backpressured
+    /// queue treatment without being confused with ordinary pointer motion.
+    PointerButton {
+        /// Normalized x in `[0.0, 1.0]`.
+        x: f32,
+        /// Normalized y in `[0.0, 1.0]`.
+        y: f32,
+        /// Button id (0 = left, 1 = middle, 2 = right, 3+ = aux).
+        button: u8,
+        /// `true` = press, `false` = release.
+        pressed: bool,
     },
 }
 
@@ -230,6 +264,15 @@ pub trait InputInjector: Send {
         for event in events {
             match event {
                 InputEvent::Pointer {
+                    x,
+                    y,
+                    button,
+                    pressed,
+                } => self.inject_pointer(*x, *y, *button, *pressed)?,
+                InputEvent::PointerMove { x, y } => {
+                    self.inject_pointer(*x, *y, 0, false)?
+                }
+                InputEvent::PointerButton {
                     x,
                     y,
                     button,
@@ -751,6 +794,13 @@ mod tests {
                 button: 1,
                 pressed: true,
             },
+            InputEvent::PointerMove { x: 0.3, y: 0.4 },
+            InputEvent::PointerButton {
+                x: 0.1,
+                y: 0.2,
+                button: 1,
+                pressed: false,
+            },
             InputEvent::Key {
                 code: 42,
                 pressed: true,
@@ -765,17 +815,19 @@ mod tests {
             },
         ];
         log.process_events(&events).unwrap();
-        assert_eq!(log.events.len(), 3);
+        assert_eq!(log.events.len(), 5);
         assert!(matches!(log.events[0], InjectedEvent::Pointer { .. }));
+        assert!(matches!(log.events[1], InjectedEvent::Pointer { .. }));
+        assert!(matches!(log.events[2], InjectedEvent::Pointer { .. }));
         assert!(matches!(
-            log.events[1],
+            log.events[3],
             InjectedEvent::Key {
                 code: 42,
                 modifiers: 1,
                 ..
             }
         ));
-        assert!(matches!(log.events[2], InjectedEvent::Touch { .. }));
+        assert!(matches!(log.events[4], InjectedEvent::Touch { .. }));
     }
 
     #[test]
@@ -786,6 +838,13 @@ mod tests {
                 y: 0.7,
                 button: 1,
                 pressed: true,
+            },
+            InputEvent::PointerMove { x: 0.2, y: 0.4 },
+            InputEvent::PointerButton {
+                x: 0.5,
+                y: 0.7,
+                button: 1,
+                pressed: false,
             },
             InputEvent::Key {
                 code: 42,

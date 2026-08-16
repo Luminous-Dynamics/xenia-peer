@@ -6605,6 +6605,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 };
+                if input.payload.len() > xenia_inject::MAX_BINCODE_INPUT_EVENT_BYTES {
+                    warn!(
+                        bytes = input.payload.len(),
+                        max_bytes = xenia_inject::MAX_BINCODE_INPUT_EVENT_BYTES,
+                        "input event payload exceeds application parser ceiling"
+                    );
+                    continue;
+                }
                 let event: xenia_inject::InputEvent = match bincode::deserialize(&input.payload) {
                     Ok(event) => event,
                     Err(err) => {

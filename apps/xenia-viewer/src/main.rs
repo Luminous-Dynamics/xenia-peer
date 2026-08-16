@@ -1356,7 +1356,7 @@ async fn send_synthetic_input(
     transport: &mut AnyTransport,
     session: &mut LaneSession,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let event = xenia_inject::InputEvent::Pointer {
+    let event = xenia_inject::InputEvent::PointerButton {
         x: 0.5,
         y: 0.5,
         button: 0,
@@ -1869,6 +1869,8 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 /// thread and the authenticated network sender. Pointer motion is lossy under
 /// saturation; state transitions use bounded backpressure.
 const DESKTOP_INPUT_QUEUE_CAP: usize = 256;
+const _: [(); DESKTOP_INPUT_QUEUE_CAP] =
+    [(); xenia_peer_core::producer_flow::INPUT_STATE_TRANSITION_V1.capacity];
 
 fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let slot = FrameSlot::new();
@@ -1879,7 +1881,9 @@ fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     };
     let audio_sink = ViewerAudioSink::new(args.play_audio, args.audio_output_device.as_deref())
         .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
-    let (audio_tx, audio_rx) = mpsc::sync_channel(64);
+    let (audio_tx, audio_rx) = mpsc::sync_channel(
+        xenia_peer_core::producer_flow::DESKTOP_AUDIO_PLAYBACK_V1.capacity,
+    );
     // Captured pointer/keyboard events flow GUI thread -> network task through
     // a bounded queue. The GUI distinguishes lossy pointer motion from
     // stateful key/button transitions when selecting overflow behavior.

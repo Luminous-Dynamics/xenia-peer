@@ -298,6 +298,37 @@ pub extern "C" fn xenia_send_pointer(handle: u64, x: f32, y: f32, button: u8, pr
     engine.send_pointer(x, y, button, pressed);
 }
 
+/// Send normalized pointer motion with no button-state transition.
+///
+/// This is the preferred V14 API for trackpad/cursor motion because it is
+/// semantically distinct from a button release and may therefore be handled
+/// lossily under bounded producer pressure.
+#[unsafe(no_mangle)]
+pub extern "C" fn xenia_send_pointer_move(handle: u64, x: f32, y: f32) {
+    let Some(engine) = engine_for(handle) else {
+        return;
+    };
+    engine.send_pointer_move(x, y);
+}
+
+/// Send a normalized pointer-button press/release transition.
+///
+/// This is the preferred V14 API for button state because a release must not be
+/// confused with ordinary pointer motion.
+#[unsafe(no_mangle)]
+pub extern "C" fn xenia_send_pointer_button(
+    handle: u64,
+    x: f32,
+    y: f32,
+    button: u8,
+    pressed: bool,
+) {
+    let Some(engine) = engine_for(handle) else {
+        return;
+    };
+    engine.send_pointer_button(x, y, button, pressed);
+}
+
 /// Send a normalized touch event. `phase`: 0=Down, 1=Move, 2=Up,
 /// 3=Cancel.
 ///
@@ -574,6 +605,8 @@ mod tests {
             assert!(empty.rgba.is_null());
             assert_eq!(empty.rgba_len, 0);
             xenia_send_pointer(0, 0.5, 0.5, 0, true);
+            xenia_send_pointer_move(0, 0.5, 0.5);
+            xenia_send_pointer_button(0, 0.5, 0.5, 0, false);
             xenia_send_touch(0, 0, 0.5, 0.5, 0, 1.0);
             xenia_send_key(0, 30, true, 0);
             let name = CString::new("test.txt").unwrap();
@@ -622,6 +655,8 @@ mod tests {
             // harmless rather than a use-after-free contract violation.
             xenia_disconnect(handle);
             xenia_send_pointer(handle, 0.5, 0.5, 0, true);
+            xenia_send_pointer_move(handle, 0.5, 0.5);
+            xenia_send_pointer_button(handle, 0.5, 0.5, 0, false);
         }
     }
 

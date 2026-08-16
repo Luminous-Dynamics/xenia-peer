@@ -56,6 +56,7 @@ pub mod frame;
 pub mod file_transfer;
 pub mod handshake;
 pub mod m1_session;
+pub mod producer_flow;
 mod session;
 pub mod transport;
 

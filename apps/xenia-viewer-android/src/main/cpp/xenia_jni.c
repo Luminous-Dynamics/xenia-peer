@@ -54,6 +54,8 @@ XeniaFrame xenia_poll_frame(uint64_t handle);
 void       xenia_frame_free(XeniaFrame frame);
 
 void xenia_send_pointer(uint64_t handle, float x, float y, uint8_t button, uint8_t pressed);
+void xenia_send_pointer_move(uint64_t handle, float x, float y);
+void xenia_send_pointer_button(uint64_t handle, float x, float y, uint8_t button, uint8_t pressed);
 void xenia_send_touch(uint64_t handle, uint8_t index, float x, float y, uint8_t phase, float pressure);
 void xenia_send_key(uint64_t handle, uint32_t code, uint8_t pressed, uint8_t modifiers);
 char *xenia_poll_clipboard(uint64_t handle);
@@ -168,6 +170,21 @@ Java_io_luminousdynamics_xenia_NativeBindings_sendPointer(JNIEnv *env, jclass cl
                                                            jint button, jboolean pressed) {
     (void)env; (void)clazz;
     xenia_send_pointer((uint64_t)handle, x, y, (uint8_t)button, pressed ? 1 : 0);
+}
+
+JNIEXPORT void JNICALL
+Java_io_luminousdynamics_xenia_NativeBindings_sendPointerMove(JNIEnv *env, jclass clazz,
+                                                               jlong handle, jfloat x, jfloat y) {
+    (void)env; (void)clazz;
+    xenia_send_pointer_move((uint64_t)handle, x, y);
+}
+
+JNIEXPORT void JNICALL
+Java_io_luminousdynamics_xenia_NativeBindings_sendPointerButton(JNIEnv *env, jclass clazz,
+                                                                 jlong handle, jfloat x, jfloat y,
+                                                                 jint button, jboolean pressed) {
+    (void)env; (void)clazz;
+    xenia_send_pointer_button((uint64_t)handle, x, y, (uint8_t)button, pressed ? 1 : 0);
 }
 
 JNIEXPORT void JNICALL

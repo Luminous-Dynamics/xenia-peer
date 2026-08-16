@@ -88,16 +88,22 @@ pub struct MobileFrame {
 /// unbounded memory — oldest frame is dropped once full, matching a
 /// "show the latest, not a queued backlog" viewer UX.
 const FRAME_QUEUE_CAP: usize = 4;
+const _: [(); FRAME_QUEUE_CAP] =
+    [(); xenia_peer_core::producer_flow::MOBILE_VIDEO_PRESENTATION_V1.capacity];
 /// Bound on buffered viewer-to-host input events (pointer/touch/key) while
-/// the network task drains them. Excess is dropped rather than queued
-/// unboundedly under a stall.
+/// the network task drains them. V14 applies semantic overflow behavior:
+/// motion samples may drop, while state transitions use bounded backpressure.
 const INPUT_QUEUE_CAP: usize = 256;
+const _: [(); INPUT_QUEUE_CAP] =
+    [(); xenia_peer_core::producer_flow::INPUT_STATE_TRANSITION_V1.capacity];
 /// Bound on buffered viewer-to-host clipboard updates.
 const CLIPBOARD_QUEUE_CAP: usize = 16;
 /// Bound on queued file-transfer UI events (offers/progress/done). A UI
 /// that stops polling only loses stale progress ticks, not correctness --
 /// the underlying transfer state machine doesn't live in this queue.
 const FILE_TRANSFER_EVENT_QUEUE_CAP: usize = 64;
+const _: [(); FILE_TRANSFER_EVENT_QUEUE_CAP] =
+    [(); xenia_peer_core::producer_flow::MOBILE_FILE_TRANSFER_EVENTS_V1.capacity];
 /// Bound on queued outgoing "send this file" commands from the UI.
 /// Small: sending is a deliberate, rare user action (tap a picker
 /// button), not a stream -- and only one outgoing transfer is in
@@ -314,6 +320,19 @@ impl ViewerEngine {
         let _ = self.clipboard_tx.try_send(content);
     }
 
+    /// Enqueue a state transition with bounded backpressure. Mobile UI APIs are
+    /// synchronous, so this may briefly block only when the fixed 256-event
+    /// queue is saturated; the network sender itself remains bounded by the
+    /// authenticated transport send-stall deadline and eventually closes the
+    /// receiver on a dead session rather than allowing unbounded memory growth.
+    fn send_stateful_input(&self, event: InputEvent) {
+        let _ = self.input_tx.blocking_send(event);
+    }
+
+    /// Legacy ambiguous pointer API retained for ABI compatibility. New
+    /// callers should use [`Self::send_pointer_move`] or
+    /// [`Self::send_pointer_button`] so queue policy can distinguish lossy
+    /// motion from state transitions.
     pub fn send_pointer(&self, x: f32, y: f32, button: u8, pressed: bool) {
         let _ = self.input_tx.try_send(InputEvent::Pointer {
             x,
@@ -323,18 +342,42 @@ impl ViewerEngine {
         });
     }
 
+    /// Send lossy/coalescible pointer motion with no button-state transition.
+    pub fn send_pointer_move(&self, x: f32, y: f32) {
+        let _ = self.input_tx.try_send(InputEvent::PointerMove { x, y });
+    }
+
+    /// Send a pointer-button state transition. This uses bounded backpressure
+    /// rather than `try_send`: silently dropping a release can leave remote
+    /// input logically stuck.
+    pub fn send_pointer_button(&self, x: f32, y: f32, button: u8, pressed: bool) {
+        self.send_stateful_input(InputEvent::PointerButton {
+            x,
+            y,
+            button,
+            pressed,
+        });
+    }
+
     pub fn send_touch(&self, index: u8, x: f32, y: f32, phase: u8, pressure: f32) {
-        let _ = self.input_tx.try_send(InputEvent::Touch {
+        let event = InputEvent::Touch {
             index,
             x,
             y,
             phase,
             pressure,
-        });
+        };
+        // Move samples are spatially supersedable. Down/up/cancel establish or
+        // clear touch state and therefore use bounded backpressure.
+        if phase == 1 {
+            let _ = self.input_tx.try_send(event);
+        } else {
+            self.send_stateful_input(event);
+        }
     }
 
     pub fn send_key(&self, code: u32, pressed: bool, modifiers: u8) {
-        let _ = self.input_tx.try_send(InputEvent::Key {
+        self.send_stateful_input(InputEvent::Key {
             code,
             pressed,
             modifiers,

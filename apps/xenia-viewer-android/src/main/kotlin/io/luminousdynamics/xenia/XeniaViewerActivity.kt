@@ -639,8 +639,8 @@ private fun Modifier.forwardTrackpadTo(session: XeniaSession, modeKey: Any): Mod
                 val change = event.changes.firstOrNull() ?: break
                 if (!change.pressed) {
                     if (totalMovement < TRACKPAD_TAP_SLOP_PX) {
-                        session.sendPointer(cursorX, cursorY, 0, true) // click down
-                        session.sendPointer(cursorX, cursorY, 0, false) // click up
+                        session.sendPointerButton(cursorX, cursorY, 0, true) // click down
+                        session.sendPointerButton(cursorX, cursorY, 0, false) // click up
                     }
                     break
                 }
@@ -650,7 +650,7 @@ private fun Modifier.forwardTrackpadTo(session: XeniaSession, modeKey: Any): Mod
                 lastPos = change.position
                 cursorX = (cursorX + dx / size.width * TRACKPAD_SENSITIVITY).coerceIn(0f, 1f)
                 cursorY = (cursorY + dy / size.height * TRACKPAD_SENSITIVITY).coerceIn(0f, 1f)
-                session.sendPointer(cursorX, cursorY, 0, false) // motion, no button
+                session.sendPointerMove(cursorX, cursorY) // motion
             }
         }
     }

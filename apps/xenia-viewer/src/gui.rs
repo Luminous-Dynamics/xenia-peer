@@ -157,9 +157,10 @@ fn pointer_button_id(button: egui::PointerButton) -> u8 {
 /// equal `width * height * 4`.
 pub struct FrameSlot {
     /// Latest frame, replaced on every arrival. `None` until the
-    /// first frame lands.
+    /// first frame lands. This is the one-slot
+    /// `DESKTOP_VIDEO_PRESENTATION_V1` coalesce-latest policy.
     pub latest: Mutex<Option<FrameData>>,
-    /// Latest host telemetry batch.
+    /// Latest host telemetry batch (`DESKTOP_TELEMETRY_PRESENTATION_V1`).
     pub telemetry: Mutex<Option<TelemetryData>>,
     /// Latest audio timing/jitter state.
     pub audio: Mutex<Option<AudioData>>,
@@ -454,12 +455,7 @@ impl ViewerApp {
         {
             self.last_pointer_pos = Some(pos);
             if let Some((x, y)) = self.normalize_in_image(pos) {
-                self.send_lossy_input(InputEvent::Pointer {
-                    x,
-                    y,
-                    button: 0,
-                    pressed: false,
-                });
+                self.send_lossy_input(InputEvent::PointerMove { x, y });
             }
         }
 
@@ -468,7 +464,7 @@ impl ViewerApp {
             let Some((x, y)) = self.normalize_in_image(pos) else {
                 continue;
             };
-            self.send_stateful_input(InputEvent::Pointer {
+            self.send_stateful_input(InputEvent::PointerButton {
                 x,
                 y,
                 button: pointer_button_id(button),
