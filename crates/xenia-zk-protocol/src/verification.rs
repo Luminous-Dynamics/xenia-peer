@@ -86,6 +86,8 @@ pub enum CryptographicVerificationError {
     Contract(EnvelopeValidationError),
     #[error("canonical public inputs do not match the envelope digest")]
     PublicInputsMismatch,
+    #[error("canonical public inputs are too large: {actual} > {limit}")]
+    PublicInputsTooLarge { actual: usize, limit: usize },
     #[error("proof backend does not match the contracted proof-system identifier")]
     BackendProofSystemMismatch,
     #[error("proof backend does not match the contracted verifier/program identifier")]
@@ -115,6 +117,13 @@ pub fn verify_backend_proof<'a>(
     backend: &dyn ProofBackendVerifier,
 ) -> Result<ProofVerifiedEnvelope<'a>, CryptographicVerificationError> {
     let envelope = validated.envelope();
+    let public_input_limit = validated.max_public_input_bytes();
+    if canonical_public_inputs.len() > public_input_limit {
+        return Err(CryptographicVerificationError::PublicInputsTooLarge {
+            actual: canonical_public_inputs.len(),
+            limit: public_input_limit,
+        });
+    }
     let digest = public_inputs_digest(
         &envelope.statement,
         &envelope.nonce,
@@ -290,6 +299,7 @@ mod tests {
                 parameter_set_id: ParameterSetId([0x22; 32]),
                 nonce: [0x33; 32],
                 public_inputs_hash,
+                extensions_digest: empty_extensions_digest(),
             },
             AuthenticationSuiteId::ML_DSA_65_FIPS204,
             [0x55; 32],
@@ -322,6 +332,28 @@ mod tests {
     }
 
     #[test]
+    fn oversized_public_inputs_are_rejected_before_backend_work() {
+        let (envelope, contract) = fixture();
+        let backend = FakeBackend {
+            accept: true,
+            verifier_id: VerifierId([0x11; 32]),
+        };
+        let policy = EnvelopePolicy {
+            max_public_input_bytes: 4,
+            ..EnvelopePolicy::default()
+        };
+        let validated =
+            validate_envelope_against_contract(&envelope, &policy, &contract, NOW).unwrap();
+        assert_eq!(
+            verify_backend_proof(validated, PUBLIC_INPUTS, &backend),
+            Err(CryptographicVerificationError::PublicInputsTooLarge {
+                actual: PUBLIC_INPUTS.len(),
+                limit: 4,
+            })
+        );
+    }
+
+    #[test]
     fn public_input_substitution_is_rejected_before_backend_acceptance() {
         let (envelope, contract) = fixture();
         let backend = FakeBackend {
@@ -347,8 +379,8 @@ mod tests {
         envelope.nonce = [0x44; 32];
         envelope.public_inputs_hash =
             public_inputs_digest(&envelope.statement, &envelope.nonce, PUBLIC_INPUTS).unwrap();
-        contract.proof.nonce = envelope.nonce;
-        contract.proof.public_inputs_hash = envelope.public_inputs_hash;
+        contract.binding.nonce = envelope.nonce;
+        contract.binding.public_inputs_hash = envelope.public_inputs_hash;
 
         let backend = FakeBackend {
             accept: true,

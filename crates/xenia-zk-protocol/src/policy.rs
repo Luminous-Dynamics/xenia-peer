@@ -18,6 +18,8 @@ use crate::{
 pub const DEFAULT_MAX_PROOF_BYTES: usize = 512 * 1024;
 pub const DEFAULT_MAX_SIGNATURE_BYTES: usize = 16 * 1024;
 pub const DEFAULT_MAX_AUTHENTICATION_ENTRIES: usize = 4;
+/// Maximum canonical application-public-input bytes hashed and handed to a backend by default.
+pub const DEFAULT_MAX_PUBLIC_INPUT_BYTES: usize = 256 * 1024;
 
 /// Exact local verifier binding for a statement.
 ///
@@ -35,6 +37,13 @@ pub struct ProofVerificationBinding {
     pub nonce: [u8; 32],
     /// Digest of the canonical public inputs expected by the relying application.
     pub public_inputs_hash: [u8; 32],
+    /// Digest of the exact typed extension-claim set expected by the relying application.
+    ///
+    /// Extensions are authenticated by the envelope signature, but signature validity alone
+    /// does not make self-selected extension semantics acceptable. Pinning the digest in the
+    /// local contract prevents an otherwise trusted signer from changing the extension set
+    /// without the relying application explicitly opting into that change.
+    pub extensions_digest: [u8; 32],
 }
 
 /// Authentication trust requirement for an accepted proof envelope.
@@ -81,11 +90,17 @@ impl VerificationContract {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ContractValidatedEnvelope<'a> {
     envelope: &'a ProofEnvelopeV3,
+    max_public_input_bytes: usize,
 }
 
 impl<'a> ContractValidatedEnvelope<'a> {
     pub fn envelope(self) -> &'a ProofEnvelopeV3 {
         self.envelope
+    }
+
+    /// Resource ceiling inherited from the structural policy for staged verification.
+    pub const fn max_public_input_bytes(self) -> usize {
+        self.max_public_input_bytes
     }
 }
 
@@ -95,6 +110,8 @@ pub struct EnvelopePolicy {
     pub max_proof_bytes: usize,
     pub max_signature_bytes: usize,
     pub max_authentication_entries: usize,
+    /// Bounds hashing/backend work for caller-supplied canonical application inputs.
+    pub max_public_input_bytes: usize,
     pub max_age_seconds: u64,
     pub max_future_skew_seconds: u64,
     /// Empty means every non-zero proof-system identifier is structurally allowed.
@@ -110,6 +127,7 @@ impl Default for EnvelopePolicy {
             max_proof_bytes: DEFAULT_MAX_PROOF_BYTES,
             max_signature_bytes: DEFAULT_MAX_SIGNATURE_BYTES,
             max_authentication_entries: DEFAULT_MAX_AUTHENTICATION_ENTRIES,
+            max_public_input_bytes: DEFAULT_MAX_PUBLIC_INPUT_BYTES,
             max_age_seconds: 60 * 60,
             max_future_skew_seconds: 5 * 60,
             allowed_proof_systems: Vec::new(),
@@ -170,6 +188,8 @@ pub enum EnvelopeValidationError {
     ContractNonceMismatch,
     #[error("public-input digest does not match the local verification contract")]
     ContractPublicInputsMismatch,
+    #[error("extension digest does not match the local verification contract")]
+    ContractExtensionsMismatch,
     #[error("authentication contract contains an invalid requirement for suite {suite}")]
     InvalidAuthenticationRequirement { suite: u16 },
     #[error("authentication entry is not trusted by the local verification contract")]
@@ -324,6 +344,9 @@ pub fn validate_envelope_against_contract<'a>(
     if envelope.public_inputs_hash != expected.public_inputs_hash {
         return Err(EnvelopeValidationError::ContractPublicInputsMismatch);
     }
+    if envelope.extensions_digest != expected.extensions_digest {
+        return Err(EnvelopeValidationError::ContractExtensionsMismatch);
+    }
 
     let mut trusted_entries = HashSet::new();
     let mut seen_requirement_suites = HashSet::new();
@@ -344,6 +367,11 @@ pub fn validate_envelope_against_contract<'a>(
 
         let trusted: HashSet<[u8; 32]> =
             requirement.trusted_signer_key_ids.iter().copied().collect();
+        if trusted.len() != requirement.trusted_signer_key_ids.len() {
+            return Err(EnvelopeValidationError::InvalidAuthenticationRequirement {
+                suite: requirement.suite.wire_id(),
+            });
+        }
         let actual: HashSet<[u8; 32]> = envelope
             .authentication
             .iter()
@@ -370,7 +398,10 @@ pub fn validate_envelope_against_contract<'a>(
         }
     }
 
-    Ok(ContractValidatedEnvelope { envelope })
+    Ok(ContractValidatedEnvelope {
+        envelope,
+        max_public_input_bytes: policy.max_public_input_bytes,
+    })
 }
 
 #[cfg(test)]
@@ -412,6 +443,7 @@ mod tests {
                 parameter_set_id: ParameterSetId([0x22; 32]),
                 nonce: [0x33; 32],
                 public_inputs_hash: [0x44; 32],
+                extensions_digest: empty_extensions_digest(),
             },
             AuthenticationSuiteId::ML_DSA_65_FIPS204,
             [0x55; 32],
@@ -473,6 +505,37 @@ mod tests {
                 NOW,
             ),
             Err(EnvelopeValidationError::AuthenticationQuorumNotMet { .. })
+        ));
+    }
+
+    #[test]
+    fn self_selected_extensions_are_rejected() {
+        let mut envelope = valid_envelope();
+        envelope.extensions_digest = [0x99; 32];
+        assert_eq!(
+            validate_envelope_against_contract(
+                &envelope,
+                &EnvelopePolicy::default(),
+                &valid_contract(),
+                NOW,
+            ),
+            Err(EnvelopeValidationError::ContractExtensionsMismatch)
+        );
+    }
+
+    #[test]
+    fn duplicate_trusted_signer_ids_make_contract_invalid() {
+        let envelope = valid_envelope();
+        let mut contract = valid_contract();
+        contract.authentication[0].trusted_signer_key_ids.push([0x55; 32]);
+        assert!(matches!(
+            validate_envelope_against_contract(
+                &envelope,
+                &EnvelopePolicy::default(),
+                &contract,
+                NOW,
+            ),
+            Err(EnvelopeValidationError::InvalidAuthenticationRequirement { .. })
         ));
     }
 

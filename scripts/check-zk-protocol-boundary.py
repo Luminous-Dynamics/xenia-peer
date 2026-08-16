@@ -117,6 +117,9 @@ if policy_path.is_file():
         "ContractParameterSetMismatch",
         "ContractNonceMismatch",
         "ContractPublicInputsMismatch",
+        "ContractExtensionsMismatch",
+        "expected.extensions_digest",
+        "DEFAULT_MAX_PUBLIC_INPUT_BYTES",
         "AuthenticationQuorumNotMet",
         "validate_envelope_against_contract",
     ):
@@ -139,6 +142,8 @@ if verification_path.is_file():
     ):
         require(fragment in verification, f"verification typestate invariant missing: {fragment}")
     require_test(verification, "fresh_challenge_cannot_be_re_enveloped_without_backend_binding")
+    require_test(verification, "oversized_public_inputs_are_rejected_before_backend_work")
+    require("contract.proof." not in verification, "stale VerificationContract field access reintroduced")
 
 workspace_manifest = root / "Cargo.toml"
 if workspace_manifest.is_file():
