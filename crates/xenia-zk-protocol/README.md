@@ -33,6 +33,20 @@ values with their canonical claim identity, sorts the claim set before hashing,
 and rejects duplicate claim types. Applications therefore do not need to invent
 their own ordering/delimiter convention for the envelope's `extensions_digest`.
 
+
+## Authentication-suite registry
+
+`AuthenticationSuiteId` now has a frozen V1 registry contract:
+
+- `1 = ed25519`
+- `2 = ml-dsa-65-fips204`
+
+The canonical registry bytes and their SHA-256 fingerprint are exported by the
+crate. Downstream credential protocols can pin that fingerprint without taking a
+build-time dependency on Xenia. Changing an existing wire ID or canonical name is
+a protocol-version event; extension IDs remain possible as non-zero values but do
+not acquire a canonical name unless the registry is explicitly revised.
+
 ## Ownership rule
 
 > Xenia proves and verifies. Applications define what is worth proving.

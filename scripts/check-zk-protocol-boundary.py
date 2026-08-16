@@ -83,6 +83,9 @@ if source_path.is_file():
         "pub fn extension_value_digest",
         "pub fn extensions_digest",
         "authentication_digest",
+        "AUTHENTICATION_SUITE_REGISTRY_V1",
+        "AUTHENTICATION_SUITE_REGISTRY_V1_SHA256",
+        'b"XENIA:AuthenticationSuiteRegistry:v1\\n1=ed25519\\n2=ml-dsa-65-fips204\\n"',
     ):
         require(fragment in source, f"V3 protocol invariant missing: {fragment}")
 
@@ -91,6 +94,7 @@ if source_path.is_file():
     require_test(source, "authentication_digest_binds_suite_and_signer")
     require_test(source, "public_inputs_digest_is_challenge_bound")
     require_test(source, "extension_digest_is_typed_order_independent_and_duplicate_safe")
+    require_test(source, "authentication_suite_registry_is_frozen")
 
     for forbidden in (
         "MYCELIX:AuthenticatedProof",

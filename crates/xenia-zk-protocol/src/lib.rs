@@ -201,6 +201,21 @@ impl From<ProofSystemId> for u16 {
     }
 }
 
+/// Canonical authentication-suite registry bytes shared with credential protocols.
+///
+/// The textual form is deliberately tiny and frozen so downstream repositories can
+/// pin a SHA-256 fingerprint without depending on this crate at build time. Any
+/// registry change is a protocol-version event, not a cosmetic rename.
+pub const AUTHENTICATION_SUITE_REGISTRY_V1: &[u8] =
+    b"XENIA:AuthenticationSuiteRegistry:v1\n1=ed25519\n2=ml-dsa-65-fips204\n";
+/// SHA-256 of [`AUTHENTICATION_SUITE_REGISTRY_V1`].
+pub const AUTHENTICATION_SUITE_REGISTRY_V1_SHA256: [u8; 32] = [
+    0x02, 0x55, 0xc2, 0xb3, 0x07, 0x0e, 0x57, 0x9d,
+    0x52, 0xe4, 0x1a, 0xb6, 0xa9, 0xd7, 0x67, 0xd1,
+    0x70, 0x0b, 0x61, 0xfd, 0x68, 0x78, 0x7b, 0xba,
+    0xe7, 0x8b, 0xd4, 0x1a, 0xa8, 0x68, 0x94, 0x5f,
+];
+
 /// Stable authentication-suite identifier. Implementations live outside this crate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "u16", into = "u16")]
@@ -220,6 +235,16 @@ impl AuthenticationSuiteId {
 
     pub const fn wire_id(self) -> u16 {
         self.0
+    }
+
+    /// Canonical registry name for suites defined by Xenia V1. Unknown non-zero
+    /// extension IDs intentionally return `None` rather than being mislabeled.
+    pub const fn canonical_name(self) -> Option<&'static str> {
+        match self.0 {
+            1 => Some("ed25519"),
+            2 => Some("ml-dsa-65-fips204"),
+            _ => None,
+        }
     }
 }
 
@@ -649,6 +674,24 @@ mod tests {
         assert_eq!(
             derive_challenge_nonce(&statement, b"service-a", b"session-1", &[0; 32]),
             Err(ProtocolError::ZeroChallengeEntropy)
+        );
+    }
+
+    #[test]
+    fn authentication_suite_registry_is_frozen() {
+        assert_eq!(AuthenticationSuiteId::ED25519.wire_id(), 1);
+        assert_eq!(AuthenticationSuiteId::ML_DSA_65_FIPS204.wire_id(), 2);
+        assert_eq!(AuthenticationSuiteId::ED25519.canonical_name(), Some("ed25519"));
+        assert_eq!(
+            AuthenticationSuiteId::ML_DSA_65_FIPS204.canonical_name(),
+            Some("ml-dsa-65-fips204")
+        );
+        let registry_digest: [u8; 32] =
+            Sha256::digest(AUTHENTICATION_SUITE_REGISTRY_V1).into();
+        assert_eq!(registry_digest, AUTHENTICATION_SUITE_REGISTRY_V1_SHA256);
+        assert_eq!(
+            hex_lower(&AUTHENTICATION_SUITE_REGISTRY_V1_SHA256),
+            "0255c2b3070e579d52e41ab6a9d767d1700b61fd68787bbae78bd41aa868945f"
         );
     }
 
