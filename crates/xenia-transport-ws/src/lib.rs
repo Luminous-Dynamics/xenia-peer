@@ -42,6 +42,8 @@
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
 
+use std::time::Duration;
+
 use futures_util::{SinkExt, StreamExt};
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream};
@@ -57,8 +59,8 @@ use tokio_tungstenite::{
 use tracing::debug;
 
 use xenia_peer_core::transport::{
-    MAX_ENVELOPE_BYTES, RecvEnvelope, SendEnvelope, Transport, TransportError, TransportKind,
-    TransportProfileV1,
+    MAX_ENVELOPE_BYTES, RECEIVE_ENVELOPE_TIMEOUT_MS, RecvEnvelope, SEND_STALL_TIMEOUT_MS,
+    SendEnvelope, Transport, TransportError, TransportKind, TransportProfileV1,
 };
 
 /// Exact RFC 6455 subprotocol token for the current Xenia WebSocket profile.
@@ -215,6 +217,40 @@ impl WsTransport {
         }
     }
 
+    async fn send_envelope_with_timeout(
+        &mut self,
+        bytes: &[u8],
+        timeout: Duration,
+    ) -> Result<(), TransportError> {
+        ensure_envelope_size(bytes.len())?;
+        tokio::time::timeout(timeout, self.send_msg(Message::Binary(bytes.to_vec())))
+            .await
+            .map_err(|_| TransportError::TimedOut {
+                operation: "send_envelope",
+                timeout_ms: timeout.as_millis().try_into().unwrap_or(u64::MAX),
+            })?
+            .map_err(|e| TransportError::from(WsError::from(e)))?;
+        Ok(())
+    }
+
+    async fn recv_envelope_with_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, TransportError> {
+        tokio::time::timeout(timeout, async {
+            loop {
+                if let Some(env) = interpret_recv(self.next_msg().await)? {
+                    return Ok(env);
+                }
+            }
+        })
+        .await
+        .map_err(|_| TransportError::TimedOut {
+            operation: "recv_envelope",
+            timeout_ms: timeout.as_millis().try_into().unwrap_or(u64::MAX),
+        })?
+    }
+
     /// Split into independently-owned send/recv halves via
     /// `futures_util::StreamExt::split`, so a caller can run concurrent
     /// send and recv loops on separate tasks. See
@@ -273,19 +309,13 @@ impl Transport for WsTransport {
     }
 
     async fn send_envelope(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
-        ensure_envelope_size(bytes.len())?;
-        self.send_msg(Message::Binary(bytes.to_vec()))
+        self.send_envelope_with_timeout(bytes, Duration::from_millis(SEND_STALL_TIMEOUT_MS))
             .await
-            .map_err(|e| TransportError::from(WsError::from(e)))?;
-        Ok(())
     }
 
     async fn recv_envelope(&mut self) -> Result<Vec<u8>, TransportError> {
-        loop {
-            if let Some(env) = interpret_recv(self.next_msg().await)? {
-                return Ok(env);
-            }
-        }
+        self.recv_envelope_with_timeout(Duration::from_millis(RECEIVE_ENVELOPE_TIMEOUT_MS))
+            .await
     }
 }
 
@@ -305,12 +335,21 @@ pub enum WsSendHalf {
 impl SendEnvelope for WsSendHalf {
     async fn send_envelope(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
         ensure_envelope_size(bytes.len())?;
+        let timeout = Duration::from_millis(SEND_STALL_TIMEOUT_MS);
         let msg = Message::Binary(bytes.to_vec());
-        let result = match self {
-            WsSendHalf::Client(sink) => sink.send(msg).await,
-            WsSendHalf::Server(sink) => sink.send(msg).await,
+        let send = async {
+            match self {
+                WsSendHalf::Client(sink) => sink.send(msg).await,
+                WsSendHalf::Server(sink) => sink.send(msg).await,
+            }
         };
-        result.map_err(|e| TransportError::from(WsError::from(e)))
+        tokio::time::timeout(timeout, send)
+            .await
+            .map_err(|_| TransportError::TimedOut {
+                operation: "send_envelope",
+                timeout_ms: SEND_STALL_TIMEOUT_MS,
+            })?
+            .map_err(|e| TransportError::from(WsError::from(e)))
     }
 }
 
@@ -328,15 +367,23 @@ pub enum WsRecvHalf {
 
 impl RecvEnvelope for WsRecvHalf {
     async fn recv_envelope(&mut self) -> Result<Vec<u8>, TransportError> {
-        loop {
-            let next = match self {
-                WsRecvHalf::Client(stream) => stream.next().await,
-                WsRecvHalf::Server(stream) => stream.next().await,
-            };
-            if let Some(env) = interpret_recv(next)? {
-                return Ok(env);
+        let timeout = Duration::from_millis(RECEIVE_ENVELOPE_TIMEOUT_MS);
+        tokio::time::timeout(timeout, async {
+            loop {
+                let next = match self {
+                    WsRecvHalf::Client(stream) => stream.next().await,
+                    WsRecvHalf::Server(stream) => stream.next().await,
+                };
+                if let Some(env) = interpret_recv(next)? {
+                    return Ok(env);
+                }
             }
-        }
+        })
+        .await
+        .map_err(|_| TransportError::TimedOut {
+            operation: "recv_envelope",
+            timeout_ms: RECEIVE_ENVELOPE_TIMEOUT_MS,
+        })?
     }
 }
 
@@ -432,6 +479,16 @@ mod tests {
     }
 
     #[test]
+    fn websocket_availability_deadlines_match_authenticated_profile() {
+        let profile = xenia_peer_core::transport::TransportAvailabilityProfileV1::current(
+            TransportKind::WebSocket,
+        );
+        assert_eq!(profile.send_stall_timeout_ms, SEND_STALL_TIMEOUT_MS);
+        assert_eq!(profile.receive_envelope_timeout_ms, RECEIVE_ENVELOPE_TIMEOUT_MS);
+        assert!(!profile.carrier_keepalive_resets_application_idle);
+    }
+
+    #[test]
     fn websocket_subprotocol_is_a_single_stable_token() {
         assert_eq!(XENIA_WEBSOCKET_SUBPROTOCOL, "xenia.transport.websocket.v1");
         assert!(!XENIA_WEBSOCKET_SUBPROTOCOL.contains(','));
@@ -471,6 +528,39 @@ mod tests {
         let too_large = vec![0u8; MAX_ENVELOPE_BYTES as usize + 1];
         let _ = client.send(Message::Binary(too_large)).await;
         assert!(server.await.unwrap().is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ping_pong_does_not_extend_application_receive_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut transport = WsTransport::accept_stream(stream).await.unwrap();
+            transport
+                .recv_envelope_with_timeout(Duration::from_millis(60))
+                .await
+        });
+
+        let mut request = format!("ws://{addr}").into_client_request().unwrap();
+        request.headers_mut().insert(
+            SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static(XENIA_WEBSOCKET_SUBPROTOCOL),
+        );
+        let (mut client, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        for _ in 0..8 {
+            let _ = client.send(Message::Ping(Vec::new())).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let err = server.await.unwrap().unwrap_err();
+        assert!(matches!(
+            err,
+            TransportError::TimedOut {
+                operation: "recv_envelope",
+                ..
+            }
+        ));
     }
 
     /// Bind to an ephemeral port, listen on a background task,

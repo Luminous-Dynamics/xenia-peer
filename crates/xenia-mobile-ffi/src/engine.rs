@@ -435,6 +435,7 @@ async fn run_session_inner(
     // possible fast-follow but would need their own `Transport` impl
     // wired in here.
     let transport_profile = transport.transport_profile();
+    let availability_profile = transport.availability_profile();
 
     let (send_half, mut recv_half) = transport.split();
     let session = Arc::new(Mutex::new(session));
@@ -531,8 +532,12 @@ async fn run_session_inner(
     };
 
     let mut pending_surface = Some(
-        PendingSessionSurface::new(handshake.negotiated_context_hash, transport_profile.clone())
-            .map_err(|e| e.to_string())?,
+        PendingSessionSurface::new_with_availability(
+            handshake.negotiated_context_hash,
+            transport_profile.clone(),
+            availability_profile,
+        )
+        .map_err(|e| e.to_string())?,
     );
     let mut authenticated_surface: Option<AuthenticatedSessionSurface> = None;
     let mut epoch_state = SessionEpochState::new(handshake.transcript_hash, RekeyPolicy::smoke());

@@ -1638,9 +1638,11 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
     let negotiated_transport = transport.negotiated_transport();
     let transport_profile = transport.transport_profile();
-    let mut pending_surface = Some(PendingSessionSurface::new(
+    let availability_profile = transport.availability_profile();
+    let mut pending_surface = Some(PendingSessionSurface::new_with_availability(
         handshake.negotiated_context_hash,
         transport_profile.clone(),
+        availability_profile,
     )?);
     let mut authenticated_surface: Option<AuthenticatedSessionSurface> = None;
     let mut epoch_state = SessionEpochState::new(handshake.transcript_hash, RekeyPolicy::smoke());
@@ -1953,6 +1955,7 @@ async fn gui_receive_loop(
     session.install_schedule(&handshake.key_schedule);
     let negotiated_transport = transport.negotiated_transport();
     let transport_profile = transport.transport_profile();
+    let availability_profile = transport.availability_profile();
 
     // Split the transport so captured input can be sent concurrently
     // with the frame-receive loop below. `session` and the send half
@@ -2095,8 +2098,12 @@ async fn gui_receive_loop(
     let mut audio_sink: Box<dyn AudioPlaybackSink + Send> =
         Box::new(ChannelAudioSink::new(audio_tx));
     let mut pending_surface = Some(
-        PendingSessionSurface::new(handshake.negotiated_context_hash, transport_profile.clone())
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?,
+        PendingSessionSurface::new_with_availability(
+            handshake.negotiated_context_hash,
+            transport_profile.clone(),
+            availability_profile,
+        )
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?,
     );
     let mut authenticated_surface: Option<AuthenticatedSessionSurface> = None;
     let mut epoch_state = SessionEpochState::new(handshake.transcript_hash, RekeyPolicy::smoke());

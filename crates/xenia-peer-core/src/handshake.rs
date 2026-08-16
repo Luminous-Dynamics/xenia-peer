@@ -8,7 +8,7 @@
 
 use crate::{
     frame::RawCapabilities,
-    transport::{MAX_HANDSHAKE_ENVELOPE_BYTES, Transport, TransportProfileV1},
+    transport::{MAX_HANDSHAKE_ENVELOPE_BYTES, Transport, TransportAvailabilityProfileV1, TransportProfileV1},
 };
 use crate::transport::TransportKind;
 use serde::{Deserialize, Serialize};
@@ -24,6 +24,7 @@ use xenia_handshake::{
 
 const HANDSHAKE_SIGNATURE_CONTEXT_V1: &str = "xenia-handshake-signature-v1";
 const NEGOTIATED_SESSION_CONTEXT_SCHEMA_V2: &str = "xenia-negotiated-session-context-v2";
+const NEGOTIATED_SESSION_CONTEXT_SCHEMA_V3: &str = "xenia-negotiated-session-context-v3";
 const XENIA_WIRE_ENVELOPE_PROFILE_V1: &str = "xenia-wire-sealed-envelope-v1";
 
 
@@ -164,25 +165,24 @@ pub enum NegotiatedSessionContextError {
     /// explicit new profile rather than silent downgrade negotiation.
     #[error("unsupported or non-canonical transport profile: {0:?}")]
     UnsupportedTransportProfile(TransportKind),
+    /// The caller supplied failure/liveness semantics that are not Xenia's
+    /// exact current policy for the selected carrier.
+    #[error("unsupported or non-canonical availability profile: {0:?}")]
+    UnsupportedAvailabilityProfile(TransportKind),
     /// Canonical context encoding failed.
     #[error("failed to encode negotiated session context: {0}")]
     Encoding(#[from] bincode::Error),
 }
 
-/// Canonical post-handshake session context, version 2.
-///
-/// V1 committed only the carrier kind plus capabilities. V2 authenticates the
-/// complete Layer-4/5 transport contract and the Layer-5/6 protocol profiles
-/// whose derived keys and sealed envelopes implement the session. This turns
-/// transport/framing/version mismatches into transcript mismatches rather than
-/// ambient assumptions.
+/// Historical V2 negotiated session context retained for explicit decode/audit
+/// compatibility. New handshakes use [`NegotiatedSessionContextV3`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NegotiatedSessionContextV2 {
     /// Stable context schema label.
     pub schema: String,
-    /// Exact transport semantics actually used by the connection.
+    /// Exact transport semantics used by the connection.
     pub transport_profile: TransportProfileV1,
-    /// Xenia-level sealed-envelope profile (independent of crate semver).
+    /// Xenia-level sealed-envelope profile.
     pub wire_envelope_profile: String,
     /// Required handshake cryptographic policy.
     pub handshake_policy_profile: String,
@@ -195,10 +195,65 @@ pub struct NegotiatedSessionContextV2 {
 }
 
 impl NegotiatedSessionContextV2 {
+    /// Construct the historical V2 representation for audit/compatibility use.
+    /// The supplied transport profile is intentionally not required to be the
+    /// *current* profile: audit tooling may need to reconstruct an older `/0`
+    /// or otherwise retired carrier contract byte-for-byte.
+    pub fn historical(transport_profile: TransportProfileV1, capabilities: RawCapabilities) -> Self {
+        Self {
+            schema: NEGOTIATED_SESSION_CONTEXT_SCHEMA_V2.to_string(),
+            transport_profile,
+            wire_envelope_profile: XENIA_WIRE_ENVELOPE_PROFILE_V1.to_string(),
+            handshake_policy_profile: HANDSHAKE_POLICY_PROFILE.to_string(),
+            handshake_transcript_schema: HANDSHAKE_TRANSCRIPT_SCHEMA.to_string(),
+            session_key_schedule_schema: SESSION_KEY_SCHEDULE_SCHEMA.to_string(),
+            capabilities,
+        }
+    }
+
+    /// Return historical canonical bincode-v1 bytes.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
+        bincode::serialize(self)
+    }
+
+    /// Return the historical V2 BLAKE3-256 context hash.
+    pub fn context_hash(&self) -> Result<[u8; 32], bincode::Error> {
+        Ok(*blake3::hash(&self.canonical_bytes()?).as_bytes())
+    }
+}
+
+/// Canonical post-handshake session context, version 3.
+///
+/// V2 authenticated framing/version/capability semantics. V3 additionally
+/// commits availability/failure semantics so send stalls, receive deadlines,
+/// teardown budgets, and carrier keepalive treatment cannot silently differ
+/// between peers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NegotiatedSessionContextV3 {
+    /// Stable context schema label.
+    pub schema: String,
+    /// Exact transport semantics actually used by the connection.
+    pub transport_profile: TransportProfileV1,
+    /// Exact availability/failure semantics enforced by the connection.
+    pub availability_profile: TransportAvailabilityProfileV1,
+    /// Xenia-level sealed-envelope profile (independent of crate semver).
+    pub wire_envelope_profile: String,
+    /// Required handshake cryptographic policy.
+    pub handshake_policy_profile: String,
+    /// Canonical handshake transcript schema.
+    pub handshake_transcript_schema: String,
+    /// Transcript-bound session key schedule schema.
+    pub session_key_schedule_schema: String,
+    /// First sealed capabilities frame decoded as typed capabilities.
+    pub capabilities: RawCapabilities,
+}
+
+impl NegotiatedSessionContextV3 {
     /// Build the current canonical session context, rejecting any transport
     /// profile that does not exactly match a supported Xenia profile.
     pub fn new(
         transport_profile: TransportProfileV1,
+        availability_profile: TransportAvailabilityProfileV1,
         capabilities: RawCapabilities,
     ) -> Result<Self, NegotiatedSessionContextError> {
         if !transport_profile.is_current_supported_profile() {
@@ -206,9 +261,17 @@ impl NegotiatedSessionContextV2 {
                 transport_profile.kind,
             ));
         }
+        if !availability_profile.is_current_supported_profile()
+            || availability_profile.kind != transport_profile.kind
+        {
+            return Err(NegotiatedSessionContextError::UnsupportedAvailabilityProfile(
+                availability_profile.kind,
+            ));
+        }
         Ok(Self {
-            schema: NEGOTIATED_SESSION_CONTEXT_SCHEMA_V2.to_string(),
+            schema: NEGOTIATED_SESSION_CONTEXT_SCHEMA_V3.to_string(),
             transport_profile,
+            availability_profile,
             wire_envelope_profile: XENIA_WIRE_ENVELOPE_PROFILE_V1.to_string(),
             handshake_policy_profile: HANDSHAKE_POLICY_PROFILE.to_string(),
             handshake_transcript_schema: HANDSHAKE_TRANSCRIPT_SCHEMA.to_string(),
@@ -235,8 +298,29 @@ pub fn negotiated_session_context_hash(
     transport_profile: &TransportProfileV1,
     capabilities: RawCapabilities,
 ) -> Result<[u8; 32], NegotiatedSessionContextError> {
-    Ok(NegotiatedSessionContextV2::new(transport_profile.clone(), capabilities)?
-        .context_hash()?)
+    let availability_profile = TransportAvailabilityProfileV1::current(transport_profile.kind);
+    negotiated_session_context_hash_with_availability(
+        transport_profile,
+        &availability_profile,
+        capabilities,
+    )
+}
+
+/// Compute the canonical V3 session context hash from the actual transport and
+/// availability profiles. Transport implementations should supply both from the
+/// live carrier object; callers that use [`negotiated_session_context_hash`] get
+/// the exact current availability profile for the selected carrier.
+pub fn negotiated_session_context_hash_with_availability(
+    transport_profile: &TransportProfileV1,
+    availability_profile: &TransportAvailabilityProfileV1,
+    capabilities: RawCapabilities,
+) -> Result<[u8; 32], NegotiatedSessionContextError> {
+    Ok(NegotiatedSessionContextV3::new(
+        transport_profile.clone(),
+        availability_profile.clone(),
+        capabilities,
+    )?
+    .context_hash()?)
 }
 
 /// Failure while accepting the daemon's one authoritative capabilities frame.
@@ -268,6 +352,7 @@ pub enum CapabilityAcceptanceError {
 pub struct PendingSessionSurface {
     expected_context_hash: Option<[u8; 32]>,
     transport_profile: TransportProfileV1,
+    availability_profile: TransportAvailabilityProfileV1,
 }
 
 impl PendingSessionSurface {
@@ -276,14 +361,35 @@ impl PendingSessionSurface {
         expected_context_hash: Option<[u8; 32]>,
         transport_profile: TransportProfileV1,
     ) -> Result<Self, CapabilityAcceptanceError> {
+        let availability_profile = TransportAvailabilityProfileV1::current(transport_profile.kind);
+        Self::new_with_availability(expected_context_hash, transport_profile, availability_profile)
+    }
+
+    /// Create a pending surface from the exact live carrier and availability
+    /// profiles. This is the preferred constructor for application entrypoints.
+    pub fn new_with_availability(
+        expected_context_hash: Option<[u8; 32]>,
+        transport_profile: TransportProfileV1,
+        availability_profile: TransportAvailabilityProfileV1,
+    ) -> Result<Self, CapabilityAcceptanceError> {
         if !transport_profile.is_current_supported_profile() {
             return Err(CapabilityAcceptanceError::Context(
                 NegotiatedSessionContextError::UnsupportedTransportProfile(transport_profile.kind),
             ));
         }
+        if !availability_profile.is_current_supported_profile()
+            || availability_profile.kind != transport_profile.kind
+        {
+            return Err(CapabilityAcceptanceError::Context(
+                NegotiatedSessionContextError::UnsupportedAvailabilityProfile(
+                    availability_profile.kind,
+                ),
+            ));
+        }
         Ok(Self {
             expected_context_hash,
             transport_profile,
+            availability_profile,
         })
     }
 
@@ -299,8 +405,11 @@ impl PendingSessionSurface {
                 lane_envelope_magic: capabilities.lane_envelope_magic,
             });
         }
-        let context_hash =
-            negotiated_session_context_hash(&self.transport_profile, capabilities.clone())?;
+        let context_hash = negotiated_session_context_hash_with_availability(
+            &self.transport_profile,
+            &self.availability_profile,
+            capabilities.clone(),
+        )?;
         if self
             .expected_context_hash
             .is_some_and(|expected| expected != context_hash)
@@ -310,6 +419,7 @@ impl PendingSessionSurface {
         Ok(AuthenticatedSessionSurface {
             context_hash,
             transport_profile: self.transport_profile,
+            availability_profile: self.availability_profile,
             capabilities,
         })
     }
@@ -322,6 +432,7 @@ impl PendingSessionSurface {
 pub struct AuthenticatedSessionSurface {
     context_hash: [u8; 32],
     transport_profile: TransportProfileV1,
+    availability_profile: TransportAvailabilityProfileV1,
     capabilities: RawCapabilities,
 }
 
@@ -335,6 +446,11 @@ impl AuthenticatedSessionSurface {
     /// Exact transport profile bound to this authenticated surface.
     pub fn transport_profile(&self) -> &TransportProfileV1 {
         &self.transport_profile
+    }
+
+    /// Exact authenticated availability/failure profile.
+    pub fn availability_profile(&self) -> &TransportAvailabilityProfileV1 {
+        &self.availability_profile
     }
 
     /// Immutable authenticated capabilities for the lifetime of the surface.
@@ -1135,6 +1251,42 @@ mod tests {
     }
 
     #[test]
+    fn negotiated_session_context_rejects_noncanonical_availability_profile() {
+        let capabilities = test_capabilities();
+        let transport = TransportProfileV1::current(TransportKind::Tcp);
+        let mut availability = TransportAvailabilityProfileV1::current(TransportKind::Tcp);
+        availability.send_stall_timeout_ms += 1;
+
+        assert!(matches!(
+            negotiated_session_context_hash_with_availability(
+                &transport,
+                &availability,
+                capabilities,
+            ),
+            Err(NegotiatedSessionContextError::UnsupportedAvailabilityProfile(
+                TransportKind::Tcp
+            ))
+        ));
+    }
+
+    #[test]
+    fn negotiated_session_context_hash_binds_availability_semantics() {
+        let capabilities = test_capabilities();
+        let transport = TransportProfileV1::current(TransportKind::Tcp);
+        let availability = TransportAvailabilityProfileV1::current(TransportKind::Tcp);
+        let mut context = NegotiatedSessionContextV3::new(
+            transport,
+            availability,
+            capabilities,
+        )
+        .unwrap();
+        let first = context.context_hash().unwrap();
+        context.availability_profile.receive_envelope_timeout_ms += 1;
+        let second = context.context_hash().unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[test]
     fn handshake_parser_ceiling_is_stricter_than_session_envelope_ceiling() {
         assert!(MAX_HANDSHAKE_ENVELOPE_BYTES < crate::transport::MAX_ENVELOPE_BYTES);
         assert!(ensure_handshake_message_size(MAX_HANDSHAKE_ENVELOPE_BYTES as usize).is_ok());
@@ -1236,6 +1388,10 @@ mod tests {
 
         assert_eq!(authenticated.context_hash(), expected);
         assert_eq!(authenticated.transport_profile(), &profile);
+        assert_eq!(
+            authenticated.availability_profile(),
+            &TransportAvailabilityProfileV1::current(TransportKind::Tcp),
+        );
         assert_eq!(authenticated.capabilities(), &capabilities);
     }
 

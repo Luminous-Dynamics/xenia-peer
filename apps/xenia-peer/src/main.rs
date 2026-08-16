@@ -35,10 +35,13 @@ use xenia_peer_core::{
         TelemetrySample as WireTelemetrySample, TelemetryValue as WireTelemetryValue,
     },
     handshake::{
-        NegotiatedTransport, negotiated_session_context_hash,
+        NegotiatedTransport, negotiated_session_context_hash_with_availability,
         perform_host_handshake_with_transcript_and_context,
     },
-    transport::{RecvEnvelope, SendEnvelope, TcpRecvHalf, TcpSendHalf, TcpTransport, Transport},
+    transport::{
+        GRACEFUL_CLOSE_TIMEOUT_MS, RecvEnvelope, SendEnvelope, TcpRecvHalf, TcpSendHalf,
+        TcpTransport, Transport,
+    },
 };
 use xenia_transport_quic::{
     QuicRecvHalf, QuicSendHalf, QuicTransport, bind_xenia_endpoint, encode_endpoint_addr,
@@ -1322,7 +1325,7 @@ impl AnySendHalf {
     async fn close(&mut self) -> Result<(), xenia_peer_core::transport::TransportError> {
         if let AnySendHalf::Quic { _endpoint, send } = self {
             let finish_result = send.finish();
-            let _ = tokio::time::timeout(Duration::from_secs(3), send.closed()).await;
+            let _ = tokio::time::timeout(Duration::from_millis(GRACEFUL_CLOSE_TIMEOUT_MS), send.closed()).await;
             _endpoint.close().await;
             finish_result?;
         }
@@ -6171,6 +6174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut transport = accept_transport(&args, audio_advertisement.clone()).await?;
         let negotiated_transport = transport.negotiated_transport();
         let transport_profile = transport.transport_profile();
+        let availability_profile = transport.availability_profile();
         let mut session = LaneSession::with_fixture(source_id, args.epoch);
         let frame_format = codec_to_frame_format(args.codec);
         let capabilities = session_capabilities_frame(
@@ -6181,8 +6185,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.input_backend,
             args.clipboard,
         )?;
-        let negotiated_context_hash = negotiated_session_context_hash(
+        let negotiated_context_hash = negotiated_session_context_hash_with_availability(
             &transport_profile,
+            &availability_profile,
             xenia_peer_core::RawCapabilities::from_frame(&capabilities)?,
         )?;
 
