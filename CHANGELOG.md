@@ -9,6 +9,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
+- V13 adds `TransportPreSessionProfileV1` and advances the current authenticated
+  session context to V4. TCP connect, WebSocket connect/upgrade, QUIC connection
+  establishment, and QUIC logical-stream establishment now have explicit
+  fail-closed pre-authentication deadlines whose exact policy is committed after
+  the handshake.
+- Desktop GUI input no longer uses an unbounded Tokio channel. The queue is
+  capped at 256 events: pointer motion is explicitly lossy under saturation,
+  while keyboard/button state transitions use bounded backpressure rather than
+  silently dropping a release event.
 - WebSocket transport profile `/1` now requires the exact RFC 6455 subprotocol
   `xenia.transport.websocket.v1` and configures tungstenite message/frame
   ceilings at the carrier boundary before Xenia envelope parsing.

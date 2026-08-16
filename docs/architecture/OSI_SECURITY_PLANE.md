@@ -147,15 +147,21 @@ Extensions should preserve the ownership boundary above. High-value future work
 includes:
 
 1. a future QUIC profile revision only through a new ALPN/profile pair (V11 now pins altered-ALPN and altered-stream-preface rejection as regressions);
-2. carrier-native handshake-phase ceilings below the general envelope ceiling
-   where the QUIC/TCP implementations can enforce them before buffering;
+2. **done in V13:** carrier-establishment/upgrade deadlines are a separate
+   `TransportPreSessionProfileV1` and are committed by current
+   `NegotiatedSessionContextV4`; listeners may remain idle, but one selected
+   unauthenticated peer cannot hold connect/upgrade/stream establishment open
+   indefinitely;
 3. optional multiple QUIC streams only through a new profile that also binds
    lane-to-stream mapping and replay/order semantics;
 4. **done in V12:** timeout/idle/keepalive policy is separately authenticated
    via `TransportAvailabilityProfileV1`; future changes require an explicit
    availability-profile revision;
 5. process/network enforcement in Nixward using Xenia identities/capabilities,
-   without moving IP routing into Xenia itself.
+   without moving IP routing into Xenia itself;
+6. bounded application producer queues with lane-specific overflow semantics;
+   V13 closes the desktop input queue first, while richer media/control queue
+   policy remains future work.
 
 The architectural rule is: **move downward only when doing so makes an Xenia
 security invariant enforceable. Do not move downward merely to own more of the

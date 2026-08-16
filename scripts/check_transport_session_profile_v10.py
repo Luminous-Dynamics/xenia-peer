@@ -95,18 +95,21 @@ for rel, text in [
 if 'let transport_profile = transport.transport_profile();' not in peer:
     failures.append("daemon does not capture actual transport profile")
 if ('negotiated_session_context_hash(\n            &transport_profile,' not in peer
-    and 'negotiated_session_context_hash_with_availability(\n            &transport_profile,' not in peer):
+    and 'negotiated_session_context_hash_with_availability(\n            &transport_profile,' not in peer
+    and 'negotiated_session_context_hash_with_profiles(\n            &transport_profile,' not in peer):
     failures.append("daemon context hash is not built from actual transport profile")
 if viewer.count('let transport_profile = transport.transport_profile();') < 2:
     failures.append("viewer paths do not capture actual transport profile")
 if ('capability_guard.accept(&transport_profile, &capabilities)' not in viewer
     and 'PendingSessionSurface::new_with_availability(' not in viewer
+    and 'PendingSessionSurface::new_with_profiles(' not in viewer
     and 'PendingSessionSurface::new(' not in viewer):
     failures.append("viewer capability acceptance is not bound to actual transport profile")
 if 'let transport_profile = transport.transport_profile();' not in mobile:
     failures.append("mobile viewer does not capture actual TCP transport profile")
 if ('negotiated_session_context_hash(&transport_profile, capabilities.clone())' not in mobile
     and 'PendingSessionSurface::new_with_availability(' not in mobile
+    and 'PendingSessionSurface::new_with_profiles(' not in mobile
     and 'PendingSessionSurface::new(' not in mobile):
     failures.append("mobile context check is not bound to actual transport profile")
 

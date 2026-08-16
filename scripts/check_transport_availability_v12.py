@@ -50,11 +50,11 @@ checks = [
     (quic, 'SEND_STALL_TIMEOUT_MS', 'QUIC send policy wiring'),
     (quic_cargo, 'tokio.workspace = true', 'QUIC runtime timeout dependency'),
     (peer, 'let availability_profile = transport.availability_profile();', 'host live availability capture'),
-    (peer, 'negotiated_session_context_hash_with_availability(', 'host V3 context binding'),
+    (peer, 'negotiated_session_context_hash_with_profiles(', 'host current context binding'),
     (viewer, 'let availability_profile = transport.availability_profile();', 'viewer live availability capture'),
-    (viewer, 'PendingSessionSurface::new_with_availability(', 'viewer V3 typestate binding'),
+    (viewer, 'PendingSessionSurface::new_with_profiles(', 'viewer current typestate binding'),
     (mobile, 'let availability_profile = transport.availability_profile();', 'mobile live availability capture'),
-    (mobile, 'PendingSessionSurface::new_with_availability(', 'mobile V3 typestate binding'),
+    (mobile, 'PendingSessionSurface::new_with_profiles(', 'mobile current typestate binding'),
     (peer, 'Duration::from_millis(GRACEFUL_CLOSE_TIMEOUT_MS)', 'profile-derived graceful QUIC close'),
 ]
 for text, token, desc in checks:
