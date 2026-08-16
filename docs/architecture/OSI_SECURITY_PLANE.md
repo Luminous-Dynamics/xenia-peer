@@ -122,7 +122,7 @@ Xenia capability.
 Extensions should preserve the ownership boundary above. High-value future work
 includes:
 
-1. versioned QUIC profile migration with ALPN downgrade tests;
+1. a future QUIC profile revision only through a new ALPN/profile pair (V11 now pins altered-ALPN and altered-stream-preface rejection as regressions);
 2. carrier-native handshake-phase ceilings below the general envelope ceiling
    where the QUIC/TCP implementations can enforce them before buffering;
 3. optional multiple QUIC streams only through a new profile that also binds

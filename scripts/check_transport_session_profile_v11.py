@@ -18,6 +18,8 @@ osi=read('docs/architecture/OSI_SECURITY_PLANE.md')
 roadmap=read('ROADMAP.md')
 ws_migration=read('docs/security/WEBSOCKET_PROFILE_V1_MIGRATION.md')
 ws_tests=read('crates/xenia-transport-ws/tests/transport_conformance.rs')
+quic=read('crates/xenia-transport-quic/src/lib.rs')
+quic_tests=read('crates/xenia-transport-quic/tests/transport_conformance.rs')
 checks=[
  (transport,'WEBSOCKET_PROTOCOL_ID: &str = "xenia/transport/websocket/1"','WS profile revision /1'),
  (transport,'TransportKind::WebSocket => 1','WS protocol version 1'),
@@ -39,6 +41,9 @@ checks=[
  (mobile,'PendingSessionSurface::new(','mobile typestate adoption'),
  (mobile,'authenticated_surface: Option<AuthenticatedSessionSurface>','mobile authenticated state'),
  (mobile,'watch::channel(false)','mobile outbound auth latch'),
+ (quic,'pub const XENIA_QUIC_ALPN: &[u8] = QUIC_PROTOCOL_ID.as_bytes();','QUIC ALPN derived from authenticated protocol ID'),
+ (quic_tests,'quic_rejects_altered_alpn_before_xenia_stream_open','QUIC ALPN downgrade regression'),
+ (quic_tests,'quic_rejects_altered_stream_preface','QUIC stream-preface downgrade regression'),
 ]
 for text, token, desc in checks:
     if token not in text: fail.append(f'missing {desc}: {token}')

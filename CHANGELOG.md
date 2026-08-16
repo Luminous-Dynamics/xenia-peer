@@ -18,6 +18,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   application surface until the sealed capabilities contract is authenticated.
 - Frame-0 synthetic viewer input is deferred until the authenticated session
   surface exists; duplicate capability advertisements remain fail-closed.
+- QUIC conformance tests now pin fail-closed behavior for an altered ALPN and
+  an altered Xenia stream preface, preventing future profile migration from
+  silently reusing `/0` semantics.
 
 - `xenia-zk-protocol` now provides `decode_bounded_envelope_with`, a format-neutral
   decode entry point that enforces the raw proof-envelope size ceiling before an
