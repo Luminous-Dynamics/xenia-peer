@@ -9,6 +9,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
+- V15 carries V14's pointer-motion/button distinction through the host injection
+  backend interface, adds session-scoped tracking and teardown release/cancel of
+  successfully injected key/button/touch state, and fixes uinput touch Cancel to
+  release `BTN_TOUCH` fail-closed. Mobile outbound clipboard now coalesces to one
+  latest-value slot, while file-transfer command queue saturation is surfaced
+  explicitly through Rust/C/JNI/Kotlin instead of being silently ignored.
 - V13 adds `TransportPreSessionProfileV1` and advances the current authenticated
   session context to V4. TCP connect, WebSocket connect/upgrade, QUIC connection
   establishment, and QUIC logical-stream establishment now have explicit

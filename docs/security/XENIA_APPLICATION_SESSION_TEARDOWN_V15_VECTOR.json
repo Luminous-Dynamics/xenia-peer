@@ -1,0 +1,53 @@
+{
+  "canonical_sha256": "7d6068b7ba81995a63d8ef1a81ce58bedd2819acdeb241cc81f24be58481a26a",
+  "file_enqueue_status": {
+    "invalid_argument": 1,
+    "invalid_handle": 2,
+    "ok": 0,
+    "queue_full": 3,
+    "session_closed": 4
+  },
+  "injector_api": {
+    "legacy_combined": "inject_pointer",
+    "pointer_button": "inject_pointer_button",
+    "pointer_motion": "inject_pointer_move"
+  },
+  "input_event_schema_version": 2,
+  "producer_policies": {
+    "mobile-clipboard-outbound": {
+      "capacity": 1,
+      "overflow": "coalesce-latest"
+    },
+    "mobile-file-transfer-command": {
+      "capacity": 2,
+      "overflow": "reject"
+    }
+  },
+  "reduced_model": {
+    "clipboard_updates": 1024,
+    "file_command_capacity": 2,
+    "held_state_combinations": 64,
+    "motion_button_traces": 729,
+    "touch_phase_values": 256
+  },
+  "schema": "xenia/application-session-teardown-vector/v1",
+  "teardown": {
+    "drop_fallback": true,
+    "pointer_release_position": "latest-successful-motion",
+    "release_order": [
+      "touch-cancel",
+      "pointer-button-release",
+      "key-release"
+    ],
+    "touch_terminal_phase": 3,
+    "tracked": [
+      "pressed-keys",
+      "pressed-pointer-buttons",
+      "active-touches"
+    ]
+  },
+  "uinput_touch_pressed_phases": [
+    0,
+    1
+  ]
+}
