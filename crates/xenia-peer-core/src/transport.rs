@@ -35,7 +35,7 @@ pub const TRANSPORT_PROFILE_SCHEMA: &str = "xenia-transport-profile-v1";
 /// Stable Xenia-over-TCP protocol identifier for the current framing.
 pub const TCP_PROTOCOL_ID: &str = "xenia/transport/tcp/0";
 /// Stable Xenia-over-WebSocket protocol identifier for the current framing.
-pub const WEBSOCKET_PROTOCOL_ID: &str = "xenia/transport/websocket/0";
+pub const WEBSOCKET_PROTOCOL_ID: &str = "xenia/transport/websocket/1";
 /// Stable Xenia-over-QUIC protocol identifier. This intentionally matches
 /// the QUIC ALPN used by `xenia-transport-quic`.
 pub const QUIC_PROTOCOL_ID: &str = "xenia/transport/quic/0";
@@ -100,11 +100,15 @@ impl TransportProfileV1 {
             ),
             TransportKind::Quic => (QUIC_PROTOCOL_ID, EnvelopeFramingV1::U32BeLengthPrefix),
         };
+        let protocol_version = match kind {
+            TransportKind::WebSocket => 1,
+            TransportKind::Tcp | TransportKind::Quic => 0,
+        };
         Self {
             schema: TRANSPORT_PROFILE_SCHEMA.to_string(),
             kind,
             protocol_id: protocol_id.to_string(),
-            protocol_version: 0,
+            protocol_version,
             framing,
             max_envelope_bytes: MAX_ENVELOPE_BYTES,
             max_handshake_envelope_bytes: MAX_HANDSHAKE_ENVELOPE_BYTES,

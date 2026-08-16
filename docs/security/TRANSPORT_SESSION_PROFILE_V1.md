@@ -11,7 +11,7 @@ carrier label such as `Quic`.
 | Carrier | Protocol ID | Framing | Session ceiling | Handshake parser ceiling | Logical streams |
 |---|---|---|---:|---:|---:|
 | TCP | `xenia/transport/tcp/0` | u32 big-endian length prefix | 16 MiB | 16 KiB | 1 |
-| WebSocket | `xenia/transport/websocket/0` | one binary WS message per envelope | 16 MiB | 16 KiB | 1 |
+| WebSocket | `xenia/transport/websocket/1` | one binary WS message per envelope | 16 MiB | 16 KiB | 1 |
 | Iroh QUIC | `xenia/transport/quic/0` | u32 big-endian length prefix inside one bidirectional stream | 16 MiB | 16 KiB | 1 |
 
 All current profiles require reliable, ordered delivery on the logical Xenia
@@ -54,3 +54,7 @@ committed context.
 
 These checks do **not** replace Rust compilation, runtime transport conformance,
 or network fuzzing.
+
+## V11 WebSocket profile revision
+
+WebSocket `/1` requires the exact RFC 6455 subprotocol token `xenia.transport.websocket.v1` and configures tungstenite receive limits at the carrier boundary. `/0` is not silently reinterpreted with these semantics.

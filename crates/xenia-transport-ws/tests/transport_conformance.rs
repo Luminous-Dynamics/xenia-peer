@@ -1,7 +1,14 @@
 use futures_util::SinkExt;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
-use tokio_tungstenite::{accept_async, tungstenite::protocol::Message};
+use tokio_tungstenite::{
+    accept_hdr_async,
+    tungstenite::{
+        handshake::server::{Request, Response},
+        http::{HeaderValue, header::SEC_WEBSOCKET_PROTOCOL},
+        protocol::Message,
+    },
+};
 use xenia_peer_core::transport::{MAX_ENVELOPE_BYTES, TcpTransport, Transport, TransportError};
 use xenia_peer_core::{
     RawAudio, RawCapabilities, RawTelemetry, Session, SessionRole, SyntheticAudioKind,
@@ -9,7 +16,7 @@ use xenia_peer_core::{
     advertisement::{AdvertisedAudioCodec, AudioAdvertisement},
     frame::PixelFormat,
 };
-use xenia_transport_ws::WsTransport;
+use xenia_transport_ws::{WsTransport, XENIA_WEBSOCKET_SUBPROTOCOL};
 
 fn payload(seed: u8, len: usize) -> Vec<u8> {
     (0..len)
@@ -39,8 +46,7 @@ async fn ws_pair() -> (WsTransport, WsTransport) {
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         stream.set_nodelay(true).ok();
-        let ws = accept_async(stream).await.unwrap();
-        WsTransport::Server(ws)
+        WsTransport::accept_stream(stream).await.unwrap()
     });
 
     let client = WsTransport::connect(&format!("ws://{addr}")).await.unwrap();
@@ -280,7 +286,24 @@ async fn websocket_rejects_text_protocol_fault() {
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         stream.set_nodelay(true).ok();
-        let mut ws = accept_async(stream).await.unwrap();
+        let mut ws = accept_hdr_async(stream, |request: &Request, mut response: Response| {
+            assert_eq!(
+                request
+                    .headers()
+                    .get(SEC_WEBSOCKET_PROTOCOL)
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                XENIA_WEBSOCKET_SUBPROTOCOL,
+            );
+            response.headers_mut().insert(
+                SEC_WEBSOCKET_PROTOCOL,
+                HeaderValue::from_static(XENIA_WEBSOCKET_SUBPROTOCOL),
+            );
+            Ok(response)
+        })
+        .await
+        .unwrap();
         ws.send(Message::Text("not a xenia sealed envelope".into()))
             .await
             .unwrap();

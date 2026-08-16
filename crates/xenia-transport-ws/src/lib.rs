@@ -45,14 +45,56 @@
 use futures_util::{SinkExt, StreamExt};
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::tungstenite::protocol::Message;
-use tokio_tungstenite::{WebSocketStream, accept_async, connect_async};
+use tokio_tungstenite::tungstenite::{
+    client::IntoClientRequest,
+    handshake::server::{ErrorResponse, Request, Response},
+    http::{HeaderValue, StatusCode, header::SEC_WEBSOCKET_PROTOCOL},
+    protocol::{Message, WebSocketConfig},
+};
+use tokio_tungstenite::{
+    WebSocketStream, accept_hdr_async_with_config, connect_async_with_config,
+};
 use tracing::debug;
 
 use xenia_peer_core::transport::{
     MAX_ENVELOPE_BYTES, RecvEnvelope, SendEnvelope, Transport, TransportError, TransportKind,
     TransportProfileV1,
 };
+
+/// Exact RFC 6455 subprotocol token for the current Xenia WebSocket profile.
+/// A changed token requires a new `WEBSOCKET_PROTOCOL_ID` revision.
+pub const XENIA_WEBSOCKET_SUBPROTOCOL: &str = "xenia.transport.websocket.v1";
+
+fn websocket_config() -> WebSocketConfig {
+    WebSocketConfig {
+        max_message_size: Some(MAX_ENVELOPE_BYTES as usize),
+        max_frame_size: Some(MAX_ENVELOPE_BYTES as usize),
+        ..WebSocketConfig::default()
+    }
+}
+
+fn accept_xenia_subprotocol(
+    request: &Request,
+    mut response: Response,
+) -> Result<Response, ErrorResponse> {
+    let exact_match = request
+        .headers()
+        .get(SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == XENIA_WEBSOCKET_SUBPROTOCOL);
+    if !exact_match {
+        let mut rejection = ErrorResponse::new(Some(
+            "Xenia requires the exact WebSocket subprotocol".to_string(),
+        ));
+        *rejection.status_mut() = StatusCode::BAD_REQUEST;
+        return Err(rejection);
+    }
+    response.headers_mut().insert(
+        SEC_WEBSOCKET_PROTOCOL,
+        HeaderValue::from_static(XENIA_WEBSOCKET_SUBPROTOCOL),
+    );
+    Ok(response)
+}
 
 /// Errors specific to the WebSocket transport. Coerced into
 /// [`TransportError::Io`] or `::UnexpectedEof` where possible so the
@@ -94,16 +136,15 @@ impl From<WsError> for TransportError {
     }
 }
 
-/// WebSocket transport wrapping a `tokio-tungstenite` stream.
-///
-/// Internally an enum over the two possible underlying streams
-/// (client-side goes through `MaybeTlsStream`, server-side owns a
-/// plain `TcpStream`). Both variants implement the same `Transport`
-/// trait surface; the enum is an implementation detail.
-pub enum WsTransport {
-    /// Client-side connection established via `connect_async`.
+/// WebSocket transport whose construction always installs Xenia's native
+/// receive ceilings and exact RFC 6455 subprotocol. The inner stream variants
+/// are private so callers cannot accidentally construct an unbounded transport.
+pub struct WsTransport {
+    inner: WsInner,
+}
+
+enum WsInner {
     Client(WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>),
-    /// Server-side connection established via `accept_async`.
     Server(WebSocketStream<TcpStream>),
 }
 
@@ -111,11 +152,20 @@ impl WsTransport {
     /// Connect to `ws://host:port[/path]`. The path component is
     /// ignored server-side by the MVP implementation.
     pub async fn connect(url: &str) -> Result<Self, TransportError> {
-        let (ws, _resp) = connect_async(url)
+        let mut request = url
+            .into_client_request()
+            .map_err(|e| TransportError::from(WsError::from(e)))?;
+        request.headers_mut().insert(
+            SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static(XENIA_WEBSOCKET_SUBPROTOCOL),
+        );
+        let (ws, _resp) = connect_async_with_config(request, Some(websocket_config()), true)
             .await
             .map_err(|e| TransportError::from(WsError::from(e)))?;
-        debug!(url = %url, "websocket client connected");
-        Ok(WsTransport::Client(ws))
+        debug!(url = %url, subprotocol = XENIA_WEBSOCKET_SUBPROTOCOL, "websocket client connected");
+        Ok(Self {
+            inner: WsInner::Client(ws),
+        })
     }
 
     /// Bind a TCP listener on `addr`, accept the first connection,
@@ -134,10 +184,16 @@ impl WsTransport {
 
     /// Upgrade an already-accepted TCP stream into a WebSocket transport.
     pub async fn accept_stream(stream: TcpStream) -> Result<Self, TransportError> {
-        let ws = accept_async(stream)
-            .await
-            .map_err(|e| TransportError::from(WsError::from(e)))?;
-        Ok(WsTransport::Server(ws))
+        let ws = accept_hdr_async_with_config(
+            stream,
+            accept_xenia_subprotocol,
+            Some(websocket_config()),
+        )
+        .await
+        .map_err(|e| TransportError::from(WsError::from(e)))?;
+        Ok(Self {
+            inner: WsInner::Server(ws),
+        })
     }
 
     /// Send a message on whichever variant we are.
@@ -145,17 +201,17 @@ impl WsTransport {
         &mut self,
         msg: Message,
     ) -> Result<(), tokio_tungstenite::tungstenite::Error> {
-        match self {
-            WsTransport::Client(ws) => ws.send(msg).await,
-            WsTransport::Server(ws) => ws.send(msg).await,
+        match &mut self.inner {
+            WsInner::Client(ws) => ws.send(msg).await,
+            WsInner::Server(ws) => ws.send(msg).await,
         }
     }
 
     /// Pull the next framed message off the underlying stream.
     async fn next_msg(&mut self) -> Option<Result<Message, tokio_tungstenite::tungstenite::Error>> {
-        match self {
-            WsTransport::Client(ws) => ws.next().await,
-            WsTransport::Server(ws) => ws.next().await,
+        match &mut self.inner {
+            WsInner::Client(ws) => ws.next().await,
+            WsInner::Server(ws) => ws.next().await,
         }
     }
 
@@ -165,12 +221,12 @@ impl WsTransport {
     /// [`xenia_peer_core::transport::Transport`]'s doc comment for why
     /// this exists.
     pub fn split(self) -> (WsSendHalf, WsRecvHalf) {
-        match self {
-            WsTransport::Client(ws) => {
+        match self.inner {
+            WsInner::Client(ws) => {
                 let (sink, stream) = ws.split();
                 (WsSendHalf::Client(sink), WsRecvHalf::Client(stream))
             }
-            WsTransport::Server(ws) => {
+            WsInner::Server(ws) => {
                 let (sink, stream) = ws.split();
                 (WsSendHalf::Server(sink), WsRecvHalf::Server(stream))
             }
@@ -365,6 +421,58 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn native_websocket_limits_match_authenticated_profile() {
+        let config = websocket_config();
+        assert_eq!(config.max_message_size, Some(MAX_ENVELOPE_BYTES as usize));
+        assert_eq!(config.max_frame_size, Some(MAX_ENVELOPE_BYTES as usize));
+        let profile = TransportProfileV1::current(TransportKind::WebSocket);
+        assert_eq!(profile.protocol_id, "xenia/transport/websocket/1");
+        assert_eq!(profile.protocol_version, 1);
+    }
+
+    #[test]
+    fn websocket_subprotocol_is_a_single_stable_token() {
+        assert_eq!(XENIA_WEBSOCKET_SUBPROTOCOL, "xenia.transport.websocket.v1");
+        assert!(!XENIA_WEBSOCKET_SUBPROTOCOL.contains(','));
+        assert!(!XENIA_WEBSOCKET_SUBPROTOCOL.contains(' '));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_rejects_client_without_xenia_subprotocol() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            WsTransport::accept_stream(stream).await
+        });
+
+        let client = tokio_tungstenite::connect_async(format!("ws://{addr}")).await;
+        assert!(client.is_err());
+        assert!(server.await.unwrap().is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn native_limit_rejects_oversize_receive() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut transport = WsTransport::accept_stream(stream).await.unwrap();
+            transport.recv_envelope().await
+        });
+
+        let mut request = format!("ws://{addr}").into_client_request().unwrap();
+        request.headers_mut().insert(
+            SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static(XENIA_WEBSOCKET_SUBPROTOCOL),
+        );
+        let (mut client, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        let too_large = vec![0u8; MAX_ENVELOPE_BYTES as usize + 1];
+        let _ = client.send(Message::Binary(too_large)).await;
+        assert!(server.await.unwrap().is_err());
+    }
+
     /// Bind to an ephemeral port, listen on a background task,
     /// connect a client, exchange 20 binary envelopes of varying
     /// sizes in each direction, verify the bytes round-trip.
@@ -384,8 +492,7 @@ mod tests {
 
             let (stream, _peer) = listener.accept().await.unwrap();
             stream.set_nodelay(true).ok();
-            let ws = accept_async(stream).await.unwrap();
-            let mut t = WsTransport::Server(ws);
+            let mut t = WsTransport::accept_stream(stream).await.unwrap();
 
             for i in 0..20u32 {
                 let env = t.recv_envelope().await.unwrap();
