@@ -120,10 +120,12 @@ if policy_path.is_file():
         "ContractExtensionsMismatch",
         "expected.extensions_digest",
         "DEFAULT_MAX_PUBLIC_INPUT_BYTES",
+        "ZeroExtensionsDigest",
         "AuthenticationQuorumNotMet",
         "validate_envelope_against_contract",
     ):
         require(fragment in policy, f"fail-closed policy invariant missing: {fragment}")
+    require_test(policy, "zero_extensions_digest_is_rejected_as_noncanonical")
 
 
 if verification_path.is_file():

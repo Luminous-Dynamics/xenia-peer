@@ -154,6 +154,8 @@ pub enum EnvelopeValidationError {
     ZeroNonce,
     #[error("public-input digest is zero")]
     ZeroPublicInputsHash,
+    #[error("extensions digest is zero; use the canonical empty-extensions digest when no claims exist")]
+    ZeroExtensionsDigest,
     #[error("proof timestamp is too far in the future")]
     FutureTimestamp,
     #[error("proof timestamp is older than policy allows")]
@@ -243,6 +245,9 @@ pub fn validate_envelope(
     }
     if envelope.public_inputs_hash == [0; 32] {
         return Err(EnvelopeValidationError::ZeroPublicInputsHash);
+    }
+    if envelope.extensions_digest == [0; 32] {
+        return Err(EnvelopeValidationError::ZeroExtensionsDigest);
     }
 
     let latest_allowed = now_unix_seconds.saturating_add(policy.max_future_skew_seconds);
@@ -537,6 +542,16 @@ mod tests {
             ),
             Err(EnvelopeValidationError::InvalidAuthenticationRequirement { .. })
         ));
+    }
+
+    #[test]
+    fn zero_extensions_digest_is_rejected_as_noncanonical() {
+        let mut envelope = valid_envelope();
+        envelope.extensions_digest = [0; 32];
+        assert_eq!(
+            validate_envelope(&envelope, &EnvelopePolicy::default(), NOW),
+            Err(EnvelopeValidationError::ZeroExtensionsDigest)
+        );
     }
 
     #[test]
