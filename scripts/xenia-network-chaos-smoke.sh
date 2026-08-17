@@ -235,6 +235,8 @@ run_profile() {
     --transport tcp \
     --connect "${DAEMON_IP}:${LISTEN_PORT}" \
     --frames "$frames" \
+    --width "$CHAOS_FRAME_WIDTH" \
+    --height "$CHAOS_FRAME_HEIGHT" \
     --codec passthrough \
     --verify \
     >"$viewer_log" 2>&1; then
