@@ -396,6 +396,7 @@ pub struct CpalAudioCapture {
 /// by an opaque sample count. At 48 kHz this is 100 ms per active channel.
 pub const HOST_AUDIO_CAPTURE_BUFFER_BUDGET_MS: u32 = 100;
 
+#[cfg(any(feature = "audio-cpal", test))]
 fn audio_capture_buffer_samples(sample_rate_hz: u32, channels: u16) -> usize {
     let samples = u64::from(sample_rate_hz)
         .saturating_mul(u64::from(channels.max(1)))
