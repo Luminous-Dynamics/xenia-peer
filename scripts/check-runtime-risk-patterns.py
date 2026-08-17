@@ -15,17 +15,6 @@ from pathlib import Path
 
 from xenia_scan_scope import cfg_test_only_lines, iter_repo_files
 
-SKIP_PARTS = {
-    ".git",
-    ".claude",
-    "_archive",
-    "target",
-    "dist",
-    "pkg",
-    "node_modules",
-    "xenia-peer-state",
-    "xenia-operator-agent-state",
-}
 TEST_PARTS = {"tests", "benches", "examples"}
 PATTERNS = {
     "panic": re.compile(r"\bpanic!\s*\("),
@@ -67,7 +56,7 @@ def is_test_or_example(path: Path) -> bool:
 
 
 def iter_rust_files(root: Path):
-    for path in iter_repo_files(root, suffixes={".rs"}, skip_parts=SKIP_PARTS):
+    for path in iter_repo_files(root, suffixes={".rs"}):
         yield path, path.relative_to(root)
 
 

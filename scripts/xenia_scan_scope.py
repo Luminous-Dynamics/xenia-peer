@@ -23,12 +23,30 @@ from typing import Iterable
 
 _CFG_TEST_ONLY_RE = re.compile(r"^\s*#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*$")
 
+# Repository-local machinery and generated/runtime state are never canonical
+# scanner input. Callers may add exclusions, but cannot accidentally omit
+# these shared defaults.
+DEFAULT_SCAN_SKIP_PARTS = frozenset(
+    {
+        ".git",
+        ".claude",
+        "_archive",
+        "target",
+        "dist",
+        "build",
+        "pkg",
+        "node_modules",
+        "xenia-peer-state",
+        "xenia-operator-agent-state",
+    }
+)
+
 
 def iter_repo_files(
     root: Path,
     *,
     suffixes: set[str],
-    skip_parts: set[str],
+    skip_parts: set[str] | frozenset[str] | None = None,
 ) -> list[Path]:
     """Return candidate files with Git-aware ignored-file handling.
 
@@ -66,9 +84,11 @@ def iter_repo_files(
     if rel_paths is None:
         rel_paths = [path.relative_to(root) for path in root.rglob("*") if path.is_file()]
 
+    effective_skip_parts = DEFAULT_SCAN_SKIP_PARTS | frozenset(skip_parts or ())
+
     result: list[Path] = []
     for rel in rel_paths:
-        if set(rel.parts) & skip_parts:
+        if set(rel.parts) & effective_skip_parts:
             continue
         path = root / rel
         if not path.is_file():

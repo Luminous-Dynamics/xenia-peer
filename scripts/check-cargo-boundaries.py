@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-ARCHIVE_PARTS = {"_archive", "target", "dist", "pkg", "node_modules"}
+from xenia_scan_scope import iter_repo_files
+
 WIRE_CRATE = "xenia-wire"
 WIRE_SUPPORT_CRATES = {"xenia-wire-fuzz"}
 APP_CRATES = {"xenia-peer", "xenia-viewer", "xenia-viewer-web", "sovereign-admin"}
@@ -44,13 +45,9 @@ class CargoPackage:
 
 
 def iter_manifest_paths(root: Path) -> Iterable[Path]:
-    for manifest in root.rglob("Cargo.toml"):
-        parts = set(manifest.relative_to(root).parts)
-        if parts & ARCHIVE_PARTS:
-            continue
-        if ".git" in parts:
-            continue
-        yield manifest
+    for manifest in iter_repo_files(root, suffixes={".toml"}):
+        if manifest.name == "Cargo.toml":
+            yield manifest
 
 
 def load_package(root: Path, manifest: Path) -> CargoPackage | None:
