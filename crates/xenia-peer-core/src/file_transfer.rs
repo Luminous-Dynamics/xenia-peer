@@ -62,6 +62,159 @@ fn open_staging_file(parent: &Path) -> io::Result<(PathBuf, File)> {
     ))
 }
 
+
+/// Incremental receive-staging failure.
+#[derive(Debug, thiserror::Error)]
+pub enum IncomingFileStageError {
+    /// A chunk did not begin exactly where the previous accepted chunk ended.
+    #[error("unexpected file chunk offset: expected {expected}, got {actual}")]
+    UnexpectedOffset {
+        /// Next required byte offset.
+        expected: u64,
+        /// Offset supplied by the peer.
+        actual: u64,
+    },
+    /// A chunk would extend beyond the size committed by the authenticated offer.
+    #[error("file chunk exceeds offered size {expected_size}: end offset {attempted_end}")]
+    SizeExceeded {
+        /// Size committed by the offer.
+        expected_size: u64,
+        /// Exclusive end offset the chunk would produce.
+        attempted_end: u64,
+    },
+    /// `Complete` arrived before exactly the offered byte count was staged.
+    #[error("received file size mismatch: expected {expected}, got {actual}")]
+    SizeMismatch {
+        /// Size committed by the offer.
+        expected: u64,
+        /// Bytes staged before completion.
+        actual: u64,
+    },
+    /// The incrementally computed BLAKE3 digest did not match the offer.
+    #[error("received file failed BLAKE3 verification")]
+    HashMismatch,
+    /// Filesystem staging or publication failed.
+    #[error(transparent)]
+    Io(#[from] io::Error),
+}
+
+/// Disk-backed, strictly sequential receiver for one authenticated file offer.
+///
+/// The stager writes each accepted chunk directly into a private same-directory
+/// temporary inode, updates BLAKE3 incrementally, and requires `offset` to equal
+/// the exact number of bytes already accepted. [`Self::finish`] verifies both
+/// the committed size and hash, syncs the inode, then publishes it with the same
+/// no-clobber hard-link rule as [`persist_received_file`]. Dropping an unfinished
+/// stager removes its private temporary path best-effort.
+pub struct IncomingFileStager {
+    final_path: PathBuf,
+    staging_path: PathBuf,
+    file: Option<File>,
+    hasher: blake3::Hasher,
+    expected_size: u64,
+    expected_hash: [u8; 32],
+    received: u64,
+}
+
+impl IncomingFileStager {
+    /// Create private receive staging for an authenticated file offer.
+    pub fn create(
+        final_path: &Path,
+        expected_size: u64,
+        expected_hash: [u8; 32],
+    ) -> Result<Self, IncomingFileStageError> {
+        let parent = receive_parent(final_path)?;
+        let (staging_path, file) = open_staging_file(parent)?;
+        Ok(Self {
+            final_path: final_path.to_path_buf(),
+            staging_path,
+            file: Some(file),
+            hasher: blake3::Hasher::new(),
+            expected_size,
+            expected_hash,
+            received: 0,
+        })
+    }
+
+    /// Append the next exact sequential chunk and return total staged bytes.
+    pub fn append(
+        &mut self,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<u64, IncomingFileStageError> {
+        if offset != self.received {
+            return Err(IncomingFileStageError::UnexpectedOffset {
+                expected: self.received,
+                actual: offset,
+            });
+        }
+        let chunk_len = u64::try_from(bytes.len()).map_err(|_| {
+            IncomingFileStageError::SizeExceeded {
+                expected_size: self.expected_size,
+                attempted_end: u64::MAX,
+            }
+        })?;
+        let attempted_end = self.received.checked_add(chunk_len).ok_or(
+            IncomingFileStageError::SizeExceeded {
+                expected_size: self.expected_size,
+                attempted_end: u64::MAX,
+            },
+        )?;
+        if attempted_end > self.expected_size {
+            return Err(IncomingFileStageError::SizeExceeded {
+                expected_size: self.expected_size,
+                attempted_end,
+            });
+        }
+        let file = self.file.as_mut().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::BrokenPipe, "receive stager is already closed")
+        })?;
+        file.write_all(bytes)?;
+        self.hasher.update(bytes);
+        self.received = attempted_end;
+        Ok(self.received)
+    }
+
+    /// Verify size/hash, sync staged bytes, and publish without clobbering.
+    pub fn finish(mut self) -> Result<(), IncomingFileStageError> {
+        if self.received != self.expected_size {
+            return Err(IncomingFileStageError::SizeMismatch {
+                expected: self.expected_size,
+                actual: self.received,
+            });
+        }
+        if self.hasher.finalize().as_bytes() != &self.expected_hash {
+            return Err(IncomingFileStageError::HashMismatch);
+        }
+        if let Some(file) = self.file.take() {
+            file.sync_all()?;
+            drop(file);
+        }
+        std::fs::hard_link(&self.staging_path, &self.final_path)?;
+        Ok(())
+    }
+
+    /// Number of bytes successfully staged so far.
+    pub fn received_bytes(&self) -> u64 {
+        self.received
+    }
+}
+
+impl Drop for IncomingFileStager {
+    fn drop(&mut self) {
+        drop(self.file.take());
+        if let Err(err) = std::fs::remove_file(&self.staging_path) {
+            if err.kind() != io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %self.staging_path.display(),
+                    error = %err,
+                    "received-file staging path could not be removed"
+                );
+            }
+        }
+    }
+}
+
 /// Persist a verified received file without clobbering an existing path.
 ///
 /// Bytes are first written and synced to a private staging file in the same
@@ -133,6 +286,56 @@ mod tests {
                     .is_some_and(|name| name.starts_with(".xenia-receive-"))
             })
             .collect()
+    }
+
+    #[test]
+    fn incremental_stager_requires_exact_offsets_and_publishes_verified_bytes() {
+        let dir = temp_dir();
+        let path = dir.join("streamed.bin");
+        let payload = b"abcdefgh";
+        let hash = *blake3::hash(payload).as_bytes();
+        let mut stager = IncomingFileStager::create(&path, payload.len() as u64, hash)
+            .expect("create receive staging");
+
+        assert_eq!(stager.append(0, &payload[..3]).unwrap(), 3);
+        assert!(matches!(
+            stager.append(4, &payload[3..4]),
+            Err(IncomingFileStageError::UnexpectedOffset {
+                expected: 3,
+                actual: 4
+            })
+        ));
+        assert_eq!(stager.append(3, &payload[3..]).unwrap(), payload.len() as u64);
+        stager.finish().expect("verified publish");
+
+        assert_eq!(std::fs::read(&path).unwrap(), payload);
+        assert!(staging_files(&dir).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn incremental_stager_rejects_overrun_hash_mismatch_and_cleans_partial_files() {
+        let dir = temp_dir();
+        let overrun_path = dir.join("overrun.bin");
+        let mut overrun = IncomingFileStager::create(&overrun_path, 2, *blake3::hash(b"ok").as_bytes())
+            .unwrap();
+        assert!(matches!(
+            overrun.append(0, b"toolong"),
+            Err(IncomingFileStageError::SizeExceeded { .. })
+        ));
+        drop(overrun);
+        assert!(!overrun_path.exists());
+        assert!(staging_files(&dir).is_empty());
+
+        let hash_path = dir.join("hash.bin");
+        let mut hash = IncomingFileStager::create(&hash_path, 3, *blake3::hash(b"abc").as_bytes())
+            .unwrap();
+        hash.append(0, b"abd").unwrap();
+        assert!(matches!(hash.finish(), Err(IncomingFileStageError::HashMismatch)));
+        assert!(!hash_path.exists());
+        assert!(staging_files(&dir).is_empty());
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
