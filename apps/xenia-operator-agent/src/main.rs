@@ -797,7 +797,7 @@ async fn sign_consent_action(
         let daemon_endpoint = normalize_daemon_endpoint(&req.common.daemon_endpoint);
         let daemon_fingerprint_hex = hex::encode(identity.fingerprint);
         let confirmed = tokio::task::spawn_blocking(move || -> Result<bool, AgentHttpError> {
-            let mut trust = lock_agent_state(&confirm_state.host_trust, "host trust")?;
+            let trust = lock_agent_state(&confirm_state.host_trust, "host trust")?;
             map_host_trust_result(trust.confirm_action(
                 "Approve broad consent grant?",
                 &[
@@ -883,7 +883,7 @@ async fn sign_revoke(
     let daemon_fingerprint_hex = hex::encode(identity.fingerprint);
     let suite = req.common.suite.clone();
     let confirmed = tokio::task::spawn_blocking(move || -> Result<bool, AgentHttpError> {
-        let mut trust = lock_agent_state(&confirm_state.host_trust, "host trust")?;
+        let trust = lock_agent_state(&confirm_state.host_trust, "host trust")?;
         map_host_trust_result(trust.confirm_action(
             "Revoke operator enrollment?",
             &[
@@ -970,7 +970,7 @@ async fn sign_replace_key(
     let suite = req.common.suite.clone();
     let new_ed25519_pubkey_hex = req.new_ed25519_pubkey_hex.clone();
     let confirmed = tokio::task::spawn_blocking(move || -> Result<bool, AgentHttpError> {
-        let mut trust = lock_agent_state(&confirm_state.host_trust, "host trust")?;
+        let trust = lock_agent_state(&confirm_state.host_trust, "host trust")?;
         map_host_trust_result(trust.confirm_action(
             "Replace operator enrollment key?",
             &[

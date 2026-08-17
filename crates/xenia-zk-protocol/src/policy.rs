@@ -452,10 +452,7 @@ pub fn validate_envelope_against_contract<'a>(
             || requirement.suite.wire_id() == 0
             || requirement.min_distinct_signers == 0
             || requirement.trusted_signer_key_ids.len() < requirement.min_distinct_signers
-            || requirement
-                .trusted_signer_key_ids
-                .iter()
-                .any(|key_id| *key_id == [0; 32])
+            || requirement.trusted_signer_key_ids.contains(&[0; 32])
         {
             return Err(EnvelopeValidationError::InvalidAuthenticationRequirement {
                 suite: requirement.suite.wire_id(),
