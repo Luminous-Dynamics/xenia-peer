@@ -51,6 +51,14 @@ VETH_VIEWER="xchaos-v0"
 DAEMON_IP="10.99.0.1"
 VIEWER_IP="10.99.0.2"
 LISTEN_PORT=17890
+# Tier 0 validates wire correctness under degraded links, not sustained
+# full-resolution passthrough throughput. Keep each synthetic RGBA frame small
+# enough that randomized TCP retransmissions do not turn this smoke test into a
+# race against HOST_VIDEO_FRESHNESS_V1's intentional 1-second fatal send
+# deadline. 80x50 RGBA is 16,000 bytes (~15.6 KiB): still multiple TCP
+# segments while leaving deadline behavior to deterministic contract tests.
+CHAOS_FRAME_WIDTH=80
+CHAOS_FRAME_HEIGHT=50
 # `ip netns exec` only needs root to enter the namespace (setns() requires
 # CAP_SYS_ADMIN); the daemon itself has no need to keep running as root
 # afterward. Captured once here so run_profile() can drop to this
@@ -173,16 +181,12 @@ cleanup_pid() {
 
 # Runs one full daemon+viewer session under `$1` (a human label) with
 # netem profile already applied to both veth ends. `$2` is a generous
-# per-attempt timeout in seconds -- degraded profiles need real slack for
+# per-attempt timeout in seconds -- degraded profiles still need slack for
 # TCP retransmission, not just clean-network latency. `$3` is the frame
-# count: kept low under harsher profiles not to weaken the proof (every
-# frame that arrives is still byte-verified against the mirror) but to
-# bound wall-clock time -- passthrough's uncompressed ~256 KB/frame
-# genuinely takes tens of seconds per frame to retransmit-complete under
-# double-digit loss, a real, disclosed characteristic this test surfaced,
-# not a harness bug (an earlier draft asked for 8 frames at 15% loss +
-# 200ms latency and the *protocol* was still byte-correct, just needed
-# far more than 90s to prove it for that many frames).
+# count. Every frame that arrives remains byte-verified against the mirror;
+# the deliberately small Tier-0 frame size keeps this test focused on wire
+# correctness under loss/jitter/reordering instead of probabilistically
+# tripping the producer lane's separate 1-second fatal send deadline.
 run_profile() {
   local label="$1" timeout_secs="$2" frames="${3:-8}"
   local peer_log="$LOG_DIR/${label}-peer.log"
@@ -207,6 +211,8 @@ run_profile() {
     --admin-port 0 \
     --consent-port 0 \
     --frames "$((frames + 4))" \
+    --width "$CHAOS_FRAME_WIDTH" \
+    --height "$CHAOS_FRAME_HEIGHT" \
     --fps 30 \
     --telemetry-level off \
     --m1-preprod-auto-consent \
@@ -273,18 +279,11 @@ main() {
   apply_netem "delay 80ms 20ms distribution normal loss 5% reorder 1%"
   run_profile "moderate" 60 6 || failures=$((failures + 1))
 
-  # Deliberately gentler than the first draft (was 15% loss / 200ms):
-  # tc netem's loss is randomized per-packet, and passthrough's
-  # uncompressed ~256 KB/frame means a single frame is ~180 TCP segments
-  # -- at 15% per-segment loss the odds of a frame completing without a
-  # retransmission are near zero, so completion time swings wildly run to
-  # run (observed anywhere from ~5s to well over 90s for the same
-  # profile). That's a real, useful finding about passthrough's viability
-  # under a genuinely bad link, but it makes a *tight* CI timeout an
-  # unreliable pass/fail signal, not a meaningful one. 10% loss still
-  # meaningfully exceeds real-world worst-case conditions (home wifi
-  # congestion ~1-3%, saturated mobile ~5-10%) while keeping completion
-  # time bounded enough for a stable CI check.
+  # Harsh keeps substantial bidirectional impairment while the reduced Tier-0
+  # frame size makes success/failure about transport correctness rather than a
+  # randomized race against the application lane's 1-second fatal send budget.
+  # The fatal-deadline behavior itself remains a separate deterministic
+  # transport/session contract and must not be relaxed to make this smoke pass.
   clear_netem
   apply_netem "delay 150ms 40ms distribution normal loss 10% reorder 4%"
   run_profile "harsh" 150 2 || failures=$((failures + 1))
