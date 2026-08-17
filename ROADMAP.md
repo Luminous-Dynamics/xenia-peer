@@ -45,6 +45,7 @@ If this file disagrees with reality, the file is wrong.
 2. Maintain the shared transport conformance tests for envelope boundaries, ordering, and oversize rejection before expanding transport behavior.
 3. Keep `--transport auto` as the normal CLI path: daemon accepts TCP/WS, advertises QUIC over an initial TCP probe, and accepts QUIC directly.
 4. Next: harden fallback policy with timeouts, user-visible selected-transport reporting, and browser-compatible advertisement over WebSocket.
+5. V10-V19 hardening now authenticates carrier/session/failure semantics, bounds semantic producer pressure, deterministically unwinds injected input state, budgets media latency, and makes mobile file admission reservation races testable. Next evidence work is real Rust 1.94 execution/fault injection rather than another transport layer.
 
 ### Viewers (3)
 

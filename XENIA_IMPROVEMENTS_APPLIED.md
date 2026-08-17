@@ -88,6 +88,14 @@ hardens the daemon around spawned-server failures.
 - Added a transcript-bound evidence contract doc and validation script.
 
 
+## Transport/session V19: deterministic reservation races and diagnostic fidelity
+
+- Switched mobile file-reservation deadlines to `tokio::time::Instant` and extracted the async expiry worker around `sleep_until`, enabling deterministic paused-time tests rather than wall-clock sleeps.
+- Added Tokio `test-util` merge tests for claim-at-29.999s, survival past the original admission deadline, copy-lease expiry returning command capacity, and non-extending repeat claims.
+- Added a JNI/Kotlin exact-result path for all stable file-admission statuses (`0..7`) while retaining the historical Boolean `sendFile` wrapper.
+- Added a point-in-time local file-admission snapshot (`active_reserved`, `active_copying`, `available_command_slots`, `command_capacity`) through Rust/C/JNI/Kotlin.
+- Added the V19 source contract/model/vector to the accumulated transport/session contract runner.
+
 ## Transport/session V18: runtime evidence and reservation-race hardening
 
 - Added a two-stage file-transfer reservation lifecycle (`Reserved` -> `Copying`) with a 30 s admission TTL and bounded 60 s copy lease.

@@ -1,0 +1,44 @@
+{
+  "profile": "xenia/application-runtime-assurance/v19",
+  "reservation_clock": {
+    "clock": "tokio::time::Instant",
+    "admission_ttl_ms": 30000,
+    "copy_lease_ms": 60000,
+    "expiry_worker": "sleep_until_current_deadline",
+    "paused_time_tests": [
+      "claim-near-admission-expiry-survives-original-deadline",
+      "copy-lease-expiry-restores-command-capacity",
+      "repeated-claim-does-not-extend-copy-lease"
+    ]
+  },
+  "file_send_status": {
+    "codes": {
+      "ok": 0,
+      "invalid_argument": 1,
+      "invalid_handle": 2,
+      "queue_full": 3,
+      "session_closed": 4,
+      "too_large": 5,
+      "invalid_reservation": 6,
+      "reservation_size_mismatch": 7
+    },
+    "jni_preserves_exact_code": true,
+    "kotlin_typed_result": true,
+    "legacy_boolean_wrapper": true
+  },
+  "admission_snapshot": {
+    "fields": [
+      "active_reserved",
+      "active_copying",
+      "available_command_slots",
+      "command_capacity"
+    ],
+    "point_in_time": true,
+    "authenticated_protocol_state": false
+  },
+  "ci": {
+    "transport_session_contract_runner": "scripts/run_transport_session_contracts.sh",
+    "rust_runtime_tests_still_required": true
+  },
+  "canonical_sha256": "4dd4497687bf088c08b160307bca06993fc397eb073e7f97ccae7fd93a30686c"
+}
