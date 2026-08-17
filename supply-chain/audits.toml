@@ -1,4 +1,8 @@
 
 # cargo-vet audits file
 
-[audits]
+[[audits.webbrowser]]
+who = "tstoltz <tstoltz@luminous-dynamics.local>"
+criteria = "safe-to-deploy"
+delta = "1.2.1 -> 1.2.2"
+notes = "Reviewed webbrowser 1.2.1 -> 1.2.2 delta for safe-to-deploy. Unix BROWSER handling now tokenizes the command template before URL substitution, preventing URL-controlled whitespace from introducing additional browser arguments. Also reviewed the macOS CoreFoundation -> objc2/NSWorkspace migration and its unsafe launch call; no new shell interpolation, attacker-controlled raw pointers, or surprising ambient capability escalation identified."
