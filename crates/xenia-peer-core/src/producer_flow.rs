@@ -139,9 +139,13 @@ pub const DESKTOP_AUDIO_PLAYBACK_V3: ProducerFlowPolicyV1 = ProducerFlowPolicyV1
 /// semantics or become part of the authenticated session transcript.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LanePressureSnapshotV1 {
+    /// Number of queued replaceable items discarded in favor of fresher work.
     pub dropped_superseded: u64,
+    /// Number of submissions rejected because the lane could not admit them.
     pub rejected: u64,
+    /// Number of items dropped because they exceeded the lane freshness budget.
     pub stale: u64,
+    /// Number of send deadlines that made the session unsafe to continue.
     pub fatal_deadline: u64,
 }
 
@@ -155,6 +159,7 @@ impl LanePressureSnapshotV1 {
             .saturating_add(self.fatal_deadline)
     }
 
+    /// Return whether this snapshot records any semantic pressure.
     pub fn has_pressure(self) -> bool {
         self.total_events() != 0
     }
@@ -171,22 +176,27 @@ pub struct LanePressureCountersV1 {
 }
 
 impl LanePressureCountersV1 {
+    /// Record and return the total number of superseded-item drops.
     pub fn record_dropped_superseded(&self) -> u64 {
         self.dropped_superseded.fetch_add(1, Ordering::Relaxed) + 1
     }
 
+    /// Record and return the total number of rejected submissions.
     pub fn record_rejected(&self) -> u64 {
         self.rejected.fetch_add(1, Ordering::Relaxed) + 1
     }
 
+    /// Record and return the total number of stale-item drops.
     pub fn record_stale(&self) -> u64 {
         self.stale.fetch_add(1, Ordering::Relaxed) + 1
     }
 
+    /// Record and return the total number of session-fatal send deadlines.
     pub fn record_fatal_deadline(&self) -> u64 {
         self.fatal_deadline.fetch_add(1, Ordering::Relaxed) + 1
     }
 
+    /// Return a point-in-time snapshot of all lane pressure counters.
     pub fn snapshot(&self) -> LanePressureSnapshotV1 {
         LanePressureSnapshotV1 {
             dropped_superseded: self.dropped_superseded.load(Ordering::Relaxed),
@@ -215,6 +225,7 @@ pub struct HostVideoFreshnessPolicyV1 {
     pub max_frames_in_flight: usize,
 }
 
+/// Host-video freshness and send-deadline policy for the V1 producer lane.
 pub const HOST_VIDEO_FRESHNESS_V1: HostVideoFreshnessPolicyV1 = HostVideoFreshnessPolicyV1 {
     max_capture_to_send_ms: 500,
     max_send_stall_ms: 1_000,
