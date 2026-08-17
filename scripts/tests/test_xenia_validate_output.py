@@ -90,7 +90,7 @@ class XeniaValidateOutputTests(unittest.TestCase):
         self.assertTrue((evidence / "summary.tsv").is_file())
         self.assertTrue(list(evidence.glob("*.log")))
 
-    def test_hard_failure_prints_tail_and_returns_nonzero(self):
+    def test_hard_failure_prints_head_and_tail_and_returns_nonzero(self):
         self.write_hygiene(exit_code=7)
         result, evidence = self.run_validator("evidence-failure")
 
@@ -99,7 +99,11 @@ class XeniaValidateOutputTests(unittest.TestCase):
             "FAIL: command failed (7): scripts/xenia-hygiene-audit.sh .",
             result.stderr,
         )
-        self.assertIn("last 40 log lines", result.stderr)
+        self.assertIn("first 20 log lines", result.stderr)
+        self.assertIn("VALIDATOR_NOISE_MARKER-1", result.stderr)
+        self.assertIn("last 20 log lines", result.stderr)
+        self.assertIn("VALIDATOR_NOISE_MARKER-250", result.stderr)
+        self.assertNotIn("VALIDATOR_NOISE_MARKER-125", result.stderr)
         self.assertIn("xenia validation failed with 1 failure(s)", result.stderr)
         self.assertIn("RESULT: FAIL", result.stderr)
         self.assertIn(f"Evidence: {evidence}", result.stderr)

@@ -38,6 +38,24 @@ surface_logged_warnings() {
   fi
 }
 
+print_failure_excerpt() {
+  local log="$1"
+  local total_lines
+  total_lines="$(wc -l < "$log" | tr -d '[:space:]')"
+
+  if (( total_lines <= 40 )); then
+    echo "--- log (${total_lines} line(s)) ---" >&2
+    cat "$log" >&2 || true
+    return 0
+  fi
+
+  echo "--- first 20 log lines ---" >&2
+  head -n 20 "$log" >&2 || true
+  echo "--- ... $((total_lines - 40)) line(s) omitted ... ---" >&2
+  echo "--- last 20 log lines ---" >&2
+  tail -n 20 "$log" >&2 || true
+}
+
 run_logged() {
   local kind="$1"
   shift
@@ -83,8 +101,7 @@ run_logged() {
 
   failures=$((failures + 1))
   echo "FAIL: command failed (${rc}): ${label}" >&2
-  echo "--- last 40 log lines ---" >&2
-  tail -n 40 "$log" >&2 || true
+  print_failure_excerpt "$log"
   echo "--- full log: ${log} ---" >&2
   printf 'FAIL\t%s\t%s\n' "$label" "$log" >> "$summary_file"
   return 0
