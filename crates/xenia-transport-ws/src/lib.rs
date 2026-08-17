@@ -74,6 +74,10 @@ fn websocket_config() -> WebSocketConfig {
     }
 }
 
+// `tokio-tungstenite`'s server handshake callback requires this exact concrete
+// `ErrorResponse` type. Boxing the error would change the callback signature
+// rather than reduce an application-owned error representation.
+#[allow(clippy::result_large_err)]
 fn accept_xenia_subprotocol(
     request: &Request,
     mut response: Response,
