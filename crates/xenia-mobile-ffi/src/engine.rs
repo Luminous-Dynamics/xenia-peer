@@ -37,9 +37,8 @@ use xenia_peer_core::handshake::{
 };
 use xenia_peer_core::transport::{RecvEnvelope, SendEnvelope, TcpTransport, Transport};
 use xenia_peer_core::{
-    ClipboardContent, FILE_TRANSFER_CHUNK_SIZE, FileTransferMessage,
+    ClipboardContent, FILE_TRANSFER_CHUNK_SIZE, FileTransferMessage, IncomingFileStager,
     PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST, PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER, RawClipboard,
-    persist_received_file,
 };
 use xenia_peer_core::{
     HandshakeManager, LaneSession, RekeyPolicy, SessionEpochState, derive_negotiated_context_key,
@@ -204,8 +203,7 @@ struct OutgoingTransfer {
 struct IncomingTransfer {
     name: String,
     expected_size: u64,
-    expected_hash: [u8; 32],
-    buffer: Vec<u8>,
+    stager: IncomingFileStager,
 }
 
 /// A UI-initiated file-transfer action, delivered to the background
@@ -1697,7 +1695,7 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
             size,
             blake3_hash,
         } => {
-            let (safe_name, reason) = match (recv_dir, sanitize_transfer_filename(&name)) {
+            let (safe_name, mut reason) = match (recv_dir, sanitize_transfer_filename(&name)) {
                 (None, _) => (
                     None,
                     "file transfer is disabled on this viewer".to_string(),
@@ -1711,15 +1709,26 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
                 }
                 (Some(_), Some(safe_name)) => (Some(safe_name), String::new()),
             };
-            let accept = safe_name.is_some();
-            if let Some(safe_name) = safe_name {
+            let staged = safe_name.and_then(|safe_name| {
+                let recv_dir = recv_dir.expect("validated receive directory");
+                let dest = recv_dir.join(&safe_name);
+                match IncomingFileStager::create(&dest, size, blake3_hash) {
+                    Ok(stager) => Some((safe_name, stager)),
+                    Err(err) => {
+                        warn!(transfer_id, error = %err, "file receive staging could not be created");
+                        reason = "receiver could not allocate private staging".to_string();
+                        None
+                    }
+                }
+            });
+            let accept = staged.is_some();
+            if let Some((safe_name, stager)) = staged {
                 incoming.insert(
                     transfer_id,
                     IncomingTransfer {
                         name: safe_name.clone(),
                         expected_size: size,
-                        expected_hash: blake3_hash,
-                        buffer: Vec::with_capacity(size.min(max_bytes) as usize),
+                        stager,
                     },
                 );
                 info!(
@@ -1847,41 +1856,34 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
                 warn!(transfer_id, "chunk for unknown/stale incoming transfer");
                 return;
             };
-            let off = offset as usize;
-            if off.saturating_add(data.len()) > transfer.expected_size as usize {
-                warn!(
-                    transfer_id,
-                    "chunk exceeds offered file size; dropping transfer"
-                );
-                let Some(dropped) = incoming.remove(&transfer_id) else {
-                    warn!(transfer_id, "incoming transfer disappeared during overrun handling");
+            let name = transfer.name.clone();
+            let total_bytes = transfer.expected_size;
+            let staged_bytes = match transfer.stager.append(offset, &data) {
+                Ok(staged_bytes) => staged_bytes,
+                Err(err) => {
+                    warn!(transfer_id, error = %err, "invalid incoming file chunk; dropping transfer");
+                    incoming.remove(&transfer_id);
+                    push_ft_event(
+                        shared,
+                        FileTransferEvent::Done {
+                            transfer_id,
+                            name,
+                            outgoing: false,
+                            ok: false,
+                            detail: err.to_string(),
+                        },
+                    )
+                    .await;
                     return;
-                };
-                let name = dropped.name;
-                push_ft_event(
-                    shared,
-                    FileTransferEvent::Done {
-                        transfer_id,
-                        name,
-                        outgoing: false,
-                        ok: false,
-                        detail: "chunk exceeded the offered file size".to_string(),
-                    },
-                )
-                .await;
-                return;
-            }
-            if transfer.buffer.len() < off + data.len() {
-                transfer.buffer.resize(off + data.len(), 0);
-            }
-            transfer.buffer[off..off + data.len()].copy_from_slice(&data);
+                }
+            };
             push_ft_event(
                 shared,
                 FileTransferEvent::Progress {
                     transfer_id,
-                    name: transfer.name.clone(),
-                    done_bytes: transfer.buffer.len() as u64,
-                    total_bytes: transfer.expected_size,
+                    name,
+                    done_bytes: staged_bytes,
+                    total_bytes,
                     outgoing: false,
                 },
             )
@@ -1892,60 +1894,38 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
                 warn!(transfer_id, "Complete for unknown/stale incoming transfer");
                 return;
             };
-            let actual_hash = *blake3::hash(&transfer.buffer).as_bytes();
-            let hash_ok = actual_hash == transfer.expected_hash;
-            let mut local_ok = hash_ok;
-            let mut detail = String::new();
-            if hash_ok {
-                match recv_dir {
-                    Some(dir) => {
-                        let dest = dir.join(&transfer.name);
-                        match persist_received_file(&dest, &transfer.buffer) {
-                            Ok(()) => info!(
-                                transfer_id,
-                                path = %dest.display(),
-                                bytes = transfer.buffer.len(),
-                                "file transfer verified and persisted"
-                            ),
-                            Err(err) => {
-                                warn!(transfer_id, error = %err, "verified file was not persisted");
-                                local_ok = false;
-                                detail = err.to_string();
-                            }
-                        }
-                    }
-                    None => {
-                        // Can't actually happen: an Offer only ever
-                        // reaches `incoming` (above) when `recv_dir`
-                        // is `Some`. Kept as a defensive branch rather
-                        // than `unreachable!()` since this is a
-                        // cross-message invariant, not a
-                        // same-function one.
-                        local_ok = false;
-                        detail = "no receive directory configured".to_string();
-                    }
+            let name = transfer.name;
+            let expected_size = transfer.expected_size;
+            let finish = transfer.stager.finish();
+            let local_ok = finish.is_ok();
+            let detail = match &finish {
+                Ok(()) => {
+                    info!(
+                        transfer_id,
+                        name,
+                        bytes = expected_size,
+                        "file transfer verified and persisted"
+                    );
+                    String::new()
                 }
-            } else {
-                warn!(
-                    transfer_id,
-                    "file transfer failed BLAKE3 verification, not written"
-                );
-                detail = "BLAKE3 verification failed".to_string();
-            }
+                Err(err) => {
+                    warn!(transfer_id, error = %err, "incoming file verification/publication failed");
+                    err.to_string()
+                }
+            };
             push_ft_event(
                 shared,
                 FileTransferEvent::Done {
                     transfer_id,
-                    name: transfer.name.clone(),
+                    name,
                     outgoing: false,
                     ok: local_ok,
                     detail,
                 },
             )
             .await;
-            // `Verified.ok` is a delivery receipt, not merely an integrity
-            // bit: the sender may report success only after the receiver both
-            // verified the hash and persisted the file locally.
+            // Match desktop receiver semantics: Verified(true) means integrity
+            // verification and final no-clobber publication both succeeded.
             if let Err(err) = seal_and_send(
                 session,
                 send_half,

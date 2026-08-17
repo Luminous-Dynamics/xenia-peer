@@ -40,9 +40,8 @@ use xenia_peer_core::transport::{
     RecvEnvelope, SendEnvelope, TcpRecvHalf, TcpSendHalf, TcpTransport, Transport, TransportError,
 };
 use xenia_peer_core::{
-    AudioCodec, AudioJitterBuffer, ClipboardContent, HandshakeManager, LaneSession,
-    RawPcmAudioCodec, RekeyPolicy, SessionEpochState, derive_negotiated_context_key,
-    persist_received_file,
+    AudioCodec, AudioJitterBuffer, ClipboardContent, HandshakeManager, IncomingFileStager,
+    LaneSession, RawPcmAudioCodec, RekeyPolicy, SessionEpochState, derive_negotiated_context_key,
 };
 use xenia_transport_quic::{
     QuicRecvHalf, QuicSendHalf, QuicTransport, bind_xenia_endpoint, decode_endpoint_addr,
@@ -856,11 +855,10 @@ struct OutgoingTransfer {
 struct IncomingTransfer {
     name: String,
     expected_size: u64,
-    expected_hash: [u8; 32],
-    buffer: Vec<u8>,
+    stager: IncomingFileStager,
 }
 
-/// Bound resident memory held by accepted but incomplete inbound transfers.
+/// Bound concurrently staged inbound transfers and their open file descriptors.
 const MAX_CONCURRENT_INCOMING_TRANSFERS: usize = 8;
 
 /// Reduce a wire-provided filename to a bare basename with no path
@@ -899,7 +897,7 @@ async fn handle_file_transfer_message(
             size,
             blake3_hash,
         } => {
-            let (safe_name, reason) = match (recv_file_dir, sanitize_transfer_filename(&name)) {
+            let (safe_name, mut reason) = match (recv_file_dir, sanitize_transfer_filename(&name)) {
                 (None, _) => (
                     None,
                     "file transfer is disabled on this viewer".to_string(),
@@ -916,15 +914,26 @@ async fn handle_file_transfer_message(
                 ),
                 (Some(_), Some(safe_name)) => (Some(safe_name), String::new()),
             };
-            let accept = safe_name.is_some();
-            if let Some(safe_name) = safe_name {
+            let staged = safe_name.and_then(|safe_name| {
+                let recv_dir = recv_file_dir.expect("validated receive directory");
+                let dest = recv_dir.join(&safe_name);
+                match IncomingFileStager::create(&dest, size, blake3_hash) {
+                    Ok(stager) => Some((safe_name, stager)),
+                    Err(err) => {
+                        warn!(transfer_id, error = %err, "file receive staging could not be created");
+                        reason = "receiver could not allocate private staging".to_string();
+                        None
+                    }
+                }
+            });
+            let accept = staged.is_some();
+            if let Some((safe_name, stager)) = staged {
                 incoming.insert(
                     transfer_id,
                     IncomingTransfer {
                         name: safe_name,
                         expected_size: size,
-                        expected_hash: blake3_hash,
-                        buffer: Vec::with_capacity(size.min(max_bytes) as usize),
+                        stager,
                     },
                 );
                 info!(transfer_id, name, size, "file transfer offer accepted");
@@ -1000,52 +1009,32 @@ async fn handle_file_transfer_message(
                 warn!(transfer_id, "chunk for unknown/stale incoming transfer");
                 return Ok(());
             };
-            let off = offset as usize;
-            if off.saturating_add(data.len()) > transfer.expected_size as usize {
-                warn!(
-                    transfer_id,
-                    "chunk exceeds offered file size; dropping transfer"
-                );
+            if let Err(err) = transfer.stager.append(offset, &data) {
+                warn!(transfer_id, error = %err, "invalid incoming file chunk; dropping transfer");
                 incoming.remove(&transfer_id);
                 return Ok(());
             }
-            if transfer.buffer.len() < off + data.len() {
-                transfer.buffer.resize(off + data.len(), 0);
-            }
-            transfer.buffer[off..off + data.len()].copy_from_slice(&data);
         }
         xenia_peer_core::FileTransferMessage::Complete { transfer_id } => {
             let Some(transfer) = incoming.remove(&transfer_id) else {
                 warn!(transfer_id, "Complete for unknown/stale incoming transfer");
                 return Ok(());
             };
-            let actual_hash = *blake3::hash(&transfer.buffer).as_bytes();
-            let hash_ok = actual_hash == transfer.expected_hash;
-            let mut delivery_ok = false;
-            if hash_ok {
-                if let Some(recv_file_dir) = recv_file_dir {
-                    let dest = recv_file_dir.join(&transfer.name);
-                    match persist_received_file(&dest, &transfer.buffer) {
-                        Ok(()) => {
-                            delivery_ok = true;
-                            info!(transfer_id, path = %dest.display(), bytes = transfer.buffer.len(), "file transfer verified and persisted")
-                        }
-                        Err(err) => {
-                            warn!(transfer_id, error = %err, "verified file was not persisted")
-                        }
-                    }
-                } else {
-                    warn!(
+            let delivery_ok = match transfer.stager.finish() {
+                Ok(()) => {
+                    info!(
                         transfer_id,
-                        "verified incoming transfer has no receive directory; not written"
+                        name = transfer.name,
+                        bytes = transfer.expected_size,
+                        "file transfer verified and persisted"
                     );
+                    true
                 }
-            } else {
-                warn!(
-                    transfer_id,
-                    "file transfer failed BLAKE3 verification, not written"
-                );
-            }
+                Err(err) => {
+                    warn!(transfer_id, error = %err, "incoming file verification/publication failed");
+                    false
+                }
+            };
             let verified = xenia_peer_core::FileTransferMessage::Verified {
                 transfer_id,
                 ok: delivery_ok,
