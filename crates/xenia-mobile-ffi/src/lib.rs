@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use engine::{
-    FileTransferAdmissionSnapshotV1, FileTransferEnqueueError, FileTransferEvent, MobileCodec, SessionState, ViewerEngine,
+    FileTransferAdmissionSnapshotV1, FileTransferAdmissionSnapshotV2, FileTransferEnqueueError, FileTransferEvent, MobileCodec, SessionState, ViewerEngine,
 };
 
 /// One shared multi-thread tokio runtime for the process lifetime —
@@ -109,8 +109,10 @@ pub const XENIA_CODEC_H264: i32 = 2;
 /// path -- on Android this should be an app-private directory (e.g.
 /// `context.getExternalFilesDir(...)`), since received files are
 /// written via plain `std::fs::write`, not Storage Access Framework.
-/// `max_file_bytes` caps both directions and is also a hard in-memory
-/// buffering cap (the whole file lives in memory on both ends).
+/// `max_file_bytes` caps incoming transfers. Legacy outbound C callers may
+/// still submit a whole buffer; the preferred V20 Android picker path uses the
+/// staged streaming APIs below and never holds the whole outbound file in a
+/// Java `ByteArray` plus Rust `Vec<u8>`.
 ///
 /// # Safety
 /// `host_port` must be a valid, NUL-terminated C string pointer, live
@@ -447,6 +449,42 @@ pub extern "C" fn xenia_file_transfer_admission_snapshot(
         .unwrap_or_default()
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct XeniaFileTransferAdmissionSnapshotV2 {
+    pub valid: bool,
+    pub active_reserved: u32,
+    pub active_copying: u32,
+    pub active_streaming: u32,
+    pub active_stream_bytes: u64,
+    pub available_command_slots: u32,
+    pub command_capacity: u32,
+}
+
+impl From<FileTransferAdmissionSnapshotV2> for XeniaFileTransferAdmissionSnapshotV2 {
+    fn from(value: FileTransferAdmissionSnapshotV2) -> Self {
+        Self {
+            valid: true,
+            active_reserved: value.active_reserved,
+            active_copying: value.active_copying,
+            active_streaming: value.active_streaming,
+            active_stream_bytes: value.active_stream_bytes,
+            available_command_slots: value.available_command_slots,
+            command_capacity: value.command_capacity,
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn xenia_file_transfer_admission_snapshot_v2(
+    handle: u64,
+) -> XeniaFileTransferAdmissionSnapshotV2 {
+    engine_for(handle)
+        .and_then(|engine| engine.file_transfer_admission_snapshot_v2())
+        .map(Into::into)
+        .unwrap_or_default()
+}
+
 /// Immediate return codes from [`xenia_try_send_file`].
 pub const XENIA_SEND_FILE_OK: i32 = 0;
 /// The C arguments were invalid (null name / invalid data pointer).
@@ -463,9 +501,12 @@ pub const XENIA_SEND_FILE_TOO_LARGE: i32 = 5;
 pub const XENIA_SEND_FILE_INVALID_RESERVATION: i32 = 6;
 /// Payload length differed from the byte length used to reserve capacity.
 pub const XENIA_SEND_FILE_RESERVATION_SIZE_MISMATCH: i32 = 7;
+/// App-private native staging I/O failed.
+pub const XENIA_SEND_FILE_IO_ERROR: i32 = 8;
 
 fn file_transfer_status(error: FileTransferEnqueueError) -> i32 {
     match error {
+        FileTransferEnqueueError::InvalidArgument => XENIA_SEND_FILE_INVALID_ARGUMENT,
         FileTransferEnqueueError::FileTooLarge => XENIA_SEND_FILE_TOO_LARGE,
         FileTransferEnqueueError::QueueFull => XENIA_SEND_FILE_QUEUE_FULL,
         FileTransferEnqueueError::SessionClosed => XENIA_SEND_FILE_SESSION_CLOSED,
@@ -473,6 +514,7 @@ fn file_transfer_status(error: FileTransferEnqueueError) -> i32 {
         FileTransferEnqueueError::ReservationSizeMismatch => {
             XENIA_SEND_FILE_RESERVATION_SIZE_MISMATCH
         }
+        FileTransferEnqueueError::IoError => XENIA_SEND_FILE_IO_ERROR,
     }
 }
 
@@ -649,6 +691,94 @@ pub unsafe extern "C" fn xenia_send_file(
 ) {
     // SAFETY: this compatibility wrapper forwards the caller contract verbatim.
     let _ = unsafe { xenia_try_send_file(handle, name, data, data_len) };
+}
+
+/// Begin the preferred chunked mobile outbound path. `expected_len` may be
+/// `u64::MAX` when the SAF provider does not expose a stable size. A real
+/// bounded command slot is reserved before any payload chunks are staged.
+///
+/// # Safety
+/// `name` must be a valid NUL-terminated string and `out_token` must point to
+/// one writable `u64` for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenia_begin_send_file_stream(
+    handle: u64,
+    name: *const c_char,
+    expected_len: u64,
+    out_token: *mut u64,
+) -> i32 {
+    if name.is_null() || out_token.is_null() {
+        return XENIA_SEND_FILE_INVALID_ARGUMENT;
+    }
+    let Some(engine) = engine_for(handle) else {
+        return XENIA_SEND_FILE_INVALID_HANDLE;
+    };
+    let Ok(name) = (unsafe { CStr::from_ptr(name) }).to_str() else {
+        return XENIA_SEND_FILE_INVALID_ARGUMENT;
+    };
+    let expected_len = if expected_len == u64::MAX {
+        None
+    } else {
+        let Ok(len) = usize::try_from(expected_len) else {
+            return XENIA_SEND_FILE_TOO_LARGE;
+        };
+        Some(len)
+    };
+    match engine.begin_file_transfer_stream(name.to_owned(), expected_len) {
+        Ok(token) => {
+            unsafe { *out_token = token };
+            XENIA_SEND_FILE_OK
+        }
+        Err(error) => file_transfer_status(error),
+    }
+}
+
+/// Append one chunk to a native staged outbound file.
+///
+/// # Safety
+/// `data` must point to `data_len` readable bytes for this call. Empty chunks
+/// may use a null pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenia_append_send_file_stream(
+    handle: u64,
+    token: u64,
+    data: *const u8,
+    data_len: usize,
+) -> i32 {
+    if data.is_null() && data_len > 0 {
+        return XENIA_SEND_FILE_INVALID_ARGUMENT;
+    }
+    let Some(engine) = engine_for(handle) else {
+        return XENIA_SEND_FILE_INVALID_HANDLE;
+    };
+    let bytes = if data_len == 0 {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(data, data_len) }
+    };
+    match engine.append_file_transfer_stream(token, bytes) {
+        Ok(()) => XENIA_SEND_FILE_OK,
+        Err(error) => file_transfer_status(error),
+    }
+}
+
+/// Finish a staged stream, hash/size-check it, and enqueue its app-private
+/// staged-file descriptor into the already reserved bounded command slot.
+#[unsafe(no_mangle)]
+pub extern "C" fn xenia_finish_send_file_stream(handle: u64, token: u64) -> i32 {
+    let Some(engine) = engine_for(handle) else {
+        return XENIA_SEND_FILE_INVALID_HANDLE;
+    };
+    match engine.finish_file_transfer_stream(token) {
+        Ok(()) => XENIA_SEND_FILE_OK,
+        Err(error) => file_transfer_status(error),
+    }
+}
+
+/// Cancel a staged outbound stream and delete its partial app-private file.
+#[unsafe(no_mangle)]
+pub extern "C" fn xenia_cancel_send_file_stream(handle: u64, token: u64) -> bool {
+    engine_for(handle).is_some_and(|engine| engine.cancel_file_transfer_stream(token))
 }
 
 /// Event kinds for [`XeniaFileTransferEvent::kind`].

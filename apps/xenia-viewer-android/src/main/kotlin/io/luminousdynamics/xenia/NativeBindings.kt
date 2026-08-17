@@ -42,6 +42,7 @@ internal object NativeBindings {
     const val SEND_FILE_TOO_LARGE: Int = 5
     const val SEND_FILE_INVALID_RESERVATION: Int = 6
     const val SEND_FILE_RESERVATION_SIZE_MISMATCH: Int = 7
+    const val SEND_FILE_IO_ERROR: Int = 8
 
     @JvmStatic external fun connect(hostPort: String, codec: Int, recvDir: String?, maxFileBytes: Long): Long
     @JvmStatic external fun sessionState(handle: Long): Int
@@ -55,7 +56,13 @@ internal object NativeBindings {
     @JvmStatic external fun pollClipboard(handle: Long): String?
     @JvmStatic external fun sendClipboard(handle: Long, text: String?)
     @JvmStatic external fun fileTransferAdmissionSnapshot(handle: Long): IntArray?
+    @JvmStatic external fun fileTransferAdmissionSnapshotV2(handle: Long): LongArray?
     @JvmStatic external fun trySendFile(handle: Long, name: String, data: ByteArray): Int
+    /** Returns [status, token]; expectedLen=-1 means provider length unknown. */
+    @JvmStatic external fun beginSendFileStream(handle: Long, name: String, expectedLen: Long): LongArray?
+    @JvmStatic external fun appendSendFileStream(handle: Long, token: Long, data: ByteArray, dataLen: Int): Int
+    @JvmStatic external fun finishSendFileStream(handle: Long, token: Long): Int
+    @JvmStatic external fun cancelSendFileStream(handle: Long, token: Long): Boolean
     /** Legacy Boolean wrapper retained for ABI/source compatibility. */
     @JvmStatic external fun sendFile(handle: Long, name: String, data: ByteArray): Boolean
     @JvmStatic external fun pollFileTransferEvent(handle: Long): ByteArray?

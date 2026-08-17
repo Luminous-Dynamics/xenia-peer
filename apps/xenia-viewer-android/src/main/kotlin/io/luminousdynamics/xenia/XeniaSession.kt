@@ -1,6 +1,7 @@
 package io.luminousdynamics.xenia
 
 import android.graphics.Bitmap
+import java.io.InputStream
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -65,6 +66,7 @@ enum class FileSendResult {
     TOO_LARGE,
     INVALID_RESERVATION,
     RESERVATION_SIZE_MISMATCH,
+    IO_ERROR,
     UNKNOWN;
 
     companion object {
@@ -77,6 +79,7 @@ enum class FileSendResult {
             NativeBindings.SEND_FILE_TOO_LARGE -> TOO_LARGE
             NativeBindings.SEND_FILE_INVALID_RESERVATION -> INVALID_RESERVATION
             NativeBindings.SEND_FILE_RESERVATION_SIZE_MISMATCH -> RESERVATION_SIZE_MISMATCH
+            NativeBindings.SEND_FILE_IO_ERROR -> IO_ERROR
             else -> UNKNOWN
         }
     }
@@ -89,8 +92,18 @@ data class FileTransferAdmissionSnapshot(
     val commandCapacity: Int,
 )
 
+data class FileTransferAdmissionSnapshotV2(
+    val activeReserved: Long,
+    val activeCopying: Long,
+    val activeStreaming: Long,
+    val activeStreamBytes: Long,
+    val availableCommandSlots: Long,
+    val commandCapacity: Long,
+)
+
 /** Header layout `xenia_jni.c`'s `pollFrame` packs (see its doc comment). */
 private const val FRAME_HEADER_LEN = 17
+private const val FILE_STREAM_CHUNK_BYTES = 64 * 1024
 
 /**
  * Owns one native viewer session: connects on construction, polls
@@ -279,11 +292,10 @@ class XeniaSession(
         if (handle != 0L) NativeBindings.sendClipboard(handle, text)
     }
 
-    /** Offer `data` to the host under `name`. The caller must have
-     * already read the whole file into memory (see
-     * `FilePickerBridge` -- Storage Access Framework `Uri`s aren't
-     * plain filesystem paths). Only one outgoing transfer is in
-     * flight at a time; see [fileTransferEvents] for progress/result. */
+    /** File transfer APIs. [trySendFile] is the legacy whole-ByteArray path;
+     * current Storage Access Framework UI uses [trySendFileStream] so only one
+     * 64 KiB Java/JNI chunk is live at a time while native code stages+hashes
+     * the source. Only one outgoing transfer is in flight at a time. */
     fun fileTransferAdmissionSnapshot(): FileTransferAdmissionSnapshot? {
         if (handle == 0L) return null
         val values = NativeBindings.fileTransferAdmissionSnapshot(handle) ?: return null
@@ -296,9 +308,73 @@ class XeniaSession(
         )
     }
 
+    fun fileTransferAdmissionSnapshotV2(): FileTransferAdmissionSnapshotV2? {
+        if (handle == 0L) return null
+        val values = NativeBindings.fileTransferAdmissionSnapshotV2(handle) ?: return null
+        if (values.size != 6) return null
+        return FileTransferAdmissionSnapshotV2(
+            activeReserved = values[0],
+            activeCopying = values[1],
+            activeStreaming = values[2],
+            activeStreamBytes = values[3],
+            availableCommandSlots = values[4],
+            commandCapacity = values[5],
+        )
+    }
+
     fun trySendFile(name: String, data: ByteArray): FileSendResult {
         if (handle == 0L) return FileSendResult.INVALID_HANDLE
         return FileSendResult.fromNative(NativeBindings.trySendFile(handle, name, data))
+    }
+
+    /** Preferred SAF/mobile path: keep only one 64 KiB Java/native chunk in
+     * memory while native code stages and hashes the file into app-private
+     * storage. `expectedLen=null` is supported for providers that do not expose
+     * a stable OpenableColumns.SIZE; native staging still enforces the 100 MiB
+     * ceiling incrementally. This method performs blocking stream I/O and must
+     * be called from a background/IO dispatcher. */
+    fun trySendFileStream(
+        name: String,
+        input: InputStream,
+        expectedLen: Long?,
+    ): FileSendResult {
+        if (handle == 0L) return FileSendResult.INVALID_HANDLE
+        val begin = NativeBindings.beginSendFileStream(handle, name, expectedLen ?: -1L)
+            ?: return FileSendResult.INVALID_ARGUMENT
+        if (begin.size != 2) return FileSendResult.INVALID_ARGUMENT
+        val admission = FileSendResult.fromNative(begin[0].toInt())
+        val token = begin[1]
+        if (admission != FileSendResult.ACCEPTED || token == 0L) {
+            return if (admission == FileSendResult.ACCEPTED) {
+                FileSendResult.INVALID_RESERVATION
+            } else {
+                admission
+            }
+        }
+        var finished = false
+        try {
+            val buffer = ByteArray(FILE_STREAM_CHUNK_BYTES)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                if (read == 0) continue
+                val append = FileSendResult.fromNative(
+                    NativeBindings.appendSendFileStream(handle, token, buffer, read)
+                )
+                if (append != FileSendResult.ACCEPTED) return append
+            }
+            val result = FileSendResult.fromNative(
+                NativeBindings.finishSendFileStream(handle, token)
+            )
+            finished = result == FileSendResult.ACCEPTED
+            return result
+        } catch (_: java.io.IOException) {
+            return FileSendResult.IO_ERROR
+        } catch (_: SecurityException) {
+            return FileSendResult.IO_ERROR
+        } finally {
+            if (!finished) NativeBindings.cancelSendFileStream(handle, token)
+        }
     }
 
     /** Legacy Boolean convenience retained for callers that only need accepted/rejected. */

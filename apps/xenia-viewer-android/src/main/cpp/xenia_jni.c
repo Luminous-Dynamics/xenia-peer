@@ -67,6 +67,10 @@ int32_t xenia_claim_send_file_reservation(uint64_t handle, uint64_t token, size_
 bool    xenia_cancel_send_file_reservation(uint64_t handle, uint64_t token);
 int32_t xenia_commit_send_file(uint64_t handle, uint64_t token, const char *name, const uint8_t *data, size_t data_len);
 int32_t xenia_try_send_file(uint64_t handle, const char *name, const uint8_t *data, size_t data_len);
+int32_t xenia_begin_send_file_stream(uint64_t handle, const char *name, uint64_t expected_len, uint64_t *out_token);
+int32_t xenia_append_send_file_stream(uint64_t handle, uint64_t token, const uint8_t *data, size_t data_len);
+int32_t xenia_finish_send_file_stream(uint64_t handle, uint64_t token);
+bool    xenia_cancel_send_file_stream(uint64_t handle, uint64_t token);
 
 typedef struct {
     bool     valid;
@@ -78,6 +82,18 @@ typedef struct {
 
 XeniaFileTransferAdmissionSnapshot xenia_file_transfer_admission_snapshot(uint64_t handle);
 
+typedef struct {
+    bool     valid;
+    uint32_t active_reserved;
+    uint32_t active_copying;
+    uint32_t active_streaming;
+    uint64_t active_stream_bytes;
+    uint32_t available_command_slots;
+    uint32_t command_capacity;
+} XeniaFileTransferAdmissionSnapshotV2;
+
+XeniaFileTransferAdmissionSnapshotV2 xenia_file_transfer_admission_snapshot_v2(uint64_t handle);
+
 enum {
     XENIA_SEND_FILE_OK = 0,
     XENIA_SEND_FILE_INVALID_ARGUMENT = 1,
@@ -87,6 +103,7 @@ enum {
     XENIA_SEND_FILE_TOO_LARGE = 5,
     XENIA_SEND_FILE_INVALID_RESERVATION = 6,
     XENIA_SEND_FILE_RESERVATION_SIZE_MISMATCH = 7,
+    XENIA_SEND_FILE_IO_ERROR = 8,
 };
 
 typedef struct {
@@ -277,6 +294,32 @@ Java_io_luminousdynamics_xenia_NativeBindings_fileTransferAdmissionSnapshot(
     return result;
 }
 
+JNIEXPORT jlongArray JNICALL
+Java_io_luminousdynamics_xenia_NativeBindings_fileTransferAdmissionSnapshotV2(
+    JNIEnv *env, jclass clazz, jlong handle
+) {
+    (void)clazz;
+    XeniaFileTransferAdmissionSnapshotV2 snapshot =
+        xenia_file_transfer_admission_snapshot_v2((uint64_t)handle);
+    if (!snapshot.valid) {
+        return NULL;
+    }
+    jlong values[6] = {
+        (jlong)snapshot.active_reserved,
+        (jlong)snapshot.active_copying,
+        (jlong)snapshot.active_streaming,
+        (jlong)snapshot.active_stream_bytes,
+        (jlong)snapshot.available_command_slots,
+        (jlong)snapshot.command_capacity,
+    };
+    jlongArray result = (*env)->NewLongArray(env, 6);
+    if (result == NULL) {
+        return NULL;
+    }
+    (*env)->SetLongArrayRegion(env, result, 0, 6, values);
+    return result;
+}
+
 static jint jni_try_send_file_status(JNIEnv *env, jlong handle, jstring name, jbyteArray data) {
     if (name == NULL || data == NULL) {
         return XENIA_SEND_FILE_INVALID_ARGUMENT;
@@ -316,6 +359,77 @@ static jint jni_try_send_file_status(JNIEnv *env, jlong handle, jstring name, jb
     (*env)->ReleaseByteArrayElements(env, data, bytes, JNI_ABORT);
     (*env)->ReleaseStringUTFChars(env, name, nameStr);
     return (jint)status;
+}
+
+JNIEXPORT jlongArray JNICALL
+Java_io_luminousdynamics_xenia_NativeBindings_beginSendFileStream(
+    JNIEnv *env, jclass clazz, jlong handle, jstring name, jlong expectedLen
+) {
+    (void)clazz;
+    jlong values[2] = { XENIA_SEND_FILE_INVALID_ARGUMENT, 0 };
+    if (name == NULL || expectedLen < -1) {
+        goto done;
+    }
+    const char *nameStr = (*env)->GetStringUTFChars(env, name, NULL);
+    if (nameStr == NULL) {
+        goto done;
+    }
+    uint64_t token = 0;
+    uint64_t nativeExpected = expectedLen < 0 ? UINT64_MAX : (uint64_t)expectedLen;
+    int32_t status = xenia_begin_send_file_stream(
+        (uint64_t)handle, nameStr, nativeExpected, &token
+    );
+    (*env)->ReleaseStringUTFChars(env, name, nameStr);
+    values[0] = (jlong)status;
+    values[1] = (jlong)token;
+
+done:
+    jlongArray result = (*env)->NewLongArray(env, 2);
+    if (result == NULL) {
+        return NULL;
+    }
+    (*env)->SetLongArrayRegion(env, result, 0, 2, values);
+    return result;
+}
+
+JNIEXPORT jint JNICALL
+Java_io_luminousdynamics_xenia_NativeBindings_appendSendFileStream(
+    JNIEnv *env, jclass clazz, jlong handle, jlong token, jbyteArray data, jint dataLen
+) {
+    (void)clazz;
+    if (data == NULL || dataLen < 0) {
+        return XENIA_SEND_FILE_INVALID_ARGUMENT;
+    }
+    jsize arrayLen = (*env)->GetArrayLength(env, data);
+    if (dataLen > arrayLen) {
+        return XENIA_SEND_FILE_INVALID_ARGUMENT;
+    }
+    jbyte *bytes = (*env)->GetByteArrayElements(env, data, NULL);
+    if (bytes == NULL) {
+        return XENIA_SEND_FILE_INVALID_ARGUMENT;
+    }
+    int32_t status = xenia_append_send_file_stream(
+        (uint64_t)handle, (uint64_t)token, (const uint8_t *)bytes, (size_t)dataLen
+    );
+    (*env)->ReleaseByteArrayElements(env, data, bytes, JNI_ABORT);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_io_luminousdynamics_xenia_NativeBindings_finishSendFileStream(
+    JNIEnv *env, jclass clazz, jlong handle, jlong token
+) {
+    (void)env; (void)clazz;
+    return (jint)xenia_finish_send_file_stream((uint64_t)handle, (uint64_t)token);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_io_luminousdynamics_xenia_NativeBindings_cancelSendFileStream(
+    JNIEnv *env, jclass clazz, jlong handle, jlong token
+) {
+    (void)env; (void)clazz;
+    return xenia_cancel_send_file_stream((uint64_t)handle, (uint64_t)token)
+        ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jint JNICALL
