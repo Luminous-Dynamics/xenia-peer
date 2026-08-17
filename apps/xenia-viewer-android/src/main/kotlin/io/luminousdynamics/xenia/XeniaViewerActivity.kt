@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.provider.OpenableColumns
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -57,11 +58,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** Caps both directions; also a hard in-memory buffering cap (the
- * whole file lives in a `ByteArray`/`Vec<u8>` on both ends -- see
- * `xenia_mobile_ffi::engine::ViewerEngine::connect`'s doc comment).
- * Lower than the desktop default (200 MiB) since phones have less RAM
- * to spare for this. */
+/** Caps both directions. V20's preferred mobile outbound path streams SAF
+ * data through a 64 KiB Java/JNI chunk into app-private native staging rather
+ * than holding a whole-file ByteArray/Vec; incoming transfers remain bounded
+ * by this value. Lower than desktop since phones have less RAM/storage headroom. */
 private const val MAX_FILE_TRANSFER_BYTES = 100L * 1024 * 1024
 
 /**
@@ -88,11 +88,11 @@ class XeniaViewerActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // App-private directory (a real filesystem path, not a SAF
-        // Uri) for files the host sends us -- `ViewerEngine` writes
-        // to it directly via `std::fs::write`, matching
-        // `xenia-viewer`'s own `--recv-file-dir` semantics.
-        val recvDir = getExternalFilesDir("received")?.apply { mkdirs() }
+        // Keep received files in credential-encrypted internal app storage.
+        // Outbound SAF staging is separate and lives under noBackupFilesDir:
+        // it is temporary pressure state, not user backup material.
+        val recvDir = filesDir.resolve("received").apply { mkdirs() }
+        val stagingDir = noBackupFilesDir.resolve("outbound-staging").apply { mkdirs() }
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
@@ -102,7 +102,8 @@ class XeniaViewerActivity : ComponentActivity() {
                                 hostPort,
                                 codec,
                                 lifecycleScope,
-                                recvDir?.absolutePath,
+                                recvDir.absolutePath,
+                                stagingDir.absolutePath,
                                 MAX_FILE_TRANSFER_BYTES,
                             )
                             session = s
@@ -276,8 +277,25 @@ private fun ViewerScreen(session: XeniaSession, onPickFile: ((Uri) -> Unit) -> U
                     onClick = {
                         onPickFile { uri ->
                             coroutineScope.launch {
-                                val picked = withContext(Dispatchers.IO) { readPickedFile(context, uri) }
-                                if (picked != null) session.sendFile(picked.first, picked.second)
+                                val result = withContext(Dispatchers.IO) {
+                                    streamPickedFile(context, session, uri)
+                                }
+                                if (result != FileSendResult.ACCEPTED) {
+                                    val message = when (result) {
+                                        FileSendResult.QUEUE_FULL -> "File transfer queue is busy"
+                                        FileSendResult.SESSION_CLOSED,
+                                        FileSendResult.INVALID_HANDLE -> "The Xenia session is disconnected"
+                                        FileSendResult.TOO_LARGE -> "File exceeds the 100 MiB mobile transfer limit"
+                                        FileSendResult.INVALID_ARGUMENT -> "The selected file could not be prepared"
+                                        FileSendResult.INVALID_RESERVATION,
+                                        FileSendResult.RESERVATION_SIZE_MISMATCH ->
+                                            "File transfer staging expired or changed; please try again"
+                                        FileSendResult.IO_ERROR -> "The selected file could not be read or staged"
+                                        FileSendResult.UNKNOWN -> "File transfer could not be admitted"
+                                        FileSendResult.ACCEPTED -> error("handled above")
+                                    }
+                                    Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                                }
                             }
                         }
                     },
@@ -291,29 +309,59 @@ private fun ViewerScreen(session: XeniaSession, onPickFile: ((Uri) -> Unit) -> U
     }
 }
 
+private data class PickedFileMetadata(
+    val name: String,
+    val size: Long?,
+)
+
 /**
- * Read a Storage Access Framework-picked file fully into memory (SAF
- * `Uri`s aren't plain filesystem paths, so this has to go through
- * `ContentResolver`, unlike receiving -- see [XeniaViewerActivity]'s
- * `recvDir`, which is a real path `ViewerEngine` writes to directly).
- * Returns `null` if the stream can't be opened, the display name can't
- * be resolved to anything usable, or the file exceeds
- * [MAX_FILE_TRANSFER_BYTES] (rejected client-side too, not just by the
- * peer, to avoid buffering an oversized file into memory for no reason).
+ * Stream a Storage Access Framework Uri through the native V20 staging path.
+ * Only one 64 KiB Java byte array is reused while Rust writes/hashes the
+ * app-private staging file. Providers with unknown SIZE are supported; native
+ * staging enforces MAX_FILE_TRANSFER_BYTES incrementally.
  */
-private fun readPickedFile(context: android.content.Context, uri: Uri): Pair<String, ByteArray>? {
-    val name = queryDisplayName(context, uri) ?: uri.lastPathSegment ?: return null
-    val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
-    if (bytes.size.toLong() > MAX_FILE_TRANSFER_BYTES) return null
-    return name to bytes
+private fun streamPickedFile(
+    context: android.content.Context,
+    session: XeniaSession,
+    uri: Uri,
+): FileSendResult {
+    val metadata = queryPickedFileMetadata(context, uri)
+        ?: return FileSendResult.INVALID_ARGUMENT
+    if (metadata.size != null && metadata.size > MAX_FILE_TRANSFER_BYTES) {
+        return FileSendResult.TOO_LARGE
+    }
+    val stream = context.contentResolver.openInputStream(uri)
+        ?: return FileSendResult.IO_ERROR
+    return stream.use {
+        session.trySendFileStream(metadata.name, it, metadata.size)
+    }
 }
 
-private fun queryDisplayName(context: android.content.Context, uri: Uri): String? {
-    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-        val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-        if (idx >= 0 && cursor.moveToFirst()) return cursor.getString(idx)
+private fun queryPickedFileMetadata(
+    context: android.content.Context,
+    uri: Uri,
+): PickedFileMetadata? {
+    var name: String? = null
+    var size: Long? = null
+    context.contentResolver.query(
+        uri,
+        arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
+        null,
+        null,
+        null,
+    )?.use { cursor ->
+        if (cursor.moveToFirst()) {
+            val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (nameIdx >= 0 && !cursor.isNull(nameIdx)) name = cursor.getString(nameIdx)
+            val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+            if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) {
+                val candidate = cursor.getLong(sizeIdx)
+                if (candidate >= 0) size = candidate
+            }
+        }
     }
-    return null
+    val resolvedName = name ?: uri.lastPathSegment ?: return null
+    return PickedFileMetadata(resolvedName, size)
 }
 
 /**
@@ -639,8 +687,8 @@ private fun Modifier.forwardTrackpadTo(session: XeniaSession, modeKey: Any): Mod
                 val change = event.changes.firstOrNull() ?: break
                 if (!change.pressed) {
                     if (totalMovement < TRACKPAD_TAP_SLOP_PX) {
-                        session.sendPointer(cursorX, cursorY, 0, true) // click down
-                        session.sendPointer(cursorX, cursorY, 0, false) // click up
+                        session.sendPointerButton(cursorX, cursorY, 0, true) // click down
+                        session.sendPointerButton(cursorX, cursorY, 0, false) // click up
                     }
                     break
                 }
@@ -650,7 +698,7 @@ private fun Modifier.forwardTrackpadTo(session: XeniaSession, modeKey: Any): Mod
                 lastPos = change.position
                 cursorX = (cursorX + dx / size.width * TRACKPAD_SENSITIVITY).coerceIn(0f, 1f)
                 cursorY = (cursorY + dy / size.height * TRACKPAD_SENSITIVITY).coerceIn(0f, 1f)
-                session.sendPointer(cursorX, cursorY, 0, false) // motion, no button
+                session.sendPointerMove(cursorX, cursorY) // motion
             }
         }
     }

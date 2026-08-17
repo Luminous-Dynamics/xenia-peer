@@ -1,0 +1,18 @@
+[package]
+name = "xenia-zk-legacy-mycelix"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "Apache-2.0 OR MIT"
+description = "Explicit, opt-in compatibility helpers for legacy Mycelix authenticated-proof v2 transcripts."
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+sha2 = "0.10"
+thiserror.workspace = true

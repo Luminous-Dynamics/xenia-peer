@@ -387,8 +387,12 @@ impl Verifier {
         let observed_head = if checkpoint.entry_count == 0 {
             [0u8; 32]
         } else {
-            let checkpoint_index = usize::try_from(checkpoint.entry_count - 1)
-                .expect("checkpoint count is bounded by the supplied ledger length");
+            let checkpoint_index = usize::try_from(checkpoint.entry_count - 1).map_err(|_| {
+                CheckpointContinuityError::CheckpointAheadOfLedger {
+                    checkpoint: checkpoint.entry_count,
+                    ledger: ledger_len,
+                }
+            })?;
             entries[checkpoint_index].entry_hash
         };
         if observed_head != checkpoint.head_hash {

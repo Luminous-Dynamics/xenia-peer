@@ -22,12 +22,15 @@ xenia-handshake = { path = "../xenia-handshake" }
 xenia-video = { path = "../xenia-video", features = ["hdc"] }
 xenia-inject = { path = "../xenia-inject" }
 xenia-wire = { workspace = true, features = ["consent", "reference-frame"] }
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs"] }
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror.workspace = true
 bincode.workspace = true
 blake3 = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 
 [[bin]]
 name = "xenia_mobile_smoke"

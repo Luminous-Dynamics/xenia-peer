@@ -20,21 +20,26 @@
 //! into its own hardware `android.media.MediaCodec` decoder (Phase 2).
 
 use std::collections::{HashMap, VecDeque};
+use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
+use tokio::time::Instant;
 
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, watch};
 use tracing::{info, warn};
 
 use xenia_inject::InputEvent;
 use xenia_peer_core::frame::{PixelFormat as FramePixelFormat, RawCapabilities, RawRekey};
 use xenia_peer_core::handshake::{
-    NegotiatedTransport, negotiated_session_context_hash, perform_viewer_handshake_with_transcript,
+    AuthenticatedSessionSurface, PendingSessionSurface, perform_viewer_handshake_with_transcript,
 };
-use xenia_peer_core::transport::{RecvEnvelope, SendEnvelope, TcpTransport};
+use xenia_peer_core::transport::{RecvEnvelope, SendEnvelope, TcpTransport, Transport};
 use xenia_peer_core::{
-    ClipboardContent, FILE_TRANSFER_CHUNK_SIZE, FileTransferMessage,
+    ClipboardContent, FILE_TRANSFER_CHUNK_SIZE, FileTransferMessage, IncomingFileStager,
     PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST, PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER, RawClipboard,
+    cleanup_orphaned_receive_staging,
 };
 use xenia_peer_core::{
     HandshakeManager, LaneSession, RekeyPolicy, SessionEpochState, derive_negotiated_context_key,
@@ -87,22 +92,46 @@ pub struct MobileFrame {
 /// unbounded memory — oldest frame is dropped once full, matching a
 /// "show the latest, not a queued backlog" viewer UX.
 const FRAME_QUEUE_CAP: usize = 4;
+const _: [(); FRAME_QUEUE_CAP] =
+    [(); xenia_peer_core::producer_flow::MOBILE_VIDEO_PRESENTATION_V1.capacity];
 /// Bound on buffered viewer-to-host input events (pointer/touch/key) while
-/// the network task drains them. Excess is dropped rather than queued
-/// unboundedly under a stall.
+/// the network task drains them. V14 applies semantic overflow behavior:
+/// motion samples may drop, while state transitions use bounded backpressure.
 const INPUT_QUEUE_CAP: usize = 256;
-/// Bound on buffered viewer-to-host clipboard updates.
-const CLIPBOARD_QUEUE_CAP: usize = 16;
+const _: [(); INPUT_QUEUE_CAP] =
+    [(); xenia_peer_core::producer_flow::INPUT_STATE_TRANSITION_V1.capacity];
+/// Outbound clipboard is latest-value state. `watch` retains one pending
+/// value and coalesces intermediate updates while the network sender is busy.
+const CLIPBOARD_SLOT_CAP: usize = 1;
+const _: [(); CLIPBOARD_SLOT_CAP] =
+    [(); xenia_peer_core::producer_flow::MOBILE_CLIPBOARD_OUTBOUND_V1.capacity];
 /// Bound on queued file-transfer UI events (offers/progress/done). A UI
 /// that stops polling only loses stale progress ticks, not correctness --
 /// the underlying transfer state machine doesn't live in this queue.
 const FILE_TRANSFER_EVENT_QUEUE_CAP: usize = 64;
+const _: [(); FILE_TRANSFER_EVENT_QUEUE_CAP] =
+    [(); xenia_peer_core::producer_flow::MOBILE_FILE_TRANSFER_EVENTS_V1.capacity];
 /// Bound on queued outgoing "send this file" commands from the UI.
 /// Small: sending is a deliberate, rare user action (tap a picker
 /// button), not a stream -- and only one outgoing transfer is in
 /// flight at a time anyway (mirrors `xenia-viewer`'s `--send-file`,
 /// which supports exactly one transfer per run).
 const FILE_TRANSFER_CMD_QUEUE_CAP: usize = 2;
+const _: [(); FILE_TRANSFER_CMD_QUEUE_CAP] =
+    [(); xenia_peer_core::producer_flow::MOBILE_FILE_TRANSFER_COMMAND_V1.capacity];
+/// Reservation lease before the caller begins materializing/copying a file.
+/// A leaked token cannot pin scarce command capacity indefinitely.
+const FILE_TRANSFER_RESERVATION_TTL_MS: u64 = 30_000;
+/// Once a reservation is *claimed* immediately before a potentially expensive
+/// JNI/native copy, its capacity remains reserved for this bounded copy/commit
+/// window. Claim is idempotent and does not keep extending the lease, so a
+/// malicious caller cannot pin a slot forever by repeatedly claiming it.
+const FILE_TRANSFER_COPY_LEASE_MS: u64 = 60_000;
+/// Absolute lease for staging a SAF stream into app-private native storage.
+/// It is intentionally not extended by each chunk: progress cannot pin a scarce
+/// command slot forever. Five minutes is generous for the fixed 100 MiB ceiling
+/// while remaining bounded under a stalled/abandoned provider.
+const FILE_TRANSFER_STREAM_LEASE_MS: u64 = 5 * 60_000;
 /// Caps how many incoming transfers can be simultaneously buffered in
 /// memory. Lower than the daemon's own `MAX_CONCURRENT_INCOMING_TRANSFERS`
 /// (8) since phones have tighter RAM budgets than desktop hosts.
@@ -150,28 +179,114 @@ pub enum FileTransferEvent {
 /// `xenia-viewer`'s own `--send-file` semantics (one transfer per
 /// run) -- a second `send_file` call while one is in flight is
 /// rejected rather than queued.
+enum OutgoingTransferSource {
+    Memory(Vec<u8>),
+    StagedFile { path: PathBuf },
+}
+
+impl Drop for OutgoingTransferSource {
+    fn drop(&mut self) {
+        if let OutgoingTransferSource::StagedFile { path } = self {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 struct OutgoingTransfer {
     transfer_id: u64,
     name: String,
-    data: Vec<u8>,
+    size: u64,
+    source: OutgoingTransferSource,
 }
 
 /// A transfer this side is receiving.
 struct IncomingTransfer {
     name: String,
     expected_size: u64,
-    expected_hash: [u8; 32],
-    buffer: Vec<u8>,
+    stager: IncomingFileStager,
 }
 
 /// A UI-initiated file-transfer action, delivered to the background
 /// session task via [`ViewerEngine::send_file`].
 enum FileTransferCommand {
-    /// Offer `data` (already read fully into memory by the caller --
-    /// e.g. via Android's Storage Access Framework, since arbitrary
-    /// user-picked files aren't necessarily reachable by a plain
-    /// filesystem path) to the host under `name`.
+    /// Legacy in-memory enqueue retained for ABI compatibility.
     SendFile { name: String, data: Vec<u8> },
+    /// Preferred mobile path: SAF bytes have already been staged and hashed
+    /// incrementally in app-private storage, so neither Java nor Rust needs a
+    /// whole-file heap allocation.
+    SendStagedFile {
+        name: String,
+        path: PathBuf,
+        size: u64,
+        blake3_hash: [u8; 32],
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileTransferReservationState {
+    Reserved,
+    Copying,
+}
+
+/// Capacity reserved in the bounded file-command channel before JNI copies a
+/// potentially large Java byte array. Dropping this value releases the slot.
+struct FileTransferReservation {
+    expected_len: usize,
+    permit: mpsc::OwnedPermit<FileTransferCommand>,
+    state: FileTransferReservationState,
+    expires_at: Instant,
+}
+
+struct FileTransferStreamUpload {
+    name: String,
+    path: PathBuf,
+    file: std::fs::File,
+    hasher: blake3::Hasher,
+    written: usize,
+    expected_len: Option<usize>,
+    permit: mpsc::OwnedPermit<FileTransferCommand>,
+    expires_at: Instant,
+}
+
+fn remove_staged_upload(stream: FileTransferStreamUpload) {
+    let path = stream.path.clone();
+    drop(stream);
+    let _ = std::fs::remove_file(path);
+}
+
+impl FileTransferReservation {
+    fn claim(&mut self, data_len: usize, now: Instant) -> Result<(), FileTransferEnqueueError> {
+        if data_len != self.expected_len {
+            return Err(FileTransferEnqueueError::ReservationSizeMismatch);
+        }
+        if now >= self.expires_at {
+            return Err(FileTransferEnqueueError::InvalidReservation);
+        }
+        if self.state == FileTransferReservationState::Reserved {
+            self.state = FileTransferReservationState::Copying;
+            self.expires_at = now + Duration::from_millis(FILE_TRANSFER_COPY_LEASE_MS);
+        }
+        Ok(())
+    }
+}
+
+/// Immediate result of trying to enqueue a user-triggered file transfer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileTransferEnqueueError {
+    /// The requested name/metadata is unusable before enqueue.
+    InvalidArgument,
+    /// The requested payload exceeds the fixed V1 mobile transfer ceiling.
+    FileTooLarge,
+    /// The fixed command queue is full. No command was silently discarded.
+    QueueFull,
+    /// The background session task has ended and no longer accepts commands.
+    SessionClosed,
+    /// Reservation token was unknown, already consumed, or unavailable.
+    InvalidReservation,
+    /// The committed payload length differs from the reserved byte length.
+    ReservationSizeMismatch,
+    /// App-private staging I/O failed.
+    IoError,
 }
 
 /// Reduce a wire-provided filename to a bare basename with no path
@@ -205,12 +320,122 @@ struct Shared {
 /// A live viewer session: owns a background tokio task running
 /// connect -> handshake -> receive/decode/send-input, plus channels
 /// the caller uses to observe/drive it.
+/// Point-in-time local evidence for the bounded mobile file-command lane.
+/// This is diagnostic state only; it is not authenticated protocol data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileTransferAdmissionSnapshotV1 {
+    pub active_reserved: u32,
+    pub active_copying: u32,
+    pub available_command_slots: u32,
+    pub command_capacity: u32,
+}
+
+/// V20 superset including disk-backed SAF staging. Bounded/local diagnostic
+/// state only; it is not peer-authenticated protocol data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileTransferAdmissionSnapshotV2 {
+    pub active_reserved: u32,
+    pub active_copying: u32,
+    pub active_streaming: u32,
+    pub active_stream_bytes: u64,
+    pub available_command_slots: u32,
+    pub command_capacity: u32,
+}
+
 pub struct ViewerEngine {
     shared: Arc<Shared>,
     input_tx: mpsc::Sender<InputEvent>,
-    clipboard_tx: mpsc::Sender<ClipboardContent>,
+    clipboard_tx: watch::Sender<Option<ClipboardContent>>,
     ft_cmd_tx: mpsc::Sender<FileTransferCommand>,
+    ft_reservations: Arc<StdMutex<HashMap<u64, FileTransferReservation>>>,
+    ft_streams: Arc<StdMutex<HashMap<u64, FileTransferStreamUpload>>>,
+    next_ft_reservation: AtomicU64,
+    staging_dir: PathBuf,
+    runtime: tokio::runtime::Handle,
     _task: tokio::task::JoinHandle<()>,
+}
+
+fn spawn_file_transfer_reservation_expiry(
+    runtime: &tokio::runtime::Handle,
+    reservations: Arc<StdMutex<HashMap<u64, FileTransferReservation>>>,
+    token: u64,
+) -> tokio::task::JoinHandle<()> {
+    runtime.spawn(async move {
+        loop {
+            let deadline = {
+                let Ok(reservations) = reservations.lock() else {
+                    return;
+                };
+                let Some(reservation) = reservations.get(&token) else {
+                    return;
+                };
+                reservation.expires_at
+            };
+
+            tokio::time::sleep_until(deadline).await;
+
+            let Ok(mut reservations) = reservations.lock() else {
+                return;
+            };
+            let expired = reservations
+                .get(&token)
+                .is_some_and(|reservation| Instant::now() >= reservation.expires_at);
+            if expired {
+                reservations.remove(&token);
+                return;
+            }
+            // A claim may have moved the deadline while this task slept. Loop
+            // and sleep until the new absolute deadline; repeated claims cannot
+            // extend it indefinitely because `claim()` is idempotent.
+        }
+    })
+}
+
+fn spawn_file_transfer_stream_expiry(
+    runtime: &tokio::runtime::Handle,
+    streams: Arc<StdMutex<HashMap<u64, FileTransferStreamUpload>>>,
+    token: u64,
+) -> tokio::task::JoinHandle<()> {
+    runtime.spawn(async move {
+        let deadline = {
+            let Ok(streams) = streams.lock() else {
+                return;
+            };
+            let Some(stream) = streams.get(&token) else {
+                return;
+            };
+            stream.expires_at
+        };
+        tokio::time::sleep_until(deadline).await;
+        let Ok(mut streams) = streams.lock() else {
+            return;
+        };
+        if streams
+            .get(&token)
+            .is_some_and(|stream| Instant::now() >= stream.expires_at)
+            && let Some(stream) = streams.remove(&token)
+        {
+            remove_staged_upload(stream);
+        }
+    })
+}
+
+fn cleanup_orphaned_outbound_staging(staging_dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(staging_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let token = name
+            .strip_prefix("upload-")
+            .and_then(|rest| rest.strip_suffix(".part"));
+        if token.is_some_and(|hex| hex.len() == 16 && hex.bytes().all(|b| b.is_ascii_hexdigit())) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 impl ViewerEngine {
@@ -223,19 +448,21 @@ impl ViewerEngine {
     /// `recv_dir`: `None` disables receiving files entirely (every
     /// incoming `Offer` is auto-rejected), mirroring `xenia-viewer`'s
     /// own "no `--recv-file-dir` means disabled" default. `Some(dir)`
-    /// must be a real, writable filesystem path -- on Android this is
-    /// expected to be an app-private directory (e.g.
-    /// `context.getExternalFilesDir(...)`), never an arbitrary
-    /// user-chosen location, since incoming files are written via
-    /// plain `std::fs::write`, not Storage Access Framework.
-    /// `max_file_bytes` caps both directions and is also a hard
-    /// in-memory buffering cap (the whole file lives in a `Vec<u8>`
-    /// on both ends, exactly like the desktop implementation).
+    /// must be a real, writable filesystem path. `staging_dir` is a separate
+    /// local pressure sink for preferred outbound SAF streaming; Android passes
+    /// an internal no-backup directory so temporary user content is neither
+    /// derived from the receive destination nor exposed through external app
+    /// storage. `None` retains a process-temp fallback for non-Android callers.
+    /// `max_file_bytes` caps incoming transfers. Legacy outbound callers may
+    /// still enqueue a whole `Vec<u8>`, while V20's preferred Android path
+    /// stages SAF input incrementally to app-private disk and later streams it
+    /// to the peer in protocol-sized chunks after Offer acceptance.
     pub fn connect(
         rt: &tokio::runtime::Handle,
         host_port: String,
         codec: MobileCodec,
         recv_dir: Option<PathBuf>,
+        staging_dir: Option<PathBuf>,
         max_file_bytes: u64,
     ) -> Self {
         let shared = Arc::new(Shared {
@@ -247,13 +474,31 @@ impl ViewerEngine {
                 FILE_TRANSFER_EVENT_QUEUE_CAP,
             )),
         });
-        // Bounded so a stalled network task can't let viewer-generated input
-        // and clipboard events accumulate without limit. These carry UI
-        // actions that outpace the wire during a stall; dropping the oldest
-        // excess (via `try_send` in the send_* methods) is the right backpressure.
+        // Input uses a bounded event queue; outbound clipboard is state-like
+        // and therefore uses a one-value watch slot so stale intermediate
+        // clipboard contents cannot accumulate. User-triggered file commands
+        // use a small bounded queue whose rejection is surfaced explicitly.
         let (input_tx, input_rx) = mpsc::channel(INPUT_QUEUE_CAP);
-        let (clipboard_tx, clipboard_rx) = mpsc::channel(CLIPBOARD_QUEUE_CAP);
+        let (clipboard_tx, clipboard_rx) = watch::channel(None);
         let (ft_cmd_tx, ft_cmd_rx) = mpsc::channel(FILE_TRANSFER_CMD_QUEUE_CAP);
+        let staging_dir = staging_dir
+            .unwrap_or_else(|| std::env::temp_dir().join("xenia-mobile-outbound-staging"));
+        if std::fs::create_dir_all(&staging_dir).is_ok() {
+            cleanup_orphaned_outbound_staging(&staging_dir);
+        }
+        if let Some(recv_dir) = recv_dir.as_deref() {
+            match cleanup_orphaned_receive_staging(recv_dir) {
+                Ok(removed) if removed > 0 => {
+                    info!(removed, dir = %recv_dir.display(), "removed orphaned receive staging files")
+                }
+                Ok(_) => {}
+                Err(err) => warn!(
+                    dir = %recv_dir.display(),
+                    error = %err,
+                    "could not scan receive directory for orphaned staging files"
+                ),
+            }
+        }
         let shared_for_task = Arc::clone(&shared);
         let task = rt.spawn(run_session(
             host_port,
@@ -270,6 +515,11 @@ impl ViewerEngine {
             input_tx,
             clipboard_tx,
             ft_cmd_tx,
+            ft_reservations: Arc::new(StdMutex::new(HashMap::new())),
+            ft_streams: Arc::new(StdMutex::new(HashMap::new())),
+            next_ft_reservation: AtomicU64::new(1),
+            staging_dir,
+            runtime: rt.clone(),
             _task: task,
         }
     }
@@ -310,9 +560,22 @@ impl ViewerEngine {
             Some(t) => ClipboardContent::Text(t),
             None => ClipboardContent::Cleared,
         };
-        let _ = self.clipboard_tx.try_send(content);
+        self.clipboard_tx.send_replace(Some(content));
     }
 
+    /// Enqueue a state transition with bounded backpressure. Mobile UI APIs are
+    /// synchronous, so this may briefly block only when the fixed 256-event
+    /// queue is saturated; the network sender itself remains bounded by the
+    /// authenticated transport send-stall deadline and eventually closes the
+    /// receiver on a dead session rather than allowing unbounded memory growth.
+    fn send_stateful_input(&self, event: InputEvent) {
+        let _ = self.input_tx.blocking_send(event);
+    }
+
+    /// Legacy ambiguous pointer API retained for ABI compatibility. New
+    /// callers should use [`Self::send_pointer_move`] or
+    /// [`Self::send_pointer_button`] so queue policy can distinguish lossy
+    /// motion from state transitions.
     pub fn send_pointer(&self, x: f32, y: f32, button: u8, pressed: bool) {
         let _ = self.input_tx.try_send(InputEvent::Pointer {
             x,
@@ -322,35 +585,449 @@ impl ViewerEngine {
         });
     }
 
+    /// Send lossy/coalescible pointer motion with no button-state transition.
+    pub fn send_pointer_move(&self, x: f32, y: f32) {
+        let _ = self.input_tx.try_send(InputEvent::PointerMove { x, y });
+    }
+
+    /// Send a pointer-button state transition. This uses bounded backpressure
+    /// rather than `try_send`: silently dropping a release can leave remote
+    /// input logically stuck.
+    pub fn send_pointer_button(&self, x: f32, y: f32, button: u8, pressed: bool) {
+        self.send_stateful_input(InputEvent::PointerButton {
+            x,
+            y,
+            button,
+            pressed,
+        });
+    }
+
     pub fn send_touch(&self, index: u8, x: f32, y: f32, phase: u8, pressure: f32) {
-        let _ = self.input_tx.try_send(InputEvent::Touch {
+        let event = InputEvent::Touch {
             index,
             x,
             y,
             phase,
             pressure,
-        });
+        };
+        // Move samples are spatially supersedable. Down/up/cancel establish or
+        // clear touch state and therefore use bounded backpressure.
+        if phase == 1 {
+            let _ = self.input_tx.try_send(event);
+        } else {
+            self.send_stateful_input(event);
+        }
     }
 
     pub fn send_key(&self, code: u32, pressed: bool, modifiers: u8) {
-        let _ = self.input_tx.try_send(InputEvent::Key {
+        self.send_stateful_input(InputEvent::Key {
             code,
             pressed,
             modifiers,
         });
     }
 
-    /// Offer `data` to the host under `name`. `data` must already be
-    /// fully read into memory by the caller (Android's Storage Access
-    /// Framework hands back a `Uri`, not a plain path, so the JNI
-    /// layer reads it via `ContentResolver` before calling this).
+    /// Snapshot bounded file-command admission state for local diagnostics.
+    /// Expired entries are not counted even if their async reaper has not yet
+    /// run; channel capacity remains the source of truth for actual admission.
+    pub fn file_transfer_admission_snapshot(&self) -> Option<FileTransferAdmissionSnapshotV1> {
+        let reservations = self.ft_reservations.lock().ok()?;
+        let now = Instant::now();
+        let mut active_reserved = 0_u32;
+        let mut active_copying = 0_u32;
+        for reservation in reservations.values().filter(|entry| now < entry.expires_at) {
+            match reservation.state {
+                FileTransferReservationState::Reserved => {
+                    active_reserved = active_reserved.saturating_add(1);
+                }
+                FileTransferReservationState::Copying => {
+                    active_copying = active_copying.saturating_add(1);
+                }
+            }
+        }
+        Some(FileTransferAdmissionSnapshotV1 {
+            active_reserved,
+            active_copying,
+            available_command_slots: self.ft_cmd_tx.capacity() as u32,
+            command_capacity: FILE_TRANSFER_CMD_QUEUE_CAP as u32,
+        })
+    }
+
+    pub fn file_transfer_admission_snapshot_v2(&self) -> Option<FileTransferAdmissionSnapshotV2> {
+        let base = self.file_transfer_admission_snapshot()?;
+        let streams = self.ft_streams.lock().ok()?;
+        let now = Instant::now();
+        let mut active_streaming = 0_u32;
+        let mut active_stream_bytes = 0_u64;
+        for stream in streams.values().filter(|entry| now < entry.expires_at) {
+            active_streaming = active_streaming.saturating_add(1);
+            active_stream_bytes = active_stream_bytes.saturating_add(stream.written as u64);
+        }
+        Some(FileTransferAdmissionSnapshotV2 {
+            active_reserved: base.active_reserved,
+            active_copying: base.active_copying,
+            active_streaming,
+            active_stream_bytes,
+            available_command_slots: base.available_command_slots,
+            command_capacity: base.command_capacity,
+        })
+    }
+
+    /// Check whether a file command is worth materializing/copying now.
+    ///
+    /// This is deliberately an advisory preflight, not a reservation: another
+    /// producer can consume queue capacity before the final `try_send`. The
+    /// final [`send_file`](Self::send_file) call therefore performs the same
+    /// size/session/queue checks again.
+    pub fn check_file_transfer_admission(
+        &self,
+        data_len: usize,
+    ) -> Result<(), FileTransferEnqueueError> {
+        if data_len > xenia_peer_core::producer_flow::MOBILE_FILE_TRANSFER_MAX_BYTES_V1 {
+            return Err(FileTransferEnqueueError::FileTooLarge);
+        }
+        if self.ft_cmd_tx.is_closed() {
+            return Err(FileTransferEnqueueError::SessionClosed);
+        }
+        if self.ft_cmd_tx.capacity() == 0 {
+            return Err(FileTransferEnqueueError::QueueFull);
+        }
+        Ok(())
+    }
+
+    /// Reserve one bounded file-command slot before materializing/copying a
+    /// potentially large payload. The token is process-local and single-use.
+    pub fn reserve_file_transfer(&self, data_len: usize) -> Result<u64, FileTransferEnqueueError> {
+        if data_len > xenia_peer_core::producer_flow::MOBILE_FILE_TRANSFER_MAX_BYTES_V1 {
+            return Err(FileTransferEnqueueError::FileTooLarge);
+        }
+        let permit = match self.ft_cmd_tx.clone().try_reserve_owned() {
+            Ok(permit) => permit,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                return Err(FileTransferEnqueueError::QueueFull);
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                return Err(FileTransferEnqueueError::SessionClosed);
+            }
+        };
+        let Ok(mut reservations) = self.ft_reservations.lock() else {
+            return Err(FileTransferEnqueueError::InvalidReservation);
+        };
+        loop {
+            let token = self.next_ft_reservation.fetch_add(1, Ordering::Relaxed);
+            if token == 0 || reservations.contains_key(&token) {
+                continue;
+            }
+            reservations.insert(
+                token,
+                FileTransferReservation {
+                    expected_len: data_len,
+                    permit,
+                    state: FileTransferReservationState::Reserved,
+                    expires_at: Instant::now()
+                        + Duration::from_millis(FILE_TRANSFER_RESERVATION_TTL_MS),
+                },
+            );
+            drop(reservations);
+            spawn_file_transfer_reservation_expiry(
+                &self.runtime,
+                Arc::clone(&self.ft_reservations),
+                token,
+            );
+            return Ok(token);
+        }
+    }
+
+    /// Validate that a live reservation exists for exactly `data_len` bytes
+    /// without consuming it. C/JNI boundaries use this before copying payload
+    /// bytes; [`Self::send_file_reserved`] still rechecks atomically on consume.
+    pub fn check_file_transfer_reservation(
+        &self,
+        token: u64,
+        data_len: usize,
+    ) -> Result<(), FileTransferEnqueueError> {
+        let mut reservations = self
+            .ft_reservations
+            .lock()
+            .map_err(|_| FileTransferEnqueueError::InvalidReservation)?;
+        let Some((expected_len, expires_at)) = reservations
+            .get(&token)
+            .map(|reservation| (reservation.expected_len, reservation.expires_at))
+        else {
+            return Err(FileTransferEnqueueError::InvalidReservation);
+        };
+        if Instant::now() >= expires_at {
+            reservations.remove(&token);
+            return Err(FileTransferEnqueueError::InvalidReservation);
+        }
+        if expected_len != data_len {
+            return Err(FileTransferEnqueueError::ReservationSizeMismatch);
+        }
+        Ok(())
+    }
+
+    /// Atomically move a live reservation into the bounded copy/commit phase.
+    /// The first successful claim extends the original admission TTL into a
+    /// separate copy lease; repeated claims are idempotent and do not extend it.
+    pub fn claim_file_transfer_reservation(
+        &self,
+        token: u64,
+        data_len: usize,
+    ) -> Result<(), FileTransferEnqueueError> {
+        let mut reservations = self
+            .ft_reservations
+            .lock()
+            .map_err(|_| FileTransferEnqueueError::InvalidReservation)?;
+        let now = Instant::now();
+        let expired = reservations
+            .get(&token)
+            .is_some_and(|reservation| now >= reservation.expires_at);
+        if expired {
+            reservations.remove(&token);
+            return Err(FileTransferEnqueueError::InvalidReservation);
+        }
+        let reservation = reservations
+            .get_mut(&token)
+            .ok_or(FileTransferEnqueueError::InvalidReservation)?;
+        reservation.claim(data_len, now)
+    }
+
+    /// Release an unused reservation and return its channel capacity.
+    pub fn cancel_file_transfer_reservation(&self, token: u64) -> bool {
+        if token == 0 {
+            return false;
+        }
+        self.ft_reservations
+            .lock()
+            .ok()
+            .and_then(|mut reservations| reservations.remove(&token))
+            .is_some()
+    }
+
+    /// Commit a file command into a capacity slot reserved before payload copy.
+    pub fn send_file_reserved(
+        &self,
+        token: u64,
+        name: String,
+        data: Vec<u8>,
+    ) -> Result<(), FileTransferEnqueueError> {
+        let reservation = self
+            .ft_reservations
+            .lock()
+            .ok()
+            .and_then(|mut reservations| reservations.remove(&token))
+            .ok_or(FileTransferEnqueueError::InvalidReservation)?;
+        if Instant::now() >= reservation.expires_at
+            || reservation.state != FileTransferReservationState::Copying
+        {
+            return Err(FileTransferEnqueueError::InvalidReservation);
+        }
+        if data.len() != reservation.expected_len {
+            return Err(FileTransferEnqueueError::ReservationSizeMismatch);
+        }
+        reservation
+            .permit
+            .send(FileTransferCommand::SendFile { name, data });
+        Ok(())
+    }
+
+    /// Legacy in-memory outbound path. New Android picker code uses the V20
+    /// staged stream API so a SAF file is not materialized as a whole-file
+    /// Java `ByteArray` plus Rust `Vec<u8>`.
     /// Only one outgoing transfer is in flight at a time -- calling
     /// this while one is already active surfaces a `Done { ok: false
     /// }` event rather than queuing a second one.
-    pub fn send_file(&self, name: String, data: Vec<u8>) {
-        let _ = self
+    pub fn send_file(&self, name: String, data: Vec<u8>) -> Result<(), FileTransferEnqueueError> {
+        self.check_file_transfer_admission(data.len())?;
+        match self
             .ft_cmd_tx
-            .try_send(FileTransferCommand::SendFile { name, data });
+            .try_send(FileTransferCommand::SendFile { name, data })
+        {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(FileTransferEnqueueError::QueueFull),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(FileTransferEnqueueError::SessionClosed)
+            }
+        }
+    }
+
+    /// Begin a disk-backed outbound stream. A real file-command channel slot
+    /// is reserved before any SAF bytes are copied into native code. `None`
+    /// means the provider did not expose a stable length; the fixed mobile
+    /// ceiling is still enforced incrementally while chunks are staged.
+    pub fn begin_file_transfer_stream(
+        &self,
+        name: String,
+        expected_len: Option<usize>,
+    ) -> Result<u64, FileTransferEnqueueError> {
+        if expected_len.is_some_and(|len| {
+            len > xenia_peer_core::producer_flow::MOBILE_FILE_TRANSFER_MAX_BYTES_V1
+        }) {
+            return Err(FileTransferEnqueueError::FileTooLarge);
+        }
+        if self.ft_cmd_tx.is_closed() {
+            return Err(FileTransferEnqueueError::SessionClosed);
+        }
+        let safe_name =
+            sanitize_transfer_filename(&name).ok_or(FileTransferEnqueueError::InvalidArgument)?;
+        let permit = match self.ft_cmd_tx.clone().try_reserve_owned() {
+            Ok(permit) => permit,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                return Err(FileTransferEnqueueError::QueueFull);
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                return Err(FileTransferEnqueueError::SessionClosed);
+            }
+        };
+        std::fs::create_dir_all(&self.staging_dir)
+            .map_err(|_| FileTransferEnqueueError::IoError)?;
+        let mut streams = self
+            .ft_streams
+            .lock()
+            .map_err(|_| FileTransferEnqueueError::InvalidReservation)?;
+        loop {
+            let token = self.next_ft_reservation.fetch_add(1, Ordering::Relaxed);
+            if token == 0
+                || streams.contains_key(&token)
+                || self
+                    .ft_reservations
+                    .lock()
+                    .ok()
+                    .is_some_and(|reservations| reservations.contains_key(&token))
+            {
+                continue;
+            }
+            let path = self.staging_dir.join(format!("upload-{token:016x}.part"));
+            let file = match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return Err(FileTransferEnqueueError::IoError),
+            };
+            streams.insert(
+                token,
+                FileTransferStreamUpload {
+                    name: safe_name,
+                    path,
+                    file,
+                    hasher: blake3::Hasher::new(),
+                    written: 0,
+                    expected_len,
+                    permit,
+                    expires_at: Instant::now()
+                        + Duration::from_millis(FILE_TRANSFER_STREAM_LEASE_MS),
+                },
+            );
+            drop(streams);
+            spawn_file_transfer_stream_expiry(&self.runtime, Arc::clone(&self.ft_streams), token);
+            return Ok(token);
+        }
+    }
+
+    /// Append one bounded SAF chunk to a native staging file. Chunks are
+    /// hashed as they arrive; no whole-file Rust allocation is created.
+    pub fn append_file_transfer_stream(
+        &self,
+        token: u64,
+        bytes: &[u8],
+    ) -> Result<(), FileTransferEnqueueError> {
+        let mut streams = self
+            .ft_streams
+            .lock()
+            .map_err(|_| FileTransferEnqueueError::InvalidReservation)?;
+        let expired = streams
+            .get(&token)
+            .is_some_and(|stream| Instant::now() >= stream.expires_at);
+        if expired {
+            if let Some(stream) = streams.remove(&token) {
+                remove_staged_upload(stream);
+            }
+            return Err(FileTransferEnqueueError::InvalidReservation);
+        }
+        let stream = streams
+            .get_mut(&token)
+            .ok_or(FileTransferEnqueueError::InvalidReservation)?;
+        let new_len = stream
+            .written
+            .checked_add(bytes.len())
+            .ok_or(FileTransferEnqueueError::FileTooLarge)?;
+        if new_len > xenia_peer_core::producer_flow::MOBILE_FILE_TRANSFER_MAX_BYTES_V1 {
+            return Err(FileTransferEnqueueError::FileTooLarge);
+        }
+        if stream
+            .expected_len
+            .is_some_and(|expected| new_len > expected)
+        {
+            return Err(FileTransferEnqueueError::ReservationSizeMismatch);
+        }
+        stream
+            .file
+            .write_all(bytes)
+            .map_err(|_| FileTransferEnqueueError::IoError)?;
+        stream.hasher.update(bytes);
+        stream.written = new_len;
+        Ok(())
+    }
+
+    /// Finish staging and consume the reserved command slot. The background
+    /// session later reads the app-private file in protocol-sized chunks only
+    /// after the peer accepts the authenticated whole-file hash/size offer.
+    pub fn finish_file_transfer_stream(&self, token: u64) -> Result<(), FileTransferEnqueueError> {
+        let mut stream = self
+            .ft_streams
+            .lock()
+            .ok()
+            .and_then(|mut streams| streams.remove(&token))
+            .ok_or(FileTransferEnqueueError::InvalidReservation)?;
+        if Instant::now() >= stream.expires_at {
+            remove_staged_upload(stream);
+            return Err(FileTransferEnqueueError::InvalidReservation);
+        }
+        if stream
+            .expected_len
+            .is_some_and(|expected| expected != stream.written)
+        {
+            remove_staged_upload(stream);
+            return Err(FileTransferEnqueueError::ReservationSizeMismatch);
+        }
+        if stream.file.flush().is_err() {
+            remove_staged_upload(stream);
+            return Err(FileTransferEnqueueError::IoError);
+        }
+        let hash = *stream.hasher.finalize().as_bytes();
+        let path = stream.path;
+        let name = stream.name;
+        let size = stream.written as u64;
+        let permit = stream.permit;
+        permit.send(FileTransferCommand::SendStagedFile {
+            name,
+            path,
+            size,
+            blake3_hash: hash,
+        });
+        Ok(())
+    }
+
+    /// Cancel a staged stream and return its queue permit; dropping the stream
+    /// also removes its app-private partial file.
+    pub fn cancel_file_transfer_stream(&self, token: u64) -> bool {
+        if token == 0 {
+            return false;
+        }
+        let removed = self
+            .ft_streams
+            .lock()
+            .ok()
+            .and_then(|mut streams| streams.remove(&token));
+        if let Some(stream) = removed {
+            remove_staged_upload(stream);
+            true
+        } else {
+            false
+        }
     }
 
     /// Pop the oldest queued file-transfer event, if any.
@@ -364,8 +1041,17 @@ impl Drop for ViewerEngine {
         // Dropping a Tokio JoinHandle detaches its task. A disconnected mobile
         // session must instead terminate its network/background work, otherwise
         // a stale task can retain sockets and buffers after the registry id is
-        // gone.
+        // gone. Outstanding pre-copy file reservations are also released
+        // immediately rather than waiting for their short lease to expire.
         self._task.abort();
+        if let Ok(mut reservations) = self.ft_reservations.lock() {
+            reservations.clear();
+        }
+        if let Ok(mut streams) = self.ft_streams.lock() {
+            for (_, stream) in streams.drain() {
+                remove_staged_upload(stream);
+            }
+        }
     }
 }
 
@@ -375,7 +1061,7 @@ async fn run_session(
     codec: MobileCodec,
     shared: Arc<Shared>,
     input_rx: mpsc::Receiver<InputEvent>,
-    clipboard_rx: mpsc::Receiver<ClipboardContent>,
+    clipboard_rx: watch::Receiver<Option<ClipboardContent>>,
     ft_cmd_rx: mpsc::Receiver<FileTransferCommand>,
     recv_dir: Option<PathBuf>,
     max_file_bytes: u64,
@@ -406,7 +1092,7 @@ async fn run_session_inner(
     codec: MobileCodec,
     shared: &Arc<Shared>,
     mut input_rx: mpsc::Receiver<InputEvent>,
-    mut clipboard_rx: mpsc::Receiver<ClipboardContent>,
+    mut clipboard_rx: watch::Receiver<Option<ClipboardContent>>,
     mut ft_cmd_rx: mpsc::Receiver<FileTransferCommand>,
     recv_dir: Option<PathBuf>,
     max_file_bytes: u64,
@@ -433,11 +1119,14 @@ async fn run_session_inner(
     // This engine only ever dials TCP (see module doc); WS/QUIC are a
     // possible fast-follow but would need their own `Transport` impl
     // wired in here.
-    let negotiated_transport = NegotiatedTransport::Tcp;
+    let transport_profile = transport.transport_profile();
+    let pre_session_profile = transport.pre_session_profile();
+    let availability_profile = transport.availability_profile();
 
     let (send_half, mut recv_half) = transport.split();
     let session = Arc::new(Mutex::new(session));
     let send_half = Arc::new(Mutex::new(send_half));
+    let (surface_ready_tx, surface_ready_rx) = watch::channel(false);
 
     // Outbound input-event sender task: mirrors xenia-viewer's GUI
     // input loop exactly (bincode-serialize -> seal_input_event ->
@@ -445,7 +1134,13 @@ async fn run_session_inner(
     {
         let session = Arc::clone(&session);
         let send_half = Arc::clone(&send_half);
+        let mut surface_ready = surface_ready_rx.clone();
         tokio::spawn(async move {
+            while !*surface_ready.borrow() {
+                if surface_ready.changed().await.is_err() {
+                    return;
+                }
+            }
             while let Some(event) = input_rx.recv().await {
                 let payload = match bincode::serialize(&event) {
                     Ok(bytes) => bytes,
@@ -479,8 +1174,20 @@ async fn run_session_inner(
     {
         let session = Arc::clone(&session);
         let send_half = Arc::clone(&send_half);
+        let mut surface_ready = surface_ready_rx.clone();
         tokio::spawn(async move {
-            while let Some(content) = clipboard_rx.recv().await {
+            while !*surface_ready.borrow() {
+                if surface_ready.changed().await.is_err() {
+                    return;
+                }
+            }
+            loop {
+                if clipboard_rx.changed().await.is_err() {
+                    return;
+                }
+                let Some(content) = clipboard_rx.borrow_and_update().clone() else {
+                    continue;
+                };
                 let envelope = {
                     let mut session = session.lock().await;
                     match session.seal_clipboard_event(content) {
@@ -516,7 +1223,16 @@ async fn run_session_inner(
         MobileCodec::H264 => FramePixelFormat::H264,
     };
 
-    let mut capabilities_received = false;
+    let mut pending_surface = Some(
+        PendingSessionSurface::new_with_profiles(
+            handshake.negotiated_context_hash,
+            transport_profile.clone(),
+            pre_session_profile,
+            availability_profile,
+        )
+        .map_err(|e| e.to_string())?,
+    );
+    let mut authenticated_surface: Option<AuthenticatedSessionSurface> = None;
     let mut epoch_state = SessionEpochState::new(handshake.transcript_hash, RekeyPolicy::smoke());
 
     // File-transfer state, owned exclusively by this loop (unlike
@@ -533,7 +1249,10 @@ async fn run_session_inner(
     loop {
         let envelope = tokio::select! {
             biased;
-            Some(cmd) = ft_cmd_rx.recv() => {
+            Some(cmd) = ft_cmd_rx.recv(), if can_activate_file_transfer_command(
+                authenticated_surface.is_some(),
+                outgoing.is_some(),
+            ) => {
                 handle_file_transfer_command(
                     cmd,
                     &session,
@@ -562,6 +1281,9 @@ async fn run_session_inner(
             Some(PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST)
                 | Some(PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER)
         ) {
+            let _authenticated_surface = authenticated_surface
+                .as_ref()
+                .ok_or("daemon sent file-transfer payload before sealed capabilities")?;
             let message = {
                 let mut session = session.lock().await;
                 match session.open_file_transfer_message(&envelope) {
@@ -597,32 +1319,32 @@ async fn run_session_inner(
             }
         };
 
-        if raw_frame.pixel_format == FramePixelFormat::Telemetry {
-            continue;
-        }
         if raw_frame.pixel_format == FramePixelFormat::Capabilities {
+            if authenticated_surface.is_some() {
+                return Err("daemon advertised sealed capabilities more than once".into());
+            }
             let capabilities =
                 RawCapabilities::from_frame(&raw_frame).map_err(|e| e.to_string())?;
-            let negotiated_context_hash =
-                negotiated_session_context_hash(negotiated_transport, capabilities.clone())
-                    .map_err(|e| e.to_string())?;
-            if let Some(expected_hash) = handshake.negotiated_context_hash
-                && expected_hash != negotiated_context_hash
-            {
-                return Err("sealed capabilities do not match handshake context hash".into());
-            }
-            if !capabilities.supports_current_lane_envelope() {
-                return Err("daemon advertised unsupported lane envelope version".into());
-            }
+            let pending = pending_surface
+                .take()
+                .ok_or("missing pending session surface before capabilities")?;
+            let surface = pending
+                .authenticate_capabilities(capabilities)
+                .map_err(|e| e.to_string())?;
+            let negotiated_context_hash = surface.context_hash();
             let _negotiated_context_key =
                 derive_negotiated_context_key(&handshake.key_schedule, &negotiated_context_hash);
-            capabilities_received = true;
+            info!(video_format = ?surface.capabilities().video_format, "mobile viewer capabilities accepted");
+            authenticated_surface = Some(surface);
+            let _ = surface_ready_tx.send(true);
             *shared.state.lock().await = SessionState::Connected;
-            info!(video_format = ?capabilities.video_format, "mobile viewer capabilities accepted");
             continue;
         }
-        if !capabilities_received {
-            return Err("daemon sent media before sealed session capabilities".into());
+        let _authenticated_surface = authenticated_surface
+            .as_ref()
+            .ok_or("daemon sent media before sealed session capabilities")?;
+        if raw_frame.pixel_format == FramePixelFormat::Telemetry {
+            continue;
         }
         if raw_frame.pixel_format == FramePixelFormat::Rekey {
             let RawRekey::Proposal {
@@ -751,6 +1473,14 @@ async fn push_ft_event(shared: &Arc<Shared>, event: FileTransferEvent) {
     queue.push_back(event);
 }
 
+/// A staged/mobile file command is expensive producer work. Keep it in the
+/// bounded MPSC lane until it can actually become the one active outgoing
+/// transfer. This prevents pre-authentication or already-busy consumers from
+/// dequeuing and discarding a fully staged file.
+fn can_activate_file_transfer_command(authenticated: bool, outgoing_active: bool) -> bool {
+    authenticated && !outgoing_active
+}
+
 /// Seal `message` under the control lane (always `is_host = false` --
 /// this engine only ever plays the viewer role) and send it.
 async fn seal_and_send<S: SendEnvelope>(
@@ -783,7 +1513,27 @@ async fn handle_file_transfer_command<S: SendEnvelope>(
     outgoing: &mut Option<OutgoingTransfer>,
     next_transfer_id: &mut u64,
 ) {
-    let FileTransferCommand::SendFile { name, data } = cmd;
+    // Unpack first so the defensive busy path owns the staged source. If this
+    // function is ever called while busy despite the select guard above,
+    // dropping `source` also removes a staged file rather than leaking it.
+    let (name, size, blake3_hash, source) = match cmd {
+        FileTransferCommand::SendFile { name, data } => {
+            let size = data.len() as u64;
+            let hash = *blake3::hash(&data).as_bytes();
+            (name, size, hash, OutgoingTransferSource::Memory(data))
+        }
+        FileTransferCommand::SendStagedFile {
+            name,
+            path,
+            size,
+            blake3_hash,
+        } => (
+            name,
+            size,
+            blake3_hash,
+            OutgoingTransferSource::StagedFile { path },
+        ),
+    };
     if outgoing.is_some() {
         warn!(
             name,
@@ -800,13 +1550,12 @@ async fn handle_file_transfer_command<S: SendEnvelope>(
             },
         )
         .await;
+        // `source` drops here. Disk-backed sources remove their staging file.
         return;
     }
 
     let transfer_id = *next_transfer_id;
     *next_transfer_id += 1;
-    let size = data.len() as u64;
-    let blake3_hash = *blake3::hash(&data).as_bytes();
     let offer = FileTransferMessage::Offer {
         transfer_id,
         name: name.clone(),
@@ -843,8 +1592,85 @@ async fn handle_file_transfer_command<S: SendEnvelope>(
     *outgoing = Some(OutgoingTransfer {
         transfer_id,
         name,
-        data,
+        size,
+        source,
     });
+}
+
+async fn send_outgoing_transfer_chunks<S: SendEnvelope>(
+    transfer: &OutgoingTransfer,
+    session: &Arc<Mutex<LaneSession>>,
+    send_half: &Arc<Mutex<S>>,
+    shared: &Arc<Shared>,
+) -> Result<(), String> {
+    let transfer_id = transfer.transfer_id;
+    let name = transfer.name.clone();
+    let total = transfer.size;
+    let mut offset = 0_u64;
+    match &transfer.source {
+        OutgoingTransferSource::Memory(data) => {
+            for chunk in data.chunks(FILE_TRANSFER_CHUNK_SIZE) {
+                let msg = FileTransferMessage::Chunk {
+                    transfer_id,
+                    offset,
+                    data: chunk.to_vec(),
+                };
+                seal_and_send(session, send_half, msg).await?;
+                offset = offset.saturating_add(chunk.len() as u64);
+                push_ft_event(
+                    shared,
+                    FileTransferEvent::Progress {
+                        transfer_id,
+                        name: name.clone(),
+                        done_bytes: offset,
+                        total_bytes: total,
+                        outgoing: true,
+                    },
+                )
+                .await;
+            }
+        }
+        OutgoingTransferSource::StagedFile { path } => {
+            use tokio::io::AsyncReadExt;
+            let mut file = tokio::fs::File::open(path)
+                .await
+                .map_err(|e| format!("open staged file: {e}"))?;
+            let mut buffer = vec![0_u8; FILE_TRANSFER_CHUNK_SIZE];
+            loop {
+                let read = file
+                    .read(&mut buffer)
+                    .await
+                    .map_err(|e| format!("read staged file: {e}"))?;
+                if read == 0 {
+                    break;
+                }
+                let msg = FileTransferMessage::Chunk {
+                    transfer_id,
+                    offset,
+                    data: buffer[..read].to_vec(),
+                };
+                seal_and_send(session, send_half, msg).await?;
+                offset = offset.saturating_add(read as u64);
+                push_ft_event(
+                    shared,
+                    FileTransferEvent::Progress {
+                        transfer_id,
+                        name: name.clone(),
+                        done_bytes: offset,
+                        total_bytes: total,
+                        outgoing: true,
+                    },
+                )
+                .await;
+            }
+        }
+    }
+    if offset != total {
+        return Err(format!(
+            "outgoing source length changed after offer: expected {total}, read {offset}"
+        ));
+    }
+    Ok(())
 }
 
 /// Handle one already-opened [`FileTransferMessage`] arriving from the
@@ -872,29 +1698,37 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
             size,
             blake3_hash,
         } => {
-            let (accept, reason) = match (recv_dir, sanitize_transfer_filename(&name)) {
-                (None, _) => (
-                    false,
-                    "file transfer is disabled on this viewer".to_string(),
-                ),
-                (Some(_), None) => (false, "unusable filename".to_string()),
+            let (safe_name, mut reason) = match (recv_dir, sanitize_transfer_filename(&name)) {
+                (None, _) => (None, "file transfer is disabled on this viewer".to_string()),
+                (Some(_), None) => (None, "unusable filename".to_string()),
                 (Some(_), Some(_)) if size > max_bytes => {
-                    (false, format!("file exceeds {max_bytes}-byte cap"))
+                    (None, format!("file exceeds {max_bytes}-byte cap"))
                 }
                 (Some(_), Some(_)) if incoming.len() >= MAX_CONCURRENT_INCOMING_TRANSFERS => {
-                    (false, "too many concurrent incoming transfers".to_string())
+                    (None, "too many concurrent incoming transfers".to_string())
                 }
-                (Some(_), Some(_)) => (true, String::new()),
+                (Some(_), Some(safe_name)) => (Some(safe_name), String::new()),
             };
-            if accept {
-                let safe_name = sanitize_transfer_filename(&name).expect("checked above");
+            let staged = safe_name.and_then(|safe_name| {
+                let recv_dir = recv_dir.expect("validated receive directory");
+                let dest = recv_dir.join(&safe_name);
+                match IncomingFileStager::create(&dest, size, blake3_hash) {
+                    Ok(stager) => Some((safe_name, stager)),
+                    Err(err) => {
+                        warn!(transfer_id, error = %err, "file receive staging could not be created");
+                        reason = "receiver could not allocate private staging".to_string();
+                        None
+                    }
+                }
+            });
+            let accept = staged.is_some();
+            if let Some((safe_name, stager)) = staged {
                 incoming.insert(
                     transfer_id,
                     IncomingTransfer {
                         name: safe_name.clone(),
                         expected_size: size,
-                        expected_hash: blake3_hash,
-                        buffer: Vec::with_capacity(size.min(max_bytes) as usize),
+                        stager,
                     },
                 );
                 info!(
@@ -949,47 +1783,29 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
                 return;
             };
             let name = transfer.name.clone();
-            let data = transfer.data.clone();
-            let total = data.len() as u64;
+            let total = transfer.size;
             info!(
                 transfer_id,
                 bytes = total,
                 "transfer accepted, sending chunks"
             );
-            for (i, chunk) in data.chunks(FILE_TRANSFER_CHUNK_SIZE).enumerate() {
-                let msg = FileTransferMessage::Chunk {
-                    transfer_id,
-                    offset: (i * FILE_TRANSFER_CHUNK_SIZE) as u64,
-                    data: chunk.to_vec(),
-                };
-                if let Err(err) = seal_and_send(session, send_half, msg).await {
-                    warn!(error = %err, "failed to send file-transfer chunk");
-                    *outgoing = None;
-                    push_ft_event(
-                        shared,
-                        FileTransferEvent::Done {
-                            transfer_id,
-                            name,
-                            outgoing: true,
-                            ok: false,
-                            detail: err,
-                        },
-                    )
-                    .await;
-                    return;
-                }
-                let done = ((i + 1) * FILE_TRANSFER_CHUNK_SIZE).min(total as usize) as u64;
+            let send_result =
+                send_outgoing_transfer_chunks(transfer, session, send_half, shared).await;
+            if let Err(err) = send_result {
+                warn!(error = %err, "failed to send file-transfer chunk");
+                *outgoing = None;
                 push_ft_event(
                     shared,
-                    FileTransferEvent::Progress {
+                    FileTransferEvent::Done {
                         transfer_id,
-                        name: name.clone(),
-                        done_bytes: done,
-                        total_bytes: total,
+                        name,
                         outgoing: true,
+                        ok: false,
+                        detail: err,
                     },
                 )
                 .await;
+                return;
             }
             if let Err(err) = seal_and_send(
                 session,
@@ -1011,7 +1827,14 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
                 .is_some_and(|t| t.transfer_id == transfer_id)
             {
                 warn!(transfer_id, reason, "outgoing transfer rejected by peer");
-                let name = outgoing.take().expect("checked is_some_and above").name;
+                let Some(transfer) = outgoing.take() else {
+                    warn!(
+                        transfer_id,
+                        "outgoing transfer disappeared before rejection handling"
+                    );
+                    return;
+                };
+                let name = transfer.name;
                 push_ft_event(
                     shared,
                     FileTransferEvent::Done {
@@ -1034,40 +1857,34 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
                 warn!(transfer_id, "chunk for unknown/stale incoming transfer");
                 return;
             };
-            let off = offset as usize;
-            if off.saturating_add(data.len()) > transfer.expected_size as usize {
-                warn!(
-                    transfer_id,
-                    "chunk exceeds offered file size; dropping transfer"
-                );
-                let name = incoming
-                    .remove(&transfer_id)
-                    .expect("just matched via get_mut")
-                    .name;
-                push_ft_event(
-                    shared,
-                    FileTransferEvent::Done {
-                        transfer_id,
-                        name,
-                        outgoing: false,
-                        ok: false,
-                        detail: "chunk exceeded the offered file size".to_string(),
-                    },
-                )
-                .await;
-                return;
-            }
-            if transfer.buffer.len() < off + data.len() {
-                transfer.buffer.resize(off + data.len(), 0);
-            }
-            transfer.buffer[off..off + data.len()].copy_from_slice(&data);
+            let name = transfer.name.clone();
+            let total_bytes = transfer.expected_size;
+            let staged_bytes = match transfer.stager.append(offset, &data) {
+                Ok(staged_bytes) => staged_bytes,
+                Err(err) => {
+                    warn!(transfer_id, error = %err, "invalid incoming file chunk; dropping transfer");
+                    incoming.remove(&transfer_id);
+                    push_ft_event(
+                        shared,
+                        FileTransferEvent::Done {
+                            transfer_id,
+                            name,
+                            outgoing: false,
+                            ok: false,
+                            detail: err.to_string(),
+                        },
+                    )
+                    .await;
+                    return;
+                }
+            };
             push_ft_event(
                 shared,
                 FileTransferEvent::Progress {
                     transfer_id,
-                    name: transfer.name.clone(),
-                    done_bytes: transfer.buffer.len() as u64,
-                    total_bytes: transfer.expected_size,
+                    name,
+                    done_bytes: staged_bytes,
+                    total_bytes,
                     outgoing: false,
                 },
             )
@@ -1078,67 +1895,44 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
                 warn!(transfer_id, "Complete for unknown/stale incoming transfer");
                 return;
             };
-            let actual_hash = *blake3::hash(&transfer.buffer).as_bytes();
-            let hash_ok = actual_hash == transfer.expected_hash;
-            let mut local_ok = hash_ok;
-            let mut detail = String::new();
-            if hash_ok {
-                match recv_dir {
-                    Some(dir) => {
-                        let dest = dir.join(&transfer.name);
-                        match std::fs::write(&dest, &transfer.buffer) {
-                            Ok(()) => info!(
-                                transfer_id,
-                                path = %dest.display(),
-                                bytes = transfer.buffer.len(),
-                                "file transfer verified and written"
-                            ),
-                            Err(err) => {
-                                warn!(transfer_id, error = %err, "verified file failed to write to disk");
-                                local_ok = false;
-                                detail = err.to_string();
-                            }
-                        }
-                    }
-                    None => {
-                        // Can't actually happen: an Offer only ever
-                        // reaches `incoming` (above) when `recv_dir`
-                        // is `Some`. Kept as a defensive branch rather
-                        // than `unreachable!()` since this is a
-                        // cross-message invariant, not a
-                        // same-function one.
-                        local_ok = false;
-                        detail = "no receive directory configured".to_string();
-                    }
+            let name = transfer.name;
+            let expected_size = transfer.expected_size;
+            let finish = transfer.stager.finish();
+            let local_ok = finish.is_ok();
+            let detail = match &finish {
+                Ok(()) => {
+                    info!(
+                        transfer_id,
+                        name,
+                        bytes = expected_size,
+                        "file transfer verified and persisted"
+                    );
+                    String::new()
                 }
-            } else {
-                warn!(
-                    transfer_id,
-                    "file transfer failed BLAKE3 verification, not written"
-                );
-                detail = "BLAKE3 verification failed".to_string();
-            }
+                Err(err) => {
+                    warn!(transfer_id, error = %err, "incoming file verification/publication failed");
+                    err.to_string()
+                }
+            };
             push_ft_event(
                 shared,
                 FileTransferEvent::Done {
                     transfer_id,
-                    name: transfer.name.clone(),
+                    name,
                     outgoing: false,
                     ok: local_ok,
                     detail,
                 },
             )
             .await;
-            // The wire reply's `ok` reflects only the hash comparison
-            // (matching `xenia-viewer`'s exact protocol behavior) even
-            // though the local `Done` event above also folds in
-            // whether the disk write itself succeeded.
+            // Match desktop receiver semantics: Verified(true) means integrity
+            // verification and final no-clobber publication both succeeded.
             if let Err(err) = seal_and_send(
                 session,
                 send_half,
                 FileTransferMessage::Verified {
                     transfer_id,
-                    ok: hash_ok,
+                    ok: local_ok,
                 },
             )
             .await
@@ -1152,7 +1946,14 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
                 .is_some_and(|t| t.transfer_id == transfer_id)
             {
                 info!(transfer_id, ok, "outgoing transfer verification result");
-                let name = outgoing.take().expect("checked is_some_and above").name;
+                let Some(transfer) = outgoing.take() else {
+                    warn!(
+                        transfer_id,
+                        "outgoing transfer disappeared before verification handling"
+                    );
+                    return;
+                };
+                let name = transfer.name;
                 push_ft_event(
                     shared,
                     FileTransferEvent::Done {
@@ -1192,6 +1993,7 @@ mod tests {
             "127.0.0.1:1".to_string(),
             MobileCodec::Passthrough,
             None,
+            None,
             DEFAULT_TEST_MAX_FILE_BYTES,
         );
 
@@ -1224,6 +2026,7 @@ mod tests {
             "127.0.0.1:2".to_string(),
             MobileCodec::Hdc,
             None,
+            None,
             DEFAULT_TEST_MAX_FILE_BYTES,
         );
         assert!(engine.poll_frame().is_none());
@@ -1243,14 +2046,232 @@ mod tests {
             "127.0.0.1:3".to_string(),
             MobileCodec::Passthrough,
             None,
+            None,
             DEFAULT_TEST_MAX_FILE_BYTES,
         );
-        // The outbound clipboard task isn't spawned until the
-        // handshake completes -- sending before then should just
-        // queue harmlessly on the unbounded channel, not panic or
-        // block.
+        // The outbound clipboard task isn't spawned until the handshake
+        // completes. The one-value watch slot should retain only the latest
+        // state without growing a stale clipboard backlog.
         engine.send_clipboard(Some("hello".to_string()));
         engine.send_clipboard(None);
+    }
+
+    #[test]
+    fn file_transfer_admission_rejects_oversized_payload_before_queue_state() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let engine = ViewerEngine::connect(
+            rt.handle(),
+            "127.0.0.1:4".to_string(),
+            MobileCodec::Passthrough,
+            None,
+            None,
+            DEFAULT_TEST_MAX_FILE_BYTES,
+        );
+        assert_eq!(
+            engine.check_file_transfer_admission(
+                xenia_peer_core::producer_flow::MOBILE_FILE_TRANSFER_MAX_BYTES_V1 + 1,
+            ),
+            Err(FileTransferEnqueueError::FileTooLarge)
+        );
+    }
+
+    #[test]
+    fn owned_file_command_permit_holds_capacity_until_used_or_dropped() {
+        let (tx, mut rx) = mpsc::channel::<FileTransferCommand>(1);
+        let permit = tx.clone().try_reserve_owned().expect("reserve one slot");
+        assert!(matches!(
+            tx.try_send(FileTransferCommand::SendFile {
+                name: "other.txt".to_string(),
+                data: vec![9],
+            }),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+        drop(permit);
+        tx.try_send(FileTransferCommand::SendFile {
+            name: "after-cancel.txt".to_string(),
+            data: vec![1],
+        })
+        .expect("dropping reservation returns capacity");
+        assert!(rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn file_reservation_claim_extends_once_and_binds_length() {
+        let (tx, _rx) = mpsc::channel::<FileTransferCommand>(1);
+        let permit = tx.clone().try_reserve_owned().expect("reserve one slot");
+        let now = Instant::now();
+        let original_expiry = now + Duration::from_millis(10);
+        let mut reservation = FileTransferReservation {
+            expected_len: 8,
+            permit,
+            state: FileTransferReservationState::Reserved,
+            expires_at: original_expiry,
+        };
+
+        reservation.claim(8, now).expect("first claim");
+        let copy_expiry = reservation.expires_at;
+        assert_eq!(reservation.state, FileTransferReservationState::Copying);
+        assert!(copy_expiry > original_expiry);
+
+        reservation
+            .claim(8, now + Duration::from_millis(1))
+            .expect("idempotent repeated claim");
+        assert_eq!(
+            reservation.expires_at, copy_expiry,
+            "repeat claim must not extend lease"
+        );
+        assert_eq!(
+            reservation.claim(9, now + Duration::from_millis(2)),
+            Err(FileTransferEnqueueError::ReservationSizeMismatch)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reservation_expiry_tracks_claimed_copy_lease_and_restores_capacity() {
+        let (tx, _rx) = mpsc::channel::<FileTransferCommand>(1);
+        let permit = tx.clone().try_reserve_owned().expect("reserve one slot");
+        let reservations = Arc::new(StdMutex::new(HashMap::new()));
+        let token = 41_u64;
+        let now = Instant::now();
+        reservations.lock().unwrap().insert(
+            token,
+            FileTransferReservation {
+                expected_len: 8,
+                permit,
+                state: FileTransferReservationState::Reserved,
+                expires_at: now + Duration::from_millis(FILE_TRANSFER_RESERVATION_TTL_MS),
+            },
+        );
+        let expiry_task = spawn_file_transfer_reservation_expiry(
+            &tokio::runtime::Handle::current(),
+            Arc::clone(&reservations),
+            token,
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(tx.capacity(), 0, "reservation must hold the only slot");
+
+        tokio::time::advance(Duration::from_millis(FILE_TRANSFER_RESERVATION_TTL_MS - 1)).await;
+        reservations
+            .lock()
+            .unwrap()
+            .get_mut(&token)
+            .expect("live reservation before admission expiry")
+            .claim(8, Instant::now())
+            .expect("claim just before admission expiry");
+        let copy_expiry = reservations.lock().unwrap()[&token].expires_at;
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            reservations.lock().unwrap().contains_key(&token),
+            "original admission deadline must not reap a claimed copy lease"
+        );
+
+        let remaining = copy_expiry.saturating_duration_since(Instant::now());
+        assert!(remaining > Duration::from_millis(1));
+        tokio::time::advance(remaining - Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(reservations.lock().unwrap().contains_key(&token));
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(reservations.lock().unwrap().get(&token).is_none());
+        assert_eq!(tx.capacity(), 1, "expiry must return channel capacity");
+        expiry_task.await.expect("expiry worker exits cleanly");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeated_claim_does_not_extend_copy_lease_under_paused_time() {
+        let (tx, _rx) = mpsc::channel::<FileTransferCommand>(1);
+        let permit = tx.clone().try_reserve_owned().expect("reserve one slot");
+        let now = Instant::now();
+        let mut reservation = FileTransferReservation {
+            expected_len: 4,
+            permit,
+            state: FileTransferReservationState::Reserved,
+            expires_at: now + Duration::from_secs(1),
+        };
+        reservation.claim(4, now).expect("first claim");
+        let first_copy_expiry = reservation.expires_at;
+        tokio::time::advance(Duration::from_secs(10)).await;
+        reservation
+            .claim(4, Instant::now())
+            .expect("repeat claim while copy lease is live");
+        assert_eq!(reservation.expires_at, first_copy_expiry);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn staged_stream_expiry_removes_partial_file_and_restores_capacity() {
+        let (tx, _rx) = mpsc::channel::<FileTransferCommand>(1);
+        let permit = tx.clone().try_reserve_owned().expect("reserve one slot");
+        let token = 0x20_u64;
+        let path = std::env::temp_dir().join(format!(
+            "xenia-v20-stream-expiry-{}-{token}.part",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("create staged test file");
+        file.write_all(b"partial").expect("stage partial bytes");
+
+        let streams = Arc::new(StdMutex::new(HashMap::new()));
+        streams.lock().unwrap().insert(
+            token,
+            FileTransferStreamUpload {
+                name: "partial.bin".into(),
+                path: path.clone(),
+                file,
+                hasher: blake3::Hasher::new(),
+                written: 7,
+                expected_len: None,
+                permit,
+                expires_at: Instant::now() + Duration::from_millis(FILE_TRANSFER_STREAM_LEASE_MS),
+            },
+        );
+        let expiry_task = spawn_file_transfer_stream_expiry(
+            &tokio::runtime::Handle::current(),
+            Arc::clone(&streams),
+            token,
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(tx.capacity(), 0);
+        assert!(path.exists());
+
+        tokio::time::advance(Duration::from_millis(FILE_TRANSFER_STREAM_LEASE_MS)).await;
+        tokio::task::yield_now().await;
+        assert!(streams.lock().unwrap().is_empty());
+        assert!(
+            !path.exists(),
+            "expiry must delete the partial staging file"
+        );
+        assert_eq!(tx.capacity(), 1, "expiry must return command capacity");
+        expiry_task
+            .await
+            .expect("stream expiry worker exits cleanly");
+    }
+
+    #[test]
+    fn file_reservation_claim_rejects_expired_token() {
+        let (tx, _rx) = mpsc::channel::<FileTransferCommand>(1);
+        let permit = tx.clone().try_reserve_owned().expect("reserve one slot");
+        let now = Instant::now();
+        let mut reservation = FileTransferReservation {
+            expected_len: 1,
+            permit,
+            state: FileTransferReservationState::Reserved,
+            expires_at: now,
+        };
+        assert_eq!(
+            reservation.claim(1, now),
+            Err(FileTransferEnqueueError::InvalidReservation)
+        );
     }
 
     #[test]
@@ -1265,12 +2286,46 @@ mod tests {
             "127.0.0.1:4".to_string(),
             MobileCodec::Passthrough,
             None,
+            None,
             DEFAULT_TEST_MAX_FILE_BYTES,
         );
         // Mirrors `send_clipboard_before_any_connection_progress_does_not_panic`:
         // the file-transfer command isn't drained until the handshake
         // completes -- sending before then must just queue harmlessly.
-        engine.send_file("test.txt".to_string(), vec![1, 2, 3]);
+        let result = engine.send_file("test.txt".to_string(), vec![1, 2, 3]);
+        assert!(result.is_ok() || result == Err(FileTransferEnqueueError::SessionClosed));
+    }
+
+    #[test]
+    fn orphan_cleanup_only_removes_owned_upload_part_names() {
+        let root = std::env::temp_dir().join(format!(
+            "xenia-v20-staging-cleanup-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let owned = root.join("upload-0123456789abcdef.part");
+        let malformed = root.join("upload-not-a-token.part");
+        let unrelated = root.join("notes.part");
+        std::fs::write(&owned, b"stale").unwrap();
+        std::fs::write(&malformed, b"keep").unwrap();
+        std::fs::write(&unrelated, b"keep").unwrap();
+
+        cleanup_orphaned_outbound_staging(&root);
+
+        assert!(!owned.exists());
+        assert!(malformed.exists());
+        assert!(unrelated.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn file_command_activation_requires_authentication_and_an_idle_sender() {
+        assert!(!can_activate_file_transfer_command(false, false));
+        assert!(!can_activate_file_transfer_command(false, true));
+        assert!(!can_activate_file_transfer_command(true, true));
+        assert!(can_activate_file_transfer_command(true, false));
     }
 
     #[test]

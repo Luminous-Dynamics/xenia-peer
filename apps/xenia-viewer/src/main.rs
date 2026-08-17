@@ -16,12 +16,8 @@
 //! Both modes share the same receive/decode pipeline; the flag
 //! selects the output sink.
 
-#[cfg(feature = "audio-output")]
 use std::collections::VecDeque;
-use std::sync::Arc;
-#[cfg(feature = "audio-output")]
-use std::sync::Mutex;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
@@ -37,14 +33,16 @@ use xenia_peer_core::frame::{
     RawTelemetry, audio_flags,
 };
 use xenia_peer_core::handshake::{
-    NegotiatedTransport, SessionCapabilityGuard, perform_viewer_handshake_with_transcript,
+    AuthenticatedSessionSurface, NegotiatedTransport, PendingSessionSurface,
+    perform_viewer_handshake_with_transcript,
 };
 use xenia_peer_core::transport::{
     RecvEnvelope, SendEnvelope, TcpRecvHalf, TcpSendHalf, TcpTransport, Transport, TransportError,
 };
 use xenia_peer_core::{
-    AudioCodec, AudioJitterBuffer, ClipboardContent, HandshakeManager, LaneSession,
-    RawPcmAudioCodec, RekeyPolicy, SessionEpochState, derive_negotiated_context_key,
+    AudioCodec, AudioJitterBuffer, ClipboardContent, HandshakeManager, IncomingFileStager,
+    LaneSession, RawPcmAudioCodec, RekeyPolicy, SessionEpochState,
+    cleanup_orphaned_receive_staging, derive_negotiated_context_key,
 };
 use xenia_transport_quic::{
     QuicRecvHalf, QuicSendHalf, QuicTransport, bind_xenia_endpoint, decode_endpoint_addr,
@@ -84,6 +82,16 @@ struct ConnectedTransport {
 }
 
 impl Transport for AnyTransport {
+    fn transport_profile(&self) -> xenia_peer_core::transport::TransportProfileV1 {
+        match self {
+            AnyTransport::Tcp(t) | AnyTransport::PreloadedTcp { transport: t, .. } => {
+                t.transport_profile()
+            }
+            AnyTransport::Ws(t) => t.transport_profile(),
+            AnyTransport::Quic { transport, .. } => transport.transport_profile(),
+        }
+    }
+
     async fn send_envelope(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
         match self {
             AnyTransport::Tcp(t) => t.send_envelope(bytes).await,
@@ -111,11 +119,7 @@ impl Transport for AnyTransport {
 
 impl AnyTransport {
     fn negotiated_transport(&self) -> NegotiatedTransport {
-        match self {
-            AnyTransport::Tcp(_) | AnyTransport::PreloadedTcp { .. } => NegotiatedTransport::Tcp,
-            AnyTransport::Ws(_) => NegotiatedTransport::WebSocket,
-            AnyTransport::Quic { .. } => NegotiatedTransport::Quic,
-        }
+        self.transport_profile().kind
     }
 
     async fn close(&mut self) -> Result<(), TransportError> {
@@ -303,15 +307,60 @@ impl AudioPlaybackSink for SyntheticAudioSink {
     }
 }
 
+/// Small freshness-oriented GUI audio queue. When the GUI falls behind, V17
+/// discards the *oldest* queued frame before inserting the newest one so
+/// playback converges toward the present instead of preserving stale audio.
+struct FreshAudioQueue {
+    frames: Mutex<VecDeque<RawAudio>>,
+    capacity: usize,
+    pressure: xenia_peer_core::producer_flow::LanePressureCountersV1,
+}
+
+impl FreshAudioQueue {
+    fn new(capacity: usize) -> Self {
+        Self {
+            frames: Mutex::new(VecDeque::with_capacity(capacity.max(1))),
+            capacity: capacity.max(1),
+            pressure: xenia_peer_core::producer_flow::LanePressureCountersV1::default(),
+        }
+    }
+
+    /// Insert the newest decoded frame. Returns `true` when an older frame was
+    /// displaced to preserve the latency budget.
+    fn push_latest(&self, frame: RawAudio) -> Result<bool, ()> {
+        let Ok(mut frames) = self.frames.lock() else {
+            self.pressure.record_rejected();
+            return Err(());
+        };
+        let dropped = if frames.len() >= self.capacity {
+            frames.pop_front();
+            self.pressure.record_dropped_superseded();
+            true
+        } else {
+            false
+        };
+        frames.push_back(frame);
+        Ok(dropped)
+    }
+
+    fn pop_front(&self) -> Option<RawAudio> {
+        self.frames.lock().ok()?.pop_front()
+    }
+
+    fn pressure_snapshot(&self) -> xenia_peer_core::producer_flow::LanePressureSnapshotV1 {
+        self.pressure.snapshot()
+    }
+}
+
 struct ChannelAudioSink {
-    sender: mpsc::SyncSender<RawAudio>,
+    queue: Arc<FreshAudioQueue>,
     stats: AudioPlaybackStats,
 }
 
 impl ChannelAudioSink {
-    fn new(sender: mpsc::SyncSender<RawAudio>) -> Self {
+    fn new(queue: Arc<FreshAudioQueue>) -> Self {
         Self {
-            sender,
+            queue,
             stats: AudioPlaybackStats::default(),
         }
     }
@@ -319,16 +368,27 @@ impl ChannelAudioSink {
 
 impl AudioPlaybackSink for ChannelAudioSink {
     fn submit(&mut self, frame: &RawAudio) {
-        match self.sender.try_send(frame.clone()) {
-            Ok(()) => {
+        match self.queue.push_latest(frame.clone()) {
+            Ok(dropped_oldest) => {
                 self.stats.frames_played += 1;
                 self.stats.samples_played = self
                     .stats
                     .samples_played
                     .saturating_add(frame.payload.len() as u64 / 2);
+                if dropped_oldest {
+                    self.stats.rejected = self.stats.rejected.saturating_add(1);
+                    let dropped = self.queue.pressure_snapshot().dropped_superseded;
+                    if dropped <= 3 || dropped.is_multiple_of(32) {
+                        warn!(
+                            dropped_oldest = dropped,
+                            capacity = self.queue.capacity,
+                            "desktop audio ingress dropped oldest frame to recover freshness"
+                        );
+                    }
+                }
             }
-            Err(_) => {
-                self.stats.rejected += 1;
+            Err(()) => {
+                self.stats.rejected = self.stats.rejected.saturating_add(1);
             }
         }
     }
@@ -396,8 +456,6 @@ struct DeviceAudioSink {
 
 #[cfg(feature = "audio-output")]
 impl DeviceAudioSink {
-    const MAX_BUFFERED_SAMPLES: usize = 48_000 * 2;
-
     fn new(output_device: Option<&str>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -493,9 +551,14 @@ impl AudioPlaybackSink for DeviceAudioSink {
         }
 
         let adapted = adapt_audio_samples(frame, self.output_sample_rate_hz, self.output_channels);
-        let mut queue = self.queue.lock().expect("audio queue poisoned");
+        let Ok(mut queue) = self.queue.lock() else {
+            self.stats.rejected = self.stats.rejected.saturating_add(1);
+            return;
+        };
+        let max_buffered_samples =
+            audio_device_buffer_samples(self.output_sample_rate_hz, self.output_channels);
         for sample in adapted {
-            if queue.len() >= Self::MAX_BUFFERED_SAMPLES {
+            if queue.len() >= max_buffered_samples {
                 queue.pop_front();
             }
             queue.push_back(sample);
@@ -512,6 +575,19 @@ impl AudioPlaybackSink for DeviceAudioSink {
     fn stats(&self) -> AudioPlaybackStats {
         self.stats
     }
+}
+
+/// Convert the V16 device-output latency budget into a sample count for the
+/// actual output format. The count includes interleaved channels.
+#[cfg(any(feature = "audio-output", test))]
+fn audio_device_buffer_samples(sample_rate_hz: u32, channels: u16) -> usize {
+    let budget_ms =
+        u64::from(xenia_peer_core::producer_flow::DESKTOP_AUDIO_LATENCY_V1.device_buffer_ms);
+    let samples = u64::from(sample_rate_hz)
+        .saturating_mul(u64::from(channels.max(1)))
+        .saturating_mul(budget_ms)
+        / 1_000;
+    usize::try_from(samples.max(1)).unwrap_or(usize::MAX)
 }
 
 #[cfg(feature = "audio-output")]
@@ -575,7 +651,10 @@ fn adapt_audio_samples(
 
 #[cfg(feature = "audio-output")]
 fn fill_output_i16(data: &mut [i16], queue: &Arc<Mutex<VecDeque<i16>>>) {
-    let mut queue = queue.lock().expect("audio queue poisoned");
+    let Ok(mut queue) = queue.lock() else {
+        data.fill(0);
+        return;
+    };
     for sample in data {
         *sample = queue.pop_front().unwrap_or(0);
     }
@@ -583,7 +662,10 @@ fn fill_output_i16(data: &mut [i16], queue: &Arc<Mutex<VecDeque<i16>>>) {
 
 #[cfg(feature = "audio-output")]
 fn fill_output_f32(data: &mut [f32], queue: &Arc<Mutex<VecDeque<i16>>>) {
-    let mut queue = queue.lock().expect("audio queue poisoned");
+    let Ok(mut queue) = queue.lock() else {
+        data.fill(0.0);
+        return;
+    };
     for sample in data {
         *sample = f32::from(queue.pop_front().unwrap_or(0)) / f32::from(i16::MAX);
     }
@@ -591,7 +673,10 @@ fn fill_output_f32(data: &mut [f32], queue: &Arc<Mutex<VecDeque<i16>>>) {
 
 #[cfg(feature = "audio-output")]
 fn fill_output_u16(data: &mut [u16], queue: &Arc<Mutex<VecDeque<i16>>>) {
-    let mut queue = queue.lock().expect("audio queue poisoned");
+    let Ok(mut queue) = queue.lock() else {
+        data.fill(32_768);
+        return;
+    };
     for sample in data {
         let signed = i32::from(queue.pop_front().unwrap_or(0));
         *sample = (signed + 32_768) as u16;
@@ -768,9 +853,11 @@ struct OutgoingTransfer {
 struct IncomingTransfer {
     name: String,
     expected_size: u64,
-    expected_hash: [u8; 32],
-    buffer: Vec<u8>,
+    stager: IncomingFileStager,
 }
+
+/// Bound concurrently staged inbound transfers and their open file descriptors.
+const MAX_CONCURRENT_INCOMING_TRANSFERS: usize = 8;
 
 /// Reduce a wire-provided filename to a bare basename with no path
 /// separators, mirroring `xenia-peer`'s identically-named helper -- see
@@ -808,26 +895,40 @@ async fn handle_file_transfer_message(
             size,
             blake3_hash,
         } => {
-            let (accept, reason) = match (recv_file_dir, sanitize_transfer_filename(&name)) {
-                (None, _) => (
-                    false,
-                    "file transfer is disabled on this viewer".to_string(),
-                ),
-                (Some(_), None) => (false, "unusable filename".to_string()),
+            let (safe_name, mut reason) = match (recv_file_dir, sanitize_transfer_filename(&name)) {
+                (None, _) => (None, "file transfer is disabled on this viewer".to_string()),
+                (Some(_), None) => (None, "unusable filename".to_string()),
                 (Some(_), Some(_)) if size > max_bytes => {
-                    (false, format!("file exceeds {max_bytes}-byte cap"))
+                    (None, format!("file exceeds {max_bytes}-byte cap"))
                 }
-                (Some(_), Some(_)) => (true, String::new()),
+                (Some(_), Some(_)) if incoming.len() >= MAX_CONCURRENT_INCOMING_TRANSFERS => (
+                    None,
+                    format!(
+                        "too many concurrent transfers (max {MAX_CONCURRENT_INCOMING_TRANSFERS})"
+                    ),
+                ),
+                (Some(_), Some(safe_name)) => (Some(safe_name), String::new()),
             };
-            if accept {
-                let safe_name = sanitize_transfer_filename(&name).expect("checked above");
+            let staged = safe_name.and_then(|safe_name| {
+                let recv_dir = recv_file_dir.expect("validated receive directory");
+                let dest = recv_dir.join(&safe_name);
+                match IncomingFileStager::create(&dest, size, blake3_hash) {
+                    Ok(stager) => Some((safe_name, stager)),
+                    Err(err) => {
+                        warn!(transfer_id, error = %err, "file receive staging could not be created");
+                        reason = "receiver could not allocate private staging".to_string();
+                        None
+                    }
+                }
+            });
+            let accept = staged.is_some();
+            if let Some((safe_name, stager)) = staged {
                 incoming.insert(
                     transfer_id,
                     IncomingTransfer {
                         name: safe_name,
                         expected_size: size,
-                        expected_hash: blake3_hash,
-                        buffer: Vec::with_capacity(size.min(max_bytes) as usize),
+                        stager,
                     },
                 );
                 info!(transfer_id, name, size, "file transfer offer accepted");
@@ -903,46 +1004,36 @@ async fn handle_file_transfer_message(
                 warn!(transfer_id, "chunk for unknown/stale incoming transfer");
                 return Ok(());
             };
-            let off = offset as usize;
-            if off.saturating_add(data.len()) > transfer.expected_size as usize {
-                warn!(
-                    transfer_id,
-                    "chunk exceeds offered file size; dropping transfer"
-                );
+            if let Err(err) = transfer.stager.append(offset, &data) {
+                warn!(transfer_id, error = %err, "invalid incoming file chunk; dropping transfer");
                 incoming.remove(&transfer_id);
                 return Ok(());
             }
-            if transfer.buffer.len() < off + data.len() {
-                transfer.buffer.resize(off + data.len(), 0);
-            }
-            transfer.buffer[off..off + data.len()].copy_from_slice(&data);
         }
         xenia_peer_core::FileTransferMessage::Complete { transfer_id } => {
             let Some(transfer) = incoming.remove(&transfer_id) else {
                 warn!(transfer_id, "Complete for unknown/stale incoming transfer");
                 return Ok(());
             };
-            let actual_hash = *blake3::hash(&transfer.buffer).as_bytes();
-            let ok = actual_hash == transfer.expected_hash;
-            if ok {
-                let dest = recv_file_dir
-                    .expect("incoming transfer only exists when recv_file_dir is set")
-                    .join(&transfer.name);
-                match std::fs::write(&dest, &transfer.buffer) {
-                    Ok(()) => {
-                        info!(transfer_id, path = %dest.display(), bytes = transfer.buffer.len(), "file transfer verified and written")
-                    }
-                    Err(err) => {
-                        warn!(transfer_id, error = %err, "verified file failed to write to disk")
-                    }
+            let delivery_ok = match transfer.stager.finish() {
+                Ok(()) => {
+                    info!(
+                        transfer_id,
+                        name = transfer.name,
+                        bytes = transfer.expected_size,
+                        "file transfer verified and persisted"
+                    );
+                    true
                 }
-            } else {
-                warn!(
-                    transfer_id,
-                    "file transfer failed BLAKE3 verification, not written"
-                );
-            }
-            let verified = xenia_peer_core::FileTransferMessage::Verified { transfer_id, ok };
+                Err(err) => {
+                    warn!(transfer_id, error = %err, "incoming file verification/publication failed");
+                    false
+                }
+            };
+            let verified = xenia_peer_core::FileTransferMessage::Verified {
+                transfer_id,
+                ok: delivery_ok,
+            };
             let envelope = session
                 .lock()
                 .await
@@ -1196,9 +1287,10 @@ struct Args {
     #[arg(long)]
     send_file: Option<std::path::PathBuf>,
 
-    /// Reject/refuse to send any file larger than this many bytes. The
-    /// whole file is buffered in memory (both sending and receiving), so
-    /// this is also a memory-use cap, not just a policy knob.
+    /// Reject/refuse to send any file larger than this many bytes. Outbound
+    /// viewer files are still buffered in memory; inbound files are streamed
+    /// through private disk staging, so this remains a size-policy cap but is
+    /// no longer an equivalent receive-heap cap.
     #[arg(long, default_value_t = 200 * 1024 * 1024)]
     file_transfer_max_bytes: u64,
 
@@ -1317,7 +1409,7 @@ async fn send_synthetic_input(
     transport: &mut AnyTransport,
     session: &mut LaneSession,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let event = xenia_inject::InputEvent::Pointer {
+    let event = xenia_inject::InputEvent::PointerButton {
         x: 0.5,
         y: 0.5,
         button: 0,
@@ -1526,6 +1618,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    if let Some(recv_dir) = args.recv_file_dir.as_deref() {
+        match cleanup_orphaned_receive_staging(recv_dir) {
+            Ok(removed) if removed > 0 => {
+                info!(removed, dir = %recv_dir.display(), "removed orphaned receive staging files")
+            }
+            Ok(_) => {}
+            Err(err) => warn!(
+                dir = %recv_dir.display(),
+                error = %err,
+                "could not scan receive directory for orphaned staging files"
+            ),
+        }
+    }
+
     if args.gui {
         run_gui(args)
     } else {
@@ -1567,9 +1673,10 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut session = LaneSession::with_fixture(source_id, args.epoch);
     session.install_schedule(&handshake.key_schedule);
 
-    if args.send_synthetic_input && args.send_synthetic_input_after_frames == 0 {
-        send_synthetic_input(&mut transport, &mut session).await?;
-    }
+    // A requested frame-0 synthetic input is held until the one sealed
+    // capability contract has authenticated the application surface.
+    let mut send_initial_synthetic_input =
+        args.send_synthetic_input && args.send_synthetic_input_after_frames == 0;
 
     let mut decoder = make_decoder(args.codec)?;
     let expected_frame_fmt = codec_to_frame_format(args.codec);
@@ -1587,7 +1694,11 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut received: u64 = 0;
     let mut audio_decoded: u64 = 0;
     let mut last_audio_data: Option<AudioData> = None;
-    let mut audio_jitter = AudioJitterBuffer::with_playout_delay(0, 16, 2);
+    let mut audio_jitter = AudioJitterBuffer::with_playout_delay(
+        0,
+        xenia_peer_core::producer_flow::DESKTOP_AUDIO_LATENCY_V1.jitter_max_depth_frames,
+        xenia_peer_core::producer_flow::DESKTOP_AUDIO_LATENCY_V1.jitter_target_delay_frames,
+    );
     let mut audio_codec = make_audio_codec(selected_audio_codec)
         .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
     info!(
@@ -1597,7 +1708,16 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut audio_sink = ViewerAudioSink::new(args.play_audio, args.audio_output_device.as_deref())
         .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
     let negotiated_transport = transport.negotiated_transport();
-    let mut capability_guard = SessionCapabilityGuard::new(handshake.negotiated_context_hash);
+    let transport_profile = transport.transport_profile();
+    let pre_session_profile = transport.pre_session_profile();
+    let availability_profile = transport.availability_profile();
+    let mut pending_surface = Some(PendingSessionSurface::new_with_profiles(
+        handshake.negotiated_context_hash,
+        transport_profile.clone(),
+        pre_session_profile,
+        availability_profile,
+    )?);
+    let mut authenticated_surface: Option<AuthenticatedSessionSurface> = None;
     let mut epoch_state = SessionEpochState::new(handshake.transcript_hash, RekeyPolicy::smoke());
     loop {
         if frame_limit != 0 && received >= frame_limit {
@@ -1620,9 +1740,15 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             }
         };
         if raw_frame.pixel_format == FramePixelFormat::Capabilities {
+            if authenticated_surface.is_some() {
+                return Err("daemon advertised sealed capabilities more than once".into());
+            }
             let capabilities = RawCapabilities::from_frame(&raw_frame)?;
-            let negotiated_context_hash =
-                capability_guard.accept(negotiated_transport, &capabilities)?;
+            let pending = pending_surface
+                .take()
+                .ok_or("missing pending session surface before capabilities")?;
+            let surface = pending.authenticate_capabilities(capabilities)?;
+            let negotiated_context_hash = surface.context_hash();
             let _negotiated_context_key =
                 derive_negotiated_context_key(&handshake.key_schedule, &negotiated_context_hash);
             info!(
@@ -1631,22 +1757,27 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 "negotiated session context accepted"
             );
             let negotiated_audio_codec =
-                choose_audio_codec_from_capabilities(args.audio_codec, &capabilities)
+                choose_audio_codec_from_capabilities(args.audio_codec, surface.capabilities())
                     .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
             audio_codec = make_audio_codec(negotiated_audio_codec)
                 .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
             info!(
                 audio_codec = audio_codec.name(),
-                video_format = ?capabilities.video_format,
-                telemetry_enabled = capabilities.telemetry_enabled,
-                input_control_enabled = capabilities.input_control_enabled,
+                video_format = ?surface.capabilities().video_format,
+                telemetry_enabled = surface.capabilities().telemetry_enabled,
+                input_control_enabled = surface.capabilities().input_control_enabled,
                 "sealed session capabilities applied"
             );
+            authenticated_surface = Some(surface);
+            if send_initial_synthetic_input {
+                send_synthetic_input(&mut transport, &mut session).await?;
+                send_initial_synthetic_input = false;
+            }
             continue;
         }
-        if !capability_guard.is_accepted() {
-            return Err("daemon sent session payload before sealed capabilities".into());
-        }
+        let _authenticated_surface = authenticated_surface
+            .as_ref()
+            .ok_or("daemon sent session payload before sealed capabilities")?;
         if raw_frame.pixel_format == FramePixelFormat::Telemetry {
             let _ = decode_telemetry_frame(&raw_frame);
             continue;
@@ -1803,6 +1934,13 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
 // ─── GUI path ──────────────────────────────────────────────────────
 
+/// Maximum number of viewer input events buffered between the synchronous GUI
+/// thread and the authenticated network sender. Pointer motion is lossy under
+/// saturation; state transitions use bounded backpressure.
+const DESKTOP_INPUT_QUEUE_CAP: usize = 256;
+const _: [(); DESKTOP_INPUT_QUEUE_CAP] =
+    [(); xenia_peer_core::producer_flow::INPUT_STATE_TRANSITION_V1.capacity];
+
 fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let slot = FrameSlot::new();
     let config = ViewerConfig {
@@ -1812,12 +1950,14 @@ fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     };
     let audio_sink = ViewerAudioSink::new(args.play_audio, args.audio_output_device.as_deref())
         .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
-    let (audio_tx, audio_rx) = mpsc::sync_channel(64);
-    // Captured pointer/keyboard events flow GUI thread -> network
-    // task. `UnboundedSender::send` is a sync method, so the egui
-    // thread can call it directly without needing to be inside an
-    // async context.
-    let (input_tx, input_rx) = tokio::sync::mpsc::unbounded_channel::<xenia_inject::InputEvent>();
+    let audio_queue = Arc::new(FreshAudioQueue::new(
+        xenia_peer_core::producer_flow::DESKTOP_AUDIO_PLAYBACK_V3.capacity,
+    ));
+    // Captured pointer/keyboard events flow GUI thread -> network task through
+    // a bounded queue. The GUI distinguishes lossy pointer motion from
+    // stateful key/button transitions when selecting overflow behavior.
+    let (input_tx, input_rx) =
+        tokio::sync::mpsc::channel::<xenia_inject::InputEvent>(DESKTOP_INPUT_QUEUE_CAP);
 
     // Spawn the receive/decode pipeline on a dedicated tokio thread.
     // eframe wants to own the main thread; tokio runs beside it.
@@ -1826,9 +1966,12 @@ fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .worker_threads(2)
         .build()?;
     let slot_for_task = Arc::clone(&slot);
+    let audio_queue_for_task = Arc::clone(&audio_queue);
     let args_for_task = args.clone();
     rt.spawn(async move {
-        if let Err(err) = gui_receive_loop(args_for_task, slot_for_task, audio_tx, input_rx).await {
+        if let Err(err) =
+            gui_receive_loop(args_for_task, slot_for_task, audio_queue_for_task, input_rx).await
+        {
             tracing::error!(error = %err, "gui receive loop exited with error");
         }
     });
@@ -1849,7 +1992,7 @@ fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             Ok(Box::new(ViewerApp::new(
                 slot,
                 config,
-                Some(audio_rx),
+                Some(audio_queue),
                 Box::new(audio_sink),
                 Some(input_tx),
             )))
@@ -1865,8 +2008,8 @@ fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 async fn gui_receive_loop(
     args: Args,
     slot: Arc<FrameSlot>,
-    audio_tx: mpsc::SyncSender<RawAudio>,
-    mut input_rx: tokio::sync::mpsc::UnboundedReceiver<xenia_inject::InputEvent>,
+    audio_queue: Arc<FreshAudioQueue>,
+    mut input_rx: tokio::sync::mpsc::Receiver<xenia_inject::InputEvent>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let source_id = parse_source_id(&args.source_id_hex)
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
@@ -1894,6 +2037,9 @@ async fn gui_receive_loop(
     let mut session = LaneSession::with_fixture(source_id, args.epoch);
     session.install_schedule(&handshake.key_schedule);
     let negotiated_transport = transport.negotiated_transport();
+    let transport_profile = transport.transport_profile();
+    let pre_session_profile = transport.pre_session_profile();
+    let availability_profile = transport.availability_profile();
 
     // Split the transport so captured input can be sent concurrently
     // with the frame-receive loop below. `session` and the send half
@@ -1905,11 +2051,20 @@ async fn gui_receive_loop(
     let (send_half, mut recv_half) = transport.split();
     let session = Arc::new(tokio::sync::Mutex::new(session));
     let send_half = Arc::new(tokio::sync::Mutex::new(send_half));
+    // User-driven outbound application payloads remain parked until the
+    // authenticated capability surface is established below.
+    let (surface_ready_tx, surface_ready_rx) = tokio::sync::watch::channel(false);
 
     {
         let session = Arc::clone(&session);
         let send_half = Arc::clone(&send_half);
+        let mut surface_ready = surface_ready_rx.clone();
         tokio::spawn(async move {
+            while !*surface_ready.borrow() {
+                if surface_ready.changed().await.is_err() {
+                    return;
+                }
+            }
             while let Some(event) = input_rx.recv().await {
                 let payload = match bincode::serialize(&event) {
                     Ok(bytes) => bytes,
@@ -1939,8 +2094,14 @@ async fn gui_receive_loop(
     if args.clipboard == ClipboardMode::Bidirectional {
         let session = Arc::clone(&session);
         let send_half = Arc::clone(&send_half);
+        let mut surface_ready = surface_ready_rx.clone();
         let poll_interval = Duration::from_millis(args.clipboard_interval_ms.max(1));
         tokio::spawn(async move {
+            while !*surface_ready.borrow() {
+                if surface_ready.changed().await.is_err() {
+                    return;
+                }
+            }
             let mut last_sent: Option<String> = None;
             loop {
                 tokio::time::sleep(poll_interval).await;
@@ -2011,7 +2172,11 @@ async fn gui_receive_loop(
     let frame_limit = args.frames.unwrap_or(0);
     let mut received: u64 = 0;
     let mut audio_decoded: u64 = 0;
-    let mut audio_jitter = AudioJitterBuffer::with_playout_delay(0, 16, 2);
+    let mut audio_jitter = AudioJitterBuffer::with_playout_delay(
+        0,
+        xenia_peer_core::producer_flow::DESKTOP_AUDIO_LATENCY_V1.jitter_max_depth_frames,
+        xenia_peer_core::producer_flow::DESKTOP_AUDIO_LATENCY_V1.jitter_target_delay_frames,
+    );
     let mut audio_codec = make_audio_codec(selected_audio_codec)
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
     info!(
@@ -2019,8 +2184,17 @@ async fn gui_receive_loop(
         "viewer audio codec configured"
     );
     let mut audio_sink: Box<dyn AudioPlaybackSink + Send> =
-        Box::new(ChannelAudioSink::new(audio_tx));
-    let mut capability_guard = SessionCapabilityGuard::new(handshake.negotiated_context_hash);
+        Box::new(ChannelAudioSink::new(audio_queue));
+    let mut pending_surface = Some(
+        PendingSessionSurface::new_with_profiles(
+            handshake.negotiated_context_hash,
+            transport_profile.clone(),
+            pre_session_profile,
+            availability_profile,
+        )
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?,
+    );
+    let mut authenticated_surface: Option<AuthenticatedSessionSurface> = None;
     let mut epoch_state = SessionEpochState::new(handshake.transcript_hash, RekeyPolicy::smoke());
     loop {
         if frame_limit != 0 && received >= frame_limit {
@@ -2044,9 +2218,9 @@ async fn gui_receive_loop(
             Some(xenia_peer_core::PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST)
                 | Some(xenia_peer_core::PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER)
         ) {
-            if !capability_guard.is_accepted() {
-                return Err("daemon sent file-transfer payload before sealed capabilities".into());
-            }
+            let _authenticated_surface = authenticated_surface
+                .as_ref()
+                .ok_or("daemon sent file-transfer payload before sealed capabilities")?;
             let message = match session.lock().await.open_file_transfer_message(&envelope) {
                 Ok(message) => message,
                 Err(err) => {
@@ -2075,12 +2249,19 @@ async fn gui_receive_loop(
             }
         };
         if raw_frame.pixel_format == FramePixelFormat::Capabilities {
+            if authenticated_surface.is_some() {
+                return Err("daemon advertised sealed capabilities more than once".into());
+            }
             let capabilities = RawCapabilities::from_frame(&raw_frame).map_err(
                 |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
             )?;
-            let negotiated_context_hash = capability_guard
-                .accept(negotiated_transport, &capabilities)
+            let pending = pending_surface
+                .take()
+                .ok_or("missing pending session surface before capabilities")?;
+            let surface = pending
+                .authenticate_capabilities(capabilities)
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+            let negotiated_context_hash = surface.context_hash();
             let _negotiated_context_key =
                 derive_negotiated_context_key(&handshake.key_schedule, &negotiated_context_hash);
             info!(
@@ -2089,22 +2270,24 @@ async fn gui_receive_loop(
                 "negotiated session context accepted"
             );
             let negotiated_audio_codec =
-                choose_audio_codec_from_capabilities(args.audio_codec, &capabilities)?;
+                choose_audio_codec_from_capabilities(args.audio_codec, surface.capabilities())?;
             audio_codec = make_audio_codec(negotiated_audio_codec).map_err(
                 |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
             )?;
             info!(
                 audio_codec = audio_codec.name(),
-                video_format = ?capabilities.video_format,
-                telemetry_enabled = capabilities.telemetry_enabled,
-                input_control_enabled = capabilities.input_control_enabled,
+                video_format = ?surface.capabilities().video_format,
+                telemetry_enabled = surface.capabilities().telemetry_enabled,
+                input_control_enabled = surface.capabilities().input_control_enabled,
                 "sealed session capabilities applied"
             );
+            authenticated_surface = Some(surface);
+            let _ = surface_ready_tx.send(true);
             continue;
         }
-        if !capability_guard.is_accepted() {
-            return Err("daemon sent session payload before sealed capabilities".into());
-        }
+        let _authenticated_surface = authenticated_surface
+            .as_ref()
+            .ok_or("daemon sent session payload before sealed capabilities")?;
         if raw_frame.pixel_format == FramePixelFormat::Telemetry {
             if let Some(telemetry) = decode_telemetry_frame(&raw_frame) {
                 slot.put_telemetry(telemetry);
@@ -2341,19 +2524,29 @@ mod tests {
     }
 
     #[test]
-    fn channel_audio_sink_reports_backpressure() {
+    fn device_audio_buffer_is_derived_from_milliseconds() {
+        assert_eq!(audio_device_buffer_samples(48_000, 2), 7_680);
+        assert_eq!(audio_device_buffer_samples(48_000, 1), 3_840);
+        assert_eq!(audio_device_buffer_samples(24_000, 2), 3_840);
+    }
+
+    #[test]
+    fn channel_audio_sink_drops_oldest_to_recover_freshness() {
         let mut source = SyntheticAudioSource::new(1, SyntheticAudioKind::Sine);
-        let frame = source.next_frame(1_700_000_000_000);
-        let (tx, rx) = mpsc::sync_channel(1);
-        let mut sink = ChannelAudioSink::new(tx);
+        let first = source.next_frame(1_700_000_000_000);
+        let second = source.next_frame(1_700_000_000_020);
+        let queue = Arc::new(FreshAudioQueue::new(1));
+        let mut sink = ChannelAudioSink::new(Arc::clone(&queue));
 
-        sink.submit(&frame);
-        sink.submit(&frame);
+        sink.submit(&first);
+        sink.submit(&second);
 
-        assert_eq!(sink.stats().frames_played, 1);
+        assert_eq!(sink.stats().frames_played, 2);
         assert_eq!(sink.stats().rejected, 1);
-        assert!(rx.try_recv().is_ok());
-        assert!(rx.try_recv().is_err());
+        assert_eq!(queue.pressure_snapshot().dropped_superseded, 1);
+        let queued = queue.pop_front().expect("newest audio frame retained");
+        assert_eq!(queued.sequence, second.sequence);
+        assert!(queue.pop_front().is_none());
     }
 
     #[test]

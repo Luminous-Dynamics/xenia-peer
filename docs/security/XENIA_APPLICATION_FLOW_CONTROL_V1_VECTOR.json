@@ -1,0 +1,48 @@
+{
+  "schema": "xenia-application-flow-control-v1",
+  "input_event_schema_version": 2,
+  "input_event_bincode_variant_indices": {
+    "legacy_pointer": 0,
+    "key": 1,
+    "touch": 2,
+    "pointer_move": 3,
+    "pointer_button": 4
+  },
+  "producer_policies": [
+    {
+      "name": "pointer-motion",
+      "capacity": 256,
+      "overflow": "drop-newest"
+    },
+    {
+      "name": "input-state-transition",
+      "capacity": 256,
+      "overflow": "backpressure"
+    },
+    {
+      "name": "desktop-video-presentation",
+      "capacity": 1,
+      "overflow": "coalesce-latest"
+    },
+    {
+      "name": "mobile-video-presentation",
+      "capacity": 4,
+      "overflow": "drop-oldest"
+    },
+    {
+      "name": "desktop-telemetry-presentation",
+      "capacity": 1,
+      "overflow": "coalesce-latest"
+    },
+    {
+      "name": "desktop-audio-playback",
+      "capacity": 64,
+      "overflow": "drop-newest"
+    },
+    {
+      "name": "mobile-file-transfer-events",
+      "capacity": 64,
+      "overflow": "drop-oldest"
+    }
+  ]
+}

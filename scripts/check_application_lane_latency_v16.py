@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""No-Rust source-shape contract for Xenia application lane latency V16."""
+from pathlib import Path
+import hashlib, json, sys
+ROOT=Path(__file__).resolve().parents[1]
+def text(rel): return (ROOT/rel).read_text(encoding='utf-8')
+checks=[]
+def req(name, cond): checks.append((name,cond))
+flow=text('crates/xenia-peer-core/src/producer_flow.rs')
+viewer=text('apps/xenia-viewer/src/main.rs')
+daemon=text('apps/xenia-peer/src/main.rs')
+capture=text('crates/xenia-capture/src/lib.rs')
+mobile=text('crates/xenia-mobile-ffi/src/engine.rs')
+ffi=text('crates/xenia-mobile-ffi/src/lib.rs')
+jni=text('apps/xenia-viewer-android/src/main/cpp/xenia_jni.c')
+req('audio_latency_policy', 'pub const DESKTOP_AUDIO_LATENCY_V1' in flow)
+req('audio_ingress_v2', 'pub const DESKTOP_AUDIO_PLAYBACK_V2' in flow and 'ingress_capacity_frames: 4' in flow)
+req('audio_jitter_depth', 'jitter_max_depth_frames: 6' in flow and 'jitter_target_delay_frames: 2' in flow)
+req('audio_device_budget', 'device_buffer_ms: 80' in flow)
+req('viewer_uses_bounded_audio_queue', 'DESKTOP_AUDIO_PLAYBACK_V2.capacity' in viewer or 'DESKTOP_AUDIO_PLAYBACK_V3.capacity' in viewer)
+req('viewer_uses_policy_jitter', viewer.count('DESKTOP_AUDIO_LATENCY_V1.jitter_max_depth_frames') == 2)
+req('viewer_device_time_formula', 'fn audio_device_buffer_samples' in viewer and 'device_buffer_ms' in viewer)
+req('viewer_no_fixed_one_second_fifo', 'const MAX_BUFFERED_SAMPLES: usize = 48_000 * 2' not in viewer)
+req('capture_budget_100ms', 'pub const HOST_AUDIO_CAPTURE_BUFFER_BUDGET_MS: u32 = 100;' in capture)
+req('capture_time_formula', 'fn audio_capture_buffer_samples' in capture and 'max_buffered_samples' in capture)
+req('capture_no_fixed_one_second_fifo', 'const MAX_BUFFERED_SAMPLES: usize = 48_000 * 2' not in capture)
+req('video_freshness_policy', 'pub const HOST_VIDEO_FRESHNESS_V1' in flow and 'max_frames_in_flight: 1' in flow)
+req('video_stale_drop', 'dropping stale encoded video result before transport send' in daemon)
+req('video_lane_deadline', 'video envelope send exceeded' in daemon and 'tokio::time::timeout(send_deadline' in daemon)
+req('file_max_bytes', 'MOBILE_FILE_TRANSFER_MAX_BYTES_V1: usize = 100 * 1024 * 1024' in flow)
+req('file_admission_engine', 'pub fn check_file_transfer_admission' in mobile and 'FileTooLarge' in mobile)
+req('file_admission_ffi', 'pub extern "C" fn xenia_check_send_file' in ffi and 'XENIA_SEND_FILE_TOO_LARGE: i32 = 5;' in ffi)
+req('jni_declares_pre_copy_guard', 'xenia_check_send_file(uint64_t handle, size_t data_len)' in jni or 'xenia_reserve_send_file(uint64_t handle, size_t data_len' in jni)
+pre_candidates=[jni.find('xenia_check_send_file((uint64_t)handle'), jni.find('xenia_reserve_send_file(')]
+pre=min((p for p in pre_candidates if p != -1), default=-1)
+copy=jni.find('GetByteArrayElements(env, data')
+req('jni_checks_before_array_access', pre != -1 and copy != -1 and pre < copy)
+vector=json.loads((ROOT/'docs/security/XENIA_APPLICATION_LANE_LATENCY_V16_VECTOR.json').read_text())
+expected=vector.pop('canonical_sha256')
+canonical=json.dumps(vector,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()
+req('vector_sha256', hashlib.sha256(canonical).hexdigest()==expected)
+req('vector_audio_bound', vector['desktop_audio']['max_application_buffer_ms']==280)
+req('vector_video_fatal', vector['host_video']['send_timeout_action']=='fail-session')
+req('vector_precheck_not_reservation', vector['mobile_file_admission']['pre_copy_check_is_reservation'] is False)
+failed=[n for n,o in checks if not o]
+for n,o in checks: print(f"{'PASS' if o else 'FAIL'} {n}")
+if failed:
+    print('application lane latency V16 source contract FAILED: '+', '.join(failed),file=sys.stderr)
+    raise SystemExit(1)
+print(f'application lane latency V16 source contract passed: checks={len(checks)}')

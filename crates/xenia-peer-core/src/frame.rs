@@ -93,6 +93,11 @@ pub struct RawTelemetry {
     pub samples: Vec<TelemetrySample>,
 }
 
+/// Current application input-event payload schema. V2 appends explicit
+/// `PointerMove` and `PointerButton` variants while preserving the historical
+/// bincode indices of legacy Pointer/Key/Touch.
+pub const INPUT_EVENT_SCHEMA_VERSION: u16 = 2;
+
 /// Session capabilities sealed immediately after handshake.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawCapabilities {
@@ -110,6 +115,8 @@ pub struct RawCapabilities {
     pub input_control_enabled: bool,
     /// Clipboard sync is enabled for this session.
     pub clipboard_enabled: bool,
+    /// Application input-event payload schema version used by this session.
+    pub input_event_schema_version: u16,
     /// Lane envelope schema version used by this session.
     pub lane_envelope_version: u16,
     /// Cleartext lane envelope magic used before sealed lane payloads.
@@ -117,6 +124,11 @@ pub struct RawCapabilities {
 }
 
 impl RawCapabilities {
+    /// Return true when capabilities advertise the supported input-event schema.
+    pub fn supports_current_input_event_schema(&self) -> bool {
+        self.input_event_schema_version == INPUT_EVENT_SCHEMA_VERSION
+    }
+
     /// Return true when capabilities advertise the supported lane envelope.
     pub fn supports_current_lane_envelope(&self) -> bool {
         self.lane_envelope_version == LANE_ENVELOPE_SCHEMA_VERSION
@@ -279,12 +291,14 @@ pub enum FileTransferMessage {
         /// Matches the `Offer`'s `transfer_id`.
         transfer_id: u64,
     },
-    /// Receiver reports whether the reassembled file's BLAKE3 hash matched
-    /// the `Offer`'s.
+    /// Receiver reports whether the reassembled file passed integrity
+    /// verification and was successfully persisted at the receive destination.
     Verified {
         /// Matches the `Offer`'s `transfer_id`.
         transfer_id: u64,
-        /// Whether the reassembled file's hash matched.
+        /// `true` only when the whole-file hash matched and local persistence
+        /// completed successfully; `false` means the sender must not report
+        /// durable delivery success.
         ok: bool,
     },
 }

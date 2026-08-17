@@ -343,7 +343,7 @@ impl ConsentRecoverySummaryV1 {
         }
         let through_checkpoint = segments
             .last()
-            .expect("verified non-empty archive sequence")
+            .ok_or(LedgerArchiveError::EmptySequence)?
             .terminal_checkpoint
             .clone();
 
@@ -442,14 +442,23 @@ impl ConsentRecoverySummaryV1 {
                     session_id: hex::encode(session_id),
                 });
             }
+            let session_id_hex = hex::encode(session_id);
+            let terminal_event =
+                state
+                    .terminal_event
+                    .ok_or_else(|| ConsentRecoveryError::IncompleteSession {
+                        session_id: session_id_hex.clone(),
+                    })?;
+            let terminal_sequence =
+                state
+                    .terminal_sequence
+                    .ok_or(ConsentRecoveryError::IncompleteSession {
+                        session_id: session_id_hex,
+                    })?;
             completed.push(ConsentRecoverySessionV1 {
                 session_id,
-                terminal_event: state
-                    .terminal_event
-                    .expect("terminal session has terminal event"),
-                terminal_sequence: state
-                    .terminal_sequence
-                    .expect("terminal session has terminal sequence"),
+                terminal_event,
+                terminal_sequence,
                 approving_operator_key: state.approving_operator_key,
                 approval_action_id: state.approval_action_id,
             });

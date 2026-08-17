@@ -25,21 +25,25 @@ use std::ffi::{CStr, CString, c_char};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use engine::{FileTransferEvent, MobileCodec, SessionState, ViewerEngine};
+use engine::{
+    FileTransferAdmissionSnapshotV1, FileTransferAdmissionSnapshotV2, FileTransferEnqueueError,
+    FileTransferEvent, MobileCodec, SessionState, ViewerEngine,
+};
 
 /// One shared multi-thread tokio runtime for the process lifetime —
 /// every connected session's background task runs on it. Matches
 /// `xenia-viewer`'s own pattern (one runtime alongside the GUI event
 /// loop), just process-lifetime instead of per-window.
-fn runtime() -> &'static tokio::runtime::Runtime {
-    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+fn runtime() -> Option<&'static tokio::runtime::Runtime> {
+    static RT: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
     RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()
-            .expect("failed to start xenia-mobile-ffi tokio runtime")
+            .ok()
     })
+    .as_ref()
 }
 
 /// Process-local registry for active viewer sessions. Registry ids are never
@@ -102,23 +106,26 @@ pub const XENIA_CODEC_H264: i32 = 2;
 /// poll [`xenia_session_state`] to observe progress.
 ///
 /// `recv_dir`: `NULL` disables receiving files (every incoming offer
-/// is auto-rejected); non-null must be a real, writable filesystem
-/// path -- on Android this should be an app-private directory (e.g.
-/// `context.getExternalFilesDir(...)`), since received files are
-/// written via plain `std::fs::write`, not Storage Access Framework.
-/// `max_file_bytes` caps both directions and is also a hard in-memory
-/// buffering cap (the whole file lives in memory on both ends).
+/// is auto-rejected); non-null must be a real, writable filesystem path.
+/// `staging_dir`: optional local directory for disk-backed outbound staging.
+/// Android passes an internal no-backup directory; `NULL` retains a process
+/// temporary-directory fallback for compatibility with other C callers.
+/// `max_file_bytes` caps incoming transfers. Legacy outbound C callers may
+/// still submit a whole buffer; the preferred V20 Android picker path uses the
+/// staged streaming APIs below and never holds the whole outbound file in a
+/// Java `ByteArray` plus Rust `Vec<u8>`.
 ///
 /// # Safety
 /// `host_port` must be a valid, NUL-terminated C string pointer, live
 /// for the duration of this call (it is copied, not retained).
-/// `recv_dir`, if non-null, must likewise be a valid NUL-terminated C
-/// string pointer, live for the duration of this call.
+/// `recv_dir` and `staging_dir`, if non-null, must likewise be valid
+/// NUL-terminated C string pointers, live for the duration of this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn xenia_connect(
     host_port: *const c_char,
     codec: i32,
     recv_dir: *const c_char,
+    staging_dir: *const c_char,
     max_file_bytes: u64,
 ) -> u64 {
     if host_port.is_null() {
@@ -139,16 +146,29 @@ pub unsafe extern "C" fn xenia_connect(
             Err(_) => return 0,
         }
     };
+    let staging_dir = if staging_dir.is_null() {
+        None
+    } else {
+        // SAFETY: caller contract above.
+        match unsafe { CStr::from_ptr(staging_dir) }.to_str() {
+            Ok(s) => Some(std::path::PathBuf::from(s)),
+            Err(_) => return 0,
+        }
+    };
     let codec = match codec {
         XENIA_CODEC_HDC => MobileCodec::Hdc,
         XENIA_CODEC_H264 => MobileCodec::H264,
         _ => MobileCodec::Passthrough,
     };
+    let Some(runtime) = runtime() else {
+        return 0;
+    };
     let engine = ViewerEngine::connect(
-        runtime().handle(),
+        runtime.handle(),
         host_port,
         codec,
         recv_dir,
+        staging_dir,
         max_file_bytes,
     );
     register_engine(engine)
@@ -294,6 +314,37 @@ pub extern "C" fn xenia_send_pointer(handle: u64, x: f32, y: f32, button: u8, pr
     engine.send_pointer(x, y, button, pressed);
 }
 
+/// Send normalized pointer motion with no button-state transition.
+///
+/// This is the preferred V14 API for trackpad/cursor motion because it is
+/// semantically distinct from a button release and may therefore be handled
+/// lossily under bounded producer pressure.
+#[unsafe(no_mangle)]
+pub extern "C" fn xenia_send_pointer_move(handle: u64, x: f32, y: f32) {
+    let Some(engine) = engine_for(handle) else {
+        return;
+    };
+    engine.send_pointer_move(x, y);
+}
+
+/// Send a normalized pointer-button press/release transition.
+///
+/// This is the preferred V14 API for button state because a release must not be
+/// confused with ordinary pointer motion.
+#[unsafe(no_mangle)]
+pub extern "C" fn xenia_send_pointer_button(
+    handle: u64,
+    x: f32,
+    y: f32,
+    button: u8,
+    pressed: bool,
+) {
+    let Some(engine) = engine_for(handle) else {
+        return;
+    };
+    engine.send_pointer_button(x, y, button, pressed);
+}
+
 /// Send a normalized touch event. `phase`: 0=Down, 1=Move, 2=Up,
 /// 3=Cancel.
 ///
@@ -376,20 +427,272 @@ pub unsafe extern "C" fn xenia_send_clipboard(handle: u64, text: *const c_char) 
     }
 }
 
-/// Offer `data` (`data_len` bytes) to the host under `name`. The
-/// caller must have already read the whole file into memory (e.g. via
-/// Android's `ContentResolver` against a Storage Access Framework
-/// `Uri`, since arbitrary user-picked files aren't necessarily
-/// reachable by a plain filesystem path). Only one outgoing transfer
-/// is in flight at a time -- calling this while one is already active
-/// surfaces a failed [`XeniaFileTransferEvent`] (kind
-/// [`XENIA_FT_EVENT_DONE`], `ok == false`) rather than queuing a
-/// second one.
+/// Point-in-time bounded file-command admission diagnostics.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct XeniaFileTransferAdmissionSnapshot {
+    pub valid: bool,
+    pub active_reserved: u32,
+    pub active_copying: u32,
+    pub available_command_slots: u32,
+    pub command_capacity: u32,
+}
+
+impl From<FileTransferAdmissionSnapshotV1> for XeniaFileTransferAdmissionSnapshot {
+    fn from(value: FileTransferAdmissionSnapshotV1) -> Self {
+        Self {
+            valid: true,
+            active_reserved: value.active_reserved,
+            active_copying: value.active_copying,
+            available_command_slots: value.available_command_slots,
+            command_capacity: value.command_capacity,
+        }
+    }
+}
+
+/// Read bounded file-command admission state without mutating it.
+#[unsafe(no_mangle)]
+pub extern "C" fn xenia_file_transfer_admission_snapshot(
+    handle: u64,
+) -> XeniaFileTransferAdmissionSnapshot {
+    engine_for(handle)
+        .and_then(|engine| engine.file_transfer_admission_snapshot())
+        .map(Into::into)
+        .unwrap_or_default()
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct XeniaFileTransferAdmissionSnapshotV2 {
+    pub valid: bool,
+    pub active_reserved: u32,
+    pub active_copying: u32,
+    pub active_streaming: u32,
+    pub active_stream_bytes: u64,
+    pub available_command_slots: u32,
+    pub command_capacity: u32,
+}
+
+impl From<FileTransferAdmissionSnapshotV2> for XeniaFileTransferAdmissionSnapshotV2 {
+    fn from(value: FileTransferAdmissionSnapshotV2) -> Self {
+        Self {
+            valid: true,
+            active_reserved: value.active_reserved,
+            active_copying: value.active_copying,
+            active_streaming: value.active_streaming,
+            active_stream_bytes: value.active_stream_bytes,
+            available_command_slots: value.available_command_slots,
+            command_capacity: value.command_capacity,
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn xenia_file_transfer_admission_snapshot_v2(
+    handle: u64,
+) -> XeniaFileTransferAdmissionSnapshotV2 {
+    engine_for(handle)
+        .and_then(|engine| engine.file_transfer_admission_snapshot_v2())
+        .map(Into::into)
+        .unwrap_or_default()
+}
+
+/// Immediate return codes from [`xenia_try_send_file`].
+pub const XENIA_SEND_FILE_OK: i32 = 0;
+/// The C arguments were invalid (null name / invalid data pointer).
+pub const XENIA_SEND_FILE_INVALID_ARGUMENT: i32 = 1;
+/// The supplied session handle is stale or unknown.
+pub const XENIA_SEND_FILE_INVALID_HANDLE: i32 = 2;
+/// The bounded user-command queue is full; no command was silently dropped.
+pub const XENIA_SEND_FILE_QUEUE_FULL: i32 = 3;
+/// The background session task has already closed its command receiver.
+pub const XENIA_SEND_FILE_SESSION_CLOSED: i32 = 4;
+/// The payload exceeds the fixed V1 mobile file-transfer byte ceiling.
+pub const XENIA_SEND_FILE_TOO_LARGE: i32 = 5;
+/// Reservation token was unknown, already consumed, or unavailable.
+pub const XENIA_SEND_FILE_INVALID_RESERVATION: i32 = 6;
+/// Payload length differed from the byte length used to reserve capacity.
+pub const XENIA_SEND_FILE_RESERVATION_SIZE_MISMATCH: i32 = 7;
+/// App-private native staging I/O failed.
+pub const XENIA_SEND_FILE_IO_ERROR: i32 = 8;
+
+fn file_transfer_status(error: FileTransferEnqueueError) -> i32 {
+    match error {
+        FileTransferEnqueueError::InvalidArgument => XENIA_SEND_FILE_INVALID_ARGUMENT,
+        FileTransferEnqueueError::FileTooLarge => XENIA_SEND_FILE_TOO_LARGE,
+        FileTransferEnqueueError::QueueFull => XENIA_SEND_FILE_QUEUE_FULL,
+        FileTransferEnqueueError::SessionClosed => XENIA_SEND_FILE_SESSION_CLOSED,
+        FileTransferEnqueueError::InvalidReservation => XENIA_SEND_FILE_INVALID_RESERVATION,
+        FileTransferEnqueueError::ReservationSizeMismatch => {
+            XENIA_SEND_FILE_RESERVATION_SIZE_MISMATCH
+        }
+        FileTransferEnqueueError::IoError => XENIA_SEND_FILE_IO_ERROR,
+    }
+}
+
+/// Check whether the native viewer can currently admit a file command of
+/// `data_len` bytes without materializing/copying the payload. This is an
+/// advisory preflight, not a reservation; [`xenia_try_send_file`] rechecks.
+#[unsafe(no_mangle)]
+pub extern "C" fn xenia_check_send_file(handle: u64, data_len: usize) -> i32 {
+    let Some(engine) = engine_for(handle) else {
+        return XENIA_SEND_FILE_INVALID_HANDLE;
+    };
+    match engine.check_file_transfer_admission(data_len) {
+        Ok(()) => XENIA_SEND_FILE_OK,
+        Err(error) => file_transfer_status(error),
+    }
+}
+
+/// Reserve one bounded file-command slot before the caller copies/materializes
+/// a payload. On success writes a non-zero single-use token to `out_token`.
+///
+/// # Safety
+/// `out_token` must be a valid writable pointer for one `u64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenia_reserve_send_file(
+    handle: u64,
+    data_len: usize,
+    out_token: *mut u64,
+) -> i32 {
+    if out_token.is_null() {
+        return XENIA_SEND_FILE_INVALID_ARGUMENT;
+    }
+    let Some(engine) = engine_for(handle) else {
+        return XENIA_SEND_FILE_INVALID_HANDLE;
+    };
+    match engine.reserve_file_transfer(data_len) {
+        Ok(token) => {
+            // SAFETY: caller contract above guarantees one writable u64.
+            unsafe { *out_token = token };
+            XENIA_SEND_FILE_OK
+        }
+        Err(error) => file_transfer_status(error),
+    }
+}
+
+/// Claim a live reservation immediately before materializing/copying its
+/// payload. The first successful claim moves the token into a bounded copy
+/// lease; repeated claims are idempotent and do not extend that lease.
+#[unsafe(no_mangle)]
+pub extern "C" fn xenia_claim_send_file_reservation(
+    handle: u64,
+    token: u64,
+    data_len: usize,
+) -> i32 {
+    let Some(engine) = engine_for(handle) else {
+        return XENIA_SEND_FILE_INVALID_HANDLE;
+    };
+    match engine.claim_file_transfer_reservation(token, data_len) {
+        Ok(()) => XENIA_SEND_FILE_OK,
+        Err(error) => file_transfer_status(error),
+    }
+}
+
+/// Cancel an unused reservation. Returns `true` only if a live token was
+/// removed and its channel capacity returned.
+#[unsafe(no_mangle)]
+pub extern "C" fn xenia_cancel_send_file_reservation(handle: u64, token: u64) -> bool {
+    engine_for(handle).is_some_and(|engine| engine.cancel_file_transfer_reservation(token))
+}
+
+/// Commit a payload into a previously reserved file-command slot.
+///
+/// # Safety
+/// `name` and `data` follow the same lifetime/readability requirements as
+/// [`xenia_try_send_file`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenia_commit_send_file(
+    handle: u64,
+    token: u64,
+    name: *const c_char,
+    data: *const u8,
+    data_len: usize,
+) -> i32 {
+    let Some(engine) = engine_for(handle) else {
+        return XENIA_SEND_FILE_INVALID_HANDLE;
+    };
+    if name.is_null() || (data.is_null() && data_len > 0) {
+        engine.cancel_file_transfer_reservation(token);
+        return XENIA_SEND_FILE_INVALID_ARGUMENT;
+    }
+    // SAFETY: caller contract above guarantees a valid NUL-terminated string.
+    let Ok(name) = (unsafe { CStr::from_ptr(name) }).to_str() else {
+        engine.cancel_file_transfer_reservation(token);
+        return XENIA_SEND_FILE_INVALID_ARGUMENT;
+    };
+    if let Err(error) = engine.check_file_transfer_reservation(token, data_len) {
+        return file_transfer_status(error);
+    }
+    if let Err(error) = engine.claim_file_transfer_reservation(token, data_len) {
+        return file_transfer_status(error);
+    }
+    let bytes = if data_len == 0 {
+        Vec::new()
+    } else {
+        // SAFETY: caller contract above guarantees readable bytes.
+        unsafe { std::slice::from_raw_parts(data, data_len) }.to_vec()
+    };
+    match engine.send_file_reserved(token, name.to_owned(), bytes) {
+        Ok(()) => XENIA_SEND_FILE_OK,
+        Err(error) => file_transfer_status(error),
+    }
+}
+
+/// Try to offer `data` (`data_len` bytes) to the host under `name`.
+///
+/// Unlike the historical [`xenia_send_file`] wrapper, this V15 API returns an
+/// explicit enqueue result so UI code can distinguish acceptance from local
+/// queue saturation or session teardown. A successful enqueue still does not
+/// mean the remote peer accepted the transfer; that later result arrives via
+/// [`XeniaFileTransferEvent`].
 ///
 /// # Safety
 /// `name` must be a valid NUL-terminated C string pointer, live for the
-/// duration of this call. `data` must be a valid pointer to `data_len` readable bytes,
-/// live for the duration of this call (it is copied, not retained).
+/// duration of this call. `data` must be a valid pointer to `data_len` readable
+/// bytes, live for the duration of this call (it is copied, not retained).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenia_try_send_file(
+    handle: u64,
+    name: *const c_char,
+    data: *const u8,
+    data_len: usize,
+) -> i32 {
+    if name.is_null() || (data.is_null() && data_len > 0) {
+        return XENIA_SEND_FILE_INVALID_ARGUMENT;
+    }
+    let admission = xenia_check_send_file(handle, data_len);
+    if admission != XENIA_SEND_FILE_OK {
+        return admission;
+    }
+    let Some(engine) = engine_for(handle) else {
+        return XENIA_SEND_FILE_INVALID_HANDLE;
+    };
+    // SAFETY: caller contract above guarantees a valid NUL-terminated string
+    // for the duration of this call.
+    let Ok(name) = (unsafe { CStr::from_ptr(name) }).to_str() else {
+        return XENIA_SEND_FILE_INVALID_ARGUMENT;
+    };
+    // SAFETY: caller contract above guarantees `data_len` readable bytes for
+    // the duration of this call; this copies them out.
+    let bytes = if data_len == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(data, data_len) }.to_vec()
+    };
+    match engine.send_file(name.to_owned(), bytes) {
+        Ok(()) => XENIA_SEND_FILE_OK,
+        Err(error) => file_transfer_status(error),
+    }
+}
+
+/// Legacy fire-and-forget file enqueue retained for C ABI compatibility.
+///
+/// New callers should use [`xenia_try_send_file`] so a local enqueue failure is
+/// not mistaken for a successfully initiated transfer.
+///
+/// # Safety
+/// Same pointer/lifetime requirements as [`xenia_try_send_file`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn xenia_send_file(
     handle: u64,
@@ -397,25 +700,96 @@ pub unsafe extern "C" fn xenia_send_file(
     data: *const u8,
     data_len: usize,
 ) {
-    if name.is_null() || (data.is_null() && data_len > 0) {
-        return;
+    // SAFETY: this compatibility wrapper forwards the caller contract verbatim.
+    let _ = unsafe { xenia_try_send_file(handle, name, data, data_len) };
+}
+
+/// Begin the preferred chunked mobile outbound path. `expected_len` may be
+/// `u64::MAX` when the SAF provider does not expose a stable size. A real
+/// bounded command slot is reserved before any payload chunks are staged.
+///
+/// # Safety
+/// `name` must be a valid NUL-terminated string and `out_token` must point to
+/// one writable `u64` for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenia_begin_send_file_stream(
+    handle: u64,
+    name: *const c_char,
+    expected_len: u64,
+    out_token: *mut u64,
+) -> i32 {
+    if name.is_null() || out_token.is_null() {
+        return XENIA_SEND_FILE_INVALID_ARGUMENT;
     }
     let Some(engine) = engine_for(handle) else {
-        return;
+        return XENIA_SEND_FILE_INVALID_HANDLE;
     };
-    // SAFETY: caller contract above guarantees a valid NUL-terminated
-    // string for the duration of this call.
     let Ok(name) = (unsafe { CStr::from_ptr(name) }).to_str() else {
-        return;
+        return XENIA_SEND_FILE_INVALID_ARGUMENT;
     };
-    // SAFETY: caller contract above guarantees `data_len` readable
-    // bytes for the duration of this call; this copies them out.
-    let bytes = if data_len == 0 {
-        Vec::new()
+    let expected_len = if expected_len == u64::MAX {
+        None
     } else {
-        unsafe { std::slice::from_raw_parts(data, data_len) }.to_vec()
+        let Ok(len) = usize::try_from(expected_len) else {
+            return XENIA_SEND_FILE_TOO_LARGE;
+        };
+        Some(len)
     };
-    engine.send_file(name.to_owned(), bytes);
+    match engine.begin_file_transfer_stream(name.to_owned(), expected_len) {
+        Ok(token) => {
+            unsafe { *out_token = token };
+            XENIA_SEND_FILE_OK
+        }
+        Err(error) => file_transfer_status(error),
+    }
+}
+
+/// Append one chunk to a native staged outbound file.
+///
+/// # Safety
+/// `data` must point to `data_len` readable bytes for this call. Empty chunks
+/// may use a null pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenia_append_send_file_stream(
+    handle: u64,
+    token: u64,
+    data: *const u8,
+    data_len: usize,
+) -> i32 {
+    if data.is_null() && data_len > 0 {
+        return XENIA_SEND_FILE_INVALID_ARGUMENT;
+    }
+    let Some(engine) = engine_for(handle) else {
+        return XENIA_SEND_FILE_INVALID_HANDLE;
+    };
+    let bytes = if data_len == 0 {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(data, data_len) }
+    };
+    match engine.append_file_transfer_stream(token, bytes) {
+        Ok(()) => XENIA_SEND_FILE_OK,
+        Err(error) => file_transfer_status(error),
+    }
+}
+
+/// Finish a staged stream, hash/size-check it, and enqueue its app-private
+/// staged-file descriptor into the already reserved bounded command slot.
+#[unsafe(no_mangle)]
+pub extern "C" fn xenia_finish_send_file_stream(handle: u64, token: u64) -> i32 {
+    let Some(engine) = engine_for(handle) else {
+        return XENIA_SEND_FILE_INVALID_HANDLE;
+    };
+    match engine.finish_file_transfer_stream(token) {
+        Ok(()) => XENIA_SEND_FILE_OK,
+        Err(error) => file_transfer_status(error),
+    }
+}
+
+/// Cancel a staged outbound stream and delete its partial app-private file.
+#[unsafe(no_mangle)]
+pub extern "C" fn xenia_cancel_send_file_stream(handle: u64, token: u64) -> bool {
+    engine_for(handle).is_some_and(|engine| engine.cancel_file_transfer_stream(token))
 }
 
 /// Event kinds for [`XeniaFileTransferEvent::kind`].
@@ -570,9 +944,31 @@ mod tests {
             assert!(empty.rgba.is_null());
             assert_eq!(empty.rgba_len, 0);
             xenia_send_pointer(0, 0.5, 0.5, 0, true);
+            xenia_send_pointer_move(0, 0.5, 0.5);
+            xenia_send_pointer_button(0, 0.5, 0.5, 0, false);
             xenia_send_touch(0, 0, 0.5, 0.5, 0, 1.0);
             xenia_send_key(0, 30, true, 0);
             let name = CString::new("test.txt").unwrap();
+            assert_eq!(xenia_check_send_file(0, 0), XENIA_SEND_FILE_INVALID_HANDLE);
+            let mut reservation = 0u64;
+            assert_eq!(
+                xenia_reserve_send_file(0, 0, &mut reservation),
+                XENIA_SEND_FILE_INVALID_HANDLE
+            );
+            assert_eq!(reservation, 0);
+            assert_eq!(
+                xenia_claim_send_file_reservation(0, 1, 0),
+                XENIA_SEND_FILE_INVALID_HANDLE
+            );
+            assert!(!xenia_cancel_send_file_reservation(0, 1));
+            assert_eq!(
+                xenia_commit_send_file(0, 1, name.as_ptr(), std::ptr::null(), 0),
+                XENIA_SEND_FILE_INVALID_HANDLE
+            );
+            assert_eq!(
+                xenia_try_send_file(0, name.as_ptr(), std::ptr::null(), 0),
+                XENIA_SEND_FILE_INVALID_HANDLE
+            );
             xenia_send_file(0, name.as_ptr(), std::ptr::null(), 0);
             let empty_ft = xenia_poll_file_transfer_event(0);
             assert_eq!(empty_ft.kind, XENIA_FT_EVENT_NONE);
@@ -590,6 +986,7 @@ mod tests {
                     std::ptr::null(),
                     XENIA_CODEC_PASSTHROUGH,
                     std::ptr::null(),
+                    std::ptr::null(),
                     0
                 ),
                 0
@@ -605,6 +1002,7 @@ mod tests {
                 host_port.as_ptr(),
                 XENIA_CODEC_HDC,
                 std::ptr::null(),
+                std::ptr::null(),
                 100 * 1024 * 1024,
             );
             assert_ne!(handle, 0);
@@ -618,6 +1016,8 @@ mod tests {
             // harmless rather than a use-after-free contract violation.
             xenia_disconnect(handle);
             xenia_send_pointer(handle, 0.5, 0.5, 0, true);
+            xenia_send_pointer_move(handle, 0.5, 0.5);
+            xenia_send_pointer_button(handle, 0.5, 0.5, 0, false);
         }
     }
 
@@ -630,6 +1030,7 @@ mod tests {
                 host_port.as_ptr(),
                 XENIA_CODEC_PASSTHROUGH,
                 recv_dir.as_ptr(),
+                std::ptr::null(),
                 100 * 1024 * 1024,
             );
             assert_ne!(handle, 0);

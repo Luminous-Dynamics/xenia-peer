@@ -1,0 +1,28 @@
+{
+  "schema": "xenia-zk-envelope-codec-vector-v1",
+  "binary_magic_ascii": "XZKENV01",
+  "fixture_length_bytes": 419,
+  "fixture_sha256_hex": "beffde62e2308699923c6354ab7a5e043e9be824558431b175670eb816358d50",
+  "fixture": {
+    "protocol_version": 3,
+    "statement": "XENIA:Access:RangeCredential:v3",
+    "proof_system_wire_id": 1,
+    "verifier_id_fill_hex_byte": "11",
+    "parameter_set_id_fill_hex_byte": "22",
+    "timestamp_unix_seconds": 1800000000,
+    "nonce_fill_hex_byte": "33",
+    "public_inputs_hash_fill_hex_byte": "44",
+    "proof_length": 64,
+    "proof_fill_hex_byte": "55",
+    "extensions_digest_fill_hex_byte": "88",
+    "authentication": [
+      {
+        "suite_wire_id": 2,
+        "signer_key_id_fill_hex_byte": "66",
+        "signature_length": 96,
+        "signature_fill_hex_byte": "77"
+      }
+    ]
+  },
+  "assurance_note": "The vector fixes framing interoperability only. It is not a proof-validity or signature-validity vector."
+}

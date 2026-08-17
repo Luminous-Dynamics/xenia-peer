@@ -1,0 +1,19 @@
+[package]
+name = "xenia-zk-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "Apache-2.0 OR MIT"
+description = "Backend-neutral proof-envelope, statement identity, and verifier identity protocol substrate for Xenia."
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+thiserror.workspace = true

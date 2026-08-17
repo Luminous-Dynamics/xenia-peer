@@ -26,14 +26,11 @@
 //! against the last-rendered image rect, not the whole window, so
 //! pointer activity over the status bar / side panels is ignored.
 
-use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
+use crate::{AudioPlaybackSink, FreshAudioQueue};
 use eframe::egui;
 use xenia_inject::InputEvent;
-use xenia_peer_core::RawAudio;
-
-use crate::AudioPlaybackSink;
 
 /// Map a subset of `egui::Key` to Linux evdev keycodes (matching the
 /// convention `xenia-inject`'s backends expect — see
@@ -157,9 +154,10 @@ fn pointer_button_id(button: egui::PointerButton) -> u8 {
 /// equal `width * height * 4`.
 pub struct FrameSlot {
     /// Latest frame, replaced on every arrival. `None` until the
-    /// first frame lands.
+    /// first frame lands. This is the one-slot
+    /// `DESKTOP_VIDEO_PRESENTATION_V1` coalesce-latest policy.
     pub latest: Mutex<Option<FrameData>>,
-    /// Latest host telemetry batch.
+    /// Latest host telemetry batch (`DESKTOP_TELEMETRY_PRESENTATION_V1`).
     pub telemetry: Mutex<Option<TelemetryData>>,
     /// Latest audio timing/jitter state.
     pub audio: Mutex<Option<AudioData>>,
@@ -320,7 +318,7 @@ pub struct ViewerApp {
     slot: Arc<FrameSlot>,
     texture: Option<egui::TextureHandle>,
     config: ViewerConfig,
-    audio_rx: Option<mpsc::Receiver<RawAudio>>,
+    audio_queue: Option<Arc<FreshAudioQueue>>,
     audio_sink: Box<dyn AudioPlaybackSink>,
     frames_received: u64,
     last_wire_bytes: usize,
@@ -332,7 +330,7 @@ pub struct ViewerApp {
     recent_frame_instants: std::collections::VecDeque<std::time::Instant>,
     // Input capture (mouse / keyboard -> daemon). `None` means input
     // is disabled client-side (no channel was wired up).
-    input_tx: Option<tokio::sync::mpsc::UnboundedSender<InputEvent>>,
+    input_tx: Option<tokio::sync::mpsc::Sender<InputEvent>>,
     // On-screen rect of the last-rendered frame image, used to
     // normalize pointer coordinates and to ignore pointer activity
     // over the status bar / side panels.
@@ -347,15 +345,15 @@ impl ViewerApp {
     pub fn new(
         slot: Arc<FrameSlot>,
         config: ViewerConfig,
-        audio_rx: Option<mpsc::Receiver<RawAudio>>,
+        audio_queue: Option<Arc<FreshAudioQueue>>,
         audio_sink: Box<dyn AudioPlaybackSink>,
-        input_tx: Option<tokio::sync::mpsc::UnboundedSender<InputEvent>>,
+        input_tx: Option<tokio::sync::mpsc::Sender<InputEvent>>,
     ) -> Self {
         Self {
             slot,
             texture: None,
             config,
-            audio_rx,
+            audio_queue,
             audio_sink,
             frames_received: 0,
             last_wire_bytes: 0,
@@ -387,13 +385,23 @@ impl ViewerApp {
         Some((x, y))
     }
 
-    /// Send one captured input event to the network task, if input
-    /// capture is wired up. Silently drops on a closed channel (the
-    /// network side already ended; the GUI keeps rendering
-    /// independently until the window closes).
-    fn send_input(&self, event: InputEvent) {
+    /// Enqueue lossy pointer motion without blocking the GUI. Saturation drops
+    /// the newest motion sample; a later sample supersedes it spatially.
+    fn send_lossy_input(&self, event: InputEvent) {
         if let Some(tx) = &self.input_tx {
-            let _ = tx.send(event);
+            let _ = tx.try_send(event);
+        }
+    }
+
+    /// Enqueue a state transition with bounded backpressure. Key/button
+    /// press/release events must not be silently discarded under saturation,
+    /// because doing so can leave remote input logically stuck. This runs only
+    /// on eframe's synchronous GUI thread; the network sender itself has V12's
+    /// finite send-stall timeout, so a disconnected/stalled receiver eventually
+    /// closes this channel instead of allowing unbounded memory growth.
+    fn send_stateful_input(&self, event: InputEvent) {
+        if let Some(tx) = &self.input_tx {
+            let _ = tx.blocking_send(event);
         }
     }
 
@@ -444,12 +452,7 @@ impl ViewerApp {
         {
             self.last_pointer_pos = Some(pos);
             if let Some((x, y)) = self.normalize_in_image(pos) {
-                self.send_input(InputEvent::Pointer {
-                    x,
-                    y,
-                    button: 0,
-                    pressed: false,
-                });
+                self.send_lossy_input(InputEvent::PointerMove { x, y });
             }
         }
 
@@ -458,7 +461,7 @@ impl ViewerApp {
             let Some((x, y)) = self.normalize_in_image(pos) else {
                 continue;
             };
-            self.send_input(InputEvent::Pointer {
+            self.send_stateful_input(InputEvent::PointerButton {
                 x,
                 y,
                 button: pointer_button_id(button),
@@ -470,7 +473,7 @@ impl ViewerApp {
             let Some(code) = egui_key_to_evdev(key) else {
                 continue;
             };
-            self.send_input(InputEvent::Key {
+            self.send_stateful_input(InputEvent::Key {
                 code,
                 pressed,
                 modifiers: modifiers_bitmask(&modifiers),
@@ -479,10 +482,10 @@ impl ViewerApp {
     }
 
     fn drain_audio_playback(&mut self) {
-        let Some(rx) = &self.audio_rx else {
+        let Some(queue) = &self.audio_queue else {
             return;
         };
-        while let Ok(frame) = rx.try_recv() {
+        while let Some(frame) = queue.pop_front() {
             self.audio_sink.submit(&frame);
         }
         let playback = self.audio_sink.stats();
@@ -664,6 +667,14 @@ impl eframe::App for ViewerApp {
                         ui.label(format!("dropped: {}", audio.dropped));
                         ui.label(format!("playback rejected: {}", audio.playback_rejected));
                         ui.label(format!("underruns: {}", audio.underruns));
+                        if let Some(queue) = &self.audio_queue {
+                            let pressure = queue.pressure_snapshot();
+                            ui.label(format!(
+                                "ingress superseded: {}",
+                                pressure.dropped_superseded
+                            ));
+                            ui.label(format!("ingress rejected: {}", pressure.rejected));
+                        }
                         if self.last_video_timestamp_ms != 0 {
                             let drift_ms = audio.capture_timestamp_ms as i128
                                 - self.last_video_timestamp_ms as i128;

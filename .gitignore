@@ -23,3 +23,11 @@ _archive/**/xenia-validate-*.log
 
 # Local test VM images (multi-GB, never committed).
 *.qcow2
+
+# Local agent worktrees and runtime state. These may contain private keys,
+# trust stores, session history, and generated build output; none belong in Git.
+.claude/
+xenia-peer-state/
+xenia-operator-agent-state/
+**/xenia-peer-state/
+**/xenia-operator-agent-state/

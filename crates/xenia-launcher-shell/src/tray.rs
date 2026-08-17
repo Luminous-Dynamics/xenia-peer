@@ -63,7 +63,7 @@ pub fn build() -> Result<TrayHandles, Box<dyn std::error::Error>> {
     let tray_icon = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_tooltip("Xenia -- stopped")
-        .with_icon(placeholder_icon())
+        .with_icon(placeholder_icon()?)
         .with_menu_on_left_click(true)
         .build()?;
 
@@ -109,7 +109,7 @@ fn tooltip_suffix(status: &DaemonStatus) -> String {
 /// embedding a `.ico`/`.png` binary asset -- adequate for a v1 tray icon
 /// (distinguishable in the tray, no asset pipeline to maintain) without
 /// pretending to be real product art.
-fn placeholder_icon() -> Icon {
+fn placeholder_icon() -> Result<Icon, Box<dyn std::error::Error>> {
     const SIZE: u32 = 32;
     // A simple two-tone square: a solid indigo fill (::= AGPL "sovereign"
     // theme colors elsewhere in this repo's console) with a lighter
@@ -125,8 +125,7 @@ fn placeholder_icon() -> Icon {
             }
         }
     }
-    Icon::from_rgba(rgba, SIZE, SIZE)
-        .expect("placeholder icon dimensions/buffer are internally consistent")
+    Ok(Icon::from_rgba(rgba, SIZE, SIZE)?)
 }
 
 #[cfg(test)]
@@ -139,7 +138,7 @@ mod tests {
         // tray/display -- Icon::from_rgba validates buffer_len ==
         // width*height*4 internally, so this is a genuine check, not a
         // no-op.
-        let _ = placeholder_icon();
+        placeholder_icon().expect("placeholder icon should build");
     }
 
     #[test]

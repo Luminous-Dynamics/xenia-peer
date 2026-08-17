@@ -16,16 +16,17 @@ use tokio::sync::Mutex as AsyncMutex;
 use tracing::{info, warn};
 
 use xenia_peer_core::transport::SendEnvelope;
-use xenia_peer_core::{FILE_TRANSFER_CHUNK_SIZE, FileTransferMessage, LaneSession};
+use xenia_peer_core::{
+    FILE_TRANSFER_CHUNK_SIZE, FileTransferMessage, IncomingFileStager, LaneSession,
+};
 
 use crate::AnySendHalf;
 use crate::m1_runtime::M1RuntimeSession;
 
-/// Cap on simultaneously-open incoming transfers. Each accepted Offer can
-/// buffer up to `--file-transfer-max-bytes` in memory until it Completes, so
-/// without a cap an authenticated peer could open unbounded Offers and
-/// exhaust host memory. Bounds worst-case resident transfer state to
-/// `MAX_CONCURRENT_INCOMING_TRANSFERS * file_transfer_max_bytes`.
+/// Cap on simultaneously-open incoming transfers. Incoming payload bytes are
+/// staged to private same-directory files rather than retained in heap memory,
+/// but each accepted Offer still consumes file descriptors, disk capacity, and
+/// authenticated session bookkeeping until it completes or is dropped.
 pub(crate) const MAX_CONCURRENT_INCOMING_TRANSFERS: usize = 8;
 
 /// A transfer this side is sending. One at a time in this first cut --
@@ -40,8 +41,7 @@ pub(crate) struct OutgoingTransfer {
 struct IncomingTransfer {
     name: String,
     expected_size: u64,
-    expected_hash: [u8; 32],
-    buffer: Vec<u8>,
+    stager: IncomingFileStager,
 }
 
 /// Per-connection file-transfer state: the single outbound transfer (if any)
@@ -63,7 +63,7 @@ pub(crate) struct FileTransferConfig<'a> {
 /// The decision for an inbound Offer, computed with no I/O.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum OfferDecision {
-    /// Accept and buffer under this sanitized bare filename.
+    /// Accept and stage under this sanitized bare filename.
     Accept { safe_name: String },
     /// Reject with a human-readable reason sent back to the peer.
     Reject { reason: String },
@@ -148,19 +148,38 @@ pub(crate) async fn handle_envelope(
                 OfferDecision::Accept { safe_name } => {
                     if let Err(err) = m1_runtime.lock().await.allow_file_receive_flow() {
                         warn!(error = %err, "file transfer offer rejected by M1 consent gate");
-                        return Ok(());
+                        FileTransferMessage::Reject {
+                            transfer_id,
+                            reason: "file receive is not permitted by current consent".to_string(),
+                        }
+                    } else {
+                        let recv_dir = config
+                            .recv_file_dir
+                            .expect("accepted offer requires configured receive directory");
+                        let dest = recv_dir.join(&safe_name);
+                        match IncomingFileStager::create(&dest, size, blake3_hash) {
+                            Ok(stager) => {
+                                state.incoming.insert(
+                                    transfer_id,
+                                    IncomingTransfer {
+                                        name: safe_name,
+                                        expected_size: size,
+                                        stager,
+                                    },
+                                );
+                                info!(transfer_id, name, size, "file transfer offer accepted");
+                                FileTransferMessage::Accept { transfer_id }
+                            }
+                            Err(err) => {
+                                warn!(transfer_id, error = %err, "file receive staging could not be created");
+                                FileTransferMessage::Reject {
+                                    transfer_id,
+                                    reason: "receiver could not allocate private staging"
+                                        .to_string(),
+                                }
+                            }
+                        }
                     }
-                    state.incoming.insert(
-                        transfer_id,
-                        IncomingTransfer {
-                            name: safe_name,
-                            expected_size: size,
-                            expected_hash: blake3_hash,
-                            buffer: Vec::with_capacity(size.min(config.max_bytes) as usize),
-                        },
-                    );
-                    info!(transfer_id, name, size, "file transfer offer accepted");
-                    FileTransferMessage::Accept { transfer_id }
                 }
                 OfferDecision::Reject { reason } => {
                     info!(
@@ -243,51 +262,41 @@ pub(crate) async fn handle_envelope(
                 warn!(transfer_id, "chunk for unknown/stale incoming transfer");
                 return Ok(());
             };
-            let off = offset as usize;
-            if off.saturating_add(data.len()) > transfer.expected_size as usize {
-                warn!(
-                    transfer_id,
-                    "chunk exceeds offered file size; dropping transfer"
-                );
+            if let Err(err) = transfer.stager.append(offset, &data) {
+                warn!(transfer_id, error = %err, "invalid incoming file chunk; dropping transfer");
                 state.incoming.remove(&transfer_id);
                 return Ok(());
             }
-            if transfer.buffer.len() < off + data.len() {
-                transfer.buffer.resize(off + data.len(), 0);
-            }
-            transfer.buffer[off..off + data.len()].copy_from_slice(&data);
         }
         FileTransferMessage::Complete { transfer_id } => {
             let Some(transfer) = state.incoming.remove(&transfer_id) else {
                 warn!(transfer_id, "Complete for unknown/stale incoming transfer");
                 return Ok(());
             };
-            let actual_hash = *blake3::hash(&transfer.buffer).as_bytes();
-            let ok = actual_hash == transfer.expected_hash;
-            if ok {
-                if let Err(err) = m1_runtime.lock().await.allow_file_receive_flow() {
-                    warn!(error = %err, "completed file transfer rejected by M1 consent gate; not written");
-                    return Ok(());
-                }
-                let dest = config
-                    .recv_file_dir
-                    .expect("incoming transfer only exists when recv_file_dir is set")
-                    .join(&transfer.name);
-                match std::fs::write(&dest, &transfer.buffer) {
+            let delivery_ok = if let Err(err) = m1_runtime.lock().await.allow_file_receive_flow() {
+                warn!(error = %err, "completed file transfer rejected by M1 consent gate; not published");
+                false
+            } else {
+                match transfer.stager.finish() {
                     Ok(()) => {
-                        info!(transfer_id, path = %dest.display(), bytes = transfer.buffer.len(), "file transfer verified and written")
+                        info!(
+                            transfer_id,
+                            name = transfer.name,
+                            bytes = transfer.expected_size,
+                            "file transfer verified and persisted"
+                        );
+                        true
                     }
                     Err(err) => {
-                        warn!(transfer_id, error = %err, "verified file failed to write to disk")
+                        warn!(transfer_id, error = %err, "incoming file verification/publication failed");
+                        false
                     }
                 }
-            } else {
-                warn!(
-                    transfer_id,
-                    "file transfer failed BLAKE3 verification, not written"
-                );
-            }
-            let verified = FileTransferMessage::Verified { transfer_id, ok };
+            };
+            let verified = FileTransferMessage::Verified {
+                transfer_id,
+                ok: delivery_ok,
+            };
             let envelope = session
                 .lock()
                 .await
@@ -381,15 +390,22 @@ mod tests {
 
     #[test]
     fn offer_rejected_over_concurrent_cap() {
+        let dir = std::env::temp_dir().join(format!(
+            "xenia-peer-offer-cap-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&dir).unwrap();
         let mut state = FileTransferState::new();
+        let empty_hash = *blake3::hash(b"").as_bytes();
         for i in 0..MAX_CONCURRENT_INCOMING_TRANSFERS as u64 {
+            let path = dir.join(format!("f{i}"));
             state.incoming.insert(
                 i,
                 IncomingTransfer {
                     name: format!("f{i}"),
-                    expected_size: 1,
-                    expected_hash: [0u8; 32],
-                    buffer: Vec::new(),
+                    expected_size: 0,
+                    stager: IncomingFileStager::create(&path, 0, empty_hash).unwrap(),
                 },
             );
         }
@@ -397,6 +413,8 @@ mod tests {
             OfferDecision::Reject { reason } => assert!(reason.contains("concurrent")),
             other => panic!("expected reject, got {other:?}"),
         }
+        drop(state);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

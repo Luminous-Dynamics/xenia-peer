@@ -26,9 +26,9 @@
 //!   VP9 via `ffmpeg-next` is `xenia-video`, planned for M1.
 //! - **No input injection.** Viewer-captured events are shipped but
 //!   never actually applied. `xenia-inject` is M2.
-//! - **No handshake.** Callers install 32-byte session keys directly
-//!   via `Session::install_key`, same as `xenia_wire`. A real
-//!   ML-KEM-768 handshake is deferred to a companion crate.
+//! - **Handshake policy stays in `xenia-handshake`.** This crate composes the
+//!   hybrid handshake with transport/session profiles, but it does not own the
+//!   cryptographic primitive implementations.
 //!
 //! ## Relationship to Symthaea's in-tree RDP stack
 //!
@@ -52,12 +52,18 @@
 #![warn(missing_docs)]
 
 pub mod advertisement;
+pub mod file_transfer;
 pub mod frame;
 pub mod handshake;
 pub mod m1_session;
+pub mod producer_flow;
 mod session;
 pub mod transport;
 
+pub use file_transfer::{
+    IncomingFileStageError, IncomingFileStager, cleanup_orphaned_receive_staging,
+    persist_received_file,
+};
 #[cfg(feature = "opus")]
 pub use frame::OpusAudioCodec;
 pub use frame::{
@@ -81,4 +87,4 @@ pub use xenia_handshake::{
 /// Semantic-version string for the xenia-wire crate this server
 /// binds against. Exposed so the transport layer can log it on
 /// connect and detect mismatches.
-pub const XENIA_WIRE_VERSION: &str = "0.1.0-alpha.3";
+pub const XENIA_WIRE_VERSION: &str = "0.2.0-alpha.9";

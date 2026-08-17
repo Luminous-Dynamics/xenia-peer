@@ -53,7 +53,8 @@ fn main() {
     // No file-transfer receive dir for this smoke proof -- it only
     // exercises connect/handshake/frame plumbing (and, with
     // `send-file`, the outgoing send path).
-    let engine = ViewerEngine::connect(rt.handle(), host_port, codec, None, 100 * 1024 * 1024);
+    let engine =
+        ViewerEngine::connect(rt.handle(), host_port, codec, None, None, 100 * 1024 * 1024);
 
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut last_state = None;
@@ -85,8 +86,13 @@ fn main() {
                 .unwrap_or("test-file")
                 .to_string();
             println!("sending file: {name} ({} bytes)", data.len());
-            engine.send_file(name, data);
-            file_sent = true;
+            match engine.send_file(name, data) {
+                Ok(()) => file_sent = true,
+                Err(err) => {
+                    eprintln!("failed to enqueue file transfer: {err:?}");
+                    std::process::exit(1);
+                }
+            }
         }
 
         while let Some(event) = engine.poll_file_transfer_event() {

@@ -254,7 +254,12 @@ fn scap_worker(
             }
         }
     }
-    let mut capturer = capturer.expect("loop exits only via break or early return");
+    let Some(mut capturer) = capturer else {
+        let _ = frame_tx.send(Err(CaptureError::Backend(
+            "scap capturer initialization ended without a capturer".to_string(),
+        )));
+        return;
+    };
 
     capturer.start_capture();
 

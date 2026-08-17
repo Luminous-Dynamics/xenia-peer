@@ -11,7 +11,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use xenia_inject::{InputInjector, LoggingInjector, NoopInjector};
+use xenia_inject::{InputInjector, LoggingInjector, NoopInjector, SessionInputInjector};
 
 use ed25519_dalek::SigningKey;
 #[cfg(any(feature = "audio-capture", test))]
@@ -29,16 +29,20 @@ use xenia_peer_core::{
     AudioCodec, ClipboardContent, LaneSession, M1PermissionSet, PAYLOAD_TYPE_CLIPBOARD,
     RawPcmAudioCodec, RekeyPolicy, SessionEpochState,
     advertisement::{AdvertisedAudioCodec, AudioAdvertisement, TransportAdvertisement},
+    cleanup_orphaned_receive_staging,
     frame::{
         LANE_ENVELOPE_MAGIC, PixelFormat as FramePixelFormat, RawAudio, RawClipboard, RawFrame,
         RawRekey, RawTelemetry, SyntheticAudioKind, SyntheticAudioSource,
         TelemetrySample as WireTelemetrySample, TelemetryValue as WireTelemetryValue,
     },
     handshake::{
-        NegotiatedTransport, negotiated_session_context_hash,
+        NegotiatedTransport, negotiated_session_context_hash_with_profiles,
         perform_host_handshake_with_transcript_and_context,
     },
-    transport::{RecvEnvelope, SendEnvelope, TcpRecvHalf, TcpSendHalf, TcpTransport, Transport},
+    transport::{
+        GRACEFUL_CLOSE_TIMEOUT_MS, RecvEnvelope, SendEnvelope, TcpRecvHalf, TcpSendHalf,
+        TcpTransport, Transport,
+    },
 };
 use xenia_transport_quic::{
     QuicRecvHalf, QuicSendHalf, QuicTransport, bind_xenia_endpoint, encode_endpoint_addr,
@@ -1130,9 +1134,10 @@ struct Args {
     #[arg(long)]
     send_file: Option<std::path::PathBuf>,
 
-    /// Reject/refuse to send any file larger than this many bytes. The
-    /// whole file is buffered in memory (both sending and receiving), so
-    /// this is also a memory-use cap, not just a policy knob.
+    /// Reject/refuse to send any file larger than this many bytes. Outbound
+    /// daemon files are still buffered in memory; inbound files are streamed
+    /// through private disk staging, so this remains a size-policy cap but is
+    /// no longer an equivalent receive-heap cap.
     #[arg(long, default_value_t = 200 * 1024 * 1024)]
     file_transfer_max_bytes: u64,
 
@@ -1231,6 +1236,14 @@ enum AutoAcceptedTransport {
 }
 
 impl Transport for AnyTransport {
+    fn transport_profile(&self) -> xenia_peer_core::transport::TransportProfileV1 {
+        match self {
+            AnyTransport::Tcp(t) => t.transport_profile(),
+            AnyTransport::Ws(t) => t.transport_profile(),
+            AnyTransport::Quic { transport, .. } => transport.transport_profile(),
+        }
+    }
+
     async fn send_envelope(
         &mut self,
         bytes: &[u8],
@@ -1254,11 +1267,7 @@ impl Transport for AnyTransport {
 
 impl AnyTransport {
     fn negotiated_transport(&self) -> NegotiatedTransport {
-        match self {
-            AnyTransport::Tcp(_) => NegotiatedTransport::Tcp,
-            AnyTransport::Ws(_) => NegotiatedTransport::WebSocket,
-            AnyTransport::Quic { .. } => NegotiatedTransport::Quic,
-        }
+        self.transport_profile().kind
     }
 
     /// Split into independently-owned send/recv halves so a dedicated
@@ -1318,7 +1327,11 @@ impl AnySendHalf {
     async fn close(&mut self) -> Result<(), xenia_peer_core::transport::TransportError> {
         if let AnySendHalf::Quic { _endpoint, send } = self {
             let finish_result = send.finish();
-            let _ = tokio::time::timeout(Duration::from_secs(3), send.closed()).await;
+            let _ = tokio::time::timeout(
+                Duration::from_millis(GRACEFUL_CLOSE_TIMEOUT_MS),
+                send.closed(),
+            )
+            .await;
             _endpoint.close().await;
             finish_result?;
         }
@@ -1579,6 +1592,7 @@ fn session_capabilities_frame(
         telemetry_enabled: telemetry_level != TelemetryLevel::Off,
         input_control_enabled: input_backend != InputBackendChoice::Noop,
         clipboard_enabled: clipboard != ClipboardMode::Off,
+        input_event_schema_version: xenia_peer_core::frame::INPUT_EVENT_SCHEMA_VERSION,
         lane_envelope_version: xenia_peer_core::frame::LANE_ENVELOPE_SCHEMA_VERSION,
         lane_envelope_magic: xenia_peer_core::frame::LANE_ENVELOPE_MAGIC,
     }
@@ -2148,7 +2162,9 @@ fn build_audio_source(
     Ok(match mode {
         AudioMode::Off => None,
         AudioMode::Sine | AudioMode::Noise => {
-            let kind = synthetic_audio_kind(mode).expect("synthetic audio mode should map to kind");
+            let Some(kind) = synthetic_audio_kind(mode) else {
+                return Err("synthetic audio mode did not resolve to a source kind".into());
+            };
             Some(DaemonAudioSource::Synthetic(SyntheticAudioSource::new(
                 1, kind,
             )))
@@ -4966,10 +4982,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ledger-maintenance operations that genuinely need the live ledger
     // are wired further below, right after it loads.
     if let Some(output_path) = args.activate_consent_ledger_compacted_state.as_deref() {
-        let snapshot_path = args
-            .consent_ledger_activation_snapshot
-            .as_deref()
-            .expect("clap requires an activation snapshot");
+        let Some(snapshot_path) = args.consent_ledger_activation_snapshot.as_deref() else {
+            return Err("--activate-consent-ledger-compacted-state requires \
+                 --consent-ledger-activation-snapshot"
+                .into());
+        };
         if args.consent_ledger_activation_archive_segment.is_empty() {
             return Err(
                 "--activate-consent-ledger-compacted-state requires at least one \
@@ -5083,10 +5100,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(pin_path) = args.advance_consent_ledger_compacted_state_pin.as_deref() {
-        let state_path = args
-            .consent_ledger_compacted_state
-            .as_deref()
-            .expect("clap requires compacted state for pin advancement");
+        let Some(state_path) = args.consent_ledger_compacted_state.as_deref() else {
+            return Err("--advance-consent-ledger-compacted-state-pin requires \
+                 --consent-ledger-compacted-state"
+                .into());
+        };
         if pin_path == state_path {
             return Err("compacted-state pin path must differ from the active-state path".into());
         }
@@ -5149,14 +5167,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .verify_consent_ledger_compaction_gc_certificate
             .is_some()
     {
-        let state_path = args
-            .consent_ledger_compacted_state
-            .as_deref()
-            .expect("clap requires compacted state for GC certification");
-        let pin_path = args
-            .trusted_consent_ledger_compacted_state_pin
-            .as_deref()
-            .expect("clap requires compacted-state pin for GC certification");
+        let Some(state_path) = args.consent_ledger_compacted_state.as_deref() else {
+            return Err(
+                "consent-ledger GC certification requires --consent-ledger-compacted-state".into(),
+            );
+        };
+        let Some(pin_path) = args.trusted_consent_ledger_compacted_state_pin.as_deref() else {
+            return Err("consent-ledger GC certification requires \
+                 --trusted-consent-ledger-compacted-state-pin"
+                .into());
+        };
         let (active, _) = crate::consent_ledger_persistence::load_compacted_active_state(
             state_path,
             &signing_key,
@@ -5215,10 +5235,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
 
-        let certificate_path = args
+        let Some(certificate_path) = args
             .verify_consent_ledger_compaction_gc_certificate
             .as_deref()
-            .expect("checked GC certificate verification mode");
+        else {
+            return Err("GC certificate verification mode requires a certificate path".into());
+        };
         let certificate: consent_compaction::ConsentCompactionGcCertificateV1 =
             audit_ledger_store::read_bounded_json(
                 certificate_path,
@@ -5636,10 +5658,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(output_path) = args.export_consent_ledger_archive_segment.as_deref() {
-        let base_path = args
-            .consent_ledger_archive_base_checkpoint
-            .as_deref()
-            .expect("clap requires an archive base checkpoint");
+        let Some(base_path) = args.consent_ledger_archive_base_checkpoint.as_deref() else {
+            return Err("--export-consent-ledger-archive-segment requires \
+                 --consent-ledger-archive-base-checkpoint"
+                .into());
+        };
         let segment = audit_ledger_store::export_archive_segment_atomic(
             output_path,
             base_path,
@@ -5824,10 +5847,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(output_path) = args.export_consent_ledger_compacted_snapshot.as_deref() {
-        let bundle_path = args
-            .consent_ledger_compaction_bundle_input
-            .as_deref()
-            .expect("clap requires a compaction bundle input");
+        let Some(bundle_path) = args.consent_ledger_compaction_bundle_input.as_deref() else {
+            return Err("--export-consent-ledger-compacted-snapshot requires \
+                 --consent-ledger-compaction-bundle-input"
+                .into());
+        };
         let bundle =
             audit_ledger_store::read_bounded_json::<consent_compaction::ConsentCompactionBundleV1>(
                 bundle_path,
@@ -6115,6 +6139,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "host signing identity loaded; share this fingerprint out-of-band for viewer pinning"
     );
 
+    if let Some(recv_dir) = args.recv_file_dir.as_deref() {
+        match cleanup_orphaned_receive_staging(recv_dir) {
+            Ok(removed) if removed > 0 => {
+                info!(removed, dir = %recv_dir.display(), "removed orphaned receive staging files")
+            }
+            Ok(_) => {}
+            Err(err) => warn!(
+                dir = %recv_dir.display(),
+                error = %err,
+                "could not scan receive directory for orphaned staging files"
+            ),
+        }
+    }
+
     // Accept a peer and complete its handshake, retrying until one succeeds.
     //
     // Both halves of this loop are load-bearing for availability, and neither
@@ -6145,6 +6183,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ) = loop {
         let mut transport = accept_transport(&args, audio_advertisement.clone()).await?;
         let negotiated_transport = transport.negotiated_transport();
+        let transport_profile = transport.transport_profile();
+        let pre_session_profile = transport.pre_session_profile();
+        let availability_profile = transport.availability_profile();
         let mut session = LaneSession::with_fixture(source_id, args.epoch);
         let frame_format = codec_to_frame_format(args.codec);
         let capabilities = session_capabilities_frame(
@@ -6155,8 +6196,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.input_backend,
             args.clipboard,
         )?;
-        let negotiated_context_hash = negotiated_session_context_hash(
-            negotiated_transport,
+        let negotiated_context_hash = negotiated_session_context_hash_with_profiles(
+            &transport_profile,
+            &pre_session_profile,
+            &availability_profile,
             xenia_peer_core::RawCapabilities::from_frame(&capabilities)?,
         )?;
 
@@ -6498,7 +6541,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // task start -- a view-only session (`--input-backend
             // noop`, the default) never triggers `XdgPortalInjector`'s
             // consent dialog because it's simply never built.
-            let mut injector: Option<Box<dyn InputInjector>> = None;
+            let mut injector: Option<SessionInputInjector> = None;
             loop {
                 let envelope = match recv_half.recv_envelope().await {
                     Ok(envelope) => envelope,
@@ -6572,6 +6615,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 };
+                if input.payload.len() > xenia_inject::MAX_BINCODE_INPUT_EVENT_BYTES {
+                    warn!(
+                        bytes = input.payload.len(),
+                        max_bytes = xenia_inject::MAX_BINCODE_INPUT_EVENT_BYTES,
+                        "input event payload exceeds application parser ceiling"
+                    );
+                    continue;
+                }
                 let event: xenia_inject::InputEvent = match bincode::deserialize(&input.payload) {
                     Ok(event) => event,
                     Err(err) => {
@@ -6589,8 +6640,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let width = screen_dims.0.load(Ordering::Relaxed);
                 let height = screen_dims.1.load(Ordering::Relaxed);
-                let injector = injector
-                    .get_or_insert_with(|| build_input_injector(input_backend, width, height));
+                let injector = injector.get_or_insert_with(|| {
+                    SessionInputInjector::new(build_input_injector(input_backend, width, height))
+                });
                 match injector.process_events(std::slice::from_ref(&event)) {
                     Ok(()) => {
                         info!(
@@ -6606,6 +6658,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "input injection failed"
                         );
                     }
+                }
+            }
+
+            if let Some(injector) = injector.as_mut() {
+                let report = injector.release_all();
+                if report.attempted > 0 {
+                    info!(
+                        attempted = report.attempted,
+                        released = report.released,
+                        failed = report.failed,
+                        backend = injector.backend_name(),
+                        "released session-owned injected input state during teardown"
+                    );
+                }
+                if report.failed > 0 {
+                    warn!(
+                        failed = report.failed,
+                        backend = injector.backend_name(),
+                        "some injected input state could not be released during teardown"
+                    );
                 }
             }
         });
@@ -6635,6 +6707,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sent_telemetry = 0u64;
     let mut sent_audio = 0u64;
     let mut sent_clipboard = 0u64;
+    let video_pressure = xenia_peer_core::producer_flow::LanePressureCountersV1::default();
 
     loop {
         if args.frames != 0 && sent_frames >= args.frames {
@@ -6764,6 +6837,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         m1_runtime.lock().await.preflight_frame_flow()?;
+        let video_capture_started = std::time::Instant::now();
         let Some(frame) = capture.capture()? else {
             continue;
         };
@@ -6797,10 +6871,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             encoder = Some(make_encoder(args.codec, params)?);
         }
-        let encoder = encoder.as_mut().expect("encoder built above");
+        let Some(encoder) = encoder.as_mut() else {
+            return Err("video encoder was unavailable after capture initialization".into());
+        };
 
         let captured_at = now_ms();
         let packets = encoder.encode(&pixels, captured_at)?;
+        if video_capture_started.elapsed()
+            > Duration::from_millis(
+                xenia_peer_core::producer_flow::HOST_VIDEO_FRESHNESS_V1.max_capture_to_send_ms,
+            )
+        {
+            let stale = video_pressure.record_stale();
+            warn!(
+                age_ms = video_capture_started.elapsed().as_millis(),
+                max_age_ms =
+                    xenia_peer_core::producer_flow::HOST_VIDEO_FRESHNESS_V1.max_capture_to_send_ms,
+                packets = packets.len(),
+                stale_video_results = stale,
+                "dropping stale encoded video result before transport send"
+            );
+            continue;
+        }
         for packet in packets {
             let frame_id = session.lock().await.next_frame_id();
             let raw = RawFrame::encoded(
@@ -6813,7 +6905,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             let envelope = session.lock().await.seal_frame(&raw)?;
             m1_runtime.lock().await.allow_frame_flow()?;
-            send_half.send_envelope(&envelope).await?;
+            let send_deadline = Duration::from_millis(
+                xenia_peer_core::producer_flow::HOST_VIDEO_FRESHNESS_V1.max_send_stall_ms,
+            );
+            match tokio::time::timeout(send_deadline, send_half.send_envelope(&envelope)).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    let fatal_deadlines = video_pressure.record_fatal_deadline();
+                    return Err(format!(
+                        "video envelope send exceeded {} ms semantic deadline; session is fatal after a canceled partial send (fatal_video_deadlines={fatal_deadlines})",
+                        xenia_peer_core::producer_flow::HOST_VIDEO_FRESHNESS_V1.max_send_stall_ms
+                    )
+                    .into());
+                }
+            }
             epoch_state.record_video_frame(envelope.len());
             sent_frames += 1;
             if sent_frames <= 3 || sent_frames.is_multiple_of(10) {
@@ -6839,6 +6944,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let video_pressure_snapshot = video_pressure.snapshot();
+    if video_pressure_snapshot.has_pressure() {
+        info!(
+            stale = video_pressure_snapshot.stale,
+            fatal_deadline = video_pressure_snapshot.fatal_deadline,
+            total = video_pressure_snapshot.total_events(),
+            "host video semantic-pressure summary"
+        );
+    }
     send_half.close().await?;
     Ok(())
 }

@@ -36,7 +36,7 @@ If this file disagrees with reality, the file is wrong.
 | Transport | Crate | Status |
 |---|---|---|
 | TCP length-prefix | `xenia-peer-core::transport::TcpTransport` | ✅ daemon/viewer baseline; conformance-tested; explicit fallback |
-| WebSocket (binary frames) | `xenia-transport-ws` | ✅ daemon/viewer baseline; conformance-tested; selected by `auto` for `ws://...` |
+| WebSocket (binary frames) | `xenia-transport-ws` | ✅ native daemon/viewer profile `/1`; exact `xenia.transport.websocket.v1` subprotocol + carrier-native receive ceiling; browser client needs the companion `/1` subprotocol migration |
 | Iroh QUIC | `xenia-transport-quic` | ✅ daemon/viewer CLI wired; conformance-tested; auto-discovered from `host:port` when daemon advertises it |
 
 ### Transport improvement plan
@@ -45,6 +45,7 @@ If this file disagrees with reality, the file is wrong.
 2. Maintain the shared transport conformance tests for envelope boundaries, ordering, and oversize rejection before expanding transport behavior.
 3. Keep `--transport auto` as the normal CLI path: daemon accepts TCP/WS, advertises QUIC over an initial TCP probe, and accepts QUIC directly.
 4. Next: harden fallback policy with timeouts, user-visible selected-transport reporting, and browser-compatible advertisement over WebSocket.
+5. V10-V19 hardening now authenticates carrier/session/failure semantics, bounds semantic producer pressure, deterministically unwinds injected input state, budgets media latency, and makes mobile file admission reservation races testable. Next evidence work is real Rust 1.94 execution/fault injection rather than another transport layer.
 
 ### Viewers (3)
 
@@ -60,7 +61,21 @@ If this file disagrees with reality, the file is wrong.
 |---|---|---|---|---|
 | `xenia-peer` on desktop | CLI | tcp / ws / quic | all three | ✅ loopback + LAN; QUIC smoke verified with passthrough |
 | `xenia-peer` on desktop | egui `--gui` | tcp / ws / quic | all three | ✅ visually verifiable; QUIC path uses same receive loop |
-| `xenia-peer` on desktop | browser (phone or desktop) | ws | passthrough | ✅ |
+| `xenia-peer` on desktop | browser (phone or desktop) | ws | passthrough | ⚠️ V10 `/0` path was live; V11 `/1` requires the companion `xenia-wire` browser subprotocol/profile migration |
+
+**Transport/session V12:** authenticated availability semantics are now implemented in native Xenia. `NegotiatedSessionContextV3` binds the live carrier profile plus an exact availability profile (15s send-stall, 120s complete-envelope receive, 3s graceful-close, no synthetic application keepalive, carrier control traffic does not reset application liveness). TCP/WS/QUIC operations fail closed on the bounded deadlines. Browser `/1` companion migration remains a separate `xenia-wire` task; V12 does not claim it is closed.
+
+**Transport/session V13:** pre-session availability is now a separate explicit policy. `NegotiatedSessionContextV4` additionally binds the deadline policy that was enforced before peer authentication: TCP connect 10s, WebSocket client connect+upgrade 20s / server upgrade 10s, QUIC connection 15s, and QUIC logical-stream open/accept+preface 10s. Desktop GUI input is now bounded at 256 events, with lossy pointer motion and backpressured key/button transitions. Close/reset/timeout during handshake, capability authentication, or rekey remains session-fatal; no partial carrier/session resumption is defined.
+
+**Application flow-control V14:** pointer motion and pointer-button state are now distinct appended `xenia-inject::InputEvent` variants, preserving the historical bincode indices of legacy Pointer/Key/Touch. The sealed session capabilities bind `input_event_schema_version = 2`, so peers cannot authenticate an otherwise-current session while silently disagreeing about the input payload schema. Desktop and current Android producers emit only the explicit forms; mobile touch-move is lossy while key/button/touch Down/Up/Cancel use bounded backpressure. `xenia-peer-core::producer_flow` records finite, semantic producer policies for pointer motion, state transitions, desktop/mobile video presentation, telemetry, audio playback, and file-transfer UI events; a language-neutral vector plus independent model/source checker pins the policy.
+
+**Application teardown V15:** the input-injection abstraction now preserves V14's pointer split all the way to each OS backend (`inject_pointer_move` vs `inject_pointer_button`), eliminating the internal `PointerMove -> left-button release` collapse. The host wraps the backend in a session-scoped tracker and releases held keys/buttons and cancels touches when the input/control transport terminates, with a final Drop retry. uinput touch Cancel now releases fail-closed. Mobile outbound clipboard uses a one-value coalescing watch slot instead of a stale FIFO, and user-triggered file-transfer command saturation is returned explicitly through Rust/C/JNI/Kotlin rather than silently ignored. V15 remains local application/session hardening; it does not revise the authenticated input schema beyond V14's version 2.
+
+**Application lane latency V16:** bounded memory is now paired with explicit local usefulness budgets. Host CPAL audio capture retains at most 100 ms of samples; the native viewer uses a 4-frame audio ingress queue, 6-frame jitter depth, and 80 ms device FIFO for a 280 ms application-buffer ceiling before OS/hardware/network effects. The host video pipeline remains synchronous with no intermediate capture backlog, drops capture/encode output older than 500 ms before send, and treats a video send stalled beyond 1 s as session-fatal. Mobile file commands are capped at 100 MiB in native code and JNI performs an advisory admission check before requesting byte-array elements; the final enqueue still rechecks because preflight is not a reservation.
+
+**Application lane recovery V17:** the desktop audio ingress keeps V16's four-frame/80 ms bound but now drops the oldest queued frame under saturation so playout converges toward current audio rather than preserving stale frames. `LanePressureCountersV1` makes supersession/stale/deadline behavior observable locally. Android file transfer now reserves an actual bounded Tokio MPSC permit before JNI requests the Java byte array, commits only with the same byte length, and releases the slot on cancel, 30-second expiry, or engine teardown. The older advisory APIs remain for ABI compatibility.
+
+**Application runtime evidence V18:** file-transfer admission now has an explicit `Reserved -> Copying` state machine: admission tokens live for 30 seconds, the first pre-copy claim establishes a separate 60-second copy lease, repeated claims are idempotent, and expiry always rechecks the current deadline before releasing the owned queue permit. Desktop audio supersession/rejection counts are visible in the GUI, host video pressure is summarized on normal teardown, and `scripts/run_transport_session_contracts.sh` runs the accumulated V10-V18 source/model contracts in CI before the existing Rust test step. Rust 1.94 runtime execution remains the merge authority for authored transport/mobile tests.
 | `xenia-peer` on desktop | browser (phone or desktop) | ws | h264 | ❌ needs WebCodecs wiring |
 | `xenia-peer` on desktop | browser (phone or desktop) | ws | hdc | ❌ needs bincode+grayscale decoder in WASM (~50 LOC) |
 | **Phone → desktop** (phone as daemon) | desktop viewer | any | any | ❌ needs phone-side daemon port |
@@ -356,6 +371,11 @@ stabilizes past draft-02r2, publish xenia library crates to
 crates.io under Apache/MIT. Binaries stay on GitHub-only under AGPL.
 
 ---
+
+## Transport/session V21 candidate — incoming file streaming + durable destination admission
+
+V20 removes whole-file buffering from the preferred **outbound** Android path. The next file-transfer pressure boundary is incoming mobile transfer reassembly, which still buffers an accepted file in a `Vec<u8>` until `Complete`. A V21 tranche should consider app-private temp-file receive staging with incremental BLAKE3, destination-space/admission checks before `Accept`, atomic persist/rename semantics, and crash cleanup. Keep the current wire protocol unless measurement shows a peer-visible change is actually necessary.
+
 
 ## Conventions
 

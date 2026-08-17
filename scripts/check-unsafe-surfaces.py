@@ -12,7 +12,19 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-SKIP_PARTS = {".git", "_archive", "target", "dist", "pkg", "node_modules"}
+from xenia_scan_scope import cfg_test_only_lines, iter_repo_files
+
+SKIP_PARTS = {
+    ".git",
+    ".claude",
+    "_archive",
+    "target",
+    "dist",
+    "pkg",
+    "node_modules",
+    "xenia-peer-state",
+    "xenia-operator-agent-state",
+}
 TEST_PARTS = {"tests", "benches", "examples"}
 PATTERNS = {
     "unsafe_block_or_fn": re.compile(r"\bunsafe\b"),
@@ -36,11 +48,8 @@ def is_test_or_example(path: Path) -> bool:
 
 
 def iter_rust_files(root: Path):
-    for path in root.rglob("*.rs"):
-        rel = path.relative_to(root)
-        if set(rel.parts) & SKIP_PARTS:
-            continue
-        yield path, rel
+    for path in iter_repo_files(root, suffixes={".rs"}, skip_parts=SKIP_PARTS):
+        yield path, path.relative_to(root)
 
 
 def main() -> int:
@@ -59,13 +68,22 @@ def main() -> int:
             lines = path.read_text(encoding="utf-8").splitlines()
         except UnicodeDecodeError:
             continue
+        test_only_lines = cfg_test_only_lines(lines)
         for line_no, line in enumerate(lines, start=1):
             stripped = line.strip()
             if not stripped or stripped.startswith("//"):
                 continue
             for kind, pattern in PATTERNS.items():
                 if pattern.search(line):
-                    findings.append(Finding(rel, line_no, kind, stripped, runtime_source))
+                    findings.append(
+                        Finding(
+                            rel,
+                            line_no,
+                            kind,
+                            stripped,
+                            runtime_source and line_no not in test_only_lines,
+                        )
+                    )
 
     counts: dict[tuple[str, bool], int] = {}
     for finding in findings:

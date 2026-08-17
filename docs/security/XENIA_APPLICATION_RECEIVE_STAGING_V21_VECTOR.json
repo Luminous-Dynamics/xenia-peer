@@ -1,0 +1,31 @@
+{
+  "canonical_sha256": "cb0b488958a27d0aaf1867c90eb10670fcff6fb72ce72ad17d46bebc0a3893b8",
+  "drop_cleanup": true,
+  "finish_requires_exact_size": true,
+  "incremental_blake3": true,
+  "legacy_whole_buffer_persist_api_retained": true,
+  "mobile_outbound_staging_storage": "noBackupFilesDir/outbound-staging",
+  "mobile_receive_storage": "filesDir/received",
+  "outbound_command_dequeue_requires_authenticated_surface": true,
+  "outbound_command_dequeue_requires_idle_sender": true,
+  "profile": "xenia/application/receive-staging/v21",
+  "publish_no_clobber_hard_link": true,
+  "receive_free_space_reservation": false,
+  "receive_paths": {
+    "xenia-mobile-ffi": {
+      "max_concurrent": 4
+    },
+    "xenia-peer": {
+      "max_concurrent": 8
+    },
+    "xenia-viewer": {
+      "max_concurrent": 8
+    }
+  },
+  "restart_cleanup_preserves_current_pid": true,
+  "restart_orphan_cleanup": true,
+  "same_directory_private_staging": true,
+  "strict_sequential_offsets": true,
+  "wire_chunk_bytes": 65536,
+  "wire_protocol_changed": false
+}

@@ -328,9 +328,12 @@ impl OperatorPolicy {
             return Err(OperatorPolicyError::DuplicateKey(operator_id.to_string()));
         }
 
-        // Safe to unwrap: `old_key` was just found in this same map above.
-        let role = map.get(&old_key).unwrap().role;
-        map.remove(&old_key);
+        let old_operator = map.remove(&old_key).ok_or_else(|| {
+            OperatorPolicyError::Io(
+                "operator disappeared while the policy write lock was held".to_string(),
+            )
+        })?;
+        let role = old_operator.role;
         map.insert(
             new_ed25519_pubkey,
             EnrolledOperator {

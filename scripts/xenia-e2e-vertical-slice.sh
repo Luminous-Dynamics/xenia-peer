@@ -27,6 +27,7 @@ ROOT="$(pwd)"
 
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 LOG_DIR="${XENIA_E2E_LOG_DIR:-/tmp/xenia-e2e-vertical-slice}"
+DIST_DIR="$LOG_DIR/sovereign-admin-dist"
 rm -rf "$LOG_DIR"
 mkdir -p "$LOG_DIR"
 
@@ -34,12 +35,12 @@ echo "=== building xenia-peer, xenia-operator-agent, xenia-viewer ===" >&2
 cargo build --locked -p xenia-peer -p xenia-operator-agent -p xenia-viewer >&2
 
 echo "=== building sovereign-admin console (trunk) ===" >&2
-(cd apps/sovereign-admin && trunk build) >&2
+(cd apps/sovereign-admin && TRUNK_BUILD_DIST="$DIST_DIR" trunk build) >&2
 
 export XENIA_E2E_ROOT="$ROOT"
 export XENIA_E2E_TARGET_DIR="$TARGET_DIR"
 export XENIA_E2E_LOG_DIR="$LOG_DIR"
-export XENIA_E2E_DIST_DIR="$ROOT/apps/sovereign-admin/dist"
+export XENIA_E2E_DIST_DIR="$DIST_DIR"
 
 echo "=== running Playwright vertical-slice driver ===" >&2
 exec python3 "$ROOT/scripts/e2e/vertical_slice.py"

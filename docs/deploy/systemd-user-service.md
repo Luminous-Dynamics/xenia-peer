@@ -42,15 +42,16 @@ must be on `PATH` for the unit files below (`ExecStart=` relies on `PATH`
 rather than a hardcoded path, so it works the same way regardless of how
 you installed the binaries).
 
-**A Nix package derivation (`nix build .#xenia-peer`) is not yet
-available.** It was attempted while packaging these unit files and
-blocked on a real issue, not just left undone: this repo's `Cargo.lock`
-is deliberately `.gitignore`d, and Nix flakes only see git-tracked files
-when resolving a local path reference (`cargoLock.lockFile = ./Cargo.lock;`
-fails with *"Path 'Cargo.lock' ... is not tracked by Git"*). Un-gitignoring
-it is a real project-convention decision, not something to change as a
-side effect of a packaging PR -- left as a follow-up for whoever owns
-that call.
+A Nix derivation for the daemon is also available as `nix build
+.#xenia-peer`. `Cargo.lock` is tracked and pinned by the flake. The normal
+package deliberately **does not** compile the `preprod-fixtures` feature;
+the separately named `.#xenia-peer-preprod` output exists only for scripted
+VM tests that need the pre-production auto-consent fixture. Do not deploy
+that test package as the normal daemon.
+
+`xenia-operator-agent` does not yet have a dedicated flake package, so the
+`cargo install --locked` path above remains the documented installation path
+for the agent.
 
 ## Install the unit files
 

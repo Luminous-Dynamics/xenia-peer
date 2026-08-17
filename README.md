@@ -54,7 +54,11 @@ from `xenia-server` to `xenia-peer` in commit `a861501` precisely
 because that legacy naming was actively misleading about the
 decentralized trust model. See
 [`docs/ADR-001-m0-architecture.md`](docs/ADR-001-m0-architecture.md)
-for the full architectural decisions.
+for the full architectural decisions. The cross-layer networking boundary is
+defined in [`docs/architecture/OSI_SECURITY_PLANE.md`](docs/architecture/OSI_SECURITY_PLANE.md):
+Xenia owns the L5-L7 security/session plane and a narrow L4 transport-adapter
+surface, while intentionally leaving IP/link/physical networking to established
+carriers.
 
 ## Crate layout
 

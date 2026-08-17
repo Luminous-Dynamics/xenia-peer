@@ -30,6 +30,7 @@
 #![warn(rust_2018_idioms)]
 
 use std::io;
+use std::time::Duration;
 
 use iroh::{
     Endpoint, EndpointAddr,
@@ -38,14 +39,16 @@ use iroh::{
 use thiserror::Error;
 use tracing::debug;
 use xenia_peer_core::transport::{
-    MAX_ENVELOPE_BYTES, RecvEnvelope, SendEnvelope, Transport, TransportError,
+    MAX_ENVELOPE_BYTES, QUIC_CONNECT_TIMEOUT_MS, QUIC_PROTOCOL_ID, QUIC_STREAM_OPEN_TIMEOUT_MS,
+    RECEIVE_ENVELOPE_TIMEOUT_MS, RecvEnvelope, SEND_STALL_TIMEOUT_MS, SendEnvelope, Transport,
+    TransportError, TransportKind, TransportProfileV1,
 };
 
 /// Re-export of the Iroh crate for endpoint ownership in callers.
 pub use iroh;
 
 /// ALPN used by the Xenia QUIC transport.
-pub const XENIA_QUIC_ALPN: &[u8] = b"xenia/transport/quic/0";
+pub const XENIA_QUIC_ALPN: &[u8] = QUIC_PROTOCOL_ID.as_bytes();
 
 const STREAM_PREFACE: &[u8; 8] = b"XENIAQ0\0";
 const ADDR_PREFIX: &str = "iroh:";
@@ -135,10 +138,16 @@ impl QuicTransport {
         endpoint: &Endpoint,
         addr: impl Into<EndpointAddr>,
     ) -> Result<Self, TransportError> {
-        let conn = endpoint
-            .connect(addr, XENIA_QUIC_ALPN)
-            .await
-            .map_err(|e| TransportError::from(QuicError::Connect(e.to_string())))?;
+        let conn = tokio::time::timeout(
+            Duration::from_millis(QUIC_CONNECT_TIMEOUT_MS),
+            endpoint.connect(addr, XENIA_QUIC_ALPN),
+        )
+        .await
+        .map_err(|_| TransportError::TimedOut {
+            operation: "quic_connect",
+            timeout_ms: QUIC_CONNECT_TIMEOUT_MS,
+        })?
+        .map_err(|e| TransportError::from(QuicError::Connect(e.to_string())))?;
         Self::open(conn).await
     }
 
@@ -148,32 +157,56 @@ impl QuicTransport {
             .accept()
             .await
             .ok_or_else(|| TransportError::from(QuicError::EndpointClosed))?;
-        let conn = incoming
+        let conn = tokio::time::timeout(Duration::from_millis(QUIC_CONNECT_TIMEOUT_MS), incoming)
             .await
+            .map_err(|_| TransportError::TimedOut {
+                operation: "quic_accept_connection",
+                timeout_ms: QUIC_CONNECT_TIMEOUT_MS,
+            })?
             .map_err(|e| TransportError::from(QuicError::Accept(e.to_string())))?;
         Self::accept_stream(conn).await
     }
 
     /// Open a new bidirectional stream on an established connection.
     pub async fn open(conn: Connection) -> Result<Self, TransportError> {
-        let (mut send, recv) = conn
-            .open_bi()
-            .await
-            .map_err(|e| TransportError::from(QuicError::Stream(e.to_string())))?;
-        send.write_all(STREAM_PREFACE)
-            .await
-            .map_err(|e| TransportError::from(QuicError::Io(e.to_string())))?;
-        debug!("iroh quic stream opened");
-        Ok(Self::new(conn, send, recv))
+        tokio::time::timeout(
+            Duration::from_millis(QUIC_STREAM_OPEN_TIMEOUT_MS),
+            async move {
+                let (mut send, recv) = conn
+                    .open_bi()
+                    .await
+                    .map_err(|e| TransportError::from(QuicError::Stream(e.to_string())))?;
+                send.write_all(STREAM_PREFACE)
+                    .await
+                    .map_err(|e| TransportError::from(QuicError::Io(e.to_string())))?;
+                debug!("iroh quic stream opened");
+                Ok(Self::new(conn, send, recv))
+            },
+        )
+        .await
+        .map_err(|_| TransportError::TimedOut {
+            operation: "quic_open_stream",
+            timeout_ms: QUIC_STREAM_OPEN_TIMEOUT_MS,
+        })?
     }
 
     /// Accept the next bidirectional stream on an established connection.
     pub async fn accept_stream(conn: Connection) -> Result<Self, TransportError> {
-        let (send, recv) = conn
-            .accept_bi()
-            .await
-            .map_err(|e| TransportError::from(QuicError::Stream(e.to_string())))?;
-        Self::accept_stream_pair(conn, send, recv).await
+        tokio::time::timeout(
+            Duration::from_millis(QUIC_STREAM_OPEN_TIMEOUT_MS),
+            async move {
+                let (send, recv) = conn
+                    .accept_bi()
+                    .await
+                    .map_err(|e| TransportError::from(QuicError::Stream(e.to_string())))?;
+                Self::accept_stream_pair(conn, send, recv).await
+            },
+        )
+        .await
+        .map_err(|_| TransportError::TimedOut {
+            operation: "quic_accept_stream",
+            timeout_ms: QUIC_STREAM_OPEN_TIMEOUT_MS,
+        })?
     }
 
     /// Gracefully finish the sending side of the transport stream.
@@ -235,52 +268,83 @@ fn is_stream_eof(msg: &str) -> bool {
 
 /// Write one length-prefixed envelope to a QUIC send stream. Shared by
 /// [`QuicTransport`] and [`QuicSendHalf`].
-async fn write_envelope(send: &mut SendStream, bytes: &[u8]) -> Result<(), TransportError> {
+async fn write_envelope_with_timeout(
+    send: &mut SendStream,
+    bytes: &[u8],
+    timeout: Duration,
+) -> Result<(), TransportError> {
     let len = u32::try_from(bytes.len()).map_err(|_| TransportError::EnvelopeTooLarge(u32::MAX))?;
     if len > MAX_ENVELOPE_BYTES {
         return Err(TransportError::EnvelopeTooLarge(len));
     }
 
-    send.write_all(&len.to_be_bytes())
-        .await
-        .map_err(|e| TransportError::from(QuicError::Io(e.to_string())))?;
-    send.write_all(bytes)
-        .await
-        .map_err(|e| TransportError::from(QuicError::Io(e.to_string())))?;
-    Ok(())
+    tokio::time::timeout(timeout, async {
+        send.write_all(&len.to_be_bytes())
+            .await
+            .map_err(|e| TransportError::from(QuicError::Io(e.to_string())))?;
+        send.write_all(bytes)
+            .await
+            .map_err(|e| TransportError::from(QuicError::Io(e.to_string())))?;
+        Ok(())
+    })
+    .await
+    .map_err(|_| TransportError::TimedOut {
+        operation: "send_envelope",
+        timeout_ms: timeout.as_millis().try_into().unwrap_or(u64::MAX),
+    })?
 }
 
-/// Read one length-prefixed envelope from a QUIC recv stream. Shared
-/// by [`QuicTransport`] and [`QuicRecvHalf`].
+async fn write_envelope(send: &mut SendStream, bytes: &[u8]) -> Result<(), TransportError> {
+    write_envelope_with_timeout(send, bytes, Duration::from_millis(SEND_STALL_TIMEOUT_MS)).await
+}
+
+async fn read_envelope_with_timeout(
+    recv: &mut RecvStream,
+    timeout: Duration,
+) -> Result<Vec<u8>, TransportError> {
+    tokio::time::timeout(timeout, async {
+        let mut len_buf = [0u8; 4];
+        recv.read_exact(&mut len_buf).await.map_err(|e| {
+            let msg = e.to_string();
+            if is_stream_eof(&msg) {
+                TransportError::UnexpectedEof
+            } else {
+                TransportError::from(QuicError::Io(msg))
+            }
+        })?;
+
+        let len = u32::from_be_bytes(len_buf);
+        if len > MAX_ENVELOPE_BYTES {
+            return Err(TransportError::EnvelopeTooLarge(len));
+        }
+
+        let mut buf = vec![0u8; len as usize];
+        recv.read_exact(&mut buf).await.map_err(|e| {
+            let msg = e.to_string();
+            if is_stream_eof(&msg) {
+                TransportError::UnexpectedEof
+            } else {
+                TransportError::from(QuicError::Io(msg))
+            }
+        })?;
+        Ok(buf)
+    })
+    .await
+    .map_err(|_| TransportError::TimedOut {
+        operation: "recv_envelope",
+        timeout_ms: timeout.as_millis().try_into().unwrap_or(u64::MAX),
+    })?
+}
+
 async fn read_envelope(recv: &mut RecvStream) -> Result<Vec<u8>, TransportError> {
-    let mut len_buf = [0u8; 4];
-    recv.read_exact(&mut len_buf).await.map_err(|e| {
-        let msg = e.to_string();
-        if is_stream_eof(&msg) {
-            TransportError::UnexpectedEof
-        } else {
-            TransportError::from(QuicError::Io(msg))
-        }
-    })?;
-
-    let len = u32::from_be_bytes(len_buf);
-    if len > MAX_ENVELOPE_BYTES {
-        return Err(TransportError::EnvelopeTooLarge(len));
-    }
-
-    let mut buf = vec![0u8; len as usize];
-    recv.read_exact(&mut buf).await.map_err(|e| {
-        let msg = e.to_string();
-        if is_stream_eof(&msg) {
-            TransportError::UnexpectedEof
-        } else {
-            TransportError::from(QuicError::Io(msg))
-        }
-    })?;
-    Ok(buf)
+    read_envelope_with_timeout(recv, Duration::from_millis(RECEIVE_ENVELOPE_TIMEOUT_MS)).await
 }
 
 impl Transport for QuicTransport {
+    fn transport_profile(&self) -> TransportProfileV1 {
+        TransportProfileV1::current(TransportKind::Quic)
+    }
+
     async fn send_envelope(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
         write_envelope(&mut self.send, bytes).await
     }
@@ -340,6 +404,19 @@ mod tests {
         assert_eq!(XENIA_QUIC_ALPN, b"xenia/transport/quic/0");
         assert_eq!(STREAM_PREFACE, b"XENIAQ0\0");
         assert_eq!(STREAM_PREFACE.len(), 8);
+    }
+
+    #[test]
+    fn quic_availability_deadlines_match_authenticated_profile() {
+        let profile = xenia_peer_core::transport::TransportAvailabilityProfileV1::current(
+            TransportKind::Quic,
+        );
+        assert_eq!(profile.send_stall_timeout_ms, SEND_STALL_TIMEOUT_MS);
+        assert_eq!(
+            profile.receive_envelope_timeout_ms,
+            RECEIVE_ENVELOPE_TIMEOUT_MS
+        );
+        assert!(!profile.carrier_keepalive_resets_application_idle);
     }
 
     #[test]

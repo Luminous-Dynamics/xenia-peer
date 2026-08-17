@@ -38,6 +38,20 @@ else
   warn "python3 not found; skipping Python script syntax checks"
 fi
 
+if [[ -d scripts/tests ]] && command -v python3 >/dev/null 2>&1; then
+  run python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+fi
+
+# Archive hygiene is security-sensitive enough to keep a negative regression
+# suite in the normal validation path. It is pure shell/tar and does not need a
+# Rust toolchain, so contaminated archive acceptance is caught even on light
+# review hosts.
+if [[ -x scripts/check-source-archive-negative.sh ]]; then
+  run scripts/check-source-archive-negative.sh .
+else
+  warn "scripts/check-source-archive-negative.sh not found or not executable"
+fi
+
 if [[ -x scripts/check-xenia-policy.py ]]; then
   if command -v python3 >/dev/null 2>&1; then
     run python3 scripts/check-xenia-policy.py .
@@ -160,6 +174,14 @@ fi
 
 # Cargo path/boundary checks are cheap and catch the most common migration
 # mistakes before cargo metadata tries to resolve the whole workspace.
+if [[ -x scripts/check-zk-protocol-boundary.py ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    run python3 scripts/check-zk-protocol-boundary.py .
+  else
+    warn "python3 not found; skipping ZK protocol boundary check"
+  fi
+fi
+
 if [[ -x scripts/check-cargo-boundaries.py ]]; then
   if command -v python3 >/dev/null 2>&1; then
     run python3 scripts/check-cargo-boundaries.py .

@@ -27,8 +27,18 @@ pub fn spawn(
     event_tx: Sender<Event>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        let rt =
-            tokio::runtime::Runtime::new().expect("failed to start the worker's tokio runtime");
+        let rt = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(err) => {
+                let message = format!("failed to start launcher async runtime: {err}");
+                let _ = event_tx.send(Event::StatusChanged(DaemonStatus::Error(message.clone())));
+                let _ = event_tx.send(Event::Notify {
+                    title: "Xenia launcher failed to start".to_string(),
+                    message,
+                });
+                return;
+            }
+        };
         rt.block_on(run(profile_dir, initial_config, cmd_rx, event_tx));
     })
 }

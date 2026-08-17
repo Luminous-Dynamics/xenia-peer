@@ -45,6 +45,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
         run: nix develop .#ci --command cargo clippy --locked --all-targets -- -D warnings
+      - name: Transport/session source + model contracts
+        run: nix develop .#ci --command bash scripts/run_transport_session_contracts.sh
       - name: Test
         run: nix develop .#ci --command cargo test --locked
       - name: Docs

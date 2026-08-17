@@ -1,0 +1,19 @@
+[package]
+name = "xenia-zk-codec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "Apache-2.0 OR MIT"
+description = "Resource-bounded concrete codecs for Xenia proof envelopes."
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+xenia-zk-protocol = { path = "../xenia-zk-protocol" }
+serde_json.workspace = true
+thiserror.workspace = true

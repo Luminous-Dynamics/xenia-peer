@@ -34,7 +34,7 @@ source_extensions = [
   ".rs", ".toml", ".json", ".yaml", ".yml", ".ts", ".tsx", ".js", ".jsx", ".html", ".sh", ".py"
 ]
 doc_extensions = [".md", ".rst", ".txt"]
-exclude_dirs = [".git", "target", "dist", "node_modules", ".direnv", "_archive"]
+exclude_dirs = [".git", ".claude", "target", "dist", "node_modules", ".direnv", "_archive", "xenia-peer-state", "xenia-operator-agent-state"]
 exclude_files = [
   "scripts/check-secure-defaults.py",
   "scripts/generate-release-dashboard.py",

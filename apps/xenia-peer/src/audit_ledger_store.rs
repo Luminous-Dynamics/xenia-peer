@@ -246,7 +246,9 @@ fn verify_checkpoint_against_chain(
     }
     let base = chain
         .base_checkpoint()
-        .expect("checked compacted chain anchor");
+        .ok_or(AuditLedgerStoreError::MetadataMismatch(
+            "compacted chain anchor is missing",
+        ))?;
     Verifier::verify_checkpoint(base).map_err(CheckpointContinuityError::from)?;
     if checkpoint.entry_count < base.entry_count {
         return Err(AuditLedgerStoreError::MetadataMismatch(

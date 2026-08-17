@@ -172,6 +172,7 @@ where
         telemetry_enabled: true,
         input_control_enabled: false,
         clipboard_enabled: false,
+        input_event_schema_version: xenia_peer_core::frame::INPUT_EVENT_SCHEMA_VERSION,
         lane_envelope_version: xenia_peer_core::frame::LANE_ENVELOPE_SCHEMA_VERSION,
         lane_envelope_magic: xenia_peer_core::frame::LANE_ENVELOPE_MAGIC,
     };
@@ -220,6 +221,49 @@ async fn quic_carries_sealed_audio_metadata() {
 async fn quic_carries_sealed_capabilities_metadata() {
     let (server, client, server_endpoint, client_endpoint) = quic_pair().await;
     assert_capabilities_roundtrip(server, client).await;
+    client_endpoint.close().await;
+    server_endpoint.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_rejects_altered_alpn_before_xenia_stream_open() {
+    let server_endpoint = quic_endpoint().await;
+    let client_endpoint = quic_endpoint().await;
+    let server_addr = server_endpoint.addr();
+
+    let result = client_endpoint
+        .connect(server_addr, b"xenia/transport/quic/1")
+        .await;
+    assert!(result.is_err());
+
+    client_endpoint.close().await;
+    server_endpoint.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_rejects_altered_stream_preface() {
+    let server_endpoint = quic_endpoint().await;
+    let client_endpoint = quic_endpoint().await;
+    let server_addr = server_endpoint.addr();
+
+    let server = {
+        let endpoint = server_endpoint.clone();
+        tokio::spawn(async move {
+            let incoming = endpoint.accept().await.unwrap();
+            let conn = incoming.await.unwrap();
+            QuicTransport::accept_stream(conn).await
+        })
+    };
+
+    let conn = client_endpoint
+        .connect(server_addr, XENIA_QUIC_ALPN)
+        .await
+        .unwrap();
+    let (mut send, _recv) = conn.open_bi().await.unwrap();
+    send.write_all(b"XENIAQ1\0").await.unwrap();
+    send.finish().unwrap();
+
+    assert!(server.await.unwrap().is_err());
     client_endpoint.close().await;
     server_endpoint.close().await;
 }

@@ -1,0 +1,19 @@
+[package]
+name = "xenia-zk-auth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Concrete Ed25519 and ML-DSA-65 authentication adapters for xenia-zk-protocol"
+publish = false
+
+[dependencies]
+xenia-zk-protocol = { path = "../xenia-zk-protocol" }
+thiserror = "1"
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+ml-dsa = { version = "0.1.1", default-features = true }
+
+[lints]
+workspace = true

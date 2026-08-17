@@ -34,16 +34,37 @@ internal object NativeBindings {
     const val FT_EVENT_PROGRESS: Int = 2
     const val FT_EVENT_DONE: Int = 3
 
-    @JvmStatic external fun connect(hostPort: String, codec: Int, recvDir: String?, maxFileBytes: Long): Long
+    const val SEND_FILE_OK: Int = 0
+    const val SEND_FILE_INVALID_ARGUMENT: Int = 1
+    const val SEND_FILE_INVALID_HANDLE: Int = 2
+    const val SEND_FILE_QUEUE_FULL: Int = 3
+    const val SEND_FILE_SESSION_CLOSED: Int = 4
+    const val SEND_FILE_TOO_LARGE: Int = 5
+    const val SEND_FILE_INVALID_RESERVATION: Int = 6
+    const val SEND_FILE_RESERVATION_SIZE_MISMATCH: Int = 7
+    const val SEND_FILE_IO_ERROR: Int = 8
+
+    @JvmStatic external fun connect(hostPort: String, codec: Int, recvDir: String?, stagingDir: String?, maxFileBytes: Long): Long
     @JvmStatic external fun sessionState(handle: Long): Int
     @JvmStatic external fun lastError(handle: Long): String?
     @JvmStatic external fun pollFrame(handle: Long): ByteArray?
     @JvmStatic external fun sendPointer(handle: Long, x: Float, y: Float, button: Int, pressed: Boolean)
+    @JvmStatic external fun sendPointerMove(handle: Long, x: Float, y: Float)
+    @JvmStatic external fun sendPointerButton(handle: Long, x: Float, y: Float, button: Int, pressed: Boolean)
     @JvmStatic external fun sendTouch(handle: Long, index: Int, x: Float, y: Float, phase: Int, pressure: Float)
     @JvmStatic external fun sendKey(handle: Long, code: Int, pressed: Boolean, modifiers: Int)
     @JvmStatic external fun pollClipboard(handle: Long): String?
     @JvmStatic external fun sendClipboard(handle: Long, text: String?)
-    @JvmStatic external fun sendFile(handle: Long, name: String, data: ByteArray)
+    @JvmStatic external fun fileTransferAdmissionSnapshot(handle: Long): IntArray?
+    @JvmStatic external fun fileTransferAdmissionSnapshotV2(handle: Long): LongArray?
+    @JvmStatic external fun trySendFile(handle: Long, name: String, data: ByteArray): Int
+    /** Returns [status, token]; expectedLen=-1 means provider length unknown. */
+    @JvmStatic external fun beginSendFileStream(handle: Long, name: String, expectedLen: Long): LongArray?
+    @JvmStatic external fun appendSendFileStream(handle: Long, token: Long, data: ByteArray, dataLen: Int): Int
+    @JvmStatic external fun finishSendFileStream(handle: Long, token: Long): Int
+    @JvmStatic external fun cancelSendFileStream(handle: Long, token: Long): Boolean
+    /** Legacy Boolean wrapper retained for ABI/source compatibility. */
+    @JvmStatic external fun sendFile(handle: Long, name: String, data: ByteArray): Boolean
     @JvmStatic external fun pollFileTransferEvent(handle: Long): ByteArray?
     @JvmStatic external fun disconnect(handle: Long)
 }

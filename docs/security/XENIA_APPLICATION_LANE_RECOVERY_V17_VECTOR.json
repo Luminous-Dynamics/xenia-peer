@@ -1,0 +1,37 @@
+{
+  "canonical_sha256": "d99fb42aaac71bc33c297fd428f8667f86f222ffefef7b1758aeccb272d8c55f",
+  "desktop_audio": {
+    "ingress_capacity_frames": 4,
+    "max_frame_duration_ms": 20,
+    "max_ingress_backlog_ms": 80,
+    "overflow": "drop-oldest",
+    "recovery_goal": "converge-to-present"
+  },
+  "host_video": {
+    "deadline_failure_is_counted": true,
+    "fatal_send_deadline_ms": 1000,
+    "stale_after_ms": 500,
+    "stale_is_counted": true
+  },
+  "lane_pressure_counters": [
+    "dropped_superseded",
+    "rejected",
+    "stale",
+    "fatal_deadline"
+  ],
+  "mobile_file_reservation": {
+    "cancel_releases_capacity": true,
+    "commit_requires_exact_length": true,
+    "jni_order": [
+      "reserve",
+      "copy-java-byte-array",
+      "commit"
+    ],
+    "legacy_advisory_api_retained": true,
+    "max_bytes": 104857600,
+    "pre_copy_reservation": true,
+    "queue_capacity": 2,
+    "reservation_ttl_ms": 30000
+  },
+  "profile": "xenia/application-lane-recovery/v1"
+}

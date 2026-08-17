@@ -205,20 +205,24 @@ impl WindowsInjector {
 }
 
 impl InputInjector for WindowsInjector {
-    fn inject_pointer(
-        &mut self,
-        x: f32,
-        y: f32,
-        button: u8,
-        pressed: bool,
-    ) -> Result<(), InjectError> {
+    fn inject_pointer_move(&mut self, x: f32, y: f32) -> Result<(), InjectError> {
         let (dx, dy) = (denorm(x), denorm(y));
         self.send_one(Self::mouse_input(
             dx,
             dy,
             0,
             MOUSEEVENTF_MOVE.0 | MOUSEEVENTF_ABSOLUTE.0,
-        ))?;
+        ))
+    }
+
+    fn inject_pointer_button(
+        &mut self,
+        x: f32,
+        y: f32,
+        button: u8,
+        pressed: bool,
+    ) -> Result<(), InjectError> {
+        self.inject_pointer_move(x, y)?;
         let (down, up, mouse_data) = button_flags(button);
         let flag = if pressed { down } else { up };
         self.send_one(Self::mouse_input(0, 0, mouse_data, flag))

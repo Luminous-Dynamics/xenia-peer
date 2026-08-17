@@ -1,0 +1,37 @@
+{
+  "admission_snapshot_v2": {
+    "authenticated_protocol_state": false,
+    "fields": [
+      "active_reserved",
+      "active_copying",
+      "active_streaming",
+      "active_stream_bytes",
+      "available_command_slots",
+      "command_capacity"
+    ]
+  },
+  "canonical_sha256": "7291d1a446978b54a0f3526ef2fc2a0763f4eb2a2c823824a46d9c5bea9e7a13",
+  "command_capacity": 2,
+  "file_send_status": {
+    "io_error": 8
+  },
+  "java_jni_chunk_bytes": 65536,
+  "legacy_whole_buffer_api_retained": true,
+  "max_staged_disk_bytes": 314572800,
+  "mobile_max_file_bytes": 104857600,
+  "preferred_android_picker_uses_readBytes": false,
+  "profile": "xenia/application/file-staging/v20",
+  "stages": [
+    "reserve_command_slot",
+    "stage_and_hash",
+    "finish_offer_source",
+    "peer_accept",
+    "stream_staged_chunks",
+    "peer_verified",
+    "delete_staged_file"
+  ],
+  "stream_lease_ms": 300000,
+  "unknown_provider_length_supported": true,
+  "wire_chunk_bytes": 65536,
+  "wire_protocol_changed": false
+}

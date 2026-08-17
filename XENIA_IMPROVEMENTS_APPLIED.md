@@ -86,3 +86,40 @@ hardens the daemon around spawned-server failures.
 - Added `SessionTranscriptBinding` and `compute_session_transcript_hash` to `xenia-ledger`.
 - Added `Verifier::verify_transcript_bound_evidence_bundle(...)` so a valid exported ledger cannot be trusted beside the wrong session transcript.
 - Added a transcript-bound evidence contract doc and validation script.
+
+
+## Transport/session V20: SAF streaming staging and bounded file memory
+
+- Replaced the current Android picker path's `InputStream.readBytes()` whole-file allocation with a reusable 64 KiB chunk loop into native app-private staging.
+- Native staging incrementally hashes BLAKE3, enforces the 100 MiB mobile cap for known and unknown provider lengths, and consumes the existing bounded command permit before expensive work.
+- Preserved the existing authenticated file-transfer wire protocol: `Offer(size, hash)` remains precomputed before peer acceptance; staged bytes are read with Tokio in 64 KiB chunks only after `Accept`.
+- Added a fixed five-minute non-extending staging lease, partial-file cleanup on expiry/cancel/session teardown, and explicit staging `IO_ERROR` status `8`.
+- Added `FileTransferAdmissionSnapshotV2` with `active_streaming` and `active_stream_bytes` while retaining V19's V1 ABI.
+- Added V20 language-neutral vector, source contract, reduced resource model, and accumulated-runner integration.
+
+## Transport/session V21: shared receive staging and activation correctness
+
+- Added `xenia-peer-core::IncomingFileStager` and migrated daemon, native viewer, and mobile inbound file paths away from whole-file `Vec<u8>` accumulation.
+- Enforced exact sequential offsets and offered-size bounds while updating BLAKE3 incrementally on each staged chunk.
+- Completion now requires exact size/hash, syncs staged content, and publishes with the existing same-directory no-clobber hard-link rule before reporting verification success.
+- Added best-effort partial cleanup on state drop plus startup scavenging for the exact prior-process `.xenia-receive-<pid>-<32 hex>.tmp` namespace while preserving current-process entries.
+- Corrected mobile command consumption so already-staged outbound files remain in the bounded queue until the authenticated application surface exists and no transfer is active.
+- Split Android received-file and outbound SAF staging roots explicitly: `filesDir/received` and `noBackupFilesDir/outbound-staging`.
+- Added a V21 language-neutral vector, static source contract, reduced receive/activation model, and accumulated-runner coverage. V21 intentionally does not claim filesystem free-space reservation.
+
+## Transport/session V19: deterministic reservation races and diagnostic fidelity
+
+- Switched mobile file-reservation deadlines to `tokio::time::Instant` and extracted the async expiry worker around `sleep_until`, enabling deterministic paused-time tests rather than wall-clock sleeps.
+- Added Tokio `test-util` merge tests for claim-at-29.999s, survival past the original admission deadline, copy-lease expiry returning command capacity, and non-extending repeat claims.
+- Added a JNI/Kotlin exact-result path for all stable file-admission statuses (`0..7`) while retaining the historical Boolean `sendFile` wrapper.
+- Added a point-in-time local file-admission snapshot (`active_reserved`, `active_copying`, `available_command_slots`, `command_capacity`) through Rust/C/JNI/Kotlin.
+- Added the V19 source contract/model/vector to the accumulated transport/session contract runner.
+
+## Transport/session V18: runtime evidence and reservation-race hardening
+
+- Added a two-stage file-transfer reservation lifecycle (`Reserved` -> `Copying`) with a 30 s admission TTL and bounded 60 s copy lease.
+- Expiry tasks re-read the live deadline so a near-expiry claim cannot be removed by the original timer; repeated claims do not extend the lease.
+- JNI claims capacity before Java byte-array materialization and commit still rechecks the token/length.
+- Removed the duplicate Android file-event `name_len` header store and pinned the 32-byte layout in a V18 compatibility vector.
+- Exposed desktop audio ingress pressure in the native GUI and emit a host video-pressure summary on normal teardown.
+- Added `scripts/run_transport_session_contracts.sh` and wired the accumulated V10-V18 source/model contracts into the flake CI job before the existing Rust tests.

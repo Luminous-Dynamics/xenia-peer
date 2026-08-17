@@ -267,8 +267,13 @@ pub(crate) async fn serve_sealed_operator_channel<T: Transport>(
     // life of the connection.
     loop {
         tokio::select! {
-            _ = async { interval.as_mut().unwrap().tick().await },
-                if interval.is_some() && awaiting_ack.is_none() =>
+            _ = async {
+                if let Some(interval) = interval.as_mut() {
+                    interval.tick().await
+                } else {
+                    std::future::pending::<tokio::time::Instant>().await
+                }
+            }, if interval.is_some() && awaiting_ack.is_none() =>
             {
                 let next_epoch = current_epoch + 1;
                 let epoch_hash = match OperatorRekeyEpochContext::new(

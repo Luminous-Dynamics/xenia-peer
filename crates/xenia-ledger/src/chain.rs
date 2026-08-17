@@ -170,10 +170,9 @@ impl Chain {
             self.entries.pop();
             return Err(TransactionalAppendError::Persist(err));
         }
-        Ok(self
-            .entries
-            .last()
-            .expect("append_transactional: entry was just pushed and persist succeeded"))
+        self.entries.last().ok_or(TransactionalAppendError::Ledger(
+            LedgerError::AppendInvariant,
+        ))
     }
 
     /// Transactional append variant whose persistence callback receives the
@@ -193,10 +192,9 @@ impl Chain {
             self.entries.pop();
             return Err(TransactionalAppendError::Persist(err));
         }
-        Ok(self
-            .entries
-            .last()
-            .expect("append_transactional_chain: entry was just pushed and persist succeeded"))
+        self.entries.last().ok_or(TransactionalAppendError::Ledger(
+            LedgerError::AppendInvariant,
+        ))
     }
 
     /// Consume the chain and return its resident entries. An anchored prefix,

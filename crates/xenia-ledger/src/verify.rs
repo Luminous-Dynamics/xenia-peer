@@ -497,6 +497,12 @@ fn backend_error_to_verify_error(
         },
         EvidenceSignatureBackendError::BadSignatureEncoding
         | EvidenceSignatureBackendError::BadSignature => VerifyError::BadSignature { seq },
+        EvidenceSignatureBackendError::UnsupportedSuite { .. } => {
+            VerifyError::UnsupportedSignatureSuite {
+                seq,
+                signature_suite,
+            }
+        }
     }
 }
 
