@@ -64,7 +64,7 @@ for name, value in [
     ("XENIA_SEND_FILE_SESSION_CLOSED", 4),
 ]:
     require(f"ffi_status_{name.lower()}", f"pub const {name}: i32 = {value};" in ffi)
-require("jni_uses_explicit_file_result", "xenia_try_send_file" in jni and "JNIEXPORT jboolean JNICALL" in jni)
+require("jni_uses_explicit_file_result", ("xenia_try_send_file" in jni or "xenia_commit_send_file" in jni) and "JNIEXPORT jboolean JNICALL" in jni)
 require("kotlin_observes_file_enqueue", "external fun sendFile(handle: Long, name: String, data: ByteArray): Boolean" in kotlin)
 
 
