@@ -1109,9 +1109,7 @@ mod tests {
     #[test]
     fn session_injector_tracks_latest_drag_position_for_teardown_release() {
         let mut injector = SessionInputInjector::new(Box::new(NoopInjector));
-        injector
-            .inject_pointer_button(0.1, 0.2, 0, true)
-            .unwrap();
+        injector.inject_pointer_button(0.1, 0.2, 0, true).unwrap();
         injector.inject_pointer_move(0.8, 0.9).unwrap();
         assert_eq!(injector.pressed_buttons.get(&0), Some(&(0.8, 0.9)));
     }

@@ -26,7 +26,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use engine::{
-    FileTransferAdmissionSnapshotV1, FileTransferAdmissionSnapshotV2, FileTransferEnqueueError, FileTransferEvent, MobileCodec, SessionState, ViewerEngine,
+    FileTransferAdmissionSnapshotV1, FileTransferAdmissionSnapshotV2, FileTransferEnqueueError,
+    FileTransferEvent, MobileCodec, SessionState, ViewerEngine,
 };
 
 /// One shared multi-thread tokio runtime for the process lifetime —
@@ -592,8 +593,7 @@ pub extern "C" fn xenia_claim_send_file_reservation(
 /// removed and its channel capacity returned.
 #[unsafe(no_mangle)]
 pub extern "C" fn xenia_cancel_send_file_reservation(handle: u64, token: u64) -> bool {
-    engine_for(handle)
-        .is_some_and(|engine| engine.cancel_file_transfer_reservation(token))
+    engine_for(handle).is_some_and(|engine| engine.cancel_file_transfer_reservation(token))
 }
 
 /// Commit a payload into a previously reserved file-command slot.

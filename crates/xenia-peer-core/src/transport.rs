@@ -24,7 +24,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
-
 /// Maximum encoded handshake message accepted before deserialization. The
 /// current ML-KEM-768 + Ed25519 + ML-DSA-65 exchange is well below this.
 pub const MAX_HANDSHAKE_ENVELOPE_BYTES: u32 = 16 * 1024;
@@ -137,7 +136,6 @@ impl TransportProfileV1 {
         self == &Self::current(self.kind)
     }
 }
-
 
 /// Stable schema label for pre-session resource/deadline policy. These
 /// semantics are enforced before the cryptographic handshake can authenticate
@@ -462,16 +460,15 @@ impl TcpTransport {
 
     /// Convenience constructor: connect to a server address.
     pub async fn connect(addr: &str) -> Result<Self, TransportError> {
-        let timeout_ms = TransportPreSessionProfileV1::current(TransportKind::Tcp).connect_timeout_ms;
-        let stream = tokio::time::timeout(
-            Duration::from_millis(timeout_ms),
-            TcpStream::connect(addr),
-        )
-        .await
-        .map_err(|_| TransportError::TimedOut {
-            operation: "tcp_connect",
-            timeout_ms,
-        })??;
+        let timeout_ms =
+            TransportPreSessionProfileV1::current(TransportKind::Tcp).connect_timeout_ms;
+        let stream =
+            tokio::time::timeout(Duration::from_millis(timeout_ms), TcpStream::connect(addr))
+                .await
+                .map_err(|_| TransportError::TimedOut {
+                    operation: "tcp_connect",
+                    timeout_ms,
+                })??;
         stream.set_nodelay(true)?;
         Ok(Self::new(stream))
     }
@@ -561,13 +558,12 @@ mod tests {
     #[test]
     fn availability_profile_v1_tcp_bincode_vector_is_stable() {
         let expected: [u8; 84] = [
-            0x27, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x78, 0x65, 0x6e, 0x69,
-            0x61, 0x2d, 0x74, 0x72, 0x61, 0x6e, 0x73, 0x70, 0x6f, 0x72, 0x74, 0x2d,
-            0x61, 0x76, 0x61, 0x69, 0x6c, 0x61, 0x62, 0x69, 0x6c, 0x69, 0x74, 0x79,
-            0x2d, 0x70, 0x72, 0x6f, 0x66, 0x69, 0x6c, 0x65, 0x2d, 0x76, 0x31, 0x00,
-            0x00, 0x00, 0x00, 0x98, 0x3a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0,
-            0xd4, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xb8, 0x0b, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x27, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x78, 0x65, 0x6e, 0x69, 0x61, 0x2d,
+            0x74, 0x72, 0x61, 0x6e, 0x73, 0x70, 0x6f, 0x72, 0x74, 0x2d, 0x61, 0x76, 0x61, 0x69,
+            0x6c, 0x61, 0x62, 0x69, 0x6c, 0x69, 0x74, 0x79, 0x2d, 0x70, 0x72, 0x6f, 0x66, 0x69,
+            0x6c, 0x65, 0x2d, 0x76, 0x31, 0x00, 0x00, 0x00, 0x00, 0x98, 0x3a, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0xc0, 0xd4, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xb8, 0x0b, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
         assert_eq!(
             TransportAvailabilityProfileV1::current(TransportKind::Tcp)
@@ -579,7 +575,11 @@ mod tests {
 
     #[test]
     fn availability_profiles_are_exact_and_carrier_bound() {
-        for kind in [TransportKind::Tcp, TransportKind::WebSocket, TransportKind::Quic] {
+        for kind in [
+            TransportKind::Tcp,
+            TransportKind::WebSocket,
+            TransportKind::Quic,
+        ] {
             let profile = TransportAvailabilityProfileV1::current(kind);
             assert!(profile.is_current_supported_profile());
             assert_eq!(profile.application_keepalive_interval_ms, 0);
@@ -589,14 +589,22 @@ mod tests {
             assert!(!changed.is_current_supported_profile());
         }
         assert_ne!(
-            TransportAvailabilityProfileV1::current(TransportKind::Tcp).profile_hash().unwrap(),
-            TransportAvailabilityProfileV1::current(TransportKind::Quic).profile_hash().unwrap(),
+            TransportAvailabilityProfileV1::current(TransportKind::Tcp)
+                .profile_hash()
+                .unwrap(),
+            TransportAvailabilityProfileV1::current(TransportKind::Quic)
+                .profile_hash()
+                .unwrap(),
         );
     }
 
     #[test]
     fn pre_session_profiles_are_exact_and_carrier_bound() {
-        for kind in [TransportKind::Tcp, TransportKind::WebSocket, TransportKind::Quic] {
+        for kind in [
+            TransportKind::Tcp,
+            TransportKind::WebSocket,
+            TransportKind::Quic,
+        ] {
             let profile = TransportPreSessionProfileV1::current(kind);
             assert!(profile.is_current_supported_profile());
             let mut changed = profile.clone();
@@ -604,8 +612,12 @@ mod tests {
             assert!(!changed.is_current_supported_profile());
         }
         assert_ne!(
-            TransportPreSessionProfileV1::current(TransportKind::Tcp).profile_hash().unwrap(),
-            TransportPreSessionProfileV1::current(TransportKind::Quic).profile_hash().unwrap(),
+            TransportPreSessionProfileV1::current(TransportKind::Tcp)
+                .profile_hash()
+                .unwrap(),
+            TransportPreSessionProfileV1::current(TransportKind::Quic)
+                .profile_hash()
+                .unwrap(),
         );
     }
 
@@ -620,7 +632,13 @@ mod tests {
         let err = read_envelope_with_timeout(&mut reader, Duration::from_millis(25))
             .await
             .unwrap_err();
-        assert!(matches!(err, TransportError::TimedOut { operation: "recv_envelope", .. }));
+        assert!(matches!(
+            err,
+            TransportError::TimedOut {
+                operation: "recv_envelope",
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -630,7 +648,12 @@ mod tests {
         let err = write_envelope_with_timeout(&mut writer, &payload, Duration::from_millis(25))
             .await
             .unwrap_err();
-        assert!(matches!(err, TransportError::TimedOut { operation: "send_envelope", .. }));
+        assert!(matches!(
+            err,
+            TransportError::TimedOut {
+                operation: "send_envelope",
+                ..
+            }
+        ));
     }
-
 }

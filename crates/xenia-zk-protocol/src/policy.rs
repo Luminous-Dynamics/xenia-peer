@@ -136,16 +136,15 @@ pub enum BoundedEnvelopeDecodeError<E> {
 impl<E: std::fmt::Display> std::fmt::Display for BoundedEnvelopeDecodeError<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Frame(error) => write!(f, "proof-envelope frame rejected before decoding: {error}"),
+            Self::Frame(error) => {
+                write!(f, "proof-envelope frame rejected before decoding: {error}")
+            }
             Self::Decode(error) => write!(f, "proof-envelope decoding failed: {error}"),
         }
     }
 }
 
-impl<E> std::error::Error for BoundedEnvelopeDecodeError<E>
-where
-    E: std::error::Error + 'static,
-{}
+impl<E> std::error::Error for BoundedEnvelopeDecodeError<E> where E: std::error::Error + 'static {}
 
 #[derive(Clone, Debug)]
 pub struct EnvelopePolicy {
@@ -204,7 +203,9 @@ pub enum EnvelopeValidationError {
     ZeroNonce,
     #[error("public-input digest is zero")]
     ZeroPublicInputsHash,
-    #[error("extensions digest is zero; use the canonical empty-extensions digest when no claims exist")]
+    #[error(
+        "extensions digest is zero; use the canonical empty-extensions digest when no claims exist"
+    )]
     ZeroExtensionsDigest,
     #[error("proof timestamp is too far in the future")]
     FutureTimestamp,
@@ -349,7 +350,9 @@ pub fn validate_envelope(
     }
 
     if !policy.allowed_proof_systems.is_empty()
-        && !policy.allowed_proof_systems.contains(&envelope.proof_system)
+        && !policy
+            .allowed_proof_systems
+            .contains(&envelope.proof_system)
     {
         return Err(EnvelopeValidationError::ProofSystemNotAllowed(
             envelope.proof_system.wire_id(),
@@ -469,7 +472,9 @@ pub fn validate_envelope_against_contract<'a>(
         let actual: HashSet<[u8; 32]> = envelope
             .authentication
             .iter()
-            .filter(|entry| entry.suite == requirement.suite && trusted.contains(&entry.signer_key_id))
+            .filter(|entry| {
+                entry.suite == requirement.suite && trusted.contains(&entry.signer_key_id)
+            })
             .map(|entry| entry.signer_key_id)
             .collect();
         if actual.len() < requirement.min_distinct_signers {
@@ -621,7 +626,9 @@ mod tests {
     fn duplicate_trusted_signer_ids_make_contract_invalid() {
         let envelope = valid_envelope();
         let mut contract = valid_contract();
-        contract.authentication[0].trusted_signer_key_ids.push([0x55; 32]);
+        contract.authentication[0]
+            .trusted_signer_key_ids
+            .push([0x55; 32]);
         assert!(matches!(
             validate_envelope_against_contract(
                 &envelope,
@@ -682,7 +689,10 @@ mod tests {
         assert_eq!(
             result,
             Err(BoundedEnvelopeDecodeError::Frame(
-                EnvelopeValidationError::EncodedEnvelopeTooLarge { actual: 5, limit: 4 }
+                EnvelopeValidationError::EncodedEnvelopeTooLarge {
+                    actual: 5,
+                    limit: 4
+                }
             ))
         );
     }
@@ -740,7 +750,9 @@ mod tests {
     #[test]
     fn duplicate_authentication_is_rejected() {
         let mut envelope = valid_envelope();
-        envelope.authentication.push(envelope.authentication[0].clone());
+        envelope
+            .authentication
+            .push(envelope.authentication[0].clone());
         assert!(matches!(
             validate_envelope(&envelope, &EnvelopePolicy::default(), NOW),
             Err(EnvelopeValidationError::DuplicateAuthentication { .. })

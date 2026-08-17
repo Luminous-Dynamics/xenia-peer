@@ -52,14 +52,18 @@
 #![warn(missing_docs)]
 
 pub mod advertisement;
-pub mod frame;
 pub mod file_transfer;
+pub mod frame;
 pub mod handshake;
 pub mod m1_session;
 pub mod producer_flow;
 mod session;
 pub mod transport;
 
+pub use file_transfer::{
+    IncomingFileStageError, IncomingFileStager, cleanup_orphaned_receive_staging,
+    persist_received_file,
+};
 #[cfg(feature = "opus")]
 pub use frame::OpusAudioCodec;
 pub use frame::{
@@ -69,10 +73,6 @@ pub use frame::{
     PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER, PixelFormat, RawAudio, RawCapabilities, RawClipboard,
     RawFrame, RawInput, RawPcmAudioCodec, RawRekey, RawTelemetry, SyntheticAudioKind,
     SyntheticAudioSource, TelemetrySample, TelemetryValue,
-};
-pub use file_transfer::{
-    IncomingFileStageError, IncomingFileStager, cleanup_orphaned_receive_staging,
-    persist_received_file,
 };
 pub use handshake::{RekeyPolicy, SessionEpochState};
 pub use m1_session::{

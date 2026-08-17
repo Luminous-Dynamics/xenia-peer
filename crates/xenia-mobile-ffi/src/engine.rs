@@ -199,7 +199,6 @@ struct OutgoingTransfer {
     source: OutgoingTransferSource,
 }
 
-
 /// A transfer this side is receiving.
 struct IncomingTransfer {
     name: String,
@@ -237,7 +236,6 @@ struct FileTransferReservation {
     state: FileTransferReservationState,
     expires_at: Instant,
 }
-
 
 struct FileTransferStreamUpload {
     name: String,
@@ -700,10 +698,7 @@ impl ViewerEngine {
 
     /// Reserve one bounded file-command slot before materializing/copying a
     /// potentially large payload. The token is process-local and single-use.
-    pub fn reserve_file_transfer(
-        &self,
-        data_len: usize,
-    ) -> Result<u64, FileTransferEnqueueError> {
+    pub fn reserve_file_transfer(&self, data_len: usize) -> Result<u64, FileTransferEnqueueError> {
         if data_len > xenia_peer_core::producer_flow::MOBILE_FILE_TRANSFER_MAX_BYTES_V1 {
             return Err(FileTransferEnqueueError::FileTooLarge);
         }
@@ -843,11 +838,7 @@ impl ViewerEngine {
     /// Only one outgoing transfer is in flight at a time -- calling
     /// this while one is already active surfaces a `Done { ok: false
     /// }` event rather than queuing a second one.
-    pub fn send_file(
-        &self,
-        name: String,
-        data: Vec<u8>,
-    ) -> Result<(), FileTransferEnqueueError> {
+    pub fn send_file(&self, name: String, data: Vec<u8>) -> Result<(), FileTransferEnqueueError> {
         self.check_file_transfer_admission(data.len())?;
         match self
             .ft_cmd_tx
@@ -878,8 +869,8 @@ impl ViewerEngine {
         if self.ft_cmd_tx.is_closed() {
             return Err(FileTransferEnqueueError::SessionClosed);
         }
-        let safe_name = sanitize_transfer_filename(&name)
-            .ok_or(FileTransferEnqueueError::InvalidArgument)?;
+        let safe_name =
+            sanitize_transfer_filename(&name).ok_or(FileTransferEnqueueError::InvalidArgument)?;
         let permit = match self.ft_cmd_tx.clone().try_reserve_owned() {
             Ok(permit) => permit,
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -932,11 +923,7 @@ impl ViewerEngine {
                 },
             );
             drop(streams);
-            spawn_file_transfer_stream_expiry(
-                &self.runtime,
-                Arc::clone(&self.ft_streams),
-                token,
-            );
+            spawn_file_transfer_stream_expiry(&self.runtime, Arc::clone(&self.ft_streams), token);
             return Ok(token);
         }
     }
@@ -971,7 +958,10 @@ impl ViewerEngine {
         if new_len > xenia_peer_core::producer_flow::MOBILE_FILE_TRANSFER_MAX_BYTES_V1 {
             return Err(FileTransferEnqueueError::FileTooLarge);
         }
-        if stream.expected_len.is_some_and(|expected| new_len > expected) {
+        if stream
+            .expected_len
+            .is_some_and(|expected| new_len > expected)
+        {
             return Err(FileTransferEnqueueError::ReservationSizeMismatch);
         }
         stream
@@ -986,10 +976,7 @@ impl ViewerEngine {
     /// Finish staging and consume the reserved command slot. The background
     /// session later reads the app-private file in protocol-sized chunks only
     /// after the peer accepts the authenticated whole-file hash/size offer.
-    pub fn finish_file_transfer_stream(
-        &self,
-        token: u64,
-    ) -> Result<(), FileTransferEnqueueError> {
+    pub fn finish_file_transfer_stream(&self, token: u64) -> Result<(), FileTransferEnqueueError> {
         let mut stream = self
             .ft_streams
             .lock()
@@ -1000,7 +987,10 @@ impl ViewerEngine {
             remove_staged_upload(stream);
             return Err(FileTransferEnqueueError::InvalidReservation);
         }
-        if stream.expected_len.is_some_and(|expected| expected != stream.written) {
+        if stream
+            .expected_len
+            .is_some_and(|expected| expected != stream.written)
+        {
             remove_staged_upload(stream);
             return Err(FileTransferEnqueueError::ReservationSizeMismatch);
         }
@@ -1710,10 +1700,7 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
             blake3_hash,
         } => {
             let (safe_name, mut reason) = match (recv_dir, sanitize_transfer_filename(&name)) {
-                (None, _) => (
-                    None,
-                    "file transfer is disabled on this viewer".to_string(),
-                ),
+                (None, _) => (None, "file transfer is disabled on this viewer".to_string()),
                 (Some(_), None) => (None, "unusable filename".to_string()),
                 (Some(_), Some(_)) if size > max_bytes => {
                     (None, format!("file exceeds {max_bytes}-byte cap"))
@@ -1803,10 +1790,8 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
                 bytes = total,
                 "transfer accepted, sending chunks"
             );
-            let send_result = send_outgoing_transfer_chunks(
-                transfer, session, send_half, shared,
-            )
-            .await;
+            let send_result =
+                send_outgoing_transfer_chunks(transfer, session, send_half, shared).await;
             if let Err(err) = send_result {
                 warn!(error = %err, "failed to send file-transfer chunk");
                 *outgoing = None;
@@ -1844,7 +1829,10 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
             {
                 warn!(transfer_id, reason, "outgoing transfer rejected by peer");
                 let Some(transfer) = outgoing.take() else {
-                    warn!(transfer_id, "outgoing transfer disappeared before rejection handling");
+                    warn!(
+                        transfer_id,
+                        "outgoing transfer disappeared before rejection handling"
+                    );
                     return;
                 };
                 let name = transfer.name;
@@ -1960,7 +1948,10 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
             {
                 info!(transfer_id, ok, "outgoing transfer verification result");
                 let Some(transfer) = outgoing.take() else {
-                    warn!(transfer_id, "outgoing transfer disappeared before verification handling");
+                    warn!(
+                        transfer_id,
+                        "outgoing transfer disappeared before verification handling"
+                    );
                     return;
                 };
                 let name = transfer.name;
@@ -2164,10 +2155,7 @@ mod tests {
         tokio::task::yield_now().await;
         assert_eq!(tx.capacity(), 0, "reservation must hold the only slot");
 
-        tokio::time::advance(Duration::from_millis(
-            FILE_TRANSFER_RESERVATION_TTL_MS - 1,
-        ))
-        .await;
+        tokio::time::advance(Duration::from_millis(FILE_TRANSFER_RESERVATION_TTL_MS - 1)).await;
         reservations
             .lock()
             .unwrap()
@@ -2245,8 +2233,7 @@ mod tests {
                 written: 7,
                 expected_len: None,
                 permit,
-                expires_at: Instant::now()
-                    + Duration::from_millis(FILE_TRANSFER_STREAM_LEASE_MS),
+                expires_at: Instant::now() + Duration::from_millis(FILE_TRANSFER_STREAM_LEASE_MS),
             },
         );
         let expiry_task = spawn_file_transfer_stream_expiry(
@@ -2261,9 +2248,14 @@ mod tests {
         tokio::time::advance(Duration::from_millis(FILE_TRANSFER_STREAM_LEASE_MS)).await;
         tokio::task::yield_now().await;
         assert!(streams.lock().unwrap().is_empty());
-        assert!(!path.exists(), "expiry must delete the partial staging file");
+        assert!(
+            !path.exists(),
+            "expiry must delete the partial staging file"
+        );
         assert_eq!(tx.capacity(), 1, "expiry must return command capacity");
-        expiry_task.await.expect("stream expiry worker exits cleanly");
+        expiry_task
+            .await
+            .expect("stream expiry worker exits cleanly");
     }
 
     #[test]

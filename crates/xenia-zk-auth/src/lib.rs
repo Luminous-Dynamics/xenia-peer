@@ -15,15 +15,13 @@ use ml_dsa::{
 };
 use thiserror::Error;
 use xenia_zk_protocol::{
-    AuthenticationSuiteId, signer_key_id,
-    verification::ProofAuthenticationVerifier,
+    AuthenticationSuiteId, signer_key_id, verification::ProofAuthenticationVerifier,
 };
 
 pub const ED25519_PUBLIC_KEY_BYTES: usize = 32;
 pub const ED25519_SIGNATURE_BYTES: usize = 64;
 pub const ML_DSA_65_PUBLIC_KEY_BYTES: usize = 1952;
 pub const ML_DSA_65_SIGNATURE_BYTES: usize = 3309;
-
 
 pub const MAX_AUTHENTICATION_VERIFIERS_V1: usize = 64;
 
@@ -50,9 +48,10 @@ impl AuthenticationVerifierRegistryV1 {
         }
         for (index, verifier) in verifiers.iter().enumerate() {
             let identity = (verifier.suite().wire_id(), verifier.signer_key_id());
-            if verifiers[..index].iter().any(|existing| {
-                (existing.suite().wire_id(), existing.signer_key_id()) == identity
-            }) {
+            if verifiers[..index]
+                .iter()
+                .any(|existing| (existing.suite().wire_id(), existing.signer_key_id()) == identity)
+            {
                 return Err(AuthenticationAdapterError::DuplicateVerifierIdentity);
             }
         }
@@ -74,9 +73,7 @@ impl AuthenticationVerifierRegistryV1 {
     ) -> Option<&dyn ProofAuthenticationVerifier> {
         self.verifiers
             .iter()
-            .find(|verifier| {
-                verifier.suite() == suite && verifier.signer_key_id() == signer_key_id
-            })
+            .find(|verifier| verifier.suite() == suite && verifier.signer_key_id() == signer_key_id)
             .map(|verifier| verifier.as_ref())
     }
 }
@@ -112,7 +109,10 @@ impl Ed25519AuthenticationVerifier {
             .map_err(|_| AuthenticationAdapterError::InvalidEd25519PublicKey)?;
         let signer_key_id = signer_key_id(AuthenticationSuiteId::ED25519, bytes)
             .map_err(|_| AuthenticationAdapterError::SignerKeyId)?;
-        Ok(Self { verifying_key, signer_key_id })
+        Ok(Self {
+            verifying_key,
+            signer_key_id,
+        })
     }
 }
 
@@ -155,7 +155,10 @@ impl MlDsa65AuthenticationVerifier {
         let verifying_key = MlDsaVerifyingKey::<MlDsa65>::decode(&encoded);
         let signer_key_id = signer_key_id(AuthenticationSuiteId::ML_DSA_65_FIPS204, bytes)
             .map_err(|_| AuthenticationAdapterError::SignerKeyId)?;
-        Ok(Self { verifying_key, signer_key_id })
+        Ok(Self {
+            verifying_key,
+            signer_key_id,
+        })
     }
 }
 
@@ -197,32 +200,27 @@ mod tests {
         assert_eq!(
             public,
             [
-                0x21, 0x52, 0xf8, 0xd1, 0x9b, 0x79, 0x1d, 0x24,
-                0x45, 0x32, 0x42, 0xe1, 0x5f, 0x2e, 0xab, 0x6c,
-                0xb7, 0xcf, 0xfa, 0x7b, 0x6a, 0x5e, 0xd3, 0x00,
-                0x97, 0x96, 0x0e, 0x06, 0x98, 0x81, 0xdb, 0x12,
+                0x21, 0x52, 0xf8, 0xd1, 0x9b, 0x79, 0x1d, 0x24, 0x45, 0x32, 0x42, 0xe1, 0x5f, 0x2e,
+                0xab, 0x6c, 0xb7, 0xcf, 0xfa, 0x7b, 0x6a, 0x5e, 0xd3, 0x00, 0x97, 0x96, 0x0e, 0x06,
+                0x98, 0x81, 0xdb, 0x12,
             ]
         );
         assert_eq!(
             signature,
             [
-                0xc2, 0xe6, 0x43, 0xed, 0x74, 0xc6, 0x11, 0x2d,
-                0x24, 0x73, 0x38, 0xda, 0x8f, 0x05, 0x5d, 0x0a,
-                0x00, 0xa4, 0x4a, 0xc8, 0x95, 0x39, 0xde, 0x47,
-                0xa9, 0xbe, 0xf9, 0x21, 0x3b, 0xd9, 0xec, 0xbf,
-                0x67, 0xcd, 0x34, 0xbb, 0xba, 0x1e, 0x61, 0x4c,
-                0x5d, 0x0a, 0x40, 0xb2, 0xac, 0x4d, 0xab, 0xaf,
-                0xdf, 0x2d, 0x9f, 0x13, 0x77, 0xf2, 0xc8, 0xb4,
+                0xc2, 0xe6, 0x43, 0xed, 0x74, 0xc6, 0x11, 0x2d, 0x24, 0x73, 0x38, 0xda, 0x8f, 0x05,
+                0x5d, 0x0a, 0x00, 0xa4, 0x4a, 0xc8, 0x95, 0x39, 0xde, 0x47, 0xa9, 0xbe, 0xf9, 0x21,
+                0x3b, 0xd9, 0xec, 0xbf, 0x67, 0xcd, 0x34, 0xbb, 0xba, 0x1e, 0x61, 0x4c, 0x5d, 0x0a,
+                0x40, 0xb2, 0xac, 0x4d, 0xab, 0xaf, 0xdf, 0x2d, 0x9f, 0x13, 0x77, 0xf2, 0xc8, 0xb4,
                 0xcf, 0x02, 0x39, 0x44, 0x13, 0x64, 0x0f, 0x07,
             ]
         );
         assert_eq!(
             verifier.signer_key_id(),
             [
-                0x0f, 0xf8, 0x5d, 0x10, 0x3c, 0xb9, 0x86, 0x5d,
-                0x2a, 0x01, 0xf4, 0xca, 0x0c, 0x72, 0x91, 0xd9,
-                0x97, 0x4a, 0x48, 0x70, 0x80, 0x9f, 0xd5, 0xeb,
-                0x93, 0x42, 0x6b, 0x76, 0xd2, 0x10, 0xcd, 0xcf,
+                0x0f, 0xf8, 0x5d, 0x10, 0x3c, 0xb9, 0x86, 0x5d, 0x2a, 0x01, 0xf4, 0xca, 0x0c, 0x72,
+                0x91, 0xd9, 0x97, 0x4a, 0x48, 0x70, 0x80, 0x9f, 0xd5, 0xeb, 0x93, 0x42, 0x6b, 0x76,
+                0xd2, 0x10, 0xcd, 0xcf,
             ]
         );
         assert!(verifier.verify(&digest, &signature));
@@ -245,7 +243,6 @@ mod tests {
         ));
     }
 
-
     #[test]
     fn verifier_registry_rejects_duplicate_identity_and_supports_exact_lookup() {
         let signing = SigningKey::from_bytes(&[0x24; 32]);
@@ -254,8 +251,16 @@ mod tests {
         let id = first.signer_key_id();
         let registry = AuthenticationVerifierRegistryV1::try_new(vec![Box::new(first)]).unwrap();
         assert_eq!(registry.len(), 1);
-        assert!(registry.find_exact(AuthenticationSuiteId::ED25519, id).is_some());
-        assert!(registry.find_exact(AuthenticationSuiteId::ML_DSA_65_FIPS204, id).is_none());
+        assert!(
+            registry
+                .find_exact(AuthenticationSuiteId::ED25519, id)
+                .is_some()
+        );
+        assert!(
+            registry
+                .find_exact(AuthenticationSuiteId::ML_DSA_65_FIPS204, id)
+                .is_none()
+        );
 
         let a = Ed25519AuthenticationVerifier::try_from_public_key_bytes(&public).unwrap();
         let b = Ed25519AuthenticationVerifier::try_from_public_key_bytes(&public).unwrap();

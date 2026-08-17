@@ -27,8 +27,9 @@ use xenia_peer_core::OpusAudioCodec;
 use xenia_peer_core::frame::audio_flags;
 use xenia_peer_core::{
     AudioCodec, ClipboardContent, LaneSession, M1PermissionSet, PAYLOAD_TYPE_CLIPBOARD,
-    RawPcmAudioCodec, RekeyPolicy, SessionEpochState, cleanup_orphaned_receive_staging,
+    RawPcmAudioCodec, RekeyPolicy, SessionEpochState,
     advertisement::{AdvertisedAudioCodec, AudioAdvertisement, TransportAdvertisement},
+    cleanup_orphaned_receive_staging,
     frame::{
         LANE_ENVELOPE_MAGIC, PixelFormat as FramePixelFormat, RawAudio, RawClipboard, RawFrame,
         RawRekey, RawTelemetry, SyntheticAudioKind, SyntheticAudioSource,
@@ -1326,7 +1327,11 @@ impl AnySendHalf {
     async fn close(&mut self) -> Result<(), xenia_peer_core::transport::TransportError> {
         if let AnySendHalf::Quic { _endpoint, send } = self {
             let finish_result = send.finish();
-            let _ = tokio::time::timeout(Duration::from_millis(GRACEFUL_CLOSE_TIMEOUT_MS), send.closed()).await;
+            let _ = tokio::time::timeout(
+                Duration::from_millis(GRACEFUL_CLOSE_TIMEOUT_MS),
+                send.closed(),
+            )
+            .await;
             _endpoint.close().await;
             finish_result?;
         }
@@ -4978,11 +4983,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // are wired further below, right after it loads.
     if let Some(output_path) = args.activate_consent_ledger_compacted_state.as_deref() {
         let Some(snapshot_path) = args.consent_ledger_activation_snapshot.as_deref() else {
-            return Err(
-                "--activate-consent-ledger-compacted-state requires \
+            return Err("--activate-consent-ledger-compacted-state requires \
                  --consent-ledger-activation-snapshot"
-                    .into(),
-            );
+                .into());
         };
         if args.consent_ledger_activation_archive_segment.is_empty() {
             return Err(
@@ -5098,11 +5101,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(pin_path) = args.advance_consent_ledger_compacted_state_pin.as_deref() {
         let Some(state_path) = args.consent_ledger_compacted_state.as_deref() else {
-            return Err(
-                "--advance-consent-ledger-compacted-state-pin requires \
+            return Err("--advance-consent-ledger-compacted-state-pin requires \
                  --consent-ledger-compacted-state"
-                    .into(),
-            );
+                .into());
         };
         if pin_path == state_path {
             return Err("compacted-state pin path must differ from the active-state path".into());
@@ -5168,16 +5169,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let Some(state_path) = args.consent_ledger_compacted_state.as_deref() else {
             return Err(
-                "consent-ledger GC certification requires --consent-ledger-compacted-state"
-                    .into(),
+                "consent-ledger GC certification requires --consent-ledger-compacted-state".into(),
             );
         };
         let Some(pin_path) = args.trusted_consent_ledger_compacted_state_pin.as_deref() else {
-            return Err(
-                "consent-ledger GC certification requires \
+            return Err("consent-ledger GC certification requires \
                  --trusted-consent-ledger-compacted-state-pin"
-                    .into(),
-            );
+                .into());
         };
         let (active, _) = crate::consent_ledger_persistence::load_compacted_active_state(
             state_path,
@@ -5661,11 +5659,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(output_path) = args.export_consent_ledger_archive_segment.as_deref() {
         let Some(base_path) = args.consent_ledger_archive_base_checkpoint.as_deref() else {
-            return Err(
-                "--export-consent-ledger-archive-segment requires \
+            return Err("--export-consent-ledger-archive-segment requires \
                  --consent-ledger-archive-base-checkpoint"
-                    .into(),
-            );
+                .into());
         };
         let segment = audit_ledger_store::export_archive_segment_atomic(
             output_path,
@@ -5852,11 +5848,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(output_path) = args.export_consent_ledger_compacted_snapshot.as_deref() {
         let Some(bundle_path) = args.consent_ledger_compaction_bundle_input.as_deref() else {
-            return Err(
-                "--export-consent-ledger-compacted-snapshot requires \
+            return Err("--export-consent-ledger-compacted-snapshot requires \
                  --consent-ledger-compaction-bundle-input"
-                    .into(),
-            );
+                .into());
         };
         let bundle =
             audit_ledger_store::read_bounded_json::<consent_compaction::ConsentCompactionBundleV1>(
@@ -6891,7 +6885,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let stale = video_pressure.record_stale();
             warn!(
                 age_ms = video_capture_started.elapsed().as_millis(),
-                max_age_ms = xenia_peer_core::producer_flow::HOST_VIDEO_FRESHNESS_V1.max_capture_to_send_ms,
+                max_age_ms =
+                    xenia_peer_core::producer_flow::HOST_VIDEO_FRESHNESS_V1.max_capture_to_send_ms,
                 packets = packets.len(),
                 stale_video_results = stale,
                 "dropping stale encoded video result before transport send"

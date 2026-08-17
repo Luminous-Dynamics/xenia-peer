@@ -15,8 +15,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const LEGACY_MYCELIX_PROTOCOL_VERSION: u32 = 2;
-pub const LEGACY_MYCELIX_SIGNING_DOMAIN: &[u8] =
-    b"MYCELIX:AuthenticatedProof:SignedEnvelope:v2";
+pub const LEGACY_MYCELIX_SIGNING_DOMAIN: &[u8] = b"MYCELIX:AuthenticatedProof:SignedEnvelope:v2";
 
 const MAX_COMPONENT_LEN: usize = 64;
 
@@ -190,7 +189,10 @@ mod tests {
             proof: &[1, 2, 3, 4],
             energy_millijoules: 0,
         };
-        assert_eq!(body.signed_digest(), Err(LegacyV2Error::WrongProtocolVersion));
+        assert_eq!(
+            body.signed_digest(),
+            Err(LegacyV2Error::WrongProtocolVersion)
+        );
     }
 
     fn hex_lower(bytes: &[u8]) -> String {

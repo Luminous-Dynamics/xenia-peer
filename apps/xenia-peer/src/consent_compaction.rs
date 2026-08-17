@@ -443,16 +443,18 @@ impl ConsentRecoverySummaryV1 {
                 });
             }
             let session_id_hex = hex::encode(session_id);
-            let terminal_event = state.terminal_event.ok_or_else(|| {
-                ConsentRecoveryError::IncompleteSession {
-                    session_id: session_id_hex.clone(),
-                }
-            })?;
-            let terminal_sequence = state.terminal_sequence.ok_or_else(|| {
-                ConsentRecoveryError::IncompleteSession {
-                    session_id: session_id_hex,
-                }
-            })?;
+            let terminal_event =
+                state
+                    .terminal_event
+                    .ok_or_else(|| ConsentRecoveryError::IncompleteSession {
+                        session_id: session_id_hex.clone(),
+                    })?;
+            let terminal_sequence =
+                state
+                    .terminal_sequence
+                    .ok_or_else(|| ConsentRecoveryError::IncompleteSession {
+                        session_id: session_id_hex,
+                    })?;
             completed.push(ConsentRecoverySessionV1 {
                 session_id,
                 terminal_event,

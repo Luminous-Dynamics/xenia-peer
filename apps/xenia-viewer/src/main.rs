@@ -555,10 +555,8 @@ impl AudioPlaybackSink for DeviceAudioSink {
             self.stats.rejected = self.stats.rejected.saturating_add(1);
             return;
         };
-        let max_buffered_samples = audio_device_buffer_samples(
-            self.output_sample_rate_hz,
-            self.output_channels,
-        );
+        let max_buffered_samples =
+            audio_device_buffer_samples(self.output_sample_rate_hz, self.output_channels);
         for sample in adapted {
             if queue.len() >= max_buffered_samples {
                 queue.pop_front();
@@ -583,9 +581,8 @@ impl AudioPlaybackSink for DeviceAudioSink {
 /// actual output format. The count includes interleaved channels.
 #[cfg(any(feature = "audio-output", test))]
 fn audio_device_buffer_samples(sample_rate_hz: u32, channels: u16) -> usize {
-    let budget_ms = u64::from(
-        xenia_peer_core::producer_flow::DESKTOP_AUDIO_LATENCY_V1.device_buffer_ms,
-    );
+    let budget_ms =
+        u64::from(xenia_peer_core::producer_flow::DESKTOP_AUDIO_LATENCY_V1.device_buffer_ms);
     let samples = u64::from(sample_rate_hz)
         .saturating_mul(u64::from(channels.max(1)))
         .saturating_mul(budget_ms)
@@ -899,10 +896,7 @@ async fn handle_file_transfer_message(
             blake3_hash,
         } => {
             let (safe_name, mut reason) = match (recv_file_dir, sanitize_transfer_filename(&name)) {
-                (None, _) => (
-                    None,
-                    "file transfer is disabled on this viewer".to_string(),
-                ),
+                (None, _) => (None, "file transfer is disabled on this viewer".to_string()),
                 (Some(_), None) => (None, "unusable filename".to_string()),
                 (Some(_), Some(_)) if size > max_bytes => {
                     (None, format!("file exceeds {max_bytes}-byte cap"))
@@ -1762,11 +1756,9 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 context_hash = ?negotiated_context_hash,
                 "negotiated session context accepted"
             );
-            let negotiated_audio_codec = choose_audio_codec_from_capabilities(
-                args.audio_codec,
-                surface.capabilities(),
-            )
-            .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+            let negotiated_audio_codec =
+                choose_audio_codec_from_capabilities(args.audio_codec, surface.capabilities())
+                    .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
             audio_codec = make_audio_codec(negotiated_audio_codec)
                 .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
             info!(
@@ -1977,13 +1969,8 @@ fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let audio_queue_for_task = Arc::clone(&audio_queue);
     let args_for_task = args.clone();
     rt.spawn(async move {
-        if let Err(err) = gui_receive_loop(
-            args_for_task,
-            slot_for_task,
-            audio_queue_for_task,
-            input_rx,
-        )
-        .await
+        if let Err(err) =
+            gui_receive_loop(args_for_task, slot_for_task, audio_queue_for_task, input_rx).await
         {
             tracing::error!(error = %err, "gui receive loop exited with error");
         }
@@ -2282,10 +2269,8 @@ async fn gui_receive_loop(
                 context_hash = ?negotiated_context_hash,
                 "negotiated session context accepted"
             );
-            let negotiated_audio_codec = choose_audio_codec_from_capabilities(
-                args.audio_codec,
-                surface.capabilities(),
-            )?;
+            let negotiated_audio_codec =
+                choose_audio_codec_from_capabilities(args.audio_codec, surface.capabilities())?;
             audio_codec = make_audio_codec(negotiated_audio_codec).map_err(
                 |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
             )?;

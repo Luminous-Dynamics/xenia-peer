@@ -211,10 +211,8 @@ pub const AUTHENTICATION_SUITE_REGISTRY_V1: &[u8] =
     b"XENIA:AuthenticationSuiteRegistry:v1\n1=ed25519\n2=ml-dsa-65-fips204\n";
 /// SHA-256 of [`AUTHENTICATION_SUITE_REGISTRY_V1`].
 pub const AUTHENTICATION_SUITE_REGISTRY_V1_SHA256: [u8; 32] = [
-    0x02, 0x55, 0xc2, 0xb3, 0x07, 0x0e, 0x57, 0x9d,
-    0x52, 0xe4, 0x1a, 0xb6, 0xa9, 0xd7, 0x67, 0xd1,
-    0x70, 0x0b, 0x61, 0xfd, 0x68, 0x78, 0x7b, 0xba,
-    0xe7, 0x8b, 0xd4, 0x1a, 0xa8, 0x68, 0x94, 0x5f,
+    0x02, 0x55, 0xc2, 0xb3, 0x07, 0x0e, 0x57, 0x9d, 0x52, 0xe4, 0x1a, 0xb6, 0xa9, 0xd7, 0x67, 0xd1,
+    0x70, 0x0b, 0x61, 0xfd, 0x68, 0x78, 0x7b, 0xba, 0xe7, 0x8b, 0xd4, 0x1a, 0xa8, 0x68, 0x94, 0x5f,
 ];
 
 /// Stable authentication-suite identifier. Implementations live outside this crate.
@@ -321,10 +319,7 @@ pub struct ExtensionClaim {
 }
 
 impl ExtensionClaim {
-    pub fn try_new(
-        claim_type: StatementId,
-        value_digest: [u8; 32],
-    ) -> Result<Self, ProtocolError> {
+    pub fn try_new(claim_type: StatementId, value_digest: [u8; 32]) -> Result<Self, ProtocolError> {
         claim_type.validate()?;
         if value_digest == [0; 32] {
             return Err(ProtocolError::ZeroExtensionValueDigest);
@@ -660,7 +655,8 @@ mod tests {
     fn challenge_nonce_binds_audience_session_and_statement() {
         let statement = StatementId::try_new("XENIA", "Access", "CapabilityPossession", 1).unwrap();
         let entropy = [0xA5; 32];
-        let baseline = derive_challenge_nonce(&statement, b"service-a", b"session-1", &entropy).unwrap();
+        let baseline =
+            derive_challenge_nonce(&statement, b"service-a", b"session-1", &entropy).unwrap();
         assert_ne!(
             baseline,
             derive_challenge_nonce(&statement, b"service-b", b"session-1", &entropy).unwrap()
@@ -684,13 +680,15 @@ mod tests {
     fn authentication_suite_registry_is_frozen() {
         assert_eq!(AuthenticationSuiteId::ED25519.wire_id(), 1);
         assert_eq!(AuthenticationSuiteId::ML_DSA_65_FIPS204.wire_id(), 2);
-        assert_eq!(AuthenticationSuiteId::ED25519.canonical_name(), Some("ed25519"));
+        assert_eq!(
+            AuthenticationSuiteId::ED25519.canonical_name(),
+            Some("ed25519")
+        );
         assert_eq!(
             AuthenticationSuiteId::ML_DSA_65_FIPS204.canonical_name(),
             Some("ml-dsa-65-fips204")
         );
-        let registry_digest: [u8; 32] =
-            Sha256::digest(AUTHENTICATION_SUITE_REGISTRY_V1).into();
+        let registry_digest: [u8; 32] = Sha256::digest(AUTHENTICATION_SUITE_REGISTRY_V1).into();
         assert_eq!(registry_digest, AUTHENTICATION_SUITE_REGISTRY_V1_SHA256);
         assert_eq!(
             hex_lower(&AUTHENTICATION_SUITE_REGISTRY_V1_SHA256),
@@ -716,7 +714,10 @@ mod tests {
         let session = StatementId::try_new("XENIA", "Access", "SessionBinding", 1).unwrap();
         let energy_digest = extension_value_digest(&energy, b"42mJ").unwrap();
         let session_digest = extension_value_digest(&session, b"session-7").unwrap();
-        assert_ne!(energy_digest, extension_value_digest(&session, b"42mJ").unwrap());
+        assert_ne!(
+            energy_digest,
+            extension_value_digest(&session, b"42mJ").unwrap()
+        );
 
         let energy_claim = ExtensionClaim::try_new(energy.clone(), energy_digest).unwrap();
         let session_claim = ExtensionClaim::try_new(session, session_digest).unwrap();
@@ -740,8 +741,7 @@ mod tests {
         let statement = StatementId::try_new("XENIA", "Access", "CapabilityPossession", 1).unwrap();
         assert_eq!(
             hex_lower(
-                &public_inputs_digest(&statement, &[0xA5; 32], b"canonical-public-inputs")
-                    .unwrap()
+                &public_inputs_digest(&statement, &[0xA5; 32], b"canonical-public-inputs").unwrap()
             ),
             "743950938990948d062f90b83e986d2c27f45904fe6528bf08e09e463498733d"
         );
@@ -770,7 +770,10 @@ mod tests {
 
     #[test]
     fn reserved_wire_identifiers_are_rejected_by_construction() {
-        assert_eq!(ProofSystemId::try_from(0), Err(ProtocolError::ReservedIdentifier));
+        assert_eq!(
+            ProofSystemId::try_from(0),
+            Err(ProtocolError::ReservedIdentifier)
+        );
         assert_eq!(
             AuthenticationSuiteId::try_from(0),
             Err(ProtocolError::ReservedIdentifier)

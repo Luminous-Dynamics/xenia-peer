@@ -157,16 +157,13 @@ impl QuicTransport {
             .accept()
             .await
             .ok_or_else(|| TransportError::from(QuicError::EndpointClosed))?;
-        let conn = tokio::time::timeout(
-            Duration::from_millis(QUIC_CONNECT_TIMEOUT_MS),
-            incoming,
-        )
-        .await
-        .map_err(|_| TransportError::TimedOut {
-            operation: "quic_accept_connection",
-            timeout_ms: QUIC_CONNECT_TIMEOUT_MS,
-        })?
-        .map_err(|e| TransportError::from(QuicError::Accept(e.to_string())))?;
+        let conn = tokio::time::timeout(Duration::from_millis(QUIC_CONNECT_TIMEOUT_MS), incoming)
+            .await
+            .map_err(|_| TransportError::TimedOut {
+                operation: "quic_accept_connection",
+                timeout_ms: QUIC_CONNECT_TIMEOUT_MS,
+            })?
+            .map_err(|e| TransportError::from(QuicError::Accept(e.to_string())))?;
         Self::accept_stream(conn).await
     }
 
@@ -415,7 +412,10 @@ mod tests {
             TransportKind::Quic,
         );
         assert_eq!(profile.send_stall_timeout_ms, SEND_STALL_TIMEOUT_MS);
-        assert_eq!(profile.receive_envelope_timeout_ms, RECEIVE_ENVELOPE_TIMEOUT_MS);
+        assert_eq!(
+            profile.receive_envelope_timeout_ms,
+            RECEIVE_ENVELOPE_TIMEOUT_MS
+        );
         assert!(!profile.carrier_keepalive_resets_application_idle);
     }
 

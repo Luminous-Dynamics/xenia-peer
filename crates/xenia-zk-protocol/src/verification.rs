@@ -10,11 +10,11 @@ use thiserror::Error;
 
 use crate::{
     AuthenticationSuiteId, ParameterSetId, ProofEnvelopeV3, ProofSystemId, VerifierId,
-    public_inputs_digest,
     policy::{
         ContractValidatedEnvelope, EnvelopePolicy, EnvelopeValidationError, VerificationContract,
         validate_envelope_against_contract,
     },
+    public_inputs_digest,
 };
 
 /// Public values that a challenge-response verifier must bind into the proof
@@ -129,7 +129,7 @@ pub fn verify_backend_proof<'a>(
         &envelope.nonce,
         canonical_public_inputs,
     )
-        .map_err(|_| CryptographicVerificationError::PublicInputsMismatch)?;
+    .map_err(|_| CryptographicVerificationError::PublicInputsMismatch)?;
     if digest != envelope.public_inputs_hash {
         return Err(CryptographicVerificationError::PublicInputsMismatch);
     }
@@ -171,9 +171,11 @@ pub fn verify_authentication<'a>(
             candidate.suite() == authentication.suite
                 && candidate.signer_key_id() == authentication.signer_key_id
         }) else {
-            return Err(CryptographicVerificationError::MissingAuthenticationVerifier {
-                suite: authentication.suite.wire_id(),
-            });
+            return Err(
+                CryptographicVerificationError::MissingAuthenticationVerifier {
+                    suite: authentication.suite.wire_id(),
+                },
+            );
         };
 
         if verifier.suite() != authentication.suite
@@ -219,8 +221,9 @@ mod tests {
     use super::*;
     use crate::{
         AuthenticationSuiteId, ParameterSetId, ProofAuthentication, ProofSystemId, StatementId,
-        VerifierId, empty_extensions_digest, public_inputs_digest,
+        VerifierId, empty_extensions_digest,
         policy::{ProofVerificationBinding, VerificationContract},
+        public_inputs_digest,
     };
 
     const NOW: u64 = 1_800_000_000;

@@ -174,7 +174,8 @@ pub(crate) async fn handle_envelope(
                                 warn!(transfer_id, error = %err, "file receive staging could not be created");
                                 FileTransferMessage::Reject {
                                     transfer_id,
-                                    reason: "receiver could not allocate private staging".to_string(),
+                                    reason: "receiver could not allocate private staging"
+                                        .to_string(),
                                 }
                             }
                         }

@@ -28,9 +28,9 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::{AudioPlaybackSink, FreshAudioQueue};
 use eframe::egui;
 use xenia_inject::InputEvent;
-use crate::{AudioPlaybackSink, FreshAudioQueue};
 
 /// Map a subset of `egui::Key` to Linux evdev keycodes (matching the
 /// convention `xenia-inject`'s backends expect — see

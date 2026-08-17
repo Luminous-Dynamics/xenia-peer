@@ -542,20 +542,12 @@ impl AudioCapture for CpalAudioCapture {
 }
 
 #[cfg(feature = "audio-cpal")]
-fn push_i16_samples(
-    data: &[i16],
-    buffer: &Arc<Mutex<VecDeque<i16>>>,
-    max_buffered_samples: usize,
-) {
+fn push_i16_samples(data: &[i16], buffer: &Arc<Mutex<VecDeque<i16>>>, max_buffered_samples: usize) {
     push_samples(data.iter().copied(), buffer, max_buffered_samples);
 }
 
 #[cfg(feature = "audio-cpal")]
-fn push_f32_samples(
-    data: &[f32],
-    buffer: &Arc<Mutex<VecDeque<i16>>>,
-    max_buffered_samples: usize,
-) {
+fn push_f32_samples(data: &[f32], buffer: &Arc<Mutex<VecDeque<i16>>>, max_buffered_samples: usize) {
     push_samples(
         data.iter()
             .map(|sample| (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16),
@@ -565,11 +557,7 @@ fn push_f32_samples(
 }
 
 #[cfg(feature = "audio-cpal")]
-fn push_u16_samples(
-    data: &[u16],
-    buffer: &Arc<Mutex<VecDeque<i16>>>,
-    max_buffered_samples: usize,
-) {
+fn push_u16_samples(data: &[u16], buffer: &Arc<Mutex<VecDeque<i16>>>, max_buffered_samples: usize) {
     push_samples(
         data.iter()
             .map(|sample| i32::from(*sample) - 32_768)

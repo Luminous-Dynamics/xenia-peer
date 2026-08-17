@@ -6,6 +6,7 @@
 //! Performs a PQC-hybrid (ML-KEM-768 + Ed25519) handshake over a
 //! [`Transport`] to establish a shared session key.
 
+use crate::transport::TransportKind;
 use crate::{
     frame::RawCapabilities,
     transport::{
@@ -13,7 +14,6 @@ use crate::{
         TransportPreSessionProfileV1, TransportProfileV1,
     },
 };
-use crate::transport::TransportKind;
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 use tracing::info;
@@ -21,8 +21,8 @@ use xenia_handshake::{
     HANDSHAKE_POLICY_PROFILE, HANDSHAKE_TRANSCRIPT_SCHEMA, HandshakeManager, HandshakeTranscriptV1,
     KDF_SUITE_LABEL, KEM_SUITE_LABEL, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN, ML_KEM_768_CT_LEN,
     ML_KEM_768_PK_LEN, RekeyEpochContextV1, RekeyReason, SESSION_KEY_SCHEDULE_SCHEMA,
-    SessionKeySchedule,
-    TRANSCRIPT_SIGNATURE_SUITE_LABEL, derive_rekey_epoch_keys, derive_session_key_schedule,
+    SessionKeySchedule, TRANSCRIPT_SIGNATURE_SUITE_LABEL, derive_rekey_epoch_keys,
+    derive_session_key_schedule,
 };
 
 const HANDSHAKE_SIGNATURE_CONTEXT_V1: &str = "xenia-handshake-signature-v1";
@@ -30,7 +30,6 @@ const NEGOTIATED_SESSION_CONTEXT_SCHEMA_V2: &str = "xenia-negotiated-session-con
 const NEGOTIATED_SESSION_CONTEXT_SCHEMA_V3: &str = "xenia-negotiated-session-context-v3";
 const NEGOTIATED_SESSION_CONTEXT_SCHEMA_V4: &str = "xenia-negotiated-session-context-v4";
 const XENIA_WIRE_ENVELOPE_PROFILE_V1: &str = "xenia-wire-sealed-envelope-v1";
-
 
 fn ensure_handshake_message_size(len: usize) -> Result<(), std::io::Error> {
     if len > MAX_HANDSHAKE_ENVELOPE_BYTES as usize {
@@ -207,7 +206,10 @@ impl NegotiatedSessionContextV2 {
     /// The supplied transport profile is intentionally not required to be the
     /// *current* profile: audit tooling may need to reconstruct an older `/0`
     /// or otherwise retired carrier contract byte-for-byte.
-    pub fn historical(transport_profile: TransportProfileV1, capabilities: RawCapabilities) -> Self {
+    pub fn historical(
+        transport_profile: TransportProfileV1,
+        capabilities: RawCapabilities,
+    ) -> Self {
         Self {
             schema: NEGOTIATED_SESSION_CONTEXT_SCHEMA_V2.to_string(),
             transport_profile,
@@ -270,9 +272,11 @@ impl NegotiatedSessionContextV3 {
         if !availability_profile.is_current_supported_profile()
             || availability_profile.kind != transport_profile.kind
         {
-            return Err(NegotiatedSessionContextError::UnsupportedAvailabilityProfile(
-                availability_profile.kind,
-            ));
+            return Err(
+                NegotiatedSessionContextError::UnsupportedAvailabilityProfile(
+                    availability_profile.kind,
+                ),
+            );
         }
         Ok(Self {
             schema: NEGOTIATED_SESSION_CONTEXT_SCHEMA_V3.to_string(),
@@ -348,9 +352,11 @@ impl NegotiatedSessionContextV4 {
         if !availability_profile.is_current_supported_profile()
             || availability_profile.kind != transport_profile.kind
         {
-            return Err(NegotiatedSessionContextError::UnsupportedAvailabilityProfile(
-                availability_profile.kind,
-            ));
+            return Err(
+                NegotiatedSessionContextError::UnsupportedAvailabilityProfile(
+                    availability_profile.kind,
+                ),
+            );
         }
         Ok(Self {
             schema: NEGOTIATED_SESSION_CONTEXT_SCHEMA_V4.to_string(),
@@ -1418,9 +1424,7 @@ mod tests {
                 &availability,
                 capabilities,
             ),
-            Err(NegotiatedSessionContextError::UnsupportedAvailabilityProfile(
-                TransportKind::Tcp
-            ))
+            Err(NegotiatedSessionContextError::UnsupportedAvailabilityProfile(TransportKind::Tcp))
         ));
     }
 
@@ -1451,13 +1455,9 @@ mod tests {
         let transport = TransportProfileV1::current(TransportKind::Tcp);
         let pre_session = TransportPreSessionProfileV1::current(TransportKind::Tcp);
         let availability = TransportAvailabilityProfileV1::current(TransportKind::Tcp);
-        let mut context = NegotiatedSessionContextV4::new(
-            transport,
-            pre_session,
-            availability,
-            capabilities,
-        )
-        .unwrap();
+        let mut context =
+            NegotiatedSessionContextV4::new(transport, pre_session, availability, capabilities)
+                .unwrap();
         let first = context.context_hash().unwrap();
         context.availability_profile.receive_envelope_timeout_ms += 1;
         let second = context.context_hash().unwrap();
@@ -1470,13 +1470,9 @@ mod tests {
         let transport = TransportProfileV1::current(TransportKind::Quic);
         let pre_session = TransportPreSessionProfileV1::current(TransportKind::Quic);
         let availability = TransportAvailabilityProfileV1::current(TransportKind::Quic);
-        let mut context = NegotiatedSessionContextV4::new(
-            transport,
-            pre_session,
-            availability,
-            capabilities,
-        )
-        .unwrap();
+        let mut context =
+            NegotiatedSessionContextV4::new(transport, pre_session, availability, capabilities)
+                .unwrap();
         let first = context.context_hash().unwrap();
         context.pre_session_profile.logical_stream_open_timeout_ms += 1;
         let second = context.context_hash().unwrap();
@@ -1487,9 +1483,7 @@ mod tests {
     fn handshake_parser_ceiling_is_stricter_than_session_envelope_ceiling() {
         assert!(MAX_HANDSHAKE_ENVELOPE_BYTES < crate::transport::MAX_ENVELOPE_BYTES);
         assert!(ensure_handshake_message_size(MAX_HANDSHAKE_ENVELOPE_BYTES as usize).is_ok());
-        assert!(
-            ensure_handshake_message_size(MAX_HANDSHAKE_ENVELOPE_BYTES as usize + 1).is_err()
-        );
+        assert!(ensure_handshake_message_size(MAX_HANDSHAKE_ENVELOPE_BYTES as usize + 1).is_err());
     }
 
     #[test]
@@ -1507,10 +1501,16 @@ mod tests {
             lane_envelope_magic: crate::frame::LANE_ENVELOPE_MAGIC,
         };
 
-        let tcp = negotiated_session_context_hash(&TransportProfileV1::current(TransportKind::Tcp), capabilities.clone())
-            .unwrap();
-        let quic =
-            negotiated_session_context_hash(&TransportProfileV1::current(TransportKind::Quic), capabilities).unwrap();
+        let tcp = negotiated_session_context_hash(
+            &TransportProfileV1::current(TransportKind::Tcp),
+            capabilities.clone(),
+        )
+        .unwrap();
+        let quic = negotiated_session_context_hash(
+            &TransportProfileV1::current(TransportKind::Quic),
+            capabilities,
+        )
+        .unwrap();
 
         assert_ne!(tcp, quic);
         assert_ne!(tcp, [0u8; 32]);
@@ -1531,11 +1531,17 @@ mod tests {
             lane_envelope_magic: crate::frame::LANE_ENVELOPE_MAGIC,
         };
 
-        let first = negotiated_session_context_hash(&TransportProfileV1::current(TransportKind::Tcp), capabilities.clone())
-            .unwrap();
+        let first = negotiated_session_context_hash(
+            &TransportProfileV1::current(TransportKind::Tcp),
+            capabilities.clone(),
+        )
+        .unwrap();
         capabilities.telemetry_enabled = true;
-        let second =
-            negotiated_session_context_hash(&TransportProfileV1::current(TransportKind::Tcp), capabilities).unwrap();
+        let second = negotiated_session_context_hash(
+            &TransportProfileV1::current(TransportKind::Tcp),
+            capabilities,
+        )
+        .unwrap();
 
         assert_ne!(first, second);
     }
@@ -1548,9 +1554,8 @@ mod tests {
             capabilities.clone(),
         )
         .unwrap();
-        capabilities.input_event_schema_version = capabilities
-            .input_event_schema_version
-            .saturating_add(1);
+        capabilities.input_event_schema_version =
+            capabilities.input_event_schema_version.saturating_add(1);
         let second = negotiated_session_context_hash(
             &TransportProfileV1::current(TransportKind::Tcp),
             capabilities,
@@ -1574,11 +1579,17 @@ mod tests {
             lane_envelope_magic: crate::frame::LANE_ENVELOPE_MAGIC,
         };
 
-        let first = negotiated_session_context_hash(&TransportProfileV1::current(TransportKind::Tcp), capabilities.clone())
-            .unwrap();
+        let first = negotiated_session_context_hash(
+            &TransportProfileV1::current(TransportKind::Tcp),
+            capabilities.clone(),
+        )
+        .unwrap();
         capabilities.lane_envelope_version = capabilities.lane_envelope_version.saturating_add(1);
-        let second =
-            negotiated_session_context_hash(&TransportProfileV1::current(TransportKind::Tcp), capabilities).unwrap();
+        let second = negotiated_session_context_hash(
+            &TransportProfileV1::current(TransportKind::Tcp),
+            capabilities,
+        )
+        .unwrap();
 
         assert_ne!(first, second);
     }
@@ -1604,7 +1615,9 @@ mod tests {
         let profile = TransportProfileV1::current(TransportKind::Tcp);
         let expected = negotiated_session_context_hash(&profile, capabilities.clone()).unwrap();
         let pending = PendingSessionSurface::new(Some(expected), profile.clone()).unwrap();
-        let authenticated = pending.authenticate_capabilities(capabilities.clone()).unwrap();
+        let authenticated = pending
+            .authenticate_capabilities(capabilities.clone())
+            .unwrap();
 
         assert_eq!(authenticated.context_hash(), expected);
         assert_eq!(authenticated.transport_profile(), &profile);
@@ -1620,11 +1633,9 @@ mod tests {
         let mut capabilities = test_capabilities();
         capabilities.input_event_schema_version =
             crate::frame::INPUT_EVENT_SCHEMA_VERSION.saturating_add(1);
-        let pending = PendingSessionSurface::new(
-            None,
-            TransportProfileV1::current(TransportKind::Tcp),
-        )
-        .unwrap();
+        let pending =
+            PendingSessionSurface::new(None, TransportProfileV1::current(TransportKind::Tcp))
+                .unwrap();
         assert!(matches!(
             pending.authenticate_capabilities(capabilities),
             Err(CapabilityAcceptanceError::UnsupportedInputEventSchema { .. })

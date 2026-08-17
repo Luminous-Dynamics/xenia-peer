@@ -251,10 +251,7 @@ impl HevcDecoder {
             });
         }
 
-        let scaler = self
-            .scaler
-            .as_mut()
-            .ok_or(DecodeError::ScalerUnavailable)?;
+        let scaler = self.scaler.as_mut().ok_or(DecodeError::ScalerUnavailable)?;
 
         let mut rgba_frame = ffmpeg::frame::Video::empty();
         scaler.ctx.run(yuv, &mut rgba_frame)?;

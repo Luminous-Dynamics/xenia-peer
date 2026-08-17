@@ -135,7 +135,6 @@ pub fn cleanup_orphaned_receive_staging(dir: &Path) -> io::Result<usize> {
     Ok(removed)
 }
 
-
 /// Incremental receive-staging failure.
 #[derive(Debug, thiserror::Error)]
 pub enum IncomingFileStageError {
@@ -210,29 +209,25 @@ impl IncomingFileStager {
     }
 
     /// Append the next exact sequential chunk and return total staged bytes.
-    pub fn append(
-        &mut self,
-        offset: u64,
-        bytes: &[u8],
-    ) -> Result<u64, IncomingFileStageError> {
+    pub fn append(&mut self, offset: u64, bytes: &[u8]) -> Result<u64, IncomingFileStageError> {
         if offset != self.received {
             return Err(IncomingFileStageError::UnexpectedOffset {
                 expected: self.received,
                 actual: offset,
             });
         }
-        let chunk_len = u64::try_from(bytes.len()).map_err(|_| {
-            IncomingFileStageError::SizeExceeded {
+        let chunk_len =
+            u64::try_from(bytes.len()).map_err(|_| IncomingFileStageError::SizeExceeded {
                 expected_size: self.expected_size,
                 attempted_end: u64::MAX,
-            }
-        })?;
-        let attempted_end = self.received.checked_add(chunk_len).ok_or(
-            IncomingFileStageError::SizeExceeded {
-                expected_size: self.expected_size,
-                attempted_end: u64::MAX,
-            },
-        )?;
+            })?;
+        let attempted_end =
+            self.received
+                .checked_add(chunk_len)
+                .ok_or(IncomingFileStageError::SizeExceeded {
+                    expected_size: self.expected_size,
+                    attempted_end: u64::MAX,
+                })?;
         if attempted_end > self.expected_size {
             return Err(IncomingFileStageError::SizeExceeded {
                 expected_size: self.expected_size,
@@ -240,7 +235,10 @@ impl IncomingFileStager {
             });
         }
         let file = self.file.as_mut().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::BrokenPipe, "receive stager is already closed")
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "receive stager is already closed",
+            )
         })?;
         file.write_all(bytes)?;
         self.hasher.update(bytes);
@@ -388,7 +386,11 @@ mod tests {
         assert!(!owned.exists());
         assert!(live.exists());
         for path in &unrelated {
-            assert!(path.exists(), "unrelated path was removed: {}", path.display());
+            assert!(
+                path.exists(),
+                "unrelated path was removed: {}",
+                path.display()
+            );
         }
 
         std::fs::remove_dir_all(dir).unwrap();
@@ -411,7 +413,10 @@ mod tests {
                 actual: 4
             })
         ));
-        assert_eq!(stager.append(3, &payload[3..]).unwrap(), payload.len() as u64);
+        assert_eq!(
+            stager.append(3, &payload[3..]).unwrap(),
+            payload.len() as u64
+        );
         stager.finish().expect("verified publish");
 
         assert_eq!(std::fs::read(&path).unwrap(), payload);
@@ -423,8 +428,8 @@ mod tests {
     fn incremental_stager_rejects_overrun_hash_mismatch_and_cleans_partial_files() {
         let dir = temp_dir();
         let overrun_path = dir.join("overrun.bin");
-        let mut overrun = IncomingFileStager::create(&overrun_path, 2, *blake3::hash(b"ok").as_bytes())
-            .unwrap();
+        let mut overrun =
+            IncomingFileStager::create(&overrun_path, 2, *blake3::hash(b"ok").as_bytes()).unwrap();
         assert!(matches!(
             overrun.append(0, b"toolong"),
             Err(IncomingFileStageError::SizeExceeded { .. })
@@ -434,10 +439,13 @@ mod tests {
         assert!(staging_files(&dir).is_empty());
 
         let hash_path = dir.join("hash.bin");
-        let mut hash = IncomingFileStager::create(&hash_path, 3, *blake3::hash(b"abc").as_bytes())
-            .unwrap();
+        let mut hash =
+            IncomingFileStager::create(&hash_path, 3, *blake3::hash(b"abc").as_bytes()).unwrap();
         hash.append(0, b"abd").unwrap();
-        assert!(matches!(hash.finish(), Err(IncomingFileStageError::HashMismatch)));
+        assert!(matches!(
+            hash.finish(),
+            Err(IncomingFileStageError::HashMismatch)
+        ));
         assert!(!hash_path.exists());
         assert!(staging_files(&dir).is_empty());
 

@@ -82,7 +82,6 @@ pub const DESKTOP_AUDIO_PLAYBACK_V1: ProducerFlowPolicyV1 = ProducerFlowPolicyV1
     overflow: ProducerOverflowPolicy::DropNewest,
 };
 
-
 /// Time-based audio buffering contract for the native desktop viewer.
 ///
 /// Queue lengths alone are a poor latency contract: at the protocol's maximum
@@ -259,7 +258,10 @@ mod tests {
             INPUT_STATE_TRANSITION_V1.overflow,
             ProducerOverflowPolicy::Backpressure
         );
-        assert_eq!(POINTER_MOTION_V1.capacity, INPUT_STATE_TRANSITION_V1.capacity);
+        assert_eq!(
+            POINTER_MOTION_V1.capacity,
+            INPUT_STATE_TRANSITION_V1.capacity
+        );
     }
 
     #[test]
@@ -283,7 +285,10 @@ mod tests {
     fn desktop_audio_latency_budget_is_explicit_and_subsecond() {
         let p = DESKTOP_AUDIO_LATENCY_V1;
         assert!(p.jitter_target_delay_frames < p.jitter_max_depth_frames);
-        assert_eq!(DESKTOP_AUDIO_PLAYBACK_V2.capacity, p.ingress_capacity_frames);
+        assert_eq!(
+            DESKTOP_AUDIO_PLAYBACK_V2.capacity,
+            p.ingress_capacity_frames
+        );
         let buffered_ms = (p.ingress_capacity_frames + p.jitter_max_depth_frames)
             * usize::from(p.max_frame_duration_ms)
             + p.device_buffer_ms as usize;
@@ -340,5 +345,4 @@ mod tests {
         assert_eq!(MOBILE_FILE_TRANSFER_MAX_BYTES_V1, 104_857_600);
         assert!(MOBILE_FILE_TRANSFER_MAX_BYTES_V1 < usize::MAX);
     }
-
 }

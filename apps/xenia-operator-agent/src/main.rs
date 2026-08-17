@@ -1295,14 +1295,13 @@ async fn check_host_trust_fingerprint(
     let host_alias_owned = host_alias.to_string();
     let suite_owned = suite.to_string();
     let check_state = state.clone();
-    let outcome = tokio::task::spawn_blocking(
-        move || -> Result<host_trust::PinOutcome, AgentHttpError> {
+    let outcome =
+        tokio::task::spawn_blocking(move || -> Result<host_trust::PinOutcome, AgentHttpError> {
             let mut trust = lock_agent_state(&check_state.host_trust, "host trust")?;
             map_host_trust_result(trust.check(&host_alias_owned, &suite_owned, fingerprint))
-        },
-    )
-    .await
-    .map_err(|_| internal_error("host-trust check task panicked"))??;
+        })
+        .await
+        .map_err(|_| internal_error("host-trust check task panicked"))??;
 
     // First-use and rotation are trust *decisions* worth a durable
     // record; `Matched` is the steady-state case and would otherwise

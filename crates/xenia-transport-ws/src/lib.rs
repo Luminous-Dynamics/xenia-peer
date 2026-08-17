@@ -53,9 +53,7 @@ use tokio_tungstenite::tungstenite::{
     http::{HeaderValue, StatusCode, header::SEC_WEBSOCKET_PROTOCOL},
     protocol::{Message, WebSocketConfig},
 };
-use tokio_tungstenite::{
-    WebSocketStream, accept_hdr_async_with_config, connect_async_with_config,
-};
+use tokio_tungstenite::{WebSocketStream, accept_hdr_async_with_config, connect_async_with_config};
 use tracing::debug;
 
 use xenia_peer_core::transport::{
@@ -513,7 +511,10 @@ mod tests {
             TransportKind::WebSocket,
         );
         assert_eq!(profile.send_stall_timeout_ms, SEND_STALL_TIMEOUT_MS);
-        assert_eq!(profile.receive_envelope_timeout_ms, RECEIVE_ENVELOPE_TIMEOUT_MS);
+        assert_eq!(
+            profile.receive_envelope_timeout_ms,
+            RECEIVE_ENVELOPE_TIMEOUT_MS
+        );
         assert!(!profile.carrier_keepalive_resets_application_idle);
     }
 

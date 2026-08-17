@@ -108,7 +108,8 @@ pub fn encode_binary_envelope_v1(
     }
 
     let mut out = Vec::with_capacity(
-        BINARY_ENVELOPE_MAGIC_V1.len()
+        BINARY_ENVELOPE_MAGIC_V1
+            .len()
             .saturating_add(envelope.proof.len())
             .saturating_add(
                 envelope
@@ -178,10 +179,7 @@ fn decode_binary_bounded(
     let timestamp_unix_seconds = cursor.u64()?;
     let nonce = cursor.array32()?;
     let public_inputs_hash = cursor.array32()?;
-    let proof = cursor.bytes_u32_bounded(
-        "proof",
-        policy.max_proof_bytes.min(u32::MAX as usize),
-    )?;
+    let proof = cursor.bytes_u32_bounded("proof", policy.max_proof_bytes.min(u32::MAX as usize))?;
     let extensions_digest = cursor.array32()?;
 
     let authentication_count = usize::from(cursor.u16()?);
@@ -193,13 +191,14 @@ fn decode_binary_bounded(
     // An authentication record has at least suite(2) + key-id(32) + length(4).
     // Checking the minimum representation before Vec allocation prevents a large
     // count from reserving memory when the frame cannot possibly contain it.
-    let min_auth_bytes = authentication_count
-        .checked_mul(38)
-        .ok_or(BinaryEnvelopeCodecError::LengthLimit {
-            field: "authentication",
-            actual: authentication_count,
-            limit: policy.max_authentication_entries,
-        })?;
+    let min_auth_bytes =
+        authentication_count
+            .checked_mul(38)
+            .ok_or(BinaryEnvelopeCodecError::LengthLimit {
+                field: "authentication",
+                actual: authentication_count,
+                limit: policy.max_authentication_entries,
+            })?;
     if min_auth_bytes > cursor.remaining() {
         return Err(BinaryEnvelopeCodecError::LengthExceedsFrame {
             field: "authentication",
@@ -328,7 +327,12 @@ impl<'a> Cursor<'a> {
     }
 
     fn text_u8(&mut self) -> Result<String, BinaryEnvelopeCodecError> {
-        let length = usize::from(*self.take(1)?.first().ok_or(BinaryEnvelopeCodecError::Truncated)?);
+        let length = usize::from(
+            *self
+                .take(1)?
+                .first()
+                .ok_or(BinaryEnvelopeCodecError::Truncated)?,
+        );
         let raw = self.take(length)?;
         let text = std::str::from_utf8(raw).map_err(|_| BinaryEnvelopeCodecError::InvalidUtf8)?;
         Ok(text.to_owned())
@@ -339,11 +343,12 @@ impl<'a> Cursor<'a> {
         field: &'static str,
         limit: usize,
     ) -> Result<Vec<u8>, BinaryEnvelopeCodecError> {
-        let declared = usize::try_from(self.u32()?).map_err(|_| BinaryEnvelopeCodecError::LengthLimit {
-            field,
-            actual: usize::MAX,
-            limit,
-        })?;
+        let declared =
+            usize::try_from(self.u32()?).map_err(|_| BinaryEnvelopeCodecError::LengthLimit {
+                field,
+                actual: usize::MAX,
+                limit,
+            })?;
         check_len(field, declared, limit)?;
         if declared > self.remaining() {
             return Err(BinaryEnvelopeCodecError::LengthExceedsFrame {
@@ -391,7 +396,10 @@ mod tests {
         let encoded = encode_binary_envelope_v1(&expected, &policy).unwrap();
         let decoded = decode_binary_envelope_v1(&encoded, &policy).unwrap();
         assert_eq!(decoded, expected);
-        assert_eq!(encode_binary_envelope_v1(&decoded, &policy).unwrap(), encoded);
+        assert_eq!(
+            encode_binary_envelope_v1(&decoded, &policy).unwrap(),
+            encoded
+        );
     }
 
     #[test]
