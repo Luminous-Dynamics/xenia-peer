@@ -6827,6 +6827,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         m1_runtime.lock().await.preflight_frame_flow()?;
+        let video_capture_started = std::time::Instant::now();
         let Some(frame) = capture.capture()? else {
             continue;
         };
@@ -6866,6 +6867,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let captured_at = now_ms();
         let packets = encoder.encode(&pixels, captured_at)?;
+        if video_capture_started.elapsed()
+            > Duration::from_millis(
+                xenia_peer_core::producer_flow::HOST_VIDEO_FRESHNESS_V1.max_capture_to_send_ms,
+            )
+        {
+            warn!(
+                age_ms = video_capture_started.elapsed().as_millis(),
+                max_age_ms = xenia_peer_core::producer_flow::HOST_VIDEO_FRESHNESS_V1.max_capture_to_send_ms,
+                packets = packets.len(),
+                "dropping stale encoded video result before transport send"
+            );
+            continue;
+        }
         for packet in packets {
             let frame_id = session.lock().await.next_frame_id();
             let raw = RawFrame::encoded(
@@ -6878,7 +6892,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             let envelope = session.lock().await.seal_frame(&raw)?;
             m1_runtime.lock().await.allow_frame_flow()?;
-            send_half.send_envelope(&envelope).await?;
+            let send_deadline = Duration::from_millis(
+                xenia_peer_core::producer_flow::HOST_VIDEO_FRESHNESS_V1.max_send_stall_ms,
+            );
+            match tokio::time::timeout(send_deadline, send_half.send_envelope(&envelope)).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    return Err(format!(
+                        "video envelope send exceeded {} ms semantic deadline; session is fatal after a canceled partial send",
+                        xenia_peer_core::producer_flow::HOST_VIDEO_FRESHNESS_V1.max_send_stall_ms
+                    )
+                    .into());
+                }
+            }
             epoch_state.record_video_frame(envelope.len());
             sent_frames += 1;
             if sent_frames <= 3 || sent_frames.is_multiple_of(10) {

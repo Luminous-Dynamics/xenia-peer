@@ -81,6 +81,72 @@ pub const DESKTOP_AUDIO_PLAYBACK_V1: ProducerFlowPolicyV1 = ProducerFlowPolicyV1
 };
 
 
+/// Time-based audio buffering contract for the native desktop viewer.
+///
+/// Queue lengths alone are a poor latency contract: at the protocol's maximum
+/// 20 ms audio-frame duration, the historical 64-frame GUI queue could retain
+/// roughly 1.28 seconds of stale sound before the device queue was considered.
+/// V16 names the buffering stages in milliseconds/frames so changes remain
+/// reviewable as latency policy rather than accidental container sizes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DesktopAudioLatencyPolicyV1 {
+    /// Maximum frames waiting between network/decode and the GUI playback sink.
+    pub ingress_capacity_frames: usize,
+    /// Maximum sequence-jitter depth retained before the oldest sequence is
+    /// advanced/dropped.
+    pub jitter_max_depth_frames: usize,
+    /// Minimum buffered depth before normal playout begins.
+    pub jitter_target_delay_frames: usize,
+    /// Maximum PCM time retained by the native output-device FIFO.
+    pub device_buffer_ms: u32,
+    /// Maximum protocol frame duration used to calculate the explicit bound.
+    pub max_frame_duration_ms: u16,
+}
+
+/// V16 native audio policy: <= 4 ingress frames (80 ms at the wire maximum),
+/// <= 6 jitter frames (120 ms), and <= 80 ms of device PCM. This is an
+/// application-buffering bound, not a promise about OS/hardware/network latency.
+pub const DESKTOP_AUDIO_LATENCY_V1: DesktopAudioLatencyPolicyV1 = DesktopAudioLatencyPolicyV1 {
+    ingress_capacity_frames: 4,
+    jitter_max_depth_frames: 6,
+    jitter_target_delay_frames: 2,
+    device_buffer_ms: 80,
+    max_frame_duration_ms: 20,
+};
+
+/// V16 desktop network/decode -> GUI audio queue. Newest audio is rejected on
+/// saturation rather than allowing unbounded growth; the much smaller V16
+/// capacity limits the amount of stale sound this can preserve.
+pub const DESKTOP_AUDIO_PLAYBACK_V2: ProducerFlowPolicyV1 = ProducerFlowPolicyV1 {
+    name: "desktop-audio-playback-v2",
+    capacity: DESKTOP_AUDIO_LATENCY_V1.ingress_capacity_frames,
+    overflow: ProducerOverflowPolicy::DropNewest,
+};
+
+/// Host video freshness contract. The daemon is intentionally a synchronous
+/// capture -> encode -> seal -> send pipeline today (no hidden frame backlog).
+/// Frames that spend too long in capture/encode are discarded, and a send that
+/// exceeds the lane-specific deadline is session-fatal because cancellation can
+/// leave a stream mid-envelope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostVideoFreshnessPolicyV1 {
+    /// Maximum local age from capture start until the daemon begins sending the
+    /// encoded result. Older output is superseded by a future capture.
+    pub max_capture_to_send_ms: u64,
+    /// Maximum time one video envelope may spend in the transport send call.
+    /// Timeout is fatal; Xenia does not resume the same framing stream.
+    pub max_send_stall_ms: u64,
+    /// The current synchronous pipeline permits at most one captured frame to
+    /// be active before transport backpressure reaches the capture loop.
+    pub max_frames_in_flight: usize,
+}
+
+pub const HOST_VIDEO_FRESHNESS_V1: HostVideoFreshnessPolicyV1 = HostVideoFreshnessPolicyV1 {
+    max_capture_to_send_ms: 500,
+    max_send_stall_ms: 1_000,
+    max_frames_in_flight: 1,
+};
+
 /// Mobile outbound clipboard state is latest-value state, not a history.
 pub const MOBILE_CLIPBOARD_OUTBOUND_V1: ProducerFlowPolicyV1 = ProducerFlowPolicyV1 {
     name: "mobile-clipboard-outbound",
@@ -95,6 +161,11 @@ pub const MOBILE_FILE_TRANSFER_COMMAND_V1: ProducerFlowPolicyV1 = ProducerFlowPo
     capacity: 2,
     overflow: ProducerOverflowPolicy::Reject,
 };
+
+/// Maximum size of one mobile-originated file command admitted by the native
+/// viewer before enqueue/copy work. This matches the current Android picker
+/// ceiling and the daemon/viewer default transfer cap.
+pub const MOBILE_FILE_TRANSFER_MAX_BYTES_V1: usize = 100 * 1024 * 1024;
 
 /// Mobile file-transfer UI notifications retain the newest bounded history.
 pub const MOBILE_FILE_TRANSFER_EVENTS_V1: ProducerFlowPolicyV1 = ProducerFlowPolicyV1 {
@@ -123,6 +194,7 @@ mod tests {
             MOBILE_VIDEO_PRESENTATION_V1,
             DESKTOP_TELEMETRY_PRESENTATION_V1,
             DESKTOP_AUDIO_PLAYBACK_V1,
+            DESKTOP_AUDIO_PLAYBACK_V2,
             MOBILE_CLIPBOARD_OUTBOUND_V1,
             MOBILE_FILE_TRANSFER_COMMAND_V1,
             MOBILE_FILE_TRANSFER_EVENTS_V1,
@@ -131,4 +203,33 @@ mod tests {
             assert!(policy.capacity <= 256);
         }
     }
+    #[test]
+    fn desktop_audio_latency_budget_is_explicit_and_subsecond() {
+        let p = DESKTOP_AUDIO_LATENCY_V1;
+        assert!(p.jitter_target_delay_frames < p.jitter_max_depth_frames);
+        assert_eq!(DESKTOP_AUDIO_PLAYBACK_V2.capacity, p.ingress_capacity_frames);
+        let buffered_ms = (p.ingress_capacity_frames + p.jitter_max_depth_frames)
+            * usize::from(p.max_frame_duration_ms)
+            + p.device_buffer_ms as usize;
+        assert_eq!(buffered_ms, 280);
+        assert!(buffered_ms < 1_000);
+    }
+
+    #[test]
+    fn host_video_has_no_backlog_and_fails_before_general_transport_stall() {
+        assert_eq!(HOST_VIDEO_FRESHNESS_V1.max_frames_in_flight, 1);
+        assert!(HOST_VIDEO_FRESHNESS_V1.max_capture_to_send_ms > 0);
+        assert!(
+            HOST_VIDEO_FRESHNESS_V1.max_send_stall_ms
+                >= HOST_VIDEO_FRESHNESS_V1.max_capture_to_send_ms
+        );
+        assert!(HOST_VIDEO_FRESHNESS_V1.max_send_stall_ms < 15_000);
+    }
+
+    #[test]
+    fn mobile_file_admission_has_a_fixed_byte_ceiling() {
+        assert_eq!(MOBILE_FILE_TRANSFER_MAX_BYTES_V1, 104_857_600);
+        assert!(MOBILE_FILE_TRANSFER_MAX_BYTES_V1 < usize::MAX);
+    }
+
 }

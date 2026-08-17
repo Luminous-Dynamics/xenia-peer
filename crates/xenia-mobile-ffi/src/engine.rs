@@ -189,6 +189,8 @@ enum FileTransferCommand {
 /// Immediate result of trying to enqueue a user-triggered file transfer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileTransferEnqueueError {
+    /// The requested payload exceeds the fixed V1 mobile transfer ceiling.
+    FileTooLarge,
     /// The fixed command queue is full. No command was silently discarded.
     QueueFull,
     /// The background session task has ended and no longer accepts commands.
@@ -398,6 +400,28 @@ impl ViewerEngine {
         });
     }
 
+    /// Check whether a file command is worth materializing/copying now.
+    ///
+    /// This is deliberately an advisory preflight, not a reservation: another
+    /// producer can consume queue capacity before the final `try_send`. The
+    /// final [`send_file`](Self::send_file) call therefore performs the same
+    /// size/session/queue checks again.
+    pub fn check_file_transfer_admission(
+        &self,
+        data_len: usize,
+    ) -> Result<(), FileTransferEnqueueError> {
+        if data_len > xenia_peer_core::producer_flow::MOBILE_FILE_TRANSFER_MAX_BYTES_V1 {
+            return Err(FileTransferEnqueueError::FileTooLarge);
+        }
+        if self.ft_cmd_tx.is_closed() {
+            return Err(FileTransferEnqueueError::SessionClosed);
+        }
+        if self.ft_cmd_tx.capacity() == 0 {
+            return Err(FileTransferEnqueueError::QueueFull);
+        }
+        Ok(())
+    }
+
     /// Offer `data` to the host under `name`. `data` must already be
     /// fully read into memory by the caller (Android's Storage Access
     /// Framework hands back a `Uri`, not a plain path, so the JNI
@@ -410,6 +434,7 @@ impl ViewerEngine {
         name: String,
         data: Vec<u8>,
     ) -> Result<(), FileTransferEnqueueError> {
+        self.check_file_transfer_admission(data.len())?;
         match self
             .ft_cmd_tx
             .try_send(FileTransferCommand::SendFile { name, data })
@@ -1364,6 +1389,28 @@ mod tests {
         // state without growing a stale clipboard backlog.
         engine.send_clipboard(Some("hello".to_string()));
         engine.send_clipboard(None);
+    }
+
+    #[test]
+    fn file_transfer_admission_rejects_oversized_payload_before_queue_state() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let engine = ViewerEngine::connect(
+            rt.handle(),
+            "127.0.0.1:4".to_string(),
+            MobileCodec::Passthrough,
+            None,
+            DEFAULT_TEST_MAX_FILE_BYTES,
+        );
+        assert_eq!(
+            engine.check_file_transfer_admission(
+                xenia_peer_core::producer_flow::MOBILE_FILE_TRANSFER_MAX_BYTES_V1 + 1,
+            ),
+            Err(FileTransferEnqueueError::FileTooLarge)
+        );
     }
 
     #[test]

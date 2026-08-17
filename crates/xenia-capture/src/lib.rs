@@ -391,6 +391,19 @@ pub struct CpalAudioCapture {
     _stream: cpal::Stream,
 }
 
+/// Maximum raw CPAL samples retained before daemon consumption. Audio is
+/// latency-sensitive state, so V16 bounds the capture FIFO by time rather than
+/// by an opaque sample count. At 48 kHz this is 100 ms per active channel.
+pub const HOST_AUDIO_CAPTURE_BUFFER_BUDGET_MS: u32 = 100;
+
+fn audio_capture_buffer_samples(sample_rate_hz: u32, channels: u16) -> usize {
+    let samples = u64::from(sample_rate_hz)
+        .saturating_mul(u64::from(channels.max(1)))
+        .saturating_mul(u64::from(HOST_AUDIO_CAPTURE_BUFFER_BUDGET_MS))
+        / 1_000;
+    usize::try_from(samples.max(1)).unwrap_or(usize::MAX)
+}
+
 #[cfg(feature = "audio-cpal")]
 impl CpalAudioCapture {
     /// Create a capture stream from the default host input device.
@@ -427,6 +440,7 @@ impl CpalAudioCapture {
             })?;
         let sample_rate_hz = supported.sample_rate().0;
         let channels = supported.channels();
+        let max_buffered_samples = audio_capture_buffer_samples(sample_rate_hz, channels);
 
         let frame_samples_per_channel = usize::try_from(sample_rate_hz / 50)
             .map_err(|_| IngestionError::Backend("sample rate does not fit usize".into()))?;
@@ -439,7 +453,7 @@ impl CpalAudioCapture {
                 let buffer = Arc::clone(&buffer);
                 device.build_input_stream(
                     &config,
-                    move |data: &[f32], _| push_f32_samples(data, &buffer),
+                    move |data: &[f32], _| push_f32_samples(data, &buffer, max_buffered_samples),
                     err_fn,
                     None,
                 )
@@ -448,7 +462,7 @@ impl CpalAudioCapture {
                 let buffer = Arc::clone(&buffer);
                 device.build_input_stream(
                     &config,
-                    move |data: &[i16], _| push_i16_samples(data, &buffer),
+                    move |data: &[i16], _| push_i16_samples(data, &buffer, max_buffered_samples),
                     err_fn,
                     None,
                 )
@@ -457,7 +471,7 @@ impl CpalAudioCapture {
                 let buffer = Arc::clone(&buffer);
                 device.build_input_stream(
                     &config,
-                    move |data: &[u16], _| push_u16_samples(data, &buffer),
+                    move |data: &[u16], _| push_u16_samples(data, &buffer, max_buffered_samples),
                     err_fn,
                     None,
                 )
@@ -528,35 +542,52 @@ impl AudioCapture for CpalAudioCapture {
 }
 
 #[cfg(feature = "audio-cpal")]
-fn push_i16_samples(data: &[i16], buffer: &Arc<Mutex<VecDeque<i16>>>) {
-    push_samples(data.iter().copied(), buffer);
+fn push_i16_samples(
+    data: &[i16],
+    buffer: &Arc<Mutex<VecDeque<i16>>>,
+    max_buffered_samples: usize,
+) {
+    push_samples(data.iter().copied(), buffer, max_buffered_samples);
 }
 
 #[cfg(feature = "audio-cpal")]
-fn push_f32_samples(data: &[f32], buffer: &Arc<Mutex<VecDeque<i16>>>) {
+fn push_f32_samples(
+    data: &[f32],
+    buffer: &Arc<Mutex<VecDeque<i16>>>,
+    max_buffered_samples: usize,
+) {
     push_samples(
         data.iter()
             .map(|sample| (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16),
         buffer,
+        max_buffered_samples,
     );
 }
 
 #[cfg(feature = "audio-cpal")]
-fn push_u16_samples(data: &[u16], buffer: &Arc<Mutex<VecDeque<i16>>>) {
+fn push_u16_samples(
+    data: &[u16],
+    buffer: &Arc<Mutex<VecDeque<i16>>>,
+    max_buffered_samples: usize,
+) {
     push_samples(
         data.iter()
             .map(|sample| i32::from(*sample) - 32_768)
             .map(|sample| sample.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16),
         buffer,
+        max_buffered_samples,
     );
 }
 
 #[cfg(feature = "audio-cpal")]
-fn push_samples(samples: impl IntoIterator<Item = i16>, buffer: &Arc<Mutex<VecDeque<i16>>>) {
-    const MAX_BUFFERED_SAMPLES: usize = 48_000 * 2;
+fn push_samples(
+    samples: impl IntoIterator<Item = i16>,
+    buffer: &Arc<Mutex<VecDeque<i16>>>,
+    max_buffered_samples: usize,
+) {
     if let Ok(mut buffer) = buffer.lock() {
         for sample in samples {
-            if buffer.len() >= MAX_BUFFERED_SAMPLES {
+            if buffer.len() >= max_buffered_samples {
                 buffer.pop_front();
             }
             buffer.push_back(sample);
@@ -1003,6 +1034,14 @@ mod tests {
         assert_eq!(mons[0].width, 800);
         assert_eq!(mons[0].height, 600);
         assert!(mons[0].is_primary);
+    }
+
+    #[test]
+    fn host_audio_capture_buffer_is_time_derived() {
+        assert_eq!(HOST_AUDIO_CAPTURE_BUFFER_BUDGET_MS, 100);
+        assert_eq!(audio_capture_buffer_samples(48_000, 2), 9_600);
+        assert_eq!(audio_capture_buffer_samples(48_000, 1), 4_800);
+        assert_eq!(audio_capture_buffer_samples(24_000, 2), 4_800);
     }
 
     #[test]

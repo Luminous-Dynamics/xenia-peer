@@ -423,6 +423,24 @@ pub const XENIA_SEND_FILE_INVALID_HANDLE: i32 = 2;
 pub const XENIA_SEND_FILE_QUEUE_FULL: i32 = 3;
 /// The background session task has already closed its command receiver.
 pub const XENIA_SEND_FILE_SESSION_CLOSED: i32 = 4;
+/// The payload exceeds the fixed V1 mobile file-transfer byte ceiling.
+pub const XENIA_SEND_FILE_TOO_LARGE: i32 = 5;
+
+/// Check whether the native viewer can currently admit a file command of
+/// `data_len` bytes without materializing/copying the payload. This is an
+/// advisory preflight, not a reservation; [`xenia_try_send_file`] rechecks.
+#[unsafe(no_mangle)]
+pub extern "C" fn xenia_check_send_file(handle: u64, data_len: usize) -> i32 {
+    let Some(engine) = engine_for(handle) else {
+        return XENIA_SEND_FILE_INVALID_HANDLE;
+    };
+    match engine.check_file_transfer_admission(data_len) {
+        Ok(()) => XENIA_SEND_FILE_OK,
+        Err(FileTransferEnqueueError::FileTooLarge) => XENIA_SEND_FILE_TOO_LARGE,
+        Err(FileTransferEnqueueError::QueueFull) => XENIA_SEND_FILE_QUEUE_FULL,
+        Err(FileTransferEnqueueError::SessionClosed) => XENIA_SEND_FILE_SESSION_CLOSED,
+    }
+}
 
 /// Try to offer `data` (`data_len` bytes) to the host under `name`.
 ///
@@ -446,6 +464,10 @@ pub unsafe extern "C" fn xenia_try_send_file(
     if name.is_null() || (data.is_null() && data_len > 0) {
         return XENIA_SEND_FILE_INVALID_ARGUMENT;
     }
+    let admission = xenia_check_send_file(handle, data_len);
+    if admission != XENIA_SEND_FILE_OK {
+        return admission;
+    }
     let Some(engine) = engine_for(handle) else {
         return XENIA_SEND_FILE_INVALID_HANDLE;
     };
@@ -463,6 +485,7 @@ pub unsafe extern "C" fn xenia_try_send_file(
     };
     match engine.send_file(name.to_owned(), bytes) {
         Ok(()) => XENIA_SEND_FILE_OK,
+        Err(FileTransferEnqueueError::FileTooLarge) => XENIA_SEND_FILE_TOO_LARGE,
         Err(FileTransferEnqueueError::QueueFull) => XENIA_SEND_FILE_QUEUE_FULL,
         Err(FileTransferEnqueueError::SessionClosed) => XENIA_SEND_FILE_SESSION_CLOSED,
     }
@@ -643,6 +666,7 @@ mod tests {
             xenia_send_touch(0, 0, 0.5, 0.5, 0, 1.0);
             xenia_send_key(0, 30, true, 0);
             let name = CString::new("test.txt").unwrap();
+            assert_eq!(xenia_check_send_file(0, 0), XENIA_SEND_FILE_INVALID_HANDLE);
             assert_eq!(
                 xenia_try_send_file(0, name.as_ptr(), std::ptr::null(), 0),
                 XENIA_SEND_FILE_INVALID_HANDLE

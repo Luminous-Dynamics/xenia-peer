@@ -404,8 +404,6 @@ struct DeviceAudioSink {
 
 #[cfg(feature = "audio-output")]
 impl DeviceAudioSink {
-    const MAX_BUFFERED_SAMPLES: usize = 48_000 * 2;
-
     fn new(output_device: Option<&str>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -505,8 +503,12 @@ impl AudioPlaybackSink for DeviceAudioSink {
             self.stats.rejected = self.stats.rejected.saturating_add(1);
             return;
         };
+        let max_buffered_samples = audio_device_buffer_samples(
+            self.output_sample_rate_hz,
+            self.output_channels,
+        );
         for sample in adapted {
-            if queue.len() >= Self::MAX_BUFFERED_SAMPLES {
+            if queue.len() >= max_buffered_samples {
                 queue.pop_front();
             }
             queue.push_back(sample);
@@ -523,6 +525,20 @@ impl AudioPlaybackSink for DeviceAudioSink {
     fn stats(&self) -> AudioPlaybackStats {
         self.stats
     }
+}
+
+/// Convert the V16 device-output latency budget into a sample count for the
+/// actual output format. The count includes interleaved channels.
+#[cfg(any(feature = "audio-output", test))]
+fn audio_device_buffer_samples(sample_rate_hz: u32, channels: u16) -> usize {
+    let budget_ms = u64::from(
+        xenia_peer_core::producer_flow::DESKTOP_AUDIO_LATENCY_V1.device_buffer_ms,
+    );
+    let samples = u64::from(sample_rate_hz)
+        .saturating_mul(u64::from(channels.max(1)))
+        .saturating_mul(budget_ms)
+        / 1_000;
+    usize::try_from(samples.max(1)).unwrap_or(usize::MAX)
 }
 
 #[cfg(feature = "audio-output")]
@@ -1627,7 +1643,11 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut received: u64 = 0;
     let mut audio_decoded: u64 = 0;
     let mut last_audio_data: Option<AudioData> = None;
-    let mut audio_jitter = AudioJitterBuffer::with_playout_delay(0, 16, 2);
+    let mut audio_jitter = AudioJitterBuffer::with_playout_delay(
+        0,
+        xenia_peer_core::producer_flow::DESKTOP_AUDIO_LATENCY_V1.jitter_max_depth_frames,
+        xenia_peer_core::producer_flow::DESKTOP_AUDIO_LATENCY_V1.jitter_target_delay_frames,
+    );
     let mut audio_codec = make_audio_codec(selected_audio_codec)
         .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
     info!(
@@ -1882,7 +1902,7 @@ fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let audio_sink = ViewerAudioSink::new(args.play_audio, args.audio_output_device.as_deref())
         .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
     let (audio_tx, audio_rx) = mpsc::sync_channel(
-        xenia_peer_core::producer_flow::DESKTOP_AUDIO_PLAYBACK_V1.capacity,
+        xenia_peer_core::producer_flow::DESKTOP_AUDIO_PLAYBACK_V2.capacity,
     );
     // Captured pointer/keyboard events flow GUI thread -> network task through
     // a bounded queue. The GUI distinguishes lossy pointer motion from
@@ -2100,7 +2120,11 @@ async fn gui_receive_loop(
     let frame_limit = args.frames.unwrap_or(0);
     let mut received: u64 = 0;
     let mut audio_decoded: u64 = 0;
-    let mut audio_jitter = AudioJitterBuffer::with_playout_delay(0, 16, 2);
+    let mut audio_jitter = AudioJitterBuffer::with_playout_delay(
+        0,
+        xenia_peer_core::producer_flow::DESKTOP_AUDIO_LATENCY_V1.jitter_max_depth_frames,
+        xenia_peer_core::producer_flow::DESKTOP_AUDIO_LATENCY_V1.jitter_target_delay_frames,
+    );
     let mut audio_codec = make_audio_codec(selected_audio_codec)
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
     info!(
@@ -2447,6 +2471,13 @@ mod tests {
         assert_eq!(sink.stats().rejected, 1);
         assert_eq!(sink.stats().frames_played, 1);
         assert_eq!(sink.stats().samples_played, 48_000 / 50 * 2);
+    }
+
+    #[test]
+    fn device_audio_buffer_is_derived_from_milliseconds() {
+        assert_eq!(audio_device_buffer_samples(48_000, 2), 7_680);
+        assert_eq!(audio_device_buffer_samples(48_000, 1), 3_840);
+        assert_eq!(audio_device_buffer_samples(24_000, 2), 3_840);
     }
 
     #[test]

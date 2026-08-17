@@ -61,6 +61,7 @@ void xenia_send_key(uint64_t handle, uint32_t code, uint8_t pressed, uint8_t mod
 char *xenia_poll_clipboard(uint64_t handle);
 void  xenia_send_clipboard(uint64_t handle, const char *text);
 
+int32_t xenia_check_send_file(uint64_t handle, size_t data_len);
 int32_t xenia_try_send_file(uint64_t handle, const char *name, const uint8_t *data, size_t data_len);
 
 typedef struct {
@@ -240,6 +241,11 @@ Java_io_luminousdynamics_xenia_NativeBindings_sendFile(JNIEnv *env, jclass clazz
         return JNI_FALSE;
     }
     jsize len = (*env)->GetArrayLength(env, data);
+    int32_t admission = xenia_check_send_file((uint64_t)handle, (size_t)len);
+    if (admission != 0) {
+        (*env)->ReleaseStringUTFChars(env, name, nameStr);
+        return JNI_FALSE;
+    }
     jbyte *bytes = (*env)->GetByteArrayElements(env, data, NULL);
     if (bytes == NULL) {
         (*env)->ReleaseStringUTFChars(env, name, nameStr);
