@@ -568,11 +568,12 @@ mod tests {
         let (stream, _) = listener.accept().await.unwrap();
         let _client = client.await.unwrap();
 
-        let err =
-            match WsTransport::accept_stream_with_timeout(stream, Duration::from_millis(50)).await {
-                Ok(_) => panic!("stalled server upgrade should time out before session"),
-                Err(err) => err,
-            };
+        let err = match WsTransport::accept_stream_with_timeout(stream, Duration::from_millis(50))
+            .await
+        {
+            Ok(_) => panic!("stalled server upgrade should time out before session"),
+            Err(err) => err,
+        };
         assert!(matches!(
             err,
             TransportError::TimedOut {
