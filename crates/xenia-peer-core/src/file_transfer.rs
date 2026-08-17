@@ -65,15 +65,10 @@ fn open_staging_file(parent: &Path) -> io::Result<(PathBuf, File)> {
 }
 
 fn owned_receive_staging_pid(name: &str) -> Option<u32> {
-    let Some(body) = name
+    let body = name
         .strip_prefix(RECEIVE_STAGING_PREFIX)
-        .and_then(|body| body.strip_suffix(RECEIVE_STAGING_SUFFIX))
-    else {
-        return None;
-    };
-    let Some((pid, token)) = body.split_once('-') else {
-        return None;
-    };
+        .and_then(|body| body.strip_suffix(RECEIVE_STAGING_SUFFIX))?;
+    let (pid, token) = body.split_once('-')?;
     if pid.is_empty()
         || !pid.bytes().all(|byte| byte.is_ascii_digit())
         || token.len() != 32
@@ -274,14 +269,14 @@ impl IncomingFileStager {
 impl Drop for IncomingFileStager {
     fn drop(&mut self) {
         drop(self.file.take());
-        if let Err(err) = std::fs::remove_file(&self.staging_path) {
-            if err.kind() != io::ErrorKind::NotFound {
-                tracing::warn!(
-                    path = %self.staging_path.display(),
-                    error = %err,
-                    "received-file staging path could not be removed"
-                );
-            }
+        if let Err(err) = std::fs::remove_file(&self.staging_path)
+            && err.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                path = %self.staging_path.display(),
+                error = %err,
+                "received-file staging path could not be removed"
+            );
         }
     }
 }
