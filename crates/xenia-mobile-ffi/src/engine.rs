@@ -424,6 +424,24 @@ fn spawn_file_transfer_stream_expiry(
     })
 }
 
+fn cleanup_orphaned_outbound_staging(staging_dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(staging_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let token = name
+            .strip_prefix("upload-")
+            .and_then(|rest| rest.strip_suffix(".part"));
+        if token.is_some_and(|hex| hex.len() == 16 && hex.bytes().all(|b| b.is_ascii_hexdigit())) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 impl ViewerEngine {
     /// Connect to `host:port` over TCP and start the background
     /// receive/decode loop. Returns immediately — poll [`Self::state`]
@@ -434,11 +452,11 @@ impl ViewerEngine {
     /// `recv_dir`: `None` disables receiving files entirely (every
     /// incoming `Offer` is auto-rejected), mirroring `xenia-viewer`'s
     /// own "no `--recv-file-dir` means disabled" default. `Some(dir)`
-    /// must be a real, writable filesystem path -- on Android this is
-    /// expected to be an app-private directory (e.g.
-    /// `context.getExternalFilesDir(...)`), never an arbitrary
-    /// user-chosen location, since incoming files are written via
-    /// plain `std::fs::write`, not Storage Access Framework.
+    /// must be a real, writable filesystem path. `staging_dir` is a separate
+    /// local pressure sink for preferred outbound SAF streaming; Android passes
+    /// an internal no-backup directory so temporary user content is neither
+    /// derived from the receive destination nor exposed through external app
+    /// storage. `None` retains a process-temp fallback for non-Android callers.
     /// `max_file_bytes` caps incoming transfers. Legacy outbound callers may
     /// still enqueue a whole `Vec<u8>`, while V20's preferred Android path
     /// stages SAF input incrementally to app-private disk and later streams it
@@ -448,6 +466,7 @@ impl ViewerEngine {
         host_port: String,
         codec: MobileCodec,
         recv_dir: Option<PathBuf>,
+        staging_dir: Option<PathBuf>,
         max_file_bytes: u64,
     ) -> Self {
         let shared = Arc::new(Shared {
@@ -466,11 +485,11 @@ impl ViewerEngine {
         let (input_tx, input_rx) = mpsc::channel(INPUT_QUEUE_CAP);
         let (clipboard_tx, clipboard_rx) = watch::channel(None);
         let (ft_cmd_tx, ft_cmd_rx) = mpsc::channel(FILE_TRANSFER_CMD_QUEUE_CAP);
-        let staging_dir = recv_dir
-            .as_ref()
-            .and_then(|path| path.parent())
-            .map(|parent| parent.join("outbound-staging"))
+        let staging_dir = staging_dir
             .unwrap_or_else(|| std::env::temp_dir().join("xenia-mobile-outbound-staging"));
+        if std::fs::create_dir_all(&staging_dir).is_ok() {
+            cleanup_orphaned_outbound_staging(&staging_dir);
+        }
         let shared_for_task = Arc::clone(&shared);
         let task = rt.spawn(run_session(
             host_port,
@@ -1990,6 +2009,7 @@ mod tests {
             "127.0.0.1:1".to_string(),
             MobileCodec::Passthrough,
             None,
+            None,
             DEFAULT_TEST_MAX_FILE_BYTES,
         );
 
@@ -2022,6 +2042,7 @@ mod tests {
             "127.0.0.1:2".to_string(),
             MobileCodec::Hdc,
             None,
+            None,
             DEFAULT_TEST_MAX_FILE_BYTES,
         );
         assert!(engine.poll_frame().is_none());
@@ -2040,6 +2061,7 @@ mod tests {
             rt.handle(),
             "127.0.0.1:3".to_string(),
             MobileCodec::Passthrough,
+            None,
             None,
             DEFAULT_TEST_MAX_FILE_BYTES,
         );
@@ -2061,6 +2083,7 @@ mod tests {
             rt.handle(),
             "127.0.0.1:4".to_string(),
             MobileCodec::Passthrough,
+            None,
             None,
             DEFAULT_TEST_MAX_FILE_BYTES,
         );
@@ -2278,6 +2301,7 @@ mod tests {
             "127.0.0.1:4".to_string(),
             MobileCodec::Passthrough,
             None,
+            None,
             DEFAULT_TEST_MAX_FILE_BYTES,
         );
         // Mirrors `send_clipboard_before_any_connection_progress_does_not_panic`:
@@ -2285,6 +2309,30 @@ mod tests {
         // completes -- sending before then must just queue harmlessly.
         let result = engine.send_file("test.txt".to_string(), vec![1, 2, 3]);
         assert!(result.is_ok() || result == Err(FileTransferEnqueueError::SessionClosed));
+    }
+
+    #[test]
+    fn orphan_cleanup_only_removes_owned_upload_part_names() {
+        let root = std::env::temp_dir().join(format!(
+            "xenia-v20-staging-cleanup-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let owned = root.join("upload-0123456789abcdef.part");
+        let malformed = root.join("upload-not-a-token.part");
+        let unrelated = root.join("notes.part");
+        std::fs::write(&owned, b"stale").unwrap();
+        std::fs::write(&malformed, b"keep").unwrap();
+        std::fs::write(&unrelated, b"keep").unwrap();
+
+        cleanup_orphaned_outbound_staging(&root);
+
+        assert!(!owned.exists());
+        assert!(malformed.exists());
+        assert!(unrelated.exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

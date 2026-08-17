@@ -53,7 +53,7 @@ fn main() {
     // No file-transfer receive dir for this smoke proof -- it only
     // exercises connect/handshake/frame plumbing (and, with
     // `send-file`, the outgoing send path).
-    let engine = ViewerEngine::connect(rt.handle(), host_port, codec, None, 100 * 1024 * 1024);
+    let engine = ViewerEngine::connect(rt.handle(), host_port, codec, None, None, 100 * 1024 * 1024);
 
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut last_state = None;

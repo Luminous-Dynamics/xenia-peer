@@ -88,11 +88,11 @@ class XeniaViewerActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // App-private directory (a real filesystem path, not a SAF
-        // Uri) for files the host sends us -- `ViewerEngine` writes
-        // to it directly via `std::fs::write`, matching
-        // `xenia-viewer`'s own `--recv-file-dir` semantics.
-        val recvDir = getExternalFilesDir("received")?.apply { mkdirs() }
+        // Keep received files in credential-encrypted internal app storage.
+        // Outbound SAF staging is separate and lives under noBackupFilesDir:
+        // it is temporary pressure state, not user backup material.
+        val recvDir = filesDir.resolve("received").apply { mkdirs() }
+        val stagingDir = noBackupFilesDir.resolve("outbound-staging").apply { mkdirs() }
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
@@ -102,7 +102,8 @@ class XeniaViewerActivity : ComponentActivity() {
                                 hostPort,
                                 codec,
                                 lifecycleScope,
-                                recvDir?.absolutePath,
+                                recvDir.absolutePath,
+                                stagingDir.absolutePath,
                                 MAX_FILE_TRANSFER_BYTES,
                             )
                             session = s

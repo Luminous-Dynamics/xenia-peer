@@ -44,7 +44,7 @@ internal object NativeBindings {
     const val SEND_FILE_RESERVATION_SIZE_MISMATCH: Int = 7
     const val SEND_FILE_IO_ERROR: Int = 8
 
-    @JvmStatic external fun connect(hostPort: String, codec: Int, recvDir: String?, maxFileBytes: Long): Long
+    @JvmStatic external fun connect(hostPort: String, codec: Int, recvDir: String?, stagingDir: String?, maxFileBytes: Long): Long
     @JvmStatic external fun sessionState(handle: Long): Int
     @JvmStatic external fun lastError(handle: Long): String?
     @JvmStatic external fun pollFrame(handle: Long): ByteArray?

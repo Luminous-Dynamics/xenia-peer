@@ -36,7 +36,7 @@
  * Forward declarations of Rust extern "C" functions (xenia-mobile-ffi/src/lib.rs)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-uint64_t xenia_connect(const char *host_port, int32_t codec, const char *recv_dir, uint64_t max_file_bytes);
+uint64_t xenia_connect(const char *host_port, int32_t codec, const char *recv_dir, const char *staging_dir, uint64_t max_file_bytes);
 int32_t  xenia_session_state(uint64_t handle);
 char    *xenia_last_error(uint64_t handle);
 void     xenia_string_free(char *s);
@@ -141,7 +141,8 @@ static jstring rust_string_to_jstring(JNIEnv *env, char *rust_str) {
 JNIEXPORT jlong JNICALL
 Java_io_luminousdynamics_xenia_NativeBindings_connect(JNIEnv *env, jclass clazz,
                                                        jstring hostPort, jint codec,
-                                                       jstring recvDir, jlong maxFileBytes) {
+                                                       jstring recvDir, jstring stagingDir,
+                                                       jlong maxFileBytes) {
     (void)clazz;
     if (hostPort == NULL) {
         return 0;
@@ -153,11 +154,35 @@ Java_io_luminousdynamics_xenia_NativeBindings_connect(JNIEnv *env, jclass clazz,
     const char *recvDirStr = NULL;
     if (recvDir != NULL) {
         recvDirStr = (*env)->GetStringUTFChars(env, recvDir, NULL);
+        if (recvDirStr == NULL) {
+            (*env)->ReleaseStringUTFChars(env, hostPort, cstr);
+            return 0;
+        }
     }
-    uint64_t handle = xenia_connect(cstr, (int32_t)codec, recvDirStr, (uint64_t)maxFileBytes);
+    const char *stagingDirStr = NULL;
+    if (stagingDir != NULL) {
+        stagingDirStr = (*env)->GetStringUTFChars(env, stagingDir, NULL);
+        if (stagingDirStr == NULL) {
+            if (recvDirStr != NULL) {
+                (*env)->ReleaseStringUTFChars(env, recvDir, recvDirStr);
+            }
+            (*env)->ReleaseStringUTFChars(env, hostPort, cstr);
+            return 0;
+        }
+    }
+    uint64_t handle = xenia_connect(
+        cstr,
+        (int32_t)codec,
+        recvDirStr,
+        stagingDirStr,
+        (uint64_t)maxFileBytes
+    );
     (*env)->ReleaseStringUTFChars(env, hostPort, cstr);
     if (recvDirStr != NULL) {
         (*env)->ReleaseStringUTFChars(env, recvDir, recvDirStr);
+    }
+    if (stagingDirStr != NULL) {
+        (*env)->ReleaseStringUTFChars(env, stagingDir, stagingDirStr);
     }
     return (jlong)handle;
 }

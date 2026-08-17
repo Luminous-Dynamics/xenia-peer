@@ -105,10 +105,10 @@ pub const XENIA_CODEC_H264: i32 = 2;
 /// poll [`xenia_session_state`] to observe progress.
 ///
 /// `recv_dir`: `NULL` disables receiving files (every incoming offer
-/// is auto-rejected); non-null must be a real, writable filesystem
-/// path -- on Android this should be an app-private directory (e.g.
-/// `context.getExternalFilesDir(...)`), since received files are
-/// written via plain `std::fs::write`, not Storage Access Framework.
+/// is auto-rejected); non-null must be a real, writable filesystem path.
+/// `staging_dir`: optional local directory for disk-backed outbound staging.
+/// Android passes an internal no-backup directory; `NULL` retains a process
+/// temporary-directory fallback for compatibility with other C callers.
 /// `max_file_bytes` caps incoming transfers. Legacy outbound C callers may
 /// still submit a whole buffer; the preferred V20 Android picker path uses the
 /// staged streaming APIs below and never holds the whole outbound file in a
@@ -117,13 +117,14 @@ pub const XENIA_CODEC_H264: i32 = 2;
 /// # Safety
 /// `host_port` must be a valid, NUL-terminated C string pointer, live
 /// for the duration of this call (it is copied, not retained).
-/// `recv_dir`, if non-null, must likewise be a valid NUL-terminated C
-/// string pointer, live for the duration of this call.
+/// `recv_dir` and `staging_dir`, if non-null, must likewise be valid
+/// NUL-terminated C string pointers, live for the duration of this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn xenia_connect(
     host_port: *const c_char,
     codec: i32,
     recv_dir: *const c_char,
+    staging_dir: *const c_char,
     max_file_bytes: u64,
 ) -> u64 {
     if host_port.is_null() {
@@ -144,6 +145,15 @@ pub unsafe extern "C" fn xenia_connect(
             Err(_) => return 0,
         }
     };
+    let staging_dir = if staging_dir.is_null() {
+        None
+    } else {
+        // SAFETY: caller contract above.
+        match unsafe { CStr::from_ptr(staging_dir) }.to_str() {
+            Ok(s) => Some(std::path::PathBuf::from(s)),
+            Err(_) => return 0,
+        }
+    };
     let codec = match codec {
         XENIA_CODEC_HDC => MobileCodec::Hdc,
         XENIA_CODEC_H264 => MobileCodec::H264,
@@ -157,6 +167,7 @@ pub unsafe extern "C" fn xenia_connect(
         host_port,
         codec,
         recv_dir,
+        staging_dir,
         max_file_bytes,
     );
     register_engine(engine)
@@ -975,6 +986,7 @@ mod tests {
                     std::ptr::null(),
                     XENIA_CODEC_PASSTHROUGH,
                     std::ptr::null(),
+                    std::ptr::null(),
                     0
                 ),
                 0
@@ -989,6 +1001,7 @@ mod tests {
             let handle = xenia_connect(
                 host_port.as_ptr(),
                 XENIA_CODEC_HDC,
+                std::ptr::null(),
                 std::ptr::null(),
                 100 * 1024 * 1024,
             );
@@ -1017,6 +1030,7 @@ mod tests {
                 host_port.as_ptr(),
                 XENIA_CODEC_PASSTHROUGH,
                 recv_dir.as_ptr(),
+                std::ptr::null(),
                 100 * 1024 * 1024,
             );
             assert_ne!(handle, 0);

@@ -131,9 +131,10 @@ class XeniaSession(
     val codec: Int,
     private val scope: CoroutineScope,
     recvDir: String?,
+    stagingDir: String?,
     maxFileBytes: Long,
 ) {
-    private val handle: Long = NativeBindings.connect(hostPort, codec, recvDir, maxFileBytes)
+    private val handle: Long = NativeBindings.connect(hostPort, codec, recvDir, stagingDir, maxFileBytes)
 
     private val _state = MutableStateFlow(SessionState.CONNECTING)
     val state: StateFlow<SessionState> = _state.asStateFlow()
