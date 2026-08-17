@@ -13,6 +13,7 @@ checks=(
   scripts/check_application_lane_recovery_v17.py
   scripts/check_application_runtime_evidence_v18.py
   scripts/check_application_runtime_assurance_v19.py
+  scripts/check_application_file_staging_v20.py
 )
 models=(
   scripts/model_check_transport_session_profile_v1.py
@@ -25,6 +26,7 @@ models=(
   scripts/model_check_application_lane_recovery_v17.py
   scripts/model_check_application_runtime_evidence_v18.py
   scripts/model_check_application_runtime_assurance_v19.py
+  scripts/model_check_application_file_staging_v20.py
 )
 
 for script in "${checks[@]}" "${models[@]}"; do

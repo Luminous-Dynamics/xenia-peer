@@ -372,6 +372,11 @@ crates.io under Apache/MIT. Binaries stay on GitHub-only under AGPL.
 
 ---
 
+## Transport/session V21 candidate — incoming file streaming + durable destination admission
+
+V20 removes whole-file buffering from the preferred **outbound** Android path. The next file-transfer pressure boundary is incoming mobile transfer reassembly, which still buffers an accepted file in a `Vec<u8>` until `Complete`. A V21 tranche should consider app-private temp-file receive staging with incremental BLAKE3, destination-space/admission checks before `Accept`, atomic persist/rename semantics, and crash cleanup. Keep the current wire protocol unless measurement shows a peer-visible change is actually necessary.
+
+
 ## Conventions
 
 - **`main` is always shippable.** Every commit on this branch

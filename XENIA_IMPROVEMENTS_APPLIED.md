@@ -88,6 +88,15 @@ hardens the daemon around spawned-server failures.
 - Added a transcript-bound evidence contract doc and validation script.
 
 
+## Transport/session V20: SAF streaming staging and bounded file memory
+
+- Replaced the current Android picker path's `InputStream.readBytes()` whole-file allocation with a reusable 64 KiB chunk loop into native app-private staging.
+- Native staging incrementally hashes BLAKE3, enforces the 100 MiB mobile cap for known and unknown provider lengths, and consumes the existing bounded command permit before expensive work.
+- Preserved the existing authenticated file-transfer wire protocol: `Offer(size, hash)` remains precomputed before peer acceptance; staged bytes are read with Tokio in 64 KiB chunks only after `Accept`.
+- Added a fixed five-minute non-extending staging lease, partial-file cleanup on expiry/cancel/session teardown, and explicit staging `IO_ERROR` status `8`.
+- Added `FileTransferAdmissionSnapshotV2` with `active_streaming` and `active_stream_bytes` while retaining V19's V1 ABI.
+- Added V20 language-neutral vector, source contract, reduced resource model, and accumulated-runner integration.
+
 ## Transport/session V19: deterministic reservation races and diagnostic fidelity
 
 - Switched mobile file-reservation deadlines to `tokio::time::Instant` and extracted the async expiry worker around `sleep_until`, enabling deterministic paused-time tests rather than wall-clock sleeps.
