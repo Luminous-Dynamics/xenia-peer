@@ -146,6 +146,21 @@ pub struct LanePressureSnapshotV1 {
     pub fatal_deadline: u64,
 }
 
+impl LanePressureSnapshotV1 {
+    /// Total semantic-pressure events represented by this point-in-time
+    /// snapshot. Saturation preserves monotonic evidence under extreme counts.
+    pub fn total_events(self) -> u64 {
+        self.dropped_superseded
+            .saturating_add(self.rejected)
+            .saturating_add(self.stale)
+            .saturating_add(self.fatal_deadline)
+    }
+
+    pub fn has_pressure(self) -> bool {
+        self.total_events() != 0
+    }
+}
+
 /// Lock-free counters shared by local producer/consumer paths so overload and
 /// freshness recovery are observable rather than hidden behind queue bounds.
 #[derive(Debug, Default)]
@@ -295,8 +310,9 @@ mod tests {
         assert_eq!(counters.record_rejected(), 1);
         assert_eq!(counters.record_stale(), 1);
         assert_eq!(counters.record_fatal_deadline(), 1);
+        let snapshot = counters.snapshot();
         assert_eq!(
-            counters.snapshot(),
+            snapshot,
             LanePressureSnapshotV1 {
                 dropped_superseded: 1,
                 rejected: 1,
@@ -304,6 +320,8 @@ mod tests {
                 fatal_deadline: 1,
             }
         );
+        assert_eq!(snapshot.total_events(), 4);
+        assert!(snapshot.has_pressure());
     }
 
     #[test]

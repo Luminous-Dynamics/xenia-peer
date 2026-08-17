@@ -667,6 +667,14 @@ impl eframe::App for ViewerApp {
                         ui.label(format!("dropped: {}", audio.dropped));
                         ui.label(format!("playback rejected: {}", audio.playback_rejected));
                         ui.label(format!("underruns: {}", audio.underruns));
+                        if let Some(queue) = &self.audio_queue {
+                            let pressure = queue.pressure_snapshot();
+                            ui.label(format!(
+                                "ingress superseded: {}",
+                                pressure.dropped_superseded
+                            ));
+                            ui.label(format!("ingress rejected: {}", pressure.rejected));
+                        }
                         if self.last_video_timestamp_ms != 0 {
                             let drift_ms = audio.capture_timestamp_ms as i128
                                 - self.last_video_timestamp_ms as i128;

@@ -6934,6 +6934,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let video_pressure_snapshot = video_pressure.snapshot();
+    if video_pressure_snapshot.has_pressure() {
+        info!(
+            stale = video_pressure_snapshot.stale,
+            fatal_deadline = video_pressure_snapshot.fatal_deadline,
+            total = video_pressure_snapshot.total_events(),
+            "host video semantic-pressure summary"
+        );
+    }
     send_half.close().await?;
     Ok(())
 }

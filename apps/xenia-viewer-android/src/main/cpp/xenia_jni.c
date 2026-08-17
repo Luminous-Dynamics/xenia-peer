@@ -63,6 +63,7 @@ void  xenia_send_clipboard(uint64_t handle, const char *text);
 
 int32_t xenia_check_send_file(uint64_t handle, size_t data_len);
 int32_t xenia_reserve_send_file(uint64_t handle, size_t data_len, uint64_t *out_token);
+int32_t xenia_claim_send_file_reservation(uint64_t handle, uint64_t token, size_t data_len);
 bool    xenia_cancel_send_file_reservation(uint64_t handle, uint64_t token);
 int32_t xenia_commit_send_file(uint64_t handle, uint64_t token, const char *name, const uint8_t *data, size_t data_len);
 int32_t xenia_try_send_file(uint64_t handle, const char *name, const uint8_t *data, size_t data_len);
@@ -249,6 +250,14 @@ Java_io_luminousdynamics_xenia_NativeBindings_sendFile(JNIEnv *env, jclass clazz
         (uint64_t)handle, (size_t)len, &reservation
     );
     if (admission != 0 || reservation == 0) {
+        (*env)->ReleaseStringUTFChars(env, name, nameStr);
+        return JNI_FALSE;
+    }
+    int32_t claim = xenia_claim_send_file_reservation(
+        (uint64_t)handle, reservation, (size_t)len
+    );
+    if (claim != 0) {
+        (void)xenia_cancel_send_file_reservation((uint64_t)handle, reservation);
         (*env)->ReleaseStringUTFChars(env, name, nameStr);
         return JNI_FALSE;
     }

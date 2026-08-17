@@ -23,6 +23,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, mpsc, watch};
 use tracing::{info, warn};
@@ -116,9 +117,14 @@ const _: [(); FILE_TRANSFER_EVENT_QUEUE_CAP] =
 const FILE_TRANSFER_CMD_QUEUE_CAP: usize = 2;
 const _: [(); FILE_TRANSFER_CMD_QUEUE_CAP] =
     [(); xenia_peer_core::producer_flow::MOBILE_FILE_TRANSFER_COMMAND_V1.capacity];
-/// Reservation lease for the JNI pre-copy file admission path. A leaked token
-/// cannot pin scarce command capacity indefinitely.
+/// Reservation lease before the caller begins materializing/copying a file.
+/// A leaked token cannot pin scarce command capacity indefinitely.
 const FILE_TRANSFER_RESERVATION_TTL_MS: u64 = 30_000;
+/// Once a reservation is *claimed* immediately before a potentially expensive
+/// JNI/native copy, its capacity remains reserved for this bounded copy/commit
+/// window. Claim is idempotent and does not keep extending the lease, so a
+/// malicious caller cannot pin a slot forever by repeatedly claiming it.
+const FILE_TRANSFER_COPY_LEASE_MS: u64 = 60_000;
 /// Caps how many incoming transfers can be simultaneously buffered in
 /// memory. Lower than the daemon's own `MAX_CONCURRENT_INCOMING_TRANSFERS`
 /// (8) since phones have tighter RAM budgets than desktop hosts.
@@ -190,11 +196,35 @@ enum FileTransferCommand {
     SendFile { name: String, data: Vec<u8> },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileTransferReservationState {
+    Reserved,
+    Copying,
+}
+
 /// Capacity reserved in the bounded file-command channel before JNI copies a
 /// potentially large Java byte array. Dropping this value releases the slot.
 struct FileTransferReservation {
     expected_len: usize,
     permit: mpsc::OwnedPermit<FileTransferCommand>,
+    state: FileTransferReservationState,
+    expires_at: Instant,
+}
+
+impl FileTransferReservation {
+    fn claim(&mut self, data_len: usize, now: Instant) -> Result<(), FileTransferEnqueueError> {
+        if data_len != self.expected_len {
+            return Err(FileTransferEnqueueError::ReservationSizeMismatch);
+        }
+        if now >= self.expires_at {
+            return Err(FileTransferEnqueueError::InvalidReservation);
+        }
+        if self.state == FileTransferReservationState::Reserved {
+            self.state = FileTransferReservationState::Copying;
+            self.expires_at = now + Duration::from_millis(FILE_TRANSFER_COPY_LEASE_MS);
+        }
+        Ok(())
+    }
 }
 
 /// Immediate result of trying to enqueue a user-triggered file transfer.
@@ -474,17 +504,39 @@ impl ViewerEngine {
                 FileTransferReservation {
                     expected_len: data_len,
                     permit,
+                    state: FileTransferReservationState::Reserved,
+                    expires_at: Instant::now()
+                        + Duration::from_millis(FILE_TRANSFER_RESERVATION_TTL_MS),
                 },
             );
             drop(reservations);
             let reservations = Arc::clone(&self.ft_reservations);
             self.runtime.spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(
-                    FILE_TRANSFER_RESERVATION_TTL_MS,
-                ))
-                .await;
-                if let Ok(mut reservations) = reservations.lock() {
-                    reservations.remove(&token);
+                loop {
+                    let sleep_for = {
+                        let Ok(reservations) = reservations.lock() else {
+                            return;
+                        };
+                        let Some(reservation) = reservations.get(&token) else {
+                            return;
+                        };
+                        reservation.expires_at.saturating_duration_since(Instant::now())
+                    };
+                    if sleep_for.is_zero() {
+                        tokio::task::yield_now().await;
+                    } else {
+                        tokio::time::sleep(sleep_for).await;
+                    }
+                    let Ok(mut reservations) = reservations.lock() else {
+                        return;
+                    };
+                    let expired = reservations
+                        .get(&token)
+                        .is_some_and(|reservation| Instant::now() >= reservation.expires_at);
+                    if expired {
+                        reservations.remove(&token);
+                        return;
+                    }
                 }
             });
             return Ok(token);
@@ -499,17 +551,50 @@ impl ViewerEngine {
         token: u64,
         data_len: usize,
     ) -> Result<(), FileTransferEnqueueError> {
-        let reservations = self
+        let mut reservations = self
             .ft_reservations
             .lock()
             .map_err(|_| FileTransferEnqueueError::InvalidReservation)?;
-        let reservation = reservations
+        let Some((expected_len, expires_at)) = reservations
             .get(&token)
-            .ok_or(FileTransferEnqueueError::InvalidReservation)?;
-        if reservation.expected_len != data_len {
+            .map(|reservation| (reservation.expected_len, reservation.expires_at))
+        else {
+            return Err(FileTransferEnqueueError::InvalidReservation);
+        };
+        if Instant::now() >= expires_at {
+            reservations.remove(&token);
+            return Err(FileTransferEnqueueError::InvalidReservation);
+        }
+        if expected_len != data_len {
             return Err(FileTransferEnqueueError::ReservationSizeMismatch);
         }
         Ok(())
+    }
+
+    /// Atomically move a live reservation into the bounded copy/commit phase.
+    /// The first successful claim extends the original admission TTL into a
+    /// separate copy lease; repeated claims are idempotent and do not extend it.
+    pub fn claim_file_transfer_reservation(
+        &self,
+        token: u64,
+        data_len: usize,
+    ) -> Result<(), FileTransferEnqueueError> {
+        let mut reservations = self
+            .ft_reservations
+            .lock()
+            .map_err(|_| FileTransferEnqueueError::InvalidReservation)?;
+        let now = Instant::now();
+        let expired = reservations
+            .get(&token)
+            .is_some_and(|reservation| now >= reservation.expires_at);
+        if expired {
+            reservations.remove(&token);
+            return Err(FileTransferEnqueueError::InvalidReservation);
+        }
+        let reservation = reservations
+            .get_mut(&token)
+            .ok_or(FileTransferEnqueueError::InvalidReservation)?;
+        reservation.claim(data_len, now)
     }
 
     /// Release an unused reservation and return its channel capacity.
@@ -537,6 +622,11 @@ impl ViewerEngine {
             .ok()
             .and_then(|mut reservations| reservations.remove(&token))
             .ok_or(FileTransferEnqueueError::InvalidReservation)?;
+        if Instant::now() >= reservation.expires_at
+            || reservation.state != FileTransferReservationState::Copying
+        {
+            return Err(FileTransferEnqueueError::InvalidReservation);
+        }
         if data.len() != reservation.expected_len {
             return Err(FileTransferEnqueueError::ReservationSizeMismatch);
         }
@@ -1559,6 +1649,54 @@ mod tests {
         })
         .expect("dropping reservation returns capacity");
         assert!(rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn file_reservation_claim_extends_once_and_binds_length() {
+        let (tx, _rx) = mpsc::channel::<FileTransferCommand>(1);
+        let permit = tx.clone().try_reserve_owned().expect("reserve one slot");
+        let now = Instant::now();
+        let original_expiry = now + Duration::from_millis(10);
+        let mut reservation = FileTransferReservation {
+            expected_len: 8,
+            permit,
+            state: FileTransferReservationState::Reserved,
+            expires_at: original_expiry,
+        };
+
+        reservation.claim(8, now).expect("first claim");
+        let copy_expiry = reservation.expires_at;
+        assert_eq!(reservation.state, FileTransferReservationState::Copying);
+        assert!(copy_expiry > original_expiry);
+
+        reservation
+            .claim(8, now + Duration::from_millis(1))
+            .expect("idempotent repeated claim");
+        assert_eq!(
+            reservation.expires_at, copy_expiry,
+            "repeat claim must not extend lease"
+        );
+        assert_eq!(
+            reservation.claim(9, now + Duration::from_millis(2)),
+            Err(FileTransferEnqueueError::ReservationSizeMismatch)
+        );
+    }
+
+    #[test]
+    fn file_reservation_claim_rejects_expired_token() {
+        let (tx, _rx) = mpsc::channel::<FileTransferCommand>(1);
+        let permit = tx.clone().try_reserve_owned().expect("reserve one slot");
+        let now = Instant::now();
+        let mut reservation = FileTransferReservation {
+            expected_len: 1,
+            permit,
+            state: FileTransferReservationState::Reserved,
+            expires_at: now,
+        };
+        assert_eq!(
+            reservation.claim(1, now),
+            Err(FileTransferEnqueueError::InvalidReservation)
+        );
     }
 
     #[test]

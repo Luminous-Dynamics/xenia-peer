@@ -483,6 +483,24 @@ pub unsafe extern "C" fn xenia_reserve_send_file(
     }
 }
 
+/// Claim a live reservation immediately before materializing/copying its
+/// payload. The first successful claim moves the token into a bounded copy
+/// lease; repeated claims are idempotent and do not extend that lease.
+#[unsafe(no_mangle)]
+pub extern "C" fn xenia_claim_send_file_reservation(
+    handle: u64,
+    token: u64,
+    data_len: usize,
+) -> i32 {
+    let Some(engine) = engine_for(handle) else {
+        return XENIA_SEND_FILE_INVALID_HANDLE;
+    };
+    match engine.claim_file_transfer_reservation(token, data_len) {
+        Ok(()) => XENIA_SEND_FILE_OK,
+        Err(error) => file_transfer_status(error),
+    }
+}
+
 /// Cancel an unused reservation. Returns `true` only if a live token was
 /// removed and its channel capacity returned.
 #[unsafe(no_mangle)]
@@ -517,6 +535,9 @@ pub unsafe extern "C" fn xenia_commit_send_file(
         return XENIA_SEND_FILE_INVALID_ARGUMENT;
     };
     if let Err(error) = engine.check_file_transfer_reservation(token, data_len) {
+        return file_transfer_status(error);
+    }
+    if let Err(error) = engine.claim_file_transfer_reservation(token, data_len) {
         return file_transfer_status(error);
     }
     let bytes = if data_len == 0 {
@@ -760,6 +781,10 @@ mod tests {
                 XENIA_SEND_FILE_INVALID_HANDLE
             );
             assert_eq!(reservation, 0);
+            assert_eq!(
+                xenia_claim_send_file_reservation(0, 1, 0),
+                XENIA_SEND_FILE_INVALID_HANDLE
+            );
             assert!(!xenia_cancel_send_file_reservation(0, 1));
             assert_eq!(
                 xenia_commit_send_file(0, 1, name.as_ptr(), std::ptr::null(), 0),
