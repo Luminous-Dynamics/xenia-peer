@@ -10,6 +10,8 @@
 //! These V1 descriptors make those choices reviewable and reusable without
 //! pretending every queue can share one overflow policy.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 /// What a bounded producer does when no capacity is immediately available.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProducerOverflowPolicy {
@@ -123,6 +125,64 @@ pub const DESKTOP_AUDIO_PLAYBACK_V2: ProducerFlowPolicyV1 = ProducerFlowPolicyV1
     overflow: ProducerOverflowPolicy::DropNewest,
 };
 
+/// V17 freshness-recovery policy for the desktop audio ingress. The bounded
+/// capacity stays identical to V16, but saturation now discards the oldest
+/// queued frame before admitting the newest one. This converges playback
+/// toward the present instead of preserving stale audio.
+pub const DESKTOP_AUDIO_PLAYBACK_V3: ProducerFlowPolicyV1 = ProducerFlowPolicyV1 {
+    name: "desktop-audio-playback-v3",
+    capacity: DESKTOP_AUDIO_LATENCY_V1.ingress_capacity_frames,
+    overflow: ProducerOverflowPolicy::DropOldest,
+};
+
+/// Snapshot of semantic pressure observed at an application lane boundary.
+/// These counters are diagnostic evidence only; they do not alter protocol
+/// semantics or become part of the authenticated session transcript.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LanePressureSnapshotV1 {
+    pub dropped_superseded: u64,
+    pub rejected: u64,
+    pub stale: u64,
+    pub fatal_deadline: u64,
+}
+
+/// Lock-free counters shared by local producer/consumer paths so overload and
+/// freshness recovery are observable rather than hidden behind queue bounds.
+#[derive(Debug, Default)]
+pub struct LanePressureCountersV1 {
+    dropped_superseded: AtomicU64,
+    rejected: AtomicU64,
+    stale: AtomicU64,
+    fatal_deadline: AtomicU64,
+}
+
+impl LanePressureCountersV1 {
+    pub fn record_dropped_superseded(&self) -> u64 {
+        self.dropped_superseded.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    pub fn record_rejected(&self) -> u64 {
+        self.rejected.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    pub fn record_stale(&self) -> u64 {
+        self.stale.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    pub fn record_fatal_deadline(&self) -> u64 {
+        self.fatal_deadline.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    pub fn snapshot(&self) -> LanePressureSnapshotV1 {
+        LanePressureSnapshotV1 {
+            dropped_superseded: self.dropped_superseded.load(Ordering::Relaxed),
+            rejected: self.rejected.load(Ordering::Relaxed),
+            stale: self.stale.load(Ordering::Relaxed),
+            fatal_deadline: self.fatal_deadline.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// Host video freshness contract. The daemon is intentionally a synchronous
 /// capture -> encode -> seal -> send pipeline today (no hidden frame backlog).
 /// Frames that spend too long in capture/encode are discarded, and a send that
@@ -195,6 +255,7 @@ mod tests {
             DESKTOP_TELEMETRY_PRESENTATION_V1,
             DESKTOP_AUDIO_PLAYBACK_V1,
             DESKTOP_AUDIO_PLAYBACK_V2,
+            DESKTOP_AUDIO_PLAYBACK_V3,
             MOBILE_CLIPBOARD_OUTBOUND_V1,
             MOBILE_FILE_TRANSFER_COMMAND_V1,
             MOBILE_FILE_TRANSFER_EVENTS_V1,
@@ -213,6 +274,36 @@ mod tests {
             + p.device_buffer_ms as usize;
         assert_eq!(buffered_ms, 280);
         assert!(buffered_ms < 1_000);
+    }
+
+    #[test]
+    fn desktop_audio_v17_recovers_toward_freshness() {
+        assert_eq!(
+            DESKTOP_AUDIO_PLAYBACK_V3.capacity,
+            DESKTOP_AUDIO_PLAYBACK_V2.capacity
+        );
+        assert_eq!(
+            DESKTOP_AUDIO_PLAYBACK_V3.overflow,
+            ProducerOverflowPolicy::DropOldest
+        );
+    }
+
+    #[test]
+    fn lane_pressure_counters_snapshot_monotonically() {
+        let counters = LanePressureCountersV1::default();
+        assert_eq!(counters.record_dropped_superseded(), 1);
+        assert_eq!(counters.record_rejected(), 1);
+        assert_eq!(counters.record_stale(), 1);
+        assert_eq!(counters.record_fatal_deadline(), 1);
+        assert_eq!(
+            counters.snapshot(),
+            LanePressureSnapshotV1 {
+                dropped_superseded: 1,
+                rejected: 1,
+                stale: 1,
+                fatal_deadline: 1,
+            }
+        );
     }
 
     #[test]

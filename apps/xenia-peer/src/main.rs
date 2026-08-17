@@ -6698,6 +6698,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sent_telemetry = 0u64;
     let mut sent_audio = 0u64;
     let mut sent_clipboard = 0u64;
+    let video_pressure = xenia_peer_core::producer_flow::LanePressureCountersV1::default();
 
     loop {
         if args.frames != 0 && sent_frames >= args.frames {
@@ -6872,10 +6873,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 xenia_peer_core::producer_flow::HOST_VIDEO_FRESHNESS_V1.max_capture_to_send_ms,
             )
         {
+            let stale = video_pressure.record_stale();
             warn!(
                 age_ms = video_capture_started.elapsed().as_millis(),
                 max_age_ms = xenia_peer_core::producer_flow::HOST_VIDEO_FRESHNESS_V1.max_capture_to_send_ms,
                 packets = packets.len(),
+                stale_video_results = stale,
                 "dropping stale encoded video result before transport send"
             );
             continue;
@@ -6898,8 +6901,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match tokio::time::timeout(send_deadline, send_half.send_envelope(&envelope)).await {
                 Ok(result) => result?,
                 Err(_) => {
+                    let fatal_deadlines = video_pressure.record_fatal_deadline();
                     return Err(format!(
-                        "video envelope send exceeded {} ms semantic deadline; session is fatal after a canceled partial send",
+                        "video envelope send exceeded {} ms semantic deadline; session is fatal after a canceled partial send (fatal_video_deadlines={fatal_deadlines})",
                         xenia_peer_core::producer_flow::HOST_VIDEO_FRESHNESS_V1.max_send_stall_ms
                     )
                     .into());

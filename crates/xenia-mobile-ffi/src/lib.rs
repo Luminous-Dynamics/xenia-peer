@@ -425,6 +425,22 @@ pub const XENIA_SEND_FILE_QUEUE_FULL: i32 = 3;
 pub const XENIA_SEND_FILE_SESSION_CLOSED: i32 = 4;
 /// The payload exceeds the fixed V1 mobile file-transfer byte ceiling.
 pub const XENIA_SEND_FILE_TOO_LARGE: i32 = 5;
+/// Reservation token was unknown, already consumed, or unavailable.
+pub const XENIA_SEND_FILE_INVALID_RESERVATION: i32 = 6;
+/// Payload length differed from the byte length used to reserve capacity.
+pub const XENIA_SEND_FILE_RESERVATION_SIZE_MISMATCH: i32 = 7;
+
+fn file_transfer_status(error: FileTransferEnqueueError) -> i32 {
+    match error {
+        FileTransferEnqueueError::FileTooLarge => XENIA_SEND_FILE_TOO_LARGE,
+        FileTransferEnqueueError::QueueFull => XENIA_SEND_FILE_QUEUE_FULL,
+        FileTransferEnqueueError::SessionClosed => XENIA_SEND_FILE_SESSION_CLOSED,
+        FileTransferEnqueueError::InvalidReservation => XENIA_SEND_FILE_INVALID_RESERVATION,
+        FileTransferEnqueueError::ReservationSizeMismatch => {
+            XENIA_SEND_FILE_RESERVATION_SIZE_MISMATCH
+        }
+    }
+}
 
 /// Check whether the native viewer can currently admit a file command of
 /// `data_len` bytes without materializing/copying the payload. This is an
@@ -436,9 +452,82 @@ pub extern "C" fn xenia_check_send_file(handle: u64, data_len: usize) -> i32 {
     };
     match engine.check_file_transfer_admission(data_len) {
         Ok(()) => XENIA_SEND_FILE_OK,
-        Err(FileTransferEnqueueError::FileTooLarge) => XENIA_SEND_FILE_TOO_LARGE,
-        Err(FileTransferEnqueueError::QueueFull) => XENIA_SEND_FILE_QUEUE_FULL,
-        Err(FileTransferEnqueueError::SessionClosed) => XENIA_SEND_FILE_SESSION_CLOSED,
+        Err(error) => file_transfer_status(error),
+    }
+}
+
+/// Reserve one bounded file-command slot before the caller copies/materializes
+/// a payload. On success writes a non-zero single-use token to `out_token`.
+///
+/// # Safety
+/// `out_token` must be a valid writable pointer for one `u64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenia_reserve_send_file(
+    handle: u64,
+    data_len: usize,
+    out_token: *mut u64,
+) -> i32 {
+    if out_token.is_null() {
+        return XENIA_SEND_FILE_INVALID_ARGUMENT;
+    }
+    let Some(engine) = engine_for(handle) else {
+        return XENIA_SEND_FILE_INVALID_HANDLE;
+    };
+    match engine.reserve_file_transfer(data_len) {
+        Ok(token) => {
+            // SAFETY: caller contract above guarantees one writable u64.
+            unsafe { *out_token = token };
+            XENIA_SEND_FILE_OK
+        }
+        Err(error) => file_transfer_status(error),
+    }
+}
+
+/// Cancel an unused reservation. Returns `true` only if a live token was
+/// removed and its channel capacity returned.
+#[unsafe(no_mangle)]
+pub extern "C" fn xenia_cancel_send_file_reservation(handle: u64, token: u64) -> bool {
+    engine_for(handle)
+        .is_some_and(|engine| engine.cancel_file_transfer_reservation(token))
+}
+
+/// Commit a payload into a previously reserved file-command slot.
+///
+/// # Safety
+/// `name` and `data` follow the same lifetime/readability requirements as
+/// [`xenia_try_send_file`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenia_commit_send_file(
+    handle: u64,
+    token: u64,
+    name: *const c_char,
+    data: *const u8,
+    data_len: usize,
+) -> i32 {
+    let Some(engine) = engine_for(handle) else {
+        return XENIA_SEND_FILE_INVALID_HANDLE;
+    };
+    if name.is_null() || (data.is_null() && data_len > 0) {
+        engine.cancel_file_transfer_reservation(token);
+        return XENIA_SEND_FILE_INVALID_ARGUMENT;
+    }
+    // SAFETY: caller contract above guarantees a valid NUL-terminated string.
+    let Ok(name) = (unsafe { CStr::from_ptr(name) }).to_str() else {
+        engine.cancel_file_transfer_reservation(token);
+        return XENIA_SEND_FILE_INVALID_ARGUMENT;
+    };
+    if let Err(error) = engine.check_file_transfer_reservation(token, data_len) {
+        return file_transfer_status(error);
+    }
+    let bytes = if data_len == 0 {
+        Vec::new()
+    } else {
+        // SAFETY: caller contract above guarantees readable bytes.
+        unsafe { std::slice::from_raw_parts(data, data_len) }.to_vec()
+    };
+    match engine.send_file_reserved(token, name.to_owned(), bytes) {
+        Ok(()) => XENIA_SEND_FILE_OK,
+        Err(error) => file_transfer_status(error),
     }
 }
 
@@ -485,9 +574,7 @@ pub unsafe extern "C" fn xenia_try_send_file(
     };
     match engine.send_file(name.to_owned(), bytes) {
         Ok(()) => XENIA_SEND_FILE_OK,
-        Err(FileTransferEnqueueError::FileTooLarge) => XENIA_SEND_FILE_TOO_LARGE,
-        Err(FileTransferEnqueueError::QueueFull) => XENIA_SEND_FILE_QUEUE_FULL,
-        Err(FileTransferEnqueueError::SessionClosed) => XENIA_SEND_FILE_SESSION_CLOSED,
+        Err(error) => file_transfer_status(error),
     }
 }
 
@@ -667,6 +754,17 @@ mod tests {
             xenia_send_key(0, 30, true, 0);
             let name = CString::new("test.txt").unwrap();
             assert_eq!(xenia_check_send_file(0, 0), XENIA_SEND_FILE_INVALID_HANDLE);
+            let mut reservation = 0u64;
+            assert_eq!(
+                xenia_reserve_send_file(0, 0, &mut reservation),
+                XENIA_SEND_FILE_INVALID_HANDLE
+            );
+            assert_eq!(reservation, 0);
+            assert!(!xenia_cancel_send_file_reservation(0, 1));
+            assert_eq!(
+                xenia_commit_send_file(0, 1, name.as_ptr(), std::ptr::null(), 0),
+                XENIA_SEND_FILE_INVALID_HANDLE
+            );
             assert_eq!(
                 xenia_try_send_file(0, name.as_ptr(), std::ptr::null(), 0),
                 XENIA_SEND_FILE_INVALID_HANDLE

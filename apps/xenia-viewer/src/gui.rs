@@ -26,14 +26,11 @@
 //! against the last-rendered image rect, not the whole window, so
 //! pointer activity over the status bar / side panels is ignored.
 
-use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 use xenia_inject::InputEvent;
-use xenia_peer_core::RawAudio;
-
-use crate::AudioPlaybackSink;
+use crate::{AudioPlaybackSink, FreshAudioQueue};
 
 /// Map a subset of `egui::Key` to Linux evdev keycodes (matching the
 /// convention `xenia-inject`'s backends expect — see
@@ -321,7 +318,7 @@ pub struct ViewerApp {
     slot: Arc<FrameSlot>,
     texture: Option<egui::TextureHandle>,
     config: ViewerConfig,
-    audio_rx: Option<mpsc::Receiver<RawAudio>>,
+    audio_queue: Option<Arc<FreshAudioQueue>>,
     audio_sink: Box<dyn AudioPlaybackSink>,
     frames_received: u64,
     last_wire_bytes: usize,
@@ -348,7 +345,7 @@ impl ViewerApp {
     pub fn new(
         slot: Arc<FrameSlot>,
         config: ViewerConfig,
-        audio_rx: Option<mpsc::Receiver<RawAudio>>,
+        audio_queue: Option<Arc<FreshAudioQueue>>,
         audio_sink: Box<dyn AudioPlaybackSink>,
         input_tx: Option<tokio::sync::mpsc::Sender<InputEvent>>,
     ) -> Self {
@@ -356,7 +353,7 @@ impl ViewerApp {
             slot,
             texture: None,
             config,
-            audio_rx,
+            audio_queue,
             audio_sink,
             frames_received: 0,
             last_wire_bytes: 0,
@@ -485,10 +482,10 @@ impl ViewerApp {
     }
 
     fn drain_audio_playback(&mut self) {
-        let Some(rx) = &self.audio_rx else {
+        let Some(queue) = &self.audio_queue else {
             return;
         };
-        while let Ok(frame) = rx.try_recv() {
+        while let Some(frame) = queue.pop_front() {
             self.audio_sink.submit(&frame);
         }
         let playback = self.audio_sink.stats();

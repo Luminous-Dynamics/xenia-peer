@@ -62,6 +62,9 @@ char *xenia_poll_clipboard(uint64_t handle);
 void  xenia_send_clipboard(uint64_t handle, const char *text);
 
 int32_t xenia_check_send_file(uint64_t handle, size_t data_len);
+int32_t xenia_reserve_send_file(uint64_t handle, size_t data_len, uint64_t *out_token);
+bool    xenia_cancel_send_file_reservation(uint64_t handle, uint64_t token);
+int32_t xenia_commit_send_file(uint64_t handle, uint64_t token, const char *name, const uint8_t *data, size_t data_len);
 int32_t xenia_try_send_file(uint64_t handle, const char *name, const uint8_t *data, size_t data_len);
 
 typedef struct {
@@ -241,18 +244,22 @@ Java_io_luminousdynamics_xenia_NativeBindings_sendFile(JNIEnv *env, jclass clazz
         return JNI_FALSE;
     }
     jsize len = (*env)->GetArrayLength(env, data);
-    int32_t admission = xenia_check_send_file((uint64_t)handle, (size_t)len);
-    if (admission != 0) {
+    uint64_t reservation = 0;
+    int32_t admission = xenia_reserve_send_file(
+        (uint64_t)handle, (size_t)len, &reservation
+    );
+    if (admission != 0 || reservation == 0) {
         (*env)->ReleaseStringUTFChars(env, name, nameStr);
         return JNI_FALSE;
     }
     jbyte *bytes = (*env)->GetByteArrayElements(env, data, NULL);
     if (bytes == NULL) {
+        (void)xenia_cancel_send_file_reservation((uint64_t)handle, reservation);
         (*env)->ReleaseStringUTFChars(env, name, nameStr);
         return JNI_FALSE;
     }
-    int32_t status = xenia_try_send_file(
-        (uint64_t)handle, nameStr, (const uint8_t *)bytes, (size_t)len
+    int32_t status = xenia_commit_send_file(
+        (uint64_t)handle, reservation, nameStr, (const uint8_t *)bytes, (size_t)len
     );
     (*env)->ReleaseByteArrayElements(env, data, bytes, JNI_ABORT);
     (*env)->ReleaseStringUTFChars(env, name, nameStr);

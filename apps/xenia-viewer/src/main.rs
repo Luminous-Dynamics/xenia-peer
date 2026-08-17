@@ -16,12 +16,8 @@
 //! Both modes share the same receive/decode pipeline; the flag
 //! selects the output sink.
 
-#[cfg(feature = "audio-output")]
 use std::collections::VecDeque;
-use std::sync::Arc;
-#[cfg(feature = "audio-output")]
-use std::sync::Mutex;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
@@ -311,15 +307,60 @@ impl AudioPlaybackSink for SyntheticAudioSink {
     }
 }
 
+/// Small freshness-oriented GUI audio queue. When the GUI falls behind, V17
+/// discards the *oldest* queued frame before inserting the newest one so
+/// playback converges toward the present instead of preserving stale audio.
+struct FreshAudioQueue {
+    frames: Mutex<VecDeque<RawAudio>>,
+    capacity: usize,
+    pressure: xenia_peer_core::producer_flow::LanePressureCountersV1,
+}
+
+impl FreshAudioQueue {
+    fn new(capacity: usize) -> Self {
+        Self {
+            frames: Mutex::new(VecDeque::with_capacity(capacity.max(1))),
+            capacity: capacity.max(1),
+            pressure: xenia_peer_core::producer_flow::LanePressureCountersV1::default(),
+        }
+    }
+
+    /// Insert the newest decoded frame. Returns `true` when an older frame was
+    /// displaced to preserve the latency budget.
+    fn push_latest(&self, frame: RawAudio) -> Result<bool, ()> {
+        let Ok(mut frames) = self.frames.lock() else {
+            self.pressure.record_rejected();
+            return Err(());
+        };
+        let dropped = if frames.len() >= self.capacity {
+            frames.pop_front();
+            self.pressure.record_dropped_superseded();
+            true
+        } else {
+            false
+        };
+        frames.push_back(frame);
+        Ok(dropped)
+    }
+
+    fn pop_front(&self) -> Option<RawAudio> {
+        self.frames.lock().ok()?.pop_front()
+    }
+
+    fn pressure_snapshot(&self) -> xenia_peer_core::producer_flow::LanePressureSnapshotV1 {
+        self.pressure.snapshot()
+    }
+}
+
 struct ChannelAudioSink {
-    sender: mpsc::SyncSender<RawAudio>,
+    queue: Arc<FreshAudioQueue>,
     stats: AudioPlaybackStats,
 }
 
 impl ChannelAudioSink {
-    fn new(sender: mpsc::SyncSender<RawAudio>) -> Self {
+    fn new(queue: Arc<FreshAudioQueue>) -> Self {
         Self {
-            sender,
+            queue,
             stats: AudioPlaybackStats::default(),
         }
     }
@@ -327,16 +368,27 @@ impl ChannelAudioSink {
 
 impl AudioPlaybackSink for ChannelAudioSink {
     fn submit(&mut self, frame: &RawAudio) {
-        match self.sender.try_send(frame.clone()) {
-            Ok(()) => {
+        match self.queue.push_latest(frame.clone()) {
+            Ok(dropped_oldest) => {
                 self.stats.frames_played += 1;
                 self.stats.samples_played = self
                     .stats
                     .samples_played
                     .saturating_add(frame.payload.len() as u64 / 2);
+                if dropped_oldest {
+                    self.stats.rejected = self.stats.rejected.saturating_add(1);
+                    let dropped = self.queue.pressure_snapshot().dropped_superseded;
+                    if dropped <= 3 || dropped.is_multiple_of(32) {
+                        warn!(
+                            dropped_oldest = dropped,
+                            capacity = self.queue.capacity,
+                            "desktop audio ingress dropped oldest frame to recover freshness"
+                        );
+                    }
+                }
             }
-            Err(_) => {
-                self.stats.rejected += 1;
+            Err(()) => {
+                self.stats.rejected = self.stats.rejected.saturating_add(1);
             }
         }
     }
@@ -1901,9 +1953,9 @@ fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     };
     let audio_sink = ViewerAudioSink::new(args.play_audio, args.audio_output_device.as_deref())
         .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
-    let (audio_tx, audio_rx) = mpsc::sync_channel(
-        xenia_peer_core::producer_flow::DESKTOP_AUDIO_PLAYBACK_V2.capacity,
-    );
+    let audio_queue = Arc::new(FreshAudioQueue::new(
+        xenia_peer_core::producer_flow::DESKTOP_AUDIO_PLAYBACK_V3.capacity,
+    ));
     // Captured pointer/keyboard events flow GUI thread -> network task through
     // a bounded queue. The GUI distinguishes lossy pointer motion from
     // stateful key/button transitions when selecting overflow behavior.
@@ -1917,9 +1969,17 @@ fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .worker_threads(2)
         .build()?;
     let slot_for_task = Arc::clone(&slot);
+    let audio_queue_for_task = Arc::clone(&audio_queue);
     let args_for_task = args.clone();
     rt.spawn(async move {
-        if let Err(err) = gui_receive_loop(args_for_task, slot_for_task, audio_tx, input_rx).await {
+        if let Err(err) = gui_receive_loop(
+            args_for_task,
+            slot_for_task,
+            audio_queue_for_task,
+            input_rx,
+        )
+        .await
+        {
             tracing::error!(error = %err, "gui receive loop exited with error");
         }
     });
@@ -1940,7 +2000,7 @@ fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             Ok(Box::new(ViewerApp::new(
                 slot,
                 config,
-                Some(audio_rx),
+                Some(audio_queue),
                 Box::new(audio_sink),
                 Some(input_tx),
             )))
@@ -1956,7 +2016,7 @@ fn run_gui(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 async fn gui_receive_loop(
     args: Args,
     slot: Arc<FrameSlot>,
-    audio_tx: mpsc::SyncSender<RawAudio>,
+    audio_queue: Arc<FreshAudioQueue>,
     mut input_rx: tokio::sync::mpsc::Receiver<xenia_inject::InputEvent>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let source_id = parse_source_id(&args.source_id_hex)
@@ -2132,7 +2192,7 @@ async fn gui_receive_loop(
         "viewer audio codec configured"
     );
     let mut audio_sink: Box<dyn AudioPlaybackSink + Send> =
-        Box::new(ChannelAudioSink::new(audio_tx));
+        Box::new(ChannelAudioSink::new(audio_queue));
     let mut pending_surface = Some(
         PendingSessionSurface::new_with_profiles(
             handshake.negotiated_context_hash,
@@ -2481,19 +2541,22 @@ mod tests {
     }
 
     #[test]
-    fn channel_audio_sink_reports_backpressure() {
+    fn channel_audio_sink_drops_oldest_to_recover_freshness() {
         let mut source = SyntheticAudioSource::new(1, SyntheticAudioKind::Sine);
-        let frame = source.next_frame(1_700_000_000_000);
-        let (tx, rx) = mpsc::sync_channel(1);
-        let mut sink = ChannelAudioSink::new(tx);
+        let first = source.next_frame(1_700_000_000_000);
+        let second = source.next_frame(1_700_000_000_020);
+        let queue = Arc::new(FreshAudioQueue::new(1));
+        let mut sink = ChannelAudioSink::new(Arc::clone(&queue));
 
-        sink.submit(&frame);
-        sink.submit(&frame);
+        sink.submit(&first);
+        sink.submit(&second);
 
-        assert_eq!(sink.stats().frames_played, 1);
+        assert_eq!(sink.stats().frames_played, 2);
         assert_eq!(sink.stats().rejected, 1);
-        assert!(rx.try_recv().is_ok());
-        assert!(rx.try_recv().is_err());
+        assert_eq!(queue.pressure_snapshot().dropped_superseded, 1);
+        let queued = queue.pop_front().expect("newest audio frame retained");
+        assert_eq!(queued.sequence, second.sequence);
+        assert!(queue.pop_front().is_none());
     }
 
     #[test]

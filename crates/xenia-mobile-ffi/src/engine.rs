@@ -21,7 +21,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::sync::{Mutex, mpsc, watch};
 use tracing::{info, warn};
@@ -115,6 +116,9 @@ const _: [(); FILE_TRANSFER_EVENT_QUEUE_CAP] =
 const FILE_TRANSFER_CMD_QUEUE_CAP: usize = 2;
 const _: [(); FILE_TRANSFER_CMD_QUEUE_CAP] =
     [(); xenia_peer_core::producer_flow::MOBILE_FILE_TRANSFER_COMMAND_V1.capacity];
+/// Reservation lease for the JNI pre-copy file admission path. A leaked token
+/// cannot pin scarce command capacity indefinitely.
+const FILE_TRANSFER_RESERVATION_TTL_MS: u64 = 30_000;
 /// Caps how many incoming transfers can be simultaneously buffered in
 /// memory. Lower than the daemon's own `MAX_CONCURRENT_INCOMING_TRANSFERS`
 /// (8) since phones have tighter RAM budgets than desktop hosts.
@@ -186,6 +190,13 @@ enum FileTransferCommand {
     SendFile { name: String, data: Vec<u8> },
 }
 
+/// Capacity reserved in the bounded file-command channel before JNI copies a
+/// potentially large Java byte array. Dropping this value releases the slot.
+struct FileTransferReservation {
+    expected_len: usize,
+    permit: mpsc::OwnedPermit<FileTransferCommand>,
+}
+
 /// Immediate result of trying to enqueue a user-triggered file transfer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileTransferEnqueueError {
@@ -195,6 +206,10 @@ pub enum FileTransferEnqueueError {
     QueueFull,
     /// The background session task has ended and no longer accepts commands.
     SessionClosed,
+    /// Reservation token was unknown, already consumed, or unavailable.
+    InvalidReservation,
+    /// The committed payload length differs from the reserved byte length.
+    ReservationSizeMismatch,
 }
 
 /// Reduce a wire-provided filename to a bare basename with no path
@@ -233,6 +248,9 @@ pub struct ViewerEngine {
     input_tx: mpsc::Sender<InputEvent>,
     clipboard_tx: watch::Sender<Option<ClipboardContent>>,
     ft_cmd_tx: mpsc::Sender<FileTransferCommand>,
+    ft_reservations: Arc<StdMutex<HashMap<u64, FileTransferReservation>>>,
+    next_ft_reservation: AtomicU64,
+    runtime: tokio::runtime::Handle,
     _task: tokio::task::JoinHandle<()>,
 }
 
@@ -293,6 +311,9 @@ impl ViewerEngine {
             input_tx,
             clipboard_tx,
             ft_cmd_tx,
+            ft_reservations: Arc::new(StdMutex::new(HashMap::new())),
+            next_ft_reservation: AtomicU64::new(1),
+            runtime: rt.clone(),
             _task: task,
         }
     }
@@ -422,6 +443,109 @@ impl ViewerEngine {
         Ok(())
     }
 
+    /// Reserve one bounded file-command slot before materializing/copying a
+    /// potentially large payload. The token is process-local and single-use.
+    pub fn reserve_file_transfer(
+        &self,
+        data_len: usize,
+    ) -> Result<u64, FileTransferEnqueueError> {
+        if data_len > xenia_peer_core::producer_flow::MOBILE_FILE_TRANSFER_MAX_BYTES_V1 {
+            return Err(FileTransferEnqueueError::FileTooLarge);
+        }
+        let permit = match self.ft_cmd_tx.clone().try_reserve_owned() {
+            Ok(permit) => permit,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                return Err(FileTransferEnqueueError::QueueFull);
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                return Err(FileTransferEnqueueError::SessionClosed);
+            }
+        };
+        let Ok(mut reservations) = self.ft_reservations.lock() else {
+            return Err(FileTransferEnqueueError::InvalidReservation);
+        };
+        loop {
+            let token = self.next_ft_reservation.fetch_add(1, Ordering::Relaxed);
+            if token == 0 || reservations.contains_key(&token) {
+                continue;
+            }
+            reservations.insert(
+                token,
+                FileTransferReservation {
+                    expected_len: data_len,
+                    permit,
+                },
+            );
+            drop(reservations);
+            let reservations = Arc::clone(&self.ft_reservations);
+            self.runtime.spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    FILE_TRANSFER_RESERVATION_TTL_MS,
+                ))
+                .await;
+                if let Ok(mut reservations) = reservations.lock() {
+                    reservations.remove(&token);
+                }
+            });
+            return Ok(token);
+        }
+    }
+
+    /// Validate that a live reservation exists for exactly `data_len` bytes
+    /// without consuming it. C/JNI boundaries use this before copying payload
+    /// bytes; [`Self::send_file_reserved`] still rechecks atomically on consume.
+    pub fn check_file_transfer_reservation(
+        &self,
+        token: u64,
+        data_len: usize,
+    ) -> Result<(), FileTransferEnqueueError> {
+        let reservations = self
+            .ft_reservations
+            .lock()
+            .map_err(|_| FileTransferEnqueueError::InvalidReservation)?;
+        let reservation = reservations
+            .get(&token)
+            .ok_or(FileTransferEnqueueError::InvalidReservation)?;
+        if reservation.expected_len != data_len {
+            return Err(FileTransferEnqueueError::ReservationSizeMismatch);
+        }
+        Ok(())
+    }
+
+    /// Release an unused reservation and return its channel capacity.
+    pub fn cancel_file_transfer_reservation(&self, token: u64) -> bool {
+        if token == 0 {
+            return false;
+        }
+        self.ft_reservations
+            .lock()
+            .ok()
+            .and_then(|mut reservations| reservations.remove(&token))
+            .is_some()
+    }
+
+    /// Commit a file command into a capacity slot reserved before payload copy.
+    pub fn send_file_reserved(
+        &self,
+        token: u64,
+        name: String,
+        data: Vec<u8>,
+    ) -> Result<(), FileTransferEnqueueError> {
+        let reservation = self
+            .ft_reservations
+            .lock()
+            .ok()
+            .and_then(|mut reservations| reservations.remove(&token))
+            .ok_or(FileTransferEnqueueError::InvalidReservation)?;
+        if data.len() != reservation.expected_len {
+            return Err(FileTransferEnqueueError::ReservationSizeMismatch);
+        }
+        reservation
+            .permit
+            .send(FileTransferCommand::SendFile { name, data });
+        Ok(())
+    }
+
     /// Offer `data` to the host under `name`. `data` must already be
     /// fully read into memory by the caller (Android's Storage Access
     /// Framework hands back a `Uri`, not a plain path, so the JNI
@@ -458,8 +582,12 @@ impl Drop for ViewerEngine {
         // Dropping a Tokio JoinHandle detaches its task. A disconnected mobile
         // session must instead terminate its network/background work, otherwise
         // a stale task can retain sockets and buffers after the registry id is
-        // gone.
+        // gone. Outstanding pre-copy file reservations are also released
+        // immediately rather than waiting for their short lease to expire.
         self._task.abort();
+        if let Ok(mut reservations) = self.ft_reservations.lock() {
+            reservations.clear();
+        }
     }
 }
 
@@ -1411,6 +1539,26 @@ mod tests {
             ),
             Err(FileTransferEnqueueError::FileTooLarge)
         );
+    }
+
+    #[test]
+    fn owned_file_command_permit_holds_capacity_until_used_or_dropped() {
+        let (tx, mut rx) = mpsc::channel::<FileTransferCommand>(1);
+        let permit = tx.clone().try_reserve_owned().expect("reserve one slot");
+        assert!(matches!(
+            tx.try_send(FileTransferCommand::SendFile {
+                name: "other.txt".to_string(),
+                data: vec![9],
+            }),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+        drop(permit);
+        tx.try_send(FileTransferCommand::SendFile {
+            name: "after-cancel.txt".to_string(),
+            data: vec![1],
+        })
+        .expect("dropping reservation returns capacity");
+        assert!(rx.try_recv().is_ok());
     }
 
     #[test]
