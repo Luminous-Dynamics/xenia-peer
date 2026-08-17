@@ -7,6 +7,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Concrete Ed25519 and ML-DSA-65 authentication adapters for xenia-zk-protocol"
+publish = false
 
 [dependencies]
 xenia-zk-protocol = { path = "../xenia-zk-protocol" }
