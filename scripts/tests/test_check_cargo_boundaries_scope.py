@@ -77,5 +77,59 @@ edition = "2024"
             self.assertNotIn(".claude/worktrees", combined)
 
 
+    def test_current_package_classes_are_known_in_strict_mode(self) -> None:
+        names = [
+            "xenia-launcher-linux",
+            "xenia-launcher-macos",
+            "xenia-launcher-windows",
+            "xenia-operator-agent",
+            "xenia-capture-scrcpy",
+            "xenia-launcher-core",
+            "xenia-launcher-shell",
+            "xenia-mobile-ffi",
+            "xenia-operator-agent-proto",
+            "xenia-operator-proto",
+            "xenia-secure-file",
+            "xenia-peer-fuzz",
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            for index, name in enumerate(names):
+                package = root / "packages" / str(index)
+                package.mkdir(parents=True)
+                (package / "Cargo.toml").write_text(
+                    f"""[package]
+name = "{name}"
+version = "0.0.0"
+edition = "2024"
+""",
+                    encoding="utf-8",
+                )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    str(root),
+                    "--strict-unknown",
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            combined = result.stdout + result.stderr
+            self.assertEqual(result.returncode, 0, msg=combined)
+
+            for name in names:
+                self.assertNotIn(
+                    f"unknown Xenia package '{name}'",
+                    combined,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

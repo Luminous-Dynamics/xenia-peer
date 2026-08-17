@@ -292,7 +292,7 @@ fi
 
 if [[ -x scripts/check-cargo-boundaries.py ]]; then
   if command -v python3 >/dev/null 2>&1; then
-    run python3 scripts/check-cargo-boundaries.py .
+    run python3 scripts/check-cargo-boundaries.py . --strict-unknown
   else
     warn "python3 not found; skipping Cargo boundary check"
   fi

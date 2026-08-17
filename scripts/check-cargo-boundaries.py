@@ -18,22 +18,45 @@ from xenia_scan_scope import iter_repo_files
 
 WIRE_CRATE = "xenia-wire"
 WIRE_SUPPORT_CRATES = {"xenia-wire-fuzz"}
-APP_CRATES = {"xenia-peer", "xenia-viewer", "xenia-viewer-web", "sovereign-admin"}
+TOOL_CRATES = {"xenia-peer-fuzz"}
+APP_CRATES = {
+    "sovereign-admin",
+    "xenia-launcher-linux",
+    "xenia-launcher-macos",
+    "xenia-launcher-windows",
+    "xenia-operator-agent",
+    "xenia-peer",
+    "xenia-viewer",
+    "xenia-viewer-web",
+}
 LIBRARY_CRATES = {
     "xenia-peer-core",
+    "xenia-secure-file",
     "xenia-capture",
+    "xenia-capture-scrcpy",
     "xenia-video",
     "xenia-handshake",
     "xenia-ledger",
+    "xenia-mobile-ffi",
+    "xenia-operator-agent-proto",
+    "xenia-operator-proto",
     "xenia-transport-ws",
     "xenia-transport-quic",
     "xenia-inject",
+    "xenia-launcher-core",
+    "xenia-launcher-shell",
     "xenia-zk-protocol",
     "xenia-zk-codec",
     "xenia-zk-auth",
     "xenia-zk-legacy-mycelix",
 }
-KNOWN_XENIA_CRATES = {WIRE_CRATE, *WIRE_SUPPORT_CRATES, *APP_CRATES, *LIBRARY_CRATES}
+KNOWN_XENIA_CRATES = {
+    WIRE_CRATE,
+    *WIRE_SUPPORT_CRATES,
+    *TOOL_CRATES,
+    *APP_CRATES,
+    *LIBRARY_CRATES,
+}
 
 
 @dataclass(frozen=True)
@@ -110,6 +133,8 @@ def classify(package: CargoPackage) -> str:
         return "wire"
     if package.name in WIRE_SUPPORT_CRATES:
         return "wire-support"
+    if package.name in TOOL_CRATES:
+        return "tool"
     if package.name in APP_CRATES:
         return "app"
     if package.name in LIBRARY_CRATES:
