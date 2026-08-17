@@ -179,7 +179,7 @@ fi
 
 if [[ -x scripts/check-secure-defaults.py ]]; then
   if command -v python3 >/dev/null 2>&1; then
-    run python3 scripts/check-secure-defaults.py . --max-lines 120
+    run python3 scripts/check-secure-defaults.py . --strict --max-lines 120
   else
     warn "python3 not found; skipping secure-default scan"
   fi
