@@ -1,0 +1,43 @@
+{
+  "profile": "xenia/application-runtime-evidence/v18",
+  "file_transfer_reservation": {
+    "queue_capacity": 2,
+    "admission_ttl_ms": 30000,
+    "copy_lease_ms": 60000,
+    "states": [
+      "reserved",
+      "copying"
+    ],
+    "claim_extends_once": true,
+    "repeated_claim_extends_lease": false,
+    "commit_requires_copying_state": true,
+    "expected_length_bound": true,
+    "cancel_releases_capacity": true,
+    "expiry_rechecks_current_deadline": true
+  },
+  "pressure_evidence": {
+    "classes": [
+      "dropped_superseded",
+      "rejected",
+      "stale",
+      "fatal_deadline"
+    ],
+    "desktop_audio_visible_in_gui": true,
+    "host_video_summary_on_normal_teardown": true,
+    "authenticated_protocol_state": false
+  },
+  "android_file_event_header_v1": {
+    "header_bytes": 32,
+    "name_len_offset": 28,
+    "name_len_bytes": 2,
+    "detail_len_offset": 30,
+    "detail_len_bytes": 2,
+    "duplicate_name_len_store_allowed": false
+  },
+  "ci": {
+    "transport_session_contract_runner": "scripts/run_transport_session_contracts.sh",
+    "runs_in_flake_checks": true,
+    "rust_runtime_tests_still_required": true
+  },
+  "canonical_sha256": "b8ec2b126d0eb390bfad22d63d88c5c008ffb095e77d46aa4899a68b662746fa"
+}

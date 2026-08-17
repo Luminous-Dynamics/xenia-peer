@@ -25,7 +25,7 @@ req('video_deadline_counted', 'video_pressure.record_fatal_deadline()' in daemon
 req('owned_permit_reservation', 'try_reserve_owned()' in mobile and 'mpsc::OwnedPermit<FileTransferCommand>' in mobile)
 req('reservation_ttl', 'FILE_TRANSFER_RESERVATION_TTL_MS: u64 = 30_000' in mobile and 'tokio::time::sleep' in mobile)
 req('reservation_exact_len', 'ReservationSizeMismatch' in mobile and 'data.len() != reservation.expected_len' in mobile)
-req('reservation_pre_copy_length_check', 'pub fn check_file_transfer_reservation' in mobile and 'reservation.expected_len != data_len' in mobile)
+req('reservation_pre_copy_length_check', 'pub fn check_file_transfer_reservation' in mobile and ('reservation.expected_len != data_len' in mobile or 'expected_len != data_len' in mobile))
 req('reservation_cancel', 'pub fn cancel_file_transfer_reservation' in mobile)
 req('engine_drop_releases', 'reservations.clear();' in mobile and 'self._task.abort();' in mobile)
 req('ffi_reserve', 'pub unsafe extern "C" fn xenia_reserve_send_file' in ffi)

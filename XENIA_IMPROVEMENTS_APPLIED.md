@@ -86,3 +86,13 @@ hardens the daemon around spawned-server failures.
 - Added `SessionTranscriptBinding` and `compute_session_transcript_hash` to `xenia-ledger`.
 - Added `Verifier::verify_transcript_bound_evidence_bundle(...)` so a valid exported ledger cannot be trusted beside the wrong session transcript.
 - Added a transcript-bound evidence contract doc and validation script.
+
+
+## Transport/session V18: runtime evidence and reservation-race hardening
+
+- Added a two-stage file-transfer reservation lifecycle (`Reserved` -> `Copying`) with a 30 s admission TTL and bounded 60 s copy lease.
+- Expiry tasks re-read the live deadline so a near-expiry claim cannot be removed by the original timer; repeated claims do not extend the lease.
+- JNI claims capacity before Java byte-array materialization and commit still rechecks the token/length.
+- Removed the duplicate Android file-event `name_len` header store and pinned the 32-byte layout in a V18 compatibility vector.
+- Exposed desktop audio ingress pressure in the native GUI and emit a host video-pressure summary on normal teardown.
+- Added `scripts/run_transport_session_contracts.sh` and wired the accumulated V10-V18 source/model contracts into the flake CI job before the existing Rust tests.
