@@ -11,13 +11,105 @@ root="${1:-.}"
 cd "$root"
 
 failures=0
-warn() { echo "WARN: $*" >&2; }
-fail() { echo "FAIL: $*" >&2; failures=$((failures + 1)); }
-run() {
-  echo "+ $*"
-  if ! "$@"; then
-    fail "command failed: $*"
+warnings=0
+checks=0
+verbose="${XENIA_VERBOSE:-0}"
+validation_dir="${XENIA_VALIDATION_DIR:-/tmp/xenia-validation-$(date +%Y%m%d-%H%M%S)-$$}"
+mkdir -p "$validation_dir"
+chmod 700 "$validation_dir"
+summary_file="$validation_dir/summary.tsv"
+printf 'status\tcheck\tlog\n' > "$summary_file"
+chmod 600 "$summary_file"
+
+warn() {
+  warnings=$((warnings + 1))
+  echo "WARN: $*" >&2
+  printf 'WARN\t%s\t-\n' "$*" >> "$summary_file"
+}
+
+surface_logged_warnings() {
+  local label="$1" log="$2"
+  [[ "$verbose" == "1" ]] && return 0
+  if grep -Eiq '(^|[[:space:]])warn(ing)?([:[:space:]]|$)' "$log"; then
+    warnings=$((warnings + 1))
+    echo "WARN: ${label} emitted warning lines; showing up to 3 (full log: ${log})" >&2
+    grep -Ei '(^|[[:space:]])warn(ing)?([:[:space:]]|$)' "$log" | head -n 3 >&2 || true
+    printf 'WARN\t%s emitted warning lines\t%s\n' "$label" "$log" >> "$summary_file"
   fi
+}
+
+run_logged() {
+  local kind="$1"
+  shift
+  checks=$((checks + 1))
+
+  local label="$*" log rc
+  printf -v log '%s/%03d.log' "$validation_dir" "$checks"
+  : > "$log"
+  chmod 600 "$log"
+  {
+    printf 'kind=%s\ncommand=' "$kind"
+    printf ' %q' "$@"
+    printf '\n\n'
+  } > "$log"
+
+  if [[ "$verbose" == "1" ]]; then
+    echo "+ $*"
+    if "$@" > >(tee -a "$log") 2> >(tee -a "$log" >&2); then
+      rc=0
+    else
+      rc=$?
+    fi
+  else
+    if "$@" >> "$log" 2>&1; then
+      rc=0
+    else
+      rc=$?
+    fi
+  fi
+
+  if [[ "$rc" -eq 0 ]]; then
+    printf 'PASS\t%s\t%s\n' "$label" "$log" >> "$summary_file"
+    surface_logged_warnings "$label" "$log"
+    return 0
+  fi
+
+  if [[ "$kind" == "advisory" ]]; then
+    warnings=$((warnings + 1))
+    echo "WARN: advisory command failed (${rc}): ${label} (log: ${log})" >&2
+    printf 'WARN\t%s\t%s\n' "$label" "$log" >> "$summary_file"
+    return 0
+  fi
+
+  failures=$((failures + 1))
+  echo "FAIL: command failed (${rc}): ${label}" >&2
+  echo "--- last 40 log lines ---" >&2
+  tail -n 40 "$log" >&2 || true
+  echo "--- full log: ${log} ---" >&2
+  printf 'FAIL\t%s\t%s\n' "$label" "$log" >> "$summary_file"
+  return 0
+}
+
+run() {
+  run_logged gate "$@"
+}
+
+run_advisory() {
+  run_logged advisory "$@"
+}
+
+finish_validation() {
+  echo
+  if [[ "$failures" -ne 0 ]]; then
+    echo "xenia validation failed with ${failures} failure(s)" >&2
+    echo "RESULT: FAIL (${failures} gate(s); ${warnings} warning/advisory finding(s))" >&2
+    echo "Evidence: ${validation_dir}" >&2
+    return 1
+  fi
+
+  echo "xenia validation completed"
+  echo "RESULT: PASS (${checks} checks; ${warnings} warning/advisory finding(s))"
+  echo "Evidence: ${validation_dir}"
 }
 
 if [[ -x scripts/xenia-hygiene-audit.sh ]]; then
@@ -165,8 +257,7 @@ fi
 # normalization-v0.2 has been applied. It still catches contradictory states.
 if [[ -x scripts/check-post-normalization.py ]]; then
   if command -v python3 >/dev/null 2>&1; then
-    echo "+ python3 scripts/check-post-normalization.py ."
-    python3 scripts/check-post-normalization.py . || warn "post-normalization check has findings or normalization is not applied yet"
+    run_advisory python3 scripts/check-post-normalization.py .
   else
     warn "python3 not found; skipping post-normalization check"
   fi
@@ -194,8 +285,7 @@ fi
 # `scripts/check-runtime-risk-patterns.py . --strict` for RC hardening.
 if [[ -x scripts/check-runtime-risk-patterns.py ]]; then
   if command -v python3 >/dev/null 2>&1; then
-    echo "+ python3 scripts/check-runtime-risk-patterns.py . --max-lines 120"
-    python3 scripts/check-runtime-risk-patterns.py . --max-lines 120 || warn "runtime risk pattern report failed"
+    run_advisory python3 scripts/check-runtime-risk-patterns.py . --max-lines 120
   else
     warn "python3 not found; skipping runtime risk pattern report"
   fi
@@ -204,8 +294,7 @@ fi
 # Unsafe/FFI scans are advisory during stabilization and become review gates for RC work.
 if [[ -x scripts/check-unsafe-surfaces.py ]]; then
   if command -v python3 >/dev/null 2>&1; then
-    echo "+ python3 scripts/check-unsafe-surfaces.py . --max-lines 120"
-    python3 scripts/check-unsafe-surfaces.py . --max-lines 120 || warn "unsafe/FFI surface report failed"
+    run_advisory python3 scripts/check-unsafe-surfaces.py . --max-lines 120
   else
     warn "python3 not found; skipping unsafe/FFI surface report"
   fi
@@ -214,8 +303,7 @@ fi
 
 if [[ -x scripts/generate-release-dashboard.py ]]; then
   if command -v python3 >/dev/null 2>&1; then
-    echo "+ python3 scripts/generate-release-dashboard.py . --markdown /tmp/xenia-release-dashboard.md --json /tmp/xenia-release-dashboard.json"
-    python3 scripts/generate-release-dashboard.py . --markdown /tmp/xenia-release-dashboard.md --json /tmp/xenia-release-dashboard.json || warn "release dashboard generation failed"
+    run_advisory python3 scripts/generate-release-dashboard.py . --markdown /tmp/xenia-release-dashboard.md --json /tmp/xenia-release-dashboard.json
   else
     warn "python3 not found; skipping release dashboard generation"
   fi
@@ -226,10 +314,9 @@ if ! command -v cargo >/dev/null 2>&1; then
   exit "$failures"
 fi
 
-check_cargo_dir() {
+validate_cargo_dir() {
   local dir="$1"
   [[ -f "$dir/Cargo.toml" ]] || return 0
-  echo "== cargo validation: $dir =="
   (
     cd "$dir"
     # `--locked` when a Cargo.lock is actually present -- xenia-peer commits
@@ -256,11 +343,17 @@ check_cargo_dir() {
     if [[ -f apps/xenia-launcher-windows/Cargo.toml ]]; then
       exclude_flags=(--exclude xenia-launcher-windows --exclude xenia-launcher-shell --exclude xenia-launcher-linux --exclude xenia-launcher-macos)
     fi
-    cargo metadata --format-version 1 --no-deps >/dev/null
-    cargo fmt --all -- --check
-    cargo check "${locked_flag[@]}" --workspace --all-targets "${exclude_flags[@]}"
-    cargo test "${locked_flag[@]}" --workspace --all-targets --no-run "${exclude_flags[@]}"
-  ) || fail "cargo validation failed in $dir"
+    cargo metadata --format-version 1 --no-deps >/dev/null || exit $?
+    cargo fmt --all -- --check || exit $?
+    cargo check "${locked_flag[@]}" --workspace --all-targets "${exclude_flags[@]}" || exit $?
+    cargo test "${locked_flag[@]}" --workspace --all-targets --no-run "${exclude_flags[@]}" || exit $?
+  )
+}
+
+check_cargo_dir() {
+  local dir="$1"
+  [[ -f "$dir/Cargo.toml" ]] || return 0
+  run validate_cargo_dir "$dir"
 }
 
 # Support both the transitional flat extraction and the intended Xenia tree.
@@ -304,7 +397,6 @@ fi
 # exemptions` (after actually reviewing what changed) in the same commit.
 if [[ -f supply-chain/config.toml ]]; then
   if command -v cargo-vet >/dev/null 2>&1 || cargo vet --version >/dev/null 2>&1; then
-    echo "+ cargo vet --locked"
     run cargo vet --locked
   else
     warn "cargo-vet not found; skipping supply-chain audit-provenance check"
@@ -315,9 +407,6 @@ fi
 # manifests, do not try to synthesize a workspace here. That normalization belongs
 # in the active repo, not in this validator.
 
-if [[ "$failures" -ne 0 ]]; then
-  echo "xenia validation failed with ${failures} failure(s)" >&2
+if ! finish_validation; then
   exit 1
 fi
-
-echo "xenia validation completed"
