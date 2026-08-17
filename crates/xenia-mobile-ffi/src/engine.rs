@@ -413,10 +413,9 @@ fn spawn_file_transfer_stream_expiry(
         if streams
             .get(&token)
             .is_some_and(|stream| Instant::now() >= stream.expires_at)
+            && let Some(stream) = streams.remove(&token)
         {
-            if let Some(stream) = streams.remove(&token) {
-                remove_staged_upload(stream);
-            }
+            remove_staged_upload(stream);
         }
     })
 }
