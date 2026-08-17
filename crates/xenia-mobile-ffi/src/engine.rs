@@ -39,6 +39,7 @@ use xenia_peer_core::transport::{RecvEnvelope, SendEnvelope, TcpTransport, Trans
 use xenia_peer_core::{
     ClipboardContent, FILE_TRANSFER_CHUNK_SIZE, FileTransferMessage, IncomingFileStager,
     PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST, PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER, RawClipboard,
+    cleanup_orphaned_receive_staging,
 };
 use xenia_peer_core::{
     HandshakeManager, LaneSession, RekeyPolicy, SessionEpochState, derive_negotiated_context_key,
@@ -487,6 +488,19 @@ impl ViewerEngine {
             .unwrap_or_else(|| std::env::temp_dir().join("xenia-mobile-outbound-staging"));
         if std::fs::create_dir_all(&staging_dir).is_ok() {
             cleanup_orphaned_outbound_staging(&staging_dir);
+        }
+        if let Some(recv_dir) = recv_dir.as_deref() {
+            match cleanup_orphaned_receive_staging(recv_dir) {
+                Ok(removed) if removed > 0 => {
+                    info!(removed, dir = %recv_dir.display(), "removed orphaned receive staging files")
+                }
+                Ok(_) => {}
+                Err(err) => warn!(
+                    dir = %recv_dir.display(),
+                    error = %err,
+                    "could not scan receive directory for orphaned staging files"
+                ),
+            }
         }
         let shared_for_task = Arc::clone(&shared);
         let task = rt.spawn(run_session(

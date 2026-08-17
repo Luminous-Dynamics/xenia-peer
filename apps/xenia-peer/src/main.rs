@@ -27,7 +27,7 @@ use xenia_peer_core::OpusAudioCodec;
 use xenia_peer_core::frame::audio_flags;
 use xenia_peer_core::{
     AudioCodec, ClipboardContent, LaneSession, M1PermissionSet, PAYLOAD_TYPE_CLIPBOARD,
-    RawPcmAudioCodec, RekeyPolicy, SessionEpochState,
+    RawPcmAudioCodec, RekeyPolicy, SessionEpochState, cleanup_orphaned_receive_staging,
     advertisement::{AdvertisedAudioCodec, AudioAdvertisement, TransportAdvertisement},
     frame::{
         LANE_ENVELOPE_MAGIC, PixelFormat as FramePixelFormat, RawAudio, RawClipboard, RawFrame,
@@ -1133,9 +1133,10 @@ struct Args {
     #[arg(long)]
     send_file: Option<std::path::PathBuf>,
 
-    /// Reject/refuse to send any file larger than this many bytes. The
-    /// whole file is buffered in memory (both sending and receiving), so
-    /// this is also a memory-use cap, not just a policy knob.
+    /// Reject/refuse to send any file larger than this many bytes. Outbound
+    /// daemon files are still buffered in memory; inbound files are streamed
+    /// through private disk staging, so this remains a size-policy cap but is
+    /// no longer an equivalent receive-heap cap.
     #[arg(long, default_value_t = 200 * 1024 * 1024)]
     file_transfer_max_bytes: u64,
 
@@ -6143,6 +6144,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         path = %args.host_identity_key_path.display(),
         "host signing identity loaded; share this fingerprint out-of-band for viewer pinning"
     );
+
+    if let Some(recv_dir) = args.recv_file_dir.as_deref() {
+        match cleanup_orphaned_receive_staging(recv_dir) {
+            Ok(removed) if removed > 0 => {
+                info!(removed, dir = %recv_dir.display(), "removed orphaned receive staging files")
+            }
+            Ok(_) => {}
+            Err(err) => warn!(
+                dir = %recv_dir.display(),
+                error = %err,
+                "could not scan receive directory for orphaned staging files"
+            ),
+        }
+    }
 
     // Accept a peer and complete its handshake, retrying until one succeeds.
     //

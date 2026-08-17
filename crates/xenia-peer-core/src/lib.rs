@@ -70,7 +70,10 @@ pub use frame::{
     RawFrame, RawInput, RawPcmAudioCodec, RawRekey, RawTelemetry, SyntheticAudioKind,
     SyntheticAudioSource, TelemetrySample, TelemetryValue,
 };
-pub use file_transfer::{IncomingFileStageError, IncomingFileStager, persist_received_file};
+pub use file_transfer::{
+    IncomingFileStageError, IncomingFileStager, cleanup_orphaned_receive_staging,
+    persist_received_file,
+};
 pub use handshake::{RekeyPolicy, SessionEpochState};
 pub use m1_session::{
     M1AuditEvent, M1Permission, M1PermissionSet, M1SessionError, M1SessionMachine, M1SessionState,

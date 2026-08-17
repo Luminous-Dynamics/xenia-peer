@@ -16,6 +16,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 const STAGING_ATTEMPTS: usize = 32;
+const RECEIVE_STAGING_PREFIX: &str = ".xenia-receive-";
+const RECEIVE_STAGING_SUFFIX: &str = ".tmp";
 
 fn receive_parent(path: &Path) -> io::Result<&Path> {
     if path.file_name().is_none() {
@@ -60,6 +62,77 @@ fn open_staging_file(parent: &Path) -> io::Result<(PathBuf, File)> {
         io::ErrorKind::AlreadyExists,
         "could not allocate a unique received-file staging path",
     ))
+}
+
+fn owned_receive_staging_pid(name: &str) -> Option<u32> {
+    let Some(body) = name
+        .strip_prefix(RECEIVE_STAGING_PREFIX)
+        .and_then(|body| body.strip_suffix(RECEIVE_STAGING_SUFFIX))
+    else {
+        return None;
+    };
+    let Some((pid, token)) = body.split_once('-') else {
+        return None;
+    };
+    if pid.is_empty()
+        || !pid.bytes().all(|byte| byte.is_ascii_digit())
+        || token.len() != 32
+        || !token.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    pid.parse().ok()
+}
+
+/// Remove stale receive-staging paths left behind by an earlier process crash.
+///
+/// The matcher accepts only Xenia's reserved private staging namespace
+/// (`.xenia-receive-<pid>-<32 hex>.tmp`), so unrelated dot files are never
+/// selected. Entries owned by the current process ID are preserved so starting
+/// another session in the same process cannot delete a live transfer. Individual
+/// removal failures are warned and do not prevent the remaining stale entries
+/// from being considered.
+///
+/// Returns the number of staging directory entries successfully removed. A
+/// missing directory is treated as an empty directory; other `read_dir`
+/// failures are returned to the caller.
+pub fn cleanup_orphaned_receive_staging(dir: &Path) -> io::Result<usize> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => return Err(err),
+    };
+    let mut removed = 0;
+    let current_pid = std::process::id();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                tracing::warn!(error = %err, "received-file staging directory entry could not be read");
+                continue;
+            }
+        };
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(owner_pid) = owned_receive_staging_pid(name) else {
+            continue;
+        };
+        if owner_pid == current_pid {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => removed += 1,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => tracing::warn!(
+                path = %entry.path().display(),
+                error = %err,
+                "orphaned received-file staging path could not be removed"
+            ),
+        }
+    }
+    Ok(removed)
 }
 
 
@@ -286,6 +359,39 @@ mod tests {
                     .is_some_and(|name| name.starts_with(".xenia-receive-"))
             })
             .collect()
+    }
+
+    #[test]
+    fn orphan_cleanup_only_removes_owned_receive_staging_names() {
+        let dir = temp_dir();
+        let stale_pid = std::process::id().wrapping_add(1).max(1);
+        let owned = dir.join(format!(
+            ".xenia-receive-{stale_pid}-0123456789abcdef0123456789abcdef.tmp"
+        ));
+        let live = dir.join(format!(
+            ".xenia-receive-{}-fedcba9876543210fedcba9876543210.tmp",
+            std::process::id()
+        ));
+        let unrelated = [
+            dir.join(".xenia-receive-not-a-pid-0123456789abcdef0123456789abcdef.tmp"),
+            dir.join(".xenia-receive-1234-short.tmp"),
+            dir.join(".xenia-receive-1234-0123456789abcdef0123456789abcdef.txt"),
+            dir.join("notes.tmp"),
+        ];
+        std::fs::write(&owned, b"partial").unwrap();
+        std::fs::write(&live, b"active").unwrap();
+        for path in &unrelated {
+            std::fs::write(path, b"keep").unwrap();
+        }
+
+        assert_eq!(cleanup_orphaned_receive_staging(&dir).unwrap(), 1);
+        assert!(!owned.exists());
+        assert!(live.exists());
+        for path in &unrelated {
+            assert!(path.exists(), "unrelated path was removed: {}", path.display());
+        }
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
