@@ -61,6 +61,12 @@ use xenia_wire::{PAYLOAD_TYPE_APPLICATION_MIN, Session};
 /// sealed-envelope nonces line up with what the daemon opens.
 const OPERATOR_CHANNEL_SOURCE_ID: [u8; 8] = *b"xnaopch1";
 
+/// Exact RFC 6455 subprotocol required by `xenia-transport-ws` for the current
+/// browser-compatible Xenia WebSocket profile. Browser WebSocket APIs cannot
+/// add arbitrary headers, so this must be requested through the constructor's
+/// protocol argument rather than `Sec-WebSocket-Protocol` directly.
+const XENIA_WEBSOCKET_SUBPROTOCOL: &str = "xenia.transport.websocket.v1";
+
 /// Shared driver for both [`send_sealed_consent`] (`suite = "standard"`) and
 /// [`send_sealed_consent_highsec`] (`suite = "highsec"`): the browser no
 /// longer holds the operator's raw seeds or drives `ViewerHandshake`/
@@ -80,7 +86,7 @@ async fn drive_agent_handshake(
     suite: &str,
     payload: &[u8],
 ) -> Result<(), String> {
-    let ws = WebSocket::open(sealed_ws_url)
+    let ws = WebSocket::open_with_protocol(sealed_ws_url, XENIA_WEBSOCKET_SUBPROTOCOL)
         .map_err(|e| format!("failed to open sealed channel {sealed_ws_url}: {e}"))?;
     let (mut writer, mut reader) = ws.split();
 
