@@ -1,0 +1,32 @@
+{
+  "canonical_sha256": "e8b128372f9e058b59eb397addcd832a0cb7b0fcd0f0974ae42fc5208c106d7e",
+  "desktop_audio": {
+    "device_buffer_ms": 80,
+    "ingress_capacity_frames": 4,
+    "ingress_overflow": "drop-newest",
+    "jitter_max_depth_frames": 6,
+    "jitter_target_delay_frames": 2,
+    "max_application_buffer_ms": 280,
+    "wire_max_frame_duration_ms": 20
+  },
+  "host_audio_capture": {
+    "buffer_ms": 100,
+    "max_channels": 2,
+    "sample_rate_hz": 48000
+  },
+  "host_video": {
+    "max_capture_to_send_ms": 500,
+    "max_frames_in_flight": 1,
+    "max_send_stall_ms": 1000,
+    "send_timeout_action": "fail-session",
+    "stale_capture_action": "drop"
+  },
+  "mobile_file_admission": {
+    "command_queue_capacity": 2,
+    "max_bytes": 104857600,
+    "pre_copy_check": true,
+    "pre_copy_check_is_reservation": false,
+    "too_large_status": 5
+  },
+  "profile": "xenia/application-lane-latency/v1"
+}

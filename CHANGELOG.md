@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
+- V16 replaces opaque media queue sizes with explicit local latency budgets: host CPAL audio capture retains at most 100 ms, native viewer application audio buffering is bounded to 280 ms before OS/hardware/network effects, and the synchronous host video path drops capture/encode results older than 500 ms and treats a video send stalled beyond 1 s as session-fatal. Mobile file transfer now has a native 100 MiB admission ceiling and JNI checks size/session/queue admission before requesting native access to a Java byte array where possible.
 - V15 carries V14's pointer-motion/button distinction through the host injection
   backend interface, adds session-scoped tracking and teardown release/cancel of
   successfully injected key/button/touch state, and fixes uinput touch Cancel to
