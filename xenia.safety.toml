@@ -97,5 +97,29 @@ entries = [
   { path = "docs/implementation/NORMALIZATION_FOLLOWUPS.md", pattern = "ws://", text_contains = "local `http://` and `ws://` endpoints", reason = "Follow-up document tracks the secure-default review item itself." },
   { path = "docs/implementation/NORMALIZATION_FOLLOWUPS.md", pattern = "http://", text_contains = "local `http://` and `ws://` endpoints", reason = "Follow-up document tracks the secure-default review item itself." },
   { path = "crates/xenia-transport-ws/src/lib.rs", pattern = "ws://", text_contains = "format!(\"ws://{addr}\")", reason = "Literal appears in crate-local test code for loopback WebSocket conformance." },
-  { path = "crates/xenia-transport-ws/tests/transport_conformance.rs", pattern = "ws://", text_contains = "format!(\"ws://{addr}\")", reason = "Literal appears in integration test code for loopback WebSocket conformance." }
+  { path = "crates/xenia-transport-ws/tests/transport_conformance.rs", pattern = "ws://", text_contains = "format!(\"ws://{addr}\")", reason = "Literal appears in integration test code for loopback WebSocket conformance." },
+
+  # V21.1 secure-default review: remaining literals after exact #[cfg(test)]
+  # Rust filtering. These are intentionally narrow reviews, not broad file
+  # exclusions; new unmatched literals still re-enter the review queue.
+  { path = "ROADMAP.md", pattern = "http://", text_contains = "http://127.0.0.1:<admin-port>/", reason = "Roadmap records the verified loopback embedded-admin smoke test; this is validation evidence, not a deployment default." },
+  { path = "apps/sovereign-admin/README.md", pattern = "ws://", text_contains = "ws://localhost:8888", reason = "README documents the loopback Holochain conductor used by the local development console." },
+  { path = "apps/sovereign-admin/src/agent_client.rs", pattern = "http://", text_contains = "http://127.0.0.1:8180", reason = "Operator-agent default is deliberately loopback-only." },
+  { path = "apps/sovereign-admin/src/config.rs", pattern = "http://", text_contains = "http://127.0.0.1:8081", reason = "Admin daemon default is deliberately loopback-only during pre-production." },
+  { path = "apps/sovereign-admin/src/config.rs", pattern = "http://", text_contains = "strip_prefix(\"http://\")", reason = "Protocol parser recognizes an explicitly supplied HTTP scheme so it can derive the corresponding WebSocket authority; this is not a bind default." },
+  { path = "apps/xenia-launcher-macos/src/startup.rs", pattern = "http://", text_contains = "http://www.apple.com/DTDs/PropertyList-1.0.dtd", reason = "Fixed Apple plist XML public identifier, not an application network endpoint." },
+  { path = "apps/xenia-operator-agent/src/main.rs", pattern = "http://", text_contains = "http://127.0.0.1:8134", reason = "Default allowed console origins are loopback-only." },
+  { path = "apps/xenia-operator-agent/src/main.rs", pattern = "http://", text_contains = "http://127.0.0.1:{}", reason = "Startup status message reports the loopback-only listener." },
+  { path = "apps/xenia-peer/src/main.rs", pattern = "http://", text_contains = "http://127.0.0.1:8134", reason = "Default Sovereign Admin origins are loopback-only." },
+  { path = "apps/xenia-peer/src/operator_live_smoke.rs", pattern = "http://", text_contains = "http://{addr}", reason = "Live-smoke harness constructs a URL for the explicitly supplied test listener address." },
+  { path = "docs/deploy/remote-operators.md", pattern = "http://", text_contains = "proxy_pass http://127.0.0.1:8081", reason = "Reverse-proxy deployment example intentionally terminates TLS before forwarding to a loopback daemon." },
+  { path = "docs/deploy/remote-operators.md", pattern = "http://", text_contains = "proxy_pass http://127.0.0.1:8082", reason = "Reverse-proxy deployment example intentionally forwards to the loopback consent service." },
+  { path = "docs/deploy/remote-operators.md", pattern = "ws://", text_contains = "cannot open `ws://`", reason = "Documentation warns that HTTPS deployments require WSS rather than insecure mixed-content WebSockets." },
+  { path = "docs/deploy/systemd-user-service.md", pattern = "http://", text_contains = "http://127.0.0.1:8081/health", reason = "Local health-check example targets the loopback daemon." },
+  { path = "docs/deploy/systemd-user-service.md", pattern = "http://", text_contains = "http://127.0.0.1:8180/v1/health", reason = "Local health-check example targets the loopback operator agent." },
+  { path = "docs/packaging/apt-repo.md", pattern = "http://", text_contains = "http://localhost:8000", reason = "Packaging documentation uses a temporary localhost HTTP server for repository testing only." },
+  { path = "docs/security/OPERATOR_RBAC_PLAN.md", pattern = "http://", text_contains = "http://127.0.0.1:8081", reason = "Security design document references the pre-production loopback admin endpoint." },
+  { path = "scripts/build-apt-repo.sh", pattern = "http://", text_contains = "http://localhost:8000", reason = "Generated instructions describe localhost-only APT repository testing." },
+  { path = "scripts/e2e/vertical_slice.py", pattern = "http://", text_contains = "http://127.0.0.1:", reason = "End-to-end harness allocates ephemeral loopback HTTP services for deterministic local validation." },
+  { path = "scripts/xenia-audio-e2e-smoke.sh", pattern = "ws://", text_contains = "ws://127.0.0.1:", reason = "Audio smoke harness uses an ephemeral loopback WebSocket listener." }
 ]
