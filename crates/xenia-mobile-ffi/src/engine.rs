@@ -23,7 +23,8 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use tokio::sync::{Mutex, mpsc, watch};
 use tracing::{info, warn};
@@ -273,6 +274,16 @@ struct Shared {
 /// A live viewer session: owns a background tokio task running
 /// connect -> handshake -> receive/decode/send-input, plus channels
 /// the caller uses to observe/drive it.
+/// Point-in-time local evidence for the bounded mobile file-command lane.
+/// This is diagnostic state only; it is not authenticated protocol data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileTransferAdmissionSnapshotV1 {
+    pub active_reserved: u32,
+    pub active_copying: u32,
+    pub available_command_slots: u32,
+    pub command_capacity: u32,
+}
+
 pub struct ViewerEngine {
     shared: Arc<Shared>,
     input_tx: mpsc::Sender<InputEvent>,
@@ -282,6 +293,42 @@ pub struct ViewerEngine {
     next_ft_reservation: AtomicU64,
     runtime: tokio::runtime::Handle,
     _task: tokio::task::JoinHandle<()>,
+}
+
+fn spawn_file_transfer_reservation_expiry(
+    runtime: &tokio::runtime::Handle,
+    reservations: Arc<StdMutex<HashMap<u64, FileTransferReservation>>>,
+    token: u64,
+) -> tokio::task::JoinHandle<()> {
+    runtime.spawn(async move {
+        loop {
+            let deadline = {
+                let Ok(reservations) = reservations.lock() else {
+                    return;
+                };
+                let Some(reservation) = reservations.get(&token) else {
+                    return;
+                };
+                reservation.expires_at
+            };
+
+            tokio::time::sleep_until(deadline).await;
+
+            let Ok(mut reservations) = reservations.lock() else {
+                return;
+            };
+            let expired = reservations
+                .get(&token)
+                .is_some_and(|reservation| Instant::now() >= reservation.expires_at);
+            if expired {
+                reservations.remove(&token);
+                return;
+            }
+            // A claim may have moved the deadline while this task slept. Loop
+            // and sleep until the new absolute deadline; repeated claims cannot
+            // extend it indefinitely because `claim()` is idempotent.
+        }
+    })
 }
 
 impl ViewerEngine {
@@ -451,6 +498,32 @@ impl ViewerEngine {
         });
     }
 
+    /// Snapshot bounded file-command admission state for local diagnostics.
+    /// Expired entries are not counted even if their async reaper has not yet
+    /// run; channel capacity remains the source of truth for actual admission.
+    pub fn file_transfer_admission_snapshot(&self) -> Option<FileTransferAdmissionSnapshotV1> {
+        let reservations = self.ft_reservations.lock().ok()?;
+        let now = Instant::now();
+        let mut active_reserved = 0_u32;
+        let mut active_copying = 0_u32;
+        for reservation in reservations.values().filter(|entry| now < entry.expires_at) {
+            match reservation.state {
+                FileTransferReservationState::Reserved => {
+                    active_reserved = active_reserved.saturating_add(1);
+                }
+                FileTransferReservationState::Copying => {
+                    active_copying = active_copying.saturating_add(1);
+                }
+            }
+        }
+        Some(FileTransferAdmissionSnapshotV1 {
+            active_reserved,
+            active_copying,
+            available_command_slots: self.ft_cmd_tx.capacity() as u32,
+            command_capacity: FILE_TRANSFER_CMD_QUEUE_CAP as u32,
+        })
+    }
+
     /// Check whether a file command is worth materializing/copying now.
     ///
     /// This is deliberately an advisory preflight, not a reservation: another
@@ -510,35 +583,11 @@ impl ViewerEngine {
                 },
             );
             drop(reservations);
-            let reservations = Arc::clone(&self.ft_reservations);
-            self.runtime.spawn(async move {
-                loop {
-                    let sleep_for = {
-                        let Ok(reservations) = reservations.lock() else {
-                            return;
-                        };
-                        let Some(reservation) = reservations.get(&token) else {
-                            return;
-                        };
-                        reservation.expires_at.saturating_duration_since(Instant::now())
-                    };
-                    if sleep_for.is_zero() {
-                        tokio::task::yield_now().await;
-                    } else {
-                        tokio::time::sleep(sleep_for).await;
-                    }
-                    let Ok(mut reservations) = reservations.lock() else {
-                        return;
-                    };
-                    let expired = reservations
-                        .get(&token)
-                        .is_some_and(|reservation| Instant::now() >= reservation.expires_at);
-                    if expired {
-                        reservations.remove(&token);
-                        return;
-                    }
-                }
-            });
+            spawn_file_transfer_reservation_expiry(
+                &self.runtime,
+                Arc::clone(&self.ft_reservations),
+                token,
+            );
             return Ok(token);
         }
     }
@@ -1680,6 +1729,83 @@ mod tests {
             reservation.claim(9, now + Duration::from_millis(2)),
             Err(FileTransferEnqueueError::ReservationSizeMismatch)
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reservation_expiry_tracks_claimed_copy_lease_and_restores_capacity() {
+        let (tx, _rx) = mpsc::channel::<FileTransferCommand>(1);
+        let permit = tx.clone().try_reserve_owned().expect("reserve one slot");
+        let reservations = Arc::new(StdMutex::new(HashMap::new()));
+        let token = 41_u64;
+        let now = Instant::now();
+        reservations.lock().unwrap().insert(
+            token,
+            FileTransferReservation {
+                expected_len: 8,
+                permit,
+                state: FileTransferReservationState::Reserved,
+                expires_at: now + Duration::from_millis(FILE_TRANSFER_RESERVATION_TTL_MS),
+            },
+        );
+        let expiry_task = spawn_file_transfer_reservation_expiry(
+            &tokio::runtime::Handle::current(),
+            Arc::clone(&reservations),
+            token,
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(tx.capacity(), 0, "reservation must hold the only slot");
+
+        tokio::time::advance(Duration::from_millis(
+            FILE_TRANSFER_RESERVATION_TTL_MS - 1,
+        ))
+        .await;
+        reservations
+            .lock()
+            .unwrap()
+            .get_mut(&token)
+            .expect("live reservation before admission expiry")
+            .claim(8, Instant::now())
+            .expect("claim just before admission expiry");
+        let copy_expiry = reservations.lock().unwrap()[&token].expires_at;
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            reservations.lock().unwrap().contains_key(&token),
+            "original admission deadline must not reap a claimed copy lease"
+        );
+
+        let remaining = copy_expiry.saturating_duration_since(Instant::now());
+        assert!(remaining > Duration::from_millis(1));
+        tokio::time::advance(remaining - Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(reservations.lock().unwrap().contains_key(&token));
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(reservations.lock().unwrap().get(&token).is_none());
+        assert_eq!(tx.capacity(), 1, "expiry must return channel capacity");
+        expiry_task.await.expect("expiry worker exits cleanly");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeated_claim_does_not_extend_copy_lease_under_paused_time() {
+        let (tx, _rx) = mpsc::channel::<FileTransferCommand>(1);
+        let permit = tx.clone().try_reserve_owned().expect("reserve one slot");
+        let now = Instant::now();
+        let mut reservation = FileTransferReservation {
+            expected_len: 4,
+            permit,
+            state: FileTransferReservationState::Reserved,
+            expires_at: now + Duration::from_secs(1),
+        };
+        reservation.claim(4, now).expect("first claim");
+        let first_copy_expiry = reservation.expires_at;
+        tokio::time::advance(Duration::from_secs(10)).await;
+        reservation
+            .claim(4, Instant::now())
+            .expect("repeat claim while copy lease is live");
+        assert_eq!(reservation.expires_at, first_copy_expiry);
     }
 
     #[test]

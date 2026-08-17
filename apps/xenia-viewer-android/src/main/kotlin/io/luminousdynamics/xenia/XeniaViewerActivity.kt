@@ -278,12 +278,23 @@ private fun ViewerScreen(session: XeniaSession, onPickFile: ((Uri) -> Unit) -> U
                         onPickFile { uri ->
                             coroutineScope.launch {
                                 val picked = withContext(Dispatchers.IO) { readPickedFile(context, uri) }
-                                if (picked != null && !session.sendFile(picked.first, picked.second)) {
-                                    Toast.makeText(
-                                        context,
-                                        "File transfer queue is busy or the session disconnected",
-                                        Toast.LENGTH_SHORT,
-                                    ).show()
+                                if (picked != null) {
+                                    val result = session.trySendFile(picked.first, picked.second)
+                                    if (result != FileSendResult.ACCEPTED) {
+                                        val message = when (result) {
+                                            FileSendResult.QUEUE_FULL -> "File transfer queue is busy"
+                                            FileSendResult.SESSION_CLOSED,
+                                            FileSendResult.INVALID_HANDLE -> "The Xenia session is disconnected"
+                                            FileSendResult.TOO_LARGE -> "File exceeds the 100 MiB mobile transfer limit"
+                                            FileSendResult.INVALID_ARGUMENT -> "The selected file could not be prepared"
+                                            FileSendResult.INVALID_RESERVATION,
+                                            FileSendResult.RESERVATION_SIZE_MISMATCH ->
+                                                "File transfer admission expired; please try again"
+                                            FileSendResult.UNKNOWN -> "File transfer could not be admitted"
+                                            FileSendResult.ACCEPTED -> error("handled above")
+                                        }
+                                        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                                    }
                                 }
                             }
                         }

@@ -55,6 +55,40 @@ sealed class FileTransferEvent {
 /** Mirrors [NativeBindings]'s `STATE_*` constants as a Kotlin enum. */
 enum class SessionState { CONNECTING, CONNECTED, DISCONNECTED, ERROR, INVALID }
 
+/** Exact local admission result for a user-triggered outbound file command. */
+enum class FileSendResult {
+    ACCEPTED,
+    INVALID_ARGUMENT,
+    INVALID_HANDLE,
+    QUEUE_FULL,
+    SESSION_CLOSED,
+    TOO_LARGE,
+    INVALID_RESERVATION,
+    RESERVATION_SIZE_MISMATCH,
+    UNKNOWN;
+
+    companion object {
+        internal fun fromNative(code: Int): FileSendResult = when (code) {
+            NativeBindings.SEND_FILE_OK -> ACCEPTED
+            NativeBindings.SEND_FILE_INVALID_ARGUMENT -> INVALID_ARGUMENT
+            NativeBindings.SEND_FILE_INVALID_HANDLE -> INVALID_HANDLE
+            NativeBindings.SEND_FILE_QUEUE_FULL -> QUEUE_FULL
+            NativeBindings.SEND_FILE_SESSION_CLOSED -> SESSION_CLOSED
+            NativeBindings.SEND_FILE_TOO_LARGE -> TOO_LARGE
+            NativeBindings.SEND_FILE_INVALID_RESERVATION -> INVALID_RESERVATION
+            NativeBindings.SEND_FILE_RESERVATION_SIZE_MISMATCH -> RESERVATION_SIZE_MISMATCH
+            else -> UNKNOWN
+        }
+    }
+}
+
+data class FileTransferAdmissionSnapshot(
+    val activeReserved: Int,
+    val activeCopying: Int,
+    val availableCommandSlots: Int,
+    val commandCapacity: Int,
+)
+
 /** Header layout `xenia_jni.c`'s `pollFrame` packs (see its doc comment). */
 private const val FRAME_HEADER_LEN = 17
 
@@ -250,8 +284,26 @@ class XeniaSession(
      * `FilePickerBridge` -- Storage Access Framework `Uri`s aren't
      * plain filesystem paths). Only one outgoing transfer is in
      * flight at a time; see [fileTransferEvents] for progress/result. */
+    fun fileTransferAdmissionSnapshot(): FileTransferAdmissionSnapshot? {
+        if (handle == 0L) return null
+        val values = NativeBindings.fileTransferAdmissionSnapshot(handle) ?: return null
+        if (values.size != 4) return null
+        return FileTransferAdmissionSnapshot(
+            activeReserved = values[0],
+            activeCopying = values[1],
+            availableCommandSlots = values[2],
+            commandCapacity = values[3],
+        )
+    }
+
+    fun trySendFile(name: String, data: ByteArray): FileSendResult {
+        if (handle == 0L) return FileSendResult.INVALID_HANDLE
+        return FileSendResult.fromNative(NativeBindings.trySendFile(handle, name, data))
+    }
+
+    /** Legacy Boolean convenience retained for callers that only need accepted/rejected. */
     fun sendFile(name: String, data: ByteArray): Boolean {
-        return handle != 0L && NativeBindings.sendFile(handle, name, data)
+        return trySendFile(name, data) == FileSendResult.ACCEPTED
     }
 
     fun disconnect() {

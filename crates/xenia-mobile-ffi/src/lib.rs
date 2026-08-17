@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use engine::{
-    FileTransferEnqueueError, FileTransferEvent, MobileCodec, SessionState, ViewerEngine,
+    FileTransferAdmissionSnapshotV1, FileTransferEnqueueError, FileTransferEvent, MobileCodec, SessionState, ViewerEngine,
 };
 
 /// One shared multi-thread tokio runtime for the process lifetime —
@@ -411,6 +411,40 @@ pub unsafe extern "C" fn xenia_send_clipboard(handle: u64, text: *const c_char) 
     if let Ok(s) = unsafe { CStr::from_ptr(text) }.to_str() {
         engine.send_clipboard(Some(s.to_owned()));
     }
+}
+
+/// Point-in-time bounded file-command admission diagnostics.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct XeniaFileTransferAdmissionSnapshot {
+    pub valid: bool,
+    pub active_reserved: u32,
+    pub active_copying: u32,
+    pub available_command_slots: u32,
+    pub command_capacity: u32,
+}
+
+impl From<FileTransferAdmissionSnapshotV1> for XeniaFileTransferAdmissionSnapshot {
+    fn from(value: FileTransferAdmissionSnapshotV1) -> Self {
+        Self {
+            valid: true,
+            active_reserved: value.active_reserved,
+            active_copying: value.active_copying,
+            available_command_slots: value.available_command_slots,
+            command_capacity: value.command_capacity,
+        }
+    }
+}
+
+/// Read bounded file-command admission state without mutating it.
+#[unsafe(no_mangle)]
+pub extern "C" fn xenia_file_transfer_admission_snapshot(
+    handle: u64,
+) -> XeniaFileTransferAdmissionSnapshot {
+    engine_for(handle)
+        .and_then(|engine| engine.file_transfer_admission_snapshot())
+        .map(Into::into)
+        .unwrap_or_default()
 }
 
 /// Immediate return codes from [`xenia_try_send_file`].
