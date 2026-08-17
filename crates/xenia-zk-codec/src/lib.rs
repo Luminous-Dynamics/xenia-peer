@@ -419,8 +419,10 @@ mod tests {
 
     #[test]
     fn binary_declared_lengths_are_bounded_before_allocation() {
-        let mut policy = EnvelopePolicy::default();
-        policy.max_proof_bytes = 32;
+        let policy = EnvelopePolicy {
+            max_proof_bytes: 32,
+            ..EnvelopePolicy::default()
+        };
         let encoded = encode_binary_envelope_v1(&envelope(), &EnvelopePolicy::default()).unwrap();
         assert!(matches!(
             decode_binary_envelope_v1(&encoded, &policy),

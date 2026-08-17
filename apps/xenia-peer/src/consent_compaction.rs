@@ -452,7 +452,7 @@ impl ConsentRecoverySummaryV1 {
             let terminal_sequence =
                 state
                     .terminal_sequence
-                    .ok_or_else(|| ConsentRecoveryError::IncompleteSession {
+                    .ok_or(ConsentRecoveryError::IncompleteSession {
                         session_id: session_id_hex,
                     })?;
             completed.push(ConsentRecoverySessionV1 {

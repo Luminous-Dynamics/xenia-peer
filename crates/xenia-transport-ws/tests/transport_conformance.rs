@@ -279,6 +279,11 @@ async fn tcp_detects_truncated_envelope_as_unexpected_eof() {
     server.await.unwrap();
 }
 
+// `tokio-tungstenite` requires this handshake callback to use its concrete
+// `ErrorResponse` type, the same API constraint as the production callback.
+// Boxing that error would change the callback contract rather than improve a
+// Xenia-owned error representation.
+#[allow(clippy::result_large_err)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn websocket_rejects_text_protocol_fault() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

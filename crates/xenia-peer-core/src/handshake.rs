@@ -1481,7 +1481,9 @@ mod tests {
 
     #[test]
     fn handshake_parser_ceiling_is_stricter_than_session_envelope_ceiling() {
-        assert!(MAX_HANDSHAKE_ENVELOPE_BYTES < crate::transport::MAX_ENVELOPE_BYTES);
+        const {
+            assert!(MAX_HANDSHAKE_ENVELOPE_BYTES < crate::transport::MAX_ENVELOPE_BYTES);
+        }
         assert!(ensure_handshake_message_size(MAX_HANDSHAKE_ENVELOPE_BYTES as usize).is_ok());
         assert!(ensure_handshake_message_size(MAX_HANDSHAKE_ENVELOPE_BYTES as usize + 1).is_err());
     }

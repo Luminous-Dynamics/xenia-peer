@@ -343,17 +343,21 @@ mod tests {
     #[test]
     fn host_video_has_no_backlog_and_fails_before_general_transport_stall() {
         assert_eq!(HOST_VIDEO_FRESHNESS_V1.max_frames_in_flight, 1);
-        assert!(HOST_VIDEO_FRESHNESS_V1.max_capture_to_send_ms > 0);
-        assert!(
-            HOST_VIDEO_FRESHNESS_V1.max_send_stall_ms
-                >= HOST_VIDEO_FRESHNESS_V1.max_capture_to_send_ms
-        );
-        assert!(HOST_VIDEO_FRESHNESS_V1.max_send_stall_ms < 15_000);
+        const {
+            assert!(HOST_VIDEO_FRESHNESS_V1.max_capture_to_send_ms > 0);
+            assert!(
+                HOST_VIDEO_FRESHNESS_V1.max_send_stall_ms
+                    >= HOST_VIDEO_FRESHNESS_V1.max_capture_to_send_ms
+            );
+            assert!(HOST_VIDEO_FRESHNESS_V1.max_send_stall_ms < 15_000);
+        }
     }
 
     #[test]
     fn mobile_file_admission_has_a_fixed_byte_ceiling() {
         assert_eq!(MOBILE_FILE_TRANSFER_MAX_BYTES_V1, 104_857_600);
-        assert!(MOBILE_FILE_TRANSFER_MAX_BYTES_V1 < usize::MAX);
+        const {
+            assert!(MOBILE_FILE_TRANSFER_MAX_BYTES_V1 < usize::MAX);
+        }
     }
 }
