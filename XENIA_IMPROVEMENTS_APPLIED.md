@@ -97,6 +97,16 @@ hardens the daemon around spawned-server failures.
 - Added `FileTransferAdmissionSnapshotV2` with `active_streaming` and `active_stream_bytes` while retaining V19's V1 ABI.
 - Added V20 language-neutral vector, source contract, reduced resource model, and accumulated-runner integration.
 
+## Transport/session V21: shared receive staging and activation correctness
+
+- Added `xenia-peer-core::IncomingFileStager` and migrated daemon, native viewer, and mobile inbound file paths away from whole-file `Vec<u8>` accumulation.
+- Enforced exact sequential offsets and offered-size bounds while updating BLAKE3 incrementally on each staged chunk.
+- Completion now requires exact size/hash, syncs staged content, and publishes with the existing same-directory no-clobber hard-link rule before reporting verification success.
+- Added best-effort partial cleanup on state drop plus startup scavenging for the exact prior-process `.xenia-receive-<pid>-<32 hex>.tmp` namespace while preserving current-process entries.
+- Corrected mobile command consumption so already-staged outbound files remain in the bounded queue until the authenticated application surface exists and no transfer is active.
+- Split Android received-file and outbound SAF staging roots explicitly: `filesDir/received` and `noBackupFilesDir/outbound-staging`.
+- Added a V21 language-neutral vector, static source contract, reduced receive/activation model, and accumulated-runner coverage. V21 intentionally does not claim filesystem free-space reservation.
+
 ## Transport/session V19: deterministic reservation races and diagnostic fidelity
 
 - Switched mobile file-reservation deadlines to `tokio::time::Instant` and extracted the async expiry worker around `sleep_until`, enabling deterministic paused-time tests rather than wall-clock sleeps.

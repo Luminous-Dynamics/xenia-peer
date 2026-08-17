@@ -14,6 +14,7 @@ checks=(
   scripts/check_application_runtime_evidence_v18.py
   scripts/check_application_runtime_assurance_v19.py
   scripts/check_application_file_staging_v20.py
+  scripts/check_application_receive_staging_v21.py
 )
 models=(
   scripts/model_check_transport_session_profile_v1.py
@@ -27,6 +28,7 @@ models=(
   scripts/model_check_application_runtime_evidence_v18.py
   scripts/model_check_application_runtime_assurance_v19.py
   scripts/model_check_application_file_staging_v20.py
+  scripts/model_check_application_receive_staging_v21.py
 )
 
 for script in "${checks[@]}" "${models[@]}"; do
