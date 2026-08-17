@@ -1229,11 +1229,10 @@ async fn run_session_inner(
     loop {
         let envelope = tokio::select! {
             biased;
-            Some(cmd) = ft_cmd_rx.recv() => {
-                if authenticated_surface.is_none() {
-                    warn!("ignoring file-transfer command before authenticated session surface");
-                    continue;
-                }
+            Some(cmd) = ft_cmd_rx.recv(), if can_activate_file_transfer_command(
+                authenticated_surface.is_some(),
+                outgoing.is_some(),
+            ) => {
                 handle_file_transfer_command(
                     cmd,
                     &session,
@@ -1454,6 +1453,14 @@ async fn push_ft_event(shared: &Arc<Shared>, event: FileTransferEvent) {
     queue.push_back(event);
 }
 
+/// A staged/mobile file command is expensive producer work. Keep it in the
+/// bounded MPSC lane until it can actually become the one active outgoing
+/// transfer. This prevents pre-authentication or already-busy consumers from
+/// dequeuing and discarding a fully staged file.
+fn can_activate_file_transfer_command(authenticated: bool, outgoing_active: bool) -> bool {
+    authenticated && !outgoing_active
+}
+
 /// Seal `message` under the control lane (always `is_host = false` --
 /// this engine only ever plays the viewer role) and send it.
 async fn seal_and_send<S: SendEnvelope>(
@@ -1486,27 +1493,9 @@ async fn handle_file_transfer_command<S: SendEnvelope>(
     outgoing: &mut Option<OutgoingTransfer>,
     next_transfer_id: &mut u64,
 ) {
-    if outgoing.is_some() {
-        warn!(
-            name,
-            "send_file while another outgoing transfer is in flight; dropping"
-        );
-        push_ft_event(
-            shared,
-            FileTransferEvent::Done {
-                transfer_id: 0,
-                name,
-                outgoing: true,
-                ok: false,
-                detail: "another outgoing transfer is already in progress".to_string(),
-            },
-        )
-        .await;
-        return;
-    }
-
-    let transfer_id = *next_transfer_id;
-    *next_transfer_id += 1;
+    // Unpack first so the defensive busy path owns the staged source. If this
+    // function is ever called while busy despite the select guard above,
+    // dropping `source` also removes a staged file rather than leaking it.
     let (name, size, blake3_hash, source) = match cmd {
         FileTransferCommand::SendFile { name, data } => {
             let size = data.len() as u64;
@@ -1525,6 +1514,28 @@ async fn handle_file_transfer_command<S: SendEnvelope>(
             OutgoingTransferSource::StagedFile { path },
         ),
     };
+    if outgoing.is_some() {
+        warn!(
+            name,
+            "send_file while another outgoing transfer is in flight; dropping"
+        );
+        push_ft_event(
+            shared,
+            FileTransferEvent::Done {
+                transfer_id: 0,
+                name,
+                outgoing: true,
+                ok: false,
+                detail: "another outgoing transfer is already in progress".to_string(),
+            },
+        )
+        .await;
+        // `source` drops here. Disk-backed sources remove their staging file.
+        return;
+    }
+
+    let transfer_id = *next_transfer_id;
+    *next_transfer_id += 1;
     let offer = FileTransferMessage::Offer {
         transfer_id,
         name: name.clone(),
@@ -2274,6 +2285,14 @@ mod tests {
         // completes -- sending before then must just queue harmlessly.
         let result = engine.send_file("test.txt".to_string(), vec![1, 2, 3]);
         assert!(result.is_ok() || result == Err(FileTransferEnqueueError::SessionClosed));
+    }
+
+    #[test]
+    fn file_command_activation_requires_authentication_and_an_idle_sender() {
+        assert!(!can_activate_file_transfer_command(false, false));
+        assert!(!can_activate_file_transfer_command(false, true));
+        assert!(!can_activate_file_transfer_command(true, true));
+        assert!(can_activate_file_transfer_command(true, false));
     }
 
     #[test]
