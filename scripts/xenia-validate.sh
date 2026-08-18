@@ -311,7 +311,7 @@ fi
 # Unsafe/FFI scans are advisory during stabilization and become review gates for RC work.
 if [[ -x scripts/check-unsafe-surfaces.py ]]; then
   if command -v python3 >/dev/null 2>&1; then
-    run_advisory python3 scripts/check-unsafe-surfaces.py . --max-lines 120
+    run python3 scripts/check-unsafe-surfaces.py . --baseline xenia.unsafe.toml --strict-baseline --max-lines 120
   else
     warn "python3 not found; skipping unsafe/FFI surface report"
   fi
