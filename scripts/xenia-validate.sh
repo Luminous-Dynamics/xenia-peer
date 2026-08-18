@@ -299,16 +299,17 @@ if [[ -x scripts/check-cargo-boundaries.py ]]; then
 fi
 
 # Risk pattern checks are intentionally advisory in normal validation. Use
-# `scripts/check-runtime-risk-patterns.py . --strict` for RC hardening.
+# Production panic-like assumptions are forbidden. Test/example findings
+# remain visible in the report but do not fail --strict.
 if [[ -x scripts/check-runtime-risk-patterns.py ]]; then
   if command -v python3 >/dev/null 2>&1; then
-    run_advisory python3 scripts/check-runtime-risk-patterns.py . --strict --max-lines 120
+    run python3 scripts/check-runtime-risk-patterns.py . --strict --max-lines 120
   else
     warn "python3 not found; skipping runtime risk pattern report"
   fi
 fi
 
-# Unsafe/FFI scans are advisory during stabilization and become review gates for RC work.
+# Production unsafe/FFI is allowed only when it exactly matches the reviewed baseline.
 if [[ -x scripts/check-unsafe-surfaces.py ]]; then
   if command -v python3 >/dev/null 2>&1; then
     run python3 scripts/check-unsafe-surfaces.py . --baseline xenia.unsafe.toml --strict-baseline --max-lines 120
