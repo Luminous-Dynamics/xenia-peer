@@ -302,7 +302,7 @@ fi
 # `scripts/check-runtime-risk-patterns.py . --strict` for RC hardening.
 if [[ -x scripts/check-runtime-risk-patterns.py ]]; then
   if command -v python3 >/dev/null 2>&1; then
-    run_advisory python3 scripts/check-runtime-risk-patterns.py . --max-lines 120
+    run_advisory python3 scripts/check-runtime-risk-patterns.py . --strict --max-lines 120
   else
     warn "python3 not found; skipping runtime risk pattern report"
   fi
