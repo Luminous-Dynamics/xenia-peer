@@ -153,9 +153,11 @@ pub(crate) async fn handle_envelope(
                             reason: "file receive is not permitted by current consent".to_string(),
                         }
                     } else {
-                        let recv_dir = config
-                            .recv_file_dir
-                            .expect("accepted offer requires configured receive directory");
+                        let recv_dir = config.recv_file_dir.ok_or_else(|| {
+                            std::io::Error::other(
+                                "accepted file-transfer offer without configured receive directory",
+                            )
+                        })?;
                         let dest = recv_dir.join(&safe_name);
                         match IncomingFileStager::create(&dest, size, blake3_hash) {
                             Ok(stager) => {

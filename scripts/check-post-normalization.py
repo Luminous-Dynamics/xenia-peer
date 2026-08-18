@@ -4,9 +4,23 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from xenia_scan_scope import DEFAULT_SCAN_SKIP_PARTS
 
-def is_inside_archive(path: Path) -> bool:
-    return "_archive" in path.parts
+
+# These names are findings when they occur in the canonical checkout, so they
+# must not themselves be treated as containers to skip. Other shared scanner
+# exclusions (.claude, _archive, runtime state, etc.) are noncanonical
+# containers whose contents must not contaminate normalization checks.
+GENERATED_DIR_NAMES = {"target", "dist", "build", "node_modules"}
+NONCANONICAL_CONTAINER_PARTS = (
+    set(DEFAULT_SCAN_SKIP_PARTS) - GENERATED_DIR_NAMES
+)
+
+
+def is_beneath_noncanonical_container(path: Path) -> bool:
+    return bool(
+        set(path.parts[:-1]) & NONCANONICAL_CONTAINER_PARTS
+    )
 
 
 def main() -> int:
@@ -21,7 +35,9 @@ def main() -> int:
         path = path.resolve()
         if path == root / ".git":
             continue
-        if is_inside_archive(path.relative_to(root)):
+        if is_beneath_noncanonical_container(
+            path.relative_to(root)
+        ):
             continue
         print(f"FAIL: nested Git metadata remains outside archive: {path.relative_to(root)}")
         failures += 1
@@ -45,7 +61,7 @@ def main() -> int:
             if not path.is_dir():
                 continue
             rel = path.relative_to(root)
-            if rel.parts and rel.parts[0] == "_archive":
+            if is_beneath_noncanonical_container(rel):
                 continue
             if path in generated_dirs:
                 continue

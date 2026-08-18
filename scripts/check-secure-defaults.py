@@ -20,7 +20,7 @@ import sys
 import tomllib
 from typing import Any
 
-from xenia_scan_scope import iter_repo_files
+from xenia_scan_scope import cfg_test_only_lines, iter_repo_files
 
 
 @dataclass(frozen=True)
@@ -151,9 +151,16 @@ def scan(root: Path, data: dict[str, Any]) -> list[Finding]:
             findings.append(Finding("warning", rel, 0, "unreadable", str(exc)))
             continue
         is_doc = path.suffix in doc_exts and path.suffix not in source_exts
+        test_only_lines = (
+            cfg_test_only_lines(lines)
+            if path.suffix == ".rs"
+            else set()
+        )
         for idx, line in enumerate(lines, start=1):
             stripped = line.strip()
             if not stripped or stripped.startswith("#") or stripped.startswith("//"):
+                continue
+            if idx in test_only_lines:
                 continue
             for pattern in hard_patterns:
                 if pattern in line:

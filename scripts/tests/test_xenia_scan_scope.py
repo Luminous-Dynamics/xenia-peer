@@ -36,7 +36,6 @@ class ScanScopeTests(unittest.TestCase):
                 for path in iter_repo_files(
                     root,
                     suffixes={".rs"},
-                    skip_parts={".git", ".claude", "xenia-peer-state"},
                 )
             }
             self.assertEqual(paths, {"src/tracked.rs", "src/untracked.rs"})
@@ -55,7 +54,6 @@ class ScanScopeTests(unittest.TestCase):
                 for path in iter_repo_files(
                     root,
                     suffixes={".rs"},
-                    skip_parts={".claude"},
                 )
             }
             self.assertEqual(paths, {"src/main.rs"})

@@ -65,7 +65,7 @@ pub fn open(
     initial_start_at_login: bool,
     result_tx: Sender<SettingsResult>,
 ) -> windows::core::Result<HWND> {
-    register_class_once();
+    register_class_once()?;
 
     let state = Box::new(WindowState {
         initial_config,
@@ -112,11 +112,11 @@ fn module_handle() -> windows::core::Result<windows::Win32::Foundation::HMODULE>
     unsafe { GetModuleHandleW(None) }
 }
 
-fn register_class_once() {
+fn register_class_once() -> windows::core::Result<()> {
+    let hinstance = module_handle()?;
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        let hinstance = module_handle().expect("GetModuleHandleW(None) should never fail");
         let class = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(wndproc),
@@ -132,6 +132,7 @@ fn register_class_once() {
             RegisterClassExW(&class);
         }
     });
+    Ok(())
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {

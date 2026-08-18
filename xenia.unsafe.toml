@@ -1,0 +1,119 @@
+# Reviewed runtime unsafe/FFI surface contract for Xenia.
+#
+# Counts are exact, not ceilings. Any addition, removal, or category
+# change requires this file to be reviewed in the same commit.
+# Test/example unsafe is intentionally outside this production baseline.
+
+schema = "xenia-unsafe-baseline-v1"
+
+[[surface]]
+path = "apps/xenia-launcher-macos/src/main.rs"
+owner = "xenia-launcher-macos"
+rationale = "The native macOS application lifecycle crosses the AppKit/Objective-C runtime boundary."
+invariant = "AppKit calls execute under required thread/lifetime rules and native application objects outlive all Rust-side borrows."
+evidence = "V21.1 full validator plus exact per-kind unsafe-surface inventory; semantic changes to this boundary require targeted platform/FFI review."
+counts = { unsafe_block_or_fn = 1 }
+
+[[surface]]
+path = "apps/xenia-launcher-macos/src/notify.rs"
+owner = "xenia-launcher-macos"
+rationale = "macOS notification integration uses Objective-C runtime calls."
+invariant = "Native notification objects obey their framework lifetime and threading contracts and no Rust reference escapes those lifetimes."
+evidence = "V21.1 full validator plus exact per-kind unsafe-surface inventory; semantic changes to this boundary require targeted platform/FFI review."
+counts = { raw_pointer = 2 }
+
+[[surface]]
+path = "apps/xenia-launcher-macos/src/settings_window.rs"
+owner = "xenia-launcher-macos"
+rationale = "Native macOS settings UI crosses the Objective-C/AppKit runtime boundary."
+invariant = "Objective-C objects and callbacks obey AppKit thread and lifetime requirements; Rust references never outlive the native objects from which they are derived."
+evidence = "V21.1 full validator plus exact per-kind unsafe-surface inventory; semantic changes to this boundary require targeted platform/FFI review."
+counts = { unsafe_block_or_fn = 9 }
+
+[[surface]]
+path = "apps/xenia-launcher-windows/src/main.rs"
+owner = "xenia-launcher-windows"
+rationale = "Win32 launcher message loop, tray integration, window callbacks, and native handles require Windows FFI."
+invariant = "Callback parameters are interpreted only for their documented message type; handles obey Windows lifetime rules; callback state cannot outlive the objects it references."
+evidence = "V21.1 full validator plus exact per-kind unsafe-surface inventory; semantic changes to this boundary require targeted platform/FFI review."
+counts = { extern_block_or_fn = 1, raw_pointer = 1, unsafe_block_or_fn = 14 }
+
+[[surface]]
+path = "apps/xenia-launcher-windows/src/notify.rs"
+owner = "xenia-launcher-windows"
+rationale = "Windows notification/tray callbacks cross the Win32 ABI."
+invariant = "Callback payloads are decoded only under the corresponding native message contract and referenced state remains live for callback execution."
+evidence = "V21.1 full validator plus exact per-kind unsafe-surface inventory; semantic changes to this boundary require targeted platform/FFI review."
+counts = { raw_pointer = 1, unsafe_block_or_fn = 4 }
+
+[[surface]]
+path = "apps/xenia-launcher-windows/src/settings_window.rs"
+owner = "xenia-launcher-windows"
+rationale = "Raw Win32 settings-window implementation uses window procedures, message parameters, handles, and GWLP_USERDATA state."
+invariant = "WindowState ownership transfers at most once to the window; failed creation reclaims it; stored pointers remain valid for the window lifetime; borrowed Win32 handles are not freed as owned."
+evidence = "V21.1 full validator plus exact per-kind unsafe-surface inventory; semantic changes to this boundary require targeted platform/FFI review."
+counts = { extern_block_or_fn = 1, raw_pointer = 9, unsafe_block_or_fn = 23 }
+
+[[surface]]
+path = "apps/xenia-launcher-windows/src/startup.rs"
+owner = "xenia-launcher-windows"
+rationale = "Windows start-at-login integration calls native platform APIs and operates on platform handles/strings."
+invariant = "Native buffers remain valid for each call, platform errors are propagated, and no borrowed OS resource is treated as Rust-owned."
+evidence = "V21.1 full validator plus exact per-kind unsafe-surface inventory; semantic changes to this boundary require targeted platform/FFI review."
+counts = { unsafe_block_or_fn = 7 }
+
+[[surface]]
+path = "crates/xenia-capture-scrcpy/src/scrcpy/decoder.rs"
+owner = "xenia-capture-scrcpy"
+rationale = "The scrcpy decoder adapter bridges external decoder/native state whose thread or ownership guarantees cannot be expressed entirely through Rust's type system."
+invariant = "Any manually asserted thread/ownership property remains true for the complete decoder lifetime; native state is not concurrently accessed in violation of its contract."
+evidence = "V21.1 full validator plus exact per-kind unsafe-surface inventory; semantic changes to this boundary require targeted platform/FFI review."
+counts = { unsafe_block_or_fn = 1 }
+
+[[surface]]
+path = "crates/xenia-inject/src/lib.rs"
+owner = "xenia-inject"
+rationale = "Input injection is intentionally an OS privilege boundary and uses native descriptors/ioctls or equivalent platform interfaces."
+invariant = "Injection operates only through explicitly authorized runtime paths; descriptors and buffers remain valid for native calls; platform failures do not bypass higher-level consent gates."
+evidence = "V21.1 full validator plus exact per-kind unsafe-surface inventory; semantic changes to this boundary require targeted platform/FFI review."
+counts = { unsafe_block_or_fn = 6 }
+
+[[surface]]
+path = "crates/xenia-inject/src/windows.rs"
+owner = "xenia-inject"
+rationale = "Windows input injection crosses the SendInput/Win32 FFI boundary."
+invariant = "Native INPUT structures are fully initialized and valid for the duration of each call; partial/native failure remains a failure."
+evidence = "V21.1 full validator plus exact per-kind unsafe-surface inventory; semantic changes to this boundary require targeted platform/FFI review."
+counts = { unsafe_block_or_fn = 1 }
+
+[[surface]]
+path = "crates/xenia-launcher-core/src/process.rs"
+owner = "xenia-launcher-core"
+rationale = "Cross-platform process lifecycle management requires native process and handle operations."
+invariant = "Process handles have one ownership model, are not used after close, and native failure cannot be mistaken for successful process creation or termination."
+evidence = "V21.1 full validator plus exact per-kind unsafe-surface inventory; semantic changes to this boundary require targeted platform/FFI review."
+counts = { unsafe_block_or_fn = 5 }
+
+[[surface]]
+path = "crates/xenia-launcher-core/src/single_instance.rs"
+owner = "xenia-launcher-core"
+rationale = "Single-instance enforcement requires a platform lock/mutex or equivalent native resource."
+invariant = "The native resource remains owned for the protected process lifetime and acquisition failure never grants false ownership."
+evidence = "V21.1 full validator plus exact per-kind unsafe-surface inventory; semantic changes to this boundary require targeted platform/FFI review."
+counts = { unsafe_block_or_fn = 1 }
+
+[[surface]]
+path = "crates/xenia-mobile-ffi/src/lib.rs"
+owner = "xenia-mobile-ffi"
+rationale = "Public C ABI boundary for mobile hosts; raw pointers and extern functions are intrinsic to transferring buffers, events, and engine handles across the language boundary."
+invariant = "Caller-provided pointers are validated before dereference; lengths describe accessible memory; ownership transfer is explicit; every returned allocation has one defined release path."
+evidence = "V21.1 full validator plus exact per-kind unsafe-surface inventory; semantic changes to this boundary require targeted platform/FFI review."
+counts = { extern_block_or_fn = 29, ffi_repr = 4, raw_pointer = 21, unsafe_block_or_fn = 56 }
+
+[[surface]]
+path = "crates/xenia-secure-file/src/lib.rs"
+owner = "xenia-secure-file"
+rationale = "Secure file publication requires platform filesystem primitives whose Rust interfaces cross syscall/OS ownership boundaries."
+invariant = "Security-sensitive files preserve exclusive/no-clobber creation, intended permissions and ownership, atomic publication, and fail-closed behavior on platform API errors."
+evidence = "V21.1 full validator plus exact per-kind unsafe-surface inventory; semantic changes to this boundary require targeted platform/FFI review."
+counts = { unsafe_block_or_fn = 19 }
