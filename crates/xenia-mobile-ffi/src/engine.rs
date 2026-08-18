@@ -1698,19 +1698,21 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
             size,
             blake3_hash,
         } => {
-            let (safe_name, mut reason) = match (recv_dir, sanitize_transfer_filename(&name)) {
-                (None, _) => (None, "file transfer is disabled on this viewer".to_string()),
-                (Some(_), None) => (None, "unusable filename".to_string()),
-                (Some(_), Some(_)) if size > max_bytes => {
-                    (None, format!("file exceeds {max_bytes}-byte cap"))
-                }
-                (Some(_), Some(_)) if incoming.len() >= MAX_CONCURRENT_INCOMING_TRANSFERS => {
-                    (None, "too many concurrent incoming transfers".to_string())
-                }
-                (Some(_), Some(safe_name)) => (Some(safe_name), String::new()),
-            };
-            let staged = safe_name.and_then(|safe_name| {
-                let recv_dir = recv_dir.expect("validated receive directory");
+            let (staging_candidate, mut reason) =
+                match (recv_dir, sanitize_transfer_filename(&name)) {
+                    (None, _) => (None, "file transfer is disabled on this viewer".to_string()),
+                    (Some(_), None) => (None, "unusable filename".to_string()),
+                    (Some(_), Some(_)) if size > max_bytes => {
+                        (None, format!("file exceeds {max_bytes}-byte cap"))
+                    }
+                    (Some(_), Some(_)) if incoming.len() >= MAX_CONCURRENT_INCOMING_TRANSFERS => {
+                        (None, "too many concurrent incoming transfers".to_string())
+                    }
+                    (Some(recv_dir), Some(safe_name)) => {
+                        (Some((recv_dir, safe_name)), String::new())
+                    }
+                };
+            let staged = staging_candidate.and_then(|(recv_dir, safe_name)| {
                 let dest = recv_dir.join(&safe_name);
                 match IncomingFileStager::create(&dest, size, blake3_hash) {
                     Ok(stager) => Some((safe_name, stager)),

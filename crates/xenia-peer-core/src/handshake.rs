@@ -817,21 +817,34 @@ impl SessionEpochState {
     }
 }
 
-fn append_len_prefixed(out: &mut Vec<u8>, bytes: &[u8]) {
-    let len = u32::try_from(bytes.len()).expect("handshake transcript component exceeds u32");
-    out.extend_from_slice(&len.to_be_bytes());
-    out.extend_from_slice(bytes);
+fn checked_transcript_component_len(len: usize) -> Result<u32, std::io::Error> {
+    u32::try_from(len).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "handshake transcript component too large ({len} bytes > {} byte length-prefix limit)",
+                u32::MAX
+            ),
+        )
+    })
 }
 
-fn signature_context_prefix() -> Vec<u8> {
+fn append_len_prefixed(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), std::io::Error> {
+    let len = checked_transcript_component_len(bytes.len())?;
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn signature_context_prefix() -> Result<Vec<u8>, std::io::Error> {
     let mut out = Vec::new();
-    append_len_prefixed(&mut out, HANDSHAKE_SIGNATURE_CONTEXT_V1.as_bytes());
-    append_len_prefixed(&mut out, HANDSHAKE_TRANSCRIPT_SCHEMA.as_bytes());
-    append_len_prefixed(&mut out, HANDSHAKE_POLICY_PROFILE.as_bytes());
-    append_len_prefixed(&mut out, KEM_SUITE_LABEL.as_bytes());
-    append_len_prefixed(&mut out, TRANSCRIPT_SIGNATURE_SUITE_LABEL.as_bytes());
-    append_len_prefixed(&mut out, KDF_SUITE_LABEL.as_bytes());
-    out
+    append_len_prefixed(&mut out, HANDSHAKE_SIGNATURE_CONTEXT_V1.as_bytes())?;
+    append_len_prefixed(&mut out, HANDSHAKE_TRANSCRIPT_SCHEMA.as_bytes())?;
+    append_len_prefixed(&mut out, HANDSHAKE_POLICY_PROFILE.as_bytes())?;
+    append_len_prefixed(&mut out, KEM_SUITE_LABEL.as_bytes())?;
+    append_len_prefixed(&mut out, TRANSCRIPT_SIGNATURE_SUITE_LABEL.as_bytes())?;
+    append_len_prefixed(&mut out, KDF_SUITE_LABEL.as_bytes())?;
+    Ok(out)
 }
 
 /// Build the transcript both sides sign at the viewer-response phase.
@@ -849,15 +862,15 @@ fn viewer_signature_transcript(
     viewer_ml_dsa_pk: &[u8; ML_DSA_65_PK_LEN],
     kem_ct: &[u8],
     viewer_nonce: &[u8; 32],
-) -> Vec<u8> {
-    let mut transcript = signature_context_prefix();
-    append_len_prefixed(&mut transcript, b"viewer-response");
-    append_len_prefixed(&mut transcript, hello_bytes);
-    append_len_prefixed(&mut transcript, viewer_ed25519_pk);
-    append_len_prefixed(&mut transcript, viewer_ml_dsa_pk);
-    append_len_prefixed(&mut transcript, kem_ct);
-    append_len_prefixed(&mut transcript, viewer_nonce);
-    transcript
+) -> Result<Vec<u8>, std::io::Error> {
+    let mut transcript = signature_context_prefix()?;
+    append_len_prefixed(&mut transcript, b"viewer-response")?;
+    append_len_prefixed(&mut transcript, hello_bytes)?;
+    append_len_prefixed(&mut transcript, viewer_ed25519_pk)?;
+    append_len_prefixed(&mut transcript, viewer_ml_dsa_pk)?;
+    append_len_prefixed(&mut transcript, kem_ct)?;
+    append_len_prefixed(&mut transcript, viewer_nonce)?;
+    Ok(transcript)
 }
 
 /// Build the transcript both sides sign at the host-finalize phase --
@@ -872,18 +885,18 @@ fn host_signature_transcript(
     viewer_nonce: &[u8; 32],
     viewer_signature: &[u8; 64],
     viewer_ml_dsa_signature: &[u8; ML_DSA_65_SIG_LEN],
-) -> Vec<u8> {
+) -> Result<Vec<u8>, std::io::Error> {
     let mut transcript = viewer_signature_transcript(
         hello_bytes,
         viewer_ed25519_pk,
         viewer_ml_dsa_pk,
         kem_ct,
         viewer_nonce,
-    );
-    append_len_prefixed(&mut transcript, b"host-finalize");
-    append_len_prefixed(&mut transcript, viewer_signature);
-    append_len_prefixed(&mut transcript, viewer_ml_dsa_signature);
-    transcript
+    )?;
+    append_len_prefixed(&mut transcript, b"host-finalize")?;
+    append_len_prefixed(&mut transcript, viewer_signature)?;
+    append_len_prefixed(&mut transcript, viewer_ml_dsa_signature)?;
+    Ok(transcript)
 }
 
 /// Perform a host-side handshake and return only the session key.
@@ -980,7 +993,7 @@ pub async fn perform_host_handshake_authenticating_peer<T: Transport>(
         &ml_dsa_pk,
         &kem_ct,
         &viewer_nonce,
-    );
+    )?;
 
     let sig = ed25519_dalek::Signature::from_bytes(&signature);
     HandshakeManager::verify(&viewer_verifying_key, &transcript, &sig)?;
@@ -1003,7 +1016,7 @@ pub async fn perform_host_handshake_authenticating_peer<T: Transport>(
         &viewer_nonce,
         &signature,
         &ml_dsa_signature,
-    );
+    )?;
     let host_sig = mgr.sign(&final_transcript).to_bytes();
     let host_ml_dsa_sig = mgr.sign_ml_dsa(&final_transcript);
 
@@ -1108,7 +1121,7 @@ pub async fn perform_viewer_handshake_with_transcript<T: Transport>(
         &viewer_ml_dsa_pk,
         &kem_ct,
         &viewer_nonce,
-    );
+    )?;
 
     let viewer_sig = mgr.sign(&transcript).to_bytes();
     let viewer_ml_dsa_sig = mgr.sign_ml_dsa(&transcript);
@@ -1149,7 +1162,7 @@ pub async fn perform_viewer_handshake_with_transcript<T: Transport>(
         &viewer_nonce,
         &viewer_sig,
         &viewer_ml_dsa_sig,
-    );
+    )?;
     let host_sig = ed25519_dalek::Signature::from_bytes(&host_sig_bytes);
     HandshakeManager::verify(&host_verifying_key, &final_transcript, &host_sig)?;
     HandshakeManager::verify_ml_dsa(&ml_dsa_pk, &final_transcript, &host_ml_dsa_sig_bytes)?;
@@ -1195,6 +1208,13 @@ pub async fn perform_viewer_handshake_with_transcript<T: Transport>(
 mod tests {
     use super::*;
 
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn transcript_component_length_rejects_u32_overflow() {
+        let too_large = (u32::MAX as usize) + 1;
+        assert!(checked_transcript_component_len(too_large).is_err());
+    }
+
     #[test]
     fn viewer_signature_transcript_binds_suite_context() {
         let hello_bytes = bincode::serialize(&HandshakeMessage::HostHello {
@@ -1212,7 +1232,8 @@ mod tests {
             &[0xAA; ML_DSA_65_PK_LEN],
             &[0x55; ML_KEM_768_CT_LEN],
             &[0x66; 32],
-        );
+        )
+        .unwrap();
 
         assert!(
             transcript
@@ -1254,7 +1275,8 @@ mod tests {
             &viewer_ml_dsa_pk,
             &kem_ct,
             &viewer_nonce,
-        );
+        )
+        .unwrap();
         let signature = signer.sign(&transcript);
 
         kem_ct[0] ^= 0x01;
@@ -1264,7 +1286,8 @@ mod tests {
             &viewer_ml_dsa_pk,
             &kem_ct,
             &viewer_nonce,
-        );
+        )
+        .unwrap();
 
         assert!(HandshakeManager::verify(&verifier, &transcript, &signature).is_ok());
         assert!(HandshakeManager::verify(&verifier, &tampered, &signature).is_err());
@@ -1293,7 +1316,8 @@ mod tests {
             &viewer_ml_dsa_pk,
             &kem_ct,
             &viewer_nonce,
-        );
+        )
+        .unwrap();
         let signature = signer.sign(&transcript);
 
         let mut tampered_hello = hello_bytes.clone();
@@ -1304,7 +1328,8 @@ mod tests {
             &viewer_ml_dsa_pk,
             &kem_ct,
             &viewer_nonce,
-        );
+        )
+        .unwrap();
 
         assert!(HandshakeManager::verify(&verifier, &tampered, &signature).is_err());
     }
@@ -1339,14 +1364,16 @@ mod tests {
             &viewer_ml_dsa_pk,
             &kem_ct,
             &viewer_nonce,
-        );
+        )
+        .unwrap();
         let second = viewer_signature_transcript(
             &second_hello,
             &viewer_pk,
             &viewer_ml_dsa_pk,
             &kem_ct,
             &viewer_nonce,
-        );
+        )
+        .unwrap();
 
         assert_ne!(first, second);
     }
@@ -1378,7 +1405,8 @@ mod tests {
             &viewer_nonce,
             &viewer_signature,
             &viewer_ml_dsa_signature,
-        );
+        )
+        .unwrap();
         let signature = signer.sign(&transcript);
 
         viewer_signature[0] ^= 0x01;
@@ -1390,7 +1418,8 @@ mod tests {
             &viewer_nonce,
             &viewer_signature,
             &viewer_ml_dsa_signature,
-        );
+        )
+        .unwrap();
 
         assert!(HandshakeManager::verify(&verifier, &transcript, &signature).is_ok());
         assert!(HandshakeManager::verify(&verifier, &tampered, &signature).is_err());
