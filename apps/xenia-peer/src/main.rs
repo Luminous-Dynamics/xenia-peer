@@ -6478,19 +6478,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // xenia-viewer, which already wraps its send half in an Arc<Mutex>).
     let (ft_tx, mut ft_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
 
-    let mut ft_state = file_transfer::FileTransferState::new();
+    let receive_reservation_capacity = args
+        .file_transfer_max_bytes
+        .saturating_mul(file_transfer::MAX_CONCURRENT_INCOMING_TRANSFERS as u64);
+    let mut ft_state = file_transfer::FileTransferState::new(receive_reservation_capacity);
     if let Some(path) = &args.send_file {
-        let data = std::fs::read(path)?;
-        if data.len() as u64 > args.file_transfer_max_bytes {
-            return Err(format!(
-                "--send-file {} is {} bytes, exceeds --file-transfer-max-bytes {}",
-                path.display(),
-                data.len(),
-                args.file_transfer_max_bytes
-            )
-            .into());
-        }
-        let blake3_hash = *blake3::hash(&data).as_bytes();
+        let source =
+            xenia_peer_core::TransferSource::open_file_limited(path, args.file_transfer_max_bytes)
+                .await?;
+        let size = source.size();
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -6501,23 +6497,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let offer = xenia_peer_core::FileTransferMessage::Offer {
             transfer_id,
             name: name.clone(),
-            size: data.len() as u64,
-            blake3_hash,
+            size,
+            blake3_hash: source.blake3_hash(),
         };
         let envelope = session
             .lock()
             .await
             .seal_file_transfer_message(offer, true)?;
         send_half.send_envelope(&envelope).await?;
-        info!(
-            transfer_id,
-            name,
-            size = data.len(),
-            "file transfer offered"
-        );
+        info!(transfer_id, name, size, "file transfer offered");
         ft_state.outgoing = Some(file_transfer::OutgoingTransfer {
             transfer_id,
-            data,
+            source,
             started: false,
         });
     }

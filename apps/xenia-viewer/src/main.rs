@@ -846,7 +846,7 @@ fn apply_clipboard_content_to_viewer(content: &ClipboardContent) {
 /// `--send-file` offers a single file per viewer run.
 struct OutgoingTransfer {
     transfer_id: u64,
-    data: Vec<u8>,
+    source: xenia_peer_core::TransferSource,
 }
 
 /// A transfer this side is receiving.
@@ -854,6 +854,7 @@ struct IncomingTransfer {
     name: String,
     expected_size: u64,
     stager: IncomingFileStager,
+    _reservation: xenia_peer_core::ReceiveReservation,
 }
 
 /// Bound concurrently staged inbound transfers and their open file descriptors.
@@ -885,6 +886,7 @@ async fn handle_file_transfer_message(
     session: &Arc<tokio::sync::Mutex<LaneSession>>,
     outgoing: &mut Option<OutgoingTransfer>,
     incoming: &mut std::collections::HashMap<u64, IncomingTransfer>,
+    receive_reservations: &xenia_peer_core::ReceiveReservationPool,
     recv_file_dir: Option<&std::path::Path>,
     max_bytes: u64,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -913,9 +915,17 @@ async fn handle_file_transfer_message(
                 (Some(recv_dir), Some(safe_name)) => (Some((recv_dir, safe_name)), String::new()),
             };
             let staged = staging_candidate.and_then(|(recv_dir, safe_name)| {
+                let reservation = match receive_reservations.try_reserve(size) {
+                    Ok(reservation) => reservation,
+                    Err(err) => {
+                        warn!(transfer_id, error = %err, "file receive reservation rejected");
+                        reason = "receiver has insufficient reserved receive capacity".to_string();
+                        return None;
+                    }
+                };
                 let dest = recv_dir.join(&safe_name);
                 match IncomingFileStager::create(&dest, size, blake3_hash) {
-                    Ok(stager) => Some((safe_name, stager)),
+                    Ok(stager) => Some((safe_name, stager, reservation)),
                     Err(err) => {
                         warn!(transfer_id, error = %err, "file receive staging could not be created");
                         reason = "receiver could not allocate private staging".to_string();
@@ -924,13 +934,14 @@ async fn handle_file_transfer_message(
                 }
             });
             let accept = staged.is_some();
-            if let Some((safe_name, stager)) = staged {
+            if let Some((safe_name, stager, reservation)) = staged {
                 incoming.insert(
                     transfer_id,
                     IncomingTransfer {
                         name: safe_name,
                         expected_size: size,
                         stager,
+                        _reservation: reservation,
                     },
                 );
                 info!(transfer_id, name, size, "file transfer offer accepted");
@@ -955,21 +966,24 @@ async fn handle_file_transfer_message(
             send_half.lock().await.send_envelope(&envelope).await?;
         }
         xenia_peer_core::FileTransferMessage::Accept { transfer_id } => {
-            let Some(transfer) = outgoing.as_ref().filter(|t| t.transfer_id == transfer_id) else {
+            let Some(transfer) = outgoing.as_mut().filter(|t| t.transfer_id == transfer_id) else {
                 warn!(transfer_id, "Accept for unknown/stale outgoing transfer");
                 return Ok(());
             };
             info!(
                 transfer_id,
-                bytes = transfer.data.len(),
-                "transfer accepted, sending chunks"
+                bytes = transfer.source.size(),
+                "transfer accepted, streaming chunks"
             );
-            let chunk_size = xenia_peer_core::FILE_TRANSFER_CHUNK_SIZE;
-            for (i, chunk) in transfer.data.chunks(chunk_size).enumerate() {
+            while let Some(chunk) = transfer
+                .source
+                .next_chunk(xenia_peer_core::FILE_TRANSFER_CHUNK_SIZE)
+                .await?
+            {
                 let msg = xenia_peer_core::FileTransferMessage::Chunk {
                     transfer_id,
-                    offset: (i * chunk_size) as u64,
-                    data: chunk.to_vec(),
+                    offset: chunk.offset,
+                    data: chunk.data,
                 };
                 let envelope = session
                     .lock()
@@ -2135,7 +2149,11 @@ async fn gui_receive_loop(
     let mut outgoing_transfer: Option<OutgoingTransfer> = None;
     let mut incoming_transfers: std::collections::HashMap<u64, IncomingTransfer> =
         std::collections::HashMap::new();
-    // Prepared here (read the file, hash it) but NOT sent yet -- the actual
+    let receive_reservations = xenia_peer_core::ReceiveReservationPool::new(
+        args.file_transfer_max_bytes
+            .saturating_mul(MAX_CONCURRENT_INCOMING_TRANSFERS as u64),
+    );
+    // Prepared here (open and hash the file by streaming) but NOT sent yet -- the actual
     // Offer send is deferred until after the initial rekey exchange
     // completes (see the Rekey-handling branch below). Sending it here,
     // immediately after the handshake, raced ahead of the daemon's own
@@ -2145,26 +2163,20 @@ async fn gui_receive_loop(
     // picking up this bare file-transfer envelope instead, since this
     // pre-loop code ran (and sent) before the loop below ever received or
     // acted on the daemon's Rekey Proposal.
-    let mut pending_initial_offer: Option<(u64, String, Vec<u8>, [u8; 32])> = None;
+    let mut pending_initial_offer: Option<(u64, String, xenia_peer_core::TransferSource)> = None;
     if let Some(path) = &args.send_file {
-        let data = std::fs::read(path)
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
-        if data.len() as u64 > args.file_transfer_max_bytes {
-            return Err(format!(
-                "--send-file {} is {} bytes, exceeds --file-transfer-max-bytes {}",
-                path.display(),
-                data.len(),
-                args.file_transfer_max_bytes
-            )
-            .into());
-        }
-        let blake3_hash = *blake3::hash(&data).as_bytes();
+        let source =
+            xenia_peer_core::TransferSource::open_file_limited(path, args.file_transfer_max_bytes)
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                    format!("--send-file {} could not be prepared: {e}", path.display()).into()
+                })?;
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("transfer")
             .to_string();
-        pending_initial_offer = Some((1, name, data, blake3_hash));
+        pending_initial_offer = Some((1, name, source));
     }
 
     let mut decoder = make_decoder(args.codec)
@@ -2236,6 +2248,7 @@ async fn gui_receive_loop(
                 &session,
                 &mut outgoing_transfer,
                 &mut incoming_transfers,
+                &receive_reservations,
                 args.recv_file_dir.as_deref(),
                 args.file_transfer_max_bytes,
             )
@@ -2351,12 +2364,13 @@ async fn gui_receive_loop(
             // subsequent bare envelope from us will be read by the
             // daemon's split recv task rather than mistaken for the Ack it
             // was waiting on.
-            if let Some((transfer_id, name, data, blake3_hash)) = pending_initial_offer.take() {
+            if let Some((transfer_id, name, source)) = pending_initial_offer.take() {
+                let size = source.size();
                 let offer = xenia_peer_core::FileTransferMessage::Offer {
                     transfer_id,
                     name: name.clone(),
-                    size: data.len() as u64,
-                    blake3_hash,
+                    size,
+                    blake3_hash: source.blake3_hash(),
                 };
                 let envelope = session
                     .lock()
@@ -2373,13 +2387,11 @@ async fn gui_receive_loop(
                     .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
                         e.to_string().into()
                     })?;
-                info!(
+                info!(transfer_id, name, size, "file transfer offered");
+                outgoing_transfer = Some(OutgoingTransfer {
                     transfer_id,
-                    name,
-                    size = data.len(),
-                    "file transfer offered"
-                );
-                outgoing_transfer = Some(OutgoingTransfer { transfer_id, data });
+                    source,
+                });
             }
             continue;
         }
