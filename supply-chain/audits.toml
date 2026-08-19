@@ -1,6 +1,12 @@
 
 # cargo-vet audits file
 
+[[audits.h2]]
+who = "tstoltz <tstoltz@luminous-dynamics.local>"
+criteria = "safe-to-deploy"
+delta = "0.4.15 -> 0.4.16"
+notes = "Reviewed h2 0.4.15 -> 0.4.16 delta. No new unsafe blocks or ambient filesystem/process capabilities. Reviewed bounded DATA-frame receive budget and release accounting, flow-control release, trailer wakeups, reset handling, WriteZero handling, send-buffer scheduling, trailer validation, stream accounting, HPACK table optimization, and associated regression tests. Security update bounds excessive small DATA-frame bookkeeping."
+
 [[audits.webbrowser]]
 who = "tstoltz <tstoltz@luminous-dynamics.local>"
 criteria = "safe-to-deploy"
