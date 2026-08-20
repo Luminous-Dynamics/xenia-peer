@@ -166,6 +166,8 @@ struct PinFile {
     pins: HashMap<String, String>,
 }
 
+type ConfirmationFn = fn(bool, &str, &[(&str, String)]) -> Result<bool, HostTrustError>;
+
 /// The native host-trust pin store: one process-local file, one entry per
 /// `(host_alias, suite)`.
 ///
@@ -188,6 +190,10 @@ pub struct HostTrustStore {
     /// defaulting this on would reopen exactly the oracle problem native
     /// confirmation exists to close.
     allow_noninteractive_privileged: bool,
+    /// Confirmation implementation. Production uses the native terminal
+    /// prompt; tests inject a deterministic noninteractive strategy so test
+    /// behavior never depends on whether the test runner inherited a TTY.
+    confirmation: ConfirmationFn,
 }
 
 impl HostTrustStore {
@@ -208,6 +214,14 @@ impl HostTrustStore {
         storage: Box<dyn PinStorage>,
         allow_noninteractive_privileged: bool,
     ) -> Result<Self, HostTrustError> {
+        Self::load_with_storage_and_confirmation(storage, allow_noninteractive_privileged, confirm)
+    }
+
+    fn load_with_storage_and_confirmation(
+        storage: Box<dyn PinStorage>,
+        allow_noninteractive_privileged: bool,
+        confirmation: ConfirmationFn,
+    ) -> Result<Self, HostTrustError> {
         let pins = match storage.read()? {
             None => HashMap::new(),
             Some(bytes) => Self::parse_pins(&bytes)?,
@@ -216,6 +230,7 @@ impl HostTrustStore {
             storage,
             pins,
             allow_noninteractive_privileged,
+            confirmation,
         })
     }
 
@@ -291,7 +306,7 @@ impl HostTrustStore {
         match self.pins.get(&key).copied() {
             Some(pinned) if pinned == fingerprint => Ok(PinOutcome::Matched),
             Some(pinned) => {
-                let confirmed = confirm(
+                let confirmed = (self.confirmation)(
                     self.allow_noninteractive_privileged,
                     "Daemon identity changed",
                     &[
@@ -320,7 +335,7 @@ impl HostTrustStore {
                 })
             }
             None => {
-                let confirmed = confirm(
+                let confirmed = (self.confirmation)(
                     self.allow_noninteractive_privileged,
                     "Trust this daemon for the first time?",
                     &[
@@ -373,7 +388,7 @@ impl HostTrustStore {
         title: &str,
         fields: &[(&str, String)],
     ) -> Result<bool, HostTrustError> {
-        confirm(self.allow_noninteractive_privileged, title, fields)
+        (self.confirmation)(self.allow_noninteractive_privileged, title, fields)
     }
 
     /// Transactional: builds the post-insert map, persists it, and only
@@ -469,6 +484,29 @@ mod tests {
         dir.join("pins.json")
     }
 
+    fn noninteractive_test_confirmation(
+        allow_noninteractive_privileged: bool,
+        _title: &str,
+        _fields: &[(&str, String)],
+    ) -> Result<bool, HostTrustError> {
+        if allow_noninteractive_privileged {
+            Ok(true)
+        } else {
+            Err(HostTrustError::ConfirmationUnavailable {
+                reason: "test confirmer: no interactive terminal available".to_string(),
+            })
+        }
+    }
+
+    fn file_store(path: PathBuf, allow_noninteractive_privileged: bool) -> HostTrustStore {
+        HostTrustStore::load_with_storage_and_confirmation(
+            Box::new(SecureFilePinStorage { path }),
+            allow_noninteractive_privileged,
+            noninteractive_test_confirmation,
+        )
+        .unwrap()
+    }
+
     /// In-memory [`PinStorage`] for fault injection. `clone()` shares the
     /// same underlying bytes (via `Arc<Mutex<_>>` -- not `Rc<RefCell<_>>`,
     /// since [`PinStorage`] requires `Send + Sync` to match
@@ -522,31 +560,33 @@ mod tests {
         storage: MockPinStorage,
         allow_noninteractive_privileged: bool,
     ) -> HostTrustStore {
-        HostTrustStore::load_with_storage(Box::new(storage), allow_noninteractive_privileged)
-            .unwrap()
+        HostTrustStore::load_with_storage_and_confirmation(
+            Box::new(storage),
+            allow_noninteractive_privileged,
+            noninteractive_test_confirmation,
+        )
+        .unwrap()
     }
 
-    // These exercise the pin-storage logic with `allow_noninteractive_privileged:
-    // true`, which -- in a non-interactive `cargo test` environment -- makes
-    // `confirm()` return `Ok(true)` immediately without touching stdin, so
-    // `check()`'s confirmation branches are exercised deterministically.
-    // Genuine interactive confirmation (a real terminal, an operator typing
-    // "yes"/anything else) is not covered by unit tests; it's a thin,
-    // deliberately simple wrapper around stdin/stdout with no logic beyond
-    // the string comparison covered by nothing-fancy manual testing.
+    // These exercise pin-storage and confirmation-policy logic through an
+    // injected deterministic noninteractive confirmer. Test results therefore
+    // do not depend on whether `cargo test` inherited a real terminal.
+    // Production `HostTrustStore::load` remains wired to the native `confirm`
+    // function above. Genuine terminal I/O (an operator typing "yes" or a
+    // refusal) remains deliberately outside unit-test scope.
 
     #[test]
     fn first_use_is_trusted_on_first_use_and_persisted() {
         let path = temp_path("first-use");
         let fp = [7u8; 32];
         {
-            let mut store = HostTrustStore::load(path.clone(), true).unwrap();
+            let mut store = file_store(path.clone(), true);
             assert_eq!(store.lookup("daemon-a", "standard"), None);
             let outcome = store.check("daemon-a", "standard", fp).unwrap();
             assert_eq!(outcome, PinOutcome::TrustedOnFirstUse);
         }
         // Reload from disk: the pin survives.
-        let store2 = HostTrustStore::load(path.clone(), true).unwrap();
+        let store2 = file_store(path.clone(), true);
         assert_eq!(store2.lookup("daemon-a", "standard"), Some(fp));
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
@@ -555,7 +595,7 @@ mod tests {
     fn matching_fingerprint_is_matched_with_no_change() {
         let path = temp_path("matching");
         let fp = [3u8; 32];
-        let mut store = HostTrustStore::load(path.clone(), true).unwrap();
+        let mut store = file_store(path.clone(), true);
         store.check("daemon-b", "highsec", fp).unwrap();
         let outcome = store.check("daemon-b", "highsec", fp).unwrap();
         assert_eq!(outcome, PinOutcome::Matched);
@@ -565,7 +605,7 @@ mod tests {
     #[test]
     fn changed_fingerprint_is_rotated_when_confirmed() {
         let path = temp_path("rotate");
-        let mut store = HostTrustStore::load(path.clone(), true).unwrap();
+        let mut store = file_store(path.clone(), true);
         store.check("daemon-c", "standard", [1u8; 32]).unwrap();
         let outcome = store.check("daemon-c", "standard", [2u8; 32]).unwrap();
         assert_eq!(
@@ -581,7 +621,7 @@ mod tests {
     #[test]
     fn confirmation_unavailable_when_noninteractive_and_not_opted_in() {
         let path = temp_path("no-confirm");
-        let mut store = HostTrustStore::load(path.clone(), false).unwrap();
+        let mut store = file_store(path.clone(), false);
         let err = store.check("daemon-d", "standard", [9u8; 32]).unwrap_err();
         assert!(matches!(
             err,
@@ -595,13 +635,13 @@ mod tests {
     #[test]
     fn forget_removes_a_pin() {
         let path = temp_path("forget");
-        let mut store = HostTrustStore::load(path.clone(), true).unwrap();
+        let mut store = file_store(path.clone(), true);
         store.check("daemon-e", "standard", [5u8; 32]).unwrap();
         assert!(store.lookup("daemon-e", "standard").is_some());
         store.forget("daemon-e", "standard").unwrap();
         assert_eq!(store.lookup("daemon-e", "standard"), None);
         // Persisted: reload confirms.
-        let store2 = HostTrustStore::load(path.clone(), true).unwrap();
+        let store2 = file_store(path.clone(), true);
         assert_eq!(store2.lookup("daemon-e", "standard"), None);
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
@@ -609,7 +649,7 @@ mod tests {
     #[test]
     fn standard_and_highsec_suites_are_independent_pins() {
         let path = temp_path("suites");
-        let mut store = HostTrustStore::load(path.clone(), true).unwrap();
+        let mut store = file_store(path.clone(), true);
         store.check("daemon-f", "standard", [1u8; 32]).unwrap();
         store.check("daemon-f", "highsec", [2u8; 32]).unwrap();
         assert_eq!(store.lookup("daemon-f", "standard"), Some([1u8; 32]));
@@ -651,7 +691,7 @@ mod tests {
     #[test]
     fn confirm_action_respects_the_store_s_noninteractive_policy() {
         let allowed_path = temp_path("confirm-action-allowed");
-        let allowed = HostTrustStore::load(allowed_path.clone(), true).unwrap();
+        let allowed = file_store(allowed_path.clone(), true);
         assert!(
             allowed
                 .confirm_action("Revoke?", &[("target", "op-1".to_string())])
@@ -660,7 +700,7 @@ mod tests {
         std::fs::remove_dir_all(allowed_path.parent().unwrap()).ok();
 
         let blocked_path = temp_path("confirm-action-blocked");
-        let blocked = HostTrustStore::load(blocked_path.clone(), false).unwrap();
+        let blocked = file_store(blocked_path.clone(), false);
         let err = blocked
             .confirm_action("Revoke?", &[("target", "op-1".to_string())])
             .unwrap_err();
