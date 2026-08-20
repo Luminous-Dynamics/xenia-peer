@@ -39,7 +39,7 @@ use xenia_peer_core::transport::{RecvEnvelope, SendEnvelope, TcpTransport, Trans
 use xenia_peer_core::{
     ClipboardContent, FILE_TRANSFER_CHUNK_SIZE, FileTransferMessage, IncomingFileStager,
     PAYLOAD_TYPE_FILE_TRANSFER_FROM_HOST, PAYLOAD_TYPE_FILE_TRANSFER_FROM_VIEWER, RawClipboard,
-    cleanup_orphaned_receive_staging,
+    ReceiveReservation, ReceiveReservationPool, TransferSource, cleanup_orphaned_receive_staging,
 };
 use xenia_peer_core::{
     HandshakeManager, LaneSession, RekeyPolicy, SessionEpochState, derive_negotiated_context_key,
@@ -132,9 +132,9 @@ const FILE_TRANSFER_COPY_LEASE_MS: u64 = 60_000;
 /// command slot forever. Five minutes is generous for the fixed 100 MiB ceiling
 /// while remaining bounded under a stalled/abandoned provider.
 const FILE_TRANSFER_STREAM_LEASE_MS: u64 = 5 * 60_000;
-/// Caps how many incoming transfers can be simultaneously buffered in
-/// memory. Lower than the daemon's own `MAX_CONCURRENT_INCOMING_TRANSFERS`
-/// (8) since phones have tighter RAM budgets than desktop hosts.
+/// Caps how many incoming transfers can be simultaneously staged.
+/// Lower than the daemon's own `MAX_CONCURRENT_INCOMING_TRANSFERS` (8)
+/// because mobile devices have tighter storage/resource budgets.
 const MAX_CONCURRENT_INCOMING_TRANSFERS: usize = 4;
 
 /// One thing that happened to a file transfer, surfaced to the UI via
@@ -179,31 +179,20 @@ pub enum FileTransferEvent {
 /// `xenia-viewer`'s own `--send-file` semantics (one transfer per
 /// run) -- a second `send_file` call while one is in flight is
 /// rejected rather than queued.
-enum OutgoingTransferSource {
-    Memory(Vec<u8>),
-    StagedFile { path: PathBuf },
-}
-
-impl Drop for OutgoingTransferSource {
-    fn drop(&mut self) {
-        if let OutgoingTransferSource::StagedFile { path } = self {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
 struct OutgoingTransfer {
     transfer_id: u64,
     name: String,
-    size: u64,
-    source: OutgoingTransferSource,
+    source: TransferSource,
 }
 
-/// A transfer this side is receiving.
+/// A transfer this side is receiving. The reservation is deliberately owned
+/// by the transfer so every success/failure/cancel/drop path releases exactly
+/// the admitted byte capacity through RAII.
 struct IncomingTransfer {
     name: String,
     expected_size: u64,
     stager: IncomingFileStager,
+    _reservation: ReceiveReservation,
 }
 
 /// A UI-initiated file-transfer action, delivered to the background
@@ -1244,6 +1233,9 @@ async fn run_session_inner(
     // that state).
     let mut outgoing: Option<OutgoingTransfer> = None;
     let mut incoming: HashMap<u64, IncomingTransfer> = HashMap::new();
+    let receive_reservations = ReceiveReservationPool::new(
+        max_file_bytes.saturating_mul(MAX_CONCURRENT_INCOMING_TRANSFERS as u64),
+    );
     let mut next_transfer_id: u64 = 1;
 
     loop {
@@ -1301,6 +1293,7 @@ async fn run_session_inner(
                 shared,
                 &mut outgoing,
                 &mut incoming,
+                &receive_reservations,
                 recv_dir.as_deref(),
                 max_file_bytes,
             )
@@ -1502,9 +1495,9 @@ async fn seal_and_send<S: SendEnvelope>(
         .map_err(|e| e.to_string())
 }
 
-/// Handle a UI-initiated [`FileTransferCommand`] (currently only
-/// `SendFile`): hash + offer the file, then remember it as `outgoing`
-/// so a later `Accept` can find the buffered bytes to chunk-send.
+/// Handle a UI-initiated [`FileTransferCommand`]: prepare a shared
+/// [`TransferSource`], authenticate its size/hash in the offer, then retain the
+/// source until the peer accepts or rejects the transfer.
 async fn handle_file_transfer_command<S: SendEnvelope>(
     cmd: FileTransferCommand,
     session: &Arc<Mutex<LaneSession>>,
@@ -1513,27 +1506,36 @@ async fn handle_file_transfer_command<S: SendEnvelope>(
     outgoing: &mut Option<OutgoingTransfer>,
     next_transfer_id: &mut u64,
 ) {
-    // Unpack first so the defensive busy path owns the staged source. If this
-    // function is ever called while busy despite the select guard above,
-    // dropping `source` also removes a staged file rather than leaking it.
-    let (name, size, blake3_hash, source) = match cmd {
-        FileTransferCommand::SendFile { name, data } => {
-            let size = data.len() as u64;
-            let hash = *blake3::hash(&data).as_bytes();
-            (name, size, hash, OutgoingTransferSource::Memory(data))
-        }
+    // Prepare first so the defensive busy path owns any staged source. For SAF
+    // uploads `cleanup_on_drop=true` transfers deletion ownership into the
+    // shared source even when preparation/validation itself fails.
+    let (name, source) = match cmd {
+        FileTransferCommand::SendFile { name, data } => (name, TransferSource::from_memory(data)),
         FileTransferCommand::SendStagedFile {
             name,
             path,
             size,
             blake3_hash,
-        } => (
-            name,
-            size,
-            blake3_hash,
-            OutgoingTransferSource::StagedFile { path },
-        ),
+        } => match TransferSource::open_prehashed_file(path, size, blake3_hash, true).await {
+            Ok(source) => (name, source),
+            Err(err) => {
+                warn!(error = %err, "failed to prepare staged transfer source");
+                push_ft_event(
+                    shared,
+                    FileTransferEvent::Done {
+                        transfer_id: 0,
+                        name,
+                        outgoing: true,
+                        ok: false,
+                        detail: format!("prepare staged transfer source: {err}"),
+                    },
+                )
+                .await;
+                return;
+            }
+        },
     };
+
     if outgoing.is_some() {
         warn!(
             name,
@@ -1550,12 +1552,15 @@ async fn handle_file_transfer_command<S: SendEnvelope>(
             },
         )
         .await;
-        // `source` drops here. Disk-backed sources remove their staging file.
+        // `source` drops here. Owned SAF staging is removed by TransferSource.
         return;
     }
 
+    let size = source.size();
+    let blake3_hash = source.blake3_hash();
     let transfer_id = *next_transfer_id;
     *next_transfer_id += 1;
+
     let offer = FileTransferMessage::Offer {
         transfer_id,
         name: name.clone(),
@@ -1577,6 +1582,7 @@ async fn handle_file_transfer_command<S: SendEnvelope>(
         .await;
         return;
     }
+
     info!(transfer_id, name, size, "file transfer offered");
     push_ft_event(
         shared,
@@ -1589,87 +1595,54 @@ async fn handle_file_transfer_command<S: SendEnvelope>(
         },
     )
     .await;
+
     *outgoing = Some(OutgoingTransfer {
         transfer_id,
         name,
-        size,
         source,
     });
 }
 
 async fn send_outgoing_transfer_chunks<S: SendEnvelope>(
-    transfer: &OutgoingTransfer,
+    transfer: &mut OutgoingTransfer,
     session: &Arc<Mutex<LaneSession>>,
     send_half: &Arc<Mutex<S>>,
     shared: &Arc<Shared>,
 ) -> Result<(), String> {
     let transfer_id = transfer.transfer_id;
     let name = transfer.name.clone();
-    let total = transfer.size;
-    let mut offset = 0_u64;
-    match &transfer.source {
-        OutgoingTransferSource::Memory(data) => {
-            for chunk in data.chunks(FILE_TRANSFER_CHUNK_SIZE) {
-                let msg = FileTransferMessage::Chunk {
-                    transfer_id,
-                    offset,
-                    data: chunk.to_vec(),
-                };
-                seal_and_send(session, send_half, msg).await?;
-                offset = offset.saturating_add(chunk.len() as u64);
-                push_ft_event(
-                    shared,
-                    FileTransferEvent::Progress {
-                        transfer_id,
-                        name: name.clone(),
-                        done_bytes: offset,
-                        total_bytes: total,
-                        outgoing: true,
-                    },
-                )
-                .await;
-            }
-        }
-        OutgoingTransferSource::StagedFile { path } => {
-            use tokio::io::AsyncReadExt;
-            let mut file = tokio::fs::File::open(path)
-                .await
-                .map_err(|e| format!("open staged file: {e}"))?;
-            let mut buffer = vec![0_u8; FILE_TRANSFER_CHUNK_SIZE];
-            loop {
-                let read = file
-                    .read(&mut buffer)
-                    .await
-                    .map_err(|e| format!("read staged file: {e}"))?;
-                if read == 0 {
-                    break;
-                }
-                let msg = FileTransferMessage::Chunk {
-                    transfer_id,
-                    offset,
-                    data: buffer[..read].to_vec(),
-                };
-                seal_and_send(session, send_half, msg).await?;
-                offset = offset.saturating_add(read as u64);
-                push_ft_event(
-                    shared,
-                    FileTransferEvent::Progress {
-                        transfer_id,
-                        name: name.clone(),
-                        done_bytes: offset,
-                        total_bytes: total,
-                        outgoing: true,
-                    },
-                )
-                .await;
-            }
-        }
+    let total = transfer.source.size();
+
+    loop {
+        let Some(chunk) = transfer
+            .source
+            .next_chunk(FILE_TRANSFER_CHUNK_SIZE)
+            .await
+            .map_err(|err| err.to_string())?
+        else {
+            break;
+        };
+
+        let done_bytes = transfer.source.bytes_sent();
+        let msg = FileTransferMessage::Chunk {
+            transfer_id,
+            offset: chunk.offset,
+            data: chunk.data,
+        };
+        seal_and_send(session, send_half, msg).await?;
+        push_ft_event(
+            shared,
+            FileTransferEvent::Progress {
+                transfer_id,
+                name: name.clone(),
+                done_bytes,
+                total_bytes: total,
+                outgoing: true,
+            },
+        )
+        .await;
     }
-    if offset != total {
-        return Err(format!(
-            "outgoing source length changed after offer: expected {total}, read {offset}"
-        ));
-    }
+
     Ok(())
 }
 
@@ -1688,6 +1661,7 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
     shared: &Arc<Shared>,
     outgoing: &mut Option<OutgoingTransfer>,
     incoming: &mut HashMap<u64, IncomingTransfer>,
+    receive_reservations: &ReceiveReservationPool,
     recv_dir: Option<&std::path::Path>,
     max_bytes: u64,
 ) {
@@ -1713,9 +1687,18 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
                     }
                 };
             let staged = staging_candidate.and_then(|(recv_dir, safe_name)| {
+                let reservation = match receive_reservations.try_reserve(size) {
+                    Ok(reservation) => reservation,
+                    Err(err) => {
+                        warn!(transfer_id, error = %err, "file receive reservation rejected");
+                        reason =
+                            "receiver has insufficient reserved receive capacity".to_string();
+                        return None;
+                    }
+                };
                 let dest = recv_dir.join(&safe_name);
                 match IncomingFileStager::create(&dest, size, blake3_hash) {
-                    Ok(stager) => Some((safe_name, stager)),
+                    Ok(stager) => Some((safe_name, stager, reservation)),
                     Err(err) => {
                         warn!(transfer_id, error = %err, "file receive staging could not be created");
                         reason = "receiver could not allocate private staging".to_string();
@@ -1724,13 +1707,14 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
                 }
             });
             let accept = staged.is_some();
-            if let Some((safe_name, stager)) = staged {
+            if let Some((safe_name, stager, reservation)) = staged {
                 incoming.insert(
                     transfer_id,
                     IncomingTransfer {
                         name: safe_name.clone(),
                         expected_size: size,
                         stager,
+                        _reservation: reservation,
                     },
                 );
                 info!(
@@ -1780,12 +1764,12 @@ async fn handle_file_transfer_message<S: SendEnvelope>(
             }
         }
         FileTransferMessage::Accept { transfer_id } => {
-            let Some(transfer) = outgoing.as_ref().filter(|t| t.transfer_id == transfer_id) else {
+            let Some(transfer) = outgoing.as_mut().filter(|t| t.transfer_id == transfer_id) else {
                 warn!(transfer_id, "Accept for unknown/stale outgoing transfer");
                 return;
             };
             let name = transfer.name.clone();
-            let total = transfer.size;
+            let total = transfer.source.size();
             info!(
                 transfer_id,
                 bytes = total,

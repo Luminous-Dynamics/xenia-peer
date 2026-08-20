@@ -57,7 +57,9 @@ pub mod frame;
 pub mod handshake;
 pub mod m1_session;
 pub mod producer_flow;
+pub mod receive_reservation;
 mod session;
+pub mod transfer_source;
 pub mod transport;
 
 pub use file_transfer::{
@@ -78,7 +80,11 @@ pub use handshake::{RekeyPolicy, SessionEpochState};
 pub use m1_session::{
     M1AuditEvent, M1Permission, M1PermissionSet, M1SessionError, M1SessionMachine, M1SessionState,
 };
+pub use receive_reservation::{
+    ReceiveReservation, ReceiveReservationError, ReceiveReservationPool,
+};
 pub use session::{FrameLane, LaneSession, Session, SessionError, SessionRole};
+pub use transfer_source::{TransferChunk, TransferSource, TransferSourceError};
 pub use xenia_handshake::{
     HandshakeManager, RekeyEpochContextV1, RekeyReason, derive_negotiated_context_key,
     derive_rekey_epoch_keys,

@@ -33,7 +33,7 @@ pub(crate) const MAX_CONCURRENT_INCOMING_TRANSFERS: usize = 8;
 /// `--send-file` offers a single file per daemon run.
 pub(crate) struct OutgoingTransfer {
     pub(crate) transfer_id: u64,
-    pub(crate) data: Vec<u8>,
+    pub(crate) source: xenia_peer_core::TransferSource,
     pub(crate) started: bool,
 }
 
@@ -42,6 +42,7 @@ struct IncomingTransfer {
     name: String,
     expected_size: u64,
     stager: IncomingFileStager,
+    _reservation: xenia_peer_core::ReceiveReservation,
 }
 
 /// Per-connection file-transfer state: the single outbound transfer (if any)
@@ -49,6 +50,7 @@ struct IncomingTransfer {
 pub(crate) struct FileTransferState {
     pub(crate) outgoing: Option<OutgoingTransfer>,
     incoming: HashMap<u64, IncomingTransfer>,
+    receive_reservations: xenia_peer_core::ReceiveReservationPool,
 }
 
 /// Immutable per-run configuration for inbound transfers.
@@ -70,10 +72,13 @@ pub(crate) enum OfferDecision {
 }
 
 impl FileTransferState {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(receive_reservation_capacity: u64) -> Self {
         Self {
             outgoing: None,
             incoming: HashMap::new(),
+            receive_reservations: xenia_peer_core::ReceiveReservationPool::new(
+                receive_reservation_capacity,
+            ),
         }
     }
 
@@ -153,31 +158,47 @@ pub(crate) async fn handle_envelope(
                             reason: "file receive is not permitted by current consent".to_string(),
                         }
                     } else {
-                        let recv_dir = config.recv_file_dir.ok_or_else(|| {
-                            std::io::Error::other(
-                                "accepted file-transfer offer without configured receive directory",
-                            )
-                        })?;
-                        let dest = recv_dir.join(&safe_name);
-                        match IncomingFileStager::create(&dest, size, blake3_hash) {
-                            Ok(stager) => {
-                                state.incoming.insert(
-                                    transfer_id,
-                                    IncomingTransfer {
-                                        name: safe_name,
-                                        expected_size: size,
-                                        stager,
-                                    },
-                                );
-                                info!(transfer_id, name, size, "file transfer offer accepted");
-                                FileTransferMessage::Accept { transfer_id }
-                            }
+                        match state.receive_reservations.try_reserve(size) {
                             Err(err) => {
-                                warn!(transfer_id, error = %err, "file receive staging could not be created");
+                                warn!(transfer_id, error = %err, "file receive reservation rejected");
                                 FileTransferMessage::Reject {
                                     transfer_id,
-                                    reason: "receiver could not allocate private staging"
+                                    reason: "receiver has insufficient reserved receive capacity"
                                         .to_string(),
+                                }
+                            }
+                            Ok(reservation) => {
+                                let recv_dir = config.recv_file_dir.ok_or_else(|| {
+                                    std::io::Error::other(
+                                        "accepted file-transfer offer without configured receive directory",
+                                    )
+                                })?;
+                                let dest = recv_dir.join(&safe_name);
+                                match IncomingFileStager::create(&dest, size, blake3_hash) {
+                                    Ok(stager) => {
+                                        state.incoming.insert(
+                                            transfer_id,
+                                            IncomingTransfer {
+                                                name: safe_name,
+                                                expected_size: size,
+                                                stager,
+                                                _reservation: reservation,
+                                            },
+                                        );
+                                        info!(
+                                            transfer_id,
+                                            name, size, "file transfer offer accepted"
+                                        );
+                                        FileTransferMessage::Accept { transfer_id }
+                                    }
+                                    Err(err) => {
+                                        warn!(transfer_id, error = %err, "file receive staging could not be created");
+                                        FileTransferMessage::Reject {
+                                            transfer_id,
+                                            reason: "receiver could not allocate private staging"
+                                                .to_string(),
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -212,19 +233,22 @@ pub(crate) async fn handle_envelope(
             transfer.started = true;
             info!(
                 transfer_id,
-                bytes = transfer.data.len(),
-                "transfer accepted, sending chunks"
+                bytes = transfer.source.size(),
+                "transfer accepted, streaming chunks"
             );
-            for (i, chunk) in transfer.data.chunks(FILE_TRANSFER_CHUNK_SIZE).enumerate() {
+            loop {
                 if let Err(err) = m1_runtime.lock().await.allow_file_send_flow() {
                     warn!(error = %err, "outgoing file transfer halted by M1 consent gate");
                     return Ok(());
                 }
-                let offset = (i * FILE_TRANSFER_CHUNK_SIZE) as u64;
+                let Some(chunk) = transfer.source.next_chunk(FILE_TRANSFER_CHUNK_SIZE).await?
+                else {
+                    break;
+                };
                 let msg = FileTransferMessage::Chunk {
                     transfer_id,
-                    offset,
-                    data: chunk.to_vec(),
+                    offset: chunk.offset,
+                    data: chunk.data,
                 };
                 let envelope = session.lock().await.seal_file_transfer_message(msg, true)?;
                 send_half.send_envelope(&envelope).await?;
@@ -361,7 +385,7 @@ mod tests {
 
     #[test]
     fn offer_rejected_when_receiving_disabled() {
-        let state = FileTransferState::new();
+        let state = FileTransferState::new(u64::MAX);
         let config = FileTransferConfig {
             recv_file_dir: None,
             max_bytes: 1000,
@@ -374,7 +398,7 @@ mod tests {
 
     #[test]
     fn offer_rejected_for_path_traversal_name() {
-        let state = FileTransferState::new();
+        let state = FileTransferState::new(u64::MAX);
         assert!(matches!(
             state.evaluate_offer(&accepting_config(), "..", 10),
             OfferDecision::Reject { .. }
@@ -383,7 +407,7 @@ mod tests {
 
     #[test]
     fn offer_rejected_over_size_cap() {
-        let state = FileTransferState::new();
+        let state = FileTransferState::new(u64::MAX);
         match state.evaluate_offer(&accepting_config(), "big.bin", 1001) {
             OfferDecision::Reject { reason } => assert!(reason.contains("cap")),
             other => panic!("expected reject, got {other:?}"),
@@ -398,16 +422,18 @@ mod tests {
             rand::random::<u64>()
         ));
         std::fs::create_dir(&dir).unwrap();
-        let mut state = FileTransferState::new();
+        let mut state = FileTransferState::new(u64::MAX);
         let empty_hash = *blake3::hash(b"").as_bytes();
         for i in 0..MAX_CONCURRENT_INCOMING_TRANSFERS as u64 {
             let path = dir.join(format!("f{i}"));
+            let reservation = state.receive_reservations.try_reserve(0).unwrap();
             state.incoming.insert(
                 i,
                 IncomingTransfer {
                     name: format!("f{i}"),
                     expected_size: 0,
                     stager: IncomingFileStager::create(&path, 0, empty_hash).unwrap(),
+                    _reservation: reservation,
                 },
             );
         }
@@ -421,7 +447,7 @@ mod tests {
 
     #[test]
     fn offer_accepted_returns_sanitized_name() {
-        let state = FileTransferState::new();
+        let state = FileTransferState::new(u64::MAX);
         assert_eq!(
             state.evaluate_offer(&accepting_config(), "/uploads/report.pdf", 10),
             OfferDecision::Accept {

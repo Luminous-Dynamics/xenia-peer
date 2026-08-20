@@ -3,6 +3,7 @@ from pathlib import Path
 import hashlib,json,re
 root=Path(__file__).resolve().parents[1]
 engine=(root/'crates/xenia-mobile-ffi/src/engine.rs').read_text()
+transfer_source=(root/'crates/xenia-peer-core/src/transfer_source.rs').read_text()
 ffi=(root/'crates/xenia-mobile-ffi/src/lib.rs').read_text()
 jni=(root/'apps/xenia-viewer-android/src/main/cpp/xenia_jni.c').read_text()
 bindings=(root/'apps/xenia-viewer-android/src/main/kotlin/io/luminousdynamics/xenia/NativeBindings.kt').read_text()
@@ -22,8 +23,26 @@ req('staged_command','SendStagedFile' in engine)
 req('incremental_blake3','stream.hasher.update(bytes)' in engine)
 req('app_private_staging','outbound-staging' in engine and 'create_new(true)' in engine)
 req('bounded_append','MOBILE_FILE_TRANSFER_MAX_BYTES_V1' in engine and 'checked_add(bytes.len())' in engine)
-req('staged_tokio_read','tokio::fs::File::open(path)' in engine and 'FILE_TRANSFER_CHUNK_SIZE' in engine)
-req('staged_cleanup','std::fs::remove_file(path)' in engine)
+req(
+    'staged_tokio_read',
+    re.search(
+        r'TransferSource::open_prehashed_file\(.*?true\s*,?\s*\)',
+        engine,
+        re.S,
+    ) is not None
+    and re.search(
+        r'\.next_chunk\(\s*FILE_TRANSFER_CHUNK_SIZE\s*\)',
+        engine,
+        re.S,
+    ) is not None
+    and 'tokio::fs::File' in transfer_source,
+)
+req(
+    'staged_cleanup',
+    'struct CleanupPath' in transfer_source
+    and 'std::fs::remove_file(&path)' in transfer_source
+    and 'cleanup_on_drop.then_some(path.clone())' in transfer_source,
+)
 req('snapshot_v2_engine','FileTransferAdmissionSnapshotV2' in engine and 'active_stream_bytes' in engine)
 req('snapshot_v2_ffi','XeniaFileTransferAdmissionSnapshotV2' in ffi)
 req('snapshot_v2_jni','NativeBindings_fileTransferAdmissionSnapshotV2' in jni)

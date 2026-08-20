@@ -15,6 +15,7 @@ checks=(
   scripts/check_application_runtime_assurance_v19.py
   scripts/check_application_file_staging_v20.py
   scripts/check_application_receive_staging_v21.py
+  scripts/check_application_transfer_source_v22.py
 )
 models=(
   scripts/model_check_transport_session_profile_v1.py
