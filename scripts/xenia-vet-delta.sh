@@ -128,11 +128,14 @@ EOF_NEXT
     [[ -n "$notes" ]] \
       || fail "certification requires non-empty --notes; record the security-relevant surfaces you reviewed"
 
+    # `--accept-all` suppresses cargo-vet's final interactive criteria prompt.
+    # It does not bypass this helper's explicit human-review gates above.
     args=(
       vet certify --locked
       "$crate" "$from_version" "$to_version"
       --criteria "$criteria"
       --notes "$notes"
+      --accept-all
     )
     if [[ -n "$who" ]]; then
       args+=(--who "$who")

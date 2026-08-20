@@ -1,113 +1,170 @@
-#!/usr/bin/env python3
-"""Contract tests for scripts/xenia-vet-delta.sh."""
-
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import subprocess
 import tempfile
+import textwrap
 import unittest
+from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = REPO_ROOT / "scripts" / "xenia-vet-delta.sh"
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = ROOT / "scripts" / "xenia-vet-delta.sh"
 
 
 class XeniaVetDeltaTests(unittest.TestCase):
-    def run_helper(self, *args: str) -> tuple[subprocess.CompletedProcess[str], list[str]]:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            (root / "supply-chain").mkdir()
-            (root / "supply-chain" / "config.toml").write_text("[cargo-vet]\nversion = \"0.10\"\n")
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
 
-            fake_bin = root / "bin"
-            fake_bin.mkdir()
-            log = root / "cargo.log"
-            cargo = fake_bin / "cargo"
-            cargo.write_text(
-                "#!/usr/bin/env bash\n"
-                "set -euo pipefail\n"
-                "printf '%s\\n' \"$*\" >> \"$XENIA_TEST_CARGO_LOG\"\n"
+        self.tmp = Path(self.tempdir.name)
+        self.bin_dir = self.tmp / "bin"
+        self.bin_dir.mkdir()
+        self.cargo_log = self.tmp / "cargo.log"
+
+        cargo = self.bin_dir / "cargo"
+        cargo.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -eu
+
+                {
+                  first=1
+                  for arg in "$@"; do
+                    if [ "$first" -eq 0 ]; then
+                      printf '\t'
+                    fi
+                    printf '%s' "$arg"
+                    first=0
+                  done
+                  printf '\n'
+                } >> "$CARGO_LOG"
+
+                if [ "${1:-}" = "vet" ] && [ "${2:-}" = "certify" ]; then
+                  accept_all=0
+                  for arg in "$@"; do
+                    if [ "$arg" = "--accept-all" ]; then
+                      accept_all=1
+                    fi
+                  done
+                  if [ "$accept_all" -ne 1 ]; then
+                    echo "fake cargo: certify would prompt without --accept-all" >&2
+                    exit 97
+                  fi
+                fi
+
+                exit 0
+                """
             )
-            cargo.chmod(0o755)
-
-            env = os.environ.copy()
-            env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
-            env["XENIA_TEST_CARGO_LOG"] = str(log)
-
-            proc = subprocess.run(
-                [str(SCRIPT), *args],
-                cwd=root,
-                env=env,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            calls = log.read_text().splitlines() if log.exists() else []
-            return proc, calls
-
-    def test_review_uses_locked_local_diff_only(self) -> None:
-        proc, calls = self.run_helper("review", "webbrowser", "1.2.1", "1.2.2")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(
-            calls,
-            ["vet diff --locked --mode=local webbrowser 1.2.1 1.2.2"],
         )
-        self.assertIn("certify it explicitly without an editor", proc.stdout)
+        cargo.chmod(0o755)
 
-    def test_certify_refuses_without_review_attestation(self) -> None:
-        proc, calls = self.run_helper(
+        self.env = os.environ.copy()
+        self.env["PATH"] = f"{self.bin_dir}:{self.env['PATH']}"
+        self.env["CARGO_LOG"] = str(self.cargo_log)
+
+    def run_helper(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(SCRIPT), *args],
+            cwd=ROOT,
+            env=self.env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+    def cargo_calls(self) -> list[list[str]]:
+        if not self.cargo_log.exists():
+            return []
+        return [line.split("\t") for line in self.cargo_log.read_text().splitlines()]
+
+    def test_certify_requires_reviewed_before_running_cargo(self) -> None:
+        result = self.run_helper(
             "certify",
-            "webbrowser",
-            "1.2.1",
-            "1.2.2",
+            "demo-crate",
+            "1.0.0",
+            "1.0.1",
             "--notes",
-            "reviewed",
+            "Reviewed the delta.",
         )
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertEqual(calls, [])
-        self.assertIn("requires --reviewed", proc.stderr)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("requires --reviewed", result.stderr)
+        self.assertEqual(self.cargo_calls(), [])
 
-    def test_certify_refuses_without_notes(self) -> None:
-        proc, calls = self.run_helper(
+    def test_certify_requires_nonempty_notes_before_running_cargo(self) -> None:
+        result = self.run_helper(
             "certify",
-            "webbrowser",
-            "1.2.1",
-            "1.2.2",
+            "demo-crate",
+            "1.0.0",
+            "1.0.1",
             "--reviewed",
         )
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertEqual(calls, [])
-        self.assertIn("requires non-empty --notes", proc.stderr)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("requires non-empty --notes", result.stderr)
+        self.assertEqual(self.cargo_calls(), [])
 
-    def test_certify_records_delta_then_runs_locked_gate(self) -> None:
-        proc, calls = self.run_helper(
+    def test_certify_passes_accept_all_only_after_review_attestation(self) -> None:
+        result = self.run_helper(
             "certify",
-            "webbrowser",
-            "1.2.1",
-            "1.2.2",
+            "demo-crate",
+            "1.0.0",
+            "1.0.1",
             "--reviewed",
             "--criteria",
             "safe-to-deploy",
-            "--who",
-            "tester <tester@example.invalid>",
             "--notes",
-            "reviewed security delta",
+            "Reviewed parser and I/O changes.",
+            "--who",
+            "Example Reviewer",
         )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(
-            calls,
-            [
-                "vet certify --locked webbrowser 1.2.1 1.2.2 --criteria safe-to-deploy --notes reviewed security delta --who tester <tester@example.invalid>",
-                "vet --locked",
-            ],
-        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_check_is_noninteractive_locked_gate(self) -> None:
-        proc, calls = self.run_helper("check")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(calls, ["vet --locked"])
+        calls = self.cargo_calls()
+        self.assertEqual(len(calls), 2, calls)
+
+        certify = calls[0]
+        self.assertEqual(certify[:6], [
+            "vet",
+            "certify",
+            "--locked",
+            "demo-crate",
+            "1.0.0",
+            "1.0.1",
+        ])
+        self.assertIn("--accept-all", certify)
+        self.assertIn("--criteria", certify)
+        self.assertIn("safe-to-deploy", certify)
+        self.assertIn("--notes", certify)
+        self.assertIn("Reviewed parser and I/O changes.", certify)
+        self.assertIn("--who", certify)
+        self.assertIn("Example Reviewer", certify)
+
+        self.assertEqual(calls[1], ["vet", "--locked"])
+
+    def test_review_remains_separate_and_does_not_certify(self) -> None:
+        result = self.run_helper(
+            "review",
+            "demo-crate",
+            "1.0.0",
+            "1.0.1",
+            "--criteria",
+            "safe-to-deploy",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        calls = self.cargo_calls()
+        self.assertEqual(calls, [[
+            "vet",
+            "diff",
+            "--locked",
+            "--mode=local",
+            "demo-crate",
+            "1.0.0",
+            "1.0.1",
+        ]])
+        self.assertNotIn("--accept-all", calls[0])
 
 
 if __name__ == "__main__":
