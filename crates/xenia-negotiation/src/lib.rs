@@ -87,6 +87,9 @@ impl NegotiatedCapabilityV1 {
 }
 
 /// Canonical selected capability set and transcript-binding digest.
+///
+/// Selection order does not affect the digest. Every exact capability name maps
+/// to exactly one selected version; duplicate names fail closed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NegotiatedContextV1 {
     capabilities: Vec<NegotiatedCapabilityV1>,
@@ -96,7 +99,9 @@ pub struct NegotiatedContextV1 {
 impl NegotiatedContextV1 {
     /// Canonicalize and hash a selected capability set.
     ///
-    /// Selection order does not affect the digest. Exact duplicates fail closed.
+    /// Selection order does not affect the digest. Exact duplicates and
+    /// multiple selected versions for the same exact capability name fail
+    /// closed rather than becoming an ambiguous policy surface.
     pub fn from_capabilities<I>(capabilities: I) -> Result<Self, NegotiatedContextError>
     where
         I: IntoIterator<Item = NegotiatedCapabilityV1>,
@@ -110,8 +115,11 @@ impl NegotiatedContextV1 {
         }
 
         capabilities.sort();
-        if capabilities.windows(2).any(|pair| pair[0] == pair[1]) {
-            return Err(NegotiatedContextError::DuplicateCapability);
+        if capabilities
+            .windows(2)
+            .any(|pair| pair[0].name() == pair[1].name())
+        {
+            return Err(NegotiatedContextError::DuplicateCapabilityName);
         }
 
         let hash = hash_capabilities(&capabilities);
@@ -203,9 +211,9 @@ pub enum NegotiatedContextError {
     /// Capability version exceeds the protocol bound.
     #[error("capability version exceeds negotiated-context bound")]
     CapabilityVersionTooLong,
-    /// Exact duplicate selected capability.
-    #[error("duplicate negotiated capability")]
-    DuplicateCapability,
+    /// More than one selected entry uses the same exact capability name.
+    #[error("negotiated capability name has more than one selected version")]
+    DuplicateCapabilityName,
     /// Exact causal-authority draft-04 is absent from the selected set.
     #[error("causal-authority draft-04 is not selected")]
     CausalAuthorityNotSelected,
@@ -272,11 +280,19 @@ mod tests {
     }
 
     #[test]
-    fn duplicates_and_identifier_ambiguity_fail_closed() {
+    fn duplicate_names_versions_and_identifier_ambiguity_fail_closed() {
         let authority = causal_authority_draft04_capability();
         assert_eq!(
             NegotiatedContextV1::from_capabilities([authority.clone(), authority]).unwrap_err(),
-            NegotiatedContextError::DuplicateCapability
+            NegotiatedContextError::DuplicateCapabilityName
+        );
+        assert_eq!(
+            NegotiatedContextV1::from_capabilities([
+                cap(b"xenia.causal-authority", b"draft-03"),
+                cap(b"xenia.causal-authority", b"draft-04"),
+            ])
+            .unwrap_err(),
+            NegotiatedContextError::DuplicateCapabilityName
         );
 
         let context = NegotiatedContextV1::from_capabilities([cap(
