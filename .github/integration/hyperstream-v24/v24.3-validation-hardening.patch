@@ -1,0 +1,214 @@
+From d77b538e504ae6b3f8358f6bfe90bca5a89bbb27 Mon Sep 17 00:00:00 2001
+From: "V24.1 Handoff Replay" <replay@users.noreply.github.com>
+Date: Wed, 26 Aug 2026 13:59:08 +0000
+Subject: [PATCH] test(validation): gate Hyperstream security and lock drift
+
+---
+ scripts/check-hyperstream-workspace-lock.py   | 89 +++++++++++++++++++
+ .../tests/test_hyperstream_workspace_lock.py  | 60 +++++++++++++
+ scripts/xenia-validate.sh                     | 26 ++++++
+ 3 files changed, 175 insertions(+)
+ create mode 100755 scripts/check-hyperstream-workspace-lock.py
+ create mode 100644 scripts/tests/test_hyperstream_workspace_lock.py
+
+diff --git a/scripts/check-hyperstream-workspace-lock.py b/scripts/check-hyperstream-workspace-lock.py
+new file mode 100755
+index 0000000..cd93d41
+--- /dev/null
++++ b/scripts/check-hyperstream-workspace-lock.py
+@@ -0,0 +1,89 @@
++#!/usr/bin/env python3
++"""Fail closed when Hyperstream workspace membership and Cargo.lock drift apart."""
++
++from __future__ import annotations
++
++import argparse
++import sys
++import tomllib
++from pathlib import Path
++
++HYPERSTREAM_MEMBERS = (
++    "crates/xenia-hyperstream",
++    "crates/xenia-hyperstream-auth",
++)
++
++EXPECTED_LOCK_DEPS = {
++    "xenia-hyperstream": ["serde", "sha2 0.10.9", "thiserror 2.0.18"],
++    "xenia-hyperstream-auth": [
++        "ed25519-dalek 2.2.0",
++        "serde",
++        "sha2 0.10.9",
++        "thiserror 2.0.18",
++        "uuid",
++        "xenia-handshake",
++        "xenia-hyperstream",
++        "xenia-ledger",
++        "xenia-peer-core",
++    ],
++}
++
++
++def fail(message: str) -> None:
++    print(f"FAIL: {message}", file=sys.stderr)
++    raise SystemExit(1)
++
++
++def load_toml(path: Path) -> dict:
++    try:
++        with path.open("rb") as handle:
++            return tomllib.load(handle)
++    except (OSError, tomllib.TOMLDecodeError) as exc:
++        fail(f"cannot parse {path}: {exc}")
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("root", nargs="?", default=".")
++    args = parser.parse_args()
++    root = Path(args.root).resolve()
++
++    workspace = load_toml(root / "Cargo.toml").get("workspace", {})
++    members = workspace.get("members", [])
++    default_members = workspace.get("default-members", [])
++    for member in HYPERSTREAM_MEMBERS:
++        if member not in members:
++            fail(f"root workspace is missing member {member}")
++        if member not in default_members:
++            fail(f"root workspace default-members is missing {member}")
++
++    lock = load_toml(root / "Cargo.lock")
++    by_name: dict[str, list[dict]] = {}
++    for package in lock.get("package", []):
++        by_name.setdefault(package.get("name", ""), []).append(package)
++
++    for name, expected_deps in EXPECTED_LOCK_DEPS.items():
++        matches = [pkg for pkg in by_name.get(name, []) if "source" not in pkg]
++        if len(matches) != 1:
++            fail(f"expected exactly one local lock record for {name}; found {len(matches)}")
++        package = matches[0]
++        if package.get("version") != "0.0.0-m0":
++            fail(f"unexpected locked version for {name}: {package.get('version')!r}")
++        if package.get("dependencies", []) != expected_deps:
++            fail(
++                f"locked dependencies for {name} drifted: "
++                f"expected {expected_deps!r}, got {package.get('dependencies', [])!r}"
++            )
++
++    peer_core = [pkg for pkg in by_name.get("xenia-peer-core", []) if "source" not in pkg]
++    if len(peer_core) != 1:
++        fail(f"expected exactly one local lock record for xenia-peer-core; found {len(peer_core)}")
++    if "sha2 0.10.9" not in peer_core[0].get("dependencies", []):
++        fail("xenia-peer-core lock record is missing sha2 0.10.9")
++
++    print("PASS: Hyperstream root workspace and Cargo.lock are coherent")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/scripts/tests/test_hyperstream_workspace_lock.py b/scripts/tests/test_hyperstream_workspace_lock.py
+new file mode 100644
+index 0000000..1155900
+--- /dev/null
++++ b/scripts/tests/test_hyperstream_workspace_lock.py
+@@ -0,0 +1,60 @@
++import shutil
++import subprocess
++import tempfile
++import unittest
++from pathlib import Path
++
++
++ROOT = Path(__file__).resolve().parents[2]
++CHECK = ROOT / "scripts" / "check-hyperstream-workspace-lock.py"
++
++
++class HyperstreamWorkspaceLockTests(unittest.TestCase):
++    def make_fixture(self):
++        tmp = tempfile.TemporaryDirectory()
++        root = Path(tmp.name)
++        shutil.copy2(ROOT / "Cargo.toml", root / "Cargo.toml")
++        shutil.copy2(ROOT / "Cargo.lock", root / "Cargo.lock")
++        return tmp, root
++
++    def run_check(self, root: Path):
++        return subprocess.run(
++            ["python3", str(CHECK), str(root)],
++            text=True,
++            stdout=subprocess.PIPE,
++            stderr=subprocess.PIPE,
++            check=False,
++        )
++
++    def test_current_locked_workspace_passes(self):
++        result = self.run_check(ROOT)
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertIn("PASS:", result.stdout)
++
++    def test_missing_hyperstream_lock_record_fails(self):
++        tmp, root = self.make_fixture()
++        self.addCleanup(tmp.cleanup)
++        text = (root / "Cargo.lock").read_text()
++        start = text.index('[[package]]\nname = "xenia-hyperstream"\n')
++        end = text.index('[[package]]\nname = "xenia-hyperstream-auth"\n', start)
++        (root / "Cargo.lock").write_text(text[:start] + text[end:])
++        result = self.run_check(root)
++        self.assertNotEqual(result.returncode, 0)
++        self.assertIn("xenia-hyperstream", result.stderr)
++
++    def test_peer_core_sha2_lock_edge_is_required(self):
++        tmp, root = self.make_fixture()
++        self.addCleanup(tmp.cleanup)
++        text = (root / "Cargo.lock").read_text()
++        marker = 'name = "xenia-peer-core"\n'
++        start = text.index(marker)
++        end = text.index('\n[[package]]', start)
++        block = text[start:end].replace(' "sha2 0.10.9",\n', '', 1)
++        (root / "Cargo.lock").write_text(text[:start] + block + text[end:])
++        result = self.run_check(root)
++        self.assertNotEqual(result.returncode, 0)
++        self.assertIn("sha2 0.10.9", result.stderr)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/scripts/xenia-validate.sh b/scripts/xenia-validate.sh
+index fc0b173..89a4ec1 100755
+--- a/scripts/xenia-validate.sh
++++ b/scripts/xenia-validate.sh
+@@ -300,6 +300,32 @@ if [[ -x scripts/check_semantic_authorization_lifecycle_v24.py ]]; then
+   fi
+ fi
+ 
++# Hyperstream promotion is security-sensitive: keep the full historical gate
++# chain and the locked-workspace representation in normal validation so source,
++# evidence, workspace, or lock drift cannot wait for a one-off release ceremony.
++if command -v python3 >/dev/null 2>&1; then
++  if [[ -x scripts/check-hyperstream-workspace-lock.py ]]; then
++    run python3 scripts/check-hyperstream-workspace-lock.py .
++  else
++    warn "scripts/check-hyperstream-workspace-lock.py not found or not executable"
++  fi
++
++  if [[ -d crates/xenia-hyperstream/test-vectors ]]; then
++    for gate in 2 3 4 5 6 7 9; do
++      gate_test="crates/xenia-hyperstream/test-vectors/test_security_lane_gate_v${gate}.py"
++      if [[ -f "$gate_test" ]]; then
++        run python3 "$gate_test"
++      else
++        warn "missing Hyperstream security-lane regression: $gate_test"
++      fi
++    done
++  else
++    warn "Hyperstream test-vector directory not found; skipping security-lane regressions"
++  fi
++else
++  warn "python3 not found; skipping Hyperstream workspace/security-lane checks"
++fi
++
+ # Cargo path/boundary checks are cheap and catch the most common migration
+ # mistakes before cargo metadata tries to resolve the whole workspace.
+ if [[ -x scripts/check-zk-protocol-boundary.py ]]; then
+-- 
+2.47.3
+
