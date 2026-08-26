@@ -8,6 +8,8 @@ on:
       - "crates/xenia-negotiation-codec/**"
       - "test-vectors/negotiated-context-v1.json"
       - "test-vectors/verify-negotiated-context.mjs"
+      - "test-vectors/handshake-v2-contract.json"
+      - "test-vectors/verify-handshake-v2-contract.mjs"
       - ".github/workflows/negotiated-context.yml"
   workflow_dispatch:
 
@@ -69,6 +71,8 @@ jobs:
           node-version: "22"
       - name: Reproduce offers, deterministic selection, and binding
         run: node test-vectors/verify-negotiated-context.mjs
+      - name: Verify V2 envelope budget and V5 context vector
+        run: node test-vectors/verify-handshake-v2-contract.mjs
 
   msrv:
     name: Negotiation + codec MSRV (Rust 1.94)
