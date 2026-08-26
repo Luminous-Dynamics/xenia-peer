@@ -1,17 +1,25 @@
 [package]
 name = "xenia-resilience-evidence"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-authors.workspace = true
-license.workspace = true
-repository.workspace = true
-homepage.workspace = true
+version = "0.0.0-m0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz <maintainer-email>"]
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+homepage = "https://github.com/Luminous-Dynamics/xenia-peer"
 description = "Read-only evidence contract for Xenia operator-compromise containment exercises"
+publish = false
+
+# Qualified independently before root-workspace integration so this exploratory
+# contract cannot invalidate Xenia's mature root Cargo.lock. A later integration
+# tranche can add the crate as a root member together with a mechanically
+# regenerated lockfile.
+[workspace]
+resolver = "2"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "deny"
