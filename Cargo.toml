@@ -27,11 +27,12 @@ members = [
     "apps/sovereign-admin",
     "apps/xenia-operator-agent",
 ]
-# `xenia-negotiation` is intentionally staged outside the locked production
-# workspace until xenia-handshake consumes it. This keeps preparatory canonical
-# context work from mutating the qualified root Cargo.lock before the handshake
-# integration tranche. Its dedicated workflow validates the crate directly.
-exclude = ["crates/xenia-negotiation"]
+# Negotiation semantics + hostile-byte decoding are intentionally staged outside
+# the locked production workspace until xenia-handshake consumes them. This keeps
+# preparatory protocol work from mutating the qualified root Cargo.lock before
+# the actual handshake integration tranche. Their dedicated workflow validates
+# both crates directly.
+exclude = ["crates/xenia-negotiation", "crates/xenia-negotiation-codec"]
 # sovereign-admin is a wasm32-unknown-unknown CSR bin; xenia-launcher-windows
 # is Windows-only (target-gated `windows` crate dependency, unconditional
 # Win32 API usage in its own source); xenia-launcher-shell and
