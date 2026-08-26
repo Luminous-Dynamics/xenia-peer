@@ -1,0 +1,57 @@
+name: Negotiated Context Conformance
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "crates/xenia-negotiation/**"
+      - ".github/workflows/negotiated-context.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: negotiated-context-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: -D warnings
+  RUSTDOCFLAGS: -D warnings
+
+jobs:
+  conformance:
+    name: Canonical context (Rust 1.96)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/xenia-negotiation
+      - name: Format
+        run: cargo fmt --manifest-path crates/xenia-negotiation/Cargo.toml --check
+      - name: Check
+        run: cargo check --manifest-path crates/xenia-negotiation/Cargo.toml --all-targets
+      - name: Clippy
+        run: cargo clippy --manifest-path crates/xenia-negotiation/Cargo.toml --all-targets -- -D warnings
+      - name: Test frozen vectors and fail-closed rules
+        run: cargo test --manifest-path crates/xenia-negotiation/Cargo.toml
+      - name: Docs
+        run: cargo doc --manifest-path crates/xenia-negotiation/Cargo.toml --no-deps
+
+  msrv:
+    name: Negotiation MSRV (Rust 1.94)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/xenia-negotiation
+      - name: Check MSRV
+        run: cargo check --manifest-path crates/xenia-negotiation/Cargo.toml --all-targets
