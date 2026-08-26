@@ -14,7 +14,7 @@ permissions:
 
 concurrency:
   group: hyperstream-v24-bootstrap
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   reconstruct:
@@ -35,6 +35,8 @@ jobs:
           git clone --filter=blob:none "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" repo
           cd repo
           git fetch --no-tags origin main "${GITHUB_REF_NAME}"
+          git checkout --detach "origin/${GITHUB_REF_NAME}"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
       - name: Verify qualified V22.1 base
         run: |
