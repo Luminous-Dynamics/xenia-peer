@@ -12,10 +12,6 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: hyperstream-v24-bootstrap
-  cancel-in-progress: true
-
 jobs:
   reconstruct:
     runs-on: ubuntu-latest
