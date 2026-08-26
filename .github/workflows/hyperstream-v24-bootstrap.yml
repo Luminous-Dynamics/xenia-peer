@@ -1,4 +1,4 @@
-name: Hyperstream V24 Bootstrap
+name: Hyperstream V24.1 Bootstrap
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   reconstruct:
-    name: Reconstruct verified V24 candidate
+    name: Reconstruct verified V24.1 candidate
     runs-on: ubuntu-latest
 
     steps:
@@ -19,7 +19,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Verify carrier blobs and reconstruct mailbox
+      - name: Verify carrier blobs and reconstruct V24 mailbox
         shell: bash
         run: |
           set -euo pipefail
@@ -51,6 +51,10 @@ jobs:
           cat "$carrier"/xz-{00..07}.b64 | base64 -d | xz -dc > /tmp/hyperstream-v24.mbox
           echo '54543cfdafa06d1c6cb32239cbdf014efe757b8321d212efcb4abc7dfff1a627  /tmp/hyperstream-v24.mbox' | sha256sum -c -
 
+          refresh="$carrier/v24.1-evidence-refresh.patch"
+          echo 'ff1503d50be30419a65ce737bbc9822f651532912f151ae0a673bc42081bd754  .github/integration/hyperstream-v24/v24.1-evidence-refresh.patch' | sha256sum -c -
+          cp "$refresh" /tmp/v24.1-evidence-refresh.patch
+
       - name: Verify exact V22.1 base
         shell: bash
         run: |
@@ -59,11 +63,11 @@ jobs:
           test "$(git rev-parse origin/main)" = "9c5a6c9303ed30985aba2e38fd09f05626482967"
           test "$(git rev-parse origin/main^{tree})" = "46464f1ad514bc55e9d1c4b7b0cdc95048f6d1a3"
 
-      - name: Replay all 78 integration commits
+      - name: Replay all 79 integration commits
         shell: bash
         run: |
           set -euo pipefail
-          rebuild=/tmp/xenia-hyperstream-v24-rebuild
+          rebuild=/tmp/xenia-hyperstream-v24.1-rebuild
           rm -rf "$rebuild"
           git worktree add --detach "$rebuild" origin/main
           cd "$rebuild"
@@ -71,21 +75,31 @@ jobs:
           git config user.name "Xenia Hyperstream Integration"
           git config user.email "hyperstream-integration@users.noreply.github.com"
           git am --3way /tmp/hyperstream-v24.mbox
+          git am --3way /tmp/v24.1-evidence-refresh.patch
 
-          test "$(git rev-list --count origin/main..HEAD)" = "78"
-          test "$(git rev-parse HEAD^{tree})" = "3b2e194ce9525ca201fa6e7e306949b75f4620d3"
+          test "$(git rev-list --count origin/main..HEAD)" = "79"
+          test "$(git rev-parse HEAD^{tree})" = "4591a19e412a49c9564fa2a54af01a5fbe14959c"
           git diff --check origin/main..HEAD
           test -z "$(git status --porcelain)"
 
           echo "candidate_head=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           echo "candidate_tree=$(git rev-parse HEAD^{tree})" >> "$GITHUB_ENV"
 
+      - name: Run toolchain-independent authorization gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/xenia-hyperstream-v24.1-rebuild
+          python3 scripts/check_session_authorization_v23.py
+          python3 scripts/check_semantic_authorization_lifecycle_v24.py
+          python3 crates/xenia-hyperstream/test-vectors/test_security_lane_gate_v9.py
+
       - name: Publish clean candidate branch without overwrite
         shell: bash
         run: |
           set -euo pipefail
-          candidate=integration/hyperstream-v24-qualified-candidate
-          rebuild=/tmp/xenia-hyperstream-v24-rebuild
+          candidate=integration/hyperstream-v24.1-qualified-candidate
+          rebuild=/tmp/xenia-hyperstream-v24.1-rebuild
           cd "$rebuild"
 
           if git ls-remote --exit-code --heads origin "refs/heads/$candidate" >/dev/null 2>&1; then
