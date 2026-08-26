@@ -1,15 +1,15 @@
 [package]
 name = "xenia-negotiation"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-authors.workspace = true
-license.workspace = true
+version = "0.0.0-m0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz <<maintainer-email>>"]
+license = "Apache-2.0 OR MIT"
 description = "Canonical authenticated-handshake capability context primitives for Xenia"
-repository.workspace = true
-homepage.workspace = true
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+homepage = "https://github.com/Luminous-Dynamics/xenia-peer"
 publish = false
 
 [dependencies]
 sha2 = "0.10"
-thiserror.workspace = true
+thiserror = "1"
