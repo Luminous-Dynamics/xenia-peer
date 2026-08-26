@@ -1,0 +1,15 @@
+[package]
+name = "xenia-negotiation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Canonical authenticated-handshake capability context primitives for Xenia"
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+sha2 = "0.10"
+thiserror.workspace = true
