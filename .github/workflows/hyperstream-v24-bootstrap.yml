@@ -1,0 +1,95 @@
+name: Hyperstream V24 Bootstrap
+
+on:
+  push:
+    branches:
+      - integration/hyperstream-v24-bootstrap
+    paths:
+      - .github/workflows/hyperstream-v24-bootstrap.yml
+      - .github/integration/hyperstream-v24/**
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: hyperstream-v24-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  reconstruct:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      EXPECTED_MAIN_SHA: 9c5a6c9303ed30985aba2e38fd09f05626482967
+      EXPECTED_MAIN_TREE: 46464f1ad514bc55e9d1c4b7b0cdc95048f6d1a3
+      EXPECTED_MAILBOX_SHA256: 54543cfdafa06d1c6cb32239cbdf014efe757b8321d212efcb4abc7dfff1a627
+      EXPECTED_RESULT_TREE: 3b2e194ce9525ca201fa6e7e306949b75f4620d3
+      CANDIDATE_BRANCH: integration/hyperstream-v24-qualified-candidate
+    steps:
+      - name: Clone exact repository state
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" repo
+          cd repo
+          git fetch --no-tags origin main "${GITHUB_REF_NAME}"
+
+      - name: Verify qualified V22.1 base
+        run: |
+          set -euo pipefail
+          cd repo
+          MAIN_SHA="$(git rev-parse origin/main)"
+          MAIN_TREE="$(git rev-parse 'origin/main^{tree}')"
+          test "$MAIN_SHA" = "$EXPECTED_MAIN_SHA"
+          test "$MAIN_TREE" = "$EXPECTED_MAIN_TREE"
+          echo "Verified main: $MAIN_SHA"
+          echo "Verified tree: $MAIN_TREE"
+
+      - name: Reconstruct and authenticate mailbox
+        run: |
+          set -euo pipefail
+          cd repo
+          STAGE=.github/integration/hyperstream-v24
+          cat \
+            "$STAGE/xz-00.b64" \
+            "$STAGE/xz-01.fixed.b64" \
+            "$STAGE/xz-02.b64" \
+            "$STAGE/xz-03.b64" \
+            "$STAGE/xz-04.b64" \
+            "$STAGE/xz-05.b64" \
+            "$STAGE/xz-06.fixed.b64" \
+            "$STAGE/xz-07.b64" \
+            > /tmp/hyperstream-v24-mailbox.xz.b64
+          base64 --decode /tmp/hyperstream-v24-mailbox.xz.b64 > /tmp/hyperstream-v24-mailbox.xz
+          xz --decompress --stdout /tmp/hyperstream-v24-mailbox.xz > /tmp/hyperstream-v24-mailbox.mbox
+          printf '%s  %s\n' "$EXPECTED_MAILBOX_SHA256" /tmp/hyperstream-v24-mailbox.mbox | sha256sum --check --strict
+          test "$(grep -c '^From [0-9a-f]\{40\} ' /tmp/hyperstream-v24-mailbox.mbox)" -eq 78
+
+      - name: Replay 78 audited commits
+        run: |
+          set -euo pipefail
+          cd repo
+          git config user.name "Xenia Integration Bot"
+          git config user.email "xenia-integration@users.noreply.github.com"
+          git checkout --detach origin/main
+          git am --3way /tmp/hyperstream-v24-mailbox.mbox
+          test "$(git rev-list --count origin/main..HEAD)" -eq 78
+          test "$(git rev-parse HEAD^{tree})" = "$EXPECTED_RESULT_TREE"
+          test -z "$(git status --porcelain)"
+          git diff --check origin/main..HEAD
+          test ! -e .github/integration/hyperstream-v24
+          test ! -e .github/workflows/hyperstream-v24-bootstrap.yml
+          echo "Replayed 78 commits"
+          echo "Result tree: $(git rev-parse HEAD^{tree})"
+          echo "Candidate head: $(git rev-parse HEAD)"
+
+      - name: Publish clean candidate branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd repo
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin "HEAD:refs/heads/${CANDIDATE_BRANCH}"
