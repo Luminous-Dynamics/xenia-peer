@@ -1,0 +1,73 @@
+From 2deb582dfa1734865eaccefd33756ee49ba38c91 Mon Sep 17 00:00:00 2001
+From: tstoltz <tstoltz@luminous-dynamics.local>
+Date: Wed, 26 Aug 2026 14:53:36 +0000
+Subject: [PATCH] test(validation): keep Cargo metadata locked
+
+---
+ .../test_xenia_validate_lock_discipline.py    | 36 +++++++++++++++++++
+ scripts/xenia-validate.sh                     |  6 +++-
+ 2 files changed, 41 insertions(+), 1 deletion(-)
+ create mode 100644 scripts/tests/test_xenia_validate_lock_discipline.py
+
+diff --git a/scripts/tests/test_xenia_validate_lock_discipline.py b/scripts/tests/test_xenia_validate_lock_discipline.py
+new file mode 100644
+index 0000000..f42d71a
+--- /dev/null
++++ b/scripts/tests/test_xenia_validate_lock_discipline.py
+@@ -0,0 +1,36 @@
++import unittest
++from pathlib import Path
++
++
++ROOT = Path(__file__).resolve().parents[2]
++VALIDATE = ROOT / "scripts" / "xenia-validate.sh"
++
++
++class XeniaValidateLockDisciplineTests(unittest.TestCase):
++    def validate_cargo_dir_body(self) -> str:
++        text = VALIDATE.read_text()
++        start = text.index("validate_cargo_dir() {")
++        end = text.index("\n}\n\ncheck_cargo_dir()", start)
++        return text[start:end]
++
++    def test_metadata_uses_same_locked_flag_as_build_gates(self):
++        body = self.validate_cargo_dir_body()
++        self.assertIn('[[ -f Cargo.lock ]] && locked_flag=(--locked)', body)
++        self.assertIn(
++            'cargo metadata "${locked_flag[@]}" --format-version 1 --no-deps',
++            body,
++        )
++        self.assertIn('cargo check "${locked_flag[@]}"', body)
++        self.assertIn('cargo test "${locked_flag[@]}"', body)
++
++    def test_no_unlocked_metadata_precedes_locked_builds(self):
++        body = self.validate_cargo_dir_body()
++        self.assertNotIn(
++            "cargo metadata --format-version 1 --no-deps",
++            body,
++            "unlocked cargo metadata could rewrite Cargo.lock before locked gates",
++        )
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/scripts/xenia-validate.sh b/scripts/xenia-validate.sh
+index 89a4ec1..c310abb 100755
+--- a/scripts/xenia-validate.sh
++++ b/scripts/xenia-validate.sh
+@@ -407,7 +407,11 @@ validate_cargo_dir() {
+     if [[ -f apps/xenia-launcher-windows/Cargo.toml ]]; then
+       exclude_flags=(--exclude xenia-launcher-windows --exclude xenia-launcher-shell --exclude xenia-launcher-linux --exclude xenia-launcher-macos)
+     fi
+-    cargo metadata --format-version 1 --no-deps >/dev/null || exit $?
++    # Metadata resolution is itself dependency resolution. If a committed
++    # lockfile exists, it must be immutable here too; otherwise an unlocked
++    # `cargo metadata` can silently refresh a stale Cargo.lock before the
++    # later `cargo check --locked` / `cargo test --locked` gates run.
++    cargo metadata "${locked_flag[@]}" --format-version 1 --no-deps >/dev/null || exit $?
+     cargo fmt --all -- --check || exit $?
+     cargo check "${locked_flag[@]}" --workspace --all-targets "${exclude_flags[@]}" || exit $?
+     cargo test "${locked_flag[@]}" --workspace --all-targets --no-run "${exclude_flags[@]}" || exit $?
+-- 
+2.47.3
+
