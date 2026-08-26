@@ -12,7 +12,6 @@ members = [
     "crates/xenia-transport-quic",
     "crates/xenia-inject",
     "crates/xenia-handshake",
-    "crates/xenia-negotiation",
     "crates/xenia-ledger",
     "crates/xenia-mobile-ffi",
     "crates/xenia-secure-file",
@@ -28,6 +27,11 @@ members = [
     "apps/sovereign-admin",
     "apps/xenia-operator-agent",
 ]
+# `xenia-negotiation` is intentionally staged outside the locked production
+# workspace until xenia-handshake consumes it. This keeps preparatory canonical
+# context work from mutating the qualified root Cargo.lock before the handshake
+# integration tranche. Its dedicated workflow validates the crate directly.
+exclude = ["crates/xenia-negotiation"]
 # sovereign-admin is a wasm32-unknown-unknown CSR bin; xenia-launcher-windows
 # is Windows-only (target-gated `windows` crate dependency, unconditional
 # Win32 API usage in its own source); xenia-launcher-shell and
@@ -52,7 +56,6 @@ default-members = [
     "crates/xenia-transport-quic",
     "crates/xenia-inject",
     "crates/xenia-handshake",
-    "crates/xenia-negotiation",
     "crates/xenia-ledger",
     "crates/xenia-mobile-ffi",
     "crates/xenia-secure-file",
@@ -75,7 +78,6 @@ homepage = "https://github.com/Luminous-Dynamics/xenia-peer"
 
 [workspace.dependencies]
 xenia-wire = "0.2.0-alpha.9"
-xenia-negotiation = { path = "crates/xenia-negotiation" }
 xenia-operator-proto = { path = "crates/xenia-operator-proto" }
 xenia-operator-agent-proto = { path = "crates/xenia-operator-agent-proto" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time", "signal"] }
