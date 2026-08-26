@@ -12,6 +12,7 @@ members = [
     "crates/xenia-transport-quic",
     "crates/xenia-inject",
     "crates/xenia-handshake",
+    "crates/xenia-negotiation",
     "crates/xenia-ledger",
     "crates/xenia-mobile-ffi",
     "crates/xenia-secure-file",
@@ -51,6 +52,7 @@ default-members = [
     "crates/xenia-transport-quic",
     "crates/xenia-inject",
     "crates/xenia-handshake",
+    "crates/xenia-negotiation",
     "crates/xenia-ledger",
     "crates/xenia-mobile-ffi",
     "crates/xenia-secure-file",
@@ -73,6 +75,7 @@ homepage = "https://github.com/Luminous-Dynamics/xenia-peer"
 
 [workspace.dependencies]
 xenia-wire = "0.2.0-alpha.9"
+xenia-negotiation = { path = "crates/xenia-negotiation" }
 xenia-operator-proto = { path = "crates/xenia-operator-proto" }
 xenia-operator-agent-proto = { path = "crates/xenia-operator-agent-proto" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time", "signal"] }
