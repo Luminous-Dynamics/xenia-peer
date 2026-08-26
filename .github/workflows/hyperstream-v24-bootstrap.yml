@@ -1,4 +1,4 @@
-name: Hyperstream V24.2 Bootstrap
+name: Hyperstream V24.3 Bootstrap
 
 on:
   push:
@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   reconstruct:
-    name: Reconstruct verified V24.2 candidate
+    name: Reconstruct verified V24.3 candidate
     runs-on: ubuntu-latest
 
     steps:
@@ -57,9 +57,11 @@ jobs:
 
           echo 'ff1503d50be30419a65ce737bbc9822f651532912f151ae0a673bc42081bd754  .github/integration/hyperstream-v24/v24.1-evidence-refresh.patch' | sha256sum -c -
           echo '829870a21e52e7e2ad61ffa26d6eebf29a9f5cfd6f411140c50cb2863aa6c432  .github/integration/hyperstream-v24/v24.2-lock-qualification.patch' | sha256sum -c -
+          echo '07dfaf6561fde3f105a08cbc3b8e004ce1f5fc1ee9d47f804e2f7641bca8e758  .github/integration/hyperstream-v24/v24.3-validation-hardening.patch' | sha256sum -c -
 
           cp "$carrier/v24.1-evidence-refresh.patch" /tmp/v24.1-evidence-refresh.patch
           cp "$carrier/v24.2-lock-qualification.patch" /tmp/v24.2-lock-qualification.patch
+          cp "$carrier/v24.3-validation-hardening.patch" /tmp/v24.3-validation-hardening.patch
 
       - name: Verify exact V22.1 base
         shell: bash
@@ -69,11 +71,11 @@ jobs:
           test "$(git rev-parse origin/main)" = "9c5a6c9303ed30985aba2e38fd09f05626482967"
           test "$(git rev-parse origin/main^{tree})" = "46464f1ad514bc55e9d1c4b7b0cdc95048f6d1a3"
 
-      - name: Replay all 80 integration commits
+      - name: Replay all 81 integration commits
         shell: bash
         run: |
           set -euo pipefail
-          rebuild=/tmp/xenia-hyperstream-v24.2-rebuild
+          rebuild=/tmp/xenia-hyperstream-v24.3-rebuild
           rm -rf "$rebuild"
           git worktree add --detach "$rebuild" origin/main
           cd "$rebuild"
@@ -83,73 +85,36 @@ jobs:
           git am --3way /tmp/hyperstream-v24.mbox
           git am --3way /tmp/v24.1-evidence-refresh.patch
           git am --3way /tmp/v24.2-lock-qualification.patch
+          git am --3way /tmp/v24.3-validation-hardening.patch
 
-          test "$(git rev-list --count origin/main..HEAD)" = "80"
-          test "$(git rev-parse HEAD^{tree})" = "37b330b38b6917372dd1d3270dd4f44c4de1e8cd"
+          test "$(git rev-list --count origin/main..HEAD)" = "81"
+          test "$(git rev-parse HEAD^{tree})" = "7911f8e4dcf3c6de2a510315dc9b5f15dc226eda"
           git diff --check origin/main..HEAD
           test -z "$(git status --porcelain)"
 
           echo "candidate_head=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           echo "candidate_tree=$(git rev-parse HEAD^{tree})" >> "$GITHUB_ENV"
 
-      - name: Verify locked workspace representation
+      - name: Run permanent toolchain-independent qualification gates
         shell: bash
         run: |
           set -euo pipefail
-          cd /tmp/xenia-hyperstream-v24.2-rebuild
-          python3 - <<'PY'
-          import tomllib
-          from pathlib import Path
-
-          with Path("Cargo.lock").open("rb") as fh:
-              lock = tomllib.load(fh)
-
-          packages = {pkg["name"]: pkg for pkg in lock["package"]}
-
-          expected = {
-              "xenia-hyperstream": ["serde", "sha2 0.10.9", "thiserror 2.0.18"],
-              "xenia-hyperstream-auth": [
-                  "ed25519-dalek 2.2.0",
-                  "serde",
-                  "sha2 0.10.9",
-                  "thiserror 2.0.18",
-                  "uuid",
-                  "xenia-handshake",
-                  "xenia-hyperstream",
-                  "xenia-ledger",
-                  "xenia-peer-core",
-              ],
-          }
-
-          for name, dependencies in expected.items():
-              pkg = packages.get(name)
-              assert pkg is not None, f"missing locked workspace package: {name}"
-              assert pkg.get("version") == "0.0.0-m0", (name, pkg.get("version"))
-              assert pkg.get("dependencies") == dependencies, (name, pkg.get("dependencies"))
-
-          peer_core = packages["xenia-peer-core"]["dependencies"]
-          assert "sha2 0.10.9" in peer_core, peer_core
-          print("PASS: V24.2 locked workspace representation")
-          PY
-
-      - name: Run toolchain-independent authorization gates
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd /tmp/xenia-hyperstream-v24.2-rebuild
+          cd /tmp/xenia-hyperstream-v24.3-rebuild
           python3 scripts/check_session_authorization_v23.py
           python3 scripts/check_semantic_authorization_lifecycle_v24.py
+          python3 scripts/check-hyperstream-workspace-lock.py .
           for gate in 2 3 4 5 6 7 9; do
             python3 "crates/xenia-hyperstream/test-vectors/test_security_lane_gate_v${gate}.py"
           done
           python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+          bash -n scripts/xenia-validate.sh
 
       - name: Publish clean candidate branch without overwrite
         shell: bash
         run: |
           set -euo pipefail
-          candidate=integration/hyperstream-v24.2-qualified-candidate
-          rebuild=/tmp/xenia-hyperstream-v24.2-rebuild
+          candidate=integration/hyperstream-v24.3-qualified-candidate
+          rebuild=/tmp/xenia-hyperstream-v24.3-rebuild
           cd "$rebuild"
 
           if git ls-remote --exit-code --heads origin "refs/heads/$candidate" >/dev/null 2>&1; then
