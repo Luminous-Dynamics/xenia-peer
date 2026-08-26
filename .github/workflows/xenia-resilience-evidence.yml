@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "crates/xenia-resilience-evidence/**"
+      - "docs/resilience/**"
       - ".github/workflows/xenia-resilience-evidence.yml"
   workflow_dispatch:
 
