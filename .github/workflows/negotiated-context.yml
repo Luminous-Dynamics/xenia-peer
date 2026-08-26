@@ -5,6 +5,8 @@ on:
     paths:
       - "Cargo.toml"
       - "crates/xenia-negotiation/**"
+      - "test-vectors/negotiated-context-v1.json"
+      - "test-vectors/verify-negotiated-context.mjs"
       - ".github/workflows/negotiated-context.yml"
   workflow_dispatch:
 
@@ -43,6 +45,17 @@ jobs:
         run: cargo test --manifest-path crates/xenia-negotiation/Cargo.toml
       - name: Docs
         run: cargo doc --manifest-path crates/xenia-negotiation/Cargo.toml --no-deps
+
+  node:
+    name: Independent Node negotiation reproduction
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Reproduce offers, deterministic selection, and binding
+        run: node test-vectors/verify-negotiated-context.mjs
 
   msrv:
     name: Negotiation MSRV (Rust 1.94)
