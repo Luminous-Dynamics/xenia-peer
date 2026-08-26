@@ -1,0 +1,55 @@
+From 94ac86519a4464bea299805a59e71c08773a507f Mon Sep 17 00:00:00 2001
+From: "V24.1 Handoff Replay" <replay@users.noreply.github.com>
+Date: Wed, 26 Aug 2026 13:53:04 +0000
+Subject: [PATCH] fix(workspace): lock Hyperstream integration dependencies
+
+---
+ Cargo.lock | 25 +++++++++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+
+diff --git a/Cargo.lock b/Cargo.lock
+index ea77853..dfaf42d 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -9560,6 +9560,30 @@ dependencies = [
+  "zeroize",
+ ]
+ 
++[[package]]
++name = "xenia-hyperstream"
++version = "0.0.0-m0"
++dependencies = [
++ "serde",
++ "sha2 0.10.9",
++ "thiserror 2.0.18",
++]
++
++[[package]]
++name = "xenia-hyperstream-auth"
++version = "0.0.0-m0"
++dependencies = [
++ "ed25519-dalek 2.2.0",
++ "serde",
++ "sha2 0.10.9",
++ "thiserror 2.0.18",
++ "uuid",
++ "xenia-handshake",
++ "xenia-hyperstream",
++ "xenia-ledger",
++ "xenia-peer-core",
++]
++
+ [[package]]
+ name = "xenia-inject"
+ version = "0.0.0-m0"
+@@ -9786,6 +9810,7 @@ dependencies = [
+  "rand 0.8.7",
+  "serde",
+  "serde-big-array",
++ "sha2 0.10.9",
+  "thiserror 2.0.18",
+  "tokio",
+  "tracing",
+-- 
+2.47.3
+
