@@ -14,9 +14,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// Schema v2 binds locators to exact claims/run identity and proves that
-/// retained-bearer exercises actually used credentials issued before revocation.
-pub const OPERATOR_CONTAINMENT_SCHEMA_VERSION: u16 = 2;
+/// Schema v3 binds locators to exact claims/run identity and proves that
+/// retained-bearer exercises used credentials issued before revocation that
+/// would still have been valid at the post-revocation attempt time.
+pub const OPERATOR_CONTAINMENT_SCHEMA_VERSION: u16 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ExerciseId(pub String);
@@ -149,6 +150,10 @@ pub struct BoundaryObservation {
     /// bearer credential that existed before revocation rather than one minted
     /// afterward. Not required for fresh-token or sealed-peer attempts.
     pub authority_issued_at_unix_ms: Option<u64>,
+    /// Required for `ExistingToken*` surfaces. The retained bearer must still be
+    /// intrinsically valid at the post-revocation attempt; otherwise a refusal
+    /// could merely be token expiry rather than revocation containment.
+    pub authority_valid_until_unix_ms: Option<u64>,
     pub evidence: EvidenceLocator,
 }
 
@@ -158,9 +163,16 @@ impl BoundaryObservation {
             return false;
         }
         if self.surface.requires_pre_revocation_bearer() {
-            return self
-                .authority_issued_at_unix_ms
-                .is_some_and(|issued_at| issued_at <= revoked_at_unix_ms);
+            return matches!(
+                (
+                    self.authority_issued_at_unix_ms,
+                    self.authority_valid_until_unix_ms,
+                ),
+                (Some(issued_at), Some(valid_until))
+                    if issued_at <= revoked_at_unix_ms
+                        && issued_at <= valid_until
+                        && self.observed_at_unix_ms <= valid_until
+            );
         }
         true
     }
@@ -201,6 +213,9 @@ pub enum ValidationError {
     MissingBoundaryAuthorityRef { surface: BoundarySurface },
     MissingPreRevocationBearerIssuance { surface: BoundarySurface },
     BearerIssuedAfterRevocation { surface: BoundarySurface },
+    MissingBearerValidity { surface: BoundarySurface },
+    InvalidBearerValidityWindow { surface: BoundarySurface },
+    BearerExpiredBeforeBoundary { surface: BoundarySurface },
     IncompleteBoundaryEvidence { surface: BoundarySurface },
     BoundaryEvidenceBindingMismatch { surface: BoundarySurface },
     DuplicateRequiredBoundary { surface: BoundarySurface },
@@ -287,6 +302,25 @@ impl OperatorCompromiseEvidence {
                     }
                     Some(_) => {}
                 }
+                match (
+                    boundary.authority_issued_at_unix_ms,
+                    boundary.authority_valid_until_unix_ms,
+                ) {
+                    (_, None) => errors.push(ValidationError::MissingBearerValidity {
+                        surface: boundary.surface,
+                    }),
+                    (Some(issued_at), Some(valid_until)) if valid_until < issued_at => {
+                        errors.push(ValidationError::InvalidBearerValidityWindow {
+                            surface: boundary.surface,
+                        });
+                    }
+                    (_, Some(valid_until)) if valid_until < boundary.observed_at_unix_ms => {
+                        errors.push(ValidationError::BearerExpiredBeforeBoundary {
+                            surface: boundary.surface,
+                        });
+                    }
+                    _ => {}
+                }
             }
             if !boundary.evidence.is_complete() {
                 errors.push(ValidationError::IncompleteBoundaryEvidence {
@@ -318,10 +352,11 @@ impl OperatorCompromiseEvidence {
     /// Evaluate operator containment asymmetrically.
     ///
     /// - a complete, claim-bound, same-run, post-revocation `ALLOWED` result on
-    ///   any required boundary with valid authority context is a material
+    ///   any required boundary with still-live authority context is a material
     ///   `FAILED` result;
-    /// - malformed, stale/foreign, missing, duplicate, claim-mismatched, or
-    ///   incomplete evidence is `UNPROVEN` rather than silently accepted;
+    /// - malformed, stale/foreign, missing, duplicate, expired-authority,
+    ///   claim-mismatched, or incomplete evidence is `UNPROVEN` rather than
+    ///   silently accepted;
     /// - only one evidenced `REFUSED` observation on each required baseline
     ///   surface yields `VERIFIED`.
     pub fn outcome(&self) -> OperatorContainmentOutcome {
@@ -391,7 +426,7 @@ mod tests {
     }
 
     fn boundary(surface: BoundarySurface, decision: BoundaryDecision) -> BoundaryObservation {
-        let authority_issued_at_unix_ms = surface.requires_pre_revocation_bearer().then_some(1_000);
+        let bearer = surface.requires_pre_revocation_bearer();
         BoundaryObservation {
             exercise_id: ExerciseId("exercise-001".to_string()),
             operator_id: OperatorId("alice".to_string()),
@@ -403,7 +438,8 @@ mod tests {
                 BoundarySurface::SealedOperatorChannel => "peer-key:alice".to_string(),
                 _ => format!("token:pre-revocation:{surface:?}"),
             },
-            authority_issued_at_unix_ms,
+            authority_issued_at_unix_ms: bearer.then_some(1_000),
+            authority_valid_until_unix_ms: bearer.then_some(3_000),
             evidence: evidence_locator(
                 &format!("{surface:?}"),
                 EvidenceClaim::Boundary { surface },
@@ -487,6 +523,33 @@ mod tests {
             .unwrap();
         observation.decision = BoundaryDecision::Allowed;
         observation.authority_issued_at_unix_ms = Some(1_501);
+
+        assert_eq!(evidence.outcome(), OperatorContainmentOutcome::Unproven);
+    }
+
+    #[test]
+    fn expired_retained_bearer_refusal_is_unproven() {
+        let mut evidence = verified_fixture();
+        let observation = evidence
+            .boundaries
+            .iter_mut()
+            .find(|b| b.surface == BoundarySurface::ExistingTokenKeyReplacement)
+            .unwrap();
+        observation.authority_valid_until_unix_ms = Some(1_999);
+
+        assert_eq!(evidence.outcome(), OperatorContainmentOutcome::Unproven);
+    }
+
+    #[test]
+    fn expired_retained_bearer_allow_is_not_promoted_to_failure() {
+        let mut evidence = verified_fixture();
+        let observation = evidence
+            .boundaries
+            .iter_mut()
+            .find(|b| b.surface == BoundarySurface::ExistingTokenAuditLedgerRead)
+            .unwrap();
+        observation.decision = BoundaryDecision::Allowed;
+        observation.authority_valid_until_unix_ms = Some(1_999);
 
         assert_eq!(evidence.outcome(), OperatorContainmentOutcome::Unproven);
     }
