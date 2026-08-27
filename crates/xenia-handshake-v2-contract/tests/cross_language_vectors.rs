@@ -115,6 +115,21 @@ fn representative_v2_message_and_signature_transcript_vectors_are_frozen() {
         "add97be37fb648148d5cb7c80f41d283187ad1e744cbd317b98fa6dc09a9f364"
     );
 
+    let mut forged_response_v5 = response.clone();
+    forged_response_v5.final_v5_context_hash[0] ^= 0x01;
+    assert!(matches!(
+        viewer_signature_transcript_v2(&host_bytes, &forged_response_v5),
+        Err(HostFinalizeTranscriptError::ViewerV5ContextMismatch)
+    ));
+    assert!(matches!(
+        host_signature_transcript_v2(
+            &host_bytes,
+            &forged_response_v5,
+            &forged_response_v5.final_v5_context_hash,
+        ),
+        Err(HostFinalizeTranscriptError::ViewerV5ContextMismatch)
+    ));
+
     let mut mismatched_finalize_v5 = finalize.final_v5_context_hash;
     mismatched_finalize_v5[0] ^= 0x01;
     assert!(matches!(
