@@ -1,0 +1,23 @@
+[package]
+name = "xenia-authority-rekey-transition-evidence"
+version = "0.0.0-m0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz <<maintainer-email>>"]
+license = "Apache-2.0 OR MIT"
+description = "Self-describing public rekey transition evidence for Xenia authority lineages"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+thiserror = "1"
+xenia-handshake = { path = "../xenia-handshake" }
+xenia-authority-activation-evidence = { path = "../xenia-authority-activation-evidence" }
+xenia-authority-lineage-epoch-evidence = { path = "../xenia-authority-lineage-epoch-evidence" }
+
+# Staged outside the production root workspace. It consumes the existing
+# xenia-handshake rekey context implementations only to recompute public epoch
+# hashes; it does not derive/install keys or modify the production handshake.
+[workspace]
