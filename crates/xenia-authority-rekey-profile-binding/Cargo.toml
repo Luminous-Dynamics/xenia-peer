@@ -13,6 +13,7 @@ publish = false
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 thiserror = "1"
+xenia-negotiation = { path = "../xenia-negotiation" }
 xenia-authority-activation-evidence = { path = "../xenia-authority-activation-evidence" }
 xenia-authority-lineage-epoch-evidence = { path = "../xenia-authority-lineage-epoch-evidence" }
 xenia-authority-rekey-transition-evidence = { path = "../xenia-authority-rekey-transition-evidence" }
