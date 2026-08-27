@@ -1,0 +1,80 @@
+name: Authority Activation Evidence
+
+on:
+  pull_request:
+    paths:
+      - "crates/xenia-negotiation/**"
+      - "crates/xenia-negotiation-policy/**"
+      - "crates/xenia-handshake-v2-contract/**"
+      - "crates/xenia-authority-activation-evidence/**"
+      - "test-vectors/authority-activation-receipt-v1.json"
+      - "test-vectors/verify-authority-activation-receipt.mjs"
+      - ".github/workflows/authority-activation-evidence.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: authority-activation-evidence-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: -D warnings
+  RUSTDOCFLAGS: -D warnings
+
+jobs:
+  rust:
+    name: Activation evidence (Rust 1.96)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates/xenia-negotiation
+            crates/xenia-negotiation-policy
+            crates/xenia-handshake-v2-contract
+            crates/xenia-authority-activation-evidence
+      - name: Format
+        run: cargo fmt --manifest-path crates/xenia-authority-activation-evidence/Cargo.toml --check
+      - name: Check
+        run: cargo check --manifest-path crates/xenia-authority-activation-evidence/Cargo.toml --all-targets
+      - name: Clippy
+        run: cargo clippy --manifest-path crates/xenia-authority-activation-evidence/Cargo.toml --all-targets -- -D warnings
+      - name: Test receipt derivation and adversarial policy cases
+        run: cargo test --manifest-path crates/xenia-authority-activation-evidence/Cargo.toml
+      - name: Docs
+        run: cargo doc --manifest-path crates/xenia-authority-activation-evidence/Cargo.toml --no-deps
+
+  msrv:
+    name: Activation evidence MSRV (Rust 1.94)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates/xenia-negotiation
+            crates/xenia-negotiation-policy
+            crates/xenia-handshake-v2-contract
+            crates/xenia-authority-activation-evidence
+      - name: Check MSRV
+        run: cargo check --manifest-path crates/xenia-authority-activation-evidence/Cargo.toml --all-targets
+
+  node:
+    name: Independent Node receipt reproduction
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Reproduce receipt bytes and hashes
+        run: node test-vectors/verify-authority-activation-receipt.mjs

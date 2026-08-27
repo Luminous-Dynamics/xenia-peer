@@ -1,0 +1,30 @@
+{
+  "schema": "xenia-handshake-v2-contract-v1",
+  "transport": {
+    "max_handshake_envelope_bytes": 16384,
+    "max_capability_offer_bytes": 8192
+  },
+  "candidate_bincode_fixed_bytes": {
+    "host_hello_v2_without_offer": 3244,
+    "viewer_response_v2_without_offer": 6521,
+    "host_finalize_v2": 3409
+  },
+  "candidate_headroom_at_max_offer": {
+    "host_hello_v2": 4948,
+    "viewer_response_v2": 1671,
+    "host_finalize_v2": 12975
+  },
+  "v5": {
+    "domain_utf8_plus_nul": "xenia.negotiated-session-context.v5\u0000",
+    "hash_algorithm": "sha256",
+    "base_v4_hash_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "negotiation_binding_hash_hex": "320f9374b3db961ed169aac86d2c3e6c2c36ea885f143b2dd991c8ee75f3c57b",
+    "preimage_hex": "78656e69612e6e65676f7469617465642d73657373696f6e2d636f6e746578742e763500000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f320f9374b3db961ed169aac86d2c3e6c2c36ea885f143b2dd991c8ee75f3c57b",
+    "sha256": "9f59efa7ef0959faf57c2490eb438d5537e1485f4bf4f2841cc0df76a647f584"
+  },
+  "notes": [
+    "Fixed-byte counts assume bincode v1 default enum discriminants (u32), fixed arrays, and Vec<u8> length prefix (u64).",
+    "The 8 KiB offer cap is a V2 handshake transport limit, not a reduction of the generic semantic capability model.",
+    "V5 treats the existing V4 context hash as an opaque commitment and does not require non-Rust verifiers to reproduce V4 bincode internals."
+  ]
+}
