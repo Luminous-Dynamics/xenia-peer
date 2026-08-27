@@ -1,0 +1,22 @@
+[package]
+name = "xenia-authority-activation-evidence"
+version = "0.0.0-m0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz <<maintainer-email>>"]
+license = "Apache-2.0 OR MIT"
+description = "Non-authorizing durable evidence for negotiated Xenia authority activation"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+thiserror = "1"
+xenia-handshake-v2-contract = { path = "../xenia-handshake-v2-contract" }
+xenia-negotiation = { path = "../xenia-negotiation" }
+xenia-negotiation-policy = { path = "../xenia-negotiation-policy" }
+
+# Staged outside the production root workspace until V2 authentication consumes
+# this evidence format deliberately.
+[workspace]
