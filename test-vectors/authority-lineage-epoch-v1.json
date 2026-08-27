@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "lineage_id_hex": "cb7a0bc37fb04a286479a9bede740b68cb9c6a86f60257822989c2843028a0da",
+  "activation_id_hex": "1ba70773ca4179593c90279e44f407688583b976bd7028d05c3feccfbc6840c3",
+  "epoch0": {
+    "key_epoch": 0,
+    "previous_epoch_hash_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+    "current_epoch_hash_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+    "canonical_length": 179,
+    "evidence_digest_hex": "47eb22fe9ff6baf4b1a9b64c6643a2f08e3de67c4c17411710f57a17fed423af"
+  },
+  "epoch1": {
+    "key_epoch": 1,
+    "previous_epoch_hash_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+    "current_epoch_hash_hex": "6666666666666666666666666666666666666666666666666666666666666666",
+    "canonical_length": 179,
+    "evidence_digest_hex": "4d2bcc3eec6d1b8e3c9fb56b329865ab73b45ca1099f52262d55a2e4adf7ad52"
+  }
+}
