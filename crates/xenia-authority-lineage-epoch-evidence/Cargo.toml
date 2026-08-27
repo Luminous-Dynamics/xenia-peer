@@ -1,0 +1,20 @@
+[package]
+name = "xenia-authority-lineage-epoch-evidence"
+version = "0.0.0-m0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz <<maintainer-email>>"]
+license = "Apache-2.0 OR MIT"
+description = "Non-authorizing rekey lineage epoch evidence for Xenia"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+thiserror = "1"
+xenia-authority-activation-evidence = { path = "../xenia-authority-activation-evidence" }
+
+# Staged outside the production root workspace. It mirrors already-verified
+# Xenia rekey epoch facts and does not replace or implement rekey cryptography.
+[workspace]
