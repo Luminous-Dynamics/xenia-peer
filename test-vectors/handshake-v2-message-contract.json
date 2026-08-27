@@ -1,0 +1,36 @@
+{
+  "schema": "xenia.handshake-v2-message-contract.v1",
+  "selected_context_sha256": "a48615f6c5b7004aa19cd57e34235ca35775dfe0abd1048c5595fe20a8b555e8",
+  "negotiation_binding_sha256": "320f9374b3db961ed169aac86d2c3e6c2c36ea885f143b2dd991c8ee75f3c57b",
+  "base_v4_context_hash": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "final_v5_context_hash": "9f59efa7ef0959faf57c2490eb438d5537e1485f4bf4f2841cc0df76a647f584",
+  "message_variants": {
+    "host_hello_v2": 3,
+    "viewer_response_v2": 4,
+    "host_finalize_v2": 5
+  },
+  "messages": {
+    "host_hello_v2": {
+      "bytes": 3348,
+      "sha256": "c63e7bd4a331f03bdf295ee0845a08eb936a9625d7a8bc413a14c13166c25b0a"
+    },
+    "viewer_response_v2": {
+      "bytes": 6615,
+      "sha256": "7e3ab9366d8336e284a5ba595ffa505610f43869a5c66fbbf942bc69e7049b0b"
+    },
+    "host_finalize_v2": {
+      "bytes": 3409,
+      "sha256": "ec55f4899e10022511681709db3d496c96b7e20faa35ba573e12f3e994782b44"
+    }
+  },
+  "signature_transcripts": {
+    "viewer_response_v2": {
+      "bytes": 6794,
+      "sha256": "fccfc6314ddcf38c5464fca454343c95716e191c8afeac22f96be49ac49c8456"
+    },
+    "host_finalize_v2": {
+      "bytes": 10231,
+      "sha256": "add97be37fb648148d5cb7c80f41d283187ad1e744cbd317b98fa6dc09a9f364"
+    }
+  }
+}
