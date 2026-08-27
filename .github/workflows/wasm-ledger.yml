@@ -2,8 +2,24 @@ name: Xenia WASM Ledger
 
 on:
   pull_request:
+    paths-ignore:
+      # Experimental protocol-contract crates are deliberately outside the
+      # production workspace and have dedicated evidence lanes. Remove these
+      # exemptions when any contract becomes production runtime code.
+      - "crates/xenia-negotiation/**"
+      - "crates/xenia-negotiation-codec/**"
+      - "crates/xenia-handshake-v2-contract/**"
+      - "crates/xenia-authority-*/**"
+      - ".github/workflows/negotiated-context.yml"
+      - ".github/workflows/negotiation-policy.yml"
+      - ".github/workflows/handshake-v2-contract.yml"
+      - ".github/workflows/authority-*.yml"
   push:
     branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   wasm-ledger:
