@@ -6,6 +6,8 @@ on:
       - "crates/xenia-negotiation/**"
       - "crates/xenia-negotiation-codec/**"
       - "crates/xenia-handshake-v2-contract/**"
+      - "test-vectors/handshake-v2-message-contract.json"
+      - "test-vectors/verify-handshake-v2-message-contract.mjs"
       - ".github/workflows/handshake-v2-contract.yml"
   workflow_dispatch:
 
@@ -43,7 +45,7 @@ jobs:
         run: cargo check --manifest-path crates/xenia-handshake-v2-contract/Cargo.toml --all-targets
       - name: Clippy
         run: cargo clippy --manifest-path crates/xenia-handshake-v2-contract/Cargo.toml --all-targets -- -D warnings
-      - name: Test V2 message, size, V5, and transcript contract
+      - name: Test V2 message, size, V5, transcript, and frozen vectors
         run: cargo test --manifest-path crates/xenia-handshake-v2-contract/Cargo.toml
       - name: Docs
         run: cargo doc --manifest-path crates/xenia-handshake-v2-contract/Cargo.toml --no-deps
@@ -62,3 +64,14 @@ jobs:
             crates/xenia-handshake-v2-contract
       - name: Check MSRV
         run: cargo check --manifest-path crates/xenia-handshake-v2-contract/Cargo.toml --all-targets
+
+  node:
+    name: Independent V2 message/transcript reproduction
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Reproduce message and signature-transcript bytes
+        run: node test-vectors/verify-handshake-v2-message-contract.mjs
