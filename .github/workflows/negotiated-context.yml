@@ -1,0 +1,91 @@
+name: Negotiated Context Conformance
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "crates/xenia-negotiation/**"
+      - "crates/xenia-negotiation-codec/**"
+      - "test-vectors/negotiated-context-v1.json"
+      - "test-vectors/verify-negotiated-context.mjs"
+      - "test-vectors/handshake-v2-contract.json"
+      - "test-vectors/verify-handshake-v2-contract.mjs"
+      - ".github/workflows/negotiated-context.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: negotiated-context-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: -D warnings
+  RUSTDOCFLAGS: -D warnings
+
+jobs:
+  conformance:
+    name: Canonical negotiation + codec (Rust 1.96)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates/xenia-negotiation
+            crates/xenia-negotiation-codec
+      - name: Format semantic primitive
+        run: cargo fmt --manifest-path crates/xenia-negotiation/Cargo.toml --check
+      - name: Check semantic primitive
+        run: cargo check --manifest-path crates/xenia-negotiation/Cargo.toml --all-targets
+      - name: Clippy semantic primitive
+        run: cargo clippy --manifest-path crates/xenia-negotiation/Cargo.toml --all-targets -- -D warnings
+      - name: Test frozen vectors and semantic fail-closed rules
+        run: cargo test --manifest-path crates/xenia-negotiation/Cargo.toml
+      - name: Docs semantic primitive
+        run: cargo doc --manifest-path crates/xenia-negotiation/Cargo.toml --no-deps
+      - name: Format hostile-byte codec
+        run: cargo fmt --manifest-path crates/xenia-negotiation-codec/Cargo.toml --check
+      - name: Check hostile-byte codec
+        run: cargo check --manifest-path crates/xenia-negotiation-codec/Cargo.toml --all-targets
+      - name: Clippy hostile-byte codec
+        run: cargo clippy --manifest-path crates/xenia-negotiation-codec/Cargo.toml --all-targets -- -D warnings
+      - name: Test malformed and non-canonical peer encodings
+        run: cargo test --manifest-path crates/xenia-negotiation-codec/Cargo.toml
+      - name: Docs hostile-byte codec
+        run: cargo doc --manifest-path crates/xenia-negotiation-codec/Cargo.toml --no-deps
+
+  node:
+    name: Independent Node negotiation reproduction
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Reproduce offers, deterministic selection, and binding
+        run: node test-vectors/verify-negotiated-context.mjs
+      - name: Verify V2 envelope budget and V5 context vector
+        run: node test-vectors/verify-handshake-v2-contract.mjs
+
+  msrv:
+    name: Negotiation + codec MSRV (Rust 1.94)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates/xenia-negotiation
+            crates/xenia-negotiation-codec
+      - name: Check semantic primitive MSRV
+        run: cargo check --manifest-path crates/xenia-negotiation/Cargo.toml --all-targets
+      - name: Check hostile-byte codec MSRV
+        run: cargo check --manifest-path crates/xenia-negotiation-codec/Cargo.toml --all-targets

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "handshake_transcript_hash_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+  "base_v4_context_hash_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "final_v5_context_hash_hex": "9f59efa7ef0959faf57c2490eb438d5537e1485f4bf4f2841cc0df76a647f584",
+  "host_offer_hash_hex": "ad1c46f1409fc3d39c6bd5ca6c979c97cd3a6576399afcb858fe0f00b5188cca",
+  "viewer_offer_hash_hex": "9a7516639523a0f14647def7412b9b87eaa763d594eb5efb3d43e149e3f26110",
+  "selected_context_hash_hex": "a48615f6c5b7004aa19cd57e34235ca35775dfe0abd1048c5595fe20a8b555e8",
+  "negotiation_binding_hash_hex": "320f9374b3db961ed169aac86d2c3e6c2c36ea885f143b2dd991c8ee75f3c57b",
+  "local_policy_hash_hex": "6456c40af9e104b82be0b0faf501c404c057d7b55928d339720a9c208f6eef0f",
+  "host_identity_fingerprint_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+  "lineage_id_hex": "cb7a0bc37fb04a286479a9bede740b68cb9c6a86f60257822989c2843028a0da",
+  "activation_id_hex": "1ba70773ca4179593c90279e44f407688583b976bd7028d05c3feccfbc6840c3",
+  "canonical_receipt_length": 391,
+  "receipt_digest_hex": "d1e0abbfcfbb6e65662a3faa38d9bb350696b30d6c454f5a2cf81cebfe3b37e9"
+}

@@ -1,0 +1,38 @@
+{
+  "schema": "xenia-capability-negotiation-vector-v1",
+  "hash_algorithm": "sha256",
+  "host_offer": [
+    {
+      "name_utf8": "xenia.causal-authority",
+      "versions_by_preference_utf8": ["draft-04", "draft-03"]
+    },
+    {
+      "name_utf8": "xenia.operator-rekey",
+      "versions_by_preference_utf8": ["v1"]
+    }
+  ],
+  "viewer_offer": [
+    {
+      "name_utf8": "xenia.causal-authority",
+      "versions_by_preference_utf8": ["draft-04"]
+    },
+    {
+      "name_utf8": "xenia.operator-rekey",
+      "versions_by_preference_utf8": ["v1"]
+    }
+  ],
+  "expected": {
+    "host_offer_canonical_hex": "78656e69612e6361706162696c6974792d6f666665722e76310000000002001678656e69612e63617573616c2d617574686f726974790002000864726166742d3034000864726166742d3033001478656e69612e6f70657261746f722d72656b6579000100027631",
+    "host_offer_sha256": "ad1c46f1409fc3d39c6bd5ca6c979c97cd3a6576399afcb858fe0f00b5188cca",
+    "viewer_offer_canonical_hex": "78656e69612e6361706162696c6974792d6f666665722e76310000000002001678656e69612e63617573616c2d617574686f726974790001000864726166742d3034001478656e69612e6f70657261746f722d72656b6579000100027631",
+    "viewer_offer_sha256": "9a7516639523a0f14647def7412b9b87eaa763d594eb5efb3d43e149e3f26110",
+    "selected": [
+      { "name_utf8": "xenia.causal-authority", "version_utf8": "draft-04" },
+      { "name_utf8": "xenia.operator-rekey", "version_utf8": "v1" }
+    ],
+    "selected_canonical_hex": "78656e69612e6e65676f7469617465642d636f6e746578742e76310000000002001678656e69612e63617573616c2d617574686f72697479000864726166742d3034001478656e69612e6f70657261746f722d72656b657900027631",
+    "selected_sha256": "a48615f6c5b7004aa19cd57e34235ca35775dfe0abd1048c5595fe20a8b555e8",
+    "binding_preimage_hex": "78656e69612e6361706162696c6974792d6e65676f74696174696f6e2d62696e64696e672e763100ad1c46f1409fc3d39c6bd5ca6c979c97cd3a6576399afcb858fe0f00b5188cca9a7516639523a0f14647def7412b9b87eaa763d594eb5efb3d43e149e3f26110a48615f6c5b7004aa19cd57e34235ca35775dfe0abd1048c5595fe20a8b555e8",
+    "binding_sha256": "320f9374b3db961ed169aac86d2c3e6c2c36ea885f143b2dd991c8ee75f3c57b"
+  }
+}
