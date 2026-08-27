@@ -1,0 +1,23 @@
+{
+  "schema": "xenia.negotiation-policy.v1",
+  "domain_hex": "78656e69612e6e65676f74696174696f6e2d706f6c6963792e763100",
+  "minimum": {
+    "mode": 0,
+    "required": [
+      ["xenia.causal-authority", "draft-04"]
+    ],
+    "allowed": [],
+    "sha256": "6456c40af9e104b82be0b0faf501c404c057d7b55928d339720a9c208f6eef0f"
+  },
+  "allow_list": {
+    "mode": 1,
+    "required": [
+      ["xenia.causal-authority", "draft-04"]
+    ],
+    "allowed": [
+      ["xenia.causal-authority", "draft-04"],
+      ["xenia.operator-rekey", "v1"]
+    ],
+    "sha256": "ed37983b2b76cbc7689d80ef2f008bdaf469483bbc2aa1caaed2352992b7fca4"
+  }
+}
