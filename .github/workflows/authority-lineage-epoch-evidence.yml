@@ -1,0 +1,74 @@
+name: Authority Lineage Epoch Evidence
+
+on:
+  pull_request:
+    paths:
+      - "crates/xenia-authority-activation-evidence/**"
+      - "crates/xenia-authority-lineage-epoch-evidence/**"
+      - "test-vectors/authority-lineage-epoch-v1.json"
+      - "test-vectors/verify-authority-lineage-epoch.mjs"
+      - ".github/workflows/authority-lineage-epoch-evidence.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: authority-lineage-epoch-evidence-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: -D warnings
+  RUSTDOCFLAGS: -D warnings
+
+jobs:
+  rust:
+    name: Lineage epoch evidence (Rust 1.96)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates/xenia-authority-activation-evidence
+            crates/xenia-authority-lineage-epoch-evidence
+      - name: Format
+        run: cargo fmt --manifest-path crates/xenia-authority-lineage-epoch-evidence/Cargo.toml --check
+      - name: Check
+        run: cargo check --manifest-path crates/xenia-authority-lineage-epoch-evidence/Cargo.toml --all-targets
+      - name: Clippy
+        run: cargo clippy --manifest-path crates/xenia-authority-lineage-epoch-evidence/Cargo.toml --all-targets -- -D warnings
+      - name: Test epoch continuity and vectors
+        run: cargo test --manifest-path crates/xenia-authority-lineage-epoch-evidence/Cargo.toml
+      - name: Docs
+        run: cargo doc --manifest-path crates/xenia-authority-lineage-epoch-evidence/Cargo.toml --no-deps
+
+  msrv:
+    name: Lineage epoch evidence MSRV (Rust 1.94)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates/xenia-authority-activation-evidence
+            crates/xenia-authority-lineage-epoch-evidence
+      - name: Check MSRV
+        run: cargo check --manifest-path crates/xenia-authority-lineage-epoch-evidence/Cargo.toml --all-targets
+
+  node:
+    name: Independent Node lineage reproduction
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Reproduce epoch evidence bytes and hashes
+        run: node test-vectors/verify-authority-lineage-epoch.mjs
