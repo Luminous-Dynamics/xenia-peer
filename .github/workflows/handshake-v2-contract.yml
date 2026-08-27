@@ -39,16 +39,27 @@ jobs:
             crates/xenia-negotiation
             crates/xenia-negotiation-codec
             crates/xenia-handshake-v2-contract
+            crates/xenia-handshake-v2-contract/finalize-binding
       - name: Format
-        run: cargo fmt --manifest-path crates/xenia-handshake-v2-contract/Cargo.toml --check
+        run: |
+          cargo fmt --manifest-path crates/xenia-handshake-v2-contract/Cargo.toml --check
+          cargo fmt --manifest-path crates/xenia-handshake-v2-contract/finalize-binding/Cargo.toml --check
       - name: Check
-        run: cargo check --manifest-path crates/xenia-handshake-v2-contract/Cargo.toml --all-targets
+        run: |
+          cargo check --manifest-path crates/xenia-handshake-v2-contract/Cargo.toml --all-targets
+          cargo check --manifest-path crates/xenia-handshake-v2-contract/finalize-binding/Cargo.toml --all-targets
       - name: Clippy
-        run: cargo clippy --manifest-path crates/xenia-handshake-v2-contract/Cargo.toml --all-targets -- -D warnings
-      - name: Test V2 message, size, V5, transcript, and frozen vectors
-        run: cargo test --manifest-path crates/xenia-handshake-v2-contract/Cargo.toml
+        run: |
+          cargo clippy --manifest-path crates/xenia-handshake-v2-contract/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --manifest-path crates/xenia-handshake-v2-contract/finalize-binding/Cargo.toml --all-targets -- -D warnings
+      - name: Test V2 message, finalize binding, size, V5, transcript, and frozen vectors
+        run: |
+          cargo test --manifest-path crates/xenia-handshake-v2-contract/Cargo.toml
+          cargo test --manifest-path crates/xenia-handshake-v2-contract/finalize-binding/Cargo.toml
       - name: Docs
-        run: cargo doc --manifest-path crates/xenia-handshake-v2-contract/Cargo.toml --no-deps
+        run: |
+          cargo doc --manifest-path crates/xenia-handshake-v2-contract/Cargo.toml --no-deps
+          cargo doc --manifest-path crates/xenia-handshake-v2-contract/finalize-binding/Cargo.toml --no-deps
 
   msrv:
     name: V2 contract MSRV (Rust 1.94)
@@ -62,8 +73,11 @@ jobs:
             crates/xenia-negotiation
             crates/xenia-negotiation-codec
             crates/xenia-handshake-v2-contract
+            crates/xenia-handshake-v2-contract/finalize-binding
       - name: Check MSRV
-        run: cargo check --manifest-path crates/xenia-handshake-v2-contract/Cargo.toml --all-targets
+        run: |
+          cargo check --manifest-path crates/xenia-handshake-v2-contract/Cargo.toml --all-targets
+          cargo check --manifest-path crates/xenia-handshake-v2-contract/finalize-binding/Cargo.toml --all-targets
 
   node:
     name: Independent V2 message/transcript reproduction
