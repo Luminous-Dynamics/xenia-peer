@@ -7,6 +7,7 @@ on:
       - "crates/xenia-authority-activation-evidence/**"
       - "crates/xenia-authority-lineage-epoch-evidence/**"
       - "crates/xenia-authority-rekey-transition-evidence/**"
+      - "crates/xenia-authority-rekey-profile-binding/**"
       - ".github/workflows/authority-rekey-transition-evidence.yml"
   workflow_dispatch:
 
@@ -25,7 +26,7 @@ env:
 
 jobs:
   rust:
-    name: Rekey transition evidence (Rust 1.96)
+    name: Rekey transition + profile binding (Rust 1.96)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,26 +35,42 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: crates/xenia-authority-rekey-transition-evidence
-      - name: Format
+          workspaces: |
+            crates/xenia-authority-rekey-transition-evidence
+            crates/xenia-authority-rekey-profile-binding
+      - name: Format transition evidence
         run: cargo fmt --manifest-path crates/xenia-authority-rekey-transition-evidence/Cargo.toml --check
-      - name: Check
+      - name: Format profile binding
+        run: cargo fmt --manifest-path crates/xenia-authority-rekey-profile-binding/Cargo.toml --check
+      - name: Check transition evidence
         run: cargo check --manifest-path crates/xenia-authority-rekey-transition-evidence/Cargo.toml --all-targets
-      - name: Clippy
+      - name: Check profile binding
+        run: cargo check --manifest-path crates/xenia-authority-rekey-profile-binding/Cargo.toml --all-targets
+      - name: Clippy transition evidence
         run: cargo clippy --manifest-path crates/xenia-authority-rekey-transition-evidence/Cargo.toml --all-targets -- -D warnings
+      - name: Clippy profile binding
+        run: cargo clippy --manifest-path crates/xenia-authority-rekey-profile-binding/Cargo.toml --all-targets -- -D warnings
       - name: Test production lane/operator hash compatibility and lineage binding
         run: cargo test --manifest-path crates/xenia-authority-rekey-transition-evidence/Cargo.toml
-      - name: Docs
+      - name: Test rekey-domain pinning and persisted binding validation
+        run: cargo test --manifest-path crates/xenia-authority-rekey-profile-binding/Cargo.toml
+      - name: Docs transition evidence
         run: cargo doc --manifest-path crates/xenia-authority-rekey-transition-evidence/Cargo.toml --no-deps
+      - name: Docs profile binding
+        run: cargo doc --manifest-path crates/xenia-authority-rekey-profile-binding/Cargo.toml --no-deps
 
   msrv:
-    name: Rekey transition evidence MSRV (Rust 1.94)
+    name: Rekey transition + profile binding MSRV (Rust 1.94)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: crates/xenia-authority-rekey-transition-evidence
-      - name: Check MSRV
+          workspaces: |
+            crates/xenia-authority-rekey-transition-evidence
+            crates/xenia-authority-rekey-profile-binding
+      - name: Check transition evidence MSRV
         run: cargo check --manifest-path crates/xenia-authority-rekey-transition-evidence/Cargo.toml --all-targets
+      - name: Check profile binding MSRV
+        run: cargo check --manifest-path crates/xenia-authority-rekey-profile-binding/Cargo.toml --all-targets
