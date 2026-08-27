@@ -17,6 +17,10 @@ on:
       - ".github/workflows/authority-*.yml"
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   collect-artifacts:
     runs-on: ubuntu-latest
