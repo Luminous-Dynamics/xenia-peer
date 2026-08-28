@@ -15,26 +15,73 @@ concurrency:
   group: xenia-resilience-evidence-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  QUALIFICATION_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+  QUALIFICATION_BASE: ${{ github.event.pull_request.base.sha || 'workflow-dispatch' }}
+
 jobs:
   qualify:
-    name: Format + test + clippy
-    runs-on: ubuntu-latest
+    name: Exact head format + test + clippy
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.QUALIFICATION_HEAD }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Assert exact clean source head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$QUALIFICATION_HEAD"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          echo "HEAD: $(git rev-parse HEAD)"
+          echo "Tree: $(git rev-parse 'HEAD^{tree}')"
+          echo "Base context: $QUALIFICATION_BASE"
+          echo "Runner OS: ${RUNNER_OS:-unknown}"
+          echo "Runner arch: ${RUNNER_ARCH:-unknown}"
+          echo "Runner image OS: ${ImageOS:-unknown}"
+          echo "Runner image version: ${ImageVersion:-unknown}"
+      - uses: dtolnay/rust-toolchain@01ba1edad32c6f80dbcce879d3e0fa5a00b2a84e
         with:
           components: rustfmt, clippy
+      - name: Toolchain provenance
+        run: |
+          rustc -vV
+          cargo -Vv
       - name: Format
         run: cargo fmt --manifest-path crates/xenia-resilience-evidence/Cargo.toml -- --check
       - name: Test
         run: cargo test --manifest-path crates/xenia-resilience-evidence/Cargo.toml
       - name: Clippy
         run: cargo clippy --manifest-path crates/xenia-resilience-evidence/Cargo.toml --all-targets -- -D warnings
+      - name: Assert source tree remained clean
+        run: test -z "$(git status --porcelain --untracked-files=all)"
 
   msrv:
-    name: MSRV (Rust 1.94)
-    runs-on: ubuntu-latest
+    name: Exact head MSRV (Rust 1.94.1)
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.94
-      - run: cargo test --manifest-path crates/xenia-resilience-evidence/Cargo.toml
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.QUALIFICATION_HEAD }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Assert exact clean source head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$QUALIFICATION_HEAD"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          echo "HEAD: $(git rev-parse HEAD)"
+          echo "Tree: $(git rev-parse 'HEAD^{tree}')"
+          echo "Base context: $QUALIFICATION_BASE"
+      - uses: dtolnay/rust-toolchain@75be91dd2711b583df57c31d0873b4145c89f1d9
+      - name: Toolchain provenance
+        run: |
+          rustc -vV
+          cargo -Vv
+      - name: MSRV test
+        run: cargo test --manifest-path crates/xenia-resilience-evidence/Cargo.toml
+      - name: Assert source tree remained clean
+        run: test -z "$(git status --porcelain --untracked-files=all)"
