@@ -9,7 +9,9 @@
 //! that later runtime code must authorize before creating a process.
 //!
 //! V1 is intentionally one-shot and non-interactive. An executable and argv are
-//! represented separately; there is no shell-command-string field.
+//! represented separately; there is no shell-command-string field. V1 policies
+//! authorize exact invocation tuples so allowing one executable does not silently
+//! allow every argument that executable happens to accept.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -23,27 +25,29 @@ pub const EXEC_PROTOCOL_VERSION: u16 = 1;
 pub const EXEC_POLICY_SCHEMA_V1: &str = "xenia-exec-policy-v1";
 /// Domain separator for policy commitments.
 pub const EXEC_POLICY_DIGEST_DOMAIN_V1: &[u8] = b"xenia-exec-policy-digest-v1";
+/// Domain separator for invocation commitments/evidence.
+pub const EXEC_INVOCATION_DIGEST_DOMAIN_V1: &[u8] = b"xenia-exec-invocation-digest-v1";
 /// Domain separator for request commitments/evidence.
 pub const EXEC_REQUEST_DIGEST_DOMAIN_V1: &[u8] = b"xenia-exec-request-digest-v1";
 
 /// Maximum encoded path-like text accepted by the protocol contract.
 pub const MAX_PATH_BYTES_V1: usize = 4 * 1024;
-/// Maximum executable entries in one policy.
-pub const MAX_ALLOWED_EXECUTABLES_V1: usize = 256;
-/// Maximum working-directory roots in one policy.
-pub const MAX_WORKING_ROOTS_V1: usize = 64;
-/// Maximum environment keys in one policy or request.
-pub const MAX_ENVIRONMENT_KEYS_V1: usize = 128;
+/// Maximum exact invocation rules in one policy.
+pub const MAX_ALLOWED_INVOCATIONS_V1: usize = 256;
+/// Maximum argv entries in one invocation.
+pub const MAX_ARGUMENTS_V1: usize = 256;
+/// Maximum bytes in one argv entry.
+pub const MAX_ARGUMENT_BYTES_V1: usize = 4 * 1024;
+/// Maximum aggregate argv bytes in one invocation.
+pub const MAX_ARGUMENT_VECTOR_BYTES_V1: usize = 64 * 1024;
+/// Maximum explicit environment entries in one invocation.
+pub const MAX_ENVIRONMENT_ENTRIES_V1: usize = 128;
 /// Maximum bytes in an environment key.
 pub const MAX_ENVIRONMENT_KEY_BYTES_V1: usize = 256;
 /// Maximum bytes in an environment value.
 pub const MAX_ENVIRONMENT_VALUE_BYTES_V1: usize = 4 * 1024;
-/// Maximum argv entries in one execution request.
-pub const MAX_ARGUMENTS_V1: usize = 256;
-/// Maximum bytes in one argv entry.
-pub const MAX_ARGUMENT_BYTES_V1: usize = 4 * 1024;
-/// Maximum aggregate argv bytes in one request.
-pub const MAX_ARGUMENT_VECTOR_BYTES_V1: usize = 64 * 1024;
+/// Maximum aggregate key/value bytes in one invocation's environment.
+pub const MAX_ENVIRONMENT_VECTOR_BYTES_V1: usize = 64 * 1024;
 /// Maximum stdout/stderr bytes carried by one protocol message.
 pub const MAX_OUTPUT_CHUNK_BYTES_V1: usize = 64 * 1024;
 /// Absolute protocol ceiling for one requested runtime (24 hours).
@@ -58,10 +62,98 @@ pub const MAX_CONCURRENT_PROCESSES_V1: u16 = 64;
 /// V1 intentionally exposes only the daemon's current user. Fixed accounts,
 /// privilege transitions, `sudo`, service identities, and container/user
 /// namespaces require a future protocol revision/policy extension.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ExecIdentityPolicyV1 {
     /// Execute as the same OS identity as the Xenia host process.
     CurrentUser,
+}
+
+/// One exact environment entry committed into an invocation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ExecEnvironmentEntryV1 {
+    /// Environment key.
+    pub key: String,
+    /// Environment value.
+    pub value: String,
+}
+
+/// Exact process invocation authorized by a V1 policy.
+///
+/// `working_directory` and `environment` are explicit so the eventual runtime
+/// does not inherit the daemon's ambient current directory or arbitrary daemon
+/// environment. The runtime must start from an empty environment and apply the
+/// committed entries exactly, subject to platform implementation constraints.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ExecInvocationV1 {
+    /// Executable identity/path. This is never a shell command string.
+    pub executable: String,
+    /// Exact argv entries passed directly to the executable.
+    pub argv: Vec<String>,
+    /// Exact committed working directory for the process.
+    pub working_directory: String,
+    /// Exact committed environment, sorted and unique by key.
+    pub environment: Vec<ExecEnvironmentEntryV1>,
+}
+
+impl ExecInvocationV1 {
+    /// Validate finite, canonical V1 invocation syntax.
+    pub fn validate(&self) -> Result<(), ExecProtocolError> {
+        validate_path_text("executable", &self.executable)?;
+        validate_path_text("working_directory", &self.working_directory)?;
+
+        if self.argv.len() > MAX_ARGUMENTS_V1 {
+            return Err(ExecProtocolError::TooManyArguments);
+        }
+        let mut argv_bytes = 0usize;
+        for arg in &self.argv {
+            validate_text("argv", arg, MAX_ARGUMENT_BYTES_V1, true)?;
+            argv_bytes = argv_bytes.saturating_add(arg.len());
+        }
+        if argv_bytes > MAX_ARGUMENT_VECTOR_BYTES_V1 {
+            return Err(ExecProtocolError::ArgumentVectorTooLarge);
+        }
+
+        if self.environment.len() > MAX_ENVIRONMENT_ENTRIES_V1 {
+            return Err(ExecProtocolError::TooManyEnvironmentEntries);
+        }
+        let mut environment_bytes = 0usize;
+        let mut previous_key: Option<&str> = None;
+        for entry in &self.environment {
+            validate_environment_key(&entry.key)?;
+            validate_text(
+                "environment value",
+                &entry.value,
+                MAX_ENVIRONMENT_VALUE_BYTES_V1,
+                true,
+            )?;
+            environment_bytes = environment_bytes
+                .saturating_add(entry.key.len())
+                .saturating_add(entry.value.len());
+            if previous_key.is_some_and(|previous| previous >= entry.key.as_str()) {
+                return Err(ExecProtocolError::NonCanonicalEnvironment);
+            }
+            previous_key = Some(&entry.key);
+        }
+        if environment_bytes > MAX_ENVIRONMENT_VECTOR_BYTES_V1 {
+            return Err(ExecProtocolError::EnvironmentVectorTooLarge);
+        }
+        Ok(())
+    }
+
+    /// Return deterministic canonical invocation bytes.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, ExecProtocolError> {
+        self.validate()?;
+        Ok(bincode::serialize(self)?)
+    }
+
+    /// Return a domain-separated BLAKE3-256 invocation commitment.
+    pub fn invocation_digest(&self) -> Result<[u8; 32], ExecProtocolError> {
+        let bytes = self.canonical_bytes()?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(EXEC_INVOCATION_DIGEST_DOMAIN_V1);
+        hasher.update(&bytes);
+        Ok(*hasher.finalize().as_bytes())
+    }
 }
 
 /// Deterministic authorization policy committed into the session consent scope.
@@ -71,18 +163,11 @@ pub struct ExecPolicyV1 {
     pub schema: String,
     /// Protocol revision this policy authorizes.
     pub protocol_version: u16,
-    /// Exact executable identities/paths permitted by the policy.
+    /// Exact invocation tuples authorized by the policy, sorted and unique.
     ///
-    /// Entries must be sorted and unique. Host runtime code is responsible for
-    /// platform-specific canonicalization and safe path resolution before
-    /// matching an execution request to this list.
-    pub allowed_executables: Vec<String>,
-    /// Exact allowed working-directory roots, sorted and unique.
-    pub allowed_working_directory_roots: Vec<String>,
-    /// Environment variable keys that a viewer may explicitly supply, sorted
-    /// and unique. The runtime must not implicitly inherit arbitrary daemon
-    /// environment state merely because a key is absent here.
-    pub allowed_environment_keys: Vec<String>,
+    /// V1 deliberately has no "any argv" rule. Parameterized/typed argument
+    /// policies require an explicit future protocol revision.
+    pub allowed_invocations: Vec<ExecInvocationV1>,
     /// Maximum requested runtime for one process.
     pub max_runtime_ms: u64,
     /// Maximum stdout bytes retained/transmitted for one process.
@@ -105,11 +190,9 @@ pub struct ExecPolicyV1 {
 }
 
 impl ExecPolicyV1 {
-    /// Construct a V1 policy for structured one-shot execution.
+    /// Construct a V1 policy for exact structured one-shot invocations.
     pub fn one_shot(
-        allowed_executables: Vec<String>,
-        allowed_working_directory_roots: Vec<String>,
-        allowed_environment_keys: Vec<String>,
+        allowed_invocations: Vec<ExecInvocationV1>,
         max_runtime_ms: u64,
         max_stdout_bytes: u64,
         max_stderr_bytes: u64,
@@ -118,9 +201,7 @@ impl ExecPolicyV1 {
         Self {
             schema: EXEC_POLICY_SCHEMA_V1.to_string(),
             protocol_version: EXEC_PROTOCOL_VERSION,
-            allowed_executables,
-            allowed_working_directory_roots,
-            allowed_environment_keys,
+            allowed_invocations,
             max_runtime_ms,
             max_stdout_bytes,
             max_stderr_bytes,
@@ -133,9 +214,9 @@ impl ExecPolicyV1 {
         }
     }
 
-    /// Construct an explicit deny-all V1 policy.
+    /// Construct the one canonical deny-all V1 policy.
     pub fn deny_all() -> Self {
-        Self::one_shot(Vec::new(), Vec::new(), Vec::new(), 0, 0, 0, 0)
+        Self::one_shot(Vec::new(), 0, 0, 0, 0)
     }
 
     /// Validate the policy's bounded, canonical V1 representation.
@@ -148,22 +229,19 @@ impl ExecPolicyV1 {
                 self.protocol_version,
             ));
         }
-        if self.allowed_executables.len() > MAX_ALLOWED_EXECUTABLES_V1 {
-            return Err(ExecProtocolError::TooManyAllowedExecutables);
+        if self.allowed_invocations.len() > MAX_ALLOWED_INVOCATIONS_V1 {
+            return Err(ExecProtocolError::TooManyAllowedInvocations);
         }
-        if self.allowed_working_directory_roots.len() > MAX_WORKING_ROOTS_V1 {
-            return Err(ExecProtocolError::TooManyWorkingRoots);
+        for invocation in &self.allowed_invocations {
+            invocation.validate()?;
         }
-        if self.allowed_environment_keys.len() > MAX_ENVIRONMENT_KEYS_V1 {
-            return Err(ExecProtocolError::TooManyEnvironmentKeys);
+        if self
+            .allowed_invocations
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        {
+            return Err(ExecProtocolError::NonCanonicalInvocationAllowlist);
         }
-
-        validate_sorted_unique_paths("allowed_executables", &self.allowed_executables)?;
-        validate_sorted_unique_paths(
-            "allowed_working_directory_roots",
-            &self.allowed_working_directory_roots,
-        )?;
-        validate_sorted_unique_environment_keys(&self.allowed_environment_keys)?;
 
         if self.max_runtime_ms > MAX_REQUEST_RUNTIME_MS_V1 {
             return Err(ExecProtocolError::RuntimeLimitTooLarge);
@@ -185,9 +263,7 @@ impl ExecPolicyV1 {
             return Err(ExecProtocolError::UnsupportedV1Privilege);
         }
 
-        // A policy is either a fully explicit deny-all policy or it must have
-        // finite non-zero ceilings for the work it can authorize.
-        if self.allowed_executables.is_empty() {
+        if self.allowed_invocations.is_empty() {
             if self.max_runtime_ms != 0
                 || self.max_stdout_bytes != 0
                 || self.max_stderr_bytes != 0
@@ -204,9 +280,23 @@ impl ExecPolicyV1 {
 
     /// Whether this policy can authorize one-shot execution at all.
     pub fn one_shot_enabled(&self) -> bool {
-        !self.allowed_executables.is_empty()
+        !self.allowed_invocations.is_empty()
             && self.max_runtime_ms != 0
             && self.max_concurrent_processes != 0
+    }
+
+    /// Whether the exact request is admitted by this policy before runtime-only
+    /// filesystem/process checks. This does not replace M1 consent.
+    pub fn permits_request(&self, request: &ExecRequestV1) -> Result<bool, ExecProtocolError> {
+        self.validate()?;
+        request.validate()?;
+        if !self.one_shot_enabled() || request.timeout_ms > self.max_runtime_ms {
+            return Ok(false);
+        }
+        Ok(self
+            .allowed_invocations
+            .binary_search(&request.invocation)
+            .is_ok())
     }
 
     /// Return deterministic canonical policy bytes.
@@ -269,20 +359,11 @@ impl ExecAdvertisementV1 {
         if self.max_concurrent_processes > MAX_CONCURRENT_PROCESSES_V1 {
             return Err(ExecProtocolError::ConcurrencyLimitTooLarge);
         }
-        if !self.one_shot_enabled && self.max_concurrent_processes != 0 {
+        if self.one_shot_enabled != (self.max_concurrent_processes != 0) {
             return Err(ExecProtocolError::InvalidAdvertisement);
         }
         Ok(())
     }
-}
-
-/// One explicitly supplied environment variable.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecEnvironmentEntryV1 {
-    /// Environment key.
-    pub key: String,
-    /// Environment value.
-    pub value: String,
 }
 
 /// Structured one-shot execution request.
@@ -292,14 +373,8 @@ pub struct ExecRequestV1 {
     pub protocol_version: u16,
     /// Viewer-chosen request identifier, unique for the live session.
     pub request_id: u64,
-    /// Executable identity/path. This is never a shell command string.
-    pub executable: String,
-    /// Exact argv entries passed to the executable, not shell-tokenized text.
-    pub argv: Vec<String>,
-    /// Optional requested working directory.
-    pub cwd: Option<String>,
-    /// Explicit environment additions, sorted and unique by key.
-    pub environment: Vec<ExecEnvironmentEntryV1>,
+    /// Exact invocation requested from the authenticated policy allowlist.
+    pub invocation: ExecInvocationV1,
     /// Requested process runtime ceiling.
     pub timeout_ms: u64,
 }
@@ -312,38 +387,7 @@ impl ExecRequestV1 {
                 self.protocol_version,
             ));
         }
-        validate_path_text("executable", &self.executable)?;
-        if self.argv.len() > MAX_ARGUMENTS_V1 {
-            return Err(ExecProtocolError::TooManyArguments);
-        }
-        let mut total_argv_bytes = 0usize;
-        for arg in &self.argv {
-            validate_text("argv", arg, MAX_ARGUMENT_BYTES_V1, true)?;
-            total_argv_bytes = total_argv_bytes.saturating_add(arg.len());
-        }
-        if total_argv_bytes > MAX_ARGUMENT_VECTOR_BYTES_V1 {
-            return Err(ExecProtocolError::ArgumentVectorTooLarge);
-        }
-        if let Some(cwd) = &self.cwd {
-            validate_path_text("cwd", cwd)?;
-        }
-        if self.environment.len() > MAX_ENVIRONMENT_KEYS_V1 {
-            return Err(ExecProtocolError::TooManyEnvironmentKeys);
-        }
-        let mut previous_key: Option<&str> = None;
-        for entry in &self.environment {
-            validate_environment_key(&entry.key)?;
-            validate_text(
-                "environment value",
-                &entry.value,
-                MAX_ENVIRONMENT_VALUE_BYTES_V1,
-                true,
-            )?;
-            if previous_key.is_some_and(|previous| previous >= entry.key.as_str()) {
-                return Err(ExecProtocolError::NonCanonicalEnvironment);
-            }
-            previous_key = Some(&entry.key);
-        }
+        self.invocation.validate()?;
         if self.timeout_ms == 0 || self.timeout_ms > MAX_REQUEST_RUNTIME_MS_V1 {
             return Err(ExecProtocolError::InvalidRequestedRuntime);
         }
@@ -506,21 +550,27 @@ pub enum ExecProtocolError {
     /// Protocol revision is not supported.
     #[error("unsupported execution protocol version {0}")]
     UnsupportedProtocolVersion(u16),
-    /// Too many executables were listed.
-    #[error("too many allowed executables")]
-    TooManyAllowedExecutables,
-    /// Too many working roots were listed.
-    #[error("too many allowed working-directory roots")]
-    TooManyWorkingRoots,
-    /// Too many environment keys were listed.
-    #[error("too many environment keys")]
-    TooManyEnvironmentKeys,
+    /// Too many invocation rules were listed.
+    #[error("too many allowed execution invocations")]
+    TooManyAllowedInvocations,
+    /// Policy invocation list is not strictly sorted and unique.
+    #[error("execution invocation allowlist must be strictly sorted and unique")]
+    NonCanonicalInvocationAllowlist,
     /// Too many argv entries were supplied.
     #[error("too many argv entries")]
     TooManyArguments,
     /// Aggregate argv bytes exceeded the V1 ceiling.
     #[error("argv vector exceeds the V1 byte ceiling")]
     ArgumentVectorTooLarge,
+    /// Too many explicit environment entries were supplied.
+    #[error("too many environment entries")]
+    TooManyEnvironmentEntries,
+    /// Aggregate environment bytes exceeded the V1 ceiling.
+    #[error("environment vector exceeds the V1 byte ceiling")]
+    EnvironmentVectorTooLarge,
+    /// Environment entries are not strictly sorted/unique by key.
+    #[error("environment entries must be strictly sorted and unique by key")]
+    NonCanonicalEnvironment,
     /// Output chunk exceeded the V1 ceiling.
     #[error("output chunk exceeds the V1 byte ceiling")]
     OutputChunkTooLarge,
@@ -548,12 +598,6 @@ pub enum ExecProtocolError {
     /// Request runtime is zero or exceeds the absolute protocol bound.
     #[error("invalid requested runtime")]
     InvalidRequestedRuntime,
-    /// Policy collection is not sorted and unique.
-    #[error("non-canonical sorted/unique policy field {0}")]
-    NonCanonicalPolicyField(&'static str),
-    /// Environment request entries are not strictly sorted/unique by key.
-    #[error("environment entries must be strictly sorted and unique by key")]
-    NonCanonicalEnvironment,
     /// Text field is empty when V1 requires a value.
     #[error("execution field {0} must not be empty")]
     EmptyField(&'static str),
@@ -563,37 +607,12 @@ pub enum ExecProtocolError {
     /// Text field contains NUL and cannot be passed safely to OS process APIs.
     #[error("execution field {0} contains NUL")]
     NulInField(&'static str),
-    /// Environment key contains a forbidden `=` separator or unsupported byte.
+    /// Environment key contains a forbidden separator or unsupported byte.
     #[error("invalid environment key")]
     InvalidEnvironmentKey,
     /// Deterministic encoding failed.
     #[error("failed to encode execution contract: {0}")]
     Encoding(#[from] bincode::Error),
-}
-
-fn validate_sorted_unique_paths(
-    field: &'static str,
-    values: &[String],
-) -> Result<(), ExecProtocolError> {
-    for value in values {
-        validate_path_text(field, value)?;
-    }
-    if values.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(ExecProtocolError::NonCanonicalPolicyField(field));
-    }
-    Ok(())
-}
-
-fn validate_sorted_unique_environment_keys(values: &[String]) -> Result<(), ExecProtocolError> {
-    for value in values {
-        validate_environment_key(value)?;
-    }
-    if values.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(ExecProtocolError::NonCanonicalPolicyField(
-            "allowed_environment_keys",
-        ));
-    }
-    Ok(())
 }
 
 fn validate_path_text(field: &'static str, value: &str) -> Result<(), ExecProtocolError> {
@@ -639,11 +658,24 @@ fn validate_text(
 mod tests {
     use super::*;
 
+    fn invocation(executable: &str, argv: Vec<&str>) -> ExecInvocationV1 {
+        ExecInvocationV1 {
+            executable: executable.into(),
+            argv: argv.into_iter().map(str::to_string).collect(),
+            working_directory: "/tmp".into(),
+            environment: vec![ExecEnvironmentEntryV1 {
+                key: "LANG".into(),
+                value: "C.UTF-8".into(),
+            }],
+        }
+    }
+
     fn policy() -> ExecPolicyV1 {
         ExecPolicyV1::one_shot(
-            vec!["/usr/bin/id".into(), "/usr/bin/uname".into()],
-            vec!["/tmp".into()],
-            vec!["LANG".into(), "TERM".into()],
+            vec![
+                invocation("/usr/bin/id", vec![]),
+                invocation("/usr/bin/uname", vec!["-a"]),
+            ],
             60_000,
             1_048_576,
             1_048_576,
@@ -651,29 +683,24 @@ mod tests {
         )
     }
 
-    fn request(argv: Vec<&str>) -> ExecRequestV1 {
+    fn request(invocation: ExecInvocationV1) -> ExecRequestV1 {
         ExecRequestV1 {
             protocol_version: EXEC_PROTOCOL_VERSION,
             request_id: 7,
-            executable: "/usr/bin/uname".into(),
-            argv: argv.into_iter().map(str::to_string).collect(),
-            cwd: Some("/tmp".into()),
-            environment: vec![ExecEnvironmentEntryV1 {
-                key: "LANG".into(),
-                value: "C.UTF-8".into(),
-            }],
+            invocation,
             timeout_ms: 5_000,
         }
     }
 
     #[test]
-    fn deny_all_is_explicit_and_valid() {
+    fn deny_all_is_single_canonical_shape() {
         let policy = ExecPolicyV1::deny_all();
         policy.validate().unwrap();
         assert!(!policy.one_shot_enabled());
         let advertisement = ExecAdvertisementV1::from_policy(&policy).unwrap();
         assert!(!advertisement.one_shot_enabled);
-        assert!(!advertisement.interactive_pty_enabled);
+        assert_eq!(advertisement.max_concurrent_processes, 0);
+        advertisement.validate().unwrap();
     }
 
     #[test]
@@ -698,40 +725,58 @@ mod tests {
     }
 
     #[test]
-    fn policy_collections_are_canonical_sorted_unique() {
+    fn invocation_allowlist_is_canonical_sorted_unique() {
         let mut candidate = policy();
-        candidate.allowed_executables.reverse();
+        candidate.allowed_invocations.reverse();
         assert!(matches!(
             candidate.validate(),
-            Err(ExecProtocolError::NonCanonicalPolicyField(
-                "allowed_executables"
-            ))
+            Err(ExecProtocolError::NonCanonicalInvocationAllowlist)
         ));
     }
 
     #[test]
-    fn argv_boundaries_are_part_of_the_request_commitment() {
-        let one_argument = request(vec!["a b"]);
-        let two_arguments = request(vec!["a", "b"]);
+    fn policy_allows_exact_invocation_not_arbitrary_argv() {
+        let policy = policy();
+        let allowed = request(invocation("/usr/bin/uname", vec!["-a"]));
+        let denied = request(invocation("/usr/bin/uname", vec!["--help"]));
+        assert!(policy.permits_request(&allowed).unwrap());
+        assert!(!policy.permits_request(&denied).unwrap());
+    }
+
+    #[test]
+    fn argv_boundaries_are_part_of_the_invocation_commitment() {
+        let one_argument = invocation("/usr/bin/tool", vec!["a b"]);
+        let two_arguments = invocation("/usr/bin/tool", vec!["a", "b"]);
         assert_ne!(
-            one_argument.request_digest().unwrap(),
-            two_arguments.request_digest().unwrap()
+            one_argument.invocation_digest().unwrap(),
+            two_arguments.invocation_digest().unwrap()
         );
     }
 
     #[test]
-    fn shell_metacharacters_are_data_not_a_command_language() {
-        let candidate = request(vec!["$(touch /tmp/never-shell-expand)", ";", "&&"]);
+    fn shell_metacharacters_are_only_argv_data() {
+        let candidate = invocation(
+            "/usr/bin/tool",
+            vec!["$(touch /tmp/never-shell-expand)", ";", "&&"],
+        );
         candidate.validate().unwrap();
-        // The protocol has only executable + argv fields. Runtime code must pass
-        // these entries directly to a process API rather than through a shell.
-        assert_eq!(candidate.executable, "/usr/bin/uname");
+        assert_eq!(candidate.executable, "/usr/bin/tool");
         assert_eq!(candidate.argv.len(), 3);
     }
 
     #[test]
+    fn invocation_requires_explicit_working_directory() {
+        let mut candidate = invocation("/usr/bin/id", vec![]);
+        candidate.working_directory.clear();
+        assert!(matches!(
+            candidate.validate(),
+            Err(ExecProtocolError::EmptyField("working_directory"))
+        ));
+    }
+
+    #[test]
     fn environment_must_be_sorted_unique() {
-        let mut candidate = request(vec!["-a"]);
+        let mut candidate = invocation("/usr/bin/id", vec![]);
         candidate.environment = vec![
             ExecEnvironmentEntryV1 {
                 key: "TERM".into(),
@@ -758,6 +803,17 @@ mod tests {
         assert!(matches!(
             message.validate(),
             Err(ExecProtocolError::OutputChunkTooLarge)
+        ));
+    }
+
+    #[test]
+    fn advertisement_rejects_enabled_with_zero_concurrency() {
+        let policy = policy();
+        let mut advertisement = ExecAdvertisementV1::from_policy(&policy).unwrap();
+        advertisement.max_concurrent_processes = 0;
+        assert!(matches!(
+            advertisement.validate(),
+            Err(ExecProtocolError::InvalidAdvertisement)
         ));
     }
 
