@@ -78,7 +78,8 @@ pub use frame::{
 };
 pub use handshake::{RekeyPolicy, SessionEpochState};
 pub use m1_session::{
-    M1AuditEvent, M1Permission, M1PermissionSet, M1SessionError, M1SessionMachine, M1SessionState,
+    M1AuditEvent, M1ExecutionPermission, M1ExecutionPermissionSet, M1Permission, M1PermissionSet,
+    M1SessionError, M1SessionMachine, M1SessionState,
 };
 pub use receive_reservation::{
     ReceiveReservation, ReceiveReservationError, ReceiveReservationPool,
