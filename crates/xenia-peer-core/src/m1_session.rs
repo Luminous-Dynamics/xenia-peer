@@ -1,9 +1,9 @@
 //! Pure M1 session lifecycle state machine.
 //!
 //! This module is intentionally deterministic and transport-free.
-//! It does not capture frames, inject input, open sockets, or make
-//! production remote-desktop claims. It records the policy lifecycle
-//! that M1 must enforce before lower-level frame/input plumbing is used.
+//! It does not capture frames, inject input, open sockets, spawn processes,
+//! or make production remote-desktop claims. It records the policy lifecycle
+//! that M1 must enforce before lower-level privileged plumbing is used.
 
 use std::error::Error;
 use std::fmt;
@@ -27,62 +27,34 @@ pub enum M1SessionState {
     Failed,
 }
 
-/// Privileged operation protected by session consent.
+/// Existing remote-session privileged operation protected by session consent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum M1Permission {
     /// Permission to stream a captured frame on the forward path.
     StreamFrame,
     /// Permission to stream host telemetry (performance metrics, and at
     /// `TelemetryLevel::System`, hostname/OS identity) to the viewer.
-    /// Independent of [`StreamFrame`] -- a grant that only permits
-    /// viewing the screen must not also silently disclose host identity
-    /// or performance data. See `docs/roadmap/
-    /// XENIA_EXPANSION_PLAN_REVIEW_2026-07-29.md`'s "one real gap found"
-    /// note: this tier didn't exist before, so every telemetry frame
-    /// rode on `StreamFrame` alone.
-    ///
-    /// [`StreamFrame`]: Self::StreamFrame
     StreamTelemetry,
-    /// Permission to stream host audio (synthetic test signal or real
-    /// device capture, per `AudioMode`) to the viewer. Independent of
-    /// [`StreamFrame`] for the same reason as [`StreamTelemetry`] -- at
-    /// `AudioMode::Capture` this is a live microphone, a materially
-    /// different privacy commitment than "can see the screen."
-    ///
-    /// [`StreamFrame`]: Self::StreamFrame
-    /// [`StreamTelemetry`]: Self::StreamTelemetry
+    /// Permission to stream host audio to the viewer.
     StreamAudio,
     /// Permission to inject viewer input on the reverse path.
     InjectInput,
-    /// Permission to disclose host clipboard contents to the viewer
-    /// (forward path). Independent of [`WriteHostClipboard`] -- a grant
-    /// that only permits viewing the screen must not also silently leak
-    /// clipboard contents.
-    ///
-    /// [`WriteHostClipboard`]: Self::WriteHostClipboard
+    /// Permission to disclose host clipboard contents to the viewer.
     ReadHostClipboard,
-    /// Permission to apply a viewer-originated clipboard update to the
-    /// real host clipboard (reverse path, bidirectional clipboard mode).
+    /// Permission to apply a viewer-originated clipboard update to the host.
     WriteHostClipboard,
-    /// Permission to read a local file's bytes and send it to the viewer
-    /// (forward path, e.g. `--send-file`).
+    /// Permission to read a local file's bytes and send it to the viewer.
     SendFileToViewer,
-    /// Permission to accept a viewer-offered file and write it to disk
-    /// (reverse path, e.g. `--recv-file-dir`).
+    /// Permission to accept a viewer-offered file and write it to disk.
     ReceiveFileFromViewer,
 }
 
-/// The set of privileged operations a granted session actually authorizes.
+/// The existing set of remote-session privileged operations a grant authorizes.
 ///
-/// Consent is not a single boolean: a viewer may be allowed to see the
-/// screen without also being allowed to type, read the clipboard, or pull
-/// files. This set records exactly which tiers a grant unlocked so
-/// `require_active` can deny an operation the operator never approved, even
-/// while the session is otherwise `Active`. Clipboard and file-transfer are
-/// each split by direction rather than a single combined flag: a grant
-/// scoped to "receive files" must not silently also permit sending host
-/// files, and "view the screen" must not silently also permit disclosing
-/// the host clipboard.
+/// Execution authority intentionally does **not** get appended to this legacy
+/// broad set. It lives in [`M1ExecutionPermissionSet`] so historical calls to
+/// [`M1PermissionSet::all`] cannot silently acquire process-execution power when
+/// this crate is upgraded. Live execution must opt into the new sidecar grant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct M1PermissionSet {
     /// Forward-path frame streaming.
@@ -104,9 +76,10 @@ pub struct M1PermissionSet {
 }
 
 impl M1PermissionSet {
-    /// Grant every privileged operation. Retained for the transcript-replay
-    /// and test paths that reconstruct a session without a per-tier scope;
-    /// live daemons should grant exactly what the operator enabled.
+    /// Grant every pre-execution privileged operation.
+    ///
+    /// This deliberately does not grant native execution or interactive
+    /// terminal authority. See [`M1ExecutionPermissionSet`].
     pub fn all() -> Self {
         Self {
             stream_frame: true,
@@ -131,6 +104,44 @@ impl M1PermissionSet {
             M1Permission::WriteHostClipboard => self.write_host_clipboard,
             M1Permission::SendFileToViewer => self.send_file_to_viewer,
             M1Permission::ReceiveFileFromViewer => self.receive_file_from_viewer,
+        }
+    }
+}
+
+/// Process/terminal authority introduced after the original M1 permission set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum M1ExecutionPermission {
+    /// Authorize one exact structured one-shot invocation under the session's
+    /// authenticated execution policy. This is not interactive PTY authority.
+    ExecuteCommand,
+    /// Authorize creation of an interactive PTY/terminal session.
+    /// Reserved for a later runtime tranche; independent of [`ExecuteCommand`].
+    OpenInteractiveTerminal,
+}
+
+/// Explicit default-off process/terminal authority for one active M1 session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct M1ExecutionPermissionSet {
+    /// Structured one-shot execution authority.
+    pub execute_command: bool,
+    /// Interactive PTY/terminal authority.
+    pub open_interactive_terminal: bool,
+}
+
+impl M1ExecutionPermissionSet {
+    /// A set that grants only structured one-shot execution.
+    pub const fn command_only() -> Self {
+        Self {
+            execute_command: true,
+            open_interactive_terminal: false,
+        }
+    }
+
+    /// Whether `permission` is included in this execution grant.
+    pub const fn contains(&self, permission: M1ExecutionPermission) -> bool {
+        match permission {
+            M1ExecutionPermission::ExecuteCommand => self.execute_command,
+            M1ExecutionPermission::OpenInteractiveTerminal => self.open_interactive_terminal,
         }
     }
 }
@@ -160,6 +171,10 @@ pub enum M1AuditEvent {
     FileSentToViewer,
     /// Viewer file bytes were accepted for host storage.
     FileReceivedFromViewer,
+    /// M1 authorized a structured one-shot command request.
+    CommandExecutionAuthorized,
+    /// M1 authorized opening an interactive terminal.
+    InteractiveTerminalAuthorized,
     /// Consent was revoked.
     ConsentRevoked,
     /// The session ended normally.
@@ -178,12 +193,19 @@ pub enum M1SessionError {
         /// Name of the attempted action.
         action: &'static str,
     },
-    /// The requested privileged operation is not allowed in this state.
+    /// The requested existing remote-session operation is not allowed.
     PermissionDenied {
         /// State in which the permission was requested.
         state: M1SessionState,
         /// Permission that was denied.
         permission: M1Permission,
+    },
+    /// The requested execution/terminal operation is not allowed.
+    ExecutionPermissionDenied {
+        /// State in which the permission was requested.
+        state: M1SessionState,
+        /// Execution permission that was denied.
+        permission: M1ExecutionPermission,
     },
 }
 
@@ -199,6 +221,10 @@ impl fmt::Display for M1SessionError {
             M1SessionError::PermissionDenied { state, permission } => {
                 write!(f, "M1 permission {permission:?} denied in state {state:?}")
             }
+            M1SessionError::ExecutionPermissionDenied { state, permission } => write!(
+                f,
+                "M1 execution permission {permission:?} denied in state {state:?}"
+            ),
         }
     }
 }
@@ -211,6 +237,7 @@ pub struct M1SessionMachine {
     state: M1SessionState,
     audit: Vec<M1AuditEvent>,
     granted: M1PermissionSet,
+    execution_granted: M1ExecutionPermissionSet,
 }
 
 impl Default for M1SessionMachine {
@@ -226,13 +253,18 @@ impl M1SessionMachine {
             state: M1SessionState::Idle,
             audit: Vec::new(),
             granted: M1PermissionSet::default(),
+            execution_granted: M1ExecutionPermissionSet::default(),
         }
     }
 
-    /// Permissions currently granted for the active session (empty unless
-    /// the session is `Active`).
+    /// Existing permissions currently granted for the active session.
     pub fn granted_permissions(&self) -> M1PermissionSet {
         self.granted
+    }
+
+    /// Execution/terminal permissions currently granted for the active session.
+    pub fn granted_execution_permissions(&self) -> M1ExecutionPermissionSet {
+        self.execution_granted
     }
 
     /// Current lifecycle state.
@@ -255,22 +287,30 @@ impl M1SessionMachine {
         )
     }
 
-    /// Viewer grants consent for every tier; M1 becomes active.
+    /// Grant every historical pre-execution tier; execution remains off.
     ///
-    /// This is the broad grant used by the deterministic transcript-replay
-    /// and test paths. Live daemons should prefer [`grant_consent_scoped`]
-    /// so a single approval does not silently authorize input, clipboard,
-    /// and file transfer alongside screen viewing.
-    ///
-    /// [`grant_consent_scoped`]: Self::grant_consent_scoped
+    /// This backwards-compatible broad grant intentionally cannot acquire
+    /// process-execution power merely because the library added a new feature.
     pub fn grant_consent(&mut self) -> Result<(), M1SessionError> {
         self.grant_consent_scoped(M1PermissionSet::all())
     }
 
-    /// Viewer grants consent for exactly the tiers in `granted`; M1 becomes
-    /// active. An operation whose permission is not in the set is denied by
-    /// `require_active` even though the session is `Active`.
+    /// Grant exactly the historical tiers in `granted`; execution remains off.
     pub fn grant_consent_scoped(&mut self, granted: M1PermissionSet) -> Result<(), M1SessionError> {
+        self.grant_consent_scoped_with_execution(granted, M1ExecutionPermissionSet::default())
+    }
+
+    /// Grant historical remote-session tiers plus an explicit execution sidecar.
+    ///
+    /// This is the only M1 activation path that can grant process/terminal
+    /// authority. The future daemon capability/consent tranche must call this
+    /// only after the exact execution policy has been authenticated and shown
+    /// in the consent scope.
+    pub fn grant_consent_scoped_with_execution(
+        &mut self,
+        granted: M1PermissionSet,
+        execution_granted: M1ExecutionPermissionSet,
+    ) -> Result<(), M1SessionError> {
         self.transition(
             M1SessionState::Offered,
             M1SessionState::Active,
@@ -278,6 +318,7 @@ impl M1SessionMachine {
             M1AuditEvent::ConsentGranted,
         )?;
         self.granted = granted;
+        self.execution_granted = execution_granted;
         Ok(())
     }
 
@@ -296,7 +337,7 @@ impl M1SessionMachine {
         match self.state {
             M1SessionState::Offered | M1SessionState::Active => {
                 self.state = M1SessionState::Revoked;
-                self.granted = M1PermissionSet::default();
+                self.clear_permissions();
                 self.audit.push(M1AuditEvent::ConsentRevoked);
                 Ok(())
             }
@@ -315,7 +356,7 @@ impl M1SessionMachine {
             | M1SessionState::Active
             | M1SessionState::Revoked => {
                 self.state = M1SessionState::Ended;
-                self.granted = M1PermissionSet::default();
+                self.clear_permissions();
                 self.audit.push(M1AuditEvent::SessionEnded);
                 Ok(())
             }
@@ -337,7 +378,7 @@ impl M1SessionMachine {
             }
             _ => {
                 self.state = M1SessionState::Failed;
-                self.granted = M1PermissionSet::default();
+                self.clear_permissions();
                 self.audit.push(M1AuditEvent::SessionFailed);
                 Ok(())
             }
@@ -351,11 +392,7 @@ impl M1SessionMachine {
         Ok(())
     }
 
-    /// Record that one telemetry batch was allowed through the forward
-    /// path. Gated separately from [`stream_frame`] -- see
-    /// [`M1Permission::StreamTelemetry`]'s doc comment.
-    ///
-    /// [`stream_frame`]: Self::stream_frame
+    /// Record that one telemetry batch was allowed through the forward path.
     pub fn stream_telemetry(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::StreamTelemetry)?;
         self.audit.push(M1AuditEvent::TelemetryStreamed);
@@ -363,10 +400,6 @@ impl M1SessionMachine {
     }
 
     /// Record that one audio frame was allowed through the forward path.
-    /// Gated separately from [`stream_frame`] -- see
-    /// [`M1Permission::StreamAudio`]'s doc comment.
-    ///
-    /// [`stream_frame`]: Self::stream_frame
     pub fn stream_audio(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::StreamAudio)?;
         self.audit.push(M1AuditEvent::AudioStreamed);
@@ -380,35 +413,51 @@ impl M1SessionMachine {
         Ok(())
     }
 
-    /// Record that host clipboard contents were disclosed to the viewer on
-    /// the forward path.
+    /// Record that host clipboard contents were disclosed to the viewer.
     pub fn read_host_clipboard(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::ReadHostClipboard)?;
         self.audit.push(M1AuditEvent::HostClipboardRead);
         Ok(())
     }
 
-    /// Record that one viewer-originated clipboard update was applied to
-    /// the host clipboard on the reverse path.
+    /// Record that a viewer-originated clipboard update was applied.
     pub fn write_host_clipboard(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::WriteHostClipboard)?;
         self.audit.push(M1AuditEvent::HostClipboardWritten);
         Ok(())
     }
 
-    /// Record that one chunk of a host-initiated (forward-path) file
-    /// transfer was allowed through.
+    /// Record that host file bytes were allowed to flow to the viewer.
     pub fn send_file_to_viewer(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::SendFileToViewer)?;
         self.audit.push(M1AuditEvent::FileSentToViewer);
         Ok(())
     }
 
-    /// Record that one chunk of a viewer-initiated (reverse-path) file
-    /// transfer was allowed through.
+    /// Record that viewer file bytes were allowed into host storage.
     pub fn receive_file_from_viewer(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::ReceiveFileFromViewer)?;
         self.audit.push(M1AuditEvent::FileReceivedFromViewer);
+        Ok(())
+    }
+
+    /// Record that M1 authorized a structured one-shot command request.
+    ///
+    /// This is an authorization event only; it does not claim a process was
+    /// spawned or completed. The runtime must still validate the authenticated
+    /// execution policy and persist required evidence before spawning.
+    pub fn authorize_command_execution(&mut self) -> Result<(), M1SessionError> {
+        self.require_execution_active(M1ExecutionPermission::ExecuteCommand)?;
+        self.audit.push(M1AuditEvent::CommandExecutionAuthorized);
+        Ok(())
+    }
+
+    /// Record that M1 authorized opening an interactive terminal.
+    ///
+    /// No terminal runtime is implemented by this state machine.
+    pub fn authorize_interactive_terminal(&mut self) -> Result<(), M1SessionError> {
+        self.require_execution_active(M1ExecutionPermission::OpenInteractiveTerminal)?;
+        self.audit.push(M1AuditEvent::InteractiveTerminalAuthorized);
         Ok(())
     }
 
@@ -441,6 +490,25 @@ impl M1SessionMachine {
             })
         }
     }
+
+    fn require_execution_active(
+        &self,
+        permission: M1ExecutionPermission,
+    ) -> Result<(), M1SessionError> {
+        if self.state == M1SessionState::Active && self.execution_granted.contains(permission) {
+            Ok(())
+        } else {
+            Err(M1SessionError::ExecutionPermissionDenied {
+                state: self.state,
+                permission,
+            })
+        }
+    }
+
+    fn clear_permissions(&mut self) {
+        self.granted = M1PermissionSet::default();
+        self.execution_granted = M1ExecutionPermissionSet::default();
+    }
 }
 
 #[cfg(test)]
@@ -458,18 +526,13 @@ mod tests {
             })
             .unwrap();
 
-        // The granted tier is allowed...
         session.stream_frame().unwrap();
 
-        // ...but the ungranted tiers are denied even though Active.
         let denied = |permission| M1SessionError::PermissionDenied {
             state: M1SessionState::Active,
             permission,
         };
-        assert_eq!(
-            session.inject_input().unwrap_err(),
-            denied(M1Permission::InjectInput)
-        );
+        assert_eq!(session.inject_input().unwrap_err(), denied(M1Permission::InjectInput));
         assert_eq!(
             session.read_host_clipboard().unwrap_err(),
             denied(M1Permission::ReadHostClipboard)
@@ -496,12 +559,97 @@ mod tests {
         );
     }
 
-    /// A screen-view-only grant must not silently also authorize
-    /// telemetry or audio streaming -- the real gap this pair of tiers
-    /// closes (see `M1Permission::StreamTelemetry`'s doc comment). Before
-    /// this fix, every telemetry/audio frame rode on
-    /// `M1Permission::StreamFrame` alone, so this exact scenario would
-    /// have wrongly authorized both.
+    #[test]
+    fn legacy_broad_grant_does_not_silently_acquire_execution() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+        session.grant_consent().unwrap();
+
+        assert_eq!(
+            session.granted_execution_permissions(),
+            M1ExecutionPermissionSet::default()
+        );
+        assert_eq!(
+            session.authorize_command_execution().unwrap_err(),
+            M1SessionError::ExecutionPermissionDenied {
+                state: M1SessionState::Active,
+                permission: M1ExecutionPermission::ExecuteCommand,
+            }
+        );
+        assert_eq!(
+            session.authorize_interactive_terminal().unwrap_err(),
+            M1SessionError::ExecutionPermissionDenied {
+                state: M1SessionState::Active,
+                permission: M1ExecutionPermission::OpenInteractiveTerminal,
+            }
+        );
+    }
+
+    #[test]
+    fn command_and_interactive_terminal_are_independent_grants() {
+        let mut command = M1SessionMachine::new();
+        command.offer().unwrap();
+        command
+            .grant_consent_scoped_with_execution(
+                M1PermissionSet::default(),
+                M1ExecutionPermissionSet::command_only(),
+            )
+            .unwrap();
+        command.authorize_command_execution().unwrap();
+        assert_eq!(
+            command.authorize_interactive_terminal().unwrap_err(),
+            M1SessionError::ExecutionPermissionDenied {
+                state: M1SessionState::Active,
+                permission: M1ExecutionPermission::OpenInteractiveTerminal,
+            }
+        );
+
+        let mut terminal = M1SessionMachine::new();
+        terminal.offer().unwrap();
+        terminal
+            .grant_consent_scoped_with_execution(
+                M1PermissionSet::default(),
+                M1ExecutionPermissionSet {
+                    execute_command: false,
+                    open_interactive_terminal: true,
+                },
+            )
+            .unwrap();
+        terminal.authorize_interactive_terminal().unwrap();
+        assert_eq!(
+            terminal.authorize_command_execution().unwrap_err(),
+            M1SessionError::ExecutionPermissionDenied {
+                state: M1SessionState::Active,
+                permission: M1ExecutionPermission::ExecuteCommand,
+            }
+        );
+    }
+
+    #[test]
+    fn revocation_clears_execution_permissions() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+        session
+            .grant_consent_scoped_with_execution(
+                M1PermissionSet::default(),
+                M1ExecutionPermissionSet::command_only(),
+            )
+            .unwrap();
+        session.revoke().unwrap();
+
+        assert_eq!(
+            session.granted_execution_permissions(),
+            M1ExecutionPermissionSet::default()
+        );
+        assert_eq!(
+            session.authorize_command_execution().unwrap_err(),
+            M1SessionError::ExecutionPermissionDenied {
+                state: M1SessionState::Revoked,
+                permission: M1ExecutionPermission::ExecuteCommand,
+            }
+        );
+    }
+
     #[test]
     fn stream_frame_grant_does_not_authorize_telemetry_or_audio() {
         let mut session = M1SessionMachine::new();
@@ -530,9 +678,6 @@ mod tests {
         );
     }
 
-    /// The converse: granting only telemetry/audio must not authorize
-    /// viewing the screen either -- these three forward-path tiers are
-    /// fully independent, not a hierarchy.
     #[test]
     fn telemetry_and_audio_grant_does_not_authorize_stream_frame() {
         let mut session = M1SessionMachine::new();
@@ -556,9 +701,6 @@ mod tests {
         );
     }
 
-    /// The core property this directional split exists for: a grant scoped
-    /// to only one direction of clipboard or file-transfer access must not
-    /// silently also authorize the opposite direction.
     #[test]
     fn directional_grants_do_not_authorize_the_opposite_direction() {
         let denied = |permission| M1SessionError::PermissionDenied {
@@ -628,7 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn broad_grant_still_authorizes_every_tier() {
+    fn broad_grant_still_authorizes_every_historical_tier() {
         let mut session = M1SessionMachine::new();
         session.offer().unwrap();
         session.grant_consent().unwrap();
@@ -640,6 +782,10 @@ mod tests {
         session.send_file_to_viewer().unwrap();
         session.receive_file_from_viewer().unwrap();
         assert_eq!(session.granted_permissions(), M1PermissionSet::all());
+        assert_eq!(
+            session.granted_execution_permissions(),
+            M1ExecutionPermissionSet::default()
+        );
     }
 
     #[test]
@@ -662,9 +808,7 @@ mod tests {
     #[test]
     fn host_offer_creates_pending_session() {
         let mut session = M1SessionMachine::new();
-
         session.offer().unwrap();
-
         assert_eq!(session.state(), M1SessionState::Offered);
         assert_eq!(session.audit(), &[M1AuditEvent::SessionOffered]);
     }
@@ -673,11 +817,8 @@ mod tests {
     fn cannot_stream_frames_before_consent() {
         let mut session = M1SessionMachine::new();
         session.offer().unwrap();
-
-        let err = session.stream_frame().unwrap_err();
-
         assert_eq!(
-            err,
+            session.stream_frame().unwrap_err(),
             M1SessionError::PermissionDenied {
                 state: M1SessionState::Offered,
                 permission: M1Permission::StreamFrame
@@ -689,11 +830,8 @@ mod tests {
     fn cannot_inject_input_before_consent() {
         let mut session = M1SessionMachine::new();
         session.offer().unwrap();
-
-        let err = session.inject_input().unwrap_err();
-
         assert_eq!(
-            err,
+            session.inject_input().unwrap_err(),
             M1SessionError::PermissionDenied {
                 state: M1SessionState::Offered,
                 permission: M1Permission::InjectInput
@@ -705,9 +843,7 @@ mod tests {
     fn viewer_approval_activates_session() {
         let mut session = M1SessionMachine::new();
         session.offer().unwrap();
-
         session.grant_consent().unwrap();
-
         assert_eq!(session.state(), M1SessionState::Active);
         assert_eq!(
             session.audit(),
@@ -720,10 +856,8 @@ mod tests {
         let mut session = M1SessionMachine::new();
         session.offer().unwrap();
         session.grant_consent().unwrap();
-
         session.stream_frame().unwrap();
         session.inject_input().unwrap();
-
         assert_eq!(
             session.audit(),
             &[
@@ -739,11 +873,8 @@ mod tests {
     fn cannot_read_host_clipboard_before_consent() {
         let mut session = M1SessionMachine::new();
         session.offer().unwrap();
-
-        let err = session.read_host_clipboard().unwrap_err();
-
         assert_eq!(
-            err,
+            session.read_host_clipboard().unwrap_err(),
             M1SessionError::PermissionDenied {
                 state: M1SessionState::Offered,
                 permission: M1Permission::ReadHostClipboard
@@ -755,11 +886,8 @@ mod tests {
     fn cannot_write_host_clipboard_before_consent() {
         let mut session = M1SessionMachine::new();
         session.offer().unwrap();
-
-        let err = session.write_host_clipboard().unwrap_err();
-
         assert_eq!(
-            err,
+            session.write_host_clipboard().unwrap_err(),
             M1SessionError::PermissionDenied {
                 state: M1SessionState::Offered,
                 permission: M1Permission::WriteHostClipboard
@@ -772,10 +900,8 @@ mod tests {
         let mut session = M1SessionMachine::new();
         session.offer().unwrap();
         session.grant_consent().unwrap();
-
         session.read_host_clipboard().unwrap();
         session.write_host_clipboard().unwrap();
-
         assert_eq!(
             session.audit(),
             &[
@@ -791,11 +917,8 @@ mod tests {
     fn cannot_send_file_to_viewer_before_consent() {
         let mut session = M1SessionMachine::new();
         session.offer().unwrap();
-
-        let err = session.send_file_to_viewer().unwrap_err();
-
         assert_eq!(
-            err,
+            session.send_file_to_viewer().unwrap_err(),
             M1SessionError::PermissionDenied {
                 state: M1SessionState::Offered,
                 permission: M1Permission::SendFileToViewer
@@ -807,11 +930,8 @@ mod tests {
     fn cannot_receive_file_from_viewer_before_consent() {
         let mut session = M1SessionMachine::new();
         session.offer().unwrap();
-
-        let err = session.receive_file_from_viewer().unwrap_err();
-
         assert_eq!(
-            err,
+            session.receive_file_from_viewer().unwrap_err(),
             M1SessionError::PermissionDenied {
                 state: M1SessionState::Offered,
                 permission: M1Permission::ReceiveFileFromViewer
@@ -824,10 +944,8 @@ mod tests {
         let mut session = M1SessionMachine::new();
         session.offer().unwrap();
         session.grant_consent().unwrap();
-
         session.send_file_to_viewer().unwrap();
         session.receive_file_from_viewer().unwrap();
-
         assert_eq!(
             session.audit(),
             &[
@@ -844,9 +962,7 @@ mod tests {
         let mut session = M1SessionMachine::new();
         session.offer().unwrap();
         session.grant_consent().unwrap();
-
         session.revoke().unwrap();
-
         assert_eq!(session.state(), M1SessionState::Revoked);
         assert!(matches!(
             session.stream_frame(),
@@ -870,7 +986,6 @@ mod tests {
         session.offer().unwrap();
         session.grant_consent().unwrap();
         session.end().unwrap();
-
         assert_eq!(session.state(), M1SessionState::Ended);
         assert!(matches!(
             session.stream_frame(),
@@ -893,7 +1008,6 @@ mod tests {
         let mut session = M1SessionMachine::new();
         session.offer().unwrap();
         session.deny_consent().unwrap();
-
         assert_eq!(session.state(), M1SessionState::Denied);
         assert!(matches!(
             session.stream_frame(),
@@ -914,11 +1028,8 @@ mod tests {
     #[test]
     fn invalid_transitions_return_typed_errors() {
         let mut session = M1SessionMachine::new();
-
-        let err = session.grant_consent().unwrap_err();
-
         assert_eq!(
-            err,
+            session.grant_consent().unwrap_err(),
             M1SessionError::InvalidTransition {
                 from: M1SessionState::Idle,
                 action: "grant_consent"
@@ -929,12 +1040,10 @@ mod tests {
     #[test]
     fn every_state_transition_produces_an_audit_event() {
         let mut session = M1SessionMachine::new();
-
         session.offer().unwrap();
         session.grant_consent().unwrap();
         session.revoke().unwrap();
         session.end().unwrap();
-
         assert_eq!(
             session.audit(),
             &[
