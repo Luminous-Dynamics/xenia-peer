@@ -1,0 +1,22 @@
+# Copyright (c) 2024-2026 Tristan Stoltz / Luminous Dynamics
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+[package]
+name = "xenia-exec-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Runtime-free Xenia native execution protocol and policy contracts."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+bincode = { workspace = true }
+blake3 = "1"
+thiserror = "2"
