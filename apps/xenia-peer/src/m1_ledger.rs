@@ -8,8 +8,9 @@
 //! `xenia-ledger` accountability layer.
 //!
 //! It is loss-aware: not every M1 audit event is a consent-boundary event.
-//! Frame/input operation counts should become richer audit records later;
-//! they should not be squeezed into misleading consent kinds today.
+//! Frame/input/exec operation authorization events should become richer audit
+//! records in their owning runtime; they should not be squeezed into misleading
+//! consent kinds today.
 
 #![allow(dead_code)] // M1 adapter lands before runtime wiring in the next PR.
 
@@ -43,7 +44,9 @@ pub(crate) fn disposition_for_m1_event(event: M1AuditEvent) -> M1LedgerDispositi
         | M1AuditEvent::HostClipboardRead
         | M1AuditEvent::HostClipboardWritten
         | M1AuditEvent::FileSentToViewer
-        | M1AuditEvent::FileReceivedFromViewer => {
+        | M1AuditEvent::FileReceivedFromViewer
+        | M1AuditEvent::CommandExecutionAuthorized
+        | M1AuditEvent::InteractiveTerminalAuthorized => {
             M1LedgerDisposition::Skip(M1LedgerSkipReason::NotConsentBoundary)
         }
         M1AuditEvent::SessionEnded => {
@@ -101,14 +104,17 @@ mod tests {
 
     #[test]
     fn operation_events_are_not_misrepresented_as_consent_events() {
-        assert_eq!(
-            disposition_for_m1_event(M1AuditEvent::FrameStreamed),
-            M1LedgerDisposition::Skip(M1LedgerSkipReason::NotConsentBoundary)
-        );
-        assert_eq!(
-            disposition_for_m1_event(M1AuditEvent::InputInjected),
-            M1LedgerDisposition::Skip(M1LedgerSkipReason::NotConsentBoundary)
-        );
+        for event in [
+            M1AuditEvent::FrameStreamed,
+            M1AuditEvent::InputInjected,
+            M1AuditEvent::CommandExecutionAuthorized,
+            M1AuditEvent::InteractiveTerminalAuthorized,
+        ] {
+            assert_eq!(
+                disposition_for_m1_event(event),
+                M1LedgerDisposition::Skip(M1LedgerSkipReason::NotConsentBoundary)
+            );
+        }
     }
 
     #[test]
