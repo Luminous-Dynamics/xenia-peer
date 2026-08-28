@@ -28,8 +28,8 @@ inside an authenticated Xenia session. The first implementation is structured,
 one-shot execution. Interactive PTY/terminal access is a later and separately
 authorized capability.
 
-The protocol must represent an executable and argument vector separately. V1
-must not contain a shell command string and the host runtime must not implement
+The protocol represents an executable and argument vector separately. V1 must
+not contain a shell command string and the host runtime must not implement
 one-shot execution with `sh -c`, `cmd /C`, PowerShell string interpolation, or
 an equivalent implicit shell.
 
@@ -63,43 +63,75 @@ A duplicate capabilities frame is not a renegotiation mechanism. Enabling or
 widening execution after the capability surface was authenticated requires a
 fresh handshake and consent flow.
 
-### 5. Consent binds the human-visible scope to an execution policy digest
+### 5. V1 authorizes exact invocation tuples, not executable names alone
+
+Allowing an executable while permitting arbitrary arguments is too broad for the
+first remote-execution profile. For example, permitting `systemctl status` must
+not silently permit every state-changing operation accepted by `systemctl`.
+
+V1 therefore commits a sorted, unique allowlist of exact invocation tuples:
+
+- executable identity/path;
+- exact argv vector, preserving argument boundaries;
+- exact working directory;
+- exact environment key/value set.
+
+There is deliberately no V1 "any argv" rule. Parameterized arguments, enums,
+resource selectors, regex/glob-like constraints, or typed command schemas may
+be introduced only through an explicit future protocol revision.
+
+The working directory is mandatory rather than ambient. The environment is
+explicit rather than inherited: the eventual runtime starts from an empty
+environment and applies the committed entries exactly, subject to documented
+platform necessities. This prevents daemon cwd/environment state from becoming
+an unreviewed privilege channel.
+
+Platform-specific executable/path identity and TOCTOU rules must be frozen
+before process spawning lands. A textual policy match alone must not be treated
+as proof that an attacker could not replace or redirect the referenced object.
+Nix store-path identity is a particularly strong future integration, but this
+ADR does not make a Nix-only requirement.
+
+### 6. Consent binds the human-visible scope to an execution policy digest
 
 Execution is disabled by default. When enabled, the offered consent scope must
 identify the execution class and commit to a deterministic policy digest. The
 policy describes, at minimum:
 
-- allowed executable identities/paths;
-- allowed working-directory roots;
-- allowed environment keys;
+- the exact invocation allowlist;
 - runtime and output ceilings;
 - maximum concurrent processes;
 - execution identity policy;
 - whether stdin, PTY, elevation, or forwarding are allowed.
 
+For protocol V1 the final four privilege-expansion booleans remain false: no
+interactive stdin, no PTY, no elevation, and no forwarding.
+
 The existing operator `scope_digest` binding remains the outer human-approval
 commitment. The execution policy digest is part of that scope rather than a
 replacement for consent.
 
-### 6. Authorization evidence precedes process creation
+### 7. Authorization evidence precedes process creation
 
 The runtime sequence for a privileged execution is:
 
 1. authenticate the session surface;
-2. verify M1 permission and the execution-policy match;
-3. validate the request against finite protocol/runtime limits;
-4. durably record authorization evidence;
-5. only then create the process.
+2. verify M1 permission and the execution-policy digest;
+3. validate the request and prove the exact invocation is in the committed
+   allowlist;
+4. perform runtime-only executable/path identity checks;
+5. durably record authorization evidence;
+6. only then create the process.
 
 If required authorization evidence cannot be durably committed, the process is
 not created.
 
 Stdout/stderr contents are not ledgered by default. Evidence should record the
-request/policy digest, executable identity, timing, exit/termination status,
-byte counts, truncation, and operator/session attribution without turning
-command output into a secret-retention mechanism.
+request/policy/invocation digest, executable identity, timing,
+exit/termination status, byte counts, truncation, and operator/session
+attribution without turning command output into a secret-retention mechanism.
 
-### 7. Resource semantics are finite and fail closed
+### 8. Resource semantics are finite and fail closed
 
 The execution protocol and runtime have explicit limits for request size,
 argument/environment cardinality, output chunk size, total output, runtime,
@@ -112,7 +144,7 @@ teardown must not leave an authorized process running beyond the lifetime its
 policy permits. The interactive-terminal tranche must additionally guarantee
 PTY and process-tree teardown.
 
-### 8. Initial wire placement uses the control security domain
+### 9. Initial wire placement uses the control security domain
 
 Low-volume one-shot execution control messages may initially use the existing
 control cryptographic lane with distinct host-origin and viewer-origin payload
@@ -125,13 +157,15 @@ transport profile.
 
 ## Initial implementation sequence
 
-1. **Contract:** add `xenia-exec-proto`, canonical policy/request/message types,
-   validation limits, deterministic policy digests, and vectors/tests. No I/O or
-   process spawning.
+1. **Contract:** add `xenia-exec-proto`, exact invocation/policy/request/message
+   types, validation limits, deterministic digests, and tests. No I/O or process
+   spawning.
 2. **Authority:** add M1 execution permissions and authenticated execution
-   advertisement/policy commitment, with viewer/daemon compatibility updates.
-3. **One-shot runtime:** direct argv process creation, bounded output/runtime,
-   cancellation/revocation teardown, and audit-before-effect.
+   advertisement/policy commitment, with viewer/daemon/browser compatibility
+   updates.
+3. **One-shot runtime:** direct argv process creation, empty-to-explicit
+   environment construction, explicit cwd, executable identity checks, bounded
+   output/runtime, cancellation/revocation teardown, and audit-before-effect.
 4. **Interactive terminal:** PTY lifecycle, resize/signal/stdin semantics,
    dedicated lane/key as justified, and terminal UI/CLI.
 5. **SSH bridge:** hardened interoperability adapter using a mature SSH
@@ -145,6 +179,9 @@ transport profile.
   consent, evidence, transcript, and capability model instead of bypassing it.
 - The first useful execution feature is smaller and more auditable than a full
   terminal or SSH server.
+- V1 has no "allowed executable therefore arbitrary arguments" escalation.
+- Process cwd and environment are committed inputs rather than ambient daemon
+  state.
 - Existing SSH infrastructure remains reachable later without making SSH's
   authentication or forwarding defaults authoritative inside Xenia.
 - A future terminal can evolve its own lane and flow-control policy without
