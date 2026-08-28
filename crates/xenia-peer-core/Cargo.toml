@@ -12,6 +12,7 @@ publish = false  # unpublished until M1 makes it useful
 [dependencies]
 xenia-wire = { workspace = true, features = ["consent"] }
 xenia-handshake = { path = "../xenia-handshake" }
+xenia-exec-proto = { path = "../xenia-exec-proto" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde-big-array = "0.5"
