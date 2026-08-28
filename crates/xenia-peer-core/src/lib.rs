@@ -52,6 +52,7 @@
 #![warn(missing_docs)]
 
 pub mod advertisement;
+pub mod capabilities_v2;
 pub mod file_transfer;
 pub mod frame;
 pub mod handshake;
@@ -62,6 +63,11 @@ mod session;
 pub mod transfer_source;
 pub mod transport;
 
+pub use capabilities_v2::{
+    CAPABILITIES_V2_DIGEST_DOMAIN, CAPABILITIES_V2_PREFIX, CAPABILITIES_V2_SCHEMA,
+    CapabilitiesV2Error, NEGOTIATED_SESSION_CONTEXT_V5_SCHEMA, NegotiatedSessionContextV5,
+    RawCapabilitiesV2, negotiated_session_context_v5_hash_with_profiles,
+};
 pub use file_transfer::{
     IncomingFileStageError, IncomingFileStager, cleanup_orphaned_receive_staging,
     persist_received_file,
