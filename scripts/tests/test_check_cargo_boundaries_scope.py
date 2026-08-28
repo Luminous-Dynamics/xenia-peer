@@ -89,6 +89,7 @@ edition = "2024"
             "xenia-mobile-ffi",
             "xenia-operator-agent-proto",
             "xenia-operator-proto",
+            "xenia-resilience-evidence",
             "xenia-secure-file",
             "xenia-peer-fuzz",
         ]
@@ -129,6 +130,11 @@ edition = "2024"
                     f"unknown Xenia package '{name}'",
                     combined,
                 )
+
+            self.assertRegex(
+                result.stdout,
+                r"xenia-resilience-evidence\s+library\s+",
+            )
 
 
 if __name__ == "__main__":
