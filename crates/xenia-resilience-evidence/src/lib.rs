@@ -377,8 +377,7 @@ impl OperatorCompromiseEvidence {
                     && observation.exercise_id == self.exercise_id
                     && observation.operator_id == self.operator_id
                     && observation.observed_at_unix_ms >= self.revocation.effective_at_unix_ms
-                    && observation
-                        .authority_context_is_valid(self.revocation.effective_at_unix_ms)
+                    && observation.authority_context_is_valid(self.revocation.effective_at_unix_ms)
                     && observation.evidence.is_complete()
                     && observation.evidence_is_bound()
                     && observation.decision == BoundaryDecision::Allowed
@@ -393,11 +392,15 @@ impl OperatorCompromiseEvidence {
             return OperatorContainmentOutcome::Unproven;
         }
 
-        if BoundarySurface::REQUIRED_BASELINE.into_iter().all(|required| {
-            self.boundaries.iter().any(|observation| {
-                observation.surface == required && observation.decision == BoundaryDecision::Refused
+        if BoundarySurface::REQUIRED_BASELINE
+            .into_iter()
+            .all(|required| {
+                self.boundaries.iter().any(|observation| {
+                    observation.surface == required
+                        && observation.decision == BoundaryDecision::Refused
+                })
             })
-        }) {
+        {
             OperatorContainmentOutcome::Verified
         } else {
             OperatorContainmentOutcome::Unproven
