@@ -283,10 +283,39 @@ impl CapabilityGrantV1 {
     }
 }
 
+/// Live runtime facts that must accompany every grant exercise.
+///
+/// This is deliberately not serialized into the grant. Requiring the current
+/// session, subject, clock, and consumed-use counter as validation inputs makes
+/// it harder for a caller to accidentally treat grant bytes as a bearer token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrantExerciseContextV1 {
+    /// Current authenticated session context hash.
+    pub session_context_hash: [u8; 32],
+    /// Current authenticated subject fingerprint.
+    pub subject_fingerprint: [u8; 32],
+    /// Current trusted-enough local Unix time in milliseconds.
+    pub now_unix_ms: u64,
+    /// Number of operation uses already atomically consumed by this grant.
+    pub consumed_uses: u32,
+}
+
+/// Live parent state required when replacing a grant with an attenuated child.
+///
+/// V1 attenuation is linear: successful child issuance must atomically mark the
+/// parent superseded so neither the parent nor a sibling child can spend the
+/// same remaining authority budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttenuationContextV1 {
+    /// Number of uses already consumed by the parent before supersession.
+    pub parent_consumed_uses: u32,
+}
+
 /// One attempted use of a privileged-operation grant.
 ///
-/// The runtime must separately maintain replay/use-count state and reject a
-/// duplicate `operation_id` or already-consumed `use_index`.
+/// The runtime must atomically compare-and-consume `use_index` after validation
+/// and before side effects. A duplicate operation id must also be rejected by
+/// runtime replay state/evidence storage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityUseV1 {
     /// Exact V1 use schema label.
@@ -305,15 +334,16 @@ pub struct CapabilityUseV1 {
 }
 
 impl CapabilityUseV1 {
-    /// Validate this use against one live grant at `now_unix_ms`.
+    /// Validate this use against one grant and the live exercise context.
     ///
-    /// This proves structural authorization only. The runtime must still perform
-    /// the V1-required live consent/policy/posture reevaluation and atomically
-    /// reserve the `use_index` before causing side effects.
+    /// Structural validation includes exact live session/subject binding and
+    /// exact use-counter matching. The runtime must additionally reevaluate
+    /// current consent/policy/posture state and atomically increment the use
+    /// counter before causing side effects.
     pub fn validate_against(
         &self,
         grant: &CapabilityGrantV1,
-        now_unix_ms: u64,
+        live: GrantExerciseContextV1,
     ) -> Result<(), OperationProtocolError> {
         if self.schema != OPERATION_USE_SCHEMA_V1 {
             return Err(OperationProtocolError::UnsupportedUseSchema);
@@ -322,7 +352,19 @@ impl CapabilityUseV1 {
             return Err(OperationProtocolError::ZeroOperationId);
         }
         self.rule.validate()?;
-        grant.validate_at(now_unix_ms)?;
+        grant.validate_at(live.now_unix_ms)?;
+        if live.session_context_hash != grant.session_context_hash {
+            return Err(OperationProtocolError::LiveSessionMismatch);
+        }
+        if live.subject_fingerprint != grant.subject_fingerprint {
+            return Err(OperationProtocolError::LiveSubjectMismatch);
+        }
+        if live.consumed_uses >= grant.max_uses {
+            return Err(OperationProtocolError::GrantExhausted);
+        }
+        if self.use_index != live.consumed_uses {
+            return Err(OperationProtocolError::UseCounterMismatch);
+        }
         if self.grant_digest != grant.grant_digest()? {
             return Err(OperationProtocolError::GrantDigestMismatch);
         }
@@ -337,9 +379,6 @@ impl CapabilityUseV1 {
                 return Err(OperationProtocolError::RequestDigestMismatch);
             }
             _ => {}
-        }
-        if self.use_index >= grant.max_uses {
-            return Err(OperationProtocolError::UseIndexOutOfRange);
         }
         Ok(())
     }
@@ -367,14 +406,22 @@ impl CapabilityUseV1 {
 
 /// Verify that `child` only attenuates `parent` and cannot widen authority.
 ///
-/// V1 intentionally requires the same subject. Cross-subject delegation needs
+/// V1 intentionally requires the same subject and linear supersession. After a
+/// successful derivation, runtime state must atomically mark the parent grant as
+/// superseded before exposing the child for use. Cross-subject delegation needs
 /// a separate signed delegation protocol and is rejected here.
 pub fn validate_attenuation(
     parent: &CapabilityGrantV1,
     child: &CapabilityGrantV1,
+    live: AttenuationContextV1,
 ) -> Result<(), OperationProtocolError> {
     parent.validate()?;
     child.validate()?;
+
+    if live.parent_consumed_uses >= parent.max_uses {
+        return Err(OperationProtocolError::ParentGrantExhausted);
+    }
+    let remaining_uses = parent.max_uses - live.parent_consumed_uses;
 
     let expected_parent = parent.grant_digest()?;
     if child.parent_grant_digest != Some(expected_parent) {
@@ -404,7 +451,7 @@ pub fn validate_attenuation(
     {
         return Err(OperationProtocolError::TimeWidenedDuringAttenuation);
     }
-    if child.max_uses > parent.max_uses {
+    if child.max_uses > remaining_uses {
         return Err(OperationProtocolError::UsesWidenedDuringAttenuation);
     }
     Ok(())
@@ -464,6 +511,21 @@ pub enum OperationProtocolError {
     /// Current time is at or beyond grant expiration.
     #[error("operation grant has expired")]
     GrantExpired,
+    /// Current authenticated session differs from the grant's session binding.
+    #[error("live session does not match operation grant")]
+    LiveSessionMismatch,
+    /// Current authenticated subject differs from the grant's subject binding.
+    #[error("live subject does not match operation grant")]
+    LiveSubjectMismatch,
+    /// All uses in this grant have already been consumed.
+    #[error("operation grant use budget is exhausted")]
+    GrantExhausted,
+    /// Use index is not exactly the next atomically consumable slot.
+    #[error("operation use index does not match live consumed-use counter")]
+    UseCounterMismatch,
+    /// Parent has no remaining authority to attenuate.
+    #[error("parent operation grant use budget is exhausted")]
+    ParentGrantExhausted,
     /// Child did not name the exact parent grant commitment.
     #[error("attenuated grant parent digest mismatch")]
     ParentDigestMismatch,
@@ -488,8 +550,8 @@ pub enum OperationProtocolError {
     /// Child widened issuance/not-before/expiry bounds.
     #[error("attenuation cannot widen operation time bounds")]
     TimeWidenedDuringAttenuation,
-    /// Child increased the maximum use budget.
-    #[error("attenuation cannot increase operation use budget")]
+    /// Child requested more uses than remain in the superseded parent.
+    #[error("attenuation cannot exceed parent remaining use budget")]
     UsesWidenedDuringAttenuation,
     /// Use named a grant digest other than the actual grant commitment.
     #[error("operation use grant digest mismatch")]
@@ -500,9 +562,6 @@ pub enum OperationProtocolError {
     /// Use request commitment differs from the rule's exact parameter commitment.
     #[error("operation request digest does not match authorized parameters")]
     RequestDigestMismatch,
-    /// Use index cannot be consumed under this grant's use budget.
-    #[error("operation use index is outside the grant budget")]
-    UseIndexOutOfRange,
     /// Deterministic bincode encoding failed.
     #[error("failed to encode operation contract: {0}")]
     Encoding(#[from] bincode::Error),
@@ -613,6 +672,15 @@ mod tests {
         }
     }
 
+    fn live(consumed_uses: u32) -> GrantExerciseContextV1 {
+        GrantExerciseContextV1 {
+            session_context_hash: [2; 32],
+            subject_fingerprint: [3; 32],
+            now_unix_ms: 30_000,
+            consumed_uses,
+        }
+    }
+
     #[test]
     fn grant_is_finite_canonical_and_valid() {
         let grant = root_grant();
@@ -687,7 +755,7 @@ mod tests {
     }
 
     #[test]
-    fn attenuation_can_only_shrink_same_subject_authority() {
+    fn attenuation_can_only_shrink_same_subject_remaining_authority() {
         let parent = root_grant();
         let mut child = parent.clone();
         child.grant_id = [7; 16];
@@ -695,10 +763,17 @@ mod tests {
         child.issued_at_unix_ms = 2_000;
         child.not_before_unix_ms = 2_000;
         child.expires_at_unix_ms = 20_000;
-        child.max_uses = 1;
+        child.max_uses = 2;
         child.parent_grant_digest = Some(parent.grant_digest().unwrap());
 
-        validate_attenuation(&parent, &child).unwrap();
+        validate_attenuation(
+            &parent,
+            &child,
+            AttenuationContextV1 {
+                parent_consumed_uses: 6,
+            },
+        )
+        .unwrap();
     }
 
     #[test]
@@ -710,13 +785,19 @@ mod tests {
         child.parent_grant_digest = Some(parent.grant_digest().unwrap());
 
         assert!(matches!(
-            validate_attenuation(&parent, &child),
+            validate_attenuation(
+                &parent,
+                &child,
+                AttenuationContextV1 {
+                    parent_consumed_uses: 0,
+                },
+            ),
             Err(OperationProtocolError::SubjectChangedDuringAttenuation)
         ));
     }
 
     #[test]
-    fn attenuation_rejects_scope_time_and_use_widening() {
+    fn attenuation_rejects_scope_time_and_remaining_use_widening() {
         let parent = {
             let mut parent = root_grant();
             parent.scope.rules = vec![exec_rule()];
@@ -730,7 +811,13 @@ mod tests {
         scope_widened.grant_id = [8; 16];
         scope_widened.parent_grant_digest = Some(parent.grant_digest().unwrap());
         assert!(matches!(
-            validate_attenuation(&parent, &scope_widened),
+            validate_attenuation(
+                &parent,
+                &scope_widened,
+                AttenuationContextV1 {
+                    parent_consumed_uses: 0,
+                },
+            ),
             Err(OperationProtocolError::ScopeWidenedDuringAttenuation)
         ));
 
@@ -739,22 +826,54 @@ mod tests {
         time_widened.expires_at_unix_ms = parent.expires_at_unix_ms + 1;
         time_widened.parent_grant_digest = Some(parent.grant_digest().unwrap());
         assert!(matches!(
-            validate_attenuation(&parent, &time_widened),
+            validate_attenuation(
+                &parent,
+                &time_widened,
+                AttenuationContextV1 {
+                    parent_consumed_uses: 0,
+                },
+            ),
             Err(OperationProtocolError::TimeWidenedDuringAttenuation)
         ));
 
         let mut uses_widened = parent.clone();
         uses_widened.grant_id = [10; 16];
-        uses_widened.max_uses = parent.max_uses + 1;
+        uses_widened.max_uses = 2;
         uses_widened.parent_grant_digest = Some(parent.grant_digest().unwrap());
         assert!(matches!(
-            validate_attenuation(&parent, &uses_widened),
+            validate_attenuation(
+                &parent,
+                &uses_widened,
+                AttenuationContextV1 {
+                    parent_consumed_uses: 7,
+                },
+            ),
             Err(OperationProtocolError::UsesWidenedDuringAttenuation)
         ));
     }
 
     #[test]
-    fn use_is_bound_to_exact_grant_rule_request_and_use_slot() {
+    fn attenuation_rejects_exhausted_parent() {
+        let parent = root_grant();
+        let mut child = parent.clone();
+        child.grant_id = [11; 16];
+        child.max_uses = 1;
+        child.parent_grant_digest = Some(parent.grant_digest().unwrap());
+
+        assert!(matches!(
+            validate_attenuation(
+                &parent,
+                &child,
+                AttenuationContextV1 {
+                    parent_consumed_uses: parent.max_uses,
+                },
+            ),
+            Err(OperationProtocolError::ParentGrantExhausted)
+        ));
+    }
+
+    #[test]
+    fn use_requires_live_session_subject_and_exact_next_counter() {
         let grant = root_grant();
         let use_record = CapabilityUseV1 {
             schema: OPERATION_USE_SCHEMA_V1.into(),
@@ -765,7 +884,39 @@ mod tests {
             request_digest: [0x22; 32],
         };
 
-        use_record.validate_against(&grant, 30_000).unwrap();
+        use_record.validate_against(&grant, live(0)).unwrap();
+
+        let mut wrong_session = live(0);
+        wrong_session.session_context_hash[0] ^= 1;
+        assert!(matches!(
+            use_record.validate_against(&grant, wrong_session),
+            Err(OperationProtocolError::LiveSessionMismatch)
+        ));
+
+        let mut wrong_subject = live(0);
+        wrong_subject.subject_fingerprint[0] ^= 1;
+        assert!(matches!(
+            use_record.validate_against(&grant, wrong_subject),
+            Err(OperationProtocolError::LiveSubjectMismatch)
+        ));
+
+        assert!(matches!(
+            use_record.validate_against(&grant, live(1)),
+            Err(OperationProtocolError::UseCounterMismatch)
+        ));
+    }
+
+    #[test]
+    fn use_is_bound_to_exact_request() {
+        let grant = root_grant();
+        let use_record = CapabilityUseV1 {
+            schema: OPERATION_USE_SCHEMA_V1.into(),
+            operation_id: [0x33; 16],
+            grant_digest: grant.grant_digest().unwrap(),
+            rule: exec_rule(),
+            use_index: 0,
+            request_digest: [0x22; 32],
+        };
 
         let mut changed_request = use_record.clone();
         changed_request.request_digest[0] ^= 1;
@@ -774,15 +925,25 @@ mod tests {
             changed_request.use_digest().unwrap()
         );
         assert!(matches!(
-            changed_request.validate_against(&grant, 30_000),
+            changed_request.validate_against(&grant, live(0)),
             Err(OperationProtocolError::RequestDigestMismatch)
         ));
+    }
 
-        let mut out_of_budget = use_record;
-        out_of_budget.use_index = grant.max_uses;
+    #[test]
+    fn exhausted_grant_rejects_another_use() {
+        let grant = root_grant();
+        let use_record = CapabilityUseV1 {
+            schema: OPERATION_USE_SCHEMA_V1.into(),
+            operation_id: [0x77; 16],
+            grant_digest: grant.grant_digest().unwrap(),
+            rule: exec_rule(),
+            use_index: grant.max_uses,
+            request_digest: [0x22; 32],
+        };
         assert!(matches!(
-            out_of_budget.validate_against(&grant, 30_000),
-            Err(OperationProtocolError::UseIndexOutOfRange)
+            use_record.validate_against(&grant, live(grant.max_uses)),
+            Err(OperationProtocolError::GrantExhausted)
         ));
     }
 
@@ -805,11 +966,11 @@ mod tests {
             use_index: 0,
             request_digest: [0; 32],
         };
-        use_record.validate_against(&grant, 30_000).unwrap();
+        use_record.validate_against(&grant, live(0)).unwrap();
 
         use_record.request_digest = [1; 32];
         assert!(matches!(
-            use_record.validate_against(&grant, 30_000),
+            use_record.validate_against(&grant, live(0)),
             Err(OperationProtocolError::RequestDigestMismatch)
         ));
     }
