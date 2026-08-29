@@ -27,6 +27,12 @@ members = [
     "apps/sovereign-admin",
     "apps/xenia-operator-agent",
 ]
+# The ransomware/operator-compromise evidence contract is intentionally
+# qualified as a standalone crate first. Keeping it out of the mature locked
+# workspace means this exploratory PR cannot silently invalidate Cargo.lock;
+# a later integration tranche may add it as a member together with a
+# mechanically regenerated lockfile after the contract is qualified.
+exclude = ["crates/xenia-resilience-evidence"]
 # sovereign-admin is a wasm32-unknown-unknown CSR bin; xenia-launcher-windows
 # is Windows-only (target-gated `windows` crate dependency, unconditional
 # Win32 API usage in its own source); xenia-launcher-shell and

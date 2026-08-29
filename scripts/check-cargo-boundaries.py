@@ -45,6 +45,7 @@ LIBRARY_CRATES = {
     "xenia-inject",
     "xenia-launcher-core",
     "xenia-launcher-shell",
+    "xenia-resilience-evidence",
     "xenia-zk-protocol",
     "xenia-zk-codec",
     "xenia-zk-auth",
