@@ -31,13 +31,15 @@ jobs:
           test ! -e crates/xenia-resilience-evidence/Cargo.lock
 
       - uses: dtolnay/rust-toolchain@75be91dd2711b583df57c31d0873b4145c89f1d9
-        with:
-          toolchain: 1.94.1
 
       - name: Toolchain provenance
+        shell: bash
         run: |
+          set -euo pipefail
           rustc -vV
           cargo -Vv
+          test "$(rustc --version | awk '{print $2}')" = "1.94.1"
+          test "$(cargo --version | awk '{print $2}')" = "1.94.1"
 
       - name: Generate standalone lock with MSRV Cargo
         run: cargo generate-lockfile --manifest-path crates/xenia-resilience-evidence/Cargo.toml
@@ -46,10 +48,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t changed < <(git status --porcelain --untracked-files=all | sed 's/^?? //; s/^...//')
-          if [[ "${#changed[@]}" -ne 1 || "${changed[0]}" != "crates/xenia-resilience-evidence/Cargo.lock" ]]; then
-            printf 'Unexpected generated scope:\n' >&2
-            git status --short >&2
+          status="$(git status --porcelain=v1 --untracked-files=all)"
+          expected='?? crates/xenia-resilience-evidence/Cargo.lock'
+          if [[ "$status" != "$expected" ]]; then
+            printf 'Unexpected generated scope:\n%s\n' "$status" >&2
             exit 1
           fi
           sha256sum crates/xenia-resilience-evidence/Cargo.lock
