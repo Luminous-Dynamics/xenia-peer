@@ -1,0 +1,19 @@
+[package]
+name = "xenia-operation-proto"
+description = "Runtime-free session-bound privileged-operation grant contracts for Xenia."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+bincode = { workspace = true }
+blake3 = "1"
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
