@@ -108,7 +108,9 @@ impl ResourceRefV1 {
 /// `parameter_digest` is `Some` when the operation has privilege-relevant
 /// parameters that must be committed exactly. For native execution this should
 /// be the digest of the exact structured execution request/invocation. `None`
-/// means the canonical resource+action pair is itself the complete operation.
+/// means the canonical resource+action pair is itself the complete operation;
+/// a matching [`CapabilityUseV1`] must then carry the canonical all-zero request
+/// digest rather than smuggling uncommitted request semantics beside the rule.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct OperationRuleV1 {
     /// Exact resource identity.
@@ -297,7 +299,8 @@ pub struct CapabilityUseV1 {
     pub rule: OperationRuleV1,
     /// Zero-based use slot consumed by this operation.
     pub use_index: u32,
-    /// Adapter-specific request commitment, e.g. exact `ExecRequestV1` digest.
+    /// Exact adapter request commitment. Must equal the rule's committed
+    /// parameter digest, or all zero when the rule is parameterless.
     pub request_digest: [u8; 32],
 }
 
@@ -325,6 +328,15 @@ impl CapabilityUseV1 {
         }
         if !grant.authorizes_rule(&self.rule) {
             return Err(OperationProtocolError::RuleNotAuthorized);
+        }
+        match self.rule.parameter_digest {
+            Some(expected) if self.request_digest != expected => {
+                return Err(OperationProtocolError::RequestDigestMismatch);
+            }
+            None if self.request_digest != [0u8; 32] => {
+                return Err(OperationProtocolError::RequestDigestMismatch);
+            }
+            _ => {}
         }
         if self.use_index >= grant.max_uses {
             return Err(OperationProtocolError::UseIndexOutOfRange);
@@ -485,6 +497,9 @@ pub enum OperationProtocolError {
     /// Use selected a rule outside the exact grant scope.
     #[error("operation rule is not authorized by the grant")]
     RuleNotAuthorized,
+    /// Use request commitment differs from the rule's exact parameter commitment.
+    #[error("operation request digest does not match authorized parameters")]
+    RequestDigestMismatch,
     /// Use index cannot be consumed under this grant's use budget.
     #[error("operation use index is outside the grant budget")]
     UseIndexOutOfRange,
@@ -747,7 +762,7 @@ mod tests {
             grant_digest: grant.grant_digest().unwrap(),
             rule: exec_rule(),
             use_index: 0,
-            request_digest: [0x44; 32],
+            request_digest: [0x22; 32],
         };
 
         use_record.validate_against(&grant, 30_000).unwrap();
@@ -758,12 +773,44 @@ mod tests {
             use_record.use_digest().unwrap(),
             changed_request.use_digest().unwrap()
         );
+        assert!(matches!(
+            changed_request.validate_against(&grant, 30_000),
+            Err(OperationProtocolError::RequestDigestMismatch)
+        ));
 
         let mut out_of_budget = use_record;
         out_of_budget.use_index = grant.max_uses;
         assert!(matches!(
             out_of_budget.validate_against(&grant, 30_000),
             Err(OperationProtocolError::UseIndexOutOfRange)
+        ));
+    }
+
+    #[test]
+    fn parameterless_rule_requires_canonical_zero_request_digest() {
+        let mut grant = root_grant();
+        let rule = OperationRuleV1 {
+            resource: host(),
+            class: OperationClassV1::Observe,
+            action: "health.read".into(),
+            parameter_digest: None,
+        };
+        grant.scope.rules = vec![rule.clone()];
+
+        let mut use_record = CapabilityUseV1 {
+            schema: OPERATION_USE_SCHEMA_V1.into(),
+            operation_id: [0x55; 16],
+            grant_digest: grant.grant_digest().unwrap(),
+            rule,
+            use_index: 0,
+            request_digest: [0; 32],
+        };
+        use_record.validate_against(&grant, 30_000).unwrap();
+
+        use_record.request_digest = [1; 32];
+        assert!(matches!(
+            use_record.validate_against(&grant, 30_000),
+            Err(OperationProtocolError::RequestDigestMismatch)
         ));
     }
 
