@@ -135,7 +135,8 @@ impl RawCapabilitiesV2 {
         }
         let decoded: Self = bincode::deserialize(&frame.pixels[CAPABILITIES_V2_PREFIX.len()..])?;
         decoded.validate()?;
-        if decoded.base.frame_id != frame.frame_id || decoded.base.timestamp_ms != frame.timestamp_ms
+        if decoded.base.frame_id != frame.frame_id
+            || decoded.base.timestamp_ms != frame.timestamp_ms
         {
             return Err(CapabilitiesV2Error::OuterMetadataMismatch);
         }
@@ -230,7 +231,9 @@ pub enum CapabilitiesV2Error {
 mod tests {
     use super::*;
     use crate::advertisement::{AdvertisedAudioCodec, AudioAdvertisement};
-    use crate::frame::{INPUT_EVENT_SCHEMA_VERSION, LANE_ENVELOPE_MAGIC, LANE_ENVELOPE_SCHEMA_VERSION};
+    use crate::frame::{
+        INPUT_EVENT_SCHEMA_VERSION, LANE_ENVELOPE_MAGIC, LANE_ENVELOPE_SCHEMA_VERSION,
+    };
     use crate::transport::TransportKind;
     use xenia_exec_proto::{ExecInvocationV1, ExecPolicyV1};
 
@@ -288,7 +291,10 @@ mod tests {
     fn execution_advertisement_changes_v2_payload_digest() {
         let disabled = RawCapabilitiesV2::new(base_capabilities(), None);
         let enabled = RawCapabilitiesV2::new(base_capabilities(), Some(exec_advertisement()));
-        assert_ne!(disabled.payload_digest().unwrap(), enabled.payload_digest().unwrap());
+        assert_ne!(
+            disabled.payload_digest().unwrap(),
+            enabled.payload_digest().unwrap()
+        );
     }
 
     #[test]

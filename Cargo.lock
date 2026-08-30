@@ -9543,6 +9543,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "xenia-exec-proto"
+version = "0.0.0-m0"
+dependencies = [
+ "bincode",
+ "blake3",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "xenia-handshake"
 version = "0.0.0-m0"
 dependencies = [
@@ -9687,6 +9697,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "xenia-operation-proto"
+version = "0.0.0-m0"
+dependencies = [
+ "bincode",
+ "blake3",
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "xenia-operator-agent"
 version = "0.0.0-m0"
 dependencies = [
@@ -9790,6 +9810,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "xenia-exec-proto",
  "xenia-handshake",
  "xenia-wire",
 ]

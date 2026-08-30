@@ -532,7 +532,10 @@ mod tests {
             state: M1SessionState::Active,
             permission,
         };
-        assert_eq!(session.inject_input().unwrap_err(), denied(M1Permission::InjectInput));
+        assert_eq!(
+            session.inject_input().unwrap_err(),
+            denied(M1Permission::InjectInput)
+        );
         assert_eq!(
             session.read_host_clipboard().unwrap_err(),
             denied(M1Permission::ReadHostClipboard)
