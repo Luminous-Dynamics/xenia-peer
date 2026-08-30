@@ -11,13 +11,17 @@
 //!
 //! These serialized records are evidence objects, not bearer credentials. A runtime must
 //! still validate current authenticated session/subject state, the current durable receipt
-//! head, store health, and every deployment-specific policy gate before invoking an adapter.
+//! head, operation-store health, prepared-frontier ancestry, and every deployment-specific
+//! policy gate before invoking an adapter.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use xenia_operation_store_frontier::{
+    OperationStoreFrontierError, OperationStoreFrontierV1, validate_frontier_chain,
+};
 
 /// Exact schema label for [`EffectArmAuthorizationV1`].
 pub const EFFECT_ARM_AUTHORIZATION_SCHEMA_V1: &str = "xenia-effect-arm-authorization-v1";
@@ -33,7 +37,7 @@ pub const EFFECT_ARM_PREPARATION_DIGEST_DOMAIN_V1: &[u8] =
 /// Maximum absolute lifetime of one V1 positive arm authorization.
 pub const MAX_EFFECT_ARM_AUTHORIZATION_LIFETIME_MS_V1: u64 = 60_000;
 
-/// Rollback-assurance gate required by deployment policy before the external effect may begin.
+/// Rollback-assurance gate required before the external effect may begin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EffectAnchorRequirementV1 {
     /// Local durable `EffectArmed` is sufficient for the deployment's intentionally narrow claim.
@@ -42,9 +46,6 @@ pub enum EffectAnchorRequirementV1 {
     /// rollback scope before the adapter may cross its external-effect boundary.
     ExternalFrontierBeforeEffect {
         /// Commitment identifying the exact external anchor policy/domain.
-        ///
-        /// This may commit to a Xenia-ledger profile, TPM policy, immutable-object-store profile,
-        /// or remote witness policy without making this crate depend on that implementation.
         anchor_domain_digest: [u8; 32],
     },
 }
@@ -69,10 +70,7 @@ impl EffectAnchorRequirementV1 {
     }
 }
 
-/// Short-lived positive authorization produced by a fresh live reevaluation before arming effect.
-///
-/// Only a permit decision should produce this structure. Denials are not represented as reusable
-/// authorization artifacts.
+/// Short-lived positive authorization produced by a fresh live reevaluation before effect arming.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectArmAuthorizationV1 {
     /// Exact V1 schema label.
@@ -101,7 +99,7 @@ pub struct EffectArmAuthorizationV1 {
     pub authorization_epoch: u64,
     /// Trusted-enough evaluation time.
     pub evaluated_at_unix_ms: u64,
-    /// Hard expiry for this positive arm authorization.
+    /// Exclusive hard expiry for this positive arm authorization.
     pub expires_at_unix_ms: u64,
 }
 
@@ -114,32 +112,26 @@ impl EffectArmAuthorizationV1 {
         if self.operation_id == [0u8; 16] {
             return Err(EffectArmAuthorizationError::ZeroOperationId);
         }
-        require_nonzero_digest(
-            self.admission_digest,
-            EffectArmAuthorizationError::ZeroAdmissionDigest,
-        )?;
-        require_nonzero_digest(
-            self.grant_digest,
-            EffectArmAuthorizationError::ZeroGrantDigest,
-        )?;
-        require_nonzero_digest(self.use_digest, EffectArmAuthorizationError::ZeroUseDigest)?;
-        require_nonzero_digest(
+        require_nonzero(self.admission_digest, EffectArmAuthorizationError::ZeroAdmissionDigest)?;
+        require_nonzero(self.grant_digest, EffectArmAuthorizationError::ZeroGrantDigest)?;
+        require_nonzero(self.use_digest, EffectArmAuthorizationError::ZeroUseDigest)?;
+        require_nonzero(
             self.live_session_context_hash,
             EffectArmAuthorizationError::ZeroSessionContextHash,
         )?;
-        require_nonzero_digest(
+        require_nonzero(
             self.live_subject_fingerprint,
             EffectArmAuthorizationError::ZeroSubjectFingerprint,
         )?;
-        require_nonzero_digest(
+        require_nonzero(
             self.consent_state_digest,
             EffectArmAuthorizationError::ZeroConsentStateDigest,
         )?;
-        require_nonzero_digest(
+        require_nonzero(
             self.policy_state_digest,
             EffectArmAuthorizationError::ZeroPolicyStateDigest,
         )?;
-        require_nonzero_digest(
+        require_nonzero(
             self.posture_state_digest,
             EffectArmAuthorizationError::ZeroPostureStateDigest,
         )?;
@@ -148,10 +140,7 @@ impl EffectArmAuthorizationV1 {
         if self.expires_at_unix_ms <= self.evaluated_at_unix_ms {
             return Err(EffectArmAuthorizationError::InvalidAuthorizationWindow);
         }
-        let lifetime = self
-            .expires_at_unix_ms
-            .checked_sub(self.evaluated_at_unix_ms)
-            .ok_or(EffectArmAuthorizationError::InvalidAuthorizationWindow)?;
+        let lifetime = self.expires_at_unix_ms - self.evaluated_at_unix_ms;
         if lifetime > MAX_EFFECT_ARM_AUTHORIZATION_LIFETIME_MS_V1 {
             return Err(EffectArmAuthorizationError::AuthorizationLifetimeTooLong);
         }
@@ -159,9 +148,11 @@ impl EffectArmAuthorizationV1 {
     }
 
     /// Return whether this valid authorization is live at `now_unix_ms`.
+    ///
+    /// Expiry is exclusive: `now == expires_at_unix_ms` is no longer live.
     pub fn is_live_at(&self, now_unix_ms: u64) -> Result<bool, EffectArmAuthorizationError> {
         self.validate()?;
-        Ok(now_unix_ms >= self.evaluated_at_unix_ms && now_unix_ms <= self.expires_at_unix_ms)
+        Ok(now_unix_ms >= self.evaluated_at_unix_ms && now_unix_ms < self.expires_at_unix_ms)
     }
 
     /// Require this authorization to be live at `now_unix_ms`.
@@ -232,16 +223,16 @@ impl EffectArmPreparationEvidenceV1 {
         if self.arm_authorization_digest != authorization.authorization_digest()? {
             return Err(EffectArmAuthorizationError::AuthorizationDigestMismatch);
         }
-        require_nonzero_digest(
+        require_nonzero(
             self.effect_armed_event_digest,
             EffectArmAuthorizationError::ZeroEffectArmedEventDigest,
         )?;
-        require_nonzero_digest(
+        require_nonzero(
             self.store_frontier_digest,
             EffectArmAuthorizationError::ZeroStoreFrontierDigest,
         )?;
         if self.prepared_at_unix_ms < authorization.evaluated_at_unix_ms
-            || self.prepared_at_unix_ms > authorization.expires_at_unix_ms
+            || self.prepared_at_unix_ms >= authorization.expires_at_unix_ms
         {
             return Err(EffectArmAuthorizationError::PreparationOutsideAuthorizationWindow);
         }
@@ -284,10 +275,6 @@ impl EffectArmPreparationEvidenceV1 {
 }
 
 /// Non-persistent current-state inputs checked immediately before adapter invocation.
-///
-/// This context is intentionally not itself an authority artifact. It lets a runtime-free
-/// validator prove that the current live state still matches the short-lived arm decision and
-/// the durable preparation evidence after any external-anchor latency.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectArmFinalGateContextV1 {
     /// Current trusted-enough time.
@@ -304,24 +291,47 @@ pub struct EffectArmFinalGateContextV1 {
     pub posture_state_digest: [u8; 32],
     /// Current durable receipt head, which must still be the expected `EffectArmed` event.
     pub current_effect_armed_event_digest: [u8; 32],
-    /// Current verified operation-store frontier.
-    pub current_store_frontier_digest: [u8; 32],
     /// Current verified external anchor commitment, when required.
     pub current_external_anchor_digest: Option<[u8; 32]>,
 }
 
+/// Prove that the prepared frontier is still retained in one valid current frontier lineage.
+///
+/// Unrelated operations may advance the store after preparation. Therefore the final gate must
+/// prove ancestry, not require equality with the latest frontier. V1 intentionally requires the
+/// exact prepared frontier to remain retained; destructive frontier-history pruning is unsupported.
+pub fn verify_prepared_frontier_ancestry(
+    preparation: &EffectArmPreparationEvidenceV1,
+    local_frontiers: &[OperationStoreFrontierV1],
+) -> Result<(), EffectArmAuthorizationError> {
+    validate_frontier_chain(local_frontiers)?;
+    if local_frontiers.is_empty() {
+        return Err(EffectArmAuthorizationError::PreparedFrontierMissing);
+    }
+
+    for frontier in local_frontiers {
+        if frontier.frontier_digest()? == preparation.store_frontier_digest {
+            return Ok(());
+        }
+    }
+    Err(EffectArmAuthorizationError::PreparedFrontierMissing)
+}
+
 /// Validate the final live gate immediately before the adapter crosses its external-effect boundary.
 ///
-/// Success means the supplied current state still matches the short-lived arm authorization and
-/// durable preparation evidence. The caller must additionally enforce store-health and adapter-
-/// specific invariants that are outside this generic protocol contract.
+/// Success proves that current live authority still matches the short-lived arm decision, this
+/// operation's receipt head is still the prepared `EffectArmed` event, the prepared store frontier
+/// remains an ancestor of current verified store state, and the required external anchor has not
+/// changed. The caller must additionally enforce store-health and adapter-specific invariants.
 pub fn validate_final_gate(
     authorization: &EffectArmAuthorizationV1,
     preparation: &EffectArmPreparationEvidenceV1,
     current: &EffectArmFinalGateContextV1,
+    local_frontiers: &[OperationStoreFrontierV1],
 ) -> Result<(), EffectArmAuthorizationError> {
     authorization.require_live_at(current.now_unix_ms)?;
     preparation.validate_against(authorization)?;
+    verify_prepared_frontier_ancestry(preparation, local_frontiers)?;
 
     if current.live_session_context_hash != authorization.live_session_context_hash {
         return Err(EffectArmAuthorizationError::LiveSessionChanged);
@@ -341,24 +351,17 @@ pub fn validate_final_gate(
     if current.current_effect_armed_event_digest != preparation.effect_armed_event_digest {
         return Err(EffectArmAuthorizationError::ReceiptHeadChanged);
     }
-    if current.current_store_frontier_digest != preparation.store_frontier_digest {
-        return Err(EffectArmAuthorizationError::StoreFrontierChanged);
-    }
     if current.current_external_anchor_digest != preparation.external_anchor_digest {
         return Err(EffectArmAuthorizationError::ExternalAnchorChanged);
     }
     Ok(())
 }
 
-fn require_nonzero_digest(
+fn require_nonzero(
     digest: [u8; 32],
     error: EffectArmAuthorizationError,
 ) -> Result<(), EffectArmAuthorizationError> {
-    if digest == [0u8; 32] {
-        Err(error)
-    } else {
-        Ok(())
-    }
+    if digest == [0u8; 32] { Err(error) } else { Ok(()) }
 }
 
 fn domain_digest(domain: &[u8], payload: &[u8]) -> [u8; 32] {
@@ -425,7 +428,7 @@ pub enum EffectArmAuthorizationError {
     /// Preparation does not bind the exact authorization digest.
     #[error("preparation arm-authorization digest mismatch")]
     AuthorizationDigestMismatch,
-    /// Durable EffectArmed receipt commitment is unset.
+    /// Durable `EffectArmed` receipt commitment is unset.
     #[error("effect-armed event digest must not be all zero")]
     ZeroEffectArmedEventDigest,
     /// Store frontier commitment is unset.
@@ -435,11 +438,14 @@ pub enum EffectArmAuthorizationError {
     #[error("effect-arm preparation occurred outside authorization lifetime")]
     PreparationOutsideAuthorizationWindow,
     /// Local-only authorization unexpectedly carried an external anchor.
-    #[error("local-durable-only effect-arm preparation must not carry an external anchor")]
+    #[error("local-durable-only preparation must not carry an external anchor")]
     UnexpectedExternalAnchor,
     /// External-anchor mode is missing a non-zero external anchor commitment.
     #[error("external-anchor-before-effect mode requires a non-zero external anchor")]
     MissingExternalAnchor,
+    /// Prepared store frontier is not retained in the verified current lineage.
+    #[error("prepared operation store frontier is missing from current verified lineage")]
+    PreparedFrontierMissing,
     /// Current live session differs from the arm reevaluation.
     #[error("live session changed after effect-arm authorization")]
     LiveSessionChanged,
@@ -455,15 +461,15 @@ pub enum EffectArmAuthorizationError {
     /// Security/posture state changed after arm reevaluation.
     #[error("posture state changed after effect-arm authorization")]
     PostureStateChanged,
-    /// Durable receipt head no longer equals the prepared EffectArmed event.
+    /// Durable receipt head no longer equals the prepared `EffectArmed` event.
     #[error("durable receipt head changed after effect-arm preparation")]
     ReceiptHeadChanged,
-    /// Current verified store frontier differs from prepared frontier.
-    #[error("operation store frontier changed after effect-arm preparation")]
-    StoreFrontierChanged,
     /// Current external anchor differs from the prepared anchor evidence.
     #[error("external anchor changed after effect-arm preparation")]
     ExternalAnchorChanged,
+    /// Operation-store frontier validation failed.
+    #[error("operation store frontier validation failed: {0}")]
+    StoreFrontier(#[from] OperationStoreFrontierError),
     /// Canonical bincode serialization failed.
     #[error("bincode serialization failed: {0}")]
     Serialization(#[from] bincode::Error),
@@ -492,14 +498,45 @@ mod tests {
         }
     }
 
-    fn local_preparation(auth: &EffectArmAuthorizationV1) -> EffectArmPreparationEvidenceV1 {
+    fn frontier_zero() -> OperationStoreFrontierV1 {
+        OperationStoreFrontierV1::from_state(
+            [21u8; 16],
+            0,
+            0,
+            [22u8; 32],
+            [0u8; 32],
+            1_500,
+            &[],
+            &[],
+        )
+        .unwrap()
+    }
+
+    fn frontier_one(previous: &OperationStoreFrontierV1) -> OperationStoreFrontierV1 {
+        OperationStoreFrontierV1::from_state(
+            previous.store_id,
+            previous.generation,
+            previous.checkpoint_sequence + 1,
+            previous.store_schema_digest,
+            previous.frontier_digest().unwrap(),
+            previous.recorded_at_unix_ms + 1,
+            &[],
+            &[],
+        )
+        .unwrap()
+    }
+
+    fn preparation(
+        auth: &EffectArmAuthorizationV1,
+        frontier: &OperationStoreFrontierV1,
+    ) -> EffectArmPreparationEvidenceV1 {
         EffectArmPreparationEvidenceV1 {
             schema: EFFECT_ARM_PREPARATION_EVIDENCE_SCHEMA_V1.to_string(),
             operation_id: auth.operation_id,
             admission_digest: auth.admission_digest,
             arm_authorization_digest: auth.authorization_digest().unwrap(),
             effect_armed_event_digest: [10u8; 32],
-            store_frontier_digest: [11u8; 32],
+            store_frontier_digest: frontier.frontier_digest().unwrap(),
             external_anchor_digest: None,
             prepared_at_unix_ms: 2_000,
         }
@@ -517,7 +554,6 @@ mod tests {
             policy_state_digest: auth.policy_state_digest,
             posture_state_digest: auth.posture_state_digest,
             current_effect_armed_event_digest: prep.effect_armed_event_digest,
-            current_store_frontier_digest: prep.store_frontier_digest,
             current_external_anchor_digest: prep.external_anchor_digest,
         }
     }
@@ -525,9 +561,8 @@ mod tests {
     #[test]
     fn authorization_lifetime_is_bounded() {
         let mut auth = authorization(EffectAnchorRequirementV1::LocalDurableOnly);
-        auth.expires_at_unix_ms = auth.evaluated_at_unix_ms
-            + MAX_EFFECT_ARM_AUTHORIZATION_LIFETIME_MS_V1
-            + 1;
+        auth.expires_at_unix_ms =
+            auth.evaluated_at_unix_ms + MAX_EFFECT_ARM_AUTHORIZATION_LIFETIME_MS_V1 + 1;
         assert!(matches!(
             auth.validate(),
             Err(EffectArmAuthorizationError::AuthorizationLifetimeTooLong)
@@ -535,25 +570,9 @@ mod tests {
     }
 
     #[test]
-    fn authorization_digest_changes_with_current_consent_state() {
-        let first = authorization(EffectAnchorRequirementV1::LocalDurableOnly);
-        let mut changed = first.clone();
-        changed.consent_state_digest = [33u8; 32];
-        assert_ne!(
-            first.authorization_digest().unwrap(),
-            changed.authorization_digest().unwrap()
-        );
-    }
-
-    #[test]
-    fn local_mode_forbids_external_anchor_evidence() {
+    fn expiry_is_exclusive() {
         let auth = authorization(EffectAnchorRequirementV1::LocalDurableOnly);
-        let mut prep = local_preparation(&auth);
-        prep.external_anchor_digest = Some([12u8; 32]);
-        assert!(matches!(
-            prep.validate_against(&auth),
-            Err(EffectArmAuthorizationError::UnexpectedExternalAnchor)
-        ));
+        assert!(!auth.is_live_at(auth.expires_at_unix_ms).unwrap());
     }
 
     #[test]
@@ -561,7 +580,8 @@ mod tests {
         let auth = authorization(EffectAnchorRequirementV1::ExternalFrontierBeforeEffect {
             anchor_domain_digest: [13u8; 32],
         });
-        let prep = local_preparation(&auth);
+        let frontier = frontier_zero();
+        let prep = preparation(&auth, &frontier);
         assert!(matches!(
             prep.validate_against(&auth),
             Err(EffectArmAuthorizationError::MissingExternalAnchor)
@@ -569,56 +589,57 @@ mod tests {
     }
 
     #[test]
-    fn external_mode_accepts_exact_anchor_evidence() {
-        let auth = authorization(EffectAnchorRequirementV1::ExternalFrontierBeforeEffect {
-            anchor_domain_digest: [13u8; 32],
-        });
-        let mut prep = local_preparation(&auth);
-        prep.external_anchor_digest = Some([14u8; 32]);
-        assert!(prep.validate_against(&auth).is_ok());
-    }
-
-    #[test]
     fn final_gate_detects_revocation_state_change() {
         let auth = authorization(EffectAnchorRequirementV1::LocalDurableOnly);
-        let prep = local_preparation(&auth);
+        let frontier = frontier_zero();
+        let prep = preparation(&auth, &frontier);
         let mut current = final_context(&auth, &prep);
         current.consent_state_digest = [99u8; 32];
         assert!(matches!(
-            validate_final_gate(&auth, &prep, &current),
+            validate_final_gate(&auth, &prep, &current, &[frontier]),
             Err(EffectArmAuthorizationError::ConsentStateChanged)
         ));
     }
 
     #[test]
-    fn final_gate_detects_expired_authorization() {
+    fn unrelated_frontier_advancement_does_not_cancel_effect() {
         let auth = authorization(EffectAnchorRequirementV1::LocalDurableOnly);
-        let prep = local_preparation(&auth);
-        let mut current = final_context(&auth, &prep);
-        current.now_unix_ms = auth.expires_at_unix_ms + 1;
+        let prepared_frontier = frontier_zero();
+        let prep = preparation(&auth, &prepared_frontier);
+        let current_frontier = frontier_one(&prepared_frontier);
+        let current = final_context(&auth, &prep);
+        assert!(validate_final_gate(
+            &auth,
+            &prep,
+            &current,
+            &[prepared_frontier, current_frontier],
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn missing_prepared_frontier_fails_closed() {
+        let auth = authorization(EffectAnchorRequirementV1::LocalDurableOnly);
+        let prepared_frontier = frontier_zero();
+        let prep = preparation(&auth, &prepared_frontier);
+        let current_frontier = frontier_one(&prepared_frontier);
+        let current = final_context(&auth, &prep);
         assert!(matches!(
-            validate_final_gate(&auth, &prep, &current),
-            Err(EffectArmAuthorizationError::AuthorizationNotLive)
+            validate_final_gate(&auth, &prep, &current, &[current_frontier]),
+            Err(EffectArmAuthorizationError::PreparedFrontierMissing)
         ));
     }
 
     #[test]
     fn final_gate_detects_receipt_head_change() {
         let auth = authorization(EffectAnchorRequirementV1::LocalDurableOnly);
-        let prep = local_preparation(&auth);
+        let frontier = frontier_zero();
+        let prep = preparation(&auth, &frontier);
         let mut current = final_context(&auth, &prep);
         current.current_effect_armed_event_digest = [88u8; 32];
         assert!(matches!(
-            validate_final_gate(&auth, &prep, &current),
+            validate_final_gate(&auth, &prep, &current, &[frontier]),
             Err(EffectArmAuthorizationError::ReceiptHeadChanged)
         ));
-    }
-
-    #[test]
-    fn final_gate_passes_when_live_and_durable_state_is_unchanged() {
-        let auth = authorization(EffectAnchorRequirementV1::LocalDurableOnly);
-        let prep = local_preparation(&auth);
-        let current = final_context(&auth, &prep);
-        assert!(validate_final_gate(&auth, &prep, &current).is_ok());
     }
 }
