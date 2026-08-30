@@ -1,28 +1,25 @@
 name: Repair Exec Stack Qualification
 
 on:
-  push:
-    branches:
-      - feat/privileged-operation-grants-v1
   pull_request:
     branches:
-      - feat/native-exec-capability-v1
+      - repair-exec-stack-base
 
 permissions:
   contents: write
 
 jobs:
   repair:
-    if: github.event_name == 'push' || github.event.pull_request.head.ref == 'feat/privileged-operation-grants-v1'
+    if: github.event.pull_request.head.ref == 'repair-exec-stack-trigger'
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repair branch
+      - name: Check out branch under repair
         uses: actions/checkout@v4
         with:
           ref: feat/privileged-operation-grants-v1
           fetch-depth: 0
 
-      - name: Install Rust
+      - name: Install pinned Rust formatter
         uses: dtolnay/rust-toolchain@1.96.0
         with:
           components: rustfmt
