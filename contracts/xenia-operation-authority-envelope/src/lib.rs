@@ -41,7 +41,7 @@ pub const EPOCH_BOUND_USE_DIGEST_DOMAIN_V1: &[u8] =
 /// `raw_grant_digest` is expected to be the validated digest produced by the
 /// existing `CapabilityGrantV1`. This crate deliberately does not reimplement
 /// grant semantics; it adds the recovery/global-revocation binding layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EpochBoundGrantV1 {
     /// Exact V1 envelope schema.
     pub schema: String,
@@ -57,7 +57,10 @@ impl EpochBoundGrantV1 {
         raw_grant_digest: [u8; 32],
         epoch: &OperationAuthorityEpochV1,
     ) -> Result<Self, AuthorityEnvelopeError> {
-        require_nonzero(raw_grant_digest, AuthorityEnvelopeError::ZeroRawGrantDigest)?;
+        require_nonzero(
+            raw_grant_digest,
+            AuthorityEnvelopeError::ZeroRawGrantDigest,
+        )?;
         let value = Self {
             schema: EPOCH_BOUND_GRANT_SCHEMA_V1.to_string(),
             raw_grant_digest,
@@ -114,7 +117,7 @@ impl EpochBoundGrantV1 {
 /// The underlying `CapabilityUseV1` must still be validated against its raw
 /// grant and live session/subject/use counter. This envelope is the additional
 /// authority-continuity object consumed by durable admission.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EpochBoundUseV1 {
     /// Exact V1 envelope schema.
     pub schema: String,
@@ -228,7 +231,10 @@ pub enum AuthorityEnvelopeError {
     Encoding(#[from] bincode::Error),
 }
 
-fn require_nonzero(value: [u8; 32], error: AuthorityEnvelopeError) -> Result<(), AuthorityEnvelopeError> {
+fn require_nonzero(
+    value: [u8; 32],
+    error: AuthorityEnvelopeError,
+) -> Result<(), AuthorityEnvelopeError> {
     if value == [0u8; 32] {
         Err(error)
     } else {
@@ -320,8 +326,9 @@ mod tests {
     fn use_envelope_commits_raw_use_and_bound_grant() {
         let epoch = genesis();
         let grant = EpochBoundGrantV1::new([0x11; 32], &epoch).unwrap();
-        let use_one = EpochBoundUseV1::new([0x33; 16], [0x22; 32], &grant, &epoch).unwrap();
-        let mut use_two = use_one;
+        let use_one =
+            EpochBoundUseV1::new([0x33; 16], [0x22; 32], &grant, &epoch).unwrap();
+        let mut use_two = use_one.clone();
         use_two.raw_use_digest[0] ^= 1;
         assert_ne!(
             use_one.epoch_bound_use_digest().unwrap(),
@@ -334,7 +341,8 @@ mod tests {
         let epoch = genesis();
         let grant_a = EpochBoundGrantV1::new([0x11; 32], &epoch).unwrap();
         let grant_b = EpochBoundGrantV1::new([0x12; 32], &epoch).unwrap();
-        let use_record = EpochBoundUseV1::new([0x33; 16], [0x22; 32], &grant_a, &epoch).unwrap();
+        let use_record =
+            EpochBoundUseV1::new([0x33; 16], [0x22; 32], &grant_a, &epoch).unwrap();
         assert!(matches!(
             use_record.validate_against(&grant_b, &epoch),
             Err(AuthorityEnvelopeError::EpochBoundGrantDigestMismatch)
