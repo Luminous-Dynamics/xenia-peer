@@ -1,0 +1,50 @@
+name: Operation Persistence Proof V2
+
+on:
+  pull_request:
+    paths:
+      - "contracts/xenia-operation-admission-proof-v2/**"
+      - "contracts/xenia-operation-authority-v2/**"
+      - "contracts/xenia-operation-authority-epoch/**"
+      - "docs/ADR-017-store-authenticated-operation-persistence-proofs.md"
+      - ".github/workflows/operation-persistence-proof-v2.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-196:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt,clippy
+      - name: Resolve standalone lock and identify it
+        working-directory: contracts/xenia-operation-admission-proof-v2
+        run: |
+          cargo generate-lockfile
+          sha256sum Cargo.lock
+      - name: Format
+        working-directory: contracts/xenia-operation-admission-proof-v2
+        run: cargo fmt --check
+      - name: Tests
+        working-directory: contracts/xenia-operation-admission-proof-v2
+        run: cargo test --locked
+      - name: Clippy
+        working-directory: contracts/xenia-operation-admission-proof-v2
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - name: Resolve standalone lock
+        working-directory: contracts/xenia-operation-admission-proof-v2
+        run: cargo generate-lockfile
+      - name: MSRV check
+        working-directory: contracts/xenia-operation-admission-proof-v2
+        run: cargo check --locked --all-targets
