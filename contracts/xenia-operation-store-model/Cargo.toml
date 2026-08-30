@@ -1,0 +1,16 @@
+[package]
+name = "xenia-operation-store-model"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz"]
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Executable reference model for Xenia privileged-operation receipt stores"
+
+[workspace]
+
+[dependencies]
+thiserror = "1"
+xenia-operation-receipt-finalization = { path = "../xenia-operation-receipt-finalization" }
+xenia-operation-store-frontier = { path = "../xenia-operation-store-frontier" }
