@@ -904,6 +904,20 @@ mod tests {
         fence.inhibit([0x95; 32]).unwrap();
         fence.transition_epoch(next).unwrap();
         fence.resume([0x96; 32]).unwrap();
-        assert!(begin(&mut fence, &fixture).evidence().authority_epoch_digest != [0; 32]);
+        assert_eq!(fence.current_epoch().epoch_sequence, 1);
+        assert!(fence
+            .begin_start(
+                &fixture.admission,
+                &fixture.admission_proof,
+                &fixture.arm,
+                &fixture.armed_proof,
+                &fixture.store,
+                fixture.admission_persistence,
+                fixture.arm_persistence,
+                [0x81; 32],
+                [0x82; 32],
+                1_500,
+            )
+            .is_err());
     }
 }
