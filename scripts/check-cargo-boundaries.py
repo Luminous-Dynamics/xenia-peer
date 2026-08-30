@@ -40,6 +40,7 @@ LIBRARY_CRATES = {
     "xenia-ledger",
     "xenia-mobile-ffi",
     "xenia-operation-proto",
+    "xenia-operation-receipt-proto",
     "xenia-operator-agent-proto",
     "xenia-operator-proto",
     "xenia-transport-ws",
