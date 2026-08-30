@@ -224,12 +224,18 @@ impl OperationReceiptStateV1 {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::CancelledBeforeEffect | Self::Completed | Self::FailedKnown | Self::OutcomeUnknown
+            Self::CancelledBeforeEffect
+                | Self::Completed
+                | Self::FailedKnown
+                | Self::OutcomeUnknown
         )
     }
 
     fn requires_outcome_digest(self) -> bool {
-        matches!(Self::Completed | Self::FailedKnown | Self::OutcomeUnknown, self)
+        matches!(
+            self,
+            Self::Completed | Self::FailedKnown | Self::OutcomeUnknown
+        )
     }
 }
 
@@ -309,8 +315,7 @@ impl OperationReceiptEventV1 {
         }
         if !matches!(
             self.state,
-            OperationReceiptStateV1::EffectArmed
-                | OperationReceiptStateV1::CancelledBeforeEffect
+            OperationReceiptStateV1::EffectArmed | OperationReceiptStateV1::CancelledBeforeEffect
         ) {
             return Err(OperationReceiptProtocolError::InvalidFirstState);
         }
@@ -328,7 +333,9 @@ impl OperationReceiptEventV1 {
         admission.validate()?;
 
         let admission_digest = admission.admission_digest()?;
-        if self.admission_digest != admission_digest || previous.admission_digest != admission_digest {
+        if self.admission_digest != admission_digest
+            || previous.admission_digest != admission_digest
+        {
             return Err(OperationReceiptProtocolError::AdmissionDigestMismatch);
         }
         if self.operation_id != admission.operation_id
@@ -501,13 +508,11 @@ fn validate_token(
     }
     let valid = match alphabet {
         TokenAlphabet::LowerName => value.bytes().all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(byte, b'.' | b'_' | b'-')
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
         }),
-        TokenAlphabet::Version => value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+')
-        }),
+        TokenAlphabet::Version => value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+')),
     };
     if !valid {
         return Err(OperationReceiptProtocolError::InvalidToken(field));
@@ -627,10 +632,7 @@ mod tests {
     #[test]
     fn first_event_can_cancel_without_effect() {
         let admission = admission();
-        let cancelled = first_event(
-            &admission,
-            OperationReceiptStateV1::CancelledBeforeEffect,
-        );
+        let cancelled = first_event(&admission, OperationReceiptStateV1::CancelledBeforeEffect);
         assert!(cancelled.validate_first(&admission).is_ok());
         assert!(cancelled.state.is_terminal());
     }

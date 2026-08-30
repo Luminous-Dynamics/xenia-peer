@@ -94,12 +94,7 @@ impl ResourceRefV1 {
     /// Validate bounded canonical V1 resource identity syntax.
     pub fn validate(&self) -> Result<(), OperationProtocolError> {
         validate_namespace(&self.namespace)?;
-        validate_text(
-            "resource id",
-            &self.id,
-            MAX_RESOURCE_ID_BYTES_V1,
-            false,
-        )
+        validate_text("resource id", &self.id, MAX_RESOURCE_ID_BYTES_V1, false)
     }
 }
 
@@ -582,9 +577,7 @@ fn validate_namespace(value: &str) -> Result<(), OperationProtocolError> {
         false,
     )?;
     if !value.bytes().all(|byte| {
-        byte.is_ascii_lowercase()
-            || byte.is_ascii_digit()
-            || matches!(byte, b'.' | b'_' | b'-')
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
     }) {
         return Err(OperationProtocolError::InvalidNamespace);
     }
@@ -746,8 +739,7 @@ mod tests {
         ));
 
         let mut too_long = grant;
-        too_long.expires_at_unix_ms =
-            too_long.not_before_unix_ms + MAX_GRANT_LIFETIME_MS_V1 + 1;
+        too_long.expires_at_unix_ms = too_long.not_before_unix_ms + MAX_GRANT_LIFETIME_MS_V1 + 1;
         assert!(matches!(
             too_long.validate(),
             Err(OperationProtocolError::GrantLifetimeTooLong)

@@ -255,10 +255,7 @@ impl ExecPolicyV1 {
             return Err(ExecProtocolError::ConcurrencyLimitTooLarge);
         }
 
-        if self.allow_stdin
-            || self.allow_pty
-            || self.allow_elevation
-            || self.allow_port_forwarding
+        if self.allow_stdin || self.allow_pty || self.allow_elevation || self.allow_port_forwarding
         {
             return Err(ExecProtocolError::UnsupportedV1Privilege);
         }
