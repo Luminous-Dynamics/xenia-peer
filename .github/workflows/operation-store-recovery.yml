@@ -1,0 +1,49 @@
+name: Operation Store Recovery Contract
+
+on:
+  pull_request:
+    paths:
+      - "contracts/xenia-operation-store-recovery/**"
+      - "contracts/xenia-operation-authority-epoch/**"
+      - "docs/ADR-014-governed-operation-store-recovery.md"
+      - ".github/workflows/operation-store-recovery.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt,clippy
+      - name: Resolve standalone lock and identify it
+        working-directory: contracts/xenia-operation-store-recovery
+        run: |
+          cargo generate-lockfile
+          sha256sum Cargo.lock
+      - name: Format
+        working-directory: contracts/xenia-operation-store-recovery
+        run: cargo fmt --check
+      - name: Tests
+        working-directory: contracts/xenia-operation-store-recovery
+        run: cargo test --locked
+      - name: Clippy
+        working-directory: contracts/xenia-operation-store-recovery
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - name: Resolve standalone lock
+        working-directory: contracts/xenia-operation-store-recovery
+        run: cargo generate-lockfile
+      - name: MSRV check
+        working-directory: contracts/xenia-operation-store-recovery
+        run: cargo check --locked --all-targets
