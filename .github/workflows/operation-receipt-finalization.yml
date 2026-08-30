@@ -1,0 +1,47 @@
+name: Operation Receipt Finalization Contract
+
+on:
+  pull_request:
+    paths:
+      - "contracts/xenia-operation-receipt-finalization/**"
+      - ".github/workflows/operation-receipt-finalization.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt,clippy
+      - name: Resolve standalone lock
+        working-directory: contracts/xenia-operation-receipt-finalization
+        run: |
+          cargo generate-lockfile
+          sha256sum Cargo.lock
+      - name: Format
+        working-directory: contracts/xenia-operation-receipt-finalization
+        run: cargo fmt --check
+      - name: Test
+        working-directory: contracts/xenia-operation-receipt-finalization
+        run: cargo test --locked
+      - name: Clippy
+        working-directory: contracts/xenia-operation-receipt-finalization
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - name: Resolve standalone lock
+        working-directory: contracts/xenia-operation-receipt-finalization
+        run: cargo generate-lockfile
+      - name: MSRV check
+        working-directory: contracts/xenia-operation-receipt-finalization
+        run: cargo check --locked
