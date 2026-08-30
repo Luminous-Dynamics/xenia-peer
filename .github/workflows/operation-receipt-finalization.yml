@@ -19,6 +19,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.96.0
         with:
           components: rustfmt,clippy
+      - name: Resolve standalone lock
+        working-directory: contracts/xenia-operation-receipt-finalization
+        run: |
+          cargo generate-lockfile
+          sha256sum Cargo.lock
       - name: Format
         working-directory: contracts/xenia-operation-receipt-finalization
         run: cargo fmt --check
@@ -34,6 +39,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94
+      - name: Resolve standalone lock
+        working-directory: contracts/xenia-operation-receipt-finalization
+        run: cargo generate-lockfile
       - name: MSRV check
         working-directory: contracts/xenia-operation-receipt-finalization
         run: cargo check --locked
