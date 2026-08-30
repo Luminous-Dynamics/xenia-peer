@@ -1,11 +1,11 @@
 // Copyright (c) 2026 Tristan Stoltz / Luminous Dynamics
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Security characterization for xenia-peer #192.
+//! Regression for xenia-peer #192.
 //!
-//! This test intentionally captures the *current unsafe behavior* so the
-//! remediation can prove it changed the right invariant. It must be replaced
-//! by an inequality regression when #192 is fixed.
+//! The characterization parent proved that viewer rekey Ack and the host's
+//! first subsequent new-key control frame could reuse the same AEAD nonce. This
+//! successor requires distinct nonce domains while preserving interoperability.
 
 use xenia_handshake::{RekeyEpochKeys, RekeyReason};
 use xenia_peer_core::{
@@ -40,20 +40,18 @@ fn inner_nonce(envelope: &[u8]) -> &[u8] {
 }
 
 #[test]
-fn viewer_rekey_ack_reuses_host_first_new_key_control_nonce_today() {
-    // Host and viewer currently receive the same configured source-id/epoch
-    // metadata. They also install the same next-epoch control key.
+fn viewer_rekey_ack_has_distinct_nonce_domain_and_still_interoperates() {
     let mut host = LaneSession::with_fixture(SOURCE_ID, SESSION_EPOCH);
     let mut viewer = LaneSession::with_fixture(SOURCE_ID, SESSION_EPOCH);
     let keys = rekey_keys([0x22; 32]);
     host.install_rekey_keys(&keys);
     viewer.install_rekey_keys(&keys);
 
-    // The viewer Ack is its first seal under the newly-installed control key,
-    // therefore FRAME sequence 0.
+    // Viewer Ack is its first seal under the newly-installed control key.
+    let ack_hash = [0xA1; 32];
     let ack = RawRekey::Ack {
         key_epoch: 1,
-        epoch_hash: [0xA1; 32],
+        epoch_hash: ack_hash,
     }
     .into_frame(0, 0)
     .expect("build ack frame");
@@ -62,15 +60,14 @@ fn viewer_rekey_ack_reuses_host_first_new_key_control_nonce_today() {
         .expect("seal viewer rekey ack");
 
     // Stand in for the host's first subsequent control frame under the same
-    // new key. A later rekey Proposal is sufficient to demonstrate the nonce
-    // construction; forward clipboard/capability-style control frames share
-    // the same FRAME payload type and sender counter on this lane.
+    // new key. It also begins at sequence 0 on the regular control sender.
+    let proposal_hash = [0xB2; 32];
     let proposal = RawRekey::Proposal {
         key_epoch: 2,
         base_transcript_hash: [0xB1; 32],
-        previous_epoch_hash: [0xA1; 32],
+        previous_epoch_hash: ack_hash,
         reason: RekeyReason::Manual,
-        epoch_hash: [0xB2; 32],
+        epoch_hash: proposal_hash,
     }
     .into_frame(1, 1)
     .expect("build proposal frame");
@@ -81,17 +78,43 @@ fn viewer_rekey_ack_reuses_host_first_new_key_control_nonce_today() {
     let ack_nonce = inner_nonce(&viewer_ack);
     let host_nonce = inner_nonce(&host_control);
 
-    // Characterization, NOT desired behavior: both independent senders reset
-    // to sequence 0 on the same new control key and currently share the same
-    // source-id/epoch/payload-type domain.
-    assert_eq!(
+    assert_ne!(
         ack_nonce, host_nonce,
-        "current implementation should reproduce the nonce collision tracked in #192"
+        "opposite sealing roles must not reuse an AEAD nonce under the same control key"
     );
-
-    // Make the collision shape explicit for reviewers: payload type and seq are
-    // equal as part of the complete identical 12-byte nonce.
-    assert_eq!(ack_nonce[6], host_nonce[6], "same FRAME payload type");
+    assert_ne!(
+        &ack_nonce[..6],
+        &host_nonce[..6],
+        "rekey Ack must use the separated sender source domain"
+    );
+    assert_eq!(ack_nonce[6], host_nonce[6], "both remain FRAME payloads");
     assert_eq!(&ack_nonce[8..12], &[0, 0, 0, 0], "viewer Ack is seq 0");
     assert_eq!(&host_nonce[8..12], &[0, 0, 0, 0], "host control is seq 0");
+
+    // Directional source separation must not change the authenticated body or
+    // require a second receive-side key. The ordinary control receiver opens
+    // both domains because replay state keys from the source carried in the
+    // authenticated nonce.
+    let opened_ack = host.open_frame(&viewer_ack).expect("host opens Ack");
+    assert_eq!(
+        RawRekey::from_frame(&opened_ack).expect("decode Ack"),
+        RawRekey::Ack {
+            key_epoch: 1,
+            epoch_hash: ack_hash,
+        }
+    );
+
+    let opened_proposal = viewer
+        .open_frame(&host_control)
+        .expect("viewer opens host control frame");
+    assert_eq!(
+        RawRekey::from_frame(&opened_proposal).expect("decode proposal"),
+        RawRekey::Proposal {
+            key_epoch: 2,
+            base_transcript_hash: [0xB1; 32],
+            previous_epoch_hash: ack_hash,
+            reason: RekeyReason::Manual,
+            epoch_hash: proposal_hash,
+        }
+    );
 }
