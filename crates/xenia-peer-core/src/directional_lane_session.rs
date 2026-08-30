@@ -11,6 +11,8 @@
 //! Acks therefore seal through a second `xenia_wire::Session` whose first
 //! source-id byte is deterministically separated from the regular lane source.
 
+use std::time::Duration;
+
 use xenia_handshake::{RekeyEpochKeys, SessionKeySchedule};
 use xenia_wire::{Session as WireSession, WireError};
 
@@ -46,7 +48,11 @@ impl LaneSession {
         ack_source_id[0] ^= REKEY_ACK_SOURCE_DOMAIN_BIT;
         Self {
             inner: InnerLaneSession::with_fixture(source_id, epoch),
-            rekey_ack_tx: WireSession::with_source_id(ack_source_id, epoch),
+            // This session never receives, so retaining superseded keys for a
+            // receive-grace window serves no purpose. Keep grace at zero and
+            // tick immediately after every replacement below.
+            rekey_ack_tx: WireSession::with_source_id(ack_source_id, epoch)
+                .with_rekey_grace(Duration::ZERO),
         }
     }
 
@@ -60,6 +66,7 @@ impl LaneSession {
     pub fn install_rekey_keys(&mut self, keys: &RekeyEpochKeys) {
         self.inner.install_rekey_keys(keys);
         self.rekey_ack_tx.install_key(keys.control);
+        self.rekey_ack_tx.tick();
     }
 
     /// Advance previous-key grace expiry for ordinary lanes and the Ack sender.
