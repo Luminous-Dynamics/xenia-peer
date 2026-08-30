@@ -1,0 +1,74 @@
+name: Qualify Operation Receipts
+
+on:
+  pull_request:
+    branches:
+      - repair-operation-receipts-base
+
+permissions:
+  contents: write
+
+jobs:
+  qualify:
+    if: github.event.pull_request.head.ref == 'repair-operation-receipts-trigger'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out receipt branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/operation-receipts-v1
+          fetch-depth: 0
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt,clippy
+
+      - name: Repair audited receipt predicate
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/xenia-operation-receipt-proto/src/lib.rs')
+          text = path.read_text()
+          old = 'matches!(Self::Completed | Self::FailedKnown | Self::OutcomeUnknown, self)'
+          new = 'matches!(self, Self::Completed | Self::FailedKnown | Self::OutcomeUnknown)'
+          if old not in text:
+              raise SystemExit('audited matches! defect not found; refusing silent rewrite')
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+      - name: Regenerate workspace lock metadata
+        run: cargo metadata --format-version 1 > /dev/null
+
+      - name: Format complete workspace
+        run: cargo fmt --all
+
+      - name: Verify Cargo boundary inventory
+        run: python3 scripts/check-cargo-boundaries.py --strict-unknown .
+
+      - name: Test receipt contract
+        run: cargo test --locked -p xenia-operation-receipt-proto
+
+      - name: Clippy receipt contract
+        run: cargo clippy --locked -p xenia-operation-receipt-proto --all-targets -- -D warnings
+
+      - name: Install MSRV toolchain
+        uses: dtolnay/rust-toolchain@1.94
+
+      - name: Check receipt contract at MSRV
+        run: cargo +1.94 check --locked -p xenia-operation-receipt-proto
+
+      - name: Commit qualified repairs
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock crates scripts/check-cargo-boundaries.py
+          if git diff --cached --quiet; then
+            echo "No qualification repairs were produced." >&2
+            exit 1
+          fi
+          git commit -m "chore(operation): qualify durable receipt contract"
+          git push origin HEAD:feat/operation-receipts-v1
