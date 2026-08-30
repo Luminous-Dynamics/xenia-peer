@@ -405,15 +405,9 @@ impl SqliteOperationStoreV2 {
         if persisted_at_unix_ms < admission_proof.persisted_at_unix_ms {
             return Err(SqliteStoreV2Error::PersistenceTimestampRegression);
         }
-        let binding = receipt_binding(admission, semantic);
-        event.validate_first(binding)?;
+        event.validate_first(receipt_binding(admission, semantic))?;
 
-        let result = self.append_effect_armed_inner(
-            admission_proof,
-            arm,
-            event,
-            persisted_at_unix_ms,
-        );
+        let result = self.append_effect_armed_inner(admission_proof, arm, event, persisted_at_unix_ms);
         if matches!(result, Err(SqliteStoreV2Error::Sqlite(_))) {
             self.health = SqliteStoreHealthV2::DurabilityUncertain;
         }
@@ -471,9 +465,7 @@ impl SqliteOperationStoreV2 {
             return self.verify_metadata();
         }
 
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute_batch(STORE_SCHEMA_SQL_V2)?;
         let admissions_root = empty_root(ADMISSION_ROOT_DOMAIN_V2);
         let receipt_heads_root = empty_root(RECEIPT_HEADS_ROOT_DOMAIN_V2);
@@ -565,6 +557,11 @@ impl SqliteOperationStoreV2 {
         let admission_digest = admission.authority_digest()?;
         let use_digest = use_authority.authority_digest()?;
         let slot_digest = slot.reservation_digest(use_authority)?;
+        let store_authority = self.store_authority.clone();
+        let current_epoch = self.current_epoch.clone();
+        let store_authority_digest = store_authority.authority_digest()?;
+        let backend_authority_digest = self.backend_authority_digest;
+        let persistence_profile_digest = self.persistence_profile_digest;
         let transaction = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         if let Some(existing) = read_admission_row(&transaction, admission.operation_id)? {
@@ -576,7 +573,7 @@ impl SqliteOperationStoreV2 {
                 .ok_or(SqliteStoreV2Error::MissingAdmissionProof)?;
             transaction.rollback()?;
             let authenticated = persistence_context_from_admission_proof(&proof);
-            proof.validate_against(admission, &self.store_authority, &self.current_epoch, authenticated)?;
+            proof.validate_against(admission, &store_authority, &current_epoch, authenticated)?;
             return Ok(AdmissionCommitV2 { decision: AdmissionDecisionV2::DuplicateSame, proof, authenticated_persistence: authenticated });
         }
 
@@ -605,7 +602,7 @@ impl SqliteOperationStoreV2 {
                 i64::from(slot.use_index),
                 sqlite_i64(sequence, "admission_sequence")?,
                 sqlite_i64(semantic.admitted_at_unix_ms, "admitted_at_unix_ms")?,
-                &self.current_epoch.epoch_digest()?[..],
+                &current_epoch.epoch_digest()?[..],
             ],
         )?;
         let following = sequence.checked_add(1).ok_or(SqliteStoreV2Error::AdmissionSequenceOverflow)?;
@@ -613,13 +610,17 @@ impl SqliteOperationStoreV2 {
             "UPDATE store_meta SET next_admission_sequence=?1 WHERE singleton=1",
             params![sqlite_i64(following, "next_admission_sequence")?],
         )?;
-        let frontier = append_frontier(&transaction, self.store_authority.authority_digest()?, persisted_at_unix_ms)?;
+        let frontier = append_frontier(&transaction, store_authority_digest, persisted_at_unix_ms)?;
         let commit_evidence = commit_evidence_digest(b"admission", admission_digest, slot_digest, frontier, sequence);
-        let authenticated = self.persistence_context(commit_evidence);
+        let authenticated = AuthenticatedPersistenceContextV2 {
+            backend_authority_digest,
+            persistence_profile_digest,
+            commit_evidence_digest: commit_evidence,
+        };
         let proof = AdmissionPersistenceProofV2::new(
             admission,
-            &self.store_authority,
-            &self.current_epoch,
+            &store_authority,
+            &current_epoch,
             sequence,
             slot_digest,
             frontier,
@@ -642,23 +643,29 @@ impl SqliteOperationStoreV2 {
         persisted_at_unix_ms: u64,
     ) -> Result<EffectArmedCommitV2, SqliteStoreV2Error> {
         let event_digest = event.event_digest()?;
+        let store_authority = self.store_authority.clone();
+        let current_epoch = self.current_epoch.clone();
+        let store_authority_digest = store_authority.authority_digest()?;
+        let backend_authority_digest = self.backend_authority_digest;
+        let persistence_profile_digest = self.persistence_profile_digest;
         let transaction = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
         if let Some(existing) = read_receipt_event(&transaction, event.operation_id, event.event_index)? {
             if existing.event_digest()? != event_digest {
                 transaction.rollback()?;
                 return Err(SqliteStoreV2Error::ReceiptCasConflict);
             }
+            let head = receipt_head(&transaction, event.operation_id)?
+                .ok_or(SqliteStoreV2Error::ReceiptCasConflict)?;
+            if head.event_digest()? != event_digest || head.state != ReceiptStateV1::EffectArmed {
+                transaction.rollback()?;
+                return Err(SqliteStoreV2Error::EffectArmedNoLongerHead);
+            }
             let proof = read_effect_armed_proof(&transaction, event.operation_id)?
                 .ok_or(SqliteStoreV2Error::MissingEffectArmedProof)?;
             transaction.rollback()?;
             let authenticated = persistence_context_from_effect_armed_proof(&proof);
-            proof.validate_final_gate(
-                arm,
-                admission_proof,
-                &self.store_authority,
-                &self.current_epoch,
-                authenticated,
-            )?;
+            proof.validate_final_gate(arm, admission_proof, &store_authority, &current_epoch, authenticated)?;
             return Ok(EffectArmedCommitV2 { decision: ReceiptDecisionV2::DuplicateSame, proof, authenticated_persistence: authenticated });
         }
         if receipt_head(&transaction, event.operation_id)?.is_some() {
@@ -667,7 +674,7 @@ impl SqliteOperationStoreV2 {
         }
 
         insert_receipt_event(&transaction, event)?;
-        let frontier = append_frontier(&transaction, self.store_authority.authority_digest()?, persisted_at_unix_ms)?;
+        let frontier = append_frontier(&transaction, store_authority_digest, persisted_at_unix_ms)?;
         let commit_evidence = commit_evidence_digest(
             b"effect-armed",
             arm.authority_digest()?,
@@ -675,12 +682,16 @@ impl SqliteOperationStoreV2 {
             frontier,
             u64::from(event.event_index),
         );
-        let authenticated = self.persistence_context(commit_evidence);
+        let authenticated = AuthenticatedPersistenceContextV2 {
+            backend_authority_digest,
+            persistence_profile_digest,
+            commit_evidence_digest: commit_evidence,
+        };
         let proof = EffectArmedPersistenceProofV2::new(
             arm,
             admission_proof,
-            &self.store_authority,
-            &self.current_epoch,
+            &store_authority,
+            &current_epoch,
             event_digest,
             frontier,
             authenticated,
@@ -701,6 +712,7 @@ impl SqliteOperationStoreV2 {
         persisted_at_unix_ms: u64,
     ) -> Result<ReceiptCommitV2, SqliteStoreV2Error> {
         let digest = event.event_digest()?;
+        let store_authority_digest = self.store_authority.authority_digest()?;
         let transaction = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(existing) = read_receipt_event(&transaction, event.operation_id, event.event_index)? {
             if existing.event_digest()? != digest {
@@ -716,7 +728,7 @@ impl SqliteOperationStoreV2 {
             Some(previous) => event.validate_successor(binding, &previous)?,
         }
         insert_receipt_event(&transaction, event)?;
-        let frontier = append_frontier(&transaction, self.store_authority.authority_digest()?, persisted_at_unix_ms)?;
+        let frontier = append_frontier(&transaction, store_authority_digest, persisted_at_unix_ms)?;
         transaction.commit()?;
         Ok(ReceiptCommitV2 { decision: ReceiptDecisionV2::Appended, event_digest: digest, committed_frontier_digest: frontier })
     }
@@ -734,14 +746,6 @@ impl SqliteOperationStoreV2 {
         let authenticated = persistence_context_from_admission_proof(&stored);
         stored.validate_against(admission, &self.store_authority, &self.current_epoch, authenticated)?;
         Ok(())
-    }
-
-    fn persistence_context(&self, commit_evidence_digest: [u8; 32]) -> AuthenticatedPersistenceContextV2 {
-        AuthenticatedPersistenceContextV2 {
-            backend_authority_digest: self.backend_authority_digest,
-            persistence_profile_digest: self.persistence_profile_digest,
-            commit_evidence_digest,
-        }
     }
 
     fn verify_frontier_chain(&self) -> Result<(), SqliteStoreV2Error> {
@@ -903,7 +907,6 @@ fn configure_connection(connection: &Connection) -> Result<(), SqliteStoreV2Erro
     if synchronous != 3 {
         return Err(SqliteStoreV2Error::SynchronousModeMismatch(synchronous));
     }
-    connection.pragma_update(None, "foreign_keys", "ON")?;
     let foreign_keys: i64 = connection.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
     if foreign_keys != 1 {
         return Err(SqliteStoreV2Error::ForeignKeysDisabled);
@@ -1369,6 +1372,9 @@ pub enum SqliteStoreV2Error {
     /// Receipt compare-and-append conflict.
     #[error("receipt compare-and-append conflict")]
     ReceiptCasConflict,
+    /// Historical EffectArmed event is no longer the durable receipt head.
+    #[error("effect armed replay refused because the operation advanced beyond EffectArmed")]
+    EffectArmedNoLongerHead,
     /// Dedicated arm method received the wrong state.
     #[error("append_effect_armed requires EffectArmed state")]
     EffectArmedMethodRequiresEffectArmed,
@@ -1511,6 +1517,12 @@ mod tests {
         root.join(SQLITE_DATABASE_FILENAME_V2)
     }
 
+    fn admitted_store(f: &Fixture, root: &Path, uid: u32) -> (SqliteOperationStoreV2, AdmissionCommitV2) {
+        let mut store = SqliteOperationStoreV2::open(db(root), f.epoch.clone(), uid).unwrap();
+        let commit = store.admit(&f.admission, &f.use_authority, f.semantic, f.slot, 1_100).unwrap();
+        (store, commit)
+    }
+
     #[test]
     fn admission_returns_store_authenticated_proof_and_advances_frontier() {
         let f = fixture();
@@ -1576,8 +1588,7 @@ mod tests {
     fn effect_armed_then_terminal_receipt_is_hash_chained() {
         let f = fixture();
         let (_temp, root, uid) = private_root();
-        let mut store = SqliteOperationStoreV2::open(db(&root), f.epoch.clone(), uid).unwrap();
-        let admission_commit = store.admit(&f.admission, &f.use_authority, f.semantic, f.slot, 1_100).unwrap();
+        let (mut store, admission_commit) = admitted_store(&f, &root, uid);
         let arm = EffectArmAuthorityV2::new([0x61; 32], &f.admission, store.store_authority(), store.current_epoch()).unwrap();
         let armed = ReceiptEventV1 {
             schema: xenia_operation_receipt_finalization::RECEIPT_FINALIZATION_SCHEMA_V1.into(),
@@ -1619,6 +1630,43 @@ mod tests {
         };
         store.append_receipt(&f.admission, f.semantic, &terminal, 1_180).unwrap();
         store.verify_local_integrity().unwrap();
+        store.close_clean().unwrap();
+    }
+
+    #[test]
+    fn stale_effect_armed_replay_is_refused_after_terminal_receipt() {
+        let f = fixture();
+        let (_temp, root, uid) = private_root();
+        let (mut store, admission_commit) = admitted_store(&f, &root, uid);
+        let arm = EffectArmAuthorityV2::new([0x61; 32], &f.admission, store.store_authority(), store.current_epoch()).unwrap();
+        let armed = ReceiptEventV1 {
+            schema: xenia_operation_receipt_finalization::RECEIPT_FINALIZATION_SCHEMA_V1.into(),
+            admission_digest: f.admission.raw_admission_digest,
+            operation_id: f.admission.operation_id,
+            event_index: 0,
+            previous_event_digest: [0; 32],
+            state: ReceiptStateV1::EffectArmed,
+            recorded_at_unix_ms: 1_150,
+            arm_authorization_digest: Some(arm.raw_arm_authorization_digest),
+            evidence_digest: None,
+        };
+        store.append_effect_armed(&f.admission, f.semantic, &admission_commit.proof, &arm, &armed, 1_160).unwrap();
+        let terminal = ReceiptEventV1 {
+            schema: xenia_operation_receipt_finalization::RECEIPT_FINALIZATION_SCHEMA_V1.into(),
+            admission_digest: f.admission.raw_admission_digest,
+            operation_id: f.admission.operation_id,
+            event_index: 1,
+            previous_event_digest: armed.event_digest().unwrap(),
+            state: ReceiptStateV1::CancelledAfterArmBeforeEffect,
+            recorded_at_unix_ms: 1_170,
+            arm_authorization_digest: None,
+            evidence_digest: Some([0x71; 32]),
+        };
+        store.append_receipt(&f.admission, f.semantic, &terminal, 1_180).unwrap();
+        assert!(matches!(
+            store.append_effect_armed(&f.admission, f.semantic, &admission_commit.proof, &arm, &armed, 1_190),
+            Err(SqliteStoreV2Error::EffectArmedNoLongerHead)
+        ));
         store.close_clean().unwrap();
     }
 
