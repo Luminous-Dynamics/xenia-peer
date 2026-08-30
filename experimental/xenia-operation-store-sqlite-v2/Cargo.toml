@@ -1,0 +1,25 @@
+[package]
+name = "xenia-operation-store-sqlite-v2"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz"]
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Experimental recovery-safe SQLite V2 operation authority and receipt store"
+
+[workspace]
+
+[dependencies]
+bincode = "1.3"
+blake3 = "1"
+rusqlite = { version = "0.39.0", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+xenia-operation-admission-proof-v2 = { path = "../../contracts/xenia-operation-admission-proof-v2" }
+xenia-operation-authority-epoch = { path = "../../contracts/xenia-operation-authority-epoch" }
+xenia-operation-authority-v2 = { path = "../../contracts/xenia-operation-authority-v2" }
+xenia-operation-receipt-finalization = { path = "../../contracts/xenia-operation-receipt-finalization" }
+
+[dev-dependencies]
+tempfile = "3"
