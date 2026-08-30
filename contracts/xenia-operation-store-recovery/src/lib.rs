@@ -283,13 +283,14 @@ impl OperationStoreRecoveryPlanV1 {
         Ok(())
     }
 
-    /// Validate this plan against the exact assessment and current authority epoch.
+    /// Validate this live plan against the exact assessment and current authority epoch.
     pub fn validate_against(
         &self,
         assessment: &OperationStoreRecoveryAssessmentV1,
         current_epoch: &OperationAuthorityEpochV1,
+        now_unix_ms: u64,
     ) -> Result<(), RecoveryProtocolError> {
-        self.validate()?;
+        self.require_live_at(now_unix_ms)?;
         assessment.validate()?;
         current_epoch.validate()?;
 
@@ -330,16 +331,20 @@ impl OperationStoreRecoveryPlanV1 {
         ))
     }
 
-    /// Validate a proposed next authority epoch as the exact transition authorized by this plan.
+    /// Validate a proposed next authority epoch as the exact **live** transition authorized by
+    /// this plan and assessment.
     ///
-    /// `ResumeSameEpoch` and `Quarantine` do not create a successor epoch and are therefore
-    /// rejected by this function.
+    /// This method repeats the assessment/current-epoch/time validation deliberately so a caller
+    /// cannot accidentally apply a stale recovery plan after the authority epoch changes.
+    /// `ResumeSameEpoch` and `Quarantine` do not create a successor epoch and are rejected here.
     pub fn validate_next_epoch(
         &self,
+        assessment: &OperationStoreRecoveryAssessmentV1,
         current: &OperationAuthorityEpochV1,
         next: &OperationAuthorityEpochV1,
+        now_unix_ms: u64,
     ) -> Result<(), RecoveryProtocolError> {
-        self.validate()?;
+        self.validate_against(assessment, current, now_unix_ms)?;
         next.validate_successor(current)?;
         let plan_digest = self.plan_digest()?;
 
@@ -575,7 +580,7 @@ mod tests {
         let current = epoch();
         let assessment = assessment(&current);
         let plan = plan(&assessment, &current, RecoveryDispositionV1::ResumeSameEpoch);
-        assert!(plan.validate_against(&assessment, &current).is_ok());
+        assert!(plan.validate_against(&assessment, &current, 120).is_ok());
     }
 
     #[test]
@@ -585,10 +590,21 @@ mod tests {
         assessment.checks[1].status = RecoveryCheckStatusV1::Failed;
         let plan = plan(&assessment, &current, RecoveryDispositionV1::ResumeSameEpoch);
         assert!(matches!(
-            plan.validate_against(&assessment, &current),
+            plan.validate_against(&assessment, &current, 120),
             Err(RecoveryProtocolError::RequiredCheckNotPassed(
                 RecoveryCheckKindV1::FilesystemAuthorityIntegrity
             ))
+        ));
+    }
+
+    #[test]
+    fn expired_plan_cannot_resume_or_transition() {
+        let current = epoch();
+        let assessment = assessment(&current);
+        let plan = plan(&assessment, &current, RecoveryDispositionV1::ResumeSameEpoch);
+        assert!(matches!(
+            plan.validate_against(&assessment, &current, plan.expires_at_unix_ms),
+            Err(RecoveryProtocolError::PlanNotLive)
         ));
     }
 
@@ -611,14 +627,13 @@ mod tests {
             established_at_unix_ms: 121,
         };
         assert!(matches!(
-            plan.validate_against(&assessment, &revoked),
+            plan.validate_against(&assessment, &revoked, 121),
             Err(RecoveryProtocolError::AuthorityEpochMismatch)
-                | Err(RecoveryProtocolError::StoreBindingMismatch)
         ));
     }
 
     #[test]
-    fn generation_rollover_epoch_must_commit_exact_plan_digest() {
+    fn generation_rollover_epoch_must_commit_exact_live_plan_digest() {
         let current = epoch();
         let assessment = assessment(&current);
         let plan = plan(
@@ -642,7 +657,10 @@ mod tests {
             },
             established_at_unix_ms: 130,
         };
-        assert!(plan.validate_next_epoch(&current, &next).is_ok());
+        assert!(
+            plan.validate_next_epoch(&assessment, &current, &next, 130)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -671,11 +689,14 @@ mod tests {
             established_at_unix_ms: 130,
         };
         assert!(matches!(
-            plan.validate_next_epoch(&current, &next),
+            plan.validate_next_epoch(&assessment, &current, &next, 130),
             Err(RecoveryProtocolError::NextEpochDoesNotMatchPlan)
         ));
         next.store_id = [14u8; 16];
-        assert!(plan.validate_next_epoch(&current, &next).is_ok());
+        assert!(
+            plan.validate_next_epoch(&assessment, &current, &next, 130)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -683,6 +704,6 @@ mod tests {
         let current = epoch();
         let assessment = assessment(&current);
         let plan = plan(&assessment, &current, RecoveryDispositionV1::Quarantine);
-        assert!(plan.validate_against(&assessment, &current).is_ok());
+        assert!(plan.validate_against(&assessment, &current, 120).is_ok());
     }
 }
