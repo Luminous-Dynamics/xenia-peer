@@ -1,0 +1,19 @@
+[package]
+name = "xenia-operation-store-frontier"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz"]
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Runtime-free anti-rollback frontier contracts for Xenia privileged-operation receipt stores"
+
+# Deliberately standalone while the parent operation stack is still draft.
+# This avoids mutating the production workspace lockfile before integration.
+[workspace]
+
+[dependencies]
+bincode = "1.3"
+blake3 = "1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
