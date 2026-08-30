@@ -61,7 +61,7 @@ pub enum RecoveryCheckStatusV1 {
 }
 
 /// One canonical evidence-check result.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoveryCheckV1 {
     /// Exact check category.
     pub kind: RecoveryCheckKindV1,
