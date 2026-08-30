@@ -1,0 +1,48 @@
+name: Operation Authority Epoch Contract
+
+on:
+  pull_request:
+    paths:
+      - "contracts/xenia-operation-authority-epoch/**"
+      - "docs/ADR-013-operation-authority-epochs-and-recovery.md"
+      - ".github/workflows/operation-authority-epoch.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt,clippy
+      - name: Resolve and identify standalone dependency lock
+        working-directory: contracts/xenia-operation-authority-epoch
+        run: |
+          cargo generate-lockfile
+          sha256sum Cargo.lock
+      - name: Format
+        working-directory: contracts/xenia-operation-authority-epoch
+        run: cargo fmt --check
+      - name: Test
+        working-directory: contracts/xenia-operation-authority-epoch
+        run: cargo test --locked
+      - name: Clippy
+        working-directory: contracts/xenia-operation-authority-epoch
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - name: Resolve standalone dependency lock
+        working-directory: contracts/xenia-operation-authority-epoch
+        run: cargo generate-lockfile
+      - name: Rust 1.94 check
+        working-directory: contracts/xenia-operation-authority-epoch
+        run: cargo check --locked --all-targets
