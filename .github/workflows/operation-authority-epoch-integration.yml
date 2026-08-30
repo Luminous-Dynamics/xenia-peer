@@ -1,0 +1,60 @@
+name: Operation Authority Epoch Integration
+
+on:
+  pull_request:
+    paths:
+      - "contracts/xenia-operation-authority-epoch/**"
+      - "contracts/xenia-operation-authority-envelope/**"
+      - "contracts/xenia-operation-authority-chain/**"
+      - "docs/ADR-015-epoch-bound-authority-migration.md"
+      - ".github/workflows/operation-authority-epoch-integration.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-196:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        crate:
+          - contracts/xenia-operation-authority-envelope
+          - contracts/xenia-operation-authority-chain
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt,clippy
+      - name: Resolve standalone lock and identify it
+        working-directory: ${{ matrix.crate }}
+        run: |
+          cargo generate-lockfile
+          sha256sum Cargo.lock
+      - name: Format
+        working-directory: ${{ matrix.crate }}
+        run: cargo fmt --check
+      - name: Tests
+        working-directory: ${{ matrix.crate }}
+        run: cargo test --locked
+      - name: Clippy
+        working-directory: ${{ matrix.crate }}
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  msrv:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        crate:
+          - contracts/xenia-operation-authority-envelope
+          - contracts/xenia-operation-authority-chain
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - name: Resolve standalone lock
+        working-directory: ${{ matrix.crate }}
+        run: cargo generate-lockfile
+      - name: MSRV check
+        working-directory: ${{ matrix.crate }}
+        run: cargo check --locked --all-targets
