@@ -6,6 +6,7 @@ on:
       - "experimental/xenia-operation-store-sqlite/**"
       - "contracts/xenia-operation-receipt-finalization/**"
       - "docs/ADR-009-sqlite-operation-store-profile.md"
+      - "docs/ADR-010-operation-store-filesystem-trust.md"
       - ".github/workflows/operation-store-sqlite.yml"
   workflow_dispatch:
 
