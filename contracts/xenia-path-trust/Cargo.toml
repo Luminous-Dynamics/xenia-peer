@@ -1,0 +1,20 @@
+[package]
+name = "xenia-path-trust"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz"]
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Descriptor-relative component-wise Unix directory trust primitive for Xenia"
+
+[workspace]
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=0.38.44", default-features = false, features = ["process", "std", "fs"] }
+
+[dependencies]
+thiserror = "1"
+
+[dev-dependencies]
+tempfile = "3"
