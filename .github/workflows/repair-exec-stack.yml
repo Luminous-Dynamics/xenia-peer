@@ -4,14 +4,16 @@ on:
   push:
     branches:
       - feat/privileged-operation-grants-v1
-    paths:
-      - .github/workflows/repair-exec-stack.yml
+  pull_request:
+    branches:
+      - feat/native-exec-capability-v1
 
 permissions:
   contents: write
 
 jobs:
   repair:
+    if: github.event_name == 'push' || github.event.pull_request.head.ref == 'feat/privileged-operation-grants-v1'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repair branch
@@ -21,7 +23,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.96.0
         with:
           components: rustfmt
 
