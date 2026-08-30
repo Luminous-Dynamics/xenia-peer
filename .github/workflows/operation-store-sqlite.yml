@@ -1,0 +1,102 @@
+name: Operation Store SQLite Experiment
+
+on:
+  pull_request:
+    paths:
+      - "experimental/xenia-operation-store-sqlite/**"
+      - "contracts/xenia-operation-receipt-finalization/**"
+      - "docs/ADR-009-sqlite-operation-store-profile.md"
+      - "docs/ADR-010-operation-store-filesystem-trust.md"
+      - ".github/workflows/operation-store-sqlite.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sqlite-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt,clippy
+
+      - name: Resolve and identify standalone dependency lock
+        working-directory: experimental/xenia-operation-store-sqlite
+        run: |
+          cargo generate-lockfile
+          sha256sum Cargo.lock
+          cargo tree -p rusqlite | head -n 80
+
+      - name: Format
+        working-directory: experimental/xenia-operation-store-sqlite
+        run: cargo fmt --check
+
+      - name: Unit tests
+        working-directory: experimental/xenia-operation-store-sqlite
+        run: cargo test --locked
+
+      - name: Clippy
+        working-directory: experimental/xenia-operation-store-sqlite
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Cross-process writer ownership and stale-marker probe
+        working-directory: experimental/xenia-operation-store-sqlite
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --bin store_lock_probe
+
+          tmp="$(mktemp -d)"
+          db="$tmp/operations.sqlite3"
+          marker="${db}.xenia-operation-store-open-v1"
+          log="$tmp/holder.log"
+          ./target/debug/store_lock_probe hold "$db" >"$log" 2>&1 &
+          holder=$!
+          cleanup() {
+            kill -KILL "$holder" 2>/dev/null || true
+            wait "$holder" 2>/dev/null || true
+            rm -rf "$tmp"
+          }
+          trap cleanup EXIT
+
+          for _ in $(seq 1 100); do
+            if [[ -e "$marker" ]] && kill -0 "$holder" 2>/dev/null; then
+              break
+            fi
+            sleep 0.05
+          done
+          [[ -e "$marker" ]]
+          kill -0 "$holder"
+
+          set +e
+          ./target/debug/store_lock_probe probe "$db" >"$tmp/second.log" 2>&1
+          second_rc=$?
+          set -e
+          if [[ "$second_rc" -eq 0 ]]; then
+            echo "FAIL: a second process opened the live writer store" >&2
+            cat "$tmp/second.log" >&2
+            exit 1
+          fi
+
+          kill -KILL "$holder"
+          wait "$holder" 2>/dev/null || true
+
+          ./target/debug/store_lock_probe probe "$db" >"$tmp/recovery.log" 2>&1
+          grep -F "HEALTH=RecoveryRequired" "$tmp/recovery.log"
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - name: Resolve dependency set under Rust 1.94
+        working-directory: experimental/xenia-operation-store-sqlite
+        run: |
+          cargo generate-lockfile
+          sha256sum Cargo.lock
+      - name: Rust 1.94 check
+        working-directory: experimental/xenia-operation-store-sqlite
+        run: cargo check --locked --all-targets

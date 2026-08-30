@@ -1,0 +1,20 @@
+[package]
+name = "xenia-operation-store-sqlite"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz"]
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Experimental conservative SQLite backend for Xenia privileged-operation admissions"
+
+[workspace]
+
+[dependencies]
+blake3 = "1"
+rusqlite = { version = "=0.39.0", features = ["bundled"] }
+thiserror = "1"
+xenia-operation-receipt-finalization = { path = "../../contracts/xenia-operation-receipt-finalization" }
+
+[dev-dependencies]
+tempfile = "3"
