@@ -1,0 +1,83 @@
+name: Operation Frontier Governed Transition
+
+on:
+  pull_request:
+    paths:
+      - "crates/xenia-ledger/**"
+      - "contracts/xenia-operation-authority-epoch/**"
+      - "contracts/xenia-operation-store-recovery/**"
+      - "contracts/xenia-operation-store-frontier/**"
+      - "contracts/xenia-operation-frontier-ledger-witness/**"
+      - "experimental/xenia-operation-frontier-ledger-adapter/**"
+      - "experimental/xenia-operation-frontier-retention-bundle/**"
+      - "experimental/xenia-operation-frontier-governed-transition/**"
+      - "docs/ADR-014-governed-operation-store-recovery.md"
+      - "docs/ADR-022-operation-frontier-ledger-witness.md"
+      - "docs/ADR-023-operation-frontier-external-retention.md"
+      - "docs/ADR-025-governed-operation-frontier-transitions.md"
+      - ".github/workflows/operation-frontier-governed-transition.yml"
+  push:
+    branches:
+      - "feat/operation-frontier-governed-transition-v1"
+      - main
+    paths:
+      - "crates/xenia-ledger/**"
+      - "contracts/xenia-operation-authority-epoch/**"
+      - "contracts/xenia-operation-store-recovery/**"
+      - "contracts/xenia-operation-store-frontier/**"
+      - "contracts/xenia-operation-frontier-ledger-witness/**"
+      - "experimental/xenia-operation-frontier-ledger-adapter/**"
+      - "experimental/xenia-operation-frontier-retention-bundle/**"
+      - "experimental/xenia-operation-frontier-governed-transition/**"
+      - "docs/ADR-014-governed-operation-store-recovery.md"
+      - "docs/ADR-022-operation-frontier-ledger-witness.md"
+      - "docs/ADR-023-operation-frontier-external-retention.md"
+      - "docs/ADR-025-governed-operation-frontier-transitions.md"
+      - ".github/workflows/operation-frontier-governed-transition.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  transition:
+    name: Governed Transition Composition
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt,clippy
+      - name: Resolve standalone lock
+        working-directory: experimental/xenia-operation-frontier-governed-transition
+        run: cargo generate-lockfile
+      - name: Record integration dependency topology
+        working-directory: experimental/xenia-operation-frontier-governed-transition
+        run: |
+          cargo tree -p xenia-operation-frontier-governed-transition
+          cargo tree -p xenia-operation-store-recovery
+          cargo tree -p xenia-operation-authority-epoch
+          cargo tree -p xenia-operation-frontier-retention-bundle
+          cargo tree -p xenia-ledger
+      - name: Format
+        run: cargo fmt --manifest-path experimental/xenia-operation-frontier-governed-transition/Cargo.toml -- --check
+      - name: Test
+        run: cargo test --manifest-path experimental/xenia-operation-frontier-governed-transition/Cargo.toml --locked
+      - name: Strict Clippy
+        run: cargo clippy --manifest-path experimental/xenia-operation-frontier-governed-transition/Cargo.toml --locked --all-targets -- -D warnings
+
+  msrv:
+    name: Governed Transition MSRV Rust 1.94
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - name: Resolve standalone lock
+        working-directory: experimental/xenia-operation-frontier-governed-transition
+        run: cargo generate-lockfile
+      - name: Check complete integration stack
+        run: cargo check --manifest-path experimental/xenia-operation-frontier-governed-transition/Cargo.toml --locked --all-targets
