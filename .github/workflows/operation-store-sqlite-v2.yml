@@ -89,6 +89,8 @@ jobs:
           grep -F 'a8f0a07bf65b28c05fa54b260d39707368ad9ed3' "$cargo"
           test -f experimental/xenia-operation-store-sqlite-v2/run_destructive_qualification.sh
           test -f experimental/xenia-operation-store-sqlite-v2/verify_production_crash_surface.sh
+          test -f experimental/xenia-operation-store-sqlite-v2/verify_qualification_artifact.sh
+          test -f experimental/xenia-operation-store-sqlite-v2/QUALIFICATION_EVIDENCE.md
           test -f experimental/xenia-operation-store-sqlite-v2/src/bin/sqlite_profile_probe.rs
 
       - name: Resolve standalone lock and dependency identity
@@ -126,11 +128,27 @@ jobs:
         shell: bash
         run: bash ./run_destructive_qualification.sh "$RUNNER_TEMP/sqlite-v2-qualification"
 
+      - name: Package evidence schema and verifier
+        if: always()
+        working-directory: experimental/xenia-operation-store-sqlite-v2
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/sqlite-v2-qualification"
+          mkdir -p "$evidence"
+          cp QUALIFICATION_EVIDENCE.md "$evidence/QUALIFICATION_EVIDENCE.md"
+          cp verify_qualification_artifact.sh "$evidence/verify_qualification_artifact.sh"
+
       - name: Verify production crash surface
         if: always()
         working-directory: experimental/xenia-operation-store-sqlite-v2
         shell: bash
         run: bash ./verify_production_crash_surface.sh "$RUNNER_TEMP/sqlite-v2-qualification"
+
+      - name: Self-verify complete qualification artifact
+        working-directory: experimental/xenia-operation-store-sqlite-v2
+        shell: bash
+        run: bash "$RUNNER_TEMP/sqlite-v2-qualification/verify_qualification_artifact.sh" "$RUNNER_TEMP/sqlite-v2-qualification"
 
       - name: Upload SQLite V2 qualification evidence
         if: always()
