@@ -17,5 +17,6 @@ serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 xenia-operation-authority-epoch = { path = "../../contracts/xenia-operation-authority-epoch" }
 xenia-operation-frontier-governed-transition = { path = "../xenia-operation-frontier-governed-transition" }
+xenia-operation-frontier-ledger-witness = { path = "../../contracts/xenia-operation-frontier-ledger-witness" }
 xenia-operation-frontier-retention-bundle = { path = "../xenia-operation-frontier-retention-bundle" }
 xenia-operation-global-revocation-transition = { path = "../xenia-operation-global-revocation-transition" }
