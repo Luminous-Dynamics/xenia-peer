@@ -10,6 +10,12 @@ description = "Experimental recovery-safe SQLite V2 operation authority and rece
 
 [workspace]
 
+[features]
+default = []
+# Deterministic process-abort / commit-window hooks used only by destructive CI qualification.
+# Normal builds do not compile an environment-controlled crash path.
+crash-injection = []
+
 [dependencies]
 bincode = "1.3"
 blake3 = "1"
@@ -23,3 +29,8 @@ xenia-operation-receipt-finalization = { path = "../../contracts/xenia-operation
 
 [dev-dependencies]
 tempfile = "3"
+
+[[bin]]
+name = "store_crash_probe"
+path = "src/bin/store_crash_probe.rs"
+required-features = ["crash-injection"]
