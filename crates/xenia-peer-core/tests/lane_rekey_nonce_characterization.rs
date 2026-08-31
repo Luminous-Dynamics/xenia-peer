@@ -7,6 +7,8 @@
 //! first subsequent new-key control frame could reuse the same AEAD nonce. This
 //! successor requires distinct nonce domains while preserving interoperability.
 
+use std::collections::HashSet;
+
 use xenia_handshake::{RekeyEpochKeys, RekeyReason};
 use xenia_peer_core::{
     LaneSession,
@@ -35,6 +37,12 @@ fn inner_nonce(envelope: &[u8]) -> &[u8] {
     );
     assert_eq!(&envelope[..LANE_ENVELOPE_MAGIC.len()], &LANE_ENVELOPE_MAGIC);
     &envelope[LANE_HEADER_LEN..LANE_HEADER_LEN + NONCE_LEN]
+}
+
+fn inner_nonce_array(envelope: &[u8]) -> [u8; NONCE_LEN] {
+    let mut nonce = [0u8; NONCE_LEN];
+    nonce.copy_from_slice(inner_nonce(envelope));
+    nonce
 }
 
 #[test]
@@ -114,5 +122,109 @@ fn viewer_rekey_ack_has_distinct_nonce_domain_and_still_interoperates() {
             reason: RekeyReason::Manual,
             epoch_hash: proposal_hash,
         }
+    );
+}
+
+#[test]
+fn repeated_genuine_rekeys_preserve_key_nonce_uniqueness_after_counter_resets() {
+    let mut host = LaneSession::with_fixture(SOURCE_ID, SESSION_EPOCH);
+    let mut viewer = LaneSession::with_fixture(SOURCE_ID, SESSION_EPOCH);
+    let mut seen_key_nonce_pairs = HashSet::new();
+
+    // A nonce may legitimately repeat byte-for-byte after a genuine rekey if
+    // the AEAD key changed. The cryptographic invariant is uniqueness of the
+    // (key, nonce) pair, not global nonce-byte uniqueness across unrelated keys.
+    // Duplicate installation of the *same* key is a lower-layer xenia-wire
+    // defect tracked separately by xenia-wire #35 and is deliberately not
+    // hidden inside this peer-layer regression.
+    for round in 1u8..=4 {
+        let control_key = [0x40 + round; 32];
+        let keys = rekey_keys(control_key);
+        host.install_rekey_keys(&keys);
+        viewer.install_rekey_keys(&keys);
+
+        let ack_hash = [0xA0 + round; 32];
+        let ack_epoch = u64::from(round);
+        let ack = RawRekey::Ack {
+            key_epoch: ack_epoch,
+            epoch_hash: ack_hash,
+        }
+        .into_frame(u64::from(round) * 2, u64::from(round) * 10)
+        .expect("build repeated-rekey Ack");
+        let viewer_ack = viewer
+            .seal_control_frame(&ack)
+            .expect("seal repeated-rekey Ack");
+
+        let proposal_hash = [0xC0 + round; 32];
+        let proposal = RawRekey::Proposal {
+            key_epoch: ack_epoch + 1,
+            base_transcript_hash: [0xB0 + round; 32],
+            previous_epoch_hash: ack_hash,
+            reason: RekeyReason::Manual,
+            epoch_hash: proposal_hash,
+        }
+        .into_frame(u64::from(round) * 2 + 1, u64::from(round) * 10 + 1)
+        .expect("build repeated-rekey proposal");
+        let host_control = host
+            .seal_control_frame(&proposal)
+            .expect("seal repeated-rekey host control");
+
+        let ack_nonce = inner_nonce_array(&viewer_ack);
+        let host_nonce = inner_nonce_array(&host_control);
+
+        // Every key install resets both sender counters, so both seals are
+        // sequence zero again. Safety must therefore come from the structural
+        // sender source-domain separation, not lucky counter skew.
+        assert_eq!(&ack_nonce[8..12], &[0, 0, 0, 0]);
+        assert_eq!(&host_nonce[8..12], &[0, 0, 0, 0]);
+        assert_ne!(
+            ack_nonce, host_nonce,
+            "round {round}: opposite sealing roles collided after counter reset"
+        );
+        assert_ne!(
+            &ack_nonce[..6],
+            &host_nonce[..6],
+            "round {round}: separated sender source domains disappeared"
+        );
+
+        assert!(
+            seen_key_nonce_pairs.insert((control_key, ack_nonce)),
+            "round {round}: viewer Ack reused a prior (key, nonce) pair"
+        );
+        assert!(
+            seen_key_nonce_pairs.insert((control_key, host_nonce)),
+            "round {round}: host control reused a prior (key, nonce) pair"
+        );
+
+        let opened_ack = host
+            .open_frame(&viewer_ack)
+            .expect("host opens repeated-rekey Ack");
+        assert_eq!(
+            RawRekey::from_frame(&opened_ack).expect("decode repeated-rekey Ack"),
+            RawRekey::Ack {
+                key_epoch: ack_epoch,
+                epoch_hash: ack_hash,
+            }
+        );
+
+        let opened_proposal = viewer
+            .open_frame(&host_control)
+            .expect("viewer opens repeated-rekey proposal");
+        assert_eq!(
+            RawRekey::from_frame(&opened_proposal).expect("decode repeated-rekey proposal"),
+            RawRekey::Proposal {
+                key_epoch: ack_epoch + 1,
+                base_transcript_hash: [0xB0 + round; 32],
+                previous_epoch_hash: ack_hash,
+                reason: RekeyReason::Manual,
+                epoch_hash: proposal_hash,
+            }
+        );
+    }
+
+    assert_eq!(
+        seen_key_nonce_pairs.len(),
+        8,
+        "four rekeys × two sealing roles must yield eight unique (key, nonce) pairs"
     );
 }
