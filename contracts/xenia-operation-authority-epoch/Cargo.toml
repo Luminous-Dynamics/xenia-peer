@@ -1,0 +1,17 @@
+[package]
+name = "xenia-operation-authority-epoch"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz"]
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Runtime-free operation authority epoch contracts for Xenia recovery and global revocation"
+
+[workspace]
+
+[dependencies]
+bincode = "1.3"
+blake3 = "1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
