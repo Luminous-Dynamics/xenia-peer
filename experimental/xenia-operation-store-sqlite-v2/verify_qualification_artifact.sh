@@ -12,11 +12,31 @@ fail() {
 [[ -f EVIDENCE.sha256 ]] || fail 'missing EVIDENCE.sha256'
 sha256sum -c EVIDENCE.sha256
 
+[[ -f tested-source/SOURCE.sha256 ]] || fail 'missing tested-source/SOURCE.sha256'
+(
+  cd tested-source
+  sha256sum -c SOURCE.sha256
+)
+
 grep -Fx 'QUALIFICATION_RESULT=PASS' result.txt >/dev/null
 grep -Fx 'PRODUCTION_CRASH_SURFACE=PASS' production-crash-surface.txt >/dev/null
 grep -Fx 'RECOVERY_HEALTH=RecoveryRequired' writer-ownership.txt >/dev/null
 grep -Fx 'SQLITE_VERSION=3.53.4' sqlite-source.txt >/dev/null
 grep -Fx 'SQLITE_SOURCE_ID=2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc' sqlite-source.txt >/dev/null
+
+lib_recorded=$(grep -E '^LIB_RS_SHA256=' source-state.txt | cut -d= -f2-)
+manifest_recorded=$(grep -E '^CARGO_TOML_SHA256=' source-state.txt | cut -d= -f2-)
+lib_actual=$(sha256sum tested-source/src/lib.rs | awk '{print $1}')
+manifest_actual=$(sha256sum tested-source/Cargo.toml | awk '{print $1}')
+[[ -n "$lib_recorded" && "$lib_recorded" == "$lib_actual" ]] || fail 'tested lib.rs hash mismatch'
+[[ -n "$manifest_recorded" && "$manifest_recorded" == "$manifest_actual" ]] || fail 'tested Cargo.toml hash mismatch'
+
+dirty=$(grep -E '^TRACKED_SOURCE_DIRTY=' source-state.txt | cut -d= -f2-)
+case "$dirty" in
+  0) promotion='PROMOTION_SOURCE_STATE=clean-second-pass-candidate' ;;
+  1) promotion='PROMOTION_SOURCE_STATE=dirty-first-pass-only' ;;
+  *) fail "invalid TRACKED_SOURCE_DIRTY value: $dirty" ;;
+esac
 
 c0_rows=$(($(wc -l < c0-c10.tsv) - 1))
 race_rows=$(($(wc -l < commit-races.tsv) - 1))
@@ -78,4 +98,5 @@ kill_targeted=$(awk -F '\t' 'NR>1 && $10=="1" {n++} END {print n+0}' commit-race
 grep -Fx "C0_C10_ROWS=${c0_rows}" summary.txt >/dev/null
 grep -Fx "COMMIT_RACE_ROWS=${race_rows}" summary.txt >/dev/null
 
+echo "$promotion"
 echo 'sqlite-v2-qualification-evidence: VERIFIED'
