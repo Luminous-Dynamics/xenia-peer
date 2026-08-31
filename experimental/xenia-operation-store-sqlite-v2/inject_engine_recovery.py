@@ -24,7 +24,7 @@ pub const QUALIFIED_SQLITE_VERSION_V2: &str = "3.53.4";
 /// Exact bundled SQLite source id qualified for rollback-journal recovery.
 pub const QUALIFIED_SQLITE_SOURCE_ID_V2: &str = "2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc";
 /// Fail-stop writer marker suffix.'''
-if "QUALIFIED_SQLITE_VERSION_V2" not in text:
+if "pub const QUALIFIED_SQLITE_VERSION_V2" not in text:
     replace_once(constant_anchor, constant_new, "qualified SQLite constants")
 
 # repair_pre_pr.py first creates a strict READ_ONLY recovery branch. Replace it with ADR-021's
@@ -168,8 +168,8 @@ fn marker_path(database_path: &Path) -> PathBuf {'''
         raise SystemExit("engine recovery helper insertion anchor missing")
     text = text.replace(anchor, helpers, 1)
 
-# Add distinct recovery/source failures.
-if "SQLiteSourceProfileMismatch" not in text:
+# Add distinct recovery/source failures. Check for the actual enum declaration, not helper uses.
+if "SQLiteSourceProfileMismatch { version: String, source_id: String }," not in text:
     error_anchor = '''    /// SQLite journal profile mismatch.
     #[error("SQLite journal mode mismatch: {0}")]
     JournalModeMismatch(String),'''
@@ -187,14 +187,13 @@ if "SQLiteSourceProfileMismatch" not in text:
     text = text.replace(error_anchor, error_new, 1)
 
 for required in (
-    "QUALIFIED_SQLITE_VERSION_V2",
-    "QUALIFIED_SQLITE_SOURCE_ID_V2",
+    "pub const QUALIFIED_SQLITE_VERSION_V2",
+    "pub const QUALIFIED_SQLITE_SOURCE_ID_V2",
     "fn run_sqlite_engine_recovery(",
     "fn verify_recovery_journal_if_present(",
-    "OpenFlags::SQLITE_OPEN_READ_WRITE",
     "PRAGMA schema_version",
-    "SQLiteSourceProfileMismatch",
-    "EngineRecoveryFailed",
+    "SQLiteSourceProfileMismatch { version: String, source_id: String },",
+    "EngineRecoveryFailed(#[source] rusqlite::Error),",
 ):
     if required not in text:
         raise SystemExit(f"missing ADR-021 hardening: {required}")
