@@ -9,6 +9,7 @@ SCRIPTS = (
     "repair_pre_pr.py",
     "inject_engine_recovery.py",
     "inject_hardening_tests.py",
+    "inject_engine_recovery_tests.py",
     "inject_frontier_semantics.py",
     "inject_clean_close_integrity.py",
     "inject_temporal_epoch_integrity.py",
