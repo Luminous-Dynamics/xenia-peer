@@ -88,6 +88,7 @@ jobs:
           grep -F 'qualification_crash_point("effect-armed", "C9")' "$file"
           grep -F 'a8f0a07bf65b28c05fa54b260d39707368ad9ed3' "$cargo"
           test -f experimental/xenia-operation-store-sqlite-v2/run_destructive_qualification.sh
+          test -f experimental/xenia-operation-store-sqlite-v2/verify_production_crash_surface.sh
           test -f experimental/xenia-operation-store-sqlite-v2/src/bin/sqlite_profile_probe.rs
 
       - name: Resolve standalone lock and dependency identity
@@ -124,6 +125,12 @@ jobs:
         working-directory: experimental/xenia-operation-store-sqlite-v2
         shell: bash
         run: bash ./run_destructive_qualification.sh "$RUNNER_TEMP/sqlite-v2-qualification"
+
+      - name: Verify production crash surface
+        if: always()
+        working-directory: experimental/xenia-operation-store-sqlite-v2
+        shell: bash
+        run: bash ./verify_production_crash_surface.sh "$RUNNER_TEMP/sqlite-v2-qualification"
 
       - name: Upload SQLite V2 qualification evidence
         if: always()
