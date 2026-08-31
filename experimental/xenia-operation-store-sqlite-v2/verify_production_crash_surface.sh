@@ -8,6 +8,17 @@ mkdir -p "$EVIDENCE"
 LOG="$EVIDENCE/production-crash-surface.txt"
 : > "$LOG"
 
+refresh_manifest() {
+  (
+    cd "$EVIDENCE"
+    find . -type f ! -name EVIDENCE.sha256 -print0 \
+      | sort -z \
+      | xargs -0 -r sha256sum \
+      > EVIDENCE.sha256
+  )
+}
+trap refresh_manifest EXIT
+
 {
   echo 'PRODUCTION_CRASH_SURFACE_SCHEMA=xenia-sqlite-v2-production-crash-surface-v1'
   echo 'EXPECTED_DEFAULT_FEATURES=none'
