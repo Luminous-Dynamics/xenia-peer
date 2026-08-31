@@ -1,0 +1,15 @@
+[package]
+name = "xenia-operation-frontier-retention-model"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Reference append-only persistence model for Xenia operation frontier witness retention"
+
+[workspace]
+
+[dependencies]
+thiserror = "2"
+xenia-operation-frontier-retention-bundle = { path = "../xenia-operation-frontier-retention-bundle" }
