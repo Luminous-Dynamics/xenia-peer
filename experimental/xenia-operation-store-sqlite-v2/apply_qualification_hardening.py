@@ -10,6 +10,7 @@ SCRIPTS = (
     "inject_hardening_tests.py",
     "inject_frontier_semantics.py",
     "inject_clean_close_integrity.py",
+    "inject_temporal_epoch_integrity.py",
 )
 
 for script in SCRIPTS:
