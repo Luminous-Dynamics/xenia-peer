@@ -19,7 +19,10 @@ crash-injection = []
 [dependencies]
 bincode = "1.3"
 blake3 = "1"
-rusqlite = { version = "0.39.0", features = ["bundled"] }
+# Pin the exact rusqlite source lineage whose bundled sqlite3.h identifies SQLite 3.53.4
+# (source id 2026-07-24 ... bf7c7f...), post-dating SQLite's 2026-06-24 crafted
+# rollback-journal/super-journal fix. Changing this revision creates a new evidence lineage.
+rusqlite = { git = "https://github.com/rusqlite/rusqlite", rev = "a8f0a07bf65b28c05fa54b260d39707368ad9ed3", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
 xenia-operation-admission-proof-v2 = { path = "../../contracts/xenia-operation-admission-proof-v2" }
