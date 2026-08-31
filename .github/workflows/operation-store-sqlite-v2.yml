@@ -90,6 +90,7 @@ jobs:
           test -f experimental/xenia-operation-store-sqlite-v2/run_destructive_qualification.sh
           test -f experimental/xenia-operation-store-sqlite-v2/verify_production_crash_surface.sh
           test -f experimental/xenia-operation-store-sqlite-v2/verify_qualification_artifact.sh
+          test -f experimental/xenia-operation-store-sqlite-v2/capture_tested_source.sh
           test -f experimental/xenia-operation-store-sqlite-v2/QUALIFICATION_EVIDENCE.md
           test -f experimental/xenia-operation-store-sqlite-v2/src/bin/sqlite_profile_probe.rs
 
@@ -127,6 +128,12 @@ jobs:
         working-directory: experimental/xenia-operation-store-sqlite-v2
         shell: bash
         run: bash ./run_destructive_qualification.sh "$RUNNER_TEMP/sqlite-v2-qualification"
+
+      - name: Capture exact tested source
+        if: always()
+        working-directory: experimental/xenia-operation-store-sqlite-v2
+        shell: bash
+        run: bash ./capture_tested_source.sh "$RUNNER_TEMP/sqlite-v2-qualification"
 
       - name: Package evidence schema and verifier
         if: always()
