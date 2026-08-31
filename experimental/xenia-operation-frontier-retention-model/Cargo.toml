@@ -13,3 +13,10 @@ description = "Reference append-only persistence model for Xenia operation front
 [dependencies]
 thiserror = "2"
 xenia-operation-frontier-retention-bundle = { path = "../xenia-operation-frontier-retention-bundle" }
+
+[dev-dependencies]
+ed25519-dalek = "2"
+uuid = "1"
+xenia-ledger = { path = "../../crates/xenia-ledger" }
+xenia-operation-frontier-ledger-witness = { path = "../../contracts/xenia-operation-frontier-ledger-witness" }
+xenia-operation-store-frontier = { path = "../../contracts/xenia-operation-store-frontier" }
