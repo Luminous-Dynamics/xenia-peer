@@ -87,6 +87,8 @@ jobs:
           grep -F 'qualification_crash_point("admission", "C9")' "$file"
           grep -F 'qualification_crash_point("effect-armed", "C9")' "$file"
           grep -F 'a8f0a07bf65b28c05fa54b260d39707368ad9ed3' "$cargo"
+          test -f experimental/xenia-operation-store-sqlite-v2/run_destructive_qualification.sh
+          test -f experimental/xenia-operation-store-sqlite-v2/src/bin/sqlite_profile_probe.rs
 
       - name: Resolve standalone lock and dependency identity
         working-directory: experimental/xenia-operation-store-sqlite-v2
@@ -118,186 +120,19 @@ jobs:
           cargo build --locked --features crash-injection --bin store_crash_probe
           cargo clippy --locked --all-targets --features crash-injection -- -D warnings
 
-      - name: Cross-process writer ownership and SIGKILL recovery probe
+      - name: Retained ADR-020/ADR-021 destructive qualification
         working-directory: experimental/xenia-operation-store-sqlite-v2
         shell: bash
-        run: |
-          set -euo pipefail
-          cargo build --locked --bin store_lock_probe
-          tmp="$(mktemp -d)"
-          chmod 700 "$tmp"
-          db="$tmp/operations-v2.sqlite3"
-          marker="${db}.xenia-operation-store-open-v2"
-          ./target/debug/store_lock_probe hold "$db" >"$tmp/holder.log" 2>&1 &
-          holder=$!
-          cleanup() {
-            kill -KILL "$holder" 2>/dev/null || true
-            wait "$holder" 2>/dev/null || true
-            rm -rf "$tmp"
-          }
-          trap cleanup EXIT
+        run: bash ./run_destructive_qualification.sh "$RUNNER_TEMP/sqlite-v2-qualification"
 
-          for _ in $(seq 1 100); do
-            if [[ -e "$marker" ]] && kill -0 "$holder" 2>/dev/null; then
-              break
-            fi
-            sleep 0.05
-          done
-          [[ -e "$marker" ]]
-          kill -0 "$holder"
-
-          set +e
-          ./target/debug/store_lock_probe probe "$db" >"$tmp/second.log" 2>&1
-          second_rc=$?
-          set -e
-          if [[ "$second_rc" -eq 0 ]]; then
-            echo 'FAIL: second process opened live writer store' >&2
-            cat "$tmp/second.log" >&2
-            exit 1
-          fi
-
-          kill -KILL "$holder"
-          wait "$holder" 2>/dev/null || true
-          ./target/debug/store_lock_probe probe "$db" >"$tmp/recovery.log" 2>&1
-          grep -F 'HEALTH=RecoveryRequired' "$tmp/recovery.log"
-
-      - name: ADR-020 deterministic admission C0-C10 crashes
-        working-directory: experimental/xenia-operation-store-sqlite-v2
-        shell: bash
-        run: |
-          set -euo pipefail
-          probe=./target/debug/store_crash_probe
-          for n in $(seq 0 10); do
-            tmp="$(mktemp -d)"
-            chmod 700 "$tmp"
-            db="$tmp/operations-v2.sqlite3"
-            "$probe" init-empty "$db"
-            point="C${n}"
-            set +e
-            XENIA_SQLITE_V2_CRASH_AT="admission:${point}" \
-              "$probe" admission "$db" "$point" >"$tmp/crash.log" 2>&1
-            rc=$?
-            set -e
-            if [[ "$rc" -eq 0 ]]; then
-              echo "FAIL: admission ${point} did not crash" >&2
-              cat "$tmp/crash.log" >&2
-              exit 1
-            fi
-            if [[ "$n" -le 8 ]]; then
-              expect=absent
-            else
-              expect=present
-            fi
-            "$probe" inspect-admission "$db" "$expect" | tee "$tmp/inspect.log"
-            grep -F 'HEALTH=RecoveryRequired' "$tmp/inspect.log"
-            rm -rf "$tmp"
-          done
-
-      - name: ADR-020 deterministic EffectArmed C0-C10 crashes
-        working-directory: experimental/xenia-operation-store-sqlite-v2
-        shell: bash
-        run: |
-          set -euo pipefail
-          probe=./target/debug/store_crash_probe
-          for n in $(seq 0 10); do
-            tmp="$(mktemp -d)"
-            chmod 700 "$tmp"
-            db="$tmp/operations-v2.sqlite3"
-            "$probe" init-arm "$db"
-            point="C${n}"
-            set +e
-            XENIA_SQLITE_V2_CRASH_AT="effect-armed:${point}" \
-              "$probe" effect-armed "$db" "$point" >"$tmp/crash.log" 2>&1
-            rc=$?
-            set -e
-            if [[ "$rc" -eq 0 ]]; then
-              echo "FAIL: EffectArmed ${point} did not crash" >&2
-              cat "$tmp/crash.log" >&2
-              exit 1
-            fi
-            if [[ "$n" -le 8 ]]; then
-              expect=absent
-            else
-              expect=present
-            fi
-            "$probe" inspect-arm "$db" "$expect" | tee "$tmp/inspect.log"
-            grep -F 'HEALTH=RecoveryRequired' "$tmp/inspect.log"
-            rm -rf "$tmp"
-          done
-
-      - name: ADR-020 admission COMMIT-in-flight SIGKILL race
-        working-directory: experimental/xenia-operation-store-sqlite-v2
-        shell: bash
-        run: |
-          set -euo pipefail
-          probe=./target/debug/store_crash_probe
-          delays=(0 0.0005 0.001 0.002 0.005 0.010 0.025)
-          for delay in "${delays[@]}"; do
-            tmp="$(mktemp -d)"
-            chmod 700 "$tmp"
-            db="$tmp/operations-v2.sqlite3"
-            ready="$tmp/ready"
-            go="$tmp/go"
-            "$probe" init-empty "$db"
-            XENIA_SQLITE_V2_COMMIT_WINDOW=admission \
-            XENIA_SQLITE_V2_COMMIT_READY="$ready" \
-            XENIA_SQLITE_V2_COMMIT_GO="$go" \
-              "$probe" admission "$db" RACE >"$tmp/child.log" 2>&1 &
-            child=$!
-            for _ in $(seq 1 1000); do
-              [[ -e "$ready" ]] && break
-              kill -0 "$child" 2>/dev/null || {
-                cat "$tmp/child.log" >&2
-                exit 1
-              }
-              sleep 0.001
-            done
-            [[ -e "$ready" ]]
-            : > "$go"
-            sleep "$delay"
-            kill -KILL "$child" 2>/dev/null || true
-            wait "$child" 2>/dev/null || true
-            "$probe" inspect-admission "$db" either | tee "$tmp/inspect.log"
-            grep -E '^OUTCOME=(absent|committed)$' "$tmp/inspect.log"
-            rm -rf "$tmp"
-          done
-
-      - name: ADR-020 EffectArmed COMMIT-in-flight SIGKILL race
-        working-directory: experimental/xenia-operation-store-sqlite-v2
-        shell: bash
-        run: |
-          set -euo pipefail
-          probe=./target/debug/store_crash_probe
-          delays=(0 0.0005 0.001 0.002 0.005 0.010 0.025)
-          for delay in "${delays[@]}"; do
-            tmp="$(mktemp -d)"
-            chmod 700 "$tmp"
-            db="$tmp/operations-v2.sqlite3"
-            ready="$tmp/ready"
-            go="$tmp/go"
-            "$probe" init-arm "$db"
-            XENIA_SQLITE_V2_COMMIT_WINDOW=effect-armed \
-            XENIA_SQLITE_V2_COMMIT_READY="$ready" \
-            XENIA_SQLITE_V2_COMMIT_GO="$go" \
-              "$probe" effect-armed "$db" RACE >"$tmp/child.log" 2>&1 &
-            child=$!
-            for _ in $(seq 1 1000); do
-              [[ -e "$ready" ]] && break
-              kill -0 "$child" 2>/dev/null || {
-                cat "$tmp/child.log" >&2
-                exit 1
-              }
-              sleep 0.001
-            done
-            [[ -e "$ready" ]]
-            : > "$go"
-            sleep "$delay"
-            kill -KILL "$child" 2>/dev/null || true
-            wait "$child" 2>/dev/null || true
-            "$probe" inspect-arm "$db" either | tee "$tmp/inspect.log"
-            grep -E '^OUTCOME=(absent|committed)$' "$tmp/inspect.log"
-            rm -rf "$tmp"
-          done
+      - name: Upload SQLite V2 qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-v2-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sqlite-v2-qualification
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Commit deterministic qualified source if needed
         if: github.event_name == 'push' && github.ref_name == 'feat/operation-store-sqlite-v2'
