@@ -1,0 +1,150 @@
+name: Operation Store SQLite V2
+
+on:
+  push:
+    branches:
+      - "feat/operation-store-sqlite-v2"
+    paths:
+      - "experimental/xenia-operation-store-sqlite-v2/**"
+      - "contracts/xenia-operation-authority-epoch/**"
+      - "contracts/xenia-operation-authority-v2/**"
+      - "contracts/xenia-operation-admission-proof-v2/**"
+      - "contracts/xenia-operation-receipt-finalization/**"
+      - "docs/ADR-019-sqlite-operation-store-v2.md"
+      - ".github/workflows/operation-store-sqlite-v2.yml"
+  pull_request:
+    paths:
+      - "experimental/xenia-operation-store-sqlite-v2/**"
+      - "contracts/xenia-operation-authority-epoch/**"
+      - "contracts/xenia-operation-authority-v2/**"
+      - "contracts/xenia-operation-admission-proof-v2/**"
+      - "contracts/xenia-operation-receipt-finalization/**"
+      - "docs/ADR-019-sqlite-operation-store-v2.md"
+      - ".github/workflows/operation-store-sqlite-v2.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-v2:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt,clippy
+
+      - name: Apply deterministic pre-PR repair
+        run: python3 experimental/xenia-operation-store-sqlite-v2/repair_pre_pr.py
+
+      - name: Assert repaired admission mapping
+        shell: bash
+        run: |
+          set -euo pipefail
+          file=experimental/xenia-operation-store-sqlite-v2/src/lib.rs
+          ! grep -F '?15, ?16)' "$file"
+          ! grep -F 'reserved compatibility field keeps explicit column count stable in this draft' "$file"
+          grep -F 'INSERT INTO admissions VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)' "$file"
+
+      - name: Resolve standalone lock and dependency identity
+        working-directory: experimental/xenia-operation-store-sqlite-v2
+        run: |
+          cargo generate-lockfile
+          sha256sum Cargo.lock
+          cargo tree -p rusqlite | head -n 100
+
+      - name: Format candidate
+        working-directory: experimental/xenia-operation-store-sqlite-v2
+        run: cargo fmt
+
+      - name: Diff hygiene
+        run: git diff --check
+
+      - name: Unit tests
+        working-directory: experimental/xenia-operation-store-sqlite-v2
+        run: cargo test --locked
+
+      - name: Strict Clippy
+        working-directory: experimental/xenia-operation-store-sqlite-v2
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Cross-process writer ownership and SIGKILL recovery probe
+        working-directory: experimental/xenia-operation-store-sqlite-v2
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --bin store_lock_probe
+          tmp="$(mktemp -d)"
+          chmod 700 "$tmp"
+          db="$tmp/operations-v2.sqlite3"
+          marker="${db}.xenia-operation-store-open-v2"
+          ./target/debug/store_lock_probe hold "$db" >"$tmp/holder.log" 2>&1 &
+          holder=$!
+          cleanup() {
+            kill -KILL "$holder" 2>/dev/null || true
+            wait "$holder" 2>/dev/null || true
+            rm -rf "$tmp"
+          }
+          trap cleanup EXIT
+
+          for _ in $(seq 1 100); do
+            if [[ -e "$marker" ]] && kill -0 "$holder" 2>/dev/null; then
+              break
+            fi
+            sleep 0.05
+          done
+          [[ -e "$marker" ]]
+          kill -0 "$holder"
+
+          set +e
+          ./target/debug/store_lock_probe probe "$db" >"$tmp/second.log" 2>&1
+          second_rc=$?
+          set -e
+          if [[ "$second_rc" -eq 0 ]]; then
+            echo 'FAIL: second process opened live writer store' >&2
+            cat "$tmp/second.log" >&2
+            exit 1
+          fi
+
+          kill -KILL "$holder"
+          wait "$holder" 2>/dev/null || true
+          ./target/debug/store_lock_probe probe "$db" >"$tmp/recovery.log" 2>&1
+          grep -F 'HEALTH=RecoveryRequired' "$tmp/recovery.log"
+
+      - name: Commit deterministic repair/format if needed
+        if: github.event_name == 'push' && github.ref_name == 'feat/operation-store-sqlite-v2'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- experimental/xenia-operation-store-sqlite-v2; then
+            echo 'No repair commit required.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add experimental/xenia-operation-store-sqlite-v2
+          git commit -m 'fix(operation): qualify sqlite v2 store candidate'
+          git push origin HEAD:feat/operation-store-sqlite-v2
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - name: Apply deterministic source repair
+        run: python3 experimental/xenia-operation-store-sqlite-v2/repair_pre_pr.py
+      - name: Resolve dependency set under Rust 1.94
+        working-directory: experimental/xenia-operation-store-sqlite-v2
+        run: |
+          cargo generate-lockfile
+          sha256sum Cargo.lock
+      - name: Rust 1.94 check
+        working-directory: experimental/xenia-operation-store-sqlite-v2
+        run: cargo check --locked --all-targets
