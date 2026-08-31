@@ -13,6 +13,14 @@ old_tail = '''                sqlite_i64(persisted_at_unix_ms, "persisted_at_uni
 '''
 new_tail = '''                sqlite_i64(persisted_at_unix_ms, "persisted_at_unix_ms")?,
 '''
+old_or_else = '''        ).or_else(|error| {
+            // The draft schema has exactly 15 columns. Keep a single obvious mapping error rather
+            // than silently falling back to a different insert shape.
+            Err(error)
+        })?;
+'''
+new_or_else = '''        )?;
+'''
 
 if old_sql in text:
     if text.count(old_sql) != 1:
@@ -27,6 +35,13 @@ if old_tail in text:
     text = text.replace(old_tail, new_tail)
 elif "reserved compatibility field keeps explicit column count stable in this draft" in text:
     raise SystemExit("obsolete compatibility field comment remains in unexpected form")
+
+if old_or_else in text:
+    if text.count(old_or_else) != 1:
+        raise SystemExit("expected exactly one obsolete admission insert error shim")
+    text = text.replace(old_or_else, new_or_else)
+elif "Keep a single obvious mapping error" in text:
+    raise SystemExit("obsolete admission insert error shim remains in unexpected form")
 
 # A recovery-required open must not chmod or change persistent SQLite profile before the stale
 # lifecycle has been classified. Existing leaves are verified without mutation. Newly created
@@ -97,6 +112,8 @@ if "?15, ?16)" in text:
     raise SystemExit("16-placeholder admission INSERT still present")
 if "reserved compatibility field keeps explicit column count stable in this draft" in text:
     raise SystemExit("obsolete compatibility field still present")
+if "Keep a single obvious mapping error" in text:
+    raise SystemExit("obsolete insert error shim still present")
 
 # Guard against regression to profile mutation before marker classification.
 open_pos = text.index("let connection = Connection::open_with_flags")
