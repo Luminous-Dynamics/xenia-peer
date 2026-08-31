@@ -200,7 +200,9 @@ Each frontier commits:
 
 The roots intentionally exclude each row's own `committed_frontier_digest`, avoiding a circular hash/fixed-point construction.
 
-The store verifies the complete retained frontier chain and recomputes the current admission/head roots during local integrity checks.
+Hash-chain validity alone is insufficient. The V2 verifier also replays durable mutations in frontier order. Genesis commits the empty admission/head roots. Every later frontier must correspond to exactly one durable admission or receipt mutation, and replaying that mutation must reproduce that frontier's stored semantic roots.
+
+This proves more than “all frontiers hash together”: it establishes that the retained frontier history is a deterministic checkpoint history of the retained mutation set.
 
 The local frontier is **not itself rollback resistant**. External anchoring from ADR-007/ADR-014 remains necessary for deployments claiming VM-snapshot/backup rollback resistance.
 
@@ -218,11 +220,13 @@ Before a clean store may be considered locally healthy, V2 also verifies:
 - use-slot reservation digests recompute from the durable authority/use-index facts;
 - admission sequences are exactly gap-free and `next_admission_sequence` agrees;
 - admission epoch commitments equal the current store epoch;
-- persistence timestamps do not precede the semantic admission or current epoch;
+- grant issuance, semantic admission, and persistence times obey the local consistency ordering required by the V2 contracts;
 - every receipt chain validates from its immutable admission;
 - receipt auxiliary columns (`event_index`, previous digest, event digest, state code, recorded time) agree with the canonical serialized event bytes;
 - receipt persistence time does not precede event time;
 - the full local frontier chain is contiguous and hash-valid;
+- every non-genesis frontier corresponds to exactly one durable mutation;
+- mutation replay reproduces the admission/head roots at every retained frontier;
 - the current frontier roots match current durable state;
 - admission/event frontier references name retained frontiers.
 
@@ -236,7 +240,14 @@ Store open creates and synchronizes an unclean-writer marker only after healthy 
 
 Ordinary `Drop`, panic, kill, or crash leaves the marker. A later owner opens the existing database read-only as `RecoveryRequired` and cannot mutate privileged authority until ADR-014 governed recovery succeeds.
 
-Verified clean close closes the SQLite connection first and only then removes and directory-syncs the marker. Failure biases toward recovery rather than a false-clean lifecycle.
+Verified clean close is a security ceremony rather than merely a connection close:
+
+1. health must still be `Healthy`;
+2. the store reruns complete local semantic integrity;
+3. SQLite connection close must succeed;
+4. only then may the marker be removed and its parent directory synchronized.
+
+If final integrity or connection close fails, the marker remains. The next lifecycle therefore enters recovery instead of inheriting a false-clean claim.
 
 ## Concurrency and process ownership
 
@@ -250,7 +261,16 @@ This profile is intentionally single-writer-process. CI exercises a real two-pro
 
 ## Crash qualification
 
-Before promotion, the implementation must fault/kill at the ADR-007 C0-C10 boundaries around admission and receipt/frontier commits.
+ADR-020 freezes the exact C0-C10 vocabulary for the admission and `EffectArmed` transactions.
+
+Before promotion, the implementation must exercise every C0-C10 boundary for both transaction classes and must separately race `SIGKILL` across SQLite `COMMIT`. C8/C9 bracketing alone is not enough to qualify a commit-in-flight crash.
+
+For a commit-in-flight race, reread may resolve only one of two semantic outcomes:
+
+- the target transaction is fully absent and the previous frontier remains authoritative; or
+- the exact complete target transaction, frontier, links, and proof-reconstruction facts are present.
+
+Partial authority is a failure.
 
 Unexpected mutation/commit errors that make commit outcome ambiguous fail-stop the in-memory store as `DurabilityUncertain`. They never become proof of non-commit and never authorize blind retry.
 
@@ -301,6 +321,9 @@ Before this backend may gate real privileged effects:
 9. RecoveryRequired inspection does not mutate SQLite profile/schema state;
 10. negative symlink/hard-link/type/owner/mode tests pass;
 11. authority/receipt/frontier auxiliary-column corruption tests fail closed;
-12. C0-C10 crash injection passes for admission and `EffectArmed`;
-13. governed recovery, authenticated issuance evidence, and external-anchor verification integrate without a bypass;
-14. only then may the native-exec adapter consume V2 persistence proofs.
+12. semantic frontier replay proves exactly one mutation per non-genesis frontier and exact roots at every checkpoint;
+13. verified clean close reruns complete local integrity before removing the unclean marker;
+14. ADR-020 admission and `EffectArmed` C0-C10 qualification passes;
+15. ADR-020 commit-in-flight SIGKILL races resolve only to fully absent or fully committed state;
+16. governed recovery, authenticated issuance evidence, and external-anchor verification integrate without a bypass;
+17. only then may the native-exec adapter consume V2 persistence proofs.
