@@ -25,8 +25,6 @@ fn rekey_keys(control: [u8; 32]) -> RekeyEpochKeys {
         video: [0x30; 32],
         audio: [0x40; 32],
         telemetry: [0x50; 32],
-        rekey: [0x60; 32],
-        context: [0x70; 32],
     }
 }
 
