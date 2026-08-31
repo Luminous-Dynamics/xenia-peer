@@ -7,6 +7,7 @@ ROOT = Path(__file__).parent
 SCRIPTS = (
     "repair_injector_idempotency.py",
     "repair_pre_pr.py",
+    "inject_engine_recovery.py",
     "inject_hardening_tests.py",
     "inject_frontier_semantics.py",
     "inject_clean_close_integrity.py",
