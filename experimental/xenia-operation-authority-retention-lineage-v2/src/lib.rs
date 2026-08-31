@@ -19,6 +19,7 @@ use xenia_operation_frontier_governed_transition::{
     GovernedOperationAuthorityTransitionV1, GovernedTransitionError,
     RetainedOperationAuthorityStateV1,
 };
+use xenia_operation_frontier_ledger_witness::FrontierLedgerWitnessError;
 use xenia_operation_frontier_retention_bundle::RetainedWitnessBundleError;
 use xenia_operation_global_revocation_transition::{
     GlobalRevocationTransitionError, GlobalRevocationTransitionReceiptV1,
@@ -54,7 +55,7 @@ pub enum OperationAuthorityRetentionPayloadV2 {
         previous: RetainedOperationAuthorityStateV1,
         /// Exact retained global-revocation successor state.
         candidate: RetainedOperationAuthorityStateV1,
-        /// Ledger-signed historical receipt produced after the live revocation gate passed.
+        /// Ledger-signed historical transition receipt produced after the live revocation gate passed.
         receipt: GlobalRevocationTransitionReceiptV1,
     },
 }
@@ -425,6 +426,9 @@ pub enum AuthorityRetentionErrorV2 {
     /// Record payload local state/signature failed.
     #[error("retained authority state/transition failed validation: {0}")]
     GovernedTransition(#[from] GovernedTransitionError),
+    /// Frontier witness digest/signature validation failed while binding retained transition evidence.
+    #[error("frontier witness rejected authority retention lineage: {0}")]
+    Witness(#[from] FrontierLedgerWitnessError),
     /// Retained witness bundle succession failed.
     #[error("retained witness bundle rejected authority retention lineage: {0}")]
     RetainedBundle(#[from] RetainedWitnessBundleError),
