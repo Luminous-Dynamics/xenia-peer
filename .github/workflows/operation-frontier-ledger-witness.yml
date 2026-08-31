@@ -1,0 +1,57 @@
+name: Operation Frontier Ledger Witness
+
+on:
+  pull_request:
+    paths:
+      - "contracts/xenia-operation-store-frontier/**"
+      - "contracts/xenia-operation-frontier-ledger-witness/**"
+      - "docs/ADR-022-operation-frontier-ledger-witness.md"
+      - ".github/workflows/operation-frontier-ledger-witness.yml"
+  push:
+    branches:
+      - "feat/operation-frontier-ledger-witness-v1"
+      - main
+    paths:
+      - "contracts/xenia-operation-store-frontier/**"
+      - "contracts/xenia-operation-frontier-ledger-witness/**"
+      - "docs/ADR-022-operation-frontier-ledger-witness.md"
+      - ".github/workflows/operation-frontier-ledger-witness.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: Format + Test + Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt,clippy
+      - name: Resolve standalone lock
+        working-directory: contracts/xenia-operation-frontier-ledger-witness
+        run: cargo generate-lockfile
+      - name: Format
+        run: cargo fmt --manifest-path contracts/xenia-operation-frontier-ledger-witness/Cargo.toml -- --check
+      - name: Test
+        run: cargo test --manifest-path contracts/xenia-operation-frontier-ledger-witness/Cargo.toml --locked
+      - name: Clippy
+        run: cargo clippy --manifest-path contracts/xenia-operation-frontier-ledger-witness/Cargo.toml --locked --all-targets -- -D warnings
+
+  msrv:
+    name: MSRV Rust 1.94
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - name: Resolve standalone lock
+        working-directory: contracts/xenia-operation-frontier-ledger-witness
+        run: cargo generate-lockfile
+      - name: Check
+        run: cargo check --manifest-path contracts/xenia-operation-frontier-ledger-witness/Cargo.toml --locked --all-targets
