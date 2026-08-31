@@ -1,0 +1,67 @@
+name: Operation Frontier Ledger Adapter
+
+on:
+  pull_request:
+    paths:
+      - "crates/xenia-ledger/**"
+      - "contracts/xenia-operation-store-frontier/**"
+      - "contracts/xenia-operation-frontier-ledger-witness/**"
+      - "experimental/xenia-operation-frontier-ledger-adapter/**"
+      - "docs/ADR-022-operation-frontier-ledger-witness.md"
+      - ".github/workflows/operation-frontier-ledger-adapter.yml"
+  push:
+    branches:
+      - "feat/operation-frontier-ledger-witness-v1"
+      - main
+    paths:
+      - "crates/xenia-ledger/**"
+      - "contracts/xenia-operation-store-frontier/**"
+      - "contracts/xenia-operation-frontier-ledger-witness/**"
+      - "experimental/xenia-operation-frontier-ledger-adapter/**"
+      - "docs/ADR-022-operation-frontier-ledger-witness.md"
+      - ".github/workflows/operation-frontier-ledger-adapter.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  adapter:
+    name: Real Ledger Composition
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt,clippy
+      - name: Resolve standalone adapter lock
+        working-directory: experimental/xenia-operation-frontier-ledger-adapter
+        run: cargo generate-lockfile
+      - name: Record dependency topology
+        working-directory: experimental/xenia-operation-frontier-ledger-adapter
+        run: |
+          cargo tree -p xenia-ledger
+          cargo tree -p xenia-operation-frontier-ledger-witness
+          cargo tree -p xenia-operation-store-frontier
+      - name: Format
+        run: cargo fmt --manifest-path experimental/xenia-operation-frontier-ledger-adapter/Cargo.toml -- --check
+      - name: Test real ledger/checkpoint composition
+        run: cargo test --manifest-path experimental/xenia-operation-frontier-ledger-adapter/Cargo.toml --locked
+      - name: Strict Clippy
+        run: cargo clippy --manifest-path experimental/xenia-operation-frontier-ledger-adapter/Cargo.toml --locked --all-targets -- -D warnings
+
+  msrv:
+    name: Adapter MSRV Rust 1.94
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - name: Resolve standalone adapter lock
+        working-directory: experimental/xenia-operation-frontier-ledger-adapter
+        run: cargo generate-lockfile
+      - name: Check adapter and real ledger dependency
+        run: cargo check --manifest-path experimental/xenia-operation-frontier-ledger-adapter/Cargo.toml --locked --all-targets
