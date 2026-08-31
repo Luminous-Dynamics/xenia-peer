@@ -1,0 +1,71 @@
+name: Operation Frontier Retention Bundle
+
+on:
+  pull_request:
+    paths:
+      - "crates/xenia-ledger/**"
+      - "contracts/xenia-operation-store-frontier/**"
+      - "contracts/xenia-operation-frontier-ledger-witness/**"
+      - "experimental/xenia-operation-frontier-ledger-adapter/**"
+      - "experimental/xenia-operation-frontier-retention-bundle/**"
+      - "docs/ADR-022-operation-frontier-ledger-witness.md"
+      - "docs/ADR-023-operation-frontier-external-retention.md"
+      - ".github/workflows/operation-frontier-retention-bundle.yml"
+  push:
+    branches:
+      - "feat/operation-frontier-retention-bundle-v1"
+      - main
+    paths:
+      - "crates/xenia-ledger/**"
+      - "contracts/xenia-operation-store-frontier/**"
+      - "contracts/xenia-operation-frontier-ledger-witness/**"
+      - "experimental/xenia-operation-frontier-ledger-adapter/**"
+      - "experimental/xenia-operation-frontier-retention-bundle/**"
+      - "docs/ADR-022-operation-frontier-ledger-witness.md"
+      - "docs/ADR-023-operation-frontier-external-retention.md"
+      - ".github/workflows/operation-frontier-retention-bundle.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  retention-bundle:
+    name: Bundle + Real Recovery Composition
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt,clippy
+      - name: Resolve standalone lock
+        working-directory: experimental/xenia-operation-frontier-retention-bundle
+        run: cargo generate-lockfile
+      - name: Record dependency topology
+        working-directory: experimental/xenia-operation-frontier-retention-bundle
+        run: |
+          cargo tree -p xenia-operation-frontier-retention-bundle
+          cargo tree -p xenia-operation-frontier-ledger-adapter
+          cargo tree -p xenia-ledger
+      - name: Format
+        run: cargo fmt --manifest-path experimental/xenia-operation-frontier-retention-bundle/Cargo.toml -- --check
+      - name: Test
+        run: cargo test --manifest-path experimental/xenia-operation-frontier-retention-bundle/Cargo.toml --locked
+      - name: Strict Clippy
+        run: cargo clippy --manifest-path experimental/xenia-operation-frontier-retention-bundle/Cargo.toml --locked --all-targets -- -D warnings
+
+  msrv:
+    name: Retention Bundle MSRV Rust 1.94
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - name: Resolve standalone lock
+        working-directory: experimental/xenia-operation-frontier-retention-bundle
+        run: cargo generate-lockfile
+      - name: Check complete dependency stack
+        run: cargo check --manifest-path experimental/xenia-operation-frontier-retention-bundle/Cargo.toml --locked --all-targets
