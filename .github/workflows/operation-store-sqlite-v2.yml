@@ -44,14 +44,22 @@ jobs:
       - name: Apply deterministic pre-PR repair
         run: python3 experimental/xenia-operation-store-sqlite-v2/repair_pre_pr.py
 
-      - name: Assert repaired admission mapping
+      - name: Assert hardened authority/store mapping
         shell: bash
         run: |
           set -euo pipefail
           file=experimental/xenia-operation-store-sqlite-v2/src/lib.rs
-          ! grep -F '?15, ?16)' "$file"
           ! grep -F 'reserved compatibility field keeps explicit column count stable in this draft' "$file"
-          grep -F 'INSERT INTO admissions VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)' "$file"
+          ! grep -F 'Keep a single obvious mapping error' "$file"
+          grep -F 'grant_authority_bytes BLOB NOT NULL' "$file"
+          grep -F 'INSERT INTO admissions(' "$file"
+          grep -F 'grant_authority_digest, grant_authority_bytes, raw_use_digest' "$file"
+          grep -F 'grant: &GrantAuthorityV2' "$file"
+          grep -F 'authenticated_issuance: AuthenticatedIssuanceContextV2' "$file"
+          grep -F 'admission.validate_against(' "$file"
+          grep -F 'OpenFlags::SQLITE_OPEN_READ_ONLY' "$file"
+          grep -F 'RecoveryDatabaseMissing' "$file"
+          grep -F 'StoredReceiptRowMismatch' "$file"
 
       - name: Resolve standalone lock and dependency identity
         working-directory: experimental/xenia-operation-store-sqlite-v2
