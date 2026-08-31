@@ -156,7 +156,9 @@ impl AuthorityRetentionObjectV1 {
     }
 
     /// Deterministic provider-independent locator.
-    pub fn locator(&self) -> Result<AuthorityRetentionObjectLocatorV1, AuthorityRetentionBackendErrorV1> {
+    pub fn locator(
+        &self,
+    ) -> Result<AuthorityRetentionObjectLocatorV1, AuthorityRetentionBackendErrorV1> {
         Ok(AuthorityRetentionObjectLocatorV1 {
             namespace_digest: self.namespace.namespace_digest()?,
             retention_sequence: self.record.retention_sequence,
@@ -249,12 +251,14 @@ pub fn append_via_backend_v1<B: ImmutableAuthorityRetentionBackendV1>(
     candidate: OperationAuthorityRetentionRecordV2,
 ) -> Result<AuthorityRetentionAppendResultV2, AuthorityRetentionBackendErrorV1> {
     namespace.validate()?;
+
+    // Validate the complete namespace/authority binding before any provider method can observe
+    // the record. This keeps configuration/misbinding errors distinct from backend rejection.
+    let object = AuthorityRetentionObjectV1::new(namespace.clone(), candidate.clone())?;
+
     let mut resolved = None;
-    let result = model.append(candidate, |record| {
-        let resolution = match AuthorityRetentionObjectV1::new(namespace.clone(), record.clone()) {
-            Ok(object) => resolve_create(backend, &object),
-            Err(_) => ResolvedCreateV1::Rejected,
-        };
+    let result = model.append(candidate, |_| {
+        let resolution = resolve_create(backend, &object);
         resolved = Some(resolution);
         match resolution {
             ResolvedCreateV1::DurableExact => PersistenceOutcomeV2::Durable,
