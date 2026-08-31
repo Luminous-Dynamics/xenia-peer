@@ -1,0 +1,88 @@
+name: Operation Authority Retention Lineage V2
+
+on:
+  pull_request:
+    paths:
+      - "crates/xenia-ledger/**"
+      - "contracts/xenia-operation-authority-epoch/**"
+      - "contracts/xenia-operation-store-frontier/**"
+      - "contracts/xenia-operation-frontier-ledger-witness/**"
+      - "experimental/xenia-operation-frontier-ledger-adapter/**"
+      - "experimental/xenia-operation-frontier-retention-bundle/**"
+      - "experimental/xenia-operation-frontier-governed-transition/**"
+      - "experimental/xenia-operation-global-revocation-transition/**"
+      - "experimental/xenia-operation-authority-retention-lineage-v2/**"
+      - "docs/ADR-022-operation-frontier-ledger-witness.md"
+      - "docs/ADR-023-operation-frontier-external-retention.md"
+      - "docs/ADR-025-governed-operation-frontier-transitions.md"
+      - "docs/ADR-026-global-operation-authority-revocation.md"
+      - "docs/ADR-027-unified-operation-authority-retention-lineage.md"
+      - ".github/workflows/operation-authority-retention-lineage-v2.yml"
+  push:
+    branches:
+      - "feat/operation-authority-retention-lineage-v2"
+      - main
+    paths:
+      - "crates/xenia-ledger/**"
+      - "contracts/xenia-operation-authority-epoch/**"
+      - "contracts/xenia-operation-store-frontier/**"
+      - "contracts/xenia-operation-frontier-ledger-witness/**"
+      - "experimental/xenia-operation-frontier-ledger-adapter/**"
+      - "experimental/xenia-operation-frontier-retention-bundle/**"
+      - "experimental/xenia-operation-frontier-governed-transition/**"
+      - "experimental/xenia-operation-global-revocation-transition/**"
+      - "experimental/xenia-operation-authority-retention-lineage-v2/**"
+      - "docs/ADR-022-operation-frontier-ledger-witness.md"
+      - "docs/ADR-023-operation-frontier-external-retention.md"
+      - "docs/ADR-025-governed-operation-frontier-transitions.md"
+      - "docs/ADR-026-global-operation-authority-revocation.md"
+      - "docs/ADR-027-unified-operation-authority-retention-lineage.md"
+      - ".github/workflows/operation-authority-retention-lineage-v2.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lineage:
+    name: Unified Retention Semantics
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt,clippy
+      - name: Resolve standalone lock
+        working-directory: experimental/xenia-operation-authority-retention-lineage-v2
+        run: cargo generate-lockfile
+      - name: Record complete dependency topology
+        working-directory: experimental/xenia-operation-authority-retention-lineage-v2
+        run: |
+          cargo tree -p xenia-operation-authority-retention-lineage-v2
+          cargo tree -p xenia-operation-global-revocation-transition
+          cargo tree -p xenia-operation-frontier-governed-transition
+          cargo tree -p xenia-operation-frontier-retention-bundle
+          cargo tree -p xenia-operation-authority-epoch
+          cargo tree -p xenia-ledger
+      - name: Format
+        run: cargo fmt --manifest-path experimental/xenia-operation-authority-retention-lineage-v2/Cargo.toml -- --check
+      - name: Test real signed authority lineage
+        run: cargo test --manifest-path experimental/xenia-operation-authority-retention-lineage-v2/Cargo.toml --locked
+      - name: Strict Clippy
+        run: cargo clippy --manifest-path experimental/xenia-operation-authority-retention-lineage-v2/Cargo.toml --locked --all-targets -- -D warnings
+
+  msrv:
+    name: Authority Retention V2 MSRV Rust 1.94
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - name: Resolve standalone lock
+        working-directory: experimental/xenia-operation-authority-retention-lineage-v2
+        run: cargo generate-lockfile
+      - name: Check complete dependency stack
+        run: cargo check --manifest-path experimental/xenia-operation-authority-retention-lineage-v2/Cargo.toml --locked --all-targets
