@@ -20,3 +20,9 @@ xenia-operation-frontier-governed-transition = { path = "../xenia-operation-fron
 xenia-operation-frontier-ledger-witness = { path = "../../contracts/xenia-operation-frontier-ledger-witness" }
 xenia-operation-frontier-retention-bundle = { path = "../xenia-operation-frontier-retention-bundle" }
 xenia-operation-global-revocation-transition = { path = "../xenia-operation-global-revocation-transition" }
+
+[dev-dependencies]
+ed25519-dalek = "2"
+uuid = "1"
+xenia-ledger = { path = "../../crates/xenia-ledger" }
+xenia-operation-store-frontier = { path = "../../contracts/xenia-operation-store-frontier" }
