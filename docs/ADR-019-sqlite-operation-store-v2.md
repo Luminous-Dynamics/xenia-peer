@@ -30,21 +30,25 @@ with:
 - `0700` authority directory;
 - `0600`, regular, single-link persistent leaves;
 - explicit unclean-writer marker;
+- exact qualified SQLite source lineage for rollback-journal recovery;
 - no automatic recovery-state clearing.
 
 SQLite/VFS/filesystem/hardware durability remains part of the deployment claim. This ADR does not claim that SQLite can overcome storage hardware that lies about synchronization.
 
 ## Recovery-open rule
 
-A pre-existing unclean-writer marker means **historical authority is being inspected**, not initialized.
+A pre-existing unclean-writer marker means **historical authority is being recovered/inspected, not initialized**.
 
-Therefore the V2 open path must distinguish two modes before mutable SQLite configuration:
+Rollback-journal SQLite may require pager-level hot-journal rollback before a crashed database can be read. ADR-021 therefore owns the narrow engine-recovery boundary. SQLite pager recovery may canonicalize the database back to its last committed SQLite image, but it is not an Xenia authority transition and cannot make the store healthy.
+
+The V2 open path distinguishes two modes before any ordinary Xenia mutation becomes possible.
 
 ### Healthy/fresh lifecycle
 
 ```text
 no historical marker
   -> open READ_WRITE | CREATE | NOFOLLOW
+  -> verify exact qualified SQLite source
   -> verify/tighten newly created leaf
   -> acquire exclusive writer ownership
   -> re-check marker race
@@ -59,19 +63,29 @@ no historical marker
 historical marker exists
   -> database MUST already exist
   -> verify DB + marker ownership/type/mode
-  -> open READ_ONLY | NOFOLLOW
-  -> do not CREATE
-  -> do not chmod persistent authority
-  -> do not change journal/synchronous/schema state
-  -> verify exact metadata
-  -> expose only RecoveryRequired inspection
+  -> verify adjacent rollback-journal leaf if present
+  -> ADR-021 engine-recovery bootstrap:
+       existing DB only
+       READ_WRITE | NOFOLLOW
+       NO CREATE
+       exact qualified SQLite source
+       pager may roll back a hot journal only
+  -> close bootstrap connection
+  -> reverify DB / journal trust
+  -> reopen READ_ONLY | NOFOLLOW
+  -> verify exact metadata + local semantic integrity
+  -> expose RecoveryRequired inspection only
 ```
+
+During the ADR-021 bootstrap, Xenia does not admit operations, consume grant slots, append receipts, advance frontiers/epochs, clear the marker, or restore privileged runtime authority.
+
+If no pager recovery is necessary, the recovery lifecycle must not perform unrelated Xenia authority mutation. If pager recovery is necessary, changed SQLite bytes are acceptable only insofar as the qualified SQLite engine canonicalizes an interrupted transaction to its last committed database image; post-recovery semantic verification remains mandatory.
 
 A marker with a missing database is an integrity failure (`RecoveryDatabaseMissing`), not permission to silently create an empty replacement authority store.
 
 A healthy open re-checks marker existence after obtaining writer ownership. If marker state changed during that window, the open fails closed instead of deciding which lifecycle “probably” won.
 
-Governed mutation of a recovery store is a later ADR-014 recovery transition, not ordinary `open()` behavior.
+Governed mutation of Xenia recovery state is an ADR-014 recovery transition, not ordinary `open()` behavior and not ADR-021 pager rollback.
 
 ## Persistent authority metadata
 
@@ -238,7 +252,7 @@ External anchor continuity is a separate recovery check.
 
 Store open creates and synchronizes an unclean-writer marker only after healthy exclusive database ownership is obtained and before mutable profile/schema work begins.
 
-Ordinary `Drop`, panic, kill, or crash leaves the marker. A later owner opens the existing database read-only as `RecoveryRequired` and cannot mutate privileged authority until ADR-014 governed recovery succeeds.
+Ordinary `Drop`, panic, kill, or crash leaves the marker. A later owner performs only the ADR-021 qualified pager-canonicalization bootstrap needed to establish a readable last-committed SQLite image, then reopens read-only as `RecoveryRequired`. Privileged Xenia authority remains fail-stopped until ADR-014 governed recovery succeeds.
 
 Verified clean close is a security ceremony rather than merely a connection close:
 
@@ -257,13 +271,16 @@ This profile is intentionally single-writer-process. CI exercises a real two-pro
 2. process B must fail to obtain usable access while A is the live exclusive writer;
 3. A is killed with `SIGKILL`;
 4. the marker survives;
-5. process C opens the existing database only as `RecoveryRequired`.
+5. process C may use ADR-021 pager recovery only to canonicalize SQLite's interrupted transaction state;
+6. process C then exposes the existing store as `RecoveryRequired`, never `Healthy`.
 
 ## Crash qualification
 
 ADR-020 freezes the exact C0-C10 vocabulary for the admission and `EffectArmed` transactions.
 
 Before promotion, the implementation must exercise every C0-C10 boundary for both transaction classes and must separately race `SIGKILL` across SQLite `COMMIT`. C8/C9 bracketing alone is not enough to qualify a commit-in-flight crash.
+
+Each crash case starts from an independent baseline and is evaluated only after ADR-021 pager recovery plus full local semantic verification.
 
 For a commit-in-flight race, reread may resolve only one of two semantic outcomes:
 
@@ -273,6 +290,12 @@ For a commit-in-flight race, reread may resolve only one of two semantic outcome
 Partial authority is a failure.
 
 Unexpected mutation/commit errors that make commit outcome ambiguous fail-stop the in-memory store as `DurabilityUncertain`. They never become proof of non-commit and never authorize blind retry.
+
+## Qualified SQLite source lineage
+
+Rollback-journal pager recovery is part of the security boundary. The qualification lineage therefore pins the exact rusqlite revision and exact bundled SQLite source ID named by ADR-021 rather than accepting an arbitrary semver-compatible SQLite build.
+
+A source-lineage change invalidates the existing crash/recovery evidence until the destructive matrix is rerun. Runtime qualification verifies both `sqlite_version()` and `sqlite_source_id()` before an unclean journal may be consumed.
 
 ## Relationship to the invocation fence
 
@@ -301,7 +324,7 @@ This ADR does not implement or authorize:
 - service tunneling;
 - credential use;
 - Redfish/device operations;
-- automatic recovery;
+- automatic Xenia authority recovery;
 - distributed multi-writer consensus;
 - generic exactly-once external effects;
 - external anti-rollback anchoring by itself.
@@ -313,17 +336,19 @@ Before this backend may gate real privileged effects:
 1. Rust 1.96 fmt/test/Clippy passes;
 2. Rust 1.94 MSRV check passes;
 3. `SQLITE_OPEN_NOFOLLOW` is proven available in the pinned rusqlite dependency;
-4. the explicit named 16-field admission mapping and serialized grant/use/admission chain are tested;
-5. wrong authenticated issuance fails before durable mutation/frontier movement;
-6. same-operation-id but different admission authority cannot append a receipt;
-7. two-process writer/SIGKILL recovery passes;
-8. stale marker + missing DB fails closed without replacement creation;
-9. RecoveryRequired inspection does not mutate SQLite profile/schema state;
-10. negative symlink/hard-link/type/owner/mode tests pass;
-11. authority/receipt/frontier auxiliary-column corruption tests fail closed;
-12. semantic frontier replay proves exactly one mutation per non-genesis frontier and exact roots at every checkpoint;
-13. verified clean close reruns complete local integrity before removing the unclean marker;
-14. ADR-020 admission and `EffectArmed` C0-C10 qualification passes;
-15. ADR-020 commit-in-flight SIGKILL races resolve only to fully absent or fully committed state;
-16. governed recovery, authenticated issuance evidence, and external-anchor verification integrate without a bypass;
-17. only then may the native-exec adapter consume V2 persistence proofs.
+4. the exact ADR-021 SQLite version/source ID is verified at runtime before rollback-journal recovery;
+5. the explicit named 16-field admission mapping and serialized grant/use/admission chain are tested;
+6. wrong authenticated issuance fails before durable mutation/frontier movement;
+7. same-operation-id but different admission authority cannot append a receipt;
+8. two-process writer/SIGKILL recovery passes through ADR-021 and remains `RecoveryRequired`;
+9. stale marker + missing DB fails closed without replacement creation;
+10. recovery with no pager rollback need performs no unrelated Xenia authority mutation;
+11. rollback-journal symlink/hard-link/type/owner/mode violations fail before pager recovery;
+12. authority/receipt/frontier auxiliary-column corruption tests fail closed;
+13. semantic frontier replay proves exactly one mutation per non-genesis frontier and exact roots at every checkpoint;
+14. verified clean close reruns complete local integrity before removing the unclean marker;
+15. ADR-020 admission and `EffectArmed` C0-C10 qualification passes after pager recovery;
+16. ADR-020 commit-in-flight SIGKILL races resolve only to fully absent or fully committed state;
+17. the qualification evidence records exact Rust, kernel/filesystem/storage, lockfile, rusqlite revision, SQLite version/source ID, C0-C10 outcomes, commit-race outcomes, and reconstructed proof commitments;
+18. governed recovery, authenticated issuance evidence, and external-anchor verification integrate without a bypass;
+19. only then may the native-exec adapter consume V2 persistence proofs.
