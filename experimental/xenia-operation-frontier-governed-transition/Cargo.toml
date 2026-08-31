@@ -20,7 +20,6 @@ thiserror = "2"
 xenia-ledger = { path = "../../crates/xenia-ledger" }
 xenia-operation-authority-epoch = { path = "../../contracts/xenia-operation-authority-epoch" }
 xenia-operation-store-recovery = { path = "../../contracts/xenia-operation-store-recovery" }
-xenia-operation-frontier-ledger-adapter = { path = "../xenia-operation-frontier-ledger-adapter" }
 xenia-operation-frontier-retention-bundle = { path = "../xenia-operation-frontier-retention-bundle" }
 xenia-operation-frontier-ledger-witness = { path = "../../contracts/xenia-operation-frontier-ledger-witness" }
 xenia-operation-store-frontier = { path = "../../contracts/xenia-operation-store-frontier" }
