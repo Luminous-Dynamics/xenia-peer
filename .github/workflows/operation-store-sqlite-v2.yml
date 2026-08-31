@@ -41,8 +41,10 @@ jobs:
         with:
           components: rustfmt,clippy
 
-      - name: Apply deterministic pre-PR repair
-        run: python3 experimental/xenia-operation-store-sqlite-v2/repair_pre_pr.py
+      - name: Apply deterministic source hardening
+        run: |
+          python3 experimental/xenia-operation-store-sqlite-v2/repair_pre_pr.py
+          python3 experimental/xenia-operation-store-sqlite-v2/inject_hardening_tests.py
 
       - name: Assert hardened authority/store mapping
         shell: bash
@@ -60,6 +62,12 @@ jobs:
           grep -F 'OpenFlags::SQLITE_OPEN_READ_ONLY' "$file"
           grep -F 'RecoveryDatabaseMissing' "$file"
           grep -F 'StoredReceiptRowMismatch' "$file"
+          grep -F 'fn unauthenticated_issuance_cannot_reach_durable_admission' "$file"
+          grep -F 'fn receipt_cannot_bind_forged_same_id_admission' "$file"
+          grep -F 'fn corrupted_admission_auxiliary_column_fails_local_integrity' "$file"
+          grep -F 'fn corrupted_receipt_digest_column_fails_local_integrity' "$file"
+          grep -F 'fn stale_marker_with_missing_database_never_creates_replacement_store' "$file"
+          grep -F 'fn recovery_required_open_does_not_change_database_bytes' "$file"
 
       - name: Resolve standalone lock and dependency identity
         working-directory: experimental/xenia-operation-store-sqlite-v2
@@ -146,8 +154,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94
-      - name: Apply deterministic source repair
-        run: python3 experimental/xenia-operation-store-sqlite-v2/repair_pre_pr.py
+      - name: Apply deterministic source hardening
+        run: |
+          python3 experimental/xenia-operation-store-sqlite-v2/repair_pre_pr.py
+          python3 experimental/xenia-operation-store-sqlite-v2/inject_hardening_tests.py
       - name: Resolve dependency set under Rust 1.94
         working-directory: experimental/xenia-operation-store-sqlite-v2
         run: |
