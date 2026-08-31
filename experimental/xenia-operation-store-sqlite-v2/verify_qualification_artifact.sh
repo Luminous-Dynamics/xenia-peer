@@ -12,10 +12,10 @@ fail() {
 [[ -f EVIDENCE.sha256 ]] || fail 'missing EVIDENCE.sha256'
 sha256sum -c EVIDENCE.sha256
 
-grep -Fx 'QUALIFICATION_RESULT=PASS' result.txt >/dev/null 
-grep -Fx 'PRODUCTION_CRASH_SURFACE=PASS' production-crash-surface.txt >/dev/null 
-grep -Fx 'RECOVERY_HEALTH=RecoveryRequired' writer-ownership.txt >/dev/null 
-grep -Fx 'SQLITE_VERSION=3.53.4' sqlite-source.txt >/dev/null 
+grep -Fx 'QUALIFICATION_RESULT=PASS' result.txt >/dev/null
+grep -Fx 'PRODUCTION_CRASH_SURFACE=PASS' production-crash-surface.txt >/dev/null
+grep -Fx 'RECOVERY_HEALTH=RecoveryRequired' writer-ownership.txt >/dev/null
+grep -Fx 'SQLITE_VERSION=3.53.4' sqlite-source.txt >/dev/null
 grep -Fx 'SQLITE_SOURCE_ID=2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc' sqlite-source.txt >/dev/null
 
 c0_rows=$(($(wc -l < c0-c10.tsv) - 1))
@@ -23,8 +23,9 @@ race_rows=$(($(wc -l < commit-races.tsv) - 1))
 [[ "$c0_rows" -eq 22 ]] || fail "expected 22 C0-C10 rows, got $c0_rows"
 [[ "$race_rows" -eq 80 ]] || fail "expected 80 COMMIT-race rows, got $race_rows"
 
-# Exactly one deterministic row for each transaction class / C-point, with the expected outcome,
-# RecoveryRequired health, and proof evidence present only when the transaction committed.
+# Exactly one deterministic row for each transaction class / C-point, with the expected durable
+# presence, corresponding observed outcome, RecoveryRequired health, and proof evidence for
+# committed cases.
 for kind in admission effect-armed; do
   for n in $(seq 0 10); do
     point="C${n}"
@@ -36,11 +37,13 @@ done
 awk -F '\t' '
   NR == 1 { next }
   {
-    expected = ($2 ~ /^C([0-8])$/) ? "absent" : "present"
-    if ($3 != expected) exit 10
-    if ($4 != expected) exit 11
+    early = ($2 ~ /^C([0-8])$/)
+    expected_presence = early ? "absent" : "present"
+    expected_outcome = early ? "absent" : "committed"
+    if ($3 != expected_presence) exit 10
+    if ($4 != expected_outcome) exit 11
     if ($5 != "RecoveryRequired") exit 12
-    if ($4 == "present") {
+    if ($4 == "committed") {
       if ($6 == "") exit 13
       if ($1 == "effect-armed" && $7 == "") exit 14
     }
@@ -72,7 +75,7 @@ kill_targeted=$(awk -F '\t' 'NR>1 && $10=="1" {n++} END {print n+0}' commit-race
 [[ "$kill_targeted" -gt 0 ]] || fail 'no COMMIT-race child was live when SIGKILL was attempted'
 
 # The summary must agree with the observed evidence cardinality.
-grep -Fx "C0_C10_ROWS=${c0_rows}" summary.txt >/dev/null 
-grep -Fx "COMMIT_RACE_ROWS=${race_rows}" summary.txt >/dev/null 
+grep -Fx "C0_C10_ROWS=${c0_rows}" summary.txt >/dev/null
+grep -Fx "COMMIT_RACE_ROWS=${race_rows}" summary.txt >/dev/null
 
 echo 'sqlite-v2-qualification-evidence: VERIFIED'
