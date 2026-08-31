@@ -11,6 +11,7 @@ SCRIPTS = (
     "inject_frontier_semantics.py",
     "inject_clean_close_integrity.py",
     "inject_temporal_epoch_integrity.py",
+    "inject_crash_qualification.py",
 )
 
 for script in SCRIPTS:
