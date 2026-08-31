@@ -45,6 +45,7 @@ jobs:
         run: |
           python3 experimental/xenia-operation-store-sqlite-v2/repair_pre_pr.py
           python3 experimental/xenia-operation-store-sqlite-v2/inject_hardening_tests.py
+          python3 experimental/xenia-operation-store-sqlite-v2/inject_frontier_semantics.py
 
       - name: Assert hardened authority/store mapping
         shell: bash
@@ -68,6 +69,8 @@ jobs:
           grep -F 'fn corrupted_receipt_digest_column_fails_local_integrity' "$file"
           grep -F 'fn stale_marker_with_missing_database_never_creates_replacement_store' "$file"
           grep -F 'fn recovery_required_open_does_not_change_database_bytes' "$file"
+          grep -F 'fn verify_frontier_semantics(&self)' "$file"
+          grep -F 'FrontierMutationCardinalityMismatch' "$file"
 
       - name: Resolve standalone lock and dependency identity
         working-directory: experimental/xenia-operation-store-sqlite-v2
@@ -158,6 +161,7 @@ jobs:
         run: |
           python3 experimental/xenia-operation-store-sqlite-v2/repair_pre_pr.py
           python3 experimental/xenia-operation-store-sqlite-v2/inject_hardening_tests.py
+          python3 experimental/xenia-operation-store-sqlite-v2/inject_frontier_semantics.py
       - name: Resolve dependency set under Rust 1.94
         working-directory: experimental/xenia-operation-store-sqlite-v2
         run: |
