@@ -1,0 +1,116 @@
+name: Operator Rekey Initiator Conformance
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "flake.nix"
+      - "flake.lock"
+      - "apps/xenia-peer/Cargo.toml"
+      - "apps/xenia-peer/src/operator_rekey_initiator.rs"
+      - "apps/xenia-peer/src/operator_rekey_transport.rs"
+      - "apps/xenia-peer/src/operator_sealed_channel.rs"
+      - "apps/xenia-peer/src/operator_sealed_channel_legacy.rs"
+      - "apps/xenia-peer/src/operator_channel_metrics.rs"
+      - "crates/xenia-peer-core/src/transport.rs"
+      - ".github/workflows/operator-rekey-initiator.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: operator-rekey-initiator-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: -D warnings
+  QUALIFICATION_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  exact-source-transaction:
+    name: Exact source transport transaction
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.QUALIFICATION_SOURCE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Assert immutable source checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$QUALIFICATION_SOURCE_SHA"
+          test -z "$(git status --porcelain)"
+          echo "SOURCE_HEAD=$(git rev-parse HEAD)"
+          echo "SOURCE_TREE=$(git rev-parse HEAD^{tree})"
+
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Retain dependency and source provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/qualification"
+          cp Cargo.lock "$RUNNER_TEMP/qualification/Cargo.lock"
+          {
+            echo "profile=xenia-operator-rekey-initiator-v1"
+            echo "source_head=$(git rev-parse HEAD)"
+            echo "source_tree=$(git rev-parse HEAD^{tree})"
+            echo "cargo_lock_sha256=$(sha256sum Cargo.lock | awk '{print $1}')"
+            echo "flake_lock_sha256=$(sha256sum flake.lock | awk '{print $1}')"
+          } > "$RUNNER_TEMP/qualification/PROVENANCE.txt"
+          cat "$RUNNER_TEMP/qualification/PROVENANCE.txt"
+
+      - name: Format exact source
+        run: nix develop .#ci --command cargo fmt --all -- --check
+
+      - name: Check daemon boundary
+        run: nix develop .#ci --command cargo check --locked -p xenia-peer --all-targets
+
+      - name: Clippy daemon boundary
+        run: nix develop .#ci --command cargo clippy --locked -p xenia-peer --all-targets -- -D warnings
+
+      - name: Rekey initiator state tests
+        run: nix develop .#ci --command cargo test --locked -p xenia-peer 'operator_sealed_channel::initiator::tests'
+
+      - name: Rekey transport transaction tests
+        run: nix develop .#ci --command cargo test --locked -p xenia-peer 'operator_sealed_channel::rekey_transport::tests'
+
+      - name: Operator protocol metrics tests
+        run: nix develop .#ci --command cargo test --locked -p xenia-peer 'operator_channel_metrics::tests'
+
+      - name: Assert source tree remained immutable
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$QUALIFICATION_SOURCE_SHA"
+          test -z "$(git status --porcelain)"
+          echo "final_source_tree=$(git rev-parse HEAD^{tree})" >> "$RUNNER_TEMP/qualification/PROVENANCE.txt"
+
+      - name: Retain qualification capsule
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: operator-rekey-initiator-${{ env.QUALIFICATION_SOURCE_SHA }}
+          path: ${{ runner.temp }}/qualification
+          if-no-files-found: error
+          retention-days: 90
+
+  msrv:
+    name: Rust 1.94 daemon boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.QUALIFICATION_SOURCE_SHA }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.94
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked -p xenia-peer --all-targets
