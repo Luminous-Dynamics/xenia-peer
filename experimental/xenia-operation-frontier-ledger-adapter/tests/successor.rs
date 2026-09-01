@@ -13,11 +13,7 @@ use xenia_operation_frontier_ledger_witness::{
 };
 use xenia_operation_store_frontier::OperationStoreFrontierV1;
 
-fn frontier(
-    sequence: u64,
-    previous: [u8; 32],
-    recorded_at_ms: u64,
-) -> OperationStoreFrontierV1 {
+fn frontier(sequence: u64, previous: [u8; 32], recorded_at_ms: u64) -> OperationStoreFrontierV1 {
     OperationStoreFrontierV1::from_state(
         [7u8; 16],
         0,

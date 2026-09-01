@@ -318,16 +318,18 @@ mod tests {
         let f0 = frontier(0, [0u8; 32], 100_000);
         let witness = witness_for(&signing_key, &checkpoint, &f0, 0, [0u8; 32], 100_000);
 
-        assert!(verify_operation_frontier_witness_v1(
-            &witness,
-            &checkpoint,
-            &entries(&chain),
-            wrong_key.verifying_key().to_bytes(),
-            std::slice::from_ref(&f0),
-            100,
-            policy(),
-        )
-        .is_err());
+        assert!(
+            verify_operation_frontier_witness_v1(
+                &witness,
+                &checkpoint,
+                &entries(&chain),
+                wrong_key.verifying_key().to_bytes(),
+                std::slice::from_ref(&f0),
+                100,
+                policy(),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -424,7 +426,9 @@ mod tests {
                 100,
                 policy(),
             ),
-            Err(OperationFrontierWitnessAdapterError::CheckpointContinuity(_))
+            Err(OperationFrontierWitnessAdapterError::CheckpointContinuity(
+                _
+            ))
         ));
     }
 }

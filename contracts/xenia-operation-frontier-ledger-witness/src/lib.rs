@@ -215,8 +215,9 @@ impl OperationFrontierLedgerWitnessV1 {
             return Err(FrontierLedgerWitnessError::UnsupportedWitnessSchema);
         }
         self.payload.validate()?;
-        let verifying_key = VerifyingKey::from_bytes(&self.payload.ledger_checkpoint.ledger_public_key)
-            .map_err(|_| FrontierLedgerWitnessError::MalformedLedgerPublicKey)?;
+        let verifying_key =
+            VerifyingKey::from_bytes(&self.payload.ledger_checkpoint.ledger_public_key)
+                .map_err(|_| FrontierLedgerWitnessError::MalformedLedgerPublicKey)?;
         let signature = Signature::from_bytes(&self.signature);
         verifying_key
             .verify(&witness_message(&self.payload)?, &signature)
@@ -444,7 +445,11 @@ mod tests {
         SigningKey::from_bytes(&[seed; 32])
     }
 
-    fn frontier(sequence: u64, previous: [u8; 32], recorded_at_ms: u64) -> OperationStoreFrontierV1 {
+    fn frontier(
+        sequence: u64,
+        previous: [u8; 32],
+        recorded_at_ms: u64,
+    ) -> OperationStoreFrontierV1 {
         OperationStoreFrontierV1::from_state(
             [7u8; 16],
             0,
