@@ -17,6 +17,8 @@
 mod legacy;
 #[path = "operator_rekey_initiator.rs"]
 mod initiator;
+#[path = "operator_rekey_transport.rs"]
+mod rekey_transport;
 
 pub(crate) use legacy::{OperatorHostIdentity, SealedConsentDeps};
 
@@ -30,6 +32,7 @@ use xenia_wire::operator_rekey;
 
 use crate::operator::OperatorPolicy;
 use initiator::{OPERATOR_REKEY_ACK_TIMEOUT, OperatorRekeyInitiator};
+use rekey_transport::prepare_send_commit_interval;
 
 /// Existing console-to-daemon source domain. Kept stable for compatibility.
 const OPERATOR_CONSOLE_SOURCE_ID: [u8; 8] = *b"xnaopch1";
@@ -124,34 +127,20 @@ async fn serve_hardened_operator_channel<T: Transport>(
                     std::future::pending::<tokio::time::Instant>().await
                 }
             }, if may_propose => {
-                rekey
-                    .prepare_interval(&mut tx_session, &channel.rekey_root)
-                    .map_err(|err| ServeError::Protocol(err.to_string()))?;
-                let key_epoch = rekey
-                    .prepared_epoch()
-                    .map_err(|err| ServeError::Protocol(err.to_string()))?;
-                let proposal = rekey
-                    .prepared_envelope()
-                    .map_err(|err| ServeError::Protocol(err.to_string()))?;
-
-                // Per the Transport contract, any send error is session-fatal.
-                // Success still does not prove remote processing, which is why
-                // the following commit is one-way until a new-key Ack arrives.
-                transport
-                    .send_envelope(proposal)
-                    .await
-                    .map_err(|err| ServeError::Protocol(format!(
-                        "rekey Proposal send failed after local preparation: {err}"
-                    )))?;
-
-                let committed_epoch = rekey
-                    .commit_sent(
-                        &mut tx_session,
-                        &mut authority_rx_session,
-                        Instant::now() + OPERATOR_REKEY_ACK_TIMEOUT,
-                    )
-                    .map_err(|err| ServeError::Protocol(err.to_string()))?;
-                debug_assert_eq!(committed_epoch, key_epoch);
+                // One transport-owned boundary enforces the only safe ordering:
+                // prepare the exact old-key Proposal, hand those exact bytes to
+                // the carrier, then commit one-way to fresh new-key-only local
+                // sessions. Any error is session-fatal; no rollback guess is made.
+                let committed_epoch = prepare_send_commit_interval(
+                    &mut rekey,
+                    transport,
+                    &mut tx_session,
+                    &mut authority_rx_session,
+                    &channel.rekey_root,
+                    Instant::now() + OPERATOR_REKEY_ACK_TIMEOUT,
+                )
+                .await
+                .map_err(|err| ServeError::Protocol(err.to_string()))?;
                 tracing::info!(
                     key_epoch = committed_epoch,
                     ack_timeout_ms = OPERATOR_REKEY_ACK_TIMEOUT.as_millis() as u64,
