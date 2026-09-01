@@ -1,0 +1,14 @@
+[package]
+name = "xenia-operation-authority-retention-gcs-live-qualification"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Fail-closed safety contract for disposable live GCS authority-retention qualification"
+
+[workspace]
+
+[dependencies]
+thiserror = "2"
