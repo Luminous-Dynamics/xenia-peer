@@ -16,6 +16,7 @@ on:
       - "apps/xenia-peer/src/operator_channel_metrics.rs"
       - "crates/xenia-peer-core/src/transport.rs"
       - "docs/security/OPERATOR_REKEY_INVARIANTS_V1.json"
+      - "scripts/check_operator_rekey_state_model.py"
       - ".github/workflows/operator-rekey-initiator.yml"
   workflow_dispatch:
 
@@ -71,12 +72,26 @@ jobs:
           assert ids == [f"ORI-{index:03d}" for index in range(1, len(ids) + 1)], (
               "operator-rekey invariant IDs must stay contiguous and reviewable"
           )
+          invariant_ids = set(ids)
+
+          models = {}
+          for model in data.get("independent_models", []):
+              model_id = model["id"]
+              assert model_id not in models, f"duplicate independent model id: {model_id}"
+              assert Path(model["source"]).exists(), f"missing model source: {model['source']}"
+              assert model["report_schema"].strip(), f"{model_id} missing report schema"
+              assert model["bounded_max_depth"] > 0, f"{model_id} has invalid depth"
+              supports = model["supports"]
+              assert supports, f"{model_id} supports no invariants"
+              assert set(supports) <= invariant_ids, f"{model_id} references unknown invariant"
+              models[model_id] = model
 
           allowed = {"pending_hosted_execution", "blocked_on_final_wire_lineage"}
           rust_source = "\n".join(
               path.read_text(errors="replace")
               for path in Path("apps/xenia-peer/src").rglob("*.rs")
           )
+          referenced_models = set()
           for entry in invariants:
               assert entry["property"].strip(), f"{entry['id']} missing property"
               assert entry["source"].strip(), f"{entry['id']} missing source"
@@ -93,6 +108,14 @@ jobs:
                   if selector.startswith("future:"):
                       assert entry["qualification"] == "blocked_on_final_wire_lineage"
                       continue
+                  if selector.startswith("model:"):
+                      model_id = selector.split(":", 1)[1]
+                      assert model_id in models, f"{entry['id']} references unknown model {model_id}"
+                      assert entry["id"] in models[model_id]["supports"], (
+                          f"{model_id} does not declare support for {entry['id']}"
+                      )
+                      referenced_models.add(model_id)
+                      continue
                   terminal = selector.rsplit("::", 1)[-1]
                   if terminal == "tests":
                       continue
@@ -100,7 +123,32 @@ jobs:
                       f"{entry['id']} evidence selector has no matching Rust test: {selector}"
                   )
 
-          print(f"validated {len(invariants)} operator-rekey invariants")
+          assert referenced_models == set(models), "declared independent model is not evidence-bound"
+          print(
+              f"validated {len(invariants)} operator-rekey invariants and "
+              f"{len(models)} independent model(s)"
+          )
+
+      - name: Run independent bounded state model
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/qualification"
+          python3 scripts/check_operator_rekey_state_model.py \
+            --max-depth 9 \
+            --json-out "$RUNNER_TEMP/qualification/OPERATOR_REKEY_STATE_MODEL.json"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          report = json.loads(
+              (Path(os.environ["RUNNER_TEMP"]) / "qualification" / "OPERATOR_REKEY_STATE_MODEL.json").read_text()
+          )
+          assert report["schema"] == "xenia.operator-rekey-state-model-report.v1"
+          assert report["max_depth"] == 9
+          assert report["checked_trace_prefixes"] > report["reachable_state_count"]
+          assert len(report["state_graph_sha256"]) == 64
+          PY
 
       # DeterminateSystems/nix-installer-action main as observed 2026-09-01,
       # pinned to an immutable verified commit rather than mutable @main.
@@ -108,13 +156,14 @@ jobs:
       # Swatinem/rust-cache v2.9.2 signed tag -> immutable commit.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
 
-      - name: Retain dependency, workflow, runner, and toolchain provenance
+      - name: Retain dependency, workflow, runner, model, and toolchain provenance
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/qualification"
           cp Cargo.lock "$RUNNER_TEMP/qualification/Cargo.lock"
           cp docs/security/OPERATOR_REKEY_INVARIANTS_V1.json "$RUNNER_TEMP/qualification/"
+          cp scripts/check_operator_rekey_state_model.py "$RUNNER_TEMP/qualification/"
           cp .github/workflows/operator-rekey-initiator.yml "$RUNNER_TEMP/qualification/"
           {
             echo "profile=xenia-operator-rekey-initiator-v1"
@@ -129,6 +178,8 @@ jobs:
             echo "cargo_lock_sha256=$(sha256sum Cargo.lock | awk '{print $1}')"
             echo "flake_lock_sha256=$(sha256sum flake.lock | awk '{print $1}')"
             echo "invariants_sha256=$(sha256sum docs/security/OPERATOR_REKEY_INVARIANTS_V1.json | awk '{print $1}')"
+            echo "state_model_source_sha256=$(sha256sum scripts/check_operator_rekey_state_model.py | awk '{print $1}')"
+            echo "state_model_report_sha256=$(sha256sum \"$RUNNER_TEMP/qualification/OPERATOR_REKEY_STATE_MODEL.json\" | awk '{print $1}')"
             echo "qualification_workflow_sha256=$(sha256sum .github/workflows/operator-rekey-initiator.yml | awk '{print $1}')"
             echo "actions_checkout_commit=11d5960a326750d5838078e36cf38b85af677262"
             echo "nix_installer_action_commit=33c9ab3ef95cd57c164d9d6eb1f9a46338538d41"
