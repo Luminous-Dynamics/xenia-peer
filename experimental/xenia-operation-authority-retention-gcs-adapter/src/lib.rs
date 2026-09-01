@@ -49,9 +49,9 @@ pub enum GcsListErrorClassV1 {
 /// `AlreadyExists`. Any future additional precondition requires a new classifier/schema.
 ///
 /// Serialization failure is rejectable because GAX documents it as a client-side failure before a
-/// request is made. Timeout, deserialization, retry exhaustion, transient/service failures, and all
-/// unrecognized cases remain `Unknown` because the object may have committed before the error was
-/// observed.
+/// request is made. Timeout, deserialization, retry exhaustion, transient/service failures, future
+/// status codes, and all unrecognized cases remain `Unknown` because the object may have committed
+/// before the error was observed.
 pub fn classify_generation_zero_create_error_v1(error: &GaxError) -> BackendCreateOutcomeV1 {
     if error.is_serialization() {
         return BackendCreateOutcomeV1::Rejected;
@@ -77,8 +77,9 @@ pub fn classify_generation_zero_create_error_v1(error: &GaxError) -> BackendCrea
             | Code::Aborted
             | Code::Internal
             | Code::Unavailable
-            | Code::DataLoss => BackendCreateOutcomeV1::Unknown,
-            Code::Ok => BackendCreateOutcomeV1::Unknown,
+            | Code::DataLoss
+            | Code::Ok => BackendCreateOutcomeV1::Unknown,
+            _ => BackendCreateOutcomeV1::Unknown,
         };
     }
 
@@ -100,7 +101,8 @@ pub fn classify_generation_zero_create_error_v1(error: &GaxError) -> BackendCrea
 /// Reads are non-mutating, so SDK retry/resume is allowed in a later transport layer. This function
 /// classifies only the final unresolved error. A service `NotFound`/HTTP 404 is authoritative
 /// absence. Client serialization or definite auth/request rejection is `Rejected`; timeout,
-/// deserialization, retry exhaustion, transient/server status, and unrecognized cases are `Unknown`.
+/// deserialization, retry exhaustion, transient/server status, future codes, and unrecognized cases
+/// are `Unknown`.
 pub fn classify_exact_read_error_v1(error: &GaxError) -> GcsReadErrorClassV1 {
     if error.is_serialization() {
         return GcsReadErrorClassV1::Rejected;
@@ -128,6 +130,7 @@ pub fn classify_exact_read_error_v1(error: &GaxError) -> GcsReadErrorClassV1 {
             | Code::Unavailable
             | Code::DataLoss
             | Code::Ok => GcsReadErrorClassV1::Unknown,
+            _ => GcsReadErrorClassV1::Unknown,
         };
     }
 
@@ -145,8 +148,8 @@ pub fn classify_exact_read_error_v1(error: &GaxError) -> GcsReadErrorClassV1 {
 /// Classify one failed object-list request/page.
 ///
 /// ADR-028 requires a complete authoritative enumeration. Any transient, timeout, deserialization,
-/// retry-exhaustion, server, or unrecognized failure therefore maps to `Unknown`; a later list
-/// transport must never return `Complete` after one page in a multi-page listing failed.
+/// retry-exhaustion, server, future, or unrecognized failure therefore maps to `Unknown`; a later
+/// list transport must never return `Complete` after one page in a multi-page listing failed.
 pub fn classify_complete_list_error_v1(error: &GaxError) -> GcsListErrorClassV1 {
     if error.is_serialization() {
         return GcsListErrorClassV1::Rejected;
@@ -174,6 +177,7 @@ pub fn classify_complete_list_error_v1(error: &GaxError) -> GcsListErrorClassV1 
             | Code::Unavailable
             | Code::DataLoss
             | Code::Ok => GcsListErrorClassV1::Unknown,
+            _ => GcsListErrorClassV1::Unknown,
         };
     }
 
