@@ -20,6 +20,7 @@ live-gcs-network = [
 ]
 
 [dependencies]
+blake3 = "1"
 thiserror = "2"
 xenia-operation-authority-retention-gcs-live-qualification = { path = "../xenia-operation-authority-retention-gcs-live-qualification" }
 google-cloud-storage = { version = "=1.18.0", default-features = false, features = ["default-rustls-provider"], optional = true }
