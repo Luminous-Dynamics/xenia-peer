@@ -1,0 +1,110 @@
+name: Operation Authority Retention Namespace Gate V1
+
+on:
+  pull_request:
+    paths:
+      - "crates/xenia-ledger/**"
+      - "contracts/xenia-operation-authority-epoch/**"
+      - "contracts/xenia-operation-store-frontier/**"
+      - "contracts/xenia-operation-frontier-ledger-witness/**"
+      - "experimental/xenia-operation-frontier-ledger-adapter/**"
+      - "experimental/xenia-operation-frontier-retention-bundle/**"
+      - "experimental/xenia-operation-frontier-governed-transition/**"
+      - "experimental/xenia-operation-global-revocation-transition/**"
+      - "experimental/xenia-operation-authority-retention-lineage-v2/**"
+      - "experimental/xenia-operation-authority-retention-backend/**"
+      - "experimental/xenia-operation-authority-retention-namespace-gate/**"
+      - "docs/ADR-028-operation-authority-retention-backend-contract.md"
+      - "docs/ADR-029-operation-authority-retention-namespace-trust.md"
+      - ".github/workflows/operation-authority-retention-namespace-gate-v1.yml"
+  push:
+    branches:
+      - "feat/operation-authority-retention-namespace-gate-v1"
+      - main
+    paths:
+      - "crates/xenia-ledger/**"
+      - "contracts/xenia-operation-authority-epoch/**"
+      - "contracts/xenia-operation-store-frontier/**"
+      - "contracts/xenia-operation-frontier-ledger-witness/**"
+      - "experimental/xenia-operation-frontier-ledger-adapter/**"
+      - "experimental/xenia-operation-frontier-retention-bundle/**"
+      - "experimental/xenia-operation-frontier-governed-transition/**"
+      - "experimental/xenia-operation-global-revocation-transition/**"
+      - "experimental/xenia-operation-authority-retention-lineage-v2/**"
+      - "experimental/xenia-operation-authority-retention-backend/**"
+      - "experimental/xenia-operation-authority-retention-namespace-gate/**"
+      - "docs/ADR-028-operation-authority-retention-backend-contract.md"
+      - "docs/ADR-029-operation-authority-retention-namespace-trust.md"
+      - ".github/workflows/operation-authority-retention-namespace-gate-v1.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  namespace-gate:
+    name: External Namespace Trust Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt,clippy
+      - name: Resolve standalone lock
+        working-directory: experimental/xenia-operation-authority-retention-namespace-gate
+        run: cargo generate-lockfile
+      - name: Record qualification environment and dependency topology
+        shell: bash
+        run: |
+          set -euo pipefail
+          EVIDENCE="$RUNNER_TEMP/authority-retention-namespace-gate-v1-evidence"
+          mkdir -p "$EVIDENCE"
+          {
+            echo "GITHUB_SHA=$GITHUB_SHA"
+            echo "GITHUB_REF=$GITHUB_REF"
+            rustc -Vv
+            cargo -Vv
+            uname -a
+          } > "$EVIDENCE/environment.txt"
+          cargo tree --manifest-path experimental/xenia-operation-authority-retention-namespace-gate/Cargo.toml \
+            > "$EVIDENCE/cargo-tree.txt"
+          sha256sum experimental/xenia-operation-authority-retention-namespace-gate/Cargo.lock \
+            > "$EVIDENCE/Cargo.lock.sha256"
+          sha256sum \
+            experimental/xenia-operation-authority-retention-namespace-gate/Cargo.toml \
+            experimental/xenia-operation-authority-retention-namespace-gate/src/lib.rs \
+            experimental/xenia-operation-authority-retention-namespace-gate/tests/namespace_gate.rs \
+            docs/ADR-029-operation-authority-retention-namespace-trust.md \
+            > "$EVIDENCE/source.sha256"
+      - name: Format
+        run: cargo fmt --manifest-path experimental/xenia-operation-authority-retention-namespace-gate/Cargo.toml -- --check
+      - name: Test authority-owned namespace gate
+        run: cargo test --manifest-path experimental/xenia-operation-authority-retention-namespace-gate/Cargo.toml --locked
+      - name: Strict Clippy
+        run: cargo clippy --manifest-path experimental/xenia-operation-authority-retention-namespace-gate/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Upload namespace-gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: authority-retention-namespace-gate-v1-${{ github.sha }}
+          path: ${{ runner.temp }}/authority-retention-namespace-gate-v1-evidence
+          if-no-files-found: warn
+          retention-days: 30
+
+  msrv:
+    name: Namespace Gate MSRV Rust 1.94
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - name: Resolve standalone lock
+        working-directory: experimental/xenia-operation-authority-retention-namespace-gate
+        run: cargo generate-lockfile
+      - name: Check complete dependency stack
+        run: cargo check --manifest-path experimental/xenia-operation-authority-retention-namespace-gate/Cargo.toml --locked --all-targets
+      - name: Test namespace gate at MSRV
+        run: cargo test --manifest-path experimental/xenia-operation-authority-retention-namespace-gate/Cargo.toml --locked
