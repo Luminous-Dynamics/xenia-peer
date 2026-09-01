@@ -8,11 +8,18 @@
 //! can't complete the PQC handshake — is a security signal a defender wants to
 //! see and alert on, not just a debug log line.
 //!
+//! Authenticated post-handshake protocol failures are tracked separately from
+//! handshake failures. They mean a peer already passed identity/channel
+//! establishment and then violated or failed the live sealed-channel protocol
+//! (for example rekey timeout, wrong nonce domain, old-key Ack, or unexpected
+//! authority traffic during a pending rekey). Mixing these with unauthenticated
+//! handshake noise would hide a materially different operational signal.
+//!
 //! These counters are process-lifetime totals, incremented as
 //! [`crate::operator_sealed_channel::run_sealed_operator_endpoint`] handles each
 //! connection. A rejection also emits a structured `tracing::warn!` carrying the
-//! running total, so a log pipeline (journald → SIEM) can alert on a spike in
-//! `not_enrolled` or `handshake_failure` events without scraping a metrics port.
+//! running total, so a log pipeline (journald → SIEM) can alert on spikes without
+//! scraping a metrics port.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -25,6 +32,7 @@ pub(crate) struct OperatorChannelMetrics {
     not_enrolled_rejections: AtomicU64,
     revoked_rejections: AtomicU64,
     channels_established: AtomicU64,
+    post_handshake_protocol_failures: AtomicU64,
     terminal_decisions: AtomicU64,
 }
 
@@ -46,6 +54,9 @@ pub(crate) struct OperatorChannelMetricsSnapshot {
     pub revoked_rejections: u64,
     /// Handshakes that authenticated an enrolled operator and opened a channel.
     pub channels_established: u64,
+    /// Authenticated channels that later failed the sealed-channel protocol and
+    /// were torn down fail-closed. This intentionally excludes handshake errors.
+    pub post_handshake_protocol_failures: u64,
     /// Channels ended by a terminal (Deny/Revoke) decision.
     pub terminal_decisions: u64,
 }
@@ -77,6 +88,14 @@ impl OperatorChannelMetrics {
         self.channels_established.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record an authenticated post-handshake sealed-channel protocol failure;
+    /// returns the new running total for structured security logs/alerts.
+    pub(crate) fn record_protocol_failure(&self) -> u64 {
+        self.post_handshake_protocol_failures
+            .fetch_add(1, Ordering::Relaxed)
+            + 1
+    }
+
     /// Record a terminal (Deny/Revoke) decision that ended the endpoint.
     pub(crate) fn record_terminal(&self) {
         self.terminal_decisions.fetch_add(1, Ordering::Relaxed);
@@ -92,6 +111,9 @@ impl OperatorChannelMetrics {
             not_enrolled_rejections: self.not_enrolled_rejections.load(Ordering::Relaxed),
             revoked_rejections: self.revoked_rejections.load(Ordering::Relaxed),
             channels_established: self.channels_established.load(Ordering::Relaxed),
+            post_handshake_protocol_failures: self
+                .post_handshake_protocol_failures
+                .load(Ordering::Relaxed),
             terminal_decisions: self.terminal_decisions.load(Ordering::Relaxed),
         }
     }
@@ -112,6 +134,7 @@ mod tests {
                 not_enrolled_rejections: 0,
                 revoked_rejections: 0,
                 channels_established: 0,
+                post_handshake_protocol_failures: 0,
                 terminal_decisions: 0,
             }
         );
@@ -123,6 +146,7 @@ mod tests {
         assert_eq!(m.record_handshake_failure(), 1);
         assert_eq!(m.record_revoked(), 1);
         m.record_established();
+        assert_eq!(m.record_protocol_failure(), 1);
         m.record_terminal();
 
         let s = m.snapshot();
@@ -131,14 +155,26 @@ mod tests {
         assert_eq!(s.handshake_failures, 1);
         assert_eq!(s.revoked_rejections, 1);
         assert_eq!(s.channels_established, 1);
+        assert_eq!(s.post_handshake_protocol_failures, 1);
         assert_eq!(s.terminal_decisions, 1);
+    }
+
+    #[test]
+    fn protocol_failures_do_not_alias_handshake_failures() {
+        let m = OperatorChannelMetrics::default();
+        assert_eq!(m.record_protocol_failure(), 1);
+        let s = m.snapshot();
+        assert_eq!(s.post_handshake_protocol_failures, 1);
+        assert_eq!(s.handshake_failures, 0);
     }
 
     #[test]
     fn snapshot_serializes_to_json() {
         let m = OperatorChannelMetrics::default();
         m.record_not_enrolled();
+        m.record_protocol_failure();
         let json = serde_json::to_string(&m.snapshot()).unwrap();
         assert!(json.contains("\"not_enrolled_rejections\":1"));
+        assert!(json.contains("\"post_handshake_protocol_failures\":1"));
     }
 }
