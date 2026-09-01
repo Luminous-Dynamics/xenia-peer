@@ -1,0 +1,95 @@
+name: Operation Authority Retention GCS Readback V1
+
+on:
+  pull_request:
+    paths:
+      - "experimental/xenia-operation-authority-retention-backend/**"
+      - "experimental/xenia-operation-authority-retention-gcs-profile/**"
+      - "experimental/xenia-operation-authority-retention-gcs-adapter/**"
+      - "experimental/xenia-operation-authority-retention-gcs-create-transport/**"
+      - "experimental/xenia-operation-authority-retention-gcs-readback-transport/**"
+      - "docs/ADR-028-operation-authority-retention-backend.md"
+      - "docs/ADR-029-operation-authority-retention-namespace-gate.md"
+      - "docs/ADR-030-gcs-operation-authority-retention-profile.md"
+      - "docs/ADR-031-gcs-authority-retention-sdk-adapter.md"
+      - "docs/ADR-032-gcs-authority-retention-single-shot-create.md"
+      - "docs/ADR-033-gcs-authority-retention-readback.md"
+      - ".github/workflows/operation-authority-retention-gcs-readback-v1.yml"
+  push:
+    branches:
+      - "feat/operation-authority-retention-gcs-readback-transport-v1"
+    paths:
+      - "experimental/xenia-operation-authority-retention-gcs-readback-transport/**"
+      - "docs/ADR-033-gcs-authority-retention-readback.md"
+      - ".github/workflows/operation-authority-retention-gcs-readback-v1.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  readback:
+    name: Exact Read + Complete Enumeration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt,clippy
+      - name: Resolve standalone lock
+        working-directory: experimental/xenia-operation-authority-retention-gcs-readback-transport
+        run: cargo generate-lockfile
+      - name: Assert exact Google SDK lineage
+        working-directory: experimental/xenia-operation-authority-retention-gcs-readback-transport
+        run: |
+          test "$(cargo tree -p google-cloud-storage --depth 0 | head -n1)" = "google-cloud-storage v1.18.0"
+          test "$(cargo tree -p google-cloud-gax --depth 0 | head -n1)" = "google-cloud-gax v1.14.0"
+      - name: Assert readback source contract
+        run: |
+          SRC=experimental/xenia-operation-authority-retention-gcs-readback-transport/src/lib.rs
+          grep -F 'while let Some(chunk) = response.next().await' "$SRC"
+          grep -F 'while let Some(item) = items.next().await' "$SRC"
+          grep -F '.set_versions(false)' "$SRC"
+          grep -F 'GCS_AUTHORITY_CREATE_MAX_BYTES_V1' "$SRC"
+          grep -F 'parse_sequence_from_object_name_v1' "$SRC"
+      - name: Record dependency topology
+        working-directory: experimental/xenia-operation-authority-retention-gcs-readback-transport
+        run: cargo tree | tee /tmp/gcs-readback-cargo-tree.txt
+      - name: Format
+        run: cargo fmt --manifest-path experimental/xenia-operation-authority-retention-gcs-readback-transport/Cargo.toml -- --check
+      - name: Test exact readback semantics
+        run: cargo test --manifest-path experimental/xenia-operation-authority-retention-gcs-readback-transport/Cargo.toml --locked
+      - name: Strict Clippy
+        run: cargo clippy --manifest-path experimental/xenia-operation-authority-retention-gcs-readback-transport/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Capture qualification evidence
+        if: always()
+        run: |
+          mkdir -p /tmp/gcs-readback-evidence
+          rustc -Vv > /tmp/gcs-readback-evidence/RUSTC.txt
+          cargo -V > /tmp/gcs-readback-evidence/CARGO.txt
+          sha256sum experimental/xenia-operation-authority-retention-gcs-readback-transport/Cargo.lock > /tmp/gcs-readback-evidence/CARGO_LOCK_SHA256.txt
+          sha256sum experimental/xenia-operation-authority-retention-gcs-readback-transport/src/lib.rs > /tmp/gcs-readback-evidence/SOURCE_SHA256.txt
+          sha256sum experimental/xenia-operation-authority-retention-gcs-readback-transport/tests/duplicate_listing.rs > /tmp/gcs-readback-evidence/INTEGRATION_TEST_SHA256.txt
+          sha256sum docs/ADR-033-gcs-authority-retention-readback.md > /tmp/gcs-readback-evidence/ADR_SHA256.txt
+          cp /tmp/gcs-readback-cargo-tree.txt /tmp/gcs-readback-evidence/CARGO_TREE.txt || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: operation-authority-retention-gcs-readback-v1-evidence
+          path: /tmp/gcs-readback-evidence
+
+  msrv:
+    name: GCS Readback MSRV Rust 1.94
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - name: Resolve standalone lock
+        working-directory: experimental/xenia-operation-authority-retention-gcs-readback-transport
+        run: cargo generate-lockfile
+      - name: Check complete readback stack
+        run: cargo check --manifest-path experimental/xenia-operation-authority-retention-gcs-readback-transport/Cargo.toml --locked --all-targets
