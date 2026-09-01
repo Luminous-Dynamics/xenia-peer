@@ -1,0 +1,17 @@
+[package]
+name = "xenia-operation-authority-retention-gcs-live-activation"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Fail-closed activation-readiness contract for Xenia live GCS qualification"
+
+[workspace]
+
+[dependencies]
+bincode = "1.3"
+blake3 = "1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
