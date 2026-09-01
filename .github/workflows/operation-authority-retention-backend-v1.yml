@@ -1,0 +1,106 @@
+name: Operation Authority Retention Backend V1
+
+on:
+  pull_request:
+    paths:
+      - "crates/xenia-ledger/**"
+      - "contracts/xenia-operation-authority-epoch/**"
+      - "contracts/xenia-operation-store-frontier/**"
+      - "contracts/xenia-operation-frontier-ledger-witness/**"
+      - "experimental/xenia-operation-frontier-ledger-adapter/**"
+      - "experimental/xenia-operation-frontier-retention-bundle/**"
+      - "experimental/xenia-operation-frontier-governed-transition/**"
+      - "experimental/xenia-operation-global-revocation-transition/**"
+      - "experimental/xenia-operation-authority-retention-lineage-v2/**"
+      - "experimental/xenia-operation-authority-retention-backend/**"
+      - "docs/ADR-028-operation-authority-retention-backend-contract.md"
+      - ".github/workflows/operation-authority-retention-backend-v1.yml"
+  push:
+    branches:
+      - "feat/operation-authority-retention-backend-v1"
+      - main
+    paths:
+      - "crates/xenia-ledger/**"
+      - "contracts/xenia-operation-authority-epoch/**"
+      - "contracts/xenia-operation-store-frontier/**"
+      - "contracts/xenia-operation-frontier-ledger-witness/**"
+      - "experimental/xenia-operation-frontier-ledger-adapter/**"
+      - "experimental/xenia-operation-frontier-retention-bundle/**"
+      - "experimental/xenia-operation-frontier-governed-transition/**"
+      - "experimental/xenia-operation-global-revocation-transition/**"
+      - "experimental/xenia-operation-authority-retention-lineage-v2/**"
+      - "experimental/xenia-operation-authority-retention-backend/**"
+      - "docs/ADR-028-operation-authority-retention-backend-contract.md"
+      - ".github/workflows/operation-authority-retention-backend-v1.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-contract:
+    name: Immutable Backend Contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt,clippy
+      - name: Resolve standalone lock
+        working-directory: experimental/xenia-operation-authority-retention-backend
+        run: cargo generate-lockfile
+      - name: Record qualification environment and dependency topology
+        shell: bash
+        run: |
+          set -euo pipefail
+          EVIDENCE="$RUNNER_TEMP/authority-retention-backend-v1-evidence"
+          mkdir -p "$EVIDENCE"
+          {
+            echo "GITHUB_SHA=$GITHUB_SHA"
+            echo "GITHUB_REF=$GITHUB_REF"
+            rustc -Vv
+            cargo -Vv
+            uname -a
+          } > "$EVIDENCE/environment.txt"
+          cargo tree --manifest-path experimental/xenia-operation-authority-retention-backend/Cargo.toml \
+            > "$EVIDENCE/cargo-tree.txt"
+          sha256sum experimental/xenia-operation-authority-retention-backend/Cargo.lock \
+            > "$EVIDENCE/Cargo.lock.sha256"
+          sha256sum \
+            experimental/xenia-operation-authority-retention-backend/Cargo.toml \
+            experimental/xenia-operation-authority-retention-backend/src/lib.rs \
+            experimental/xenia-operation-authority-retention-backend/tests/backend_conformance.rs \
+            docs/ADR-028-operation-authority-retention-backend-contract.md \
+            > "$EVIDENCE/source.sha256"
+      - name: Format
+        run: cargo fmt --manifest-path experimental/xenia-operation-authority-retention-backend/Cargo.toml -- --check
+      - name: Test provider-neutral fault model
+        run: cargo test --manifest-path experimental/xenia-operation-authority-retention-backend/Cargo.toml --locked
+      - name: Strict Clippy
+        run: cargo clippy --manifest-path experimental/xenia-operation-authority-retention-backend/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Upload backend-contract evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: authority-retention-backend-v1-${{ github.sha }}
+          path: ${{ runner.temp }}/authority-retention-backend-v1-evidence
+          if-no-files-found: warn
+          retention-days: 30
+
+  msrv:
+    name: Retention Backend MSRV Rust 1.94
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - name: Resolve standalone lock
+        working-directory: experimental/xenia-operation-authority-retention-backend
+        run: cargo generate-lockfile
+      - name: Check complete dependency stack
+        run: cargo check --manifest-path experimental/xenia-operation-authority-retention-backend/Cargo.toml --locked --all-targets
+      - name: Test backend contract at MSRV
+        run: cargo test --manifest-path experimental/xenia-operation-authority-retention-backend/Cargo.toml --locked
