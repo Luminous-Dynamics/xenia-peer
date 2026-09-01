@@ -35,7 +35,7 @@ env:
 jobs:
   exact-source-transaction:
     name: Exact source transport transaction
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       # actions/checkout v4, pinned so exact-head qualification cannot silently
       # change behavior while the Xenia source commit remains identical.
@@ -108,7 +108,7 @@ jobs:
       # Swatinem/rust-cache v2.9.2 signed tag -> immutable commit.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
 
-      - name: Retain dependency, workflow, and source provenance
+      - name: Retain dependency, workflow, runner, and toolchain provenance
         shell: bash
         run: |
           set -euo pipefail
@@ -120,6 +120,12 @@ jobs:
             echo "profile=xenia-operator-rekey-initiator-v1"
             echo "source_head=$(git rev-parse HEAD)"
             echo "source_tree=$(git rev-parse HEAD^{tree})"
+            echo "runner_label=ubuntu-24.04"
+            echo "runner_os=${RUNNER_OS:-unknown}"
+            echo "runner_arch=${RUNNER_ARCH:-unknown}"
+            echo "image_os=${ImageOS:-unknown}"
+            echo "image_version=${ImageVersion:-unknown}"
+            echo "kernel=$(uname -srmo)"
             echo "cargo_lock_sha256=$(sha256sum Cargo.lock | awk '{print $1}')"
             echo "flake_lock_sha256=$(sha256sum flake.lock | awk '{print $1}')"
             echo "invariants_sha256=$(sha256sum docs/security/OPERATOR_REKEY_INVARIANTS_V1.json | awk '{print $1}')"
@@ -129,7 +135,14 @@ jobs:
             echo "rust_cache_action_commit=6323deb102c322ba6fcbdcafc7e3dddab59af2b6"
             echo "upload_artifact_action_commit=ea165f8d65b6e75b540449e92b4886f43607fa02"
             echo "rust_toolchain_action_commit=6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772"
+            echo "--- host os-release ---"
+            cat /etc/os-release
+            echo "--- nix ---"
             nix --version
+            echo "--- nix ci rustc ---"
+            nix develop .#ci --command rustc -vV
+            echo "--- nix ci cargo ---"
+            nix develop .#ci --command cargo -Vv
           } > "$RUNNER_TEMP/qualification/PROVENANCE.txt"
           cat "$RUNNER_TEMP/qualification/PROVENANCE.txt"
 
@@ -174,7 +187,7 @@ jobs:
 
   msrv:
     name: Rust 1.94 daemon boundary
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -185,4 +198,8 @@ jobs:
         with:
           toolchain: "1.94"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - name: Record MSRV toolchain
+        run: |
+          rustc -vV
+          cargo -Vv
       - run: cargo check --locked -p xenia-peer --all-targets
