@@ -1,0 +1,15 @@
+[package]
+name = "xenia-negotiation-codec"
+version = "0.0.0-m0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz <<maintainer-email>>"]
+license = "Apache-2.0 OR MIT"
+description = "Bounded canonical byte codec for untrusted Xenia capability negotiation messages"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+homepage = "https://github.com/Luminous-Dynamics/xenia-peer"
+publish = false
+
+[dependencies]
+thiserror = "1"
+xenia-negotiation = { path = "../xenia-negotiation" }
