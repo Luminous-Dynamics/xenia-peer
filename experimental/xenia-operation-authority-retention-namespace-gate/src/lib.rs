@@ -173,6 +173,18 @@ pub fn verify_authority_retention_namespace_v1<T: AuthorityRetentionNamespaceTru
     })
 }
 
+/// Consume one freshly verified namespace for an immediate asynchronous provider composition.
+///
+/// The token cannot be recovered after this call. Liveness is rechecked at the exact operation
+/// boundary before the authenticated namespace bytes are released to the composing layer.
+pub fn consume_verified_namespace_v1(
+    verified_namespace: VerifiedAuthorityRetentionNamespaceV1,
+    now_unix_ms: u64,
+) -> Result<AuthorityRetentionNamespaceV1, NamespaceGateErrorV1> {
+    verified_namespace.validate_live(now_unix_ms)?;
+    Ok(verified_namespace.namespace)
+}
+
 /// Append one ADR-027 record using a freshly verified namespace token.
 ///
 /// The token is consumed even if the provider later rejects or returns an ambiguous outcome.
