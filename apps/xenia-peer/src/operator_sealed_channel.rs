@@ -341,12 +341,15 @@ pub(crate) async fn run_sealed_operator_endpoint(
             }
             Err(ServeError::Protocol(err)) => {
                 // This connection necessarily passed the authenticated channel
-                // establishment step; record that fact even though the protocol
-                // later failed closed.
+                // establishment step. Keep this signal distinct from handshake
+                // failures: it means an authenticated operator channel later
+                // violated or failed the sealed live protocol.
                 metrics.record_established();
+                let total = metrics.record_protocol_failure();
                 tracing::warn!(
                     error = %err,
                     peer = %peer,
+                    post_handshake_protocol_failures_total = total,
                     "authenticated sealed operator channel failed closed; fresh handshake required"
                 );
                 continue 'accept;
@@ -361,6 +364,7 @@ pub(crate) async fn run_sealed_operator_endpoint(
         not_enrolled_rejections = s.not_enrolled_rejections,
         revoked_rejections = s.revoked_rejections,
         channels_established = s.channels_established,
+        post_handshake_protocol_failures = s.post_handshake_protocol_failures,
         terminal_decisions = s.terminal_decisions,
         "sealed operator endpoint closed"
     );
