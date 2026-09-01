@@ -1,0 +1,87 @@
+name: Operation Authority Retention GCS Live Safety V1
+
+on:
+  pull_request:
+    paths:
+      - "experimental/xenia-operation-authority-retention-gcs-live-qualification/**"
+      - "docs/ADR-035-gcs-live-authority-retention-qualification-safety.md"
+      - ".github/workflows/operation-authority-retention-gcs-live-safety-v1.yml"
+  push:
+    branches:
+      - "feat/operation-authority-retention-gcs-live-qualification-v1"
+    paths:
+      - "experimental/xenia-operation-authority-retention-gcs-live-qualification/**"
+      - "docs/ADR-035-gcs-live-authority-retention-qualification-safety.md"
+      - ".github/workflows/operation-authority-retention-gcs-live-safety-v1.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  safety:
+    name: Disposable cloud arming contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt,clippy
+      - name: Resolve standalone lock
+        working-directory: experimental/xenia-operation-authority-retention-gcs-live-qualification
+        run: cargo generate-lockfile
+      - name: Assert cloud-free safety crate
+        run: |
+          MANIFEST=experimental/xenia-operation-authority-retention-gcs-live-qualification/Cargo.toml
+          ! grep -F 'google-cloud-' "$MANIFEST"
+          ! grep -F 'reqwest' "$MANIFEST"
+      - name: Assert safety source contract
+        run: |
+          SRC=experimental/xenia-operation-authority-retention-gcs-live-qualification/src/lib.rs
+          grep -F 'DISPOSABLE_QUALIFICATION_ONLY' "$SRC"
+          grep -F 'xenia-ar-qual-' "$SRC"
+          grep -F 'I_ACCEPT_DISPOSABLE_GCS_QUALIFICATION' "$SRC"
+          grep -F 'I_ACCEPT_IRREVERSIBLE_BUCKET_LOCK' "$SRC"
+          grep -F 'GCS_LIVE_QUALIFICATION_MAX_RETENTION_SECONDS_V1: u64 = 300' "$SRC"
+          grep -F 'runtime_principal_digest == admin_principal_digest' "$SRC"
+          grep -F 'soft_delete_disabled: true' "$SRC"
+      - name: Record dependency topology
+        working-directory: experimental/xenia-operation-authority-retention-gcs-live-qualification
+        run: cargo tree | tee /tmp/gcs-live-safety-cargo-tree.txt
+      - name: Format
+        run: cargo fmt --manifest-path experimental/xenia-operation-authority-retention-gcs-live-qualification/Cargo.toml -- --check
+      - name: Test fail-closed arming
+        run: cargo test --manifest-path experimental/xenia-operation-authority-retention-gcs-live-qualification/Cargo.toml --locked
+      - name: Strict Clippy
+        run: cargo clippy --manifest-path experimental/xenia-operation-authority-retention-gcs-live-qualification/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Capture qualification evidence
+        if: always()
+        run: |
+          mkdir -p /tmp/gcs-live-safety-evidence
+          rustc -Vv > /tmp/gcs-live-safety-evidence/RUSTC.txt
+          cargo -V > /tmp/gcs-live-safety-evidence/CARGO.txt
+          sha256sum experimental/xenia-operation-authority-retention-gcs-live-qualification/Cargo.lock > /tmp/gcs-live-safety-evidence/CARGO_LOCK_SHA256.txt
+          sha256sum experimental/xenia-operation-authority-retention-gcs-live-qualification/src/lib.rs > /tmp/gcs-live-safety-evidence/SOURCE_SHA256.txt
+          sha256sum docs/ADR-035-gcs-live-authority-retention-qualification-safety.md > /tmp/gcs-live-safety-evidence/ADR_SHA256.txt
+          cp /tmp/gcs-live-safety-cargo-tree.txt /tmp/gcs-live-safety-evidence/CARGO_TREE.txt || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: operation-authority-retention-gcs-live-safety-v1-evidence
+          path: /tmp/gcs-live-safety-evidence
+
+  msrv:
+    name: GCS Live Safety MSRV Rust 1.94
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - name: Resolve standalone lock
+        working-directory: experimental/xenia-operation-authority-retention-gcs-live-qualification
+        run: cargo generate-lockfile
+      - name: Check safety contract
+        run: cargo check --manifest-path experimental/xenia-operation-authority-retention-gcs-live-qualification/Cargo.toml --locked --all-targets
