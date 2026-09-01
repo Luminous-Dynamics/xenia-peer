@@ -37,7 +37,9 @@ jobs:
     name: Exact source transport transaction
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout v4, pinned so exact-head qualification cannot silently
+      # change behavior while the Xenia source commit remains identical.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ env.QUALIFICATION_SOURCE_SHA }}
           fetch-depth: 0
@@ -100,16 +102,20 @@ jobs:
 
           print(f"validated {len(invariants)} operator-rekey invariants")
 
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: Swatinem/rust-cache@v2
+      # DeterminateSystems/nix-installer-action main as observed 2026-09-01,
+      # pinned to an immutable verified commit rather than mutable @main.
+      - uses: DeterminateSystems/nix-installer-action@33c9ab3ef95cd57c164d9d6eb1f9a46338538d41
+      # Swatinem/rust-cache v2.9.2 signed tag -> immutable commit.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
 
-      - name: Retain dependency and source provenance
+      - name: Retain dependency, workflow, and source provenance
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/qualification"
           cp Cargo.lock "$RUNNER_TEMP/qualification/Cargo.lock"
           cp docs/security/OPERATOR_REKEY_INVARIANTS_V1.json "$RUNNER_TEMP/qualification/"
+          cp .github/workflows/operator-rekey-initiator.yml "$RUNNER_TEMP/qualification/"
           {
             echo "profile=xenia-operator-rekey-initiator-v1"
             echo "source_head=$(git rev-parse HEAD)"
@@ -117,6 +123,13 @@ jobs:
             echo "cargo_lock_sha256=$(sha256sum Cargo.lock | awk '{print $1}')"
             echo "flake_lock_sha256=$(sha256sum flake.lock | awk '{print $1}')"
             echo "invariants_sha256=$(sha256sum docs/security/OPERATOR_REKEY_INVARIANTS_V1.json | awk '{print $1}')"
+            echo "qualification_workflow_sha256=$(sha256sum .github/workflows/operator-rekey-initiator.yml | awk '{print $1}')"
+            echo "actions_checkout_commit=11d5960a326750d5838078e36cf38b85af677262"
+            echo "nix_installer_action_commit=33c9ab3ef95cd57c164d9d6eb1f9a46338538d41"
+            echo "rust_cache_action_commit=6323deb102c322ba6fcbdcafc7e3dddab59af2b6"
+            echo "upload_artifact_action_commit=ea165f8d65b6e75b540449e92b4886f43607fa02"
+            echo "rust_toolchain_action_commit=6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772"
+            nix --version
           } > "$RUNNER_TEMP/qualification/PROVENANCE.txt"
           cat "$RUNNER_TEMP/qualification/PROVENANCE.txt"
 
@@ -151,7 +164,8 @@ jobs:
 
       - name: Retain qualification capsule
         if: always()
-        uses: actions/upload-artifact@v4
+        # actions/upload-artifact v4, immutable pin.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: operator-rekey-initiator-${{ env.QUALIFICATION_SOURCE_SHA }}
           path: ${{ runner.temp }}/qualification
@@ -162,10 +176,13 @@ jobs:
     name: Rust 1.94 daemon boundary
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ env.QUALIFICATION_SOURCE_SHA }}
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.94
-      - uses: Swatinem/rust-cache@v2
+      # Pin action implementation separately from the requested toolchain.
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: "1.94"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       - run: cargo check --locked -p xenia-peer --all-targets
