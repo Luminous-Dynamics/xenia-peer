@@ -33,7 +33,9 @@
 //! [`AccountabilityExecutionBinding`] and [`AccountabilityExecutionAttestation`]
 //! to bind a higher-layer access receipt to the authenticated session and
 //! current signed-ledger frontier without placing citizen/case identifiers in
-//! the Xenia ledger itself.
+//! the Xenia ledger itself. [`verify_accountability_execution_for_expectation`]
+//! then closes the adapter boundary by requiring the signed binding to match the
+//! exact higher-layer receipt/query/purpose/policy/result commitments.
 //!
 //! A downstream auditor — including a non-operator third party —
 //! can use [`Verifier::verify_chain`] to reconstruct every hash link
@@ -70,6 +72,7 @@
 #![deny(unsafe_code)]
 
 mod accountability;
+mod accountability_interop;
 mod archive;
 mod binding;
 mod chain;
@@ -98,6 +101,11 @@ pub use accountability::{
 #[cfg(feature = "pqc-signatures")]
 pub use accountability::{
     sign_accountability_execution_ml_dsa_65, sign_accountability_execution_ml_dsa_87,
+};
+pub use accountability_interop::{
+    AccountabilityExecutionExpectation, AccountabilityInteropError,
+    VerifiedAccountabilityExecutionRef, accountability_execution_scheme,
+    accountability_verifier_key_id, verify_accountability_execution_for_expectation,
 };
 
 pub use archive::{
