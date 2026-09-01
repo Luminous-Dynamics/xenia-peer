@@ -1,0 +1,26 @@
+[package]
+name = "xenia-operation-authority-retention-namespace-gate"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Authority-owned namespace trust gate for Xenia external operation-authority retention"
+
+[workspace]
+
+[dependencies]
+thiserror = "2"
+xenia-operation-authority-retention-backend = { path = "../xenia-operation-authority-retention-backend" }
+xenia-operation-authority-retention-lineage-v2 = { path = "../xenia-operation-authority-retention-lineage-v2" }
+
+[dev-dependencies]
+ed25519-dalek = "2"
+uuid = "1"
+xenia-ledger = { path = "../../crates/xenia-ledger" }
+xenia-operation-authority-epoch = { path = "../../contracts/xenia-operation-authority-epoch" }
+xenia-operation-frontier-governed-transition = { path = "../xenia-operation-frontier-governed-transition" }
+xenia-operation-frontier-ledger-witness = { path = "../../contracts/xenia-operation-frontier-ledger-witness" }
+xenia-operation-frontier-retention-bundle = { path = "../xenia-operation-frontier-retention-bundle" }
+xenia-operation-store-frontier = { path = "../../contracts/xenia-operation-store-frontier" }
