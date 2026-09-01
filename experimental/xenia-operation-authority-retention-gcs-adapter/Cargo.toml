@@ -1,0 +1,21 @@
+[package]
+name = "xenia-operation-authority-retention-gcs-adapter"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Conservative Google Cloud Storage SDK outcome adapter for Xenia authority retention"
+
+[workspace]
+
+[dependencies]
+google-cloud-gax = { version = "=1.14.0", default-features = false }
+google-cloud-storage = { version = "=1.18.0", default-features = false, features = ["default-rustls-provider"] }
+thiserror = "2"
+xenia-operation-authority-retention-backend = { path = "../xenia-operation-authority-retention-backend" }
+xenia-operation-authority-retention-gcs-profile = { path = "../xenia-operation-authority-retention-gcs-profile" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

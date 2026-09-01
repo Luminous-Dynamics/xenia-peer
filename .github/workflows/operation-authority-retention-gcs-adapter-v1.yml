@@ -1,0 +1,120 @@
+name: Operation Authority Retention GCS Adapter V1
+
+on:
+  pull_request:
+    paths:
+      - "experimental/xenia-operation-authority-retention-backend/**"
+      - "experimental/xenia-operation-authority-retention-gcs-profile/**"
+      - "experimental/xenia-operation-authority-retention-gcs-adapter/**"
+      - "docs/ADR-030-gcs-operation-authority-retention-profile.md"
+      - "docs/ADR-031-gcs-operation-authority-retention-sdk-adapter.md"
+      - ".github/workflows/operation-authority-retention-gcs-adapter-v1.yml"
+  push:
+    branches:
+      - "feat/operation-authority-retention-gcs-adapter-v1"
+      - main
+    paths:
+      - "experimental/xenia-operation-authority-retention-backend/**"
+      - "experimental/xenia-operation-authority-retention-gcs-profile/**"
+      - "experimental/xenia-operation-authority-retention-gcs-adapter/**"
+      - "docs/ADR-030-gcs-operation-authority-retention-profile.md"
+      - "docs/ADR-031-gcs-operation-authority-retention-sdk-adapter.md"
+      - ".github/workflows/operation-authority-retention-gcs-adapter-v1.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  classify:
+    name: Google SDK Outcome Classification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt,clippy
+      - name: Resolve exact standalone lock
+        working-directory: experimental/xenia-operation-authority-retention-gcs-adapter
+        run: cargo generate-lockfile
+      - name: Assert frozen Google dependency lineage
+        shell: bash
+        run: |
+          set -euo pipefail
+          LOCK=experimental/xenia-operation-authority-retention-gcs-adapter/Cargo.lock
+          python3 - "$LOCK" <<'PY'
+          import pathlib, sys, tomllib
+          data = tomllib.loads(pathlib.Path(sys.argv[1]).read_text())
+          versions = {(p['name'], p['version']) for p in data['package']}
+          required = {
+              ('google-cloud-storage', '1.18.0'),
+              ('google-cloud-gax', '1.14.0'),
+          }
+          missing = required - versions
+          if missing:
+              raise SystemExit(f"missing frozen Google dependency lineage: {sorted(missing)}")
+          print('frozen Google dependency lineage: OK')
+          PY
+      - name: Record classifier evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          EVIDENCE="$RUNNER_TEMP/gcs-authority-retention-adapter-v1-evidence"
+          mkdir -p "$EVIDENCE"
+          {
+            echo "GITHUB_SHA=$GITHUB_SHA"
+            echo "GITHUB_REF=$GITHUB_REF"
+            echo "STORAGE_SDK=google-cloud-storage@1.18.0"
+            echo "GAX=google-cloud-gax@1.14.0"
+            echo "NETWORK_TRAFFIC=none"
+            echo "CREATE_RETRY_PROFILE=NeverRetry-required-by-ADR-031-transport"
+            echo "CREATE_PRECONDITION=ifGenerationMatch=0-required-by-ADR-031-transport"
+            echo "CREATE_UPLOAD_PROFILE=single-shot<=1MiB-required-by-ADR-031-transport"
+            rustc -Vv
+            cargo -Vv
+            uname -a
+          } > "$EVIDENCE/profile.txt"
+          cargo tree --manifest-path experimental/xenia-operation-authority-retention-gcs-adapter/Cargo.toml \
+            > "$EVIDENCE/cargo-tree.txt"
+          cargo tree --manifest-path experimental/xenia-operation-authority-retention-gcs-adapter/Cargo.toml \
+            -p google-cloud-storage@1.18.0 > "$EVIDENCE/google-storage-tree.txt"
+          sha256sum experimental/xenia-operation-authority-retention-gcs-adapter/Cargo.lock \
+            > "$EVIDENCE/Cargo.lock.sha256"
+          sha256sum \
+            experimental/xenia-operation-authority-retention-gcs-adapter/Cargo.toml \
+            experimental/xenia-operation-authority-retention-gcs-adapter/src/lib.rs \
+            experimental/xenia-operation-authority-retention-gcs-adapter/tests/error_classification.rs \
+            docs/ADR-031-gcs-operation-authority-retention-sdk-adapter.md \
+            > "$EVIDENCE/source.sha256"
+      - name: Format
+        run: cargo fmt --manifest-path experimental/xenia-operation-authority-retention-gcs-adapter/Cargo.toml -- --check
+      - name: Test SDK outcome classification
+        run: cargo test --manifest-path experimental/xenia-operation-authority-retention-gcs-adapter/Cargo.toml --locked
+      - name: Strict Clippy
+        run: cargo clippy --manifest-path experimental/xenia-operation-authority-retention-gcs-adapter/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Upload adapter-classifier evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gcs-authority-retention-adapter-v1-${{ github.sha }}
+          path: ${{ runner.temp }}/gcs-authority-retention-adapter-v1-evidence
+          if-no-files-found: warn
+          retention-days: 30
+
+  msrv:
+    name: GCS Adapter MSRV Rust 1.94
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - name: Resolve standalone lock
+        working-directory: experimental/xenia-operation-authority-retention-gcs-adapter
+        run: cargo generate-lockfile
+      - name: Check exact SDK classifier stack
+        run: cargo check --manifest-path experimental/xenia-operation-authority-retention-gcs-adapter/Cargo.toml --locked --all-targets
+      - name: Test classifier at MSRV
+        run: cargo test --manifest-path experimental/xenia-operation-authority-retention-gcs-adapter/Cargo.toml --locked
