@@ -37,7 +37,7 @@ jobs:
           ! grep -F 'id-token: write' "$WF"
           ! grep -F 'google-github-actions/auth@' "$WF"
           ! grep -F 'credentials_json' "$WF"
-          ! grep -F '${{ secrets.' "$WF"
+          ! grep -F 'secrets.' "$WF"
           ! grep -E '^[[:space:]]*environment:' "$WF"
       - name: Capture workflow-contract evidence
         if: always()
