@@ -1,0 +1,41 @@
+name: One-shot Operator Rekey Formatter
+
+on:
+  pull_request:
+    paths:
+      - "apps/xenia-peer/src/operator_rekey_initiator.rs"
+      - "apps/xenia-peer/src/operator_rekey_transport.rs"
+      - "apps/xenia-peer/src/operator_sealed_channel.rs"
+      - "apps/xenia-peer/src/operator_sealed_channel_adversarial_tests.rs"
+      - ".github/workflows/operator-rekey-format-once.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  format-and-remove-self:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: DeterminateSystems/nix-installer-action@33c9ab3ef95cd57c164d9d6eb1f9a46338538d41
+      - name: Format exact workspace and remove one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          nix develop .#ci --command cargo fmt --all
+          git rm .github/workflows/operator-rekey-format-once.yml
+          git diff --check
+          git status --short
+          git config user.name "xenia-qualification-bot"
+          git config user.email "xenia-qualification-bot@users.noreply.github.com"
+          git add apps/xenia-peer/src/operator_rekey_initiator.rs \
+                  apps/xenia-peer/src/operator_rekey_transport.rs \
+                  apps/xenia-peer/src/operator_sealed_channel.rs \
+                  apps/xenia-peer/src/operator_sealed_channel_adversarial_tests.rs
+          git commit -m "style(operator): apply rustfmt to rekey hardening"
+          git push origin "HEAD:${{ github.event.pull_request.head.ref }}"
