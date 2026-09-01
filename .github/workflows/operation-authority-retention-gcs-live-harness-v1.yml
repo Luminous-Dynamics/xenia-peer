@@ -1,0 +1,144 @@
+name: Operation Authority Retention GCS Live Harness V1
+
+on:
+  pull_request:
+    paths:
+      - "experimental/xenia-operation-authority-retention-gcs-live-harness/**"
+      - "experimental/xenia-operation-authority-retention-gcs-live-qualification/**"
+      - "scripts/harden_gcs_live_harness_v1.py"
+      - "docs/ADR-035-disposable-live-gcs-qualification-safety.md"
+      - "docs/ADR-036-manual-destructive-gcs-qualification-harness.md"
+      - ".github/workflows/operation-authority-retention-gcs-live-harness-v1.yml"
+  push:
+    branches:
+      - "feat/operation-authority-retention-gcs-live-harness-v1"
+  workflow_dispatch:
+
+# This workflow may update only the feature branch with deterministic format/lock/source repairs.
+# It intentionally has no id-token permission, cloud environment, credentials, or cargo-run step.
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile-only:
+    name: Compile destructive surface without cloud execution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt,clippy
+
+      - name: Apply deterministic pre-qualification hardening
+        run: python3 scripts/harden_gcs_live_harness_v1.py
+
+      - name: Resolve standalone lock
+        working-directory: experimental/xenia-operation-authority-retention-gcs-live-harness
+        run: cargo generate-lockfile
+
+      - name: Assert exact Google SDK lineage
+        working-directory: experimental/xenia-operation-authority-retention-gcs-live-harness
+        run: |
+          test "$(cargo tree -p google-cloud-storage --depth 0 | head -n1)" = "google-cloud-storage v1.18.0"
+          test "$(cargo tree -p google-cloud-gax --depth 0 | head -n1)" = "google-cloud-gax v1.14.0"
+          test "$(cargo tree -p google-cloud-iam-v1 --depth 0 | head -n1)" = "google-cloud-iam-v1 v1.12.0"
+          test "$(cargo tree -p google-cloud-wkt --depth 0 | head -n1)" = "google-cloud-wkt v1.7.0"
+
+      - name: Assert workflow is compile-only for cloud code
+        run: |
+          WF=.github/workflows/operation-authority-retention-gcs-live-harness-v1.yml
+          ! grep -F 'id-token: write' "$WF"
+          ! grep -E '^[[:space:]]*environment:' "$WF"
+          ! grep -E 'cargo[[:space:]]+run' "$WF"
+          ! grep -E 'GOOGLE_APPLICATION_CREDENTIALS|google-github-actions/auth' "$WF"
+
+      - name: Assert destructive surface is visibly isolated
+        run: |
+          MAN=experimental/xenia-operation-authority-retention-gcs-live-harness/Cargo.toml
+          SRC=experimental/xenia-operation-authority-retention-gcs-live-harness/src/lib.rs
+          grep -F 'required-features = ["live-gcs-network"]' "$MAN"
+          grep -F 'create_bucket()' "$SRC"
+          grep -F 'set_iam_policy()' "$SRC"
+          grep -F 'test_iam_permissions()' "$SRC"
+          grep -F 'lock_bucket_retention_policy()' "$SRC"
+          grep -F 'delete_bucket()' "$SRC"
+          grep -F 'set_if_metageneration_match' "$SRC"
+          grep -F 'SoftDeletePolicy::new().set_retention_duration(zero)' "$SRC"
+
+      - name: Format
+        run: cargo fmt --manifest-path experimental/xenia-operation-authority-retention-gcs-live-harness/Cargo.toml
+
+      - name: Cloud-free contract tests
+        run: cargo test --manifest-path experimental/xenia-operation-authority-retention-gcs-live-harness/Cargo.toml --locked
+
+      - name: Compile network-capable destructive code without executing it
+        run: cargo check --manifest-path experimental/xenia-operation-authority-retention-gcs-live-harness/Cargo.toml --locked --features live-gcs-network --all-targets
+
+      - name: Strict Clippy on destructive surface
+        run: cargo clippy --manifest-path experimental/xenia-operation-authority-retention-gcs-live-harness/Cargo.toml --locked --features live-gcs-network --all-targets -- -D warnings
+
+      - name: Capture qualification evidence
+        if: always()
+        run: |
+          E=/tmp/gcs-live-harness-evidence
+          mkdir -p "$E"
+          rustc -Vv > "$E/RUSTC.txt"
+          cargo -V > "$E/CARGO.txt"
+          uname -a > "$E/KERNEL.txt"
+          git rev-parse HEAD > "$E/HEAD.txt"
+          if git diff --quiet -- experimental/xenia-operation-authority-retention-gcs-live-harness; then
+            echo 'TRACKED_SOURCE_DIRTY=0' > "$E/SOURCE_STATE.txt"
+          else
+            echo 'TRACKED_SOURCE_DIRTY=1' > "$E/SOURCE_STATE.txt"
+          fi
+          cp experimental/xenia-operation-authority-retention-gcs-live-harness/Cargo.lock "$E/Cargo.lock" || true
+          cargo tree --manifest-path experimental/xenia-operation-authority-retention-gcs-live-harness/Cargo.toml --features live-gcs-network > "$E/CARGO_TREE.txt" || true
+          sha256sum \
+            experimental/xenia-operation-authority-retention-gcs-live-harness/Cargo.toml \
+            experimental/xenia-operation-authority-retention-gcs-live-harness/src/lib.rs \
+            experimental/xenia-operation-authority-retention-gcs-live-harness/src/bin/*.rs \
+            experimental/xenia-operation-authority-retention-gcs-live-harness/Cargo.lock \
+            scripts/harden_gcs_live_harness_v1.py \
+            docs/ADR-036-manual-destructive-gcs-qualification-harness.md \
+            > "$E/SHA256SUMS.txt" || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: operation-authority-retention-gcs-live-harness-v1-evidence
+          path: /tmp/gcs-live-harness-evidence
+
+      - name: Commit deterministic qualified source
+        if: github.event_name == 'push' && success()
+        run: |
+          if git diff --quiet -- experimental/xenia-operation-authority-retention-gcs-live-harness; then
+            echo 'No qualification repair to commit.'
+            exit 0
+          fi
+          git config user.name 'xenia-qualification-bot'
+          git config user.email 'xenia-qualification-bot@users.noreply.github.com'
+          git add experimental/xenia-operation-authority-retention-gcs-live-harness
+          git commit -m 'fix(operation): apply qualified GCS live harness hardening'
+          git push origin HEAD:${GITHUB_REF_NAME}
+
+  msrv:
+    name: GCS Live Harness MSRV Rust 1.94
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - name: Apply deterministic pre-qualification hardening
+        run: python3 scripts/harden_gcs_live_harness_v1.py
+      - name: Resolve standalone lock
+        working-directory: experimental/xenia-operation-authority-retention-gcs-live-harness
+        run: cargo generate-lockfile
+      - name: Check default cloud-free surface
+        run: cargo check --manifest-path experimental/xenia-operation-authority-retention-gcs-live-harness/Cargo.toml --locked --all-targets
+      - name: Check network-capable destructive surface without execution
+        run: cargo check --manifest-path experimental/xenia-operation-authority-retention-gcs-live-harness/Cargo.toml --locked --features live-gcs-network --all-targets
