@@ -1,0 +1,78 @@
+{
+  "schema": "xenia.operator-rekey-interop-profile.v1",
+  "profile_id": "xenia.operator-sealed-channel.rekey.v1",
+  "claim_boundary": "Application-profile interoperability constants and required final evidence. This file does not qualify the external xenia-wire implementation or substitute for cross-repository execution.",
+  "transport_assumptions": {
+    "ordered": true,
+    "reliable_stream_semantics": true,
+    "delivery_after_reported_send_failure_may_be_ambiguous": true,
+    "recovery_after_protocol_ambiguity": "close_connection_and_fresh_authenticated_handshake"
+  },
+  "wire_control": {
+    "message": "OperatorRekeyMessage",
+    "payload_type_hex": "0x31",
+    "payload_type_decimal": 49,
+    "proposal_sealed_under": "old_current_key",
+    "ack_sealed_under": "new_key",
+    "ack_sequence": 0
+  },
+  "session": {
+    "envelope_epoch": 1,
+    "initial_key_epoch": 0,
+    "rekey_epoch_rule": "strictly_contiguous_plus_one"
+  },
+  "host_proposal_sender": {
+    "role": "daemon_host_rekey_initiator",
+    "full_source_id_ascii": "xnaophs1",
+    "full_source_id_hex": "786e616f70687331",
+    "authenticated_nonce_prefix_ascii": "xnaoph",
+    "authenticated_nonce_prefix_hex": "786e616f7068",
+    "routing_suffix_ascii": "s1",
+    "routing_suffix_is_security_identity": false
+  },
+  "console_ack_sender": {
+    "role": "console_authority_receiver",
+    "full_source_id_ascii": "xnaopch1",
+    "full_source_id_hex": "786e616f70636831",
+    "authenticated_nonce_prefix_ascii": "xnaopc",
+    "authenticated_nonce_prefix_hex": "786e616f7063",
+    "routing_suffix_ascii": "h1",
+    "routing_suffix_is_security_identity": false
+  },
+  "receiver_requirements": {
+    "expected_proposal_nonce_domain_bound_at_activation": true,
+    "expected_proposal_source_prefix_ascii": "xnaoph",
+    "expected_proposal_payload_type_hex": "0x31",
+    "expected_proposal_epoch": 1,
+    "previous_key_authority_allowed": false,
+    "caller_supplied_expected_domain_per_rekey": false,
+    "single_live_current_key_decrypt_target": true,
+    "single_long_lived_active_key_owner_target": true
+  },
+  "initiator_requirements": {
+    "proposal_prepare_before_send": true,
+    "commit_only_after_local_send_success": true,
+    "rollback_after_possible_escape": false,
+    "application_authority_while_unconfirmed": false,
+    "ack_must_be_first_new_key_console_envelope": true,
+    "ack_absolute_timeout_seconds": 10
+  },
+  "required_wire_lineage": {
+    "same_key_install_nonce_fix_pr": 37,
+    "directional_nonce_contract_pr": 34,
+    "strict_nonce_domain_receive_pr": 40,
+    "authority_receiver_parent_pr": 41,
+    "receiver_successor_contract_pr": 42,
+    "current_key_only_receive_issue": 38
+  },
+  "final_evidence": [
+    "xenia-peer #188 exact-head hosted qualification",
+    "xenia-wire final nonce-safe receiver exact-head hosted qualification",
+    "cross-repository host Proposal -> receiver Ack -> next-authority-operation interoperability",
+    "wrong-role same-key Proposal rejected before receiver replay mutation",
+    "previous-key Proposal rejected before receiver replay mutation",
+    "old-key Ack rejected by initiator after commit",
+    "missing-Ack timeout requires fresh handshake",
+    "retained evidence binds exact source trees and this profile"
+  ]
+}
