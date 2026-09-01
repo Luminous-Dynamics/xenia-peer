@@ -15,6 +15,7 @@ on:
       - "apps/xenia-peer/src/operator_sealed_channel_adversarial_tests.rs"
       - "apps/xenia-peer/src/operator_channel_metrics.rs"
       - "crates/xenia-peer-core/src/transport.rs"
+      - "docs/security/OPERATOR_REKEY_INVARIANTS_V1.json"
       - ".github/workflows/operator-rekey-initiator.yml"
   workflow_dispatch:
 
@@ -51,6 +52,54 @@ jobs:
           echo "SOURCE_HEAD=$(git rev-parse HEAD)"
           echo "SOURCE_TREE=$(git rev-parse HEAD^{tree})"
 
+      - name: Validate security invariant registry
+        shell: python
+        run: |
+          import json
+          from pathlib import Path
+
+          registry_path = Path("docs/security/OPERATOR_REKEY_INVARIANTS_V1.json")
+          data = json.loads(registry_path.read_text())
+          assert data["schema"] == "xenia.operator-rekey-invariants.v1"
+          assert data["qualification_workflow"] == "Operator Rekey Initiator Conformance"
+
+          invariants = data["invariants"]
+          ids = [entry["id"] for entry in invariants]
+          assert len(ids) == len(set(ids)), "duplicate operator-rekey invariant id"
+          assert ids == [f"ORI-{index:03d}" for index in range(1, len(ids) + 1)], (
+              "operator-rekey invariant IDs must stay contiguous and reviewable"
+          )
+
+          allowed = {"pending_hosted_execution", "blocked_on_final_wire_lineage"}
+          rust_source = "\n".join(
+              path.read_text(errors="replace")
+              for path in Path("apps/xenia-peer/src").rglob("*.rs")
+          )
+          for entry in invariants:
+              assert entry["property"].strip(), f"{entry['id']} missing property"
+              assert entry["source"].strip(), f"{entry['id']} missing source"
+              assert entry["qualification"] in allowed, (
+                  f"{entry['id']} has unsupported qualification state"
+              )
+              evidence = entry["evidence"]
+              assert evidence, f"{entry['id']} has no evidence mapping"
+              if entry["source"] != "cross-repository":
+                  assert Path(entry["source"]).exists(), (
+                      f"{entry['id']} source path does not exist: {entry['source']}"
+                  )
+              for selector in evidence:
+                  if selector.startswith("future:"):
+                      assert entry["qualification"] == "blocked_on_final_wire_lineage"
+                      continue
+                  terminal = selector.rsplit("::", 1)[-1]
+                  if terminal == "tests":
+                      continue
+                  assert f"fn {terminal}(" in rust_source, (
+                      f"{entry['id']} evidence selector has no matching Rust test: {selector}"
+                  )
+
+          print(f"validated {len(invariants)} operator-rekey invariants")
+
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: Swatinem/rust-cache@v2
 
@@ -60,12 +109,14 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/qualification"
           cp Cargo.lock "$RUNNER_TEMP/qualification/Cargo.lock"
+          cp docs/security/OPERATOR_REKEY_INVARIANTS_V1.json "$RUNNER_TEMP/qualification/"
           {
             echo "profile=xenia-operator-rekey-initiator-v1"
             echo "source_head=$(git rev-parse HEAD)"
             echo "source_tree=$(git rev-parse HEAD^{tree})"
             echo "cargo_lock_sha256=$(sha256sum Cargo.lock | awk '{print $1}')"
             echo "flake_lock_sha256=$(sha256sum flake.lock | awk '{print $1}')"
+            echo "invariants_sha256=$(sha256sum docs/security/OPERATOR_REKEY_INVARIANTS_V1.json | awk '{print $1}')"
           } > "$RUNNER_TEMP/qualification/PROVENANCE.txt"
           cat "$RUNNER_TEMP/qualification/PROVENANCE.txt"
 
