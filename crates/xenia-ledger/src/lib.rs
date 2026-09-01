@@ -29,6 +29,12 @@
 //! the ledger to a stable session-transcript hash so a valid consent chain
 //! cannot be replayed beside the wrong handshake or session transcript.
 //!
+//! Reciprocal-accountability callers can additionally use
+//! [`AccountabilityExecutionBinding`] and [`AccountabilityExecutionAttestation`]
+//! to bind a higher-layer access receipt to the authenticated session and
+//! current signed-ledger frontier without placing citizen/case identifiers in
+//! the Xenia ledger itself.
+//!
 //! A downstream auditor — including a non-operator third party —
 //! can use [`Verifier::verify_chain`] to reconstruct every hash link
 //! and every signature offline, using only the operator's public key.
@@ -63,6 +69,7 @@
 #![warn(rust_2018_idioms)]
 #![deny(unsafe_code)]
 
+mod accountability;
 mod archive;
 mod binding;
 mod chain;
@@ -80,6 +87,18 @@ mod witness;
 
 #[cfg(test)]
 mod tests;
+
+pub use accountability::{
+    ACCOUNTABILITY_COMMITMENT_ALGORITHM, ACCOUNTABILITY_EXECUTION_ATTESTATION_SCHEMA,
+    ACCOUNTABILITY_EXECUTION_BINDING_SCHEMA, AccountabilityBindingError,
+    AccountabilityExecutionAttestation, AccountabilityExecutionBinding, AccountabilityExecutionPhase,
+    accountability_execution_binding_digest, accountability_execution_message,
+    sign_accountability_execution_ed25519,
+};
+#[cfg(feature = "pqc-signatures")]
+pub use accountability::{
+    sign_accountability_execution_ml_dsa_65, sign_accountability_execution_ml_dsa_87,
+};
 
 pub use archive::{
     LEDGER_ARCHIVE_SEGMENT_SCHEMA, LedgerArchiveError, LedgerArchiveSegment,
