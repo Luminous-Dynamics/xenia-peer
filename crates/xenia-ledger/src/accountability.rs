@@ -72,11 +72,14 @@ pub enum AccountabilityExecutionPhase {
 pub struct AccountabilityExecutionBinding {
     /// Stable schema label.
     pub schema: String,
+    /// Hash algorithm used for all fixed-size commitment fields.
+    pub commitment_algorithm: String,
     /// Unique identifier for this logical lookup/action.
     pub operation_id: Uuid,
     /// Authenticated session transcript to which the execution belongs.
     pub session: SessionTranscriptBinding,
-    /// Opaque 32-byte requester/operator principal fingerprint.
+    /// Opaque 32-byte requester/operator principal fingerprint. Construction
+    /// requires this to match the most recent resident signed-ledger event.
     pub requester_source_id: [u8; 32],
     /// Commitment to the canonical lookup/predicate.
     pub query_digest: [u8; 32],
@@ -87,7 +90,7 @@ pub struct AccountabilityExecutionBinding {
     /// Commitment to the minimum-necessary result, when a result exists.
     /// Denied/no-disclosure operations may leave this absent.
     pub result_digest: Option<[u8; 32]>,
-    /// Commitment to the canonical accountability receipt.
+    /// Commitment to the canonical pre-attestation accountability receipt.
     pub receipt_digest: [u8; 32],
     /// Number of authenticated ledger entries at the execution anchor.
     pub ledger_entry_count: u64,
@@ -99,8 +102,12 @@ pub struct AccountabilityExecutionBinding {
 
 impl AccountabilityExecutionBinding {
     /// Build a pre-disclosure binding anchored to the current Xenia ledger
-    /// frontier. The chain must already contain at least one authenticated
-    /// authorization/consent event; an all-zero pre-genesis anchor is rejected.
+    /// frontier.
+    ///
+    /// The most recent resident ledger event must belong to the same Xenia
+    /// session and requester source ID. This prevents a caller from taking a
+    /// valid session transcript or unrelated ledger frontier and claiming that
+    /// it authenticated a different principal's lookup.
     #[allow(clippy::too_many_arguments)]
     pub fn at_chain_frontier(
         chain: &Chain,
@@ -113,8 +120,23 @@ impl AccountabilityExecutionBinding {
         result_digest: Option<[u8; 32]>,
         receipt_digest: [u8; 32],
     ) -> Result<Self, AccountabilityBindingError> {
+        let anchor = chain
+            .iter()
+            .last()
+            .ok_or(AccountabilityBindingError::MissingResidentAuthorizationAnchor)?;
+        if anchor.event.session_id != session.session_id {
+            return Err(AccountabilityBindingError::LedgerSessionMismatch {
+                ledger_session_id: anchor.event.session_id,
+                binding_session_id: session.session_id,
+            });
+        }
+        if anchor.event.source_id != requester_source_id {
+            return Err(AccountabilityBindingError::RequesterSourceMismatch);
+        }
+
         let binding = Self {
             schema: ACCOUNTABILITY_EXECUTION_BINDING_SCHEMA.to_string(),
+            commitment_algorithm: ACCOUNTABILITY_COMMITMENT_ALGORITHM.to_string(),
             operation_id,
             session,
             requester_source_id,
@@ -136,6 +158,11 @@ impl AccountabilityExecutionBinding {
         if self.schema != ACCOUNTABILITY_EXECUTION_BINDING_SCHEMA {
             return Err(AccountabilityBindingError::UnsupportedSchema {
                 schema: self.schema.clone(),
+            });
+        }
+        if self.commitment_algorithm != ACCOUNTABILITY_COMMITMENT_ALGORITHM {
+            return Err(AccountabilityBindingError::UnsupportedCommitmentAlgorithm {
+                algorithm: self.commitment_algorithm.clone(),
             });
         }
         if self.operation_id.is_nil() {
@@ -231,10 +258,12 @@ impl AccountabilityExecutionAttestation {
 /// This avoids a serializer dependency for the signature preimage: every field
 /// is fixed-width or explicitly tagged, and the schema/domain are embedded.
 pub fn accountability_execution_message(binding: &AccountabilityExecutionBinding) -> Vec<u8> {
-    let mut message = Vec::with_capacity(32 + 16 + (8 * 32) + 32);
+    let mut message = Vec::with_capacity(32 + 16 + (8 * 32) + 64);
     message.extend_from_slice(ACCOUNTABILITY_EXECUTION_DOMAIN);
     message.push(0);
     message.extend_from_slice(ACCOUNTABILITY_EXECUTION_BINDING_SCHEMA.as_bytes());
+    message.push(0);
+    message.extend_from_slice(ACCOUNTABILITY_COMMITMENT_ALGORITHM.as_bytes());
     message.push(0);
     message.extend_from_slice(binding.operation_id.as_bytes());
     message.extend_from_slice(binding.session.session_id.as_bytes());
@@ -390,6 +419,12 @@ pub enum AccountabilityBindingError {
         /// Schema found in the artifact.
         schema: String,
     },
+    /// Commitment hash algorithm is not supported.
+    #[error("unsupported accountability commitment algorithm: {algorithm}")]
+    UnsupportedCommitmentAlgorithm {
+        /// Algorithm found in the artifact.
+        algorithm: String,
+    },
     /// Operation UUID was nil.
     #[error("accountability operation id must not be nil")]
     NilOperationId,
@@ -399,7 +434,23 @@ pub enum AccountabilityBindingError {
         /// Field containing the zero commitment.
         field: &'static str,
     },
-    /// No authenticated ledger event exists to anchor the execution.
+    /// No resident signed authorization event exists to bind requester/session.
+    #[error("accountability execution requires a resident signed authorization anchor")]
+    MissingResidentAuthorizationAnchor,
+    /// Ledger/session anchor and supplied transcript refer to different sessions.
+    #[error(
+        "ledger authorization session {ledger_session_id} does not match accountability binding session {binding_session_id}"
+    )]
+    LedgerSessionMismatch {
+        /// Session UUID on the latest resident ledger event.
+        ledger_session_id: Uuid,
+        /// Session UUID in the supplied transcript binding.
+        binding_session_id: Uuid,
+    },
+    /// Supplied semantic requester does not match the signed ledger principal.
+    #[error("accountability requester source id does not match signed ledger authorization principal")]
+    RequesterSourceMismatch,
+    /// Ledger anchor is structurally empty.
     #[error("accountability execution requires a non-empty signed ledger frontier")]
     EmptyLedgerAnchor,
     /// Nested session-transcript binding failed validation.
@@ -488,10 +539,11 @@ mod tests {
     }
 
     #[test]
-    fn execution_binding_is_session_and_ledger_anchored() {
+    fn execution_binding_is_session_requester_and_ledger_anchored() {
         let (attestation, _) = attestation();
         assert_eq!(attestation.binding.ledger_entry_count, 1);
         assert_ne!(attestation.binding.ledger_head_hash, [0u8; 32]);
+        assert_eq!(attestation.binding.requester_source_id, [9u8; 32]);
         assert_eq!(
             attestation.binding.phase,
             AccountabilityExecutionPhase::PreDisclosureCommit
@@ -526,12 +578,9 @@ mod tests {
     }
 
     #[test]
-    fn wrong_authenticated_session_is_rejected() {
-        let (mut attestation, _) = attestation();
+    fn wrong_authenticated_session_is_rejected_after_tampering() {
+        let (mut attestation, key) = attestation();
         attestation.binding.session.session_id = Uuid::from_u128(99);
-        // Shape alone is still valid, but its signed bytes no longer match the
-        // existing signature. This is the property a verifier relies on.
-        let key = signing_key();
         assert!(
             attestation
                 .verify(
@@ -541,6 +590,47 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn construction_rejects_session_not_matching_signed_ledger_event() {
+        let key = signing_key();
+        let chain = seeded_chain(Uuid::from_u128(1), key);
+        let result = chain.attest_accountability_execution(
+            transcript_binding(Uuid::from_u128(99)),
+            Uuid::from_u128(3),
+            [9u8; 32],
+            [10u8; 32],
+            [11u8; 32],
+            [12u8; 32],
+            None,
+            [14u8; 32],
+        );
+        assert!(matches!(
+            result,
+            Err(AccountabilityBindingError::LedgerSessionMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn construction_rejects_requester_not_matching_signed_ledger_event() {
+        let key = signing_key();
+        let session_id = Uuid::from_u128(1);
+        let chain = seeded_chain(session_id, key);
+        let result = chain.attest_accountability_execution(
+            transcript_binding(session_id),
+            Uuid::from_u128(3),
+            [99u8; 32],
+            [10u8; 32],
+            [11u8; 32],
+            [12u8; 32],
+            None,
+            [14u8; 32],
+        );
+        assert!(matches!(
+            result,
+            Err(AccountabilityBindingError::RequesterSourceMismatch)
+        ));
     }
 
     #[test]
@@ -559,7 +649,7 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(AccountabilityBindingError::EmptyLedgerAnchor)
+            Err(AccountabilityBindingError::MissingResidentAuthorizationAnchor)
         ));
     }
 
@@ -594,5 +684,15 @@ mod tests {
         changed.receipt_digest = [15u8; 32];
         let second = accountability_execution_binding_digest(&changed);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn unknown_commitment_algorithm_is_rejected() {
+        let (mut attestation, _) = attestation();
+        attestation.binding.commitment_algorithm = "sha256".into();
+        assert!(matches!(
+            attestation.binding.validate_shape(),
+            Err(AccountabilityBindingError::UnsupportedCommitmentAlgorithm { .. })
+        ));
     }
 }
