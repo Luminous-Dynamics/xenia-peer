@@ -1,0 +1,32 @@
+[package]
+name = "xenia-operation-authority-retention-gcs-authority-bridge"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Authority-gated async GCS composition for Xenia operation retention"
+
+[workspace]
+
+[dependencies]
+google-cloud-storage = { version = "=1.18.0", default-features = false, features = ["default-rustls-provider"] }
+thiserror = "2"
+xenia-operation-authority-retention-backend = { path = "../xenia-operation-authority-retention-backend" }
+xenia-operation-authority-retention-gcs-create-transport = { path = "../xenia-operation-authority-retention-gcs-create-transport" }
+xenia-operation-authority-retention-gcs-profile = { path = "../xenia-operation-authority-retention-gcs-profile" }
+xenia-operation-authority-retention-gcs-readback-transport = { path = "../xenia-operation-authority-retention-gcs-readback-transport" }
+xenia-operation-authority-retention-lineage-v2 = { path = "../xenia-operation-authority-retention-lineage-v2" }
+xenia-operation-authority-retention-namespace-gate = { path = "../xenia-operation-authority-retention-namespace-gate" }
+
+[dev-dependencies]
+ed25519-dalek = "2"
+tokio = { version = "1", features = ["macros", "rt"] }
+uuid = "1"
+xenia-ledger = { path = "../../crates/xenia-ledger" }
+xenia-operation-authority-epoch = { path = "../../contracts/xenia-operation-authority-epoch" }
+xenia-operation-frontier-governed-transition = { path = "../xenia-operation-frontier-governed-transition" }
+xenia-operation-frontier-ledger-witness = { path = "../../contracts/xenia-operation-frontier-ledger-witness" }
+xenia-operation-frontier-retention-bundle = { path = "../xenia-operation-frontier-retention-bundle" }
+xenia-operation-store-frontier = { path = "../../contracts/xenia-operation-store-frontier" }
