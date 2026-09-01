@@ -16,6 +16,7 @@ on:
       - "apps/xenia-peer/src/operator_channel_metrics.rs"
       - "crates/xenia-peer-core/src/transport.rs"
       - "docs/security/OPERATOR_REKEY_INVARIANTS_V1.json"
+      - "docs/security/OPERATOR_REKEY_INTEROP_PROFILE_V1.json"
       - "scripts/check_operator_rekey_state_model.py"
       - ".github/workflows/operator-rekey-initiator.yml"
   workflow_dispatch:
@@ -38,8 +39,6 @@ jobs:
     name: Exact source transport transaction
     runs-on: ubuntu-24.04
     steps:
-      # actions/checkout v4, pinned so exact-head qualification cannot silently
-      # change behavior while the Xenia source commit remains identical.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ env.QUALIFICATION_SOURCE_SHA }}
@@ -129,6 +128,54 @@ jobs:
               f"{len(models)} independent model(s)"
           )
 
+      - name: Validate interoperability profile against production constants
+        shell: python
+        run: |
+          import json
+          from pathlib import Path
+
+          profile = json.loads(
+              Path("docs/security/OPERATOR_REKEY_INTEROP_PROFILE_V1.json").read_text()
+          )
+          assert profile["schema"] == "xenia.operator-rekey-interop-profile.v1"
+          assert profile["profile_id"] == "xenia.operator-sealed-channel.rekey.v1"
+          assert int(profile["wire_control"]["payload_type_hex"], 16) == profile["wire_control"]["payload_type_decimal"] == 49
+          assert profile["wire_control"]["ack_sequence"] == 0
+          assert profile["session"]["envelope_epoch"] == 1
+
+          host = profile["host_proposal_sender"]
+          console = profile["console_ack_sender"]
+          assert host["full_source_id_ascii"].encode().hex() == host["full_source_id_hex"]
+          assert console["full_source_id_ascii"].encode().hex() == console["full_source_id_hex"]
+          assert host["authenticated_nonce_prefix_ascii"].encode().hex() == host["authenticated_nonce_prefix_hex"]
+          assert console["authenticated_nonce_prefix_ascii"].encode().hex() == console["authenticated_nonce_prefix_hex"]
+          assert host["full_source_id_ascii"].startswith(host["authenticated_nonce_prefix_ascii"])
+          assert console["full_source_id_ascii"].startswith(console["authenticated_nonce_prefix_ascii"])
+          assert host["authenticated_nonce_prefix_ascii"] != console["authenticated_nonce_prefix_ascii"]
+          assert not host["routing_suffix_is_security_identity"]
+          assert not console["routing_suffix_is_security_identity"]
+
+          sealed = Path("apps/xenia-peer/src/operator_sealed_channel.rs").read_text()
+          initiator = Path("apps/xenia-peer/src/operator_rekey_initiator.rs").read_text()
+          assert f'*b"{host["full_source_id_ascii"]}"' in sealed
+          assert f'*b"{console["full_source_id_ascii"]}"' in sealed
+          assert "OPERATOR_SESSION_EPOCH: u8 = 1" in sealed
+          assert "ACK_SEQUENCE: u32 = 0" in initiator
+          assert "OPERATOR_REKEY_ACK_TIMEOUT: Duration = Duration::from_secs(10)" in initiator
+
+          receiver = profile["receiver_requirements"]
+          assert receiver["expected_proposal_source_prefix_ascii"] == host["authenticated_nonce_prefix_ascii"]
+          assert receiver["expected_proposal_payload_type_hex"] == profile["wire_control"]["payload_type_hex"]
+          assert receiver["expected_proposal_epoch"] == profile["session"]["envelope_epoch"]
+          assert not receiver["previous_key_authority_allowed"]
+          assert not receiver["caller_supplied_expected_domain_per_rekey"]
+
+          # The payload value is intentionally a cross-repository assertion.
+          # Final qualification must verify it against the adopted xenia-wire
+          # source rather than pretending this local manifest proves Wire.
+          assert "xenia-wire" in profile["claim_boundary"]
+          print("validated operator rekey interoperability profile against local production constants")
+
       - name: Run independent bounded state model
         shell: bash
         run: |
@@ -150,19 +197,17 @@ jobs:
           assert len(report["state_graph_sha256"]) == 64
           PY
 
-      # DeterminateSystems/nix-installer-action main as observed 2026-09-01,
-      # pinned to an immutable verified commit rather than mutable @main.
       - uses: DeterminateSystems/nix-installer-action@33c9ab3ef95cd57c164d9d6eb1f9a46338538d41
-      # Swatinem/rust-cache v2.9.2 signed tag -> immutable commit.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
 
-      - name: Retain dependency, workflow, runner, model, and toolchain provenance
+      - name: Retain dependency, workflow, runner, model, profile, and toolchain provenance
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/qualification"
           cp Cargo.lock "$RUNNER_TEMP/qualification/Cargo.lock"
           cp docs/security/OPERATOR_REKEY_INVARIANTS_V1.json "$RUNNER_TEMP/qualification/"
+          cp docs/security/OPERATOR_REKEY_INTEROP_PROFILE_V1.json "$RUNNER_TEMP/qualification/"
           cp scripts/check_operator_rekey_state_model.py "$RUNNER_TEMP/qualification/"
           cp .github/workflows/operator-rekey-initiator.yml "$RUNNER_TEMP/qualification/"
           {
@@ -178,6 +223,7 @@ jobs:
             echo "cargo_lock_sha256=$(sha256sum Cargo.lock | awk '{print $1}')"
             echo "flake_lock_sha256=$(sha256sum flake.lock | awk '{print $1}')"
             echo "invariants_sha256=$(sha256sum docs/security/OPERATOR_REKEY_INVARIANTS_V1.json | awk '{print $1}')"
+            echo "interop_profile_sha256=$(sha256sum docs/security/OPERATOR_REKEY_INTEROP_PROFILE_V1.json | awk '{print $1}')"
             echo "state_model_source_sha256=$(sha256sum scripts/check_operator_rekey_state_model.py | awk '{print $1}')"
             echo "state_model_report_sha256=$(sha256sum \"$RUNNER_TEMP/qualification/OPERATOR_REKEY_STATE_MODEL.json\" | awk '{print $1}')"
             echo "qualification_workflow_sha256=$(sha256sum .github/workflows/operator-rekey-initiator.yml | awk '{print $1}')"
@@ -228,7 +274,6 @@ jobs:
 
       - name: Retain qualification capsule
         if: always()
-        # actions/upload-artifact v4, immutable pin.
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: operator-rekey-initiator-${{ env.QUALIFICATION_SOURCE_SHA }}
@@ -244,7 +289,6 @@ jobs:
         with:
           ref: ${{ env.QUALIFICATION_SOURCE_SHA }}
           persist-credentials: false
-      # Pin action implementation separately from the requested toolchain.
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: "1.94"
