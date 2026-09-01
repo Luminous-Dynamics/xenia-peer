@@ -12,6 +12,7 @@ on:
       - "apps/xenia-peer/src/operator_rekey_transport.rs"
       - "apps/xenia-peer/src/operator_sealed_channel.rs"
       - "apps/xenia-peer/src/operator_sealed_channel_legacy.rs"
+      - "apps/xenia-peer/src/operator_sealed_channel_adversarial_tests.rs"
       - "apps/xenia-peer/src/operator_channel_metrics.rs"
       - "crates/xenia-peer-core/src/transport.rs"
       - ".github/workflows/operator-rekey-initiator.yml"
@@ -82,6 +83,9 @@ jobs:
 
       - name: Rekey transport transaction tests
         run: nix develop .#ci --command cargo test --locked -p xenia-peer 'operator_sealed_channel::rekey_transport::tests'
+
+      - name: Live adversarial endpoint tests
+        run: nix develop .#ci --command cargo test --locked -p xenia-peer 'operator_sealed_channel::adversarial_tests'
 
       - name: Operator protocol metrics tests
         run: nix develop .#ci --command cargo test --locked -p xenia-peer 'operator_channel_metrics::tests'
