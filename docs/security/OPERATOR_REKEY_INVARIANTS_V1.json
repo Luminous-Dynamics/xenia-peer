@@ -13,6 +13,23 @@
     "issue": 38,
     "role": "remove duplicate active-key ownership via current-key-only receive and non-Copy key material"
   },
+  "independent_models": [
+    {
+      "id": "ORI-MODEL-001",
+      "source": "scripts/check_operator_rekey_state_model.py",
+      "report_schema": "xenia.operator-rekey-state-model-report.v1",
+      "bounded_max_depth": 9,
+      "claim_boundary": "Bounded exhaustive abstract-state exploration only; independent design evidence, not a formal proof of the Rust implementation, cryptography, transport, scheduler, or hardware.",
+      "supports": [
+        "ORI-004",
+        "ORI-005",
+        "ORI-007",
+        "ORI-008",
+        "ORI-009",
+        "ORI-010"
+      ]
+    }
+  ],
   "invariants": [
     {
       "id": "ORI-001",
@@ -41,7 +58,8 @@
       "source": "apps/xenia-peer/src/operator_rekey_transport.rs",
       "evidence": [
         "operator_sealed_channel::rekey_transport::tests::failure_before_any_write_never_restores_authority",
-        "operator_sealed_channel::rekey_transport::tests::reported_failure_after_complete_proposal_escape_never_rolls_back"
+        "operator_sealed_channel::rekey_transport::tests::reported_failure_after_complete_proposal_escape_never_rolls_back",
+        "model:ORI-MODEL-001"
       ],
       "qualification": "pending_hosted_execution"
     },
@@ -51,7 +69,8 @@
       "source": "apps/xenia-peer/src/operator_rekey_initiator.rs",
       "evidence": [
         "operator_sealed_channel::initiator::tests::prepare_uses_distinct_host_nonce_domain_and_commit_is_one_way",
-        "operator_sealed_channel::rekey_transport::tests::reported_failure_after_complete_proposal_escape_never_rolls_back"
+        "operator_sealed_channel::rekey_transport::tests::reported_failure_after_complete_proposal_escape_never_rolls_back",
+        "model:ORI-MODEL-001"
       ],
       "qualification": "pending_hosted_execution"
     },
@@ -73,7 +92,8 @@
       "evidence": [
         "operator_sealed_channel::initiator::tests::exact_new_key_ack_is_required_to_confirm",
         "operator_sealed_channel::initiator::tests::ack_must_be_first_new_key_envelope",
-        "operator_sealed_channel::initiator::tests::wrong_ack_identity_is_rejected_without_advancing_lineage"
+        "operator_sealed_channel::initiator::tests::wrong_ack_identity_is_rejected_without_advancing_lineage",
+        "model:ORI-MODEL-001"
       ],
       "qualification": "pending_hosted_execution"
     },
@@ -83,7 +103,8 @@
       "source": "apps/xenia-peer/src/operator_rekey_initiator.rs",
       "evidence": [
         "operator_sealed_channel::initiator::tests::old_key_forged_ack_is_rejected_even_during_generic_session_grace",
-        "operator_sealed_channel::adversarial_tests::old_key_forged_ack_tears_down_and_requires_fresh_handshake"
+        "operator_sealed_channel::adversarial_tests::old_key_forged_ack_tears_down_and_requires_fresh_handshake",
+        "model:ORI-MODEL-001"
       ],
       "qualification": "pending_hosted_execution"
     },
@@ -93,7 +114,8 @@
       "source": "apps/xenia-peer/src/operator_rekey_initiator.rs",
       "evidence": [
         "operator_sealed_channel::initiator::tests::matching_ack_after_deadline_is_rejected",
-        "operator_sealed_channel::adversarial_tests::missing_ack_deadline_tears_down_and_requires_fresh_handshake"
+        "operator_sealed_channel::adversarial_tests::missing_ack_deadline_tears_down_and_requires_fresh_handshake",
+        "model:ORI-MODEL-001"
       ],
       "qualification": "pending_hosted_execution"
     },
@@ -103,7 +125,8 @@
       "source": "apps/xenia-peer/src/operator_sealed_channel.rs",
       "evidence": [
         "operator_sealed_channel::adversarial_tests::old_key_forged_ack_tears_down_and_requires_fresh_handshake",
-        "operator_sealed_channel::adversarial_tests::missing_ack_deadline_tears_down_and_requires_fresh_handshake"
+        "operator_sealed_channel::adversarial_tests::missing_ack_deadline_tears_down_and_requires_fresh_handshake",
+        "model:ORI-MODEL-001"
       ],
       "qualification": "pending_hosted_execution"
     },
