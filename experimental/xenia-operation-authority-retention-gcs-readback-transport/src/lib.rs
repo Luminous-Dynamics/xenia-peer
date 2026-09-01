@@ -115,7 +115,8 @@ where
     /// Enumerate the complete exact ADR-030 namespace sequence.
     ///
     /// The result is `Complete` only after the Google paginator terminates normally. Any page/item
-    /// error discards all sequences accumulated so far.
+    /// error discards all sequences accumulated so far. Provider item order is not trusted: V1
+    /// rejects duplicate sequence identities and returns a canonical ascending sequence.
     pub async fn enumerate_complete(
         &self,
         namespace_digest: [u8; 32],
@@ -131,7 +132,7 @@ where
             .set_versions(false)
             .by_item();
 
-        let mut sequences = Vec::new();
+        let mut sequences = std::collections::BTreeSet::new();
         while let Some(item) = items.next().await {
             let object = match item {
                 Ok(object) => object,
@@ -146,13 +147,14 @@ where
                 return Err(GcsReadbackTransportErrorV1::ForeignBucketObject);
             }
             let sequence = parse_sequence_from_object_name_v1(&prefix, &object.name)?;
-            if sequences.last().is_some_and(|previous| *previous >= sequence) {
-                return Err(GcsReadbackTransportErrorV1::NonIncreasingEnumeration);
+            if !sequences.insert(sequence) {
+                return Err(GcsReadbackTransportErrorV1::DuplicateSequence);
             }
-            sequences.push(sequence);
         }
 
-        Ok(BackendEnumerateOutcomeV1::Complete(sequences))
+        Ok(BackendEnumerateOutcomeV1::Complete(
+            sequences.into_iter().collect(),
+        ))
     }
 }
 
@@ -222,9 +224,9 @@ pub enum GcsReadbackTransportErrorV1 {
     /// Object name does not match exact fixed-width ADR-030 grammar.
     #[error("GCS retained object name does not match ADR-030 grammar")]
     MalformedObjectName,
-    /// Complete listing was not strictly increasing in retention sequence.
-    #[error("GCS retained object enumeration is duplicate or out of order")]
-    NonIncreasingEnumeration,
+    /// Listing returned the same retention sequence more than once.
+    #[error("GCS retained object enumeration contains a duplicate retention sequence")]
+    DuplicateSequence,
 }
 
 #[cfg(test)]
@@ -439,8 +441,9 @@ mod tests {
                         let second = Object::new()
                             .set_bucket(parent)
                             .set_name(format!("{prefix}{:020}.bin", 1));
+                        // Deliberately reverse provider order; transport must canonicalize it.
                         Ok(Response::from(
-                            ListObjectsResponse::new().set_objects([first, second]),
+                            ListObjectsResponse::new().set_objects([second, first]),
                         ))
                     }
                 } else {
@@ -486,7 +489,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn complete_listing_parses_exact_fixed_width_sequences() {
+    async fn complete_listing_canonicalizes_provider_order() {
         let list = Arc::new(ListStub {
             calls: AtomicUsize::new(0),
             fail_second_page: false,
