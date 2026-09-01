@@ -295,12 +295,8 @@ mod tests {
         let checkpoint = chain.sign_checkpoint(100);
         let f0 = frontier(0, [0u8; 32], 100_000);
         let witness = witness(&key, &checkpoint, &f0, 0, [0u8; 32], 100_000);
-        let bundle = RetainedOperationFrontierWitnessBundleV1::new(
-            witness,
-            checkpoint,
-            101_000,
-        )
-        .unwrap();
+        let bundle =
+            RetainedOperationFrontierWitnessBundleV1::new(witness, checkpoint, 101_000).unwrap();
         bundle.validate_local().unwrap();
         assert_ne!(bundle.bundle_digest().unwrap(), [0u8; 32]);
     }
@@ -314,11 +310,7 @@ mod tests {
         let f0 = frontier(0, [0u8; 32], 100_000);
         let witness = witness(&key, &checkpoint, &f0, 0, [0u8; 32], 100_000);
         assert!(matches!(
-            RetainedOperationFrontierWitnessBundleV1::new(
-                witness,
-                different_checkpoint,
-                101_000,
-            ),
+            RetainedOperationFrontierWitnessBundleV1::new(witness, different_checkpoint, 101_000,),
             Err(RetainedWitnessBundleError::CheckpointBindingMismatch)
         ));
     }
