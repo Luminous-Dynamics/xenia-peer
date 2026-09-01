@@ -1,0 +1,136 @@
+{
+  "schema": "xenia.operator-rekey-invariants.v1",
+  "scope": "daemon-side sealed operator-channel rekey initiator and live endpoint",
+  "claim_boundary": "Source invariants and evidence mappings only. An invariant is not qualified until its listed hosted evidence lane executes successfully on the exact source head.",
+  "qualification_workflow": "Operator Rekey Initiator Conformance",
+  "receiver_counterpart": {
+    "repository": "Luminous-Dynamics/xenia-wire",
+    "pull_request": 41,
+    "role": "sealed exact-current-key receiver transaction"
+  },
+  "follow_up": {
+    "repository": "Luminous-Dynamics/xenia-wire",
+    "issue": 38,
+    "role": "remove duplicate active-key ownership via current-key-only receive and non-Copy key material"
+  },
+  "invariants": [
+    {
+      "id": "ORI-001",
+      "property": "Host and console sealing roles use different AEAD nonce source prefixes.",
+      "source": "apps/xenia-peer/src/operator_sealed_channel.rs",
+      "evidence": ["operator_sealed_channel::tests::host_and_console_nonce_prefixes_are_directionally_distinct"],
+      "qualification": "pending_hosted_execution"
+    },
+    {
+      "id": "ORI-002",
+      "property": "The rekey Proposal is sealed under the old host key before local key commit.",
+      "source": "apps/xenia-peer/src/operator_rekey_transport.rs",
+      "evidence": ["operator_sealed_channel::rekey_transport::tests::transport_observes_exact_old_key_proposal_before_local_commit"],
+      "qualification": "pending_hosted_execution"
+    },
+    {
+      "id": "ORI-003",
+      "property": "The exact prepared Proposal bytes are the bytes handed to Transport::send_envelope.",
+      "source": "apps/xenia-peer/src/operator_rekey_transport.rs",
+      "evidence": ["operator_sealed_channel::rekey_transport::tests::transport_observes_exact_old_key_proposal_before_local_commit"],
+      "qualification": "pending_hosted_execution"
+    },
+    {
+      "id": "ORI-004",
+      "property": "A reported send failure never rolls the transition back to application-authoritative Stable, including when the complete Proposal may already have escaped.",
+      "source": "apps/xenia-peer/src/operator_rekey_transport.rs",
+      "evidence": [
+        "operator_sealed_channel::rekey_transport::tests::failure_before_any_write_never_restores_authority",
+        "operator_sealed_channel::rekey_transport::tests::reported_failure_after_complete_proposal_escape_never_rolls_back"
+      ],
+      "qualification": "pending_hosted_execution"
+    },
+    {
+      "id": "ORI-005",
+      "property": "Application authority is unavailable in Prepared and PendingAck and resumes only in Stable.",
+      "source": "apps/xenia-peer/src/operator_rekey_initiator.rs",
+      "evidence": [
+        "operator_sealed_channel::initiator::tests::prepare_uses_distinct_host_nonce_domain_and_commit_is_one_way",
+        "operator_sealed_channel::rekey_transport::tests::reported_failure_after_complete_proposal_escape_never_rolls_back"
+      ],
+      "qualification": "pending_hosted_execution"
+    },
+    {
+      "id": "ORI-006",
+      "property": "After successful Proposal send, both local TX and authority-RX sessions are rebuilt new-key-only and reject old-key traffic.",
+      "source": "apps/xenia-peer/src/operator_rekey_initiator.rs",
+      "evidence": [
+        "operator_sealed_channel::initiator::tests::prepare_uses_distinct_host_nonce_domain_and_commit_is_one_way",
+        "operator_sealed_channel::initiator::tests::old_key_application_authority_is_dropped_immediately_on_commit",
+        "operator_sealed_channel::rekey_transport::tests::transport_observes_exact_old_key_proposal_before_local_commit"
+      ],
+      "qualification": "pending_hosted_execution"
+    },
+    {
+      "id": "ORI-007",
+      "property": "A rekey Ack must be the first envelope in the new console-key epoch, use the console nonce domain, and match the outstanding epoch/hash.",
+      "source": "apps/xenia-peer/src/operator_rekey_initiator.rs",
+      "evidence": [
+        "operator_sealed_channel::initiator::tests::exact_new_key_ack_is_required_to_confirm",
+        "operator_sealed_channel::initiator::tests::ack_must_be_first_new_key_envelope",
+        "operator_sealed_channel::initiator::tests::wrong_ack_identity_is_rejected_without_advancing_lineage"
+      ],
+      "qualification": "pending_hosted_execution"
+    },
+    {
+      "id": "ORI-008",
+      "property": "An Ack authenticated only by the old key is rejected after local rekey commit.",
+      "source": "apps/xenia-peer/src/operator_rekey_initiator.rs",
+      "evidence": [
+        "operator_sealed_channel::initiator::tests::old_key_forged_ack_is_rejected_even_during_generic_session_grace",
+        "operator_sealed_channel::adversarial_tests::old_key_forged_ack_tears_down_and_requires_fresh_handshake"
+      ],
+      "qualification": "pending_hosted_execution"
+    },
+    {
+      "id": "ORI-009",
+      "property": "The Ack deadline is absolute; expiration is session-fatal and does not return the transition to Stable.",
+      "source": "apps/xenia-peer/src/operator_rekey_initiator.rs",
+      "evidence": [
+        "operator_sealed_channel::initiator::tests::matching_ack_after_deadline_is_rejected",
+        "operator_sealed_channel::adversarial_tests::missing_ack_deadline_tears_down_and_requires_fresh_handshake"
+      ],
+      "qualification": "pending_hosted_execution"
+    },
+    {
+      "id": "ORI-010",
+      "property": "After an authenticated rekey protocol failure, the current connection is torn down and authority resumes only after a fresh cryptographic handshake.",
+      "source": "apps/xenia-peer/src/operator_sealed_channel.rs",
+      "evidence": [
+        "operator_sealed_channel::adversarial_tests::old_key_forged_ack_tears_down_and_requires_fresh_handshake",
+        "operator_sealed_channel::adversarial_tests::missing_ack_deadline_tears_down_and_requires_fresh_handshake"
+      ],
+      "qualification": "pending_hosted_execution"
+    },
+    {
+      "id": "ORI-011",
+      "property": "Prepared future AEAD key material is redacted from Rust Debug output.",
+      "source": "apps/xenia-peer/src/operator_rekey_initiator.rs",
+      "evidence": ["operator_sealed_channel::initiator::tests::prepared_debug_redacts_future_aead_key"],
+      "qualification": "pending_hosted_execution"
+    },
+    {
+      "id": "ORI-012",
+      "property": "Authenticated post-handshake protocol failures are counted separately from handshake failures.",
+      "source": "apps/xenia-peer/src/operator_channel_metrics.rs",
+      "evidence": [
+        "operator_channel_metrics::tests",
+        "operator_sealed_channel::adversarial_tests::old_key_forged_ack_tears_down_and_requires_fresh_handshake",
+        "operator_sealed_channel::adversarial_tests::missing_ack_deadline_tears_down_and_requires_fresh_handshake"
+      ],
+      "qualification": "pending_hosted_execution"
+    },
+    {
+      "id": "ORI-013",
+      "property": "The initiator's final production interoperability target is xenia-wire #41 receiver semantics on the nonce-safe #37/#34/#40 lineage; source-only tests do not substitute for that cross-repository gate.",
+      "source": "cross-repository",
+      "evidence": ["future:xenia-peer-xenia-wire-final-rekey-interoperability"],
+      "qualification": "blocked_on_final_wire_lineage"
+    }
+  ]
+}
