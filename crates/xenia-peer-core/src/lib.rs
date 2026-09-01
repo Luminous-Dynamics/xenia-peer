@@ -52,6 +52,7 @@
 #![warn(missing_docs)]
 
 pub mod advertisement;
+mod directional_lane_session;
 pub mod file_transfer;
 pub mod frame;
 pub mod handshake;
@@ -62,6 +63,7 @@ mod session;
 pub mod transfer_source;
 pub mod transport;
 
+pub use directional_lane_session::LaneSession;
 pub use file_transfer::{
     IncomingFileStageError, IncomingFileStager, cleanup_orphaned_receive_staging,
     persist_received_file,
@@ -83,7 +85,7 @@ pub use m1_session::{
 pub use receive_reservation::{
     ReceiveReservation, ReceiveReservationError, ReceiveReservationPool,
 };
-pub use session::{FrameLane, LaneSession, Session, SessionError, SessionRole};
+pub use session::{FrameLane, Session, SessionError, SessionRole};
 pub use transfer_source::{TransferChunk, TransferSource, TransferSourceError};
 pub use xenia_handshake::{
     HandshakeManager, RekeyEpochContextV1, RekeyReason, derive_negotiated_context_key,
