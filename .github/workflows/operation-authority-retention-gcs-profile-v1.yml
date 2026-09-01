@@ -1,0 +1,102 @@
+name: Operation Authority Retention GCS Profile V1
+
+on:
+  pull_request:
+    paths:
+      - "experimental/xenia-operation-authority-retention-backend/**"
+      - "experimental/xenia-operation-authority-retention-gcs-profile/**"
+      - "docs/ADR-028-operation-authority-retention-backend-contract.md"
+      - "docs/ADR-030-gcs-operation-authority-retention-profile.md"
+      - ".github/workflows/operation-authority-retention-gcs-profile-v1.yml"
+  push:
+    branches:
+      - "feat/operation-authority-retention-gcs-profile-v1"
+      - main
+    paths:
+      - "experimental/xenia-operation-authority-retention-backend/**"
+      - "experimental/xenia-operation-authority-retention-gcs-profile/**"
+      - "docs/ADR-028-operation-authority-retention-backend-contract.md"
+      - "docs/ADR-030-gcs-operation-authority-retention-profile.md"
+      - ".github/workflows/operation-authority-retention-gcs-profile-v1.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  profile:
+    name: GCS Provider Requirements Profile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt,clippy
+      - name: Resolve standalone lock
+        working-directory: experimental/xenia-operation-authority-retention-gcs-profile
+        run: cargo generate-lockfile
+      - name: Record profile evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          EVIDENCE="$RUNNER_TEMP/gcs-authority-retention-profile-v1-evidence"
+          mkdir -p "$EVIDENCE"
+          {
+            echo "GITHUB_SHA=$GITHUB_SHA"
+            echo "GITHUB_REF=$GITHUB_REF"
+            echo "PROVIDER=Google Cloud Storage"
+            echo "SDK_CRATE=google-cloud-storage"
+            echo "SDK_VERSION=1.18.0"
+            echo "API_PROFILE=google.storage.v2"
+            echo "CREATE_PRECONDITION=ifGenerationMatch=0"
+            echo "OBJECT_VERSIONING=required-disabled"
+            echo "BUCKET_RETENTION=required-locked"
+            echo "UNIFORM_BUCKET_LEVEL_ACCESS=required"
+            echo "PUBLIC_ACCESS_PREVENTION=required-explicit-enforced"
+            echo "HIERARCHICAL_NAMESPACE=required-disabled"
+            echo "LIFECYCLE_RULES=required-none"
+            rustc -Vv
+            cargo -Vv
+            uname -a
+          } > "$EVIDENCE/profile.txt"
+          cargo tree --manifest-path experimental/xenia-operation-authority-retention-gcs-profile/Cargo.toml \
+            > "$EVIDENCE/cargo-tree.txt"
+          sha256sum experimental/xenia-operation-authority-retention-gcs-profile/Cargo.lock \
+            > "$EVIDENCE/Cargo.lock.sha256"
+          sha256sum \
+            experimental/xenia-operation-authority-retention-gcs-profile/Cargo.toml \
+            experimental/xenia-operation-authority-retention-gcs-profile/src/lib.rs \
+            docs/ADR-030-gcs-operation-authority-retention-profile.md \
+            > "$EVIDENCE/source.sha256"
+      - name: Format
+        run: cargo fmt --manifest-path experimental/xenia-operation-authority-retention-gcs-profile/Cargo.toml -- --check
+      - name: Test profile invariants
+        run: cargo test --manifest-path experimental/xenia-operation-authority-retention-gcs-profile/Cargo.toml --locked
+      - name: Strict Clippy
+        run: cargo clippy --manifest-path experimental/xenia-operation-authority-retention-gcs-profile/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Upload provider-profile evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gcs-authority-retention-profile-v1-${{ github.sha }}
+          path: ${{ runner.temp }}/gcs-authority-retention-profile-v1-evidence
+          if-no-files-found: warn
+          retention-days: 30
+
+  msrv:
+    name: GCS Profile MSRV Rust 1.94
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - name: Resolve standalone lock
+        working-directory: experimental/xenia-operation-authority-retention-gcs-profile
+        run: cargo generate-lockfile
+      - name: Check profile
+        run: cargo check --manifest-path experimental/xenia-operation-authority-retention-gcs-profile/Cargo.toml --locked --all-targets
+      - name: Test profile
+        run: cargo test --manifest-path experimental/xenia-operation-authority-retention-gcs-profile/Cargo.toml --locked
