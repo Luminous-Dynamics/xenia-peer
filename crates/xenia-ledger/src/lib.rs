@@ -74,6 +74,7 @@ mod hash;
 mod key_transition;
 mod policy;
 mod seal;
+mod sif;
 mod signature;
 mod verify;
 mod witness;
@@ -140,6 +141,11 @@ pub use seal::{
 };
 #[cfg(feature = "pqc-signatures")]
 pub use seal::{sign_evidence_bundle_seal_ml_dsa_65, sign_evidence_bundle_seal_ml_dsa_87};
+
+pub use sif::{
+    SIF_PROVENANCE_KIND, SIF_PROVENANCE_VERSION, SIF_SESSION_PROVENANCE_SCHEMA,
+    SifProvenanceError, SifProvenanceExport, SifSessionProvenanceBinding,
+};
 
 pub use signature::{
     CURRENT_LEDGER_SIGNATURE_SUITE, Ed25519EvidenceSignatureBackend, EvidenceSignatureBackend,
