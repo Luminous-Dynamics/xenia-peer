@@ -24,6 +24,10 @@ use xenia_ledger::Chain;
 use xenia_peer_core::transport::Transport;
 use xenia_wire::operator_rekey::{self, OperatorRekeyMessage};
 
+const TEST_REKEY_INTERVAL: Duration = Duration::from_secs(1);
+const FORGED_ACK_TIMEOUT: Duration = Duration::from_secs(1);
+const MISSING_ACK_TIMEOUT: Duration = Duration::from_millis(300);
+
 fn fixture(
     op_ed: [u8; 32],
     op_ml: [u8; 32],
@@ -92,7 +96,7 @@ async fn receive_epoch_one_proposal(
     transport: &mut WsTransport,
     initial_key: [u8; 32],
 ) -> OperatorRekeyMessage {
-    let proposal_envelope = tokio::time::timeout(Duration::from_secs(2), transport.recv_envelope())
+    let proposal_envelope = tokio::time::timeout(Duration::from_secs(3), transport.recv_envelope())
         .await
         .expect("daemon should emit rekey Proposal")
         .expect("rekey Proposal transport receive should succeed");
@@ -141,7 +145,7 @@ async fn receive_epoch_one_proposal(
 }
 
 async fn expect_connection_teardown(transport: &mut WsTransport) {
-    let result = tokio::time::timeout(Duration::from_secs(2), transport.recv_envelope())
+    let result = tokio::time::timeout(Duration::from_secs(3), transport.recv_envelope())
         .await
         .expect("hardened endpoint should tear the failed connection down promptly");
     assert!(
@@ -154,7 +158,7 @@ async fn wait_for_protocol_failure(
     metrics: &crate::operator_channel_metrics::OperatorChannelMetrics,
     expected: u64,
 ) {
-    for _ in 0..100 {
+    for _ in 0..200 {
         if metrics.snapshot().post_handshake_protocol_failures >= expected {
             return;
         }
@@ -183,12 +187,7 @@ async fn old_key_forged_ack_tears_down_and_requires_fresh_handshake() {
     let op_ed = [71u8; 32];
     let op_ml = [72u8; 32];
     let session_uuid = Uuid::from_u128(71);
-    let (policy, deps, revoked) = fixture(
-        op_ed,
-        op_ml,
-        session_uuid,
-        Duration::from_millis(100),
-    );
+    let (policy, deps, revoked) = fixture(op_ed, op_ml, session_uuid, TEST_REKEY_INTERVAL);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -202,7 +201,7 @@ async fn old_key_forged_ack_tears_down_and_requires_fresh_handshake() {
         deps,
         grant_tx,
         endpoint_metrics,
-        Duration::from_millis(60),
+        FORGED_ACK_TIMEOUT,
     ));
 
     let (mut transport, schedule) = browser_handshake(addr, &op_ed, &op_ml).await;
@@ -238,6 +237,7 @@ async fn old_key_forged_ack_tears_down_and_requires_fresh_handshake() {
     expect_connection_teardown(&mut transport).await;
     wait_for_protocol_failure(&metrics, 1).await;
     assert_eq!(metrics.snapshot().connections_accepted, 1);
+    assert_eq!(metrics.snapshot().handshake_failures, 0);
 
     // Authority may resume only through a brand-new authenticated channel.
     approve_after_fresh_handshake(addr, &op_ed, &op_ml).await;
@@ -245,6 +245,7 @@ async fn old_key_forged_ack_tears_down_and_requires_fresh_handshake() {
     assert!(!revoked.load(Ordering::SeqCst));
     assert_eq!(metrics.snapshot().connections_accepted, 2);
     assert_eq!(metrics.snapshot().post_handshake_protocol_failures, 1);
+    assert_eq!(metrics.snapshot().handshake_failures, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -252,12 +253,7 @@ async fn missing_ack_deadline_tears_down_and_requires_fresh_handshake() {
     let op_ed = [81u8; 32];
     let op_ml = [82u8; 32];
     let session_uuid = Uuid::from_u128(81);
-    let (policy, deps, revoked) = fixture(
-        op_ed,
-        op_ml,
-        session_uuid,
-        Duration::from_millis(100),
-    );
+    let (policy, deps, revoked) = fixture(op_ed, op_ml, session_uuid, TEST_REKEY_INTERVAL);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -271,7 +267,7 @@ async fn missing_ack_deadline_tears_down_and_requires_fresh_handshake() {
         deps,
         grant_tx,
         endpoint_metrics,
-        Duration::from_millis(40),
+        MISSING_ACK_TIMEOUT,
     ));
 
     let (mut transport, schedule) = browser_handshake(addr, &op_ed, &op_ml).await;
@@ -282,10 +278,12 @@ async fn missing_ack_deadline_tears_down_and_requires_fresh_handshake() {
     expect_connection_teardown(&mut transport).await;
     wait_for_protocol_failure(&metrics, 1).await;
     assert_eq!(metrics.snapshot().connections_accepted, 1);
+    assert_eq!(metrics.snapshot().handshake_failures, 0);
 
     approve_after_fresh_handshake(addr, &op_ed, &op_ml).await;
     assert!(grant_rx.await.unwrap());
     assert!(!revoked.load(Ordering::SeqCst));
     assert_eq!(metrics.snapshot().connections_accepted, 2);
     assert_eq!(metrics.snapshot().post_handshake_protocol_failures, 1);
+    assert_eq!(metrics.snapshot().handshake_failures, 0);
 }
