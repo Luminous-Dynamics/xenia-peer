@@ -14,7 +14,7 @@
 use google_cloud_gax::paginator::ItemPaginator;
 use google_cloud_storage::{
     client::{Storage, StorageControl},
-    stub::{Storage as StorageStub, StorageControl as StorageControlStub},
+    stub::Storage as StorageStub,
 };
 use thiserror::Error;
 use xenia_operation_authority_retention_backend::{
@@ -33,25 +33,23 @@ use xenia_operation_authority_retention_gcs_profile::{
 
 /// Exact read/list transport for one frozen ADR-030 GCS profile.
 #[derive(Debug, Clone)]
-pub struct GcsAuthorityReadbackTransportV1<D, C>
+pub struct GcsAuthorityReadbackTransportV1<D>
 where
     D: StorageStub + 'static,
-    C: StorageControlStub + 'static,
 {
     data: Storage<D>,
-    control: StorageControl<C>,
+    control: StorageControl,
     profile: GcsAuthorityRetentionProfileV1,
 }
 
-impl<D, C> GcsAuthorityReadbackTransportV1<D, C>
+impl<D> GcsAuthorityReadbackTransportV1<D>
 where
     D: StorageStub + 'static,
-    C: StorageControlStub + 'static,
 {
     /// Construct after validating the exact ADR-030 provider profile.
     pub fn new(
         data: Storage<D>,
-        control: StorageControl<C>,
+        control: StorageControl,
         profile: GcsAuthorityRetentionProfileV1,
     ) -> Result<Self, GcsReadbackTransportErrorV1> {
         profile.validate()?;
@@ -246,6 +244,7 @@ mod tests {
         read_object::ReadObjectResponse,
         request_options::RequestOptions as DataRequestOptions,
         streaming_source::{SizeHint, StreamingSource},
+        stub::StorageControl as StorageControlStub,
     };
     use std::sync::{
         Arc,
