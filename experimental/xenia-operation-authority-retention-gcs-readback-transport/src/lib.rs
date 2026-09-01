@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use google_cloud_gax::paginator::ItemPaginator;
 use google_cloud_storage::{
     client::{Storage, StorageControl},
     stub::{Storage as StorageStub, StorageControl as StorageControlStub},
@@ -88,7 +89,9 @@ where
             });
         }
 
-        let mut bytes = Vec::with_capacity((metadata.size as usize).min(GCS_AUTHORITY_CREATE_MAX_BYTES_V1));
+        let mut bytes = Vec::with_capacity(
+            (metadata.size as usize).min(GCS_AUTHORITY_CREATE_MAX_BYTES_V1),
+        );
         while let Some(chunk) = response.next().await {
             let chunk = match chunk {
                 Ok(chunk) => chunk,
@@ -192,7 +195,10 @@ pub enum GcsReadbackTransportErrorV1 {
     Profile(#[from] GcsProfileErrorV1),
     /// ADR-032 create-transport shared profile helper failed.
     #[error("GCS authority create-profile helper rejected readback transport: {0}")]
-    CreateProfile(#[from] xenia_operation_authority_retention_gcs_create_transport::GcsCreateTransportErrorV1),
+    CreateProfile(
+        #[from]
+        xenia_operation_authority_retention_gcs_create_transport::GcsCreateTransportErrorV1,
+    ),
     /// Google object metadata contained an invalid negative size.
     #[error("GCS retained object reported a negative size")]
     NegativeObjectSize,
@@ -226,7 +232,10 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use google_cloud_gax::{
-        error::{Error as GaxError, rpc::{Code, Status}},
+        error::{
+            Error as GaxError,
+            rpc::{Code, Status},
+        },
         response::Response,
     };
     use google_cloud_storage::{
@@ -236,7 +245,10 @@ mod tests {
         request_options::RequestOptions as DataRequestOptions,
         streaming_source::{SizeHint, StreamingSource},
     };
-    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use xenia_operation_authority_retention_gcs_profile::{
         GCS_AUTHORITY_RETENTION_PROFILE_SCHEMA_V1, GCS_RUNTIME_OBJECT_PERMISSIONS_V1,
         GCS_RUST_SDK_CRATE_V1, GCS_RUST_SDK_VERSION_V1, GCS_STORAGE_API_PROFILE_V1,
@@ -254,7 +266,10 @@ mod tests {
             retention_admin_principal_digest: [2u8; 32],
             encryption_profile_digest: [3u8; 32],
             iam_policy_profile_digest: [4u8; 32],
-            runtime_object_permissions: GCS_RUNTIME_OBJECT_PERMISSIONS_V1.iter().map(|v| (*v).to_string()).collect(),
+            runtime_object_permissions: GCS_RUNTIME_OBJECT_PERMISSIONS_V1
+                .iter()
+                .map(|v| (*v).to_string())
+                .collect(),
             require_locked_bucket_retention: true,
             require_uniform_bucket_level_access: true,
             require_public_access_prevention_enforced: true,
@@ -268,7 +283,10 @@ mod tests {
     }
 
     fn locator() -> AuthorityRetentionObjectLocatorV1 {
-        AuthorityRetentionObjectLocatorV1 { namespace_digest: [0xabu8; 32], retention_sequence: 0 }
+        AuthorityRetentionObjectLocatorV1 {
+            namespace_digest: [0xabu8; 32],
+            retention_sequence: 0,
+        }
     }
 
     #[derive(Debug)]
@@ -278,7 +296,8 @@ mod tests {
             &self,
             _req: ReadObjectRequest,
             _options: DataRequestOptions,
-        ) -> impl std::future::Future<Output = google_cloud_storage::Result<ReadObjectResponse>> + Send {
+        ) -> impl std::future::Future<Output = google_cloud_storage::Result<ReadObjectResponse>> + Send
+        {
             async {
                 let mut meta = ObjectHighlights::default();
                 meta.size = 6;
@@ -288,10 +307,15 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct PartialThenErrorSource { step: u8 }
+    struct PartialThenErrorSource {
+        step: u8,
+    }
     impl StreamingSource for PartialThenErrorSource {
         type Error = std::io::Error;
-        fn next(&mut self) -> impl std::future::Future<Output = Option<Result<Bytes, Self::Error>>> + Send {
+
+        fn next(
+            &mut self,
+        ) -> impl std::future::Future<Output = Option<Result<Bytes, Self::Error>>> + Send {
             let step = self.step;
             self.step = self.step.saturating_add(1);
             async move {
@@ -302,7 +326,10 @@ mod tests {
                 }
             }
         }
-        fn size_hint(&self) -> impl std::future::Future<Output = Result<SizeHint, Self::Error>> + Send {
+
+        fn size_hint(
+            &self,
+        ) -> impl std::future::Future<Output = Result<SizeHint, Self::Error>> + Send {
             async { Ok(SizeHint::with_exact(6)) }
         }
     }
@@ -314,11 +341,64 @@ mod tests {
             &self,
             _req: ReadObjectRequest,
             _options: DataRequestOptions,
-        ) -> impl std::future::Future<Output = google_cloud_storage::Result<ReadObjectResponse>> + Send {
+        ) -> impl std::future::Future<Output = google_cloud_storage::Result<ReadObjectResponse>> + Send
+        {
             async {
                 let mut meta = ObjectHighlights::default();
                 meta.size = 6;
-                Ok(ReadObjectResponse::from_source(meta, PartialThenErrorSource { step: 0 }))
+                Ok(ReadObjectResponse::from_source(
+                    meta,
+                    PartialThenErrorSource { step: 0 },
+                ))
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct OversizeSource {
+        emitted: bool,
+    }
+    impl StreamingSource for OversizeSource {
+        type Error = std::io::Error;
+
+        fn next(
+            &mut self,
+        ) -> impl std::future::Future<Output = Option<Result<Bytes, Self::Error>>> + Send {
+            let emit = !self.emitted;
+            self.emitted = true;
+            async move {
+                emit.then(|| {
+                    Ok(Bytes::from(vec![
+                        7u8;
+                        GCS_AUTHORITY_CREATE_MAX_BYTES_V1 + 1
+                    ]))
+                })
+            }
+        }
+
+        fn size_hint(
+            &self,
+        ) -> impl std::future::Future<Output = Result<SizeHint, Self::Error>> + Send {
+            async { Ok(SizeHint::with_exact(1)) }
+        }
+    }
+
+    #[derive(Debug)]
+    struct OversizeReadStub;
+    impl StorageStub for OversizeReadStub {
+        fn read_object(
+            &self,
+            _req: ReadObjectRequest,
+            _options: DataRequestOptions,
+        ) -> impl std::future::Future<Output = google_cloud_storage::Result<ReadObjectResponse>> + Send
+        {
+            async {
+                let mut meta = ObjectHighlights::default();
+                meta.size = 1;
+                Ok(ReadObjectResponse::from_source(
+                    meta,
+                    OversizeSource { emitted: false },
+                ))
             }
         }
     }
@@ -328,13 +408,18 @@ mod tests {
     impl StorageControlStub for EmptyControlStub {}
 
     #[derive(Debug)]
-    struct ListStub { calls: AtomicUsize, fail_second_page: bool }
+    struct ListStub {
+        calls: AtomicUsize,
+        fail_second_page: bool,
+    }
     impl StorageControlStub for ListStub {
         fn list_objects(
             &self,
             req: ListObjectsRequest,
             _options: google_cloud_gax::options::RequestOptions,
-        ) -> impl std::future::Future<Output = google_cloud_storage::Result<Response<ListObjectsResponse>>> + Send {
+        ) -> impl std::future::Future<
+            Output = google_cloud_storage::Result<Response<ListObjectsResponse>>,
+        > + Send {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let fail_second = self.fail_second_page;
             async move {
@@ -342,20 +427,26 @@ mod tests {
                 let parent = req.parent.clone();
                 if req.page_token.is_empty() {
                     let first = Object::new()
-                        .set_bucket(parent)
+                        .set_bucket(parent.clone())
                         .set_name(format!("{prefix}{:020}.bin", 0));
-                    let mut response = ListObjectsResponse::new().set_objects([first]);
                     if fail_second {
-                        response = response.set_next_page_token("next");
+                        Ok(Response::from(
+                            ListObjectsResponse::new()
+                                .set_objects([first])
+                                .set_next_page_token("next"),
+                        ))
                     } else {
                         let second = Object::new()
-                            .set_bucket(req.parent)
+                            .set_bucket(parent)
                             .set_name(format!("{prefix}{:020}.bin", 1));
-                        response = response.set_objects([response.objects[0].clone(), second]);
+                        Ok(Response::from(
+                            ListObjectsResponse::new().set_objects([first, second]),
+                        ))
                     }
-                    Ok(Response::from(response))
                 } else {
-                    Err(GaxError::service(Status::default().set_code(Code::DataLoss)))
+                    Err(GaxError::service(
+                        Status::default().set_code(Code::DataLoss),
+                    ))
                 }
             }
         }
@@ -377,17 +468,37 @@ mod tests {
         let data = Storage::from_stub(PartialReadStub);
         let control = StorageControl::from_stub(EmptyControlStub);
         let transport = GcsAuthorityReadbackTransportV1::new(data, control, profile()).unwrap();
-        assert_eq!(transport.read_exact(&locator()).await.unwrap(), BackendReadOutcomeV1::Unknown);
+        assert_eq!(
+            transport.read_exact(&locator()).await.unwrap(),
+            BackendReadOutcomeV1::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_cap_rejects_object_even_when_metadata_claims_tiny_size() {
+        let data = Storage::from_stub(OversizeReadStub);
+        let control = StorageControl::from_stub(EmptyControlStub);
+        let transport = GcsAuthorityReadbackTransportV1::new(data, control, profile()).unwrap();
+        assert!(matches!(
+            transport.read_exact(&locator()).await,
+            Err(GcsReadbackTransportErrorV1::ExternalObjectTooLarge { .. })
+        ));
     }
 
     #[tokio::test]
     async fn complete_listing_parses_exact_fixed_width_sequences() {
-        let list = Arc::new(ListStub { calls: AtomicUsize::new(0), fail_second_page: false });
+        let list = Arc::new(ListStub {
+            calls: AtomicUsize::new(0),
+            fail_second_page: false,
+        });
         let data = Storage::from_stub(ReadSuccessStub);
         let control = StorageControl::from_stub(list.clone());
         let transport = GcsAuthorityReadbackTransportV1::new(data, control, profile()).unwrap();
         assert_eq!(
-            transport.enumerate_complete(locator().namespace_digest).await.unwrap(),
+            transport
+                .enumerate_complete(locator().namespace_digest)
+                .await
+                .unwrap(),
             BackendEnumerateOutcomeV1::Complete(vec![0, 1])
         );
         assert_eq!(list.calls.load(Ordering::SeqCst), 1);
@@ -395,12 +506,18 @@ mod tests {
 
     #[tokio::test]
     async fn second_page_failure_never_returns_partial_complete_listing() {
-        let list = Arc::new(ListStub { calls: AtomicUsize::new(0), fail_second_page: true });
+        let list = Arc::new(ListStub {
+            calls: AtomicUsize::new(0),
+            fail_second_page: true,
+        });
         let data = Storage::from_stub(ReadSuccessStub);
         let control = StorageControl::from_stub(list.clone());
         let transport = GcsAuthorityReadbackTransportV1::new(data, control, profile()).unwrap();
         assert_eq!(
-            transport.enumerate_complete(locator().namespace_digest).await.unwrap(),
+            transport
+                .enumerate_complete(locator().namespace_digest)
+                .await
+                .unwrap(),
             BackendEnumerateOutcomeV1::Unknown
         );
         assert_eq!(list.calls.load(Ordering::SeqCst), 2);
@@ -409,7 +526,11 @@ mod tests {
     #[test]
     fn object_name_parser_rejects_noncanonical_width_and_foreign_prefix() {
         let prefix = "xenia-authority-retention/v1/abc/";
-        assert_eq!(parse_sequence_from_object_name_v1(prefix, &format!("{prefix}{:020}.bin", 9)).unwrap(), 9);
+        assert_eq!(
+            parse_sequence_from_object_name_v1(prefix, &format!("{prefix}{:020}.bin", 9))
+                .unwrap(),
+            9
+        );
         assert!(matches!(
             parse_sequence_from_object_name_v1(prefix, &format!("{prefix}9.bin")),
             Err(GcsReadbackTransportErrorV1::MalformedObjectName)
