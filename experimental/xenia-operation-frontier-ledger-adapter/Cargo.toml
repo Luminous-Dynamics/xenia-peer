@@ -1,0 +1,21 @@
+[package]
+name = "xenia-operation-frontier-ledger-adapter"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Authority-owning verifier joining Xenia ledger checkpoints to operation frontier witnesses"
+
+[workspace]
+
+[dependencies]
+ed25519-dalek = "2"
+thiserror = "2"
+xenia-ledger = { path = "../../crates/xenia-ledger" }
+xenia-operation-frontier-ledger-witness = { path = "../../contracts/xenia-operation-frontier-ledger-witness" }
+xenia-operation-store-frontier = { path = "../../contracts/xenia-operation-store-frontier" }
+
+[dev-dependencies]
+uuid = "1"
