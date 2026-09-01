@@ -1,0 +1,94 @@
+name: Operation Authority Retention GCS Create Transport V1
+
+on:
+  pull_request:
+    paths:
+      - "experimental/xenia-operation-authority-retention-backend/**"
+      - "experimental/xenia-operation-authority-retention-gcs-profile/**"
+      - "experimental/xenia-operation-authority-retention-gcs-adapter/**"
+      - "experimental/xenia-operation-authority-retention-gcs-create-transport/**"
+      - "docs/ADR-028-operation-authority-retention-backend.md"
+      - "docs/ADR-029-operation-authority-retention-namespace-gate.md"
+      - "docs/ADR-030-gcs-operation-authority-retention-profile.md"
+      - "docs/ADR-031-gcs-authority-retention-sdk-adapter.md"
+      - "docs/ADR-032-gcs-authority-retention-single-shot-create.md"
+      - ".github/workflows/operation-authority-retention-gcs-create-transport-v1.yml"
+  push:
+    branches:
+      - "feat/operation-authority-retention-gcs-create-transport-v1"
+    paths:
+      - "experimental/xenia-operation-authority-retention-backend/**"
+      - "experimental/xenia-operation-authority-retention-gcs-profile/**"
+      - "experimental/xenia-operation-authority-retention-gcs-adapter/**"
+      - "experimental/xenia-operation-authority-retention-gcs-create-transport/**"
+      - "docs/ADR-032-gcs-authority-retention-single-shot-create.md"
+      - ".github/workflows/operation-authority-retention-gcs-create-transport-v1.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  transport:
+    name: GCS Single-Shot Create Transport
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt,clippy
+      - name: Resolve standalone lock
+        working-directory: experimental/xenia-operation-authority-retention-gcs-create-transport
+        run: cargo generate-lockfile
+      - name: Assert exact Google SDK lineage
+        working-directory: experimental/xenia-operation-authority-retention-gcs-create-transport
+        run: |
+          test "$(cargo tree -p google-cloud-storage --depth 0 | head -n1)" = "google-cloud-storage v1.18.0"
+          test "$(cargo tree -p google-cloud-gax --depth 0 | head -n1)" = "google-cloud-gax v1.14.0"
+      - name: Assert mutation source contract
+        run: |
+          SRC=experimental/xenia-operation-authority-retention-gcs-create-transport/src/lib.rs
+          grep -F '.set_if_generation_match(0)' "$SRC"
+          grep -F '.with_retry_policy(NeverRetry)' "$SRC"
+          grep -F '.with_resumable_upload_threshold(usize::MAX)' "$SRC"
+          grep -F 'GCS_AUTHORITY_CREATE_MAX_BYTES_V1' "$SRC"
+      - name: Record dependency topology
+        working-directory: experimental/xenia-operation-authority-retention-gcs-create-transport
+        run: cargo tree | tee /tmp/gcs-create-transport-cargo-tree.txt
+      - name: Format
+        run: cargo fmt --manifest-path experimental/xenia-operation-authority-retention-gcs-create-transport/Cargo.toml -- --check
+      - name: Test Google public-stub request construction
+        run: cargo test --manifest-path experimental/xenia-operation-authority-retention-gcs-create-transport/Cargo.toml --locked
+      - name: Strict Clippy
+        run: cargo clippy --manifest-path experimental/xenia-operation-authority-retention-gcs-create-transport/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Capture qualification evidence
+        if: always()
+        run: |
+          mkdir -p /tmp/gcs-create-transport-evidence
+          rustc -Vv > /tmp/gcs-create-transport-evidence/RUSTC.txt
+          cargo -V > /tmp/gcs-create-transport-evidence/CARGO.txt
+          sha256sum experimental/xenia-operation-authority-retention-gcs-create-transport/Cargo.lock > /tmp/gcs-create-transport-evidence/CARGO_LOCK_SHA256.txt
+          sha256sum experimental/xenia-operation-authority-retention-gcs-create-transport/src/lib.rs > /tmp/gcs-create-transport-evidence/SOURCE_SHA256.txt
+          sha256sum docs/ADR-032-gcs-authority-retention-single-shot-create.md > /tmp/gcs-create-transport-evidence/ADR_SHA256.txt
+          cp /tmp/gcs-create-transport-cargo-tree.txt /tmp/gcs-create-transport-evidence/CARGO_TREE.txt || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: operation-authority-retention-gcs-create-transport-v1-evidence
+          path: /tmp/gcs-create-transport-evidence
+
+  msrv:
+    name: GCS Create Transport MSRV Rust 1.94
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - name: Resolve standalone lock
+        working-directory: experimental/xenia-operation-authority-retention-gcs-create-transport
+        run: cargo generate-lockfile
+      - name: Check complete create-transport stack
+        run: cargo check --manifest-path experimental/xenia-operation-authority-retention-gcs-create-transport/Cargo.toml --locked --all-targets
