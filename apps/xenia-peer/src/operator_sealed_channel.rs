@@ -19,10 +19,14 @@ mod legacy;
 mod initiator;
 #[path = "operator_rekey_transport.rs"]
 mod rekey_transport;
+#[cfg(test)]
+#[path = "operator_sealed_channel_adversarial_tests.rs"]
+mod adversarial_tests;
 
 pub(crate) use legacy::{OperatorHostIdentity, SealedConsentDeps};
 
 use std::fmt;
+use std::time::Duration;
 
 use tokio::net::TcpListener;
 use tokio::time::Instant;
@@ -80,6 +84,7 @@ async fn serve_hardened_operator_channel<T: Transport>(
     policy: &OperatorPolicy,
     deps: &SealedConsentDeps,
     grant_tx: &mut Option<tokio::sync::oneshot::Sender<bool>>,
+    rekey_ack_timeout: Duration,
 ) -> Result<bool, ServeError> {
     let channel = legacy::establish_operator_channel(transport, identity, policy).await?;
     if deps.revocations.is_revoked(&channel.operator_id) {
@@ -137,13 +142,13 @@ async fn serve_hardened_operator_channel<T: Transport>(
                     &mut tx_session,
                     &mut authority_rx_session,
                     &channel.rekey_root,
-                    Instant::now() + OPERATOR_REKEY_ACK_TIMEOUT,
+                    Instant::now() + rekey_ack_timeout,
                 )
                 .await
                 .map_err(|err| ServeError::Protocol(err.to_string()))?;
                 tracing::info!(
                     key_epoch = committed_epoch,
-                    ack_timeout_ms = OPERATOR_REKEY_ACK_TIMEOUT.as_millis() as u64,
+                    ack_timeout_ms = rekey_ack_timeout.as_millis() as u64,
                     "operator rekey Proposal sent; new key committed pending exact-key Ack"
                 );
             }
@@ -248,11 +253,35 @@ async fn serve_hardened_operator_channel<T: Transport>(
 /// roll key state backward.
 pub(crate) async fn run_sealed_operator_endpoint(
     listener: TcpListener,
+    identity: OperatorHostIdentity,
+    policy: OperatorPolicy,
+    deps: SealedConsentDeps,
+    grant_tx: tokio::sync::oneshot::Sender<bool>,
+    metrics: std::sync::Arc<crate::operator_channel_metrics::OperatorChannelMetrics>,
+) {
+    run_sealed_operator_endpoint_with_ack_timeout(
+        listener,
+        identity,
+        policy,
+        deps,
+        grant_tx,
+        metrics,
+        OPERATOR_REKEY_ACK_TIMEOUT,
+    )
+    .await;
+}
+
+/// Internal endpoint driver with an injectable Ack deadline for deterministic
+/// adversarial tests. Production always calls this with
+/// [`OPERATOR_REKEY_ACK_TIMEOUT`].
+async fn run_sealed_operator_endpoint_with_ack_timeout(
+    listener: TcpListener,
     mut identity: OperatorHostIdentity,
     policy: OperatorPolicy,
     deps: SealedConsentDeps,
     grant_tx: tokio::sync::oneshot::Sender<bool>,
     metrics: std::sync::Arc<crate::operator_channel_metrics::OperatorChannelMetrics>,
+    rekey_ack_timeout: Duration,
 ) {
     let mut grant_tx = Some(grant_tx);
     'accept: loop {
@@ -286,6 +315,7 @@ pub(crate) async fn run_sealed_operator_endpoint(
             &policy,
             &deps,
             &mut grant_tx,
+            rekey_ack_timeout,
         )
         .await
         {
