@@ -69,10 +69,8 @@ pub(crate) async fn prepare_send_commit_interval<T: Transport>(
 mod tests {
     use super::*;
     use std::time::Duration;
-    use xenia_peer_core::transport::{
-        TransportError, TransportKind, TransportProfileV1,
-    };
-    use xenia_wire::operator_rekey::{self, OperatorRekeyMessage};
+    use xenia_peer_core::transport::{TransportError, TransportKind, TransportProfileV1};
+    use xenia_wire::operator_rekey::OperatorRekeyMessage;
 
     const HOST_SOURCE_ID: [u8; 8] = *b"xnaophs1";
     const PEER_SOURCE_ID: [u8; 8] = *b"xnaopch1";
@@ -81,23 +79,37 @@ mod tests {
     const REKEY_ROOT: [u8; 32] = [0x22; 32];
     const TRANSCRIPT_HASH: [u8; 32] = [0x33; 32];
 
+    #[derive(Clone, Copy)]
+    enum SendMode {
+        Success,
+        FailBeforeWrite,
+        FailAfterWrite,
+    }
+
     struct RecordingTransport {
         sent: Vec<Vec<u8>>,
-        fail_send: bool,
+        mode: SendMode,
     }
 
     impl RecordingTransport {
         fn success() -> Self {
             Self {
                 sent: Vec::new(),
-                fail_send: false,
+                mode: SendMode::Success,
             }
         }
 
-        fn failing() -> Self {
+        fn fail_before_write() -> Self {
             Self {
                 sent: Vec::new(),
-                fail_send: true,
+                mode: SendMode::FailBeforeWrite,
+            }
+        }
+
+        fn fail_after_write() -> Self {
+            Self {
+                sent: Vec::new(),
+                mode: SendMode::FailAfterWrite,
             }
         }
     }
@@ -108,11 +120,19 @@ mod tests {
         }
 
         async fn send_envelope(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
-            if self.fail_send {
-                return Err(TransportError::UnexpectedEof);
+            match self.mode {
+                SendMode::Success => {
+                    self.sent.push(bytes.to_vec());
+                    Ok(())
+                }
+                SendMode::FailBeforeWrite => Err(TransportError::UnexpectedEof),
+                SendMode::FailAfterWrite => {
+                    // Model the worst transport ambiguity: the complete Proposal
+                    // escaped locally, but the carrier still reports failure.
+                    self.sent.push(bytes.to_vec());
+                    Err(TransportError::UnexpectedEof)
+                }
             }
-            self.sent.push(bytes.to_vec());
-            Ok(())
         }
 
         async fn recv_envelope(&mut self) -> Result<Vec<u8>, TransportError> {
@@ -141,6 +161,17 @@ mod tests {
         )
     }
 
+    fn assert_proposal_is_old_key_epoch_one(envelope: &[u8]) {
+        let mut old_key_receiver = Session::with_source_id(HOST_SOURCE_ID, SESSION_EPOCH);
+        old_key_receiver.install_key(INITIAL_KEY);
+        let plaintext = old_key_receiver.open(envelope).unwrap();
+        let proposal = OperatorRekeyMessage::decode(&plaintext).unwrap();
+        assert!(matches!(
+            proposal,
+            OperatorRekeyMessage::Proposal { key_epoch: 1, .. }
+        ));
+    }
+
     #[tokio::test]
     async fn transport_observes_exact_old_key_proposal_before_local_commit() {
         let mut rekey = initiator();
@@ -163,16 +194,7 @@ mod tests {
         assert_eq!(transport.sent.len(), 1);
         assert!(rekey.is_pending_ack());
         assert!(!rekey.application_allowed());
-
-        // The exact transport bytes were produced under the old host key.
-        let mut old_key_receiver = Session::with_source_id(HOST_SOURCE_ID, SESSION_EPOCH);
-        old_key_receiver.install_key(INITIAL_KEY);
-        let plaintext = old_key_receiver.open(&transport.sent[0]).unwrap();
-        let proposal = OperatorRekeyMessage::decode(&plaintext).unwrap();
-        assert!(matches!(
-            proposal,
-            OperatorRekeyMessage::Proposal { key_epoch: 1, .. }
-        ));
+        assert_proposal_is_old_key_epoch_one(&transport.sent[0]);
 
         // After local commit, both local sessions are new-key-only. The old key
         // is not retained merely because generic Session supports grace.
@@ -192,11 +214,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ambiguous_transport_send_failure_never_restores_authority() {
+    async fn failure_before_any_write_never_restores_authority() {
         let mut rekey = initiator();
         let mut tx = tx_session();
         let mut rx = rx_session();
-        let mut transport = RecordingTransport::failing();
+        let mut transport = RecordingTransport::fail_before_write();
         let old_rx_fingerprint = rx.session_fingerprint(7).unwrap();
 
         let err = prepare_send_commit_interval(
@@ -212,12 +234,44 @@ mod tests {
 
         assert!(matches!(err, RekeyTransportTransactionError::Transport(_)));
         assert!(transport.sent.is_empty());
-
-        // Preparation consumed one old-key transmit nonce, but no local key
-        // commit occurred. Crucially, the initiator remains non-Stable, so the
-        // caller cannot continue application authority after ambiguous send.
         assert_eq!(tx.nonce_counter(), 1);
         assert_eq!(rx.session_fingerprint(7).unwrap(), old_rx_fingerprint);
+        assert!(!rekey.is_pending_ack());
+        assert!(!rekey.application_allowed());
+        assert!(matches!(
+            rekey.prepare_interval(&mut tx, &REKEY_ROOT),
+            Err(RekeyInitiatorError::TransitionAlreadyActive)
+        ));
+    }
+
+    #[tokio::test]
+    async fn reported_failure_after_complete_proposal_escape_never_rolls_back() {
+        let mut rekey = initiator();
+        let mut tx = tx_session();
+        let mut rx = rx_session();
+        let mut transport = RecordingTransport::fail_after_write();
+        let old_rx_fingerprint = rx.session_fingerprint(11).unwrap();
+
+        let err = prepare_send_commit_interval(
+            &mut rekey,
+            &mut transport,
+            &mut tx,
+            &mut rx,
+            &REKEY_ROOT,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, RekeyTransportTransactionError::Transport(_)));
+        assert_eq!(transport.sent.len(), 1);
+        assert_proposal_is_old_key_epoch_one(&transport.sent[0]);
+
+        // The local key has not committed because send did not report success,
+        // yet application authority also does not return. The only safe action
+        // is endpoint teardown + a fresh authenticated handshake.
+        assert_eq!(tx.nonce_counter(), 1);
+        assert_eq!(rx.session_fingerprint(11).unwrap(), old_rx_fingerprint);
         assert!(!rekey.is_pending_ack());
         assert!(!rekey.application_allowed());
         assert!(matches!(
