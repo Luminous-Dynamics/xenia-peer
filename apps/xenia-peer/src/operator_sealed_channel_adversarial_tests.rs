@@ -80,9 +80,7 @@ async fn browser_handshake(
     op_ed: &[u8; 32],
     op_ml: &[u8; 32],
 ) -> (WsTransport, xenia_wire::handshake::SessionKeySchedule) {
-    let mut transport = WsTransport::connect(&format!("ws://{addr}"))
-        .await
-        .unwrap();
+    let mut transport = WsTransport::connect(&format!("ws://{addr}")).await.unwrap();
     let mut hs = xenia_wire::handshake::ViewerHandshake::from_identity(op_ed, op_ml).unwrap();
     let hello = transport.recv_envelope().await.unwrap();
     let response = hs.begin(&hello).unwrap();

@@ -196,16 +196,14 @@ impl OperatorRekeyInitiator {
                 return Err(RekeyInitiatorError::ProposalEncode(err.to_string()));
             }
         };
-        let proposal_envelope = match tx_session.seal(
-            &proposal_bytes,
-            operator_rekey::PAYLOAD_TYPE_OPERATOR_REKEY,
-        ) {
-            Ok(envelope) => envelope,
-            Err(err) => {
-                new_key.fill(0);
-                return Err(RekeyInitiatorError::ProposalSeal(err.to_string()));
-            }
-        };
+        let proposal_envelope =
+            match tx_session.seal(&proposal_bytes, operator_rekey::PAYLOAD_TYPE_OPERATOR_REKEY) {
+                Ok(envelope) => envelope,
+                Err(err) => {
+                    new_key.fill(0);
+                    return Err(RekeyInitiatorError::ProposalSeal(err.to_string()));
+                }
+            };
 
         self.phase = Phase::Prepared(PreparedRekey {
             key_epoch,
@@ -318,12 +316,7 @@ impl OperatorRekeyInitiator {
         {
             return Err(RekeyInitiatorError::AckWrongNonceDomain);
         }
-        let sequence = u32::from_le_bytes([
-            envelope[8],
-            envelope[9],
-            envelope[10],
-            envelope[11],
-        ]);
+        let sequence = u32::from_le_bytes([envelope[8], envelope[9], envelope[10], envelope[11]]);
         if sequence != ACK_SEQUENCE {
             return Err(RekeyInitiatorError::AckWrongSequence);
         }
@@ -381,12 +374,7 @@ mod tests {
     }
 
     fn initiator() -> OperatorRekeyInitiator {
-        OperatorRekeyInitiator::new(
-            TRANSCRIPT_HASH,
-            &INITIAL_KEY,
-            PEER_SOURCE_ID,
-            SESSION_EPOCH,
-        )
+        OperatorRekeyInitiator::new(TRANSCRIPT_HASH, &INITIAL_KEY, PEER_SOURCE_ID, SESSION_EPOCH)
     }
 
     fn pending_identity(initiator: &OperatorRekeyInitiator) -> (u64, [u8; 32]) {
@@ -458,10 +446,7 @@ mod tests {
         ));
 
         let deadline = Instant::now() + Duration::from_secs(1);
-        assert_eq!(
-            rekey.commit_sent(&mut tx, &mut rx, deadline).unwrap(),
-            1
-        );
+        assert_eq!(rekey.commit_sent(&mut tx, &mut rx, deadline).unwrap(), 1);
         assert!(rekey.is_pending_ack());
         assert_eq!(rekey.ack_deadline(), Some(deadline));
         assert!(!rekey.application_allowed());
@@ -484,11 +469,7 @@ mod tests {
         let mut rekey = initiator();
         rekey.prepare_interval(&mut tx, &REKEY_ROOT).unwrap();
         rekey
-            .commit_sent(
-                &mut tx,
-                &mut rx,
-                Instant::now() + Duration::from_secs(1),
-            )
+            .commit_sent(&mut tx, &mut rx, Instant::now() + Duration::from_secs(1))
             .unwrap();
         let (key_epoch, epoch_hash) = pending_identity(&rekey);
         let new_key = xenia_handshake::derive_operator_rekey_key(&REKEY_ROOT, &epoch_hash);
@@ -501,10 +482,7 @@ mod tests {
             false,
         );
 
-        assert_eq!(
-            rekey.accept_ack(&mut rx, &ack, Instant::now()).unwrap(),
-            1
-        );
+        assert_eq!(rekey.accept_ack(&mut rx, &ack, Instant::now()).unwrap(), 1);
         assert!(rekey.application_allowed());
         assert!(!rekey.is_pending_ack());
     }
@@ -516,11 +494,7 @@ mod tests {
         let mut rekey = initiator();
         rekey.prepare_interval(&mut tx, &REKEY_ROOT).unwrap();
         rekey
-            .commit_sent(
-                &mut tx,
-                &mut rx,
-                Instant::now() + Duration::from_secs(1),
-            )
+            .commit_sent(&mut tx, &mut rx, Instant::now() + Duration::from_secs(1))
             .unwrap();
         let (key_epoch, epoch_hash) = pending_identity(&rekey);
         let forged = peer_envelope(
@@ -547,11 +521,7 @@ mod tests {
         let mut rekey = initiator();
         rekey.prepare_interval(&mut tx, &REKEY_ROOT).unwrap();
         rekey
-            .commit_sent(
-                &mut tx,
-                &mut rx,
-                Instant::now() + Duration::from_secs(1),
-            )
+            .commit_sent(&mut tx, &mut rx, Instant::now() + Duration::from_secs(1))
             .unwrap();
 
         let mut old_sender = Session::with_source_id(PEER_SOURCE_ID, SESSION_EPOCH);
@@ -594,11 +564,7 @@ mod tests {
         let mut rekey = initiator();
         rekey.prepare_interval(&mut tx, &REKEY_ROOT).unwrap();
         rekey
-            .commit_sent(
-                &mut tx,
-                &mut rx,
-                Instant::now() + Duration::from_secs(1),
-            )
+            .commit_sent(&mut tx, &mut rx, Instant::now() + Duration::from_secs(1))
             .unwrap();
         let (key_epoch, epoch_hash) = pending_identity(&rekey);
         let new_key = xenia_handshake::derive_operator_rekey_key(&REKEY_ROOT, &epoch_hash);
@@ -624,11 +590,7 @@ mod tests {
         let mut rekey = initiator();
         rekey.prepare_interval(&mut tx, &REKEY_ROOT).unwrap();
         rekey
-            .commit_sent(
-                &mut tx,
-                &mut rx,
-                Instant::now() + Duration::from_secs(1),
-            )
+            .commit_sent(&mut tx, &mut rx, Instant::now() + Duration::from_secs(1))
             .unwrap();
         let (key_epoch, epoch_hash) = pending_identity(&rekey);
         let new_key = xenia_handshake::derive_operator_rekey_key(&REKEY_ROOT, &epoch_hash);
@@ -657,11 +619,7 @@ mod tests {
         let mut rekey = initiator();
         rekey.prepare_interval(&mut tx, &REKEY_ROOT).unwrap();
         rekey
-            .commit_sent(
-                &mut tx,
-                &mut rx,
-                Instant::now() + Duration::from_secs(1),
-            )
+            .commit_sent(&mut tx, &mut rx, Instant::now() + Duration::from_secs(1))
             .unwrap();
         let (_, epoch_hash) = pending_identity(&rekey);
         let new_key = xenia_handshake::derive_operator_rekey_key(&REKEY_ROOT, &epoch_hash);

@@ -12,16 +12,16 @@
 //! 2. once a rekey Proposal may have left the process, there is no rollback;
 //! 3. authority-bearing receive traffic is current-key-only, including the Ack.
 
-#[path = "operator_sealed_channel_legacy.rs"]
-#[allow(dead_code)]
-mod legacy;
-#[path = "operator_rekey_initiator.rs"]
-mod initiator;
-#[path = "operator_rekey_transport.rs"]
-mod rekey_transport;
 #[cfg(test)]
 #[path = "operator_sealed_channel_adversarial_tests.rs"]
 mod adversarial_tests;
+#[path = "operator_rekey_initiator.rs"]
+mod initiator;
+#[path = "operator_sealed_channel_legacy.rs"]
+#[allow(dead_code)]
+mod legacy;
+#[path = "operator_rekey_transport.rs"]
+mod rekey_transport;
 
 pub(crate) use legacy::{OperatorHostIdentity, SealedConsentDeps};
 
@@ -395,7 +395,10 @@ mod tests {
 
     #[test]
     fn host_and_console_nonce_prefixes_are_directionally_distinct() {
-        assert_ne!(&OPERATOR_HOST_SOURCE_ID[..6], &OPERATOR_CONSOLE_SOURCE_ID[..6]);
+        assert_ne!(
+            &OPERATOR_HOST_SOURCE_ID[..6],
+            &OPERATOR_CONSOLE_SOURCE_ID[..6]
+        );
     }
 
     #[test]

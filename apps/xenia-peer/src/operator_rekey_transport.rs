@@ -153,12 +153,7 @@ mod tests {
     }
 
     fn initiator() -> OperatorRekeyInitiator {
-        OperatorRekeyInitiator::new(
-            TRANSCRIPT_HASH,
-            &INITIAL_KEY,
-            PEER_SOURCE_ID,
-            SESSION_EPOCH,
-        )
+        OperatorRekeyInitiator::new(TRANSCRIPT_HASH, &INITIAL_KEY, PEER_SOURCE_ID, SESSION_EPOCH)
     }
 
     fn assert_proposal_is_old_key_epoch_one(envelope: &[u8]) {
@@ -201,14 +196,20 @@ mod tests {
         let mut old_host = Session::with_source_id(HOST_SOURCE_ID, SESSION_EPOCH);
         old_host.install_key(INITIAL_KEY);
         let old_host_envelope = old_host
-            .seal(b"obsolete host key", xenia_wire::PAYLOAD_TYPE_APPLICATION_MIN)
+            .seal(
+                b"obsolete host key",
+                xenia_wire::PAYLOAD_TYPE_APPLICATION_MIN,
+            )
             .unwrap();
         assert!(tx.open(&old_host_envelope).is_err());
 
         let mut old_peer = Session::with_source_id(PEER_SOURCE_ID, SESSION_EPOCH);
         old_peer.install_key(INITIAL_KEY);
         let old_peer_envelope = old_peer
-            .seal(b"obsolete peer key", xenia_wire::PAYLOAD_TYPE_APPLICATION_MIN)
+            .seal(
+                b"obsolete peer key",
+                xenia_wire::PAYLOAD_TYPE_APPLICATION_MIN,
+            )
             .unwrap();
         assert!(rx.open(&old_peer_envelope).is_err());
     }
