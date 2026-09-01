@@ -13,11 +13,11 @@
 //! session-fatal at the caller.
 //!
 //! The caller supplies separate transmit and authority-receive `Session`s. On a
-//! successful Proposal send, the transmit session rotates normally, while the
-//! authority receive session is rebuilt from scratch with only the new key.
-//! That deliberately removes xenia-wire's previous-key grace from the
-//! authority-bearing receive path: old-key Acks and old-key consent decisions
-//! stop being authoritative immediately after the daemon commits the rekey.
+//! successful Proposal send, both are rebuilt from scratch with only the new key.
+//! That deliberately removes xenia-wire's previous-key grace from both local
+//! post-commit roles: obsolete key material is not retained for a transmit-only
+//! session, and old-key Acks/consent decisions stop being authoritative
+//! immediately on the receive path.
 
 use std::fmt;
 use std::mem;
@@ -235,8 +235,8 @@ impl OperatorRekeyInitiator {
     /// There is intentionally no inverse transition. Once the Proposal may have
     /// escaped the process, ambiguity is resolved only by a matching new-key Ack
     /// or by tearing down the connection and establishing a fresh handshake.
-    /// The authority receive session is *replaced*, not rekeyed in place, so it
-    /// retains no previous-key grace.
+    /// Both local sessions are *replaced*, not rekeyed in place, so they retain
+    /// no previous-key grace or obsolete traffic key after commit.
     pub(crate) fn commit_sent(
         &mut self,
         tx_session: &mut Session,
@@ -252,7 +252,12 @@ impl OperatorRekeyInitiator {
             }
         };
 
-        tx_session.install_key(prepared.new_key);
+        let tx_source_id = *tx_session.source_id();
+        let tx_epoch = tx_session.epoch();
+        let mut fresh_tx = Session::with_source_id(tx_source_id, tx_epoch);
+        fresh_tx.install_key(prepared.new_key);
+        *tx_session = fresh_tx;
+
         let mut fresh_rx = Session::with_source_id(self.peer_source_id, self.session_epoch);
         fresh_rx.install_key(prepared.new_key);
         *authority_rx_session = fresh_rx;
@@ -460,6 +465,16 @@ mod tests {
         assert!(rekey.is_pending_ack());
         assert_eq!(rekey.ack_deadline(), Some(deadline));
         assert!(!rekey.application_allowed());
+        assert_eq!(tx.nonce_counter(), 0);
+
+        // The transmit session is rebuilt new-key-only at commit. It does not
+        // retain old-key grace merely because generic Session supports it.
+        let mut old_host_sender = Session::with_source_id(HOST_SOURCE_ID, SESSION_EPOCH);
+        old_host_sender.install_key(INITIAL_KEY);
+        let old_host_envelope = old_host_sender
+            .seal(b"old host key", xenia_wire::PAYLOAD_TYPE_APPLICATION_MIN)
+            .unwrap();
+        assert!(tx.open(&old_host_envelope).is_err());
     }
 
     #[test]
