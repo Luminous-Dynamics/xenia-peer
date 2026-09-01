@@ -19,14 +19,15 @@
 //! authority-bearing receive path: old-key Acks and old-key consent decisions
 //! stop being authoritative immediately after the daemon commits the rekey.
 
+use std::fmt;
 use std::mem;
 use std::time::Duration;
 
 use thiserror::Error;
 use tokio::time::Instant;
 use xenia_handshake::{OperatorRekeyEpochContext, OperatorRekeyReason as HandshakeRekeyReason};
-use xenia_wire::operator_rekey::{self, OperatorRekeyMessage};
 use xenia_wire::Session;
+use xenia_wire::operator_rekey::{self, OperatorRekeyMessage};
 
 /// Maximum time a sent Proposal may remain unacknowledged before the caller
 /// tears down the channel and requires a fresh authenticated handshake.
@@ -73,12 +74,22 @@ pub(crate) enum RekeyInitiatorError {
     AckMismatch,
 }
 
-#[derive(Debug)]
 struct PreparedRekey {
     key_epoch: u64,
     epoch_hash: [u8; 32],
     new_key: [u8; 32],
     proposal_envelope: Vec<u8>,
+}
+
+impl fmt::Debug for PreparedRekey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PreparedRekey")
+            .field("key_epoch", &self.key_epoch)
+            .field("epoch_hash", &self.epoch_hash)
+            .field("new_key", &"<redacted>")
+            .field("proposal_envelope_len", &self.proposal_envelope.len())
+            .finish()
+    }
 }
 
 impl Drop for PreparedRekey {
@@ -398,6 +409,25 @@ mod tests {
                 operator_rekey::PAYLOAD_TYPE_OPERATOR_REKEY,
             )
             .unwrap()
+    }
+
+    #[test]
+    fn prepared_debug_redacts_future_aead_key() {
+        let mut tx = tx_session();
+        let mut rekey = initiator();
+        rekey.prepare_interval(&mut tx, &REKEY_ROOT).unwrap();
+
+        let (debug, expected_key_debug) = match &rekey.phase {
+            Phase::Prepared(prepared) => {
+                let expected_key =
+                    xenia_handshake::derive_operator_rekey_key(&REKEY_ROOT, &prepared.epoch_hash);
+                (format!("{:?}", rekey.phase), format!("{expected_key:?}"))
+            }
+            _ => panic!("expected Prepared"),
+        };
+
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains(&expected_key_debug));
     }
 
     #[test]
