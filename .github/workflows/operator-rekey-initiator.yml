@@ -170,9 +170,6 @@ jobs:
           assert not receiver["previous_key_authority_allowed"]
           assert not receiver["caller_supplied_expected_domain_per_rekey"]
 
-          # The payload value is intentionally a cross-repository assertion.
-          # Final qualification must verify it against the adopted xenia-wire
-          # source rather than pretending this local manifest proves Wire.
           assert "xenia-wire" in profile["claim_boundary"]
           print("validated operator rekey interoperability profile against local production constants")
 
@@ -210,6 +207,9 @@ jobs:
           cp docs/security/OPERATOR_REKEY_INTEROP_PROFILE_V1.json "$RUNNER_TEMP/qualification/"
           cp scripts/check_operator_rekey_state_model.py "$RUNNER_TEMP/qualification/"
           cp .github/workflows/operator-rekey-initiator.yml "$RUNNER_TEMP/qualification/"
+          model_report="$RUNNER_TEMP/qualification/OPERATOR_REKEY_STATE_MODEL.json"
+          model_report_sha256="$(sha256sum "$model_report" | awk '{print $1}')"
+          test -n "$model_report_sha256"
           {
             echo "profile=xenia-operator-rekey-initiator-v1"
             echo "source_head=$(git rev-parse HEAD)"
@@ -225,7 +225,7 @@ jobs:
             echo "invariants_sha256=$(sha256sum docs/security/OPERATOR_REKEY_INVARIANTS_V1.json | awk '{print $1}')"
             echo "interop_profile_sha256=$(sha256sum docs/security/OPERATOR_REKEY_INTEROP_PROFILE_V1.json | awk '{print $1}')"
             echo "state_model_source_sha256=$(sha256sum scripts/check_operator_rekey_state_model.py | awk '{print $1}')"
-            echo "state_model_report_sha256=$(sha256sum \"$RUNNER_TEMP/qualification/OPERATOR_REKEY_STATE_MODEL.json\" | awk '{print $1}')"
+            echo "state_model_report_sha256=$model_report_sha256"
             echo "qualification_workflow_sha256=$(sha256sum .github/workflows/operator-rekey-initiator.yml | awk '{print $1}')"
             echo "actions_checkout_commit=11d5960a326750d5838078e36cf38b85af677262"
             echo "nix_installer_action_commit=33c9ab3ef95cd57c164d9d6eb1f9a46338538d41"
@@ -241,6 +241,7 @@ jobs:
             echo "--- nix ci cargo ---"
             nix develop .#ci --command cargo -Vv
           } > "$RUNNER_TEMP/qualification/PROVENANCE.txt"
+          grep -Eq '^state_model_report_sha256=[0-9a-f]{64}$' "$RUNNER_TEMP/qualification/PROVENANCE.txt"
           cat "$RUNNER_TEMP/qualification/PROVENANCE.txt"
 
       - name: Format exact source
