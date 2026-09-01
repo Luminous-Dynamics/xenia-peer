@@ -1,0 +1,106 @@
+name: Operation Authority Retention GCS Authority Bridge V1
+
+on:
+  pull_request:
+    paths:
+      - "experimental/xenia-operation-authority-retention-lineage-v2/**"
+      - "experimental/xenia-operation-authority-retention-backend/**"
+      - "experimental/xenia-operation-authority-retention-namespace-gate/**"
+      - "experimental/xenia-operation-authority-retention-gcs-profile/**"
+      - "experimental/xenia-operation-authority-retention-gcs-adapter/**"
+      - "experimental/xenia-operation-authority-retention-gcs-create-transport/**"
+      - "experimental/xenia-operation-authority-retention-gcs-readback-transport/**"
+      - "experimental/xenia-operation-authority-retention-gcs-authority-bridge/**"
+      - "docs/ADR-027-operation-authority-retention-lineage-v2.md"
+      - "docs/ADR-028-operation-authority-retention-backend.md"
+      - "docs/ADR-029-operation-authority-retention-namespace-gate.md"
+      - "docs/ADR-030-gcs-operation-authority-retention-profile.md"
+      - "docs/ADR-031-gcs-authority-retention-sdk-adapter.md"
+      - "docs/ADR-032-gcs-authority-retention-single-shot-create.md"
+      - "docs/ADR-033-gcs-authority-retention-readback.md"
+      - "docs/ADR-034-operation-authority-retention-gcs-authority-bridge.md"
+      - ".github/workflows/operation-authority-retention-gcs-authority-bridge-v1.yml"
+  push:
+    branches:
+      - "feat/operation-authority-retention-gcs-authority-bridge-v1"
+    paths:
+      - "experimental/xenia-operation-authority-retention-namespace-gate/**"
+      - "experimental/xenia-operation-authority-retention-gcs-authority-bridge/**"
+      - "docs/ADR-034-operation-authority-retention-gcs-authority-bridge.md"
+      - ".github/workflows/operation-authority-retention-gcs-authority-bridge-v1.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bridge:
+    name: Authority-gated async GCS composition
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt,clippy
+      - name: Resolve standalone lock
+        working-directory: experimental/xenia-operation-authority-retention-gcs-authority-bridge
+        run: cargo generate-lockfile
+      - name: Assert exact Google SDK lineage
+        working-directory: experimental/xenia-operation-authority-retention-gcs-authority-bridge
+        run: |
+          test "$(cargo tree -p google-cloud-storage --depth 0 | head -n1)" = "google-cloud-storage v1.18.0"
+          test "$(cargo tree -p google-cloud-gax --depth 0 | head -n1)" = "google-cloud-gax v1.14.0"
+      - name: Assert authority composition source contract
+        run: |
+          SRC=experimental/xenia-operation-authority-retention-gcs-authority-bridge/src/lib.rs
+          NS=experimental/xenia-operation-authority-retention-namespace-gate/src/lib.rs
+          grep -F 'consume_verified_namespace_v1(verified_namespace, now_unix_ms)' "$SRC"
+          grep -F 'self.profile.validate_namespace(&namespace)?' "$SRC"
+          grep -F 'let mut shadow = model.clone();' "$SRC"
+          grep -F 'shadow.append(candidate.clone(), |_| PersistenceOutcomeV2::Durable)?' "$SRC"
+          grep -F 'append_via_backend_v1(model, &namespace, &mut observed, candidate)' "$SRC"
+          grep -F 'readback_complete_lineage_v1(' "$SRC"
+          grep -F 'pub fn consume_verified_namespace_v1(' "$NS"
+          grep -F 'verified_namespace.validate_live(now_unix_ms)?' "$NS"
+      - name: Record dependency topology
+        working-directory: experimental/xenia-operation-authority-retention-gcs-authority-bridge
+        run: cargo tree | tee /tmp/gcs-authority-bridge-cargo-tree.txt
+      - name: Format
+        run: cargo fmt --manifest-path experimental/xenia-operation-authority-retention-gcs-authority-bridge/Cargo.toml -- --check
+      - name: Test authority composition semantics
+        run: cargo test --manifest-path experimental/xenia-operation-authority-retention-gcs-authority-bridge/Cargo.toml --locked
+      - name: Strict Clippy
+        run: cargo clippy --manifest-path experimental/xenia-operation-authority-retention-gcs-authority-bridge/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Capture qualification evidence
+        if: always()
+        run: |
+          mkdir -p /tmp/gcs-authority-bridge-evidence
+          rustc -Vv > /tmp/gcs-authority-bridge-evidence/RUSTC.txt
+          cargo -V > /tmp/gcs-authority-bridge-evidence/CARGO.txt
+          sha256sum experimental/xenia-operation-authority-retention-gcs-authority-bridge/Cargo.lock > /tmp/gcs-authority-bridge-evidence/CARGO_LOCK_SHA256.txt
+          sha256sum experimental/xenia-operation-authority-retention-gcs-authority-bridge/src/lib.rs > /tmp/gcs-authority-bridge-evidence/BRIDGE_SOURCE_SHA256.txt
+          sha256sum experimental/xenia-operation-authority-retention-gcs-authority-bridge/tests/authority_bridge.rs > /tmp/gcs-authority-bridge-evidence/INTEGRATION_TEST_SHA256.txt
+          sha256sum experimental/xenia-operation-authority-retention-namespace-gate/src/lib.rs > /tmp/gcs-authority-bridge-evidence/NAMESPACE_GATE_SOURCE_SHA256.txt
+          sha256sum docs/ADR-034-operation-authority-retention-gcs-authority-bridge.md > /tmp/gcs-authority-bridge-evidence/ADR_SHA256.txt
+          cp /tmp/gcs-authority-bridge-cargo-tree.txt /tmp/gcs-authority-bridge-evidence/CARGO_TREE.txt || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: operation-authority-retention-gcs-authority-bridge-v1-evidence
+          path: /tmp/gcs-authority-bridge-evidence
+
+  msrv:
+    name: GCS Authority Bridge MSRV Rust 1.94
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - name: Resolve standalone lock
+        working-directory: experimental/xenia-operation-authority-retention-gcs-authority-bridge
+        run: cargo generate-lockfile
+      - name: Check authority bridge stack
+        run: cargo check --manifest-path experimental/xenia-operation-authority-retention-gcs-authority-bridge/Cargo.toml --locked --all-targets
