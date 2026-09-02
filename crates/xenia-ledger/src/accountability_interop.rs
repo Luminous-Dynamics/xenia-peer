@@ -13,12 +13,37 @@ use uuid::Uuid;
 
 use crate::{
     accountability_execution_binding_digest, AccountabilityBindingError,
-    AccountabilityExecutionAttestation, EvidenceCryptoManifest, EvidenceSignatureBackend,
-    SignatureSuite,
+    AccountabilityExecutionAttestation, AccountabilityExecutionBinding, EvidenceCryptoManifest,
+    EvidenceSignatureBackend, SignatureSuite,
 };
 
 /// Domain separator for stable verifier-key identifiers exported to higher layers.
 const ACCOUNTABILITY_VERIFIER_KEY_DOMAIN: &[u8] = b"xenia:accountability-verifier-key:v1";
+
+/// Domain separator for the opaque operation nonce shared with a computation
+/// proof provider such as Symthaea.
+const ACCOUNTABILITY_OPERATION_NONCE_DOMAIN: &[u8] =
+    b"xenia:sif-computation-operation-nonce:v1";
+
+impl AccountabilityExecutionBinding {
+    /// Derive the opaque 32-byte operation nonce that a computation proof MUST
+    /// bind when it claims to belong to this authenticated Xenia execution.
+    ///
+    /// This closes a subtle cross-provider gap: the Mycelix receipt statement
+    /// proves common semantics, while this nonce additionally ties Symthaea's
+    /// computation proof to Xenia's concrete live operation/session. The nonce
+    /// contains no citizen or case identifier.
+    pub fn sif_computation_operation_nonce(&self) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(ACCOUNTABILITY_OPERATION_NONCE_DOMAIN);
+        hasher.update(&[0]);
+        hasher.update(self.operation_id.as_bytes());
+        hasher.update(self.session.session_id.as_bytes());
+        hasher.update(&self.receipt_digest);
+        hasher.update(&self.query_digest);
+        *hasher.finalize().as_bytes()
+    }
+}
 
 /// Expected higher-layer commitments for one accountability execution.
 ///
