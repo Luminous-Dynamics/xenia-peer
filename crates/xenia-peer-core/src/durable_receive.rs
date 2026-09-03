@@ -90,13 +90,21 @@ impl CrashDurableIncomingFileStager {
         self.inner.append(offset, bytes)
     }
 
-    /// Number of file-content bytes durably staged so far.
+    /// Number of file-content bytes successfully staged so far.
+    ///
+    /// This is not a durability claim: the staging inode is synchronized only during
+    /// [`Self::finish`] after the complete file has passed size/hash verification.
     pub fn received_bytes(&self) -> u64 {
         self.inner.received_bytes()
     }
 
     /// Verify the complete file, sync its inode, publish without clobbering, then
     /// sync the containing directory before reporting crash-durable custody.
+    ///
+    /// If this returns [`CrashDurableReceiveError::NamespaceSync`], the final pathname
+    /// has already been published and may be visible locally, but crash durability is
+    /// unproven. Callers must preserve that uncertainty instead of retrying the receive
+    /// as though no side effect occurred.
     pub fn finish(self) -> Result<CrashDurableReceivePublication, CrashDurableReceiveError> {
         let Self { inner, final_path } = self;
         inner.finish()?;
@@ -117,7 +125,9 @@ impl CrashDurableIncomingFileStager {
 /// boundary used by [`CrashDurableIncomingFileStager`].
 ///
 /// The legacy helper remains unchanged; protected callers can opt into this stricter
-/// contract without altering ordinary file-transfer behavior.
+/// contract without altering ordinary file-transfer behavior. A
+/// [`CrashDurableReceiveError::NamespaceSync`] result means publication already
+/// occurred but its final directory entry could not be proven crash-durable.
 pub fn persist_received_file_crash_durable(
     path: &Path,
     contents: &[u8],
@@ -179,15 +189,30 @@ pub enum CrashDurableReceiveError {
     /// In-memory verified-file publication failed before directory synchronization.
     #[error(transparent)]
     Publish(#[from] io::Error),
-    /// Final pathname publication could not be made crash-durable.
+    /// Final pathname was published, but its containing directory could not be synced.
+    ///
+    /// This is an uncertainty state, not proof that no file exists. The named final
+    /// path may already be visible and must not be overwritten by a blind retry.
     #[error("failed to synchronize receive namespace for {path}: {source}")]
     NamespaceSync {
-        /// Final protected receive path.
+        /// Final protected receive path that was already published.
         path: PathBuf,
         /// Directory synchronization failure.
         #[source]
         source: io::Error,
     },
+}
+
+impl CrashDurableReceiveError {
+    /// Return the final path when publication occurred before durability became
+    /// uncertain. `None` means this error does not assert that final-name publication
+    /// succeeded.
+    pub fn published_but_unsynced_path(&self) -> Option<&Path> {
+        match self {
+            Self::NamespaceSync { path, .. } => Some(path),
+            Self::Stage(_) | Self::Publish(_) => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -247,7 +272,8 @@ mod tests {
         let dir = temp_dir();
         let path = dir.join("existing.bin");
         std::fs::write(&path, b"original").unwrap();
-        assert!(persist_received_file_crash_durable(&path, b"replacement").is_err());
+        let err = persist_received_file_crash_durable(&path, b"replacement").unwrap_err();
+        assert!(err.published_but_unsynced_path().is_none());
         assert_eq!(std::fs::read(&path).unwrap(), b"original");
         std::fs::remove_dir_all(dir).unwrap();
     }
