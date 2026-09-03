@@ -12,11 +12,16 @@
 //! `HandshakeManager::verify_ml_dsa` path. It introduces no alternate verifier,
 //! signing implementation, or compatibility fallback.
 
+use sha2::{Digest, Sha256};
 use xenia_handshake::{HandshakeManager, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN};
 
 const MESSAGE: [u8; 32] = [0xA5; 32];
 const PUBLIC_KEY_HEX: &str = include_str!("test-vectors/openssl-3.5.5-mldsa65-public.hex");
 const SIGNATURE_HEX: &str = include_str!("test-vectors/openssl-3.5.5-mldsa65-signature.hex");
+
+const MESSAGE_SHA256: &str = "fc8b64001c5fdd0f2f40fb67dae4a865a2c5bd17836676d6d5b58b7917e33717";
+const PUBLIC_KEY_SHA256: &str = "a0f077786cbea674bdf68eef84713d19822f1a61c0b82be7c0ec0e2292934afa";
+const SIGNATURE_SHA256: &str = "a274d68afe37fdde6cd330a04fc91cef86756ea61c6f6a46c910d4999280c5e3";
 
 const _: () = assert!(ML_DSA_65_PK_LEN == 1_952);
 const _: () = assert!(ML_DSA_65_SIG_LEN == 3_309);
@@ -42,6 +47,26 @@ fn hex_nibble(byte: u8) -> u8 {
         b'A'..=b'F' => byte - b'A' + 10,
         _ => panic!("non-hex byte in committed neutral vector"),
     }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut out, "{byte:02x}").expect("writing into String cannot fail");
+    }
+    out
+}
+
+#[test]
+fn neutral_vector_bytes_match_frozen_public_commitments() {
+    let public_key = decode_hex::<ML_DSA_65_PK_LEN>(PUBLIC_KEY_HEX);
+    let signature = decode_hex::<ML_DSA_65_SIG_LEN>(SIGNATURE_HEX);
+
+    assert_eq!(sha256_hex(&MESSAGE), MESSAGE_SHA256);
+    assert_eq!(sha256_hex(&public_key), PUBLIC_KEY_SHA256);
+    assert_eq!(sha256_hex(&signature), SIGNATURE_SHA256);
 }
 
 #[test]
