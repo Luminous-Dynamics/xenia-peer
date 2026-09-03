@@ -239,6 +239,31 @@ fn host_handshake_evidence(
     }
 }
 
+/// Test-only fixture for sibling-module security composition tests.
+///
+/// This does not exist in production builds, preserving the public anti-forgery
+/// property of [`AuthenticatedSessionEvidenceV1`].
+#[cfg(test)]
+pub(crate) fn test_authenticated_session_evidence(
+    peer_role: AuthenticatedPeerRole,
+    peer_identity_fingerprint: [u8; 32],
+    transcript_hash: [u8; 32],
+    surface: &AuthenticatedSessionSurface,
+) -> AuthenticatedSessionEvidenceV1 {
+    AuthenticatedSessionEvidenceV1 {
+        schema: AUTHENTICATED_SESSION_EVIDENCE_SCHEMA.to_string(),
+        peer_role,
+        peer_identity_fingerprint,
+        transcript_hash,
+        session_context_hash: surface.context_hash(),
+        handshake_policy_profile: HANDSHAKE_POLICY_PROFILE.to_string(),
+        handshake_transcript_schema: HANDSHAKE_TRANSCRIPT_SCHEMA.to_string(),
+        session_key_schedule_schema: SESSION_KEY_SCHEDULE_SCHEMA.to_string(),
+        telemetry_enabled: surface.capabilities().telemetry_enabled,
+        input_control_enabled: surface.capabilities().input_control_enabled,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
