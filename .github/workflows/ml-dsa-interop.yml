@@ -1,0 +1,104 @@
+name: ML-DSA Interoperability
+
+on:
+  pull_request:
+    paths:
+      - 'crates/xenia-handshake/src/**'
+      - 'crates/xenia-handshake/tests/ml_dsa_openssl_interop.rs'
+      - 'crates/xenia-handshake/tests/test-vectors/**'
+      - 'crates/xenia-handshake/Cargo.toml'
+      - '.github/workflows/ml-dsa-interop.yml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ml-dsa-interop-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-format:
+    name: Handshake interop source format (Rust 1.96)
+    runs-on: ubuntu-24.04
+    env:
+      RUSTUP_TOOLCHAIN: 1.96.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Install exact formatter
+        run: rustup toolchain install 1.96.0 --profile minimal --component rustfmt
+      - name: Verify exact checkout and toolchain
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+          fi
+          rustc --version | grep -F 'rustc 1.96.0'
+          cargo --version | grep -F 'cargo 1.96.0'
+      - name: Check xenia-handshake formatting only
+        run: cargo fmt --check -p xenia-handshake
+
+  interoperability:
+    name: RustCrypto/OpenSSL ML-DSA-65 interop (MSRV 1.94)
+    runs-on: ubuntu-24.04
+    env:
+      RUSTUP_TOOLCHAIN: 1.94.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify qualification-only diff scope
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          python3 - <<'PY'
+          import os
+          import subprocess
+
+          base = os.environ['BASE_SHA']
+          head = os.environ['HEAD_SHA']
+          changed = set(subprocess.check_output(
+              ['git', 'diff', '--name-only', base, head], text=True
+          ).splitlines())
+          allowed = {
+              '.github/workflows/ml-dsa-interop.yml',
+              'crates/xenia-handshake/tests/ml_dsa_openssl_interop.rs',
+              'crates/xenia-handshake/tests/test-vectors/OPENSSL_ML_DSA_65_V1.md',
+              'crates/xenia-handshake/tests/test-vectors/README.md',
+              'crates/xenia-handshake/tests/test-vectors/openssl-3.5.5-mldsa65-public.hex',
+              'crates/xenia-handshake/tests/test-vectors/openssl-3.5.5-mldsa65-signature.hex',
+          }
+          print('qualification changed files:', sorted(changed))
+          unexpected = changed - allowed
+          assert not unexpected, f'production or unreviewed files changed: {sorted(unexpected)!r}'
+          assert changed, 'qualification diff unexpectedly empty'
+          PY
+      - name: Install exact MSRV toolchain
+        run: rustup toolchain install 1.94.0 --profile minimal --component clippy
+      - name: Verify exact checkout and toolchain
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+          fi
+          rustc --version | grep -F 'rustc 1.94.0'
+          cargo --version | grep -F 'cargo 1.94.0'
+      - name: Locked metadata resolves without mutation
+        run: |
+          before=$(sha256sum Cargo.lock | awk '{print $1}')
+          cargo metadata --locked --format-version 1 --no-deps >/dev/null
+          after=$(sha256sum Cargo.lock | awk '{print $1}')
+          test "$before" = "$after"
+          git diff --exit-code -- Cargo.lock
+      - name: Check xenia-handshake
+        run: cargo check --locked -p xenia-handshake --all-targets
+      - name: Run neutral interoperability gate
+        run: cargo test --locked -p xenia-handshake --test ml_dsa_openssl_interop
+      - name: Test xenia-handshake
+        run: cargo test --locked -p xenia-handshake --all-targets
+      - name: Clippy xenia-handshake
+        run: cargo clippy --locked -p xenia-handshake --all-targets -- -D warnings
