@@ -19,3 +19,7 @@
 pub mod sif_negotiation;
 pub mod sif_receive_runtime;
 mod sif_semantic_wire;
+
+// The raw semantic channel remains unreachable externally, but the negotiated public
+// error taxonomy may transparently retain this lower-layer error as a source.
+pub use sif_semantic_wire::SifSemanticWireError;
