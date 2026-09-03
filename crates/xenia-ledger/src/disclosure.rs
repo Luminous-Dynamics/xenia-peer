@@ -22,6 +22,12 @@
 //! Release outcomes are explicit. A crash after commit but before an outcome leaves
 //! an unresolved commit and MUST NOT be replayed automatically. A retry uses a new
 //! release ID and may reference only an earlier `Aborted` or `Partial` release.
+//!
+//! The signed release journal prevents accidental replay and makes forks detectable
+//! once journal heads are compared. It does not by itself provide global
+//! non-equivocation against a signer/storage layer intentionally maintaining two
+//! histories. High-assurance deployments should persist the journal with atomic
+//! compare-and-swap semantics and externally witness/checkpoint its head.
 
 use std::collections::BTreeMap;
 
@@ -367,10 +373,13 @@ pub struct DisclosureReleaseState {
 }
 
 impl DisclosureReleaseState {
-    /// Rehydrate release state. Call [`verify_disclosure_release_entries`] before
-    /// trusting externally loaded entries.
-    pub fn from_entries(entries: Vec<DisclosureReleaseEntry>) -> Self {
-        Self { entries }
+    /// Verify and rehydrate persisted release state in one fail-closed operation.
+    pub fn from_verified_entries(
+        entries: Vec<DisclosureReleaseEntry>,
+        ledger_public_key: &[u8],
+    ) -> Result<Self, AccountabilityDisclosureError> {
+        verify_disclosure_release_entries(&entries, ledger_public_key)?;
+        Ok(Self { entries })
     }
 
     /// Read all journal entries for persistence/audit.
@@ -736,10 +745,13 @@ fn require_live_approval(
     chain: &Chain,
     binding: &AccountabilityDisclosureBinding,
 ) -> Result<(), AccountabilityDisclosureError> {
-    let latest = chain.iter().rev().find(|entry| {
-        entry.event.session_id == binding.session.session_id
-            && entry.event.source_id == binding.requester_source_id
-    });
+    let latest = chain
+        .iter()
+        .filter(|entry| {
+            entry.event.session_id == binding.session.session_id
+                && entry.event.source_id == binding.requester_source_id
+        })
+        .last();
     match latest {
         Some(entry) if entry.event.kind == ConsentKind::Approval => Ok(()),
         Some(_) => Err(AccountabilityDisclosureError::CurrentConsentNotApproved),
@@ -1301,12 +1313,12 @@ mod tests {
         )
         .unwrap();
 
-        let mut entries = state.into_entries();
-        entries[0].entry_hash = [99u8; 32];
-        assert!(verify_disclosure_release_entries(
-            &entries,
-            chain.signing_key.verifying_key().as_bytes()
+        let entries = state.into_entries();
+        let restored = DisclosureReleaseState::from_verified_entries(
+            entries,
+            chain.signing_key.verifying_key().as_bytes(),
         )
-        .is_err());
+        .unwrap();
+        assert_eq!(restored.entries().len(), 2);
     }
 }
