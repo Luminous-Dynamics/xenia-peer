@@ -1,0 +1,175 @@
+name: Operator Rekey Composition Model
+
+on:
+  pull_request:
+    paths:
+      - "scripts/check_operator_rekey_composition_model.py"
+      - "docs/security/OPERATOR_REKEY_COMPOSITION_INVARIANTS_V1.json"
+      - ".github/workflows/operator-rekey-composition-model.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: operator-rekey-composition-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  QUALIFICATION_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  exact-source-model:
+    name: Exact source two-party model
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.QUALIFICATION_SOURCE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Assert immutable exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$QUALIFICATION_SOURCE_SHA"
+          test -z "$(git status --porcelain)"
+          echo "SOURCE_HEAD=$(git rev-parse HEAD)"
+          echo "SOURCE_TREE=$(git rev-parse HEAD^{tree})"
+
+      - name: Validate composition invariant registry
+        shell: python
+        run: |
+          import json
+          from pathlib import Path
+
+          path = Path("docs/security/OPERATOR_REKEY_COMPOSITION_INVARIANTS_V1.json")
+          data = json.loads(path.read_text())
+          assert data["schema"] == "xenia.operator-rekey-composition-invariants.v1"
+          assert data["profile_id"] == "xenia.operator-sealed-channel.rekey-composition.v1"
+          assert data["qualification_workflow"] == "Operator Rekey Composition Model"
+          assert data["host_parent"]["pull_request"] == 229
+          assert data["host_parent"]["head"] == "5c3c1a6559f6426a23f2cd212f8b8bd8ceb4c567"
+          assert data["receiver_contract"]["pull_request"] == 42
+          assert data["receiver_primitive"]["pull_request"] == 44
+          assert data["ack_transport"]["issue"] == 225
+
+          model = data["model"]
+          assert Path(model["source"]).exists()
+          assert model["report_schema"] == "xenia.operator-rekey-composition-model-report.v1"
+          assert model["max_depth"] == 12
+          assert model["bounded_max_key_epoch"] == 2
+          assert model["bounded_reverse_fifo_slots"] == 3
+          assert len(model["expected_state_graph_sha256"]) == 64
+
+          ids = [entry["id"] for entry in data["invariants"]]
+          assert ids == [f"OEC-{index:03d}" for index in range(1, 8)]
+          assert len(ids) == len(set(ids))
+          assert all(entry["property"].strip() for entry in data["invariants"])
+          assert len(data["assumptions"]) >= 5
+          assert data["claim_boundary"].strip()
+
+      - name: Compile model source
+        run: python3 -m py_compile scripts/check_operator_rekey_composition_model.py
+
+      - name: Explore bounded two-party composition
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/operator-rekey-composition"
+          mkdir -p "$OUT"
+          python3 scripts/check_operator_rekey_composition_model.py \
+            --max-depth 12 \
+            --json-out "$OUT/OPERATOR_REKEY_COMPOSITION_MODEL.json"
+
+      - name: Bind report to reviewed registry
+        shell: python
+        run: |
+          import json
+          import os
+          from pathlib import Path
+
+          registry = json.loads(
+              Path("docs/security/OPERATOR_REKEY_COMPOSITION_INVARIANTS_V1.json").read_text()
+          )
+          report = json.loads(
+              (Path(os.environ["RUNNER_TEMP"]) / "operator-rekey-composition" /
+               "OPERATOR_REKEY_COMPOSITION_MODEL.json").read_text()
+          )
+          model = registry["model"]
+
+          assert report["schema"] == model["report_schema"]
+          assert report["max_depth"] == model["max_depth"]
+          assert report["bounded_max_key_epoch"] == model["bounded_max_key_epoch"]
+          assert report["bounded_reverse_fifo_slots"] == model["bounded_reverse_fifo_slots"]
+          assert report["reachable_state_count"] == model["expected_reachable_state_count"]
+          assert report["transition_count"] == model["expected_transition_count"]
+          assert report["checked_trace_prefixes"] == model["expected_checked_trace_prefixes"]
+          assert report["state_graph_sha256"] == model["expected_state_graph_sha256"]
+          assert report["invariant_ids_checked"] == [
+              entry["id"] for entry in registry["invariants"]
+          ]
+
+          required_witnesses = {
+              "proposal_send_failure_before_write",
+              "proposal_send_failure_after_escape",
+              "receiver_commit_after_ambiguous_proposal",
+              "receiver_validation_failure_before_commit",
+              "ack_send_failure_after_escape",
+              "old_console_message_ahead_of_ack",
+              "valid_ack_cutover",
+              "duplicate_ack_rejected_after_confirmation",
+              "old_key_ack_rejected",
+              "wrong_domain_ack_rejected",
+              "wrong_sequence_ack_rejected",
+              "replayed_proposal_rejected",
+              "fresh_handshake_clears_stale_carrier",
+          }
+          assert required_witnesses <= report["representative_traces"].keys()
+
+      - name: Retain exact model evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/operator-rekey-composition"
+          cp scripts/check_operator_rekey_composition_model.py "$OUT/"
+          cp docs/security/OPERATOR_REKEY_COMPOSITION_INVARIANTS_V1.json "$OUT/"
+          cp .github/workflows/operator-rekey-composition-model.yml "$OUT/"
+          {
+            echo "profile=xenia-operator-rekey-composition-v1"
+            echo "source_head=$(git rev-parse HEAD)"
+            echo "source_tree=$(git rev-parse HEAD^{tree})"
+            echo "runner_label=ubuntu-24.04"
+            echo "runner_os=${RUNNER_OS:-unknown}"
+            echo "runner_arch=${RUNNER_ARCH:-unknown}"
+            echo "image_os=${ImageOS:-unknown}"
+            echo "image_version=${ImageVersion:-unknown}"
+            echo "kernel=$(uname -srmo)"
+            echo "python=$(python3 --version 2>&1)"
+            echo "model_source_sha256=$(sha256sum scripts/check_operator_rekey_composition_model.py | awk '{print $1}')"
+            echo "registry_sha256=$(sha256sum docs/security/OPERATOR_REKEY_COMPOSITION_INVARIANTS_V1.json | awk '{print $1}')"
+            echo "workflow_sha256=$(sha256sum .github/workflows/operator-rekey-composition-model.yml | awk '{print $1}')"
+            echo "report_sha256=$(sha256sum "$OUT/OPERATOR_REKEY_COMPOSITION_MODEL.json" | awk '{print $1}')"
+            echo "actions_checkout_commit=11d5960a326750d5838078e36cf38b85af677262"
+            echo "upload_artifact_action_commit=ea165f8d65b6e75b540449e92b4886f43607fa02"
+          } > "$OUT/PROVENANCE.txt"
+          cat "$OUT/PROVENANCE.txt"
+
+      - name: Assert source tree remained immutable
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$QUALIFICATION_SOURCE_SHA"
+          test -z "$(git status --porcelain)"
+          echo "final_source_tree=$(git rev-parse HEAD^{tree})" >> \
+            "$RUNNER_TEMP/operator-rekey-composition/PROVENANCE.txt"
+
+      - name: Upload qualification capsule
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: operator-rekey-composition-${{ env.QUALIFICATION_SOURCE_SHA }}
+          path: ${{ runner.temp }}/operator-rekey-composition
+          if-no-files-found: error
+          retention-days: 90
