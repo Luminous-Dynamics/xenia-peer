@@ -46,7 +46,7 @@ use xenia_peer_core::{
     FILE_TRANSFER_CHUNK_SIZE, FileTransferMessage, LaneSession, M1SessionState, TransferSource,
 };
 
-use crate::m1_runtime::{M1RuntimeError, M1RuntimeSession};
+use crate::m1_runtime::M1RuntimeSession;
 use crate::sif_m1_authority::{
     M1SifAuthorityError, M1SifCommitError, M1SifOutcomeAuthority,
     commit_disclosure_from_current_runtime,
@@ -152,10 +152,6 @@ impl PreparedProtectedFileDisclosure {
                 },
             }),
             Err(binding) => {
-                // Precommit validation used these exact same values and owns the
-                // TransferSource, so this should only be reachable after an internal
-                // invariant regression. Close the durable lineage as Aborted rather
-                // than leave a zero-byte unresolved Commit if possible.
                 match outcome_authority.record_outcome(
                     release_state,
                     release_id,
@@ -201,14 +197,15 @@ impl ProtectedFileCore {
         (disclosure.interrupted(), outcome_authority)
     }
 
+    /// Fallback used only after an accounting invariant itself fails. `TransferSource`
+    /// advances when the Chunk is read, so its position is the exact prefix after a
+    /// carrier-successful Chunk and the conservative full-attempt prefix after an
+    /// ambiguous carrier failure.
     fn fallback_terminal(
         &self,
         byte_accounting: FileDisclosureByteAccounting,
     ) -> FileDisclosureTerminal {
-        let accounted = match byte_accounting {
-            FileDisclosureByteAccounting::Exact => self.disclosure.emitted_bytes(),
-            FileDisclosureByteAccounting::ConservativeUpperBound => self.source.bytes_sent(),
-        };
+        let accounted = self.source.bytes_sent();
         FileDisclosureTerminal {
             release_id: self.disclosure.release_id(),
             outcome: if accounted == 0 {
@@ -224,9 +221,6 @@ impl ProtectedFileCore {
 }
 
 /// Move-only exact-file output capability produced only after durable SIF Commit.
-///
-/// This is the first type in the protected-file stack that can emit a network
-/// envelope. Therefore a protected Offer is unrepresentable before durable Commit.
 pub(crate) struct CommittedProtectedFileDisclosure {
     core: ProtectedFileCore,
 }
@@ -235,33 +229,23 @@ impl CommittedProtectedFileDisclosure {
     pub(crate) fn release_id(&self) -> uuid::Uuid {
         self.core.disclosure.release_id()
     }
-
     pub(crate) fn transfer_id(&self) -> u64 {
         self.core.transfer_id
     }
-
     pub(crate) fn display_name(&self) -> &str {
         &self.core.display_name
     }
-
     pub(crate) fn size(&self) -> u64 {
         self.core.source.size()
     }
-
     pub(crate) fn content_blake3(&self) -> [u8; 32] {
         self.core.source.blake3_hash()
     }
-
     pub(crate) fn emitted_bytes(&self) -> u64 {
         self.core.disclosure.emitted_bytes()
     }
 
-    /// Send the authenticated Offer only from the durably committed typestate.
-    ///
-    /// The M1 guard is held through the carrier send, linearizing a concurrent
-    /// revocation against this first protected protocol emission. If M1, sealing, or
-    /// transport fails, the zero-content release is terminalized as `Aborted` before
-    /// the error is returned whenever durable outcome persistence remains available.
+    /// The first network-capable transition in the protected-file type graph.
     pub(crate) async fn send_offer<T: SendEnvelope>(
         self,
         send: &mut T,
@@ -276,11 +260,7 @@ impl CommittedProtectedFileDisclosure {
             size: self.core.source.size(),
             blake3_hash: self.core.source.blake3_hash(),
         };
-        let envelope = match session
-            .lock()
-            .await
-            .seal_file_transfer_message(offer, true)
-        {
+        let envelope = match session.lock().await.seal_file_transfer_message(offer, true) {
             Ok(envelope) => envelope,
             Err(error) => {
                 return Err(terminalize_interrupted_error(
@@ -304,9 +284,6 @@ impl CommittedProtectedFileDisclosure {
         }
         if let Err(error) = send.send_envelope(&envelope).await {
             drop(m1);
-            // A failed Offer may have emitted authenticated protocol metadata, but
-            // no file-content Chunk has been attempted. The release outcome's byte
-            // count is explicitly file-content accounting, so this is Aborted.
             return Err(terminalize_interrupted_error(
                 self.core,
                 format!("carrier failed protected file Offer: {error}"),
@@ -315,23 +292,15 @@ impl CommittedProtectedFileDisclosure {
             ));
         }
         drop(m1);
-
         Ok(OfferedProtectedFileDisclosure { core: self.core })
     }
 }
 
-/// Protected file whose authenticated Offer was successfully handed to the carrier.
 pub(crate) struct OfferedProtectedFileDisclosure {
     core: ProtectedFileCore,
 }
 
 impl OfferedProtectedFileDisclosure {
-    /// Consume the first authenticated peer response for this protected Offer.
-    ///
-    /// A matching `Accept` is the only transition to file-content output. A matching
-    /// `Reject` durably terminalizes `Aborted`. Any other/wrong-transfer message is
-    /// treated as a protocol failure and also terminalized rather than leaving the
-    /// release unresolved.
     pub(crate) fn handle_offer_response(
         self,
         response: FileTransferMessage,
@@ -347,27 +316,19 @@ impl OfferedProtectedFileDisclosure {
                     FileTransferMessage::Reject { reason, .. } => reason,
                     _ => unreachable!("classification already fixed Reject variant"),
                 };
-                let terminal = persist_interrupted(
-                    self.core,
-                    release_state,
-                    release_store,
-                )
-                .map_err(|outcome| ProtectedFileSendError::TerminalPersistence {
-                    cause: "peer rejected protected file Offer".to_string(),
-                    outcome,
-                })?;
+                let terminal = persist_interrupted(self.core, release_state, release_store)
+                    .map_err(|outcome| ProtectedFileSendError::TerminalPersistence {
+                        cause: "peer rejected protected file Offer".to_string(),
+                        outcome,
+                    })?;
                 Ok(ProtectedFileOfferDisposition::Rejected { reason, terminal })
             }
             Err(()) => {
-                let terminal = persist_interrupted(
-                    self.core,
-                    release_state,
-                    release_store,
-                )
-                .map_err(|outcome| ProtectedFileSendError::TerminalPersistence {
-                    cause: "unexpected protected file Offer response".to_string(),
-                    outcome,
-                })?;
+                let terminal = persist_interrupted(self.core, release_state, release_store)
+                    .map_err(|outcome| ProtectedFileSendError::TerminalPersistence {
+                        cause: "unexpected protected file Offer response".to_string(),
+                        outcome,
+                    })?;
                 Err(ProtectedFileSendError::Interrupted {
                     cause: "unexpected or wrong-transfer response to protected file Offer".to_string(),
                     terminal,
@@ -377,7 +338,6 @@ impl OfferedProtectedFileDisclosure {
     }
 }
 
-/// Result of the peer's first authenticated response to a protected Offer.
 pub(crate) enum ProtectedFileOfferDisposition {
     Accepted(AcceptedProtectedFileDisclosure),
     Rejected {
@@ -386,20 +346,12 @@ pub(crate) enum ProtectedFileOfferDisposition {
     },
 }
 
-/// Protected file explicitly accepted by the authenticated peer.
 pub(crate) struct AcceptedProtectedFileDisclosure {
     core: ProtectedFileCore,
 }
 
 impl AcceptedProtectedFileDisclosure {
-    /// Stream the complete protected file and durably close the release journal.
-    ///
-    /// This method is terminal: it never returns an in-progress sender. Any failure
-    /// before verified content completion records an exact or conservative `Partial`
-    /// (or zero-content `Aborted`) and returns an error carrying the persisted terminal
-    /// receipt. Once every content byte was successfully sent and `TransferSource`
-    /// verifies its second length/hash pass, the disclosure is `Completed` regardless
-    /// of whether the final protocol `Complete` control message can be delivered.
+    /// Terminal streaming operation. It never returns an in-progress sender.
     pub(crate) async fn send_contents<T: SendEnvelope>(
         mut self,
         send: &mut T,
@@ -409,9 +361,6 @@ impl AcceptedProtectedFileDisclosure {
         release_store: &mut FileSifReleaseStore,
     ) -> Result<ProtectedFileTerminalReceipt, ProtectedFileSendError> {
         loop {
-            // Cheap non-mutating lifecycle preflight before local source I/O. The
-            // exact SendFileToViewer tier is checked later immediately before carrier
-            // output by `allow_file_send_flow()` while holding the same runtime lock.
             if m1_runtime.lock().await.state() != M1SessionState::Active {
                 return Err(terminalize_interrupted_error(
                     self.core,
@@ -442,11 +391,7 @@ impl AcceptedProtectedFileDisclosure {
                 offset: chunk.offset,
                 data: chunk.data,
             };
-            let envelope = match session
-                .lock()
-                .await
-                .seal_file_transfer_message(message, true)
-            {
+            let envelope = match session.lock().await.seal_file_transfer_message(message, true) {
                 Ok(envelope) => envelope,
                 Err(error) => {
                     return Err(terminalize_interrupted_error(
@@ -458,10 +403,6 @@ impl AcceptedProtectedFileDisclosure {
                 }
             };
 
-            // Linearization point for revocation versus this Chunk. The guard remains
-            // held across carrier send. If revoke acquires the mutex first, this gate
-            // fails and no Chunk leaves. If we acquire first, this Chunk is authorized
-            // before revoke can advance the M1 state.
             let mut m1 = m1_runtime.lock().await;
             if let Err(error) = m1.allow_file_send_flow() {
                 drop(m1);
@@ -477,9 +418,6 @@ impl AcceptedProtectedFileDisclosure {
                 Ok(()) => {
                     if let Err(error) = self.core.disclosure.note_emitted(content_len) {
                         drop(m1);
-                        // Carrier success means the current source prefix definitely
-                        // left the application boundary even if the local tracker hit
-                        // an internal invariant. Persist a truthful exact fallback.
                         let terminal = self
                             .core
                             .fallback_terminal(FileDisclosureByteAccounting::Exact);
@@ -494,24 +432,29 @@ impl AcceptedProtectedFileDisclosure {
                     drop(m1);
                 }
                 Err(error) => {
-                    // `send_envelope` is not an atomic physical-network primitive.
-                    // Conservatively charge the full attempted content Chunk before
-                    // ending the session so the journal cannot understate release.
                     let accounting_error = self
                         .core
                         .disclosure
                         .note_transport_uncertain(content_len)
                         .err();
                     drop(m1);
-                    let cause = match accounting_error {
-                        Some(accounting) => format!(
-                            "carrier failed protected file Chunk: {error}; conservative byte accounting also failed: {accounting}"
-                        ),
-                        None => format!("carrier failed protected file Chunk: {error}"),
-                    };
+                    if let Some(accounting) = accounting_error {
+                        let terminal = self
+                            .core
+                            .fallback_terminal(FileDisclosureByteAccounting::ConservativeUpperBound);
+                        return Err(terminalize_explicit_error(
+                            self.core.outcome_authority,
+                            terminal,
+                            format!(
+                                "carrier failed protected file Chunk: {error}; conservative byte accounting also failed: {accounting}"
+                            ),
+                            release_state,
+                            release_store,
+                        ));
+                    }
                     return Err(terminalize_interrupted_error(
                         self.core,
-                        cause,
+                        format!("carrier failed protected file Chunk: {error}"),
                         release_state,
                         release_store,
                     ));
@@ -519,8 +462,6 @@ impl AcceptedProtectedFileDisclosure {
             }
         }
 
-        // `next_chunk(None)` above only occurs after TransferSource independently
-        // re-checks exact final length and its second streaming BLAKE3 hash.
         let release_id = self.core.disclosure.release_id();
         let emitted = self.core.disclosure.emitted_bytes();
         let accounting = self.core.disclosure.byte_accounting();
@@ -555,16 +496,8 @@ impl AcceptedProtectedFileDisclosure {
             }
         };
 
-        // The content release is already complete. `Complete` is authenticated
-        // protocol metadata telling the receiver to finalize/verify its staged file;
-        // it is not allowed to change the release outcome back from Completed.
-        let complete_signal = send_complete_signal(
-            transfer_id,
-            send,
-            session,
-            m1_runtime,
-        )
-        .await;
+        let complete_signal =
+            send_complete_signal(transfer_id, send, session, m1_runtime).await;
 
         persist_terminal(
             &outcome_authority,
@@ -588,18 +521,10 @@ async fn send_complete_signal<T: SendEnvelope>(
     m1_runtime: &AsyncMutex<M1RuntimeSession>,
 ) -> ProtectedFileCompletionSignalStatus {
     let complete = FileTransferMessage::Complete { transfer_id };
-    let envelope = match session
-        .lock()
-        .await
-        .seal_file_transfer_message(complete, true)
-    {
+    let envelope = match session.lock().await.seal_file_transfer_message(complete, true) {
         Ok(envelope) => envelope,
         Err(_) => return ProtectedFileCompletionSignalStatus::SealFailed,
     };
-
-    // Scoped permissions cannot change while one M1 session remains Active. The last
-    // content Chunk already passed SendFileToViewer; this check exists only to avoid
-    // sending extra completion metadata after a concurrent Revocation.
     let m1 = m1_runtime.lock().await;
     if m1.state() != M1SessionState::Active {
         return ProtectedFileCompletionSignalStatus::SuppressedByM1;
@@ -733,15 +658,11 @@ fn map_commit_error(
     }
 }
 
-/// Durable terminal record for the protected file-content release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ProtectedFileTerminalReceipt {
     pub(crate) release_id: uuid::Uuid,
     pub(crate) outcome: DisclosureReleaseOutcome,
     pub(crate) byte_accounting: FileDisclosureByteAccounting,
-    /// Status of the receiver-finalization control message. This is deliberately
-    /// separate from `outcome`: remote delivery/finalization is not the same claim as
-    /// local protected-content release.
     pub(crate) completion_signal: ProtectedFileCompletionSignalStatus,
 }
 
@@ -798,13 +719,11 @@ pub(crate) enum ProtectedFileOutcomeError {
 
 #[derive(Debug, Error)]
 pub(crate) enum ProtectedFileSendError {
-    /// The operational path failed, but a durable terminal release outcome exists.
     #[error("SIF protected-file send interrupted: {cause}; durable terminal={terminal:?}")]
     Interrupted {
         cause: String,
         terminal: ProtectedFileTerminalReceipt,
     },
-    /// Output may already have occurred and terminal journaling itself failed.
     #[error("SIF protected-file send failed and terminal persistence also failed: {cause}; outcome_error={outcome}")]
     TerminalPersistence {
         cause: String,
