@@ -9,11 +9,11 @@
 use ed25519_dalek::Signer;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use xenia_agent_authority_proto::{
+
+use crate::agent_authority_proto::{
     AgentCapabilityAuthorizationError, AgentCapabilityAuthorizationV1, AgentCheckpointAnchorV1,
     TranscriptSignatureSuiteV1,
 };
-
 use crate::binding::{
     EVIDENCE_PUBLIC_KEY_FINGERPRINT_ALGORITHM, EvidencePublicKeyBinding,
     EvidencePublicKeyBindingError, SESSION_TRANSCRIPT_BINDING_SCHEMA,
