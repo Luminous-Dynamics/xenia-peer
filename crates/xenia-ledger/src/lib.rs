@@ -52,8 +52,11 @@
 //!
 //! For bounded outbound files, [`CommittedFileDisclosure`] consumes that generic
 //! permit only when [`sif_file_result_digest`] matches the exact wire-visible filename,
-//! byte length, and BLAKE3 content hash. It then accounts only transport-confirmed
-//! bytes and yields an exact Completed/Aborted/Partial terminal observation.
+//! byte length, and BLAKE3 content hash. Successful carrier sends are accounted exactly;
+//! an ambiguous carrier failure can instead be conservatively charged as an upper bound
+//! through [`CommittedFileDisclosure::note_transport_uncertain`]. The local terminal
+//! artifact exposes [`FileDisclosureByteAccounting`] so audit code never has to pretend
+//! such a Partial count is exact.
 //!
 //! A downstream auditor — including a non-operator third party —
 //! can use [`Verifier::verify_chain`] to reconstruct every hash link
@@ -164,8 +167,8 @@ pub use entry::{
 pub use errors::{EvidenceBundleVerifyError, LedgerError, TransactionalAppendError, VerifyError};
 
 pub use file_disclosure::{
-    CommittedFileDisclosure, FileDisclosureError, FileDisclosureTerminal, SIF_FILE_RESULT_PROFILE,
-    sif_file_result_digest,
+    CommittedFileDisclosure, FileDisclosureByteAccounting, FileDisclosureError,
+    FileDisclosureTerminal, SIF_FILE_RESULT_PROFILE, sif_file_result_digest,
 };
 
 pub use key_transition::{
