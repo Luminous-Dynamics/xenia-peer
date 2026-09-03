@@ -9,17 +9,19 @@
 //! combines ledger semantics with peer-core filesystem mechanics without making the
 //! permissively licensed peer core depend on the AGPL evidence layer.
 //!
-//! The raw SIF semantic carrier is intentionally crate-private. External callers reach
-//! protected Offer/Chunk APIs only through the authenticated pending→negotiated gate in
-//! [`sif_negotiation`].
+//! Both lower SIF layers are intentionally crate-private. External callers reach
+//! protected traffic only through [`sif_transfer_flow`], which enforces authenticated
+//! exact-profile negotiation plus Offer/Accept/Chunk/Complete phase ordering.
 
 #![warn(missing_docs)]
 #![deny(unsafe_code)]
 
-pub mod sif_negotiation;
+mod sif_negotiation;
 pub mod sif_receive_runtime;
 mod sif_semantic_wire;
+pub mod sif_transfer_flow;
 
-// The raw semantic channel remains unreachable externally, but the negotiated public
-// error taxonomy may transparently retain this lower-layer error as a source.
+// Lower-layer errors remain reachable because the public phase error taxonomy retains
+// them as typed sources, while the bypass-capable channel implementations stay private.
+pub use sif_negotiation::SifNegotiationError;
 pub use sif_semantic_wire::SifSemanticWireError;
