@@ -1,0 +1,40 @@
+name: Accountability Disclosure
+
+on:
+  pull_request:
+    paths:
+      - "crates/xenia-ledger/src/accountability.rs"
+      - "crates/xenia-ledger/src/accountability_interop.rs"
+      - "crates/xenia-ledger/src/disclosure.rs"
+      - "crates/xenia-ledger/src/lib.rs"
+      - ".github/workflows/accountability-disclosure.yml"
+  push:
+    branches:
+      - "sif/disclosure-permit-v0.1"
+    paths:
+      - "crates/xenia-ledger/src/accountability.rs"
+      - "crates/xenia-ledger/src/accountability_interop.rs"
+      - "crates/xenia-ledger/src/disclosure.rs"
+      - "crates/xenia-ledger/src/lib.rs"
+      - ".github/workflows/accountability-disclosure.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  disclosure-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Format
+        run: cargo fmt --check -p xenia-ledger
+      - name: Test disclosure gate
+        run: cargo test --locked -p xenia-ledger disclosure --no-fail-fast
+      - name: Test ledger regression surface
+        run: cargo test --locked -p xenia-ledger --lib --no-fail-fast
+      - name: Clippy
+        run: cargo clippy --locked -p xenia-ledger --all-targets -- -D warnings
