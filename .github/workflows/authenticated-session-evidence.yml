@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'crates/xenia-peer-core/src/authenticated_session_evidence.rs'
+      - 'crates/xenia-peer-core/src/authenticated_payload_receipt.rs'
       - 'crates/xenia-peer-core/src/lib.rs'
       - '.github/workflows/authenticated-session-evidence.yml'
       - 'crates/xenia-peer-core/Cargo.toml'
