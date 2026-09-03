@@ -1,0 +1,15 @@
+[package]
+name = "xenia-agent-authority-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Crypto-free canonical protocol for Xenia-authenticated bounded agent capability attestations"
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+thiserror = { workspace = true }
