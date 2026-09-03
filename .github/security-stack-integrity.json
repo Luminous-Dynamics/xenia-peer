@@ -1,0 +1,82 @@
+{
+  "schema_version": 2,
+  "tracker": "Luminous-Dynamics/xenia-peer#214",
+  "stacks": [
+    {
+      "name": "xenia-wire-nonce-safety-v1",
+      "repository": "Luminous-Dynamics/xenia-wire",
+      "nodes": [
+        {
+          "pr": 37,
+          "mode": "clean",
+          "require_draft": true,
+          "head": "a91b4fc77b02601473e2f6d9f302a5a77c1d3b11",
+          "head_ref": "install-key-idempotent-nonce-fix-v1",
+          "head_repo": "Luminous-Dynamics/xenia-wire",
+          "parent": "98bf5fcd8bc540fccec66a64793851802e3b1bde",
+          "configured_base": "98bf5fcd8bc540fccec66a64793851802e3b1bde",
+          "base_ref": "main",
+          "base_repo": "Luminous-Dynamics/xenia-wire",
+          "files": [
+            ".github/workflows/nonce-safety.yml",
+            "src/session.rs",
+            "tests/install_key_nonce_characterization.rs"
+          ]
+        },
+        {
+          "pr": 34,
+          "mode": "clean",
+          "require_draft": true,
+          "head": "d507f9e331f1da2fc7126323318428dad013586f",
+          "head_ref": "directional-nonce-contract-v1",
+          "head_repo": "Luminous-Dynamics/xenia-wire",
+          "parent": "a91b4fc77b02601473e2f6d9f302a5a77c1d3b11",
+          "configured_base": "a91b4fc77b02601473e2f6d9f302a5a77c1d3b11",
+          "base_ref": "install-key-idempotent-nonce-fix-v1",
+          "base_repo": "Luminous-Dynamics/xenia-wire",
+          "files": [
+            "SPEC_DRAFT03_ERRATA.md",
+            "tests/directional_nonce_contract.rs"
+          ]
+        },
+        {
+          "pr": 40,
+          "mode": "clean",
+          "require_draft": true,
+          "head": "ad47509f265cbf1ff2dca677de52b39db6e67a49",
+          "head_ref": "strict-nonce-domain-receive-v1",
+          "head_repo": "Luminous-Dynamics/xenia-wire",
+          "parent": "d507f9e331f1da2fc7126323318428dad013586f",
+          "configured_base": "d507f9e331f1da2fc7126323318428dad013586f",
+          "base_ref": "directional-nonce-contract-v1",
+          "base_repo": "Luminous-Dynamics/xenia-wire",
+          "files": [
+            "src/error.rs",
+            "src/lib.rs",
+            "src/strict_receive.rs",
+            "tests/strict_nonce_domain.rs"
+          ]
+        },
+        {
+          "pr": 44,
+          "mode": "blocked-divergent",
+          "require_draft": true,
+          "head": "d13f203caeb46497490527c39bfec567f7902e60",
+          "head_ref": "session-current-key-open-v1",
+          "head_repo": "Luminous-Dynamics/xenia-wire",
+          "parent": "0ad16f308638a378b851ffc461219af62e1135f0",
+          "configured_base": "ad47509f265cbf1ff2dca677de52b39db6e67a49",
+          "base_ref": "strict-nonce-domain-receive-v1",
+          "base_repo": "Luminous-Dynamics/xenia-wire",
+          "files": [
+            ".github/workflows/nonce-safety.yml",
+            "src/lib.rs",
+            "src/session.rs",
+            "src/strict_receive.rs",
+            "tests/current_key_open.rs"
+          ]
+        }
+      ]
+    }
+  ]
+}
