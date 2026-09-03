@@ -45,12 +45,13 @@
 //! consume it.
 //!
 //! The release layer uses [`AccountabilityDisclosurePermit`], but the permit is not
-//! itself a release token: [`DisclosureReleaseState::commit_permit_transactional`]
-//! must first durably append a signed release-journal commit before returning the
-//! move-only [`CommittedDisclosurePermit`] intended for protected-output adapters.
-//! One release credential is constrained to one non-branching release lineage, and
-//! the exact consent approval that anchored execution must remain current through
-//! the durable release commit.
+//! itself a release token. The public [`DisclosureReleaseState`] is a CAS-enforced
+//! wrapper: every Commit/Outcome transition must atomically compare the durable
+//! [`DisclosureReleaseFrontier`] before persistence. Only a successful durable Commit
+//! returns the move-only [`CommittedDisclosurePermit`] intended for protected-output
+//! adapters. One release credential is constrained to one non-branching release
+//! lineage, and the exact consent approval that anchored execution must remain current
+//! through that durable commit.
 //!
 //! A downstream auditor — including a non-operator third party —
 //! can use [`Verifier::verify_chain`] to reconstruct every hash link
@@ -99,6 +100,7 @@ mod errors;
 mod hash;
 mod key_transition;
 mod policy;
+mod release_cas;
 mod release_credential;
 mod seal;
 mod signature;
@@ -160,9 +162,9 @@ pub use disclosure_v2::{
     ACCOUNTABILITY_DISCLOSURE_PERMIT_SCHEMA, ACCOUNTABILITY_RELEASE_ENTRY_SCHEMA,
     AccountabilityDisclosureBinding, AccountabilityDisclosureError, AccountabilityDisclosurePermit,
     AccountabilityDisclosurePhase, CommittedDisclosurePermit, DisclosureReleaseEntry,
-    DisclosureReleaseEvent, DisclosureReleaseOutcome, DisclosureReleaseState,
-    TransactionalDisclosureError, accountability_disclosure_message,
-    accountability_disclosure_permit_digest, verify_disclosure_release_entries,
+    DisclosureReleaseEvent, DisclosureReleaseOutcome, TransactionalDisclosureError,
+    accountability_disclosure_message, accountability_disclosure_permit_digest,
+    verify_disclosure_release_entries,
 };
 
 pub use entry::{
@@ -185,6 +187,11 @@ pub use errors::{EvidenceBundleVerifyError, LedgerError, TransactionalAppendErro
 pub use policy::{
     CURRENT_EVIDENCE_CRYPTO_MANIFEST, CURRENT_LEDGER_EVIDENCE_PROFILE, CryptoPolicyProfile,
     DowngradePolicy, EvidenceCryptoManifest, EvidencePolicyError, LedgerEvidenceProfile,
+};
+
+pub use release_cas::{
+    CasDisclosureReleaseState as DisclosureReleaseState, DisclosureReleaseFrontier,
+    DisclosureReleaseStore,
 };
 
 pub use release_credential::{
