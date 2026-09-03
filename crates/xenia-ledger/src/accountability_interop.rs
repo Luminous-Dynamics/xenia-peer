@@ -12,9 +12,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    accountability_execution_binding_digest, AccountabilityBindingError,
-    AccountabilityExecutionAttestation, AccountabilityExecutionBinding, EvidenceCryptoManifest,
-    EvidenceSignatureBackend, SignatureSuite,
+    AccountabilityBindingError, AccountabilityExecutionAttestation, AccountabilityExecutionBinding,
+    EvidenceCryptoManifest, EvidenceSignatureBackend, SignatureSuite,
+    accountability_execution_binding_digest,
 };
 
 /// Domain separator for stable verifier-key identifiers exported to higher layers.
@@ -22,8 +22,7 @@ const ACCOUNTABILITY_VERIFIER_KEY_DOMAIN: &[u8] = b"xenia:accountability-verifie
 
 /// Domain separator for the opaque operation nonce shared with a computation
 /// proof provider such as Symthaea.
-const ACCOUNTABILITY_OPERATION_NONCE_DOMAIN: &[u8] =
-    b"xenia:sif-computation-operation-nonce:v1";
+const ACCOUNTABILITY_OPERATION_NONCE_DOMAIN: &[u8] = b"xenia:sif-computation-operation-nonce:v1";
 
 impl AccountabilityExecutionBinding {
     /// Derive the opaque 32-byte operation nonce that a computation proof MUST
@@ -102,37 +101,44 @@ pub fn verify_accountability_execution_for_expectation(
     backend: &impl EvidenceSignatureBackend,
     public_key: &[u8],
 ) -> Result<VerifiedAccountabilityExecutionRef, AccountabilityInteropError> {
-    // Authenticate schema, nested session binding, signature suite and signature
-    // before trusting any binding field as evidence.
     attestation.verify(manifest, backend, public_key)?;
 
     let binding = &attestation.binding;
-    require_equal("receipt statement", &binding.receipt_digest, &expectation.statement_digest)?;
+    require_equal(
+        "receipt statement",
+        &binding.receipt_digest,
+        &expectation.statement_digest,
+    )?;
     require_equal(
         "requester source",
         &binding.requester_source_id,
         &expectation.requester_source_id,
     )?;
     require_equal("query", &binding.query_digest, &expectation.query_digest)?;
-    require_equal("purpose", &binding.purpose_digest, &expectation.purpose_digest)?;
+    require_equal(
+        "purpose",
+        &binding.purpose_digest,
+        &expectation.purpose_digest,
+    )?;
     require_equal("policy", &binding.policy_digest, &expectation.policy_digest)?;
     if binding.result_digest != expectation.result_digest {
-        return Err(AccountabilityInteropError::CommitmentMismatch {
-            field: "result",
-        });
+        return Err(AccountabilityInteropError::CommitmentMismatch { field: "result" });
     }
-    if let Some(operation_id) = expectation.operation_id {
-        if binding.operation_id != operation_id {
-            return Err(AccountabilityInteropError::OperationMismatch);
-        }
+    if let Some(operation_id) = expectation.operation_id
+        && binding.operation_id != operation_id
+    {
+        return Err(AccountabilityInteropError::OperationMismatch);
     }
-    if let Some(session_id) = expectation.session_id {
-        if binding.session.session_id != session_id {
-            return Err(AccountabilityInteropError::SessionMismatch);
-        }
+    if let Some(session_id) = expectation.session_id
+        && binding.session.session_id != session_id
+    {
+        return Err(AccountabilityInteropError::SessionMismatch);
     }
 
-    let suite = attestation.signature.suite().map_err(AccountabilityBindingError::from)?;
+    let suite = attestation
+        .signature
+        .suite()
+        .map_err(AccountabilityBindingError::from)?;
     Ok(VerifiedAccountabilityExecutionRef {
         scheme: accountability_execution_scheme(suite),
         statement_digest: expectation.statement_digest,
@@ -154,9 +160,6 @@ pub fn accountability_execution_scheme(suite: SignatureSuite) -> String {
 }
 
 /// Stable commitment to the exact verifier key and signature suite.
-///
-/// Higher layers can store this as an opaque verifier-key ID without learning or
-/// duplicating the raw public key in every accountability receipt.
 pub fn accountability_verifier_key_id(suite: SignatureSuite, public_key: &[u8]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(ACCOUNTABILITY_VERIFIER_KEY_DOMAIN);
@@ -202,6 +205,32 @@ pub enum AccountabilityInteropError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        ACCOUNTABILITY_COMMITMENT_ALGORITHM, ACCOUNTABILITY_EXECUTION_BINDING_SCHEMA,
+        AccountabilityExecutionPhase, SessionTranscriptBinding,
+    };
+
+    fn binding(operation: u128, session: u128) -> AccountabilityExecutionBinding {
+        AccountabilityExecutionBinding {
+            schema: ACCOUNTABILITY_EXECUTION_BINDING_SCHEMA.to_string(),
+            commitment_algorithm: ACCOUNTABILITY_COMMITMENT_ALGORITHM.to_string(),
+            operation_id: Uuid::from_u128(operation),
+            session: SessionTranscriptBinding::from_hash(
+                Uuid::from_u128(session),
+                [5u8; 32],
+                SignatureSuite::Ed25519Rfc8032,
+            ),
+            requester_source_id: [6u8; 32],
+            query_digest: [7u8; 32],
+            purpose_digest: [8u8; 32],
+            policy_digest: [9u8; 32],
+            result_digest: Some([10u8; 32]),
+            receipt_digest: [11u8; 32],
+            ledger_entry_count: 1,
+            ledger_head_hash: [12u8; 32],
+            phase: AccountabilityExecutionPhase::PreDisclosureCommit,
+        }
+    }
 
     #[test]
     fn scheme_is_signature_suite_specific() {
@@ -219,5 +248,15 @@ mod tests {
         let pq = accountability_verifier_key_id(SignatureSuite::MlDsa65Fips204, &key);
         assert_ne!(ed, pq);
         assert_ne!(ed, [0u8; 32]);
+    }
+
+    #[test]
+    fn computation_nonce_is_bound_to_live_operation_and_session() {
+        let base = binding(1, 2).sif_computation_operation_nonce();
+        let different_operation = binding(3, 2).sif_computation_operation_nonce();
+        let different_session = binding(1, 4).sif_computation_operation_nonce();
+        assert_ne!(base, different_operation);
+        assert_ne!(base, different_session);
+        assert_ne!(base, [0u8; 32]);
     }
 }
