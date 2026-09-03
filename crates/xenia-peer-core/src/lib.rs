@@ -60,6 +60,7 @@ pub mod m1_session;
 pub mod producer_flow;
 pub mod receive_reservation;
 mod session;
+pub mod sif_capability_wire;
 pub mod sif_wire;
 pub mod transfer_source;
 pub mod transport;
@@ -90,14 +91,20 @@ pub use receive_reservation::{
     ReceiveReservation, ReceiveReservationError, ReceiveReservationPool,
 };
 pub use session::{FrameLane, LaneSession, Session, SessionError, SessionRole};
+pub use sif_capability_wire::{
+    MAX_SIF_CAPABILITY_ENVELOPE_BYTES, MAX_SIF_CAPABILITY_SEMANTIC_BYTES,
+    PAYLOAD_TYPE_SIF_CAPABILITY_FROM_HOST, PAYLOAD_TYPE_SIF_CAPABILITY_FROM_VIEWER,
+    SIF_CAPABILITY_WIRE_SCHEMA_VERSION, SifCapabilityWireError,
+    SifProtectedFileCapabilityWireChannel, SifProtectedFileCapabilityWirePayload,
+};
 pub use sif_wire::{
-    MAX_SIF_PROTECTED_FILE_CAPABILITY_BYTES, MAX_SIF_PROTECTED_FILE_CHUNK_WIRE_BYTES,
-    MAX_SIF_PROTECTED_FILE_COMPLETE_BYTES, MAX_SIF_PROTECTED_FILE_ENVELOPE_BYTES,
-    MAX_SIF_PROTECTED_FILE_OFFER_BYTES, MAX_SIF_PROTECTED_FILE_RESPONSE_BYTES,
-    MAX_SIF_PROTECTED_FILE_SEMANTIC_BYTES, PAYLOAD_TYPE_SIF_PROTECTED_FILE_FROM_HOST,
-    PAYLOAD_TYPE_SIF_PROTECTED_FILE_FROM_VIEWER, SIF_PROTECTED_FILE_WIRE_SCHEMA_VERSION,
-    SifProtectedFileWireChannel, SifProtectedFileWireError, SifProtectedFileWireKind,
-    SifProtectedFileWirePayload, SifProtectedFileWireRole,
+    MAX_SIF_PROTECTED_FILE_CHUNK_WIRE_BYTES, MAX_SIF_PROTECTED_FILE_COMPLETE_BYTES,
+    MAX_SIF_PROTECTED_FILE_ENVELOPE_BYTES, MAX_SIF_PROTECTED_FILE_OFFER_BYTES,
+    MAX_SIF_PROTECTED_FILE_RESPONSE_BYTES, MAX_SIF_PROTECTED_FILE_SEMANTIC_BYTES,
+    PAYLOAD_TYPE_SIF_PROTECTED_FILE_FROM_HOST, PAYLOAD_TYPE_SIF_PROTECTED_FILE_FROM_VIEWER,
+    SIF_PROTECTED_FILE_WIRE_SCHEMA_VERSION, SifProtectedFileWireChannel,
+    SifProtectedFileWireError, SifProtectedFileWireKind, SifProtectedFileWirePayload,
+    SifProtectedFileWireRole,
 };
 pub use transfer_source::{TransferChunk, TransferSource, TransferSourceError};
 pub use xenia_handshake::{
