@@ -51,8 +51,7 @@ const ACCOUNTABILITY_EXECUTION_DOMAIN: &[u8] = b"xenia:accountability-execution:
 
 /// Domain separator for the digest exported to higher layers as an attestation
 /// statement commitment.
-const ACCOUNTABILITY_BINDING_DIGEST_DOMAIN: &[u8] =
-    b"xenia:accountability-binding-digest:v1";
+const ACCOUNTABILITY_BINDING_DIGEST_DOMAIN: &[u8] = b"xenia:accountability-binding-digest:v1";
 
 /// Phase represented by an execution binding.
 ///
@@ -194,7 +193,7 @@ impl AccountabilityExecutionBinding {
     }
 }
 
-/// Signed proof that an Xenia evidence authority committed to an accountability
+/// Signed proof that a Xenia evidence authority committed to an accountability
 /// binding at a particular ledger/session frontier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountabilityExecutionAttestation {
@@ -329,10 +328,7 @@ pub fn sign_accountability_execution_ml_dsa_65(
     AccountabilityExecutionAttestation {
         schema: ACCOUNTABILITY_EXECUTION_ATTESTATION_SCHEMA.to_string(),
         binding,
-        signature: SignatureEnvelope::new(
-            SignatureSuite::MlDsa65Fips204,
-            signature_bytes.to_vec(),
-        ),
+        signature: SignatureEnvelope::new(SignatureSuite::MlDsa65Fips204, signature_bytes.to_vec()),
     }
 }
 
@@ -349,10 +345,7 @@ pub fn sign_accountability_execution_ml_dsa_87(
     AccountabilityExecutionAttestation {
         schema: ACCOUNTABILITY_EXECUTION_ATTESTATION_SCHEMA.to_string(),
         binding,
-        signature: SignatureEnvelope::new(
-            SignatureSuite::MlDsa87Fips204,
-            signature_bytes.to_vec(),
-        ),
+        signature: SignatureEnvelope::new(SignatureSuite::MlDsa87Fips204, signature_bytes.to_vec()),
     }
 }
 
@@ -448,7 +441,9 @@ pub enum AccountabilityBindingError {
         binding_session_id: Uuid,
     },
     /// Supplied semantic requester does not match the signed ledger principal.
-    #[error("accountability requester source id does not match signed ledger authorization principal")]
+    #[error(
+        "accountability requester source id does not match signed ledger authorization principal"
+    )]
     RequesterSourceMismatch,
     /// Ledger anchor is structurally empty.
     #[error("accountability execution requires a non-empty signed ledger frontier")]
