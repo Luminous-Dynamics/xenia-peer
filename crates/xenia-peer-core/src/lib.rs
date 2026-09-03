@@ -61,6 +61,7 @@ pub mod producer_flow;
 pub mod receive_reservation;
 mod session;
 pub mod sif_capability_wire;
+pub mod sif_custody_wire;
 pub mod sif_wire;
 pub mod transfer_source;
 pub mod transport;
@@ -96,6 +97,12 @@ pub use sif_capability_wire::{
     PAYLOAD_TYPE_SIF_CAPABILITY_FROM_HOST, PAYLOAD_TYPE_SIF_CAPABILITY_FROM_VIEWER,
     SIF_CAPABILITY_WIRE_SCHEMA_VERSION, SifCapabilityWireError,
     SifProtectedFileCapabilityWireChannel, SifProtectedFileCapabilityWirePayload,
+};
+pub use sif_custody_wire::{
+    MAX_SIF_CUSTODY_ENVELOPE_BYTES, MAX_SIF_CUSTODY_SEMANTIC_BYTES,
+    PAYLOAD_TYPE_SIF_CUSTODY_FROM_HOST, PAYLOAD_TYPE_SIF_CUSTODY_FROM_VIEWER,
+    SIF_CUSTODY_WIRE_SCHEMA_VERSION, SifCustodyWireChannel, SifCustodyWireError,
+    SifCustodyWirePayload,
 };
 pub use sif_wire::{
     MAX_SIF_PROTECTED_FILE_CHUNK_WIRE_BYTES, MAX_SIF_PROTECTED_FILE_COMPLETE_BYTES,
