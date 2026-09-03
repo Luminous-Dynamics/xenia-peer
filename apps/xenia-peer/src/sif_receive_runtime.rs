@@ -17,7 +17,7 @@
 //! publication. Runtime code therefore does not choose a positive portable receipt
 //! disposition independently of the persistence result.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 use xenia_ledger::{
@@ -158,6 +158,56 @@ pub enum SifReceiveRuntimeTerminal {
     IntegrityMismatch(IntegrityMismatchSifProtectedFileReceive),
 }
 
+impl SifReceiveRuntimeTerminal {
+    /// Consume any typed terminal custody observation into its portable receipt binding.
+    ///
+    /// This is the single application-layer projection from local receive outcome to
+    /// portable evidence. Post-publication directory-sync uncertainty deliberately
+    /// fails closed because the current delivery-receipt schema can represent
+    /// `PersistenceFailed` but cannot truthfully express "published, durability
+    /// uncertain". A future receipt schema may add that distinct disposition.
+    #[allow(clippy::too_many_arguments)]
+    pub fn into_delivery_receipt_binding(
+        self,
+        session: SessionTranscriptBinding,
+        receiver_signature_suite: SignatureSuite,
+        receiver_public_key: &[u8],
+        observed_at_unix_ms: u64,
+        manifest: EvidenceCryptoManifest,
+    ) -> Result<SifDeliveryReceiptBinding, SifReceiveRuntimeError> {
+        match self {
+            Self::DurableVerified(durable) => durable.into_delivery_receipt_binding(
+                session,
+                receiver_signature_suite,
+                receiver_public_key,
+                observed_at_unix_ms,
+                manifest,
+            ),
+            Self::PersistenceFailed(failed) => failed.into_delivery_receipt_binding(
+                session,
+                receiver_signature_suite,
+                receiver_public_key,
+                observed_at_unix_ms,
+                manifest,
+            ),
+            Self::Incomplete(incomplete) => Ok(incomplete.into_delivery_receipt_binding(
+                session,
+                receiver_signature_suite,
+                receiver_public_key,
+                observed_at_unix_ms,
+                manifest,
+            )?),
+            Self::IntegrityMismatch(mismatch) => Ok(mismatch.into_delivery_receipt_binding(
+                session,
+                receiver_signature_suite,
+                receiver_public_key,
+                observed_at_unix_ms,
+                manifest,
+            )?),
+        }
+    }
+}
+
 /// Positive joined custody state.
 ///
 /// Construction is private. Possession means this runtime instance reached both
@@ -233,9 +283,10 @@ impl PersistenceFailedSifReceive {
 
     /// Consume verified content into a portable negative persistence receipt binding.
     ///
-    /// The local filesystem error is intentionally not embedded in portable evidence;
-    /// the portable claim remains the stable `PersistenceFailed` disposition while the
-    /// receiver retains detailed local diagnostics.
+    /// A failure that happened *before* publication can be represented truthfully by
+    /// the current `PersistenceFailed` disposition. If the final name may already be
+    /// visible but directory fsync failed, the v1 portable schema has no faithful
+    /// disposition; this method refuses to manufacture a misleading receipt.
     #[allow(clippy::too_many_arguments)]
     pub fn into_delivery_receipt_binding(
         self,
@@ -245,6 +296,11 @@ impl PersistenceFailedSifReceive {
         observed_at_unix_ms: u64,
         manifest: EvidenceCryptoManifest,
     ) -> Result<SifDeliveryReceiptBinding, SifReceiveRuntimeError> {
+        if let Some(path) = self.published_but_unsynced_path() {
+            return Err(SifReceiveRuntimeError::PersistenceDurabilityUncertain {
+                published_path: path.to_path_buf(),
+            });
+        }
         Ok(self.verified.into_delivery_receipt_binding(
             session,
             receiver_signature_suite,
@@ -256,7 +312,7 @@ impl PersistenceFailedSifReceive {
     }
 }
 
-/// Runtime bridge failures that occur before a typed terminal custody observation.
+/// Runtime bridge failures that occur before a portable custody receipt can be formed.
 #[derive(Debug, Error)]
 pub enum SifReceiveRuntimeError {
     /// Protected semantic protocol/receiver validation failed.
@@ -268,6 +324,16 @@ pub enum SifReceiveRuntimeError {
     /// Portable delivery-receipt construction failed.
     #[error(transparent)]
     Receipt(#[from] SifDeliveryReceiptError),
+    /// Final-name publication may already be visible but crash durability is unproven.
+    ///
+    /// Current portable receipt schema v1 cannot represent this state faithfully, so
+    /// receipt generation and session reuse must stop until an operator/new schema
+    /// resolves the uncertainty.
+    #[error("SIF receive publication exists but directory durability is uncertain: {published_path:?}")]
+    PersistenceDurabilityUncertain {
+        /// Final path that may already be published despite failed directory sync.
+        published_path: PathBuf,
+    },
 }
 
 #[cfg(test)]
@@ -276,8 +342,7 @@ mod tests {
     use std::path::PathBuf;
     use uuid::Uuid;
     use xenia_ledger::{
-        CURRENT_EVIDENCE_CRYPTO_MANIFEST, SifDeliveryDisposition,
-        sif_file_result_digest,
+        CURRENT_EVIDENCE_CRYPTO_MANIFEST, SifDeliveryDisposition, sif_file_result_digest,
     };
 
     fn temp_dir() -> PathBuf {
