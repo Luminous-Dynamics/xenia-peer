@@ -41,12 +41,16 @@
 //! [`SifReleaseCredential`]. [`verify_release_credential`] authenticates configured
 //! release-authority roots and trust domains, then
 //! [`bind_release_credential_to_execution`] proves that credential names the exact
-//! Xenia execution before the disclosure-permit layer can consume it.
+//! Xenia execution — including its semantic policy — before the disclosure layer can
+//! consume it.
 //!
 //! The release layer uses [`AccountabilityDisclosurePermit`], but the permit is not
 //! itself a release token: [`DisclosureReleaseState::commit_permit_transactional`]
 //! must first durably append a signed release-journal commit before returning the
 //! move-only [`CommittedDisclosurePermit`] intended for protected-output adapters.
+//! One release credential is constrained to one non-branching release lineage, and
+//! the exact consent approval that anchored execution must remain current through
+//! the durable release commit.
 //!
 //! A downstream auditor — including a non-operator third party —
 //! can use [`Verifier::verify_chain`] to reconstruct every hash link
@@ -89,7 +93,7 @@ mod binding;
 mod chain;
 mod checkpoint;
 mod compaction;
-mod disclosure;
+mod disclosure_v2;
 mod entry;
 mod errors;
 mod hash;
@@ -151,11 +155,10 @@ pub use compaction::{
     ledger_compaction_manifest_message,
 };
 
-pub use disclosure::{
+pub use disclosure_v2::{
     ACCOUNTABILITY_DISCLOSURE_BINDING_SCHEMA, ACCOUNTABILITY_DISCLOSURE_COMMITMENT_ALGORITHM,
     ACCOUNTABILITY_DISCLOSURE_PERMIT_SCHEMA, ACCOUNTABILITY_RELEASE_ENTRY_SCHEMA,
-    AccountabilityDisclosureBinding, AccountabilityDisclosureError,
-    AccountabilityDisclosureExpectation, AccountabilityDisclosurePermit,
+    AccountabilityDisclosureBinding, AccountabilityDisclosureError, AccountabilityDisclosurePermit,
     AccountabilityDisclosurePhase, CommittedDisclosurePermit, DisclosureReleaseEntry,
     DisclosureReleaseEvent, DisclosureReleaseOutcome, DisclosureReleaseState,
     TransactionalDisclosureError, accountability_disclosure_message,
