@@ -1,0 +1,138 @@
+name: Authority Rekey Transport Admission Conformance
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "flake.nix"
+      - "flake.lock"
+      - "crates/xenia-peer-core/Cargo.toml"
+      - "crates/xenia-peer-core/src/authority_transport.rs"
+      - "crates/xenia-peer-core/src/handshake.rs"
+      - "crates/xenia-peer-core/src/lib.rs"
+      - "crates/xenia-peer-core/src/transport.rs"
+      - ".github/workflows/authority-rekey-transport-admission.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: authority-rekey-transport-admission-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: -D warnings
+  QUALIFICATION_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  exact-source:
+    name: Exact source authenticated transport admission
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.QUALIFICATION_SOURCE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Assert exact immutable source checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$QUALIFICATION_SOURCE_SHA"
+          test -z "$(git status --porcelain)"
+          echo "SOURCE_HEAD=$(git rev-parse HEAD)"
+          echo "SOURCE_TREE=$(git rev-parse HEAD^{tree})"
+
+      - uses: DeterminateSystems/nix-installer-action@33c9ab3ef95cd57c164d9d6eb1f9a46338538d41
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+
+      - name: Retain exact dependency and source provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/qualification"
+          mkdir -p "$OUT"
+          cp Cargo.lock "$OUT/Cargo.lock"
+          cp .github/workflows/authority-rekey-transport-admission.yml "$OUT/"
+          cp crates/xenia-peer-core/src/authority_transport.rs "$OUT/"
+          {
+            echo "profile=xenia-authority-rekey-transport-admission-v1"
+            echo "source_head=$(git rev-parse HEAD)"
+            echo "source_tree=$(git rev-parse HEAD^{tree})"
+            echo "runner_label=ubuntu-24.04"
+            echo "runner_os=${RUNNER_OS:-unknown}"
+            echo "runner_arch=${RUNNER_ARCH:-unknown}"
+            echo "image_os=${ImageOS:-unknown}"
+            echo "image_version=${ImageVersion:-unknown}"
+            echo "kernel=$(uname -srmo)"
+            echo "cargo_lock_sha256=$(sha256sum Cargo.lock | awk '{print $1}')"
+            echo "authority_transport_sha256=$(sha256sum crates/xenia-peer-core/src/authority_transport.rs | awk '{print $1}')"
+            echo "handshake_sha256=$(sha256sum crates/xenia-peer-core/src/handshake.rs | awk '{print $1}')"
+            echo "transport_sha256=$(sha256sum crates/xenia-peer-core/src/transport.rs | awk '{print $1}')"
+            echo "workflow_sha256=$(sha256sum .github/workflows/authority-rekey-transport-admission.yml | awk '{print $1}')"
+            echo "actions_checkout_commit=11d5960a326750d5838078e36cf38b85af677262"
+            echo "nix_installer_action_commit=33c9ab3ef95cd57c164d9d6eb1f9a46338538d41"
+            echo "rust_cache_action_commit=6323deb102c322ba6fcbdcafc7e3dddab59af2b6"
+            echo "upload_artifact_action_commit=ea165f8d65b6e75b540449e92b4886f43607fa02"
+            echo "rust_toolchain_action_commit=6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772"
+            echo "--- nix ---"
+            nix --version
+            echo "--- nix ci rustc ---"
+            nix develop .#ci --command rustc -vV
+            echo "--- nix ci cargo ---"
+            nix develop .#ci --command cargo -Vv
+          } > "$OUT/PROVENANCE.txt"
+          cat "$OUT/PROVENANCE.txt"
+
+      - name: Format exact source
+        run: nix develop .#ci --command cargo fmt --all -- --check
+
+      - name: Check peer-core boundary
+        run: nix develop .#ci --command cargo check --locked -p xenia-peer-core --all-targets
+
+      - name: Clippy peer-core boundary
+        run: nix develop .#ci --command cargo clippy --locked -p xenia-peer-core --all-targets -- -D warnings
+
+      - name: Test authenticated transport admission
+        run: nix develop .#ci --command cargo test --locked -p xenia-peer-core 'authority_transport::tests'
+
+      - name: Assert source tree remained immutable
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$QUALIFICATION_SOURCE_SHA"
+          test -z "$(git status --porcelain)"
+          echo "final_source_tree=$(git rev-parse HEAD^{tree})" >> "$RUNNER_TEMP/qualification/PROVENANCE.txt"
+
+      - name: Retain qualification capsule
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: authority-rekey-transport-admission-${{ env.QUALIFICATION_SOURCE_SHA }}
+          path: ${{ runner.temp }}/qualification
+          if-no-files-found: error
+          retention-days: 90
+
+  msrv:
+    name: Rust 1.94 peer-core boundary
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.QUALIFICATION_SOURCE_SHA }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: "1.94"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - name: Record MSRV toolchain
+        run: |
+          rustc -vV
+          cargo -Vv
+      - run: cargo check --locked -p xenia-peer-core --all-targets
+      - run: cargo test --locked -p xenia-peer-core 'authority_transport::tests'
