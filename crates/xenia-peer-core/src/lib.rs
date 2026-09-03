@@ -16,6 +16,9 @@
 //!   transport: length-prefixed sealed envelopes over a
 //!   `tokio::net::TcpStream`. Not production — QUIC/Iroh is the
 //!   primary transport for M1+.
+//! - [`authority_transport`] — fail-closed admission for treating one
+//!   authenticated transport profile as a single reliable ordered local
+//!   authority-rekey Ack handoff domain. This does not prove remote receipt.
 //!
 //! ## What this crate deliberately does NOT do yet
 //!
@@ -52,6 +55,7 @@
 #![warn(missing_docs)]
 
 pub mod advertisement;
+pub mod authority_transport;
 pub mod file_transfer;
 pub mod frame;
 pub mod handshake;
