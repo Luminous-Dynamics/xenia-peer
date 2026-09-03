@@ -63,6 +63,7 @@
 #![warn(rust_2018_idioms)]
 #![deny(unsafe_code)]
 
+mod agent_authority;
 mod archive;
 mod binding;
 mod chain;
@@ -80,6 +81,16 @@ mod witness;
 
 #[cfg(test)]
 mod tests;
+
+pub use agent_authority::{
+    AGENT_CAPABILITY_ATTESTATION_SCHEMA, AgentCapabilityAttestationError,
+    AgentCapabilityAttestationV1, verify_agent_capability_attestation,
+};
+pub use xenia_agent_authority_proto::{
+    AGENT_CAPABILITY_AUTHORIZATION_DOMAIN, AGENT_CAPABILITY_AUTHORIZATION_SCHEMA_VERSION,
+    AgentCapabilityAuthorizationError, AgentCapabilityAuthorizationV1, AgentCheckpointAnchorV1,
+    TranscriptSignatureSuiteV1,
+};
 
 pub use archive::{
     LEDGER_ARCHIVE_SEGMENT_SCHEMA, LedgerArchiveError, LedgerArchiveSegment,
