@@ -94,9 +94,9 @@ mod tests;
 pub use accountability::{
     ACCOUNTABILITY_COMMITMENT_ALGORITHM, ACCOUNTABILITY_EXECUTION_ATTESTATION_SCHEMA,
     ACCOUNTABILITY_EXECUTION_BINDING_SCHEMA, AccountabilityBindingError,
-    AccountabilityExecutionAttestation, AccountabilityExecutionBinding, AccountabilityExecutionPhase,
-    accountability_execution_binding_digest, accountability_execution_message,
-    sign_accountability_execution_ed25519,
+    AccountabilityExecutionAttestation, AccountabilityExecutionBinding,
+    AccountabilityExecutionPhase, accountability_execution_binding_digest,
+    accountability_execution_message, sign_accountability_execution_ed25519,
 };
 #[cfg(feature = "pqc-signatures")]
 pub use accountability::{
