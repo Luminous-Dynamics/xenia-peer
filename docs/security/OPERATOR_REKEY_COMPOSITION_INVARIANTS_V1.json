@@ -1,0 +1,77 @@
+{
+  "schema": "xenia.operator-rekey-composition-invariants.v1",
+  "profile_id": "xenia.operator-sealed-channel.rekey-composition.v1",
+  "issue": 228,
+  "qualification_workflow": "Operator Rekey Composition Model",
+  "host_parent": {
+    "repository": "Luminous-Dynamics/xenia-peer",
+    "pull_request": 229,
+    "head": "5c3c1a6559f6426a23f2cd212f8b8bd8ceb4c567",
+    "role": "linear initiator-bound Proposal send/commit successor"
+  },
+  "receiver_contract": {
+    "repository": "Luminous-Dynamics/xenia-wire",
+    "pull_request": 42,
+    "role": "receiver successor contract/model; production reconstruction still pending"
+  },
+  "receiver_primitive": {
+    "repository": "Luminous-Dynamics/xenia-wire",
+    "pull_request": 44,
+    "role": "strict current-key-only live receive primitive"
+  },
+  "ack_transport": {
+    "repository": "Luminous-Dynamics/xenia-peer",
+    "issue": 225,
+    "role": "one-shot committed Ack delivery / ambiguity successor"
+  },
+  "model": {
+    "source": "scripts/check_operator_rekey_composition_model.py",
+    "report_schema": "xenia.operator-rekey-composition-model-report.v1",
+    "max_depth": 12,
+    "bounded_max_key_epoch": 2,
+    "bounded_reverse_fifo_slots": 3,
+    "expected_reachable_state_count": 6396,
+    "expected_transition_count": 31319,
+    "expected_checked_trace_prefixes": 89908,
+    "expected_state_graph_sha256": "94b9884f35b588dccf942a7609c1cecee4264d7d44fb214912a3570ed9828eec"
+  },
+  "assumptions": [
+    "The console-to-host carrier is ordered within one authenticated connection generation.",
+    "A carrier send may fail before write or after bytes may have escaped; the model never infers delivery from a local send result alone.",
+    "Receiver application authority resumes only after the committed Ack send reports success; later receiver application messages append behind that Ack on the same ordered reverse stream.",
+    "V1 may fail closed and require a fresh authenticated handshake when an old-epoch console application message is already queued ahead of the Ack.",
+    "Fresh authenticated handshake creates a new connection generation and discards old-generation queued protocol/application messages.",
+    "Cryptographic validity, nonce-domain checks, current-key-only receive, and exact Ack sequence/domain are abstracted as explicit valid/invalid protocol events; this model does not reimplement cryptography."
+  ],
+  "invariants": [
+    {
+      "id": "OEC-001",
+      "property": "No reachable state in one connection generation has both peers application-authoritative while their confirmed authority/key epochs differ."
+    },
+    {
+      "id": "OEC-002",
+      "property": "After host begin_send enters DeliveryUnknown, no same-generation carrier success/failure/timeout path restores host Stable except delivery of the exact valid current-transition Ack."
+    },
+    {
+      "id": "OEC-003",
+      "property": "Receiver commit is one-way: receiver epoch is monotonic within a generation, commit reserves/preseals Ack sequence zero, and no Ack-delivery outcome restores the previous receiver epoch."
+    },
+    {
+      "id": "OEC-004",
+      "property": "Ack is the ordered cutover marker: receiver new-epoch application traffic cannot overtake the same epoch Ack on the modeled reverse FIFO."
+    },
+    {
+      "id": "OEC-005",
+      "property": "Proposal/Ack ambiguity, invalid old/wrong-role authority traffic, timeout, and the V1 old-console-message cutover race fail closed rather than guessing a shared epoch."
+    },
+    {
+      "id": "OEC-006",
+      "property": "Replayed Proposal or Ack cannot advance either side twice or restore application authority incorrectly."
+    },
+    {
+      "id": "OEC-007",
+      "property": "Only a fresh authenticated handshake changes connection generation, and it clears all old-generation carrier/rekey state before authority resumes."
+    }
+  ],
+  "claim_boundary": "Bounded independent protocol-state composition evidence. It does not prove production Rust equivalence, cryptography, carrier delivery, scheduler behavior, crash/hardware atomicity, Byzantine consensus, or final cross-repository interoperability."
+}
