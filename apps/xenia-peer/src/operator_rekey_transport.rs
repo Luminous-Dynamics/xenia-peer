@@ -50,17 +50,18 @@ pub(crate) async fn prepare_send_commit_interval<T: Transport>(
     ack_deadline: Instant,
 ) -> Result<u64, RekeyTransportTransactionError> {
     rekey.prepare_interval(tx_session, rekey_root)?;
-    let prepared_epoch = rekey.prepared_epoch()?;
+    let prepared_send = rekey.begin_send()?;
+    let prepared_epoch = prepared_send.key_epoch();
 
-    {
-        let proposal = rekey.prepared_envelope()?;
-        transport
-            .send_envelope(proposal)
-            .await
-            .map_err(|err| RekeyTransportTransactionError::Transport(err.to_string()))?;
-    }
+    transport
+        .send_envelope(prepared_send.proposal_envelope())
+        .await
+        .map_err(|err| RekeyTransportTransactionError::Transport(err.to_string()))?;
 
-    let committed_epoch = rekey.commit_sent(tx_session, authority_rx_session, ack_deadline)?;
+    // No recoverable local Result exists after the carrier reports success.
+    // `prepared_send` is a linear capability created before the send began;
+    // consuming it commits the new-key-only local state directly to PendingAck.
+    let committed_epoch = prepared_send.commit(tx_session, authority_rx_session, ack_deadline);
     debug_assert_eq!(prepared_epoch, committed_epoch);
     Ok(committed_epoch)
 }

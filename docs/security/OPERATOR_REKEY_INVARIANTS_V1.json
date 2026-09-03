@@ -5,8 +5,8 @@
   "qualification_workflow": "Operator Rekey Initiator Conformance",
   "receiver_counterpart": {
     "repository": "Luminous-Dynamics/xenia-wire",
-    "pull_request": 41,
-    "role": "sealed exact-current-key receiver transaction"
+    "pull_request": 42,
+    "role": "receiver successor contract/model; production reconstruction pending #38/#40"
   },
   "follow_up": {
     "repository": "Luminous-Dynamics/xenia-wire",
@@ -26,7 +26,8 @@
         "ORI-007",
         "ORI-008",
         "ORI-009",
-        "ORI-010"
+        "ORI-010",
+        "ORI-014"
       ]
     }
   ],
@@ -35,21 +36,27 @@
       "id": "ORI-001",
       "property": "Host and console sealing roles use different AEAD nonce source prefixes.",
       "source": "apps/xenia-peer/src/operator_sealed_channel.rs",
-      "evidence": ["operator_sealed_channel::tests::host_and_console_nonce_prefixes_are_directionally_distinct"],
+      "evidence": [
+        "operator_sealed_channel::tests::host_and_console_nonce_prefixes_are_directionally_distinct"
+      ],
       "qualification": "pending_hosted_execution"
     },
     {
       "id": "ORI-002",
       "property": "The rekey Proposal is sealed under the old host key before local key commit.",
       "source": "apps/xenia-peer/src/operator_rekey_transport.rs",
-      "evidence": ["operator_sealed_channel::rekey_transport::tests::transport_observes_exact_old_key_proposal_before_local_commit"],
+      "evidence": [
+        "operator_sealed_channel::rekey_transport::tests::transport_observes_exact_old_key_proposal_before_local_commit"
+      ],
       "qualification": "pending_hosted_execution"
     },
     {
       "id": "ORI-003",
       "property": "The exact prepared Proposal bytes are the bytes handed to Transport::send_envelope.",
       "source": "apps/xenia-peer/src/operator_rekey_transport.rs",
-      "evidence": ["operator_sealed_channel::rekey_transport::tests::transport_observes_exact_old_key_proposal_before_local_commit"],
+      "evidence": [
+        "operator_sealed_channel::rekey_transport::tests::transport_observes_exact_old_key_proposal_before_local_commit"
+      ],
       "qualification": "pending_hosted_execution"
     },
     {
@@ -65,7 +72,7 @@
     },
     {
       "id": "ORI-005",
-      "property": "Application authority is unavailable in Prepared and PendingAck and resumes only in Stable.",
+      "property": "Application authority is unavailable in Prepared, DeliveryUnknown, and PendingAck and resumes only in Stable.",
       "source": "apps/xenia-peer/src/operator_rekey_initiator.rs",
       "evidence": [
         "operator_sealed_channel::initiator::tests::prepare_uses_distinct_host_nonce_domain_and_commit_is_one_way",
@@ -134,7 +141,9 @@
       "id": "ORI-011",
       "property": "Prepared future AEAD key material is redacted from Rust Debug output.",
       "source": "apps/xenia-peer/src/operator_rekey_initiator.rs",
-      "evidence": ["operator_sealed_channel::initiator::tests::prepared_debug_redacts_future_aead_key"],
+      "evidence": [
+        "operator_sealed_channel::initiator::tests::prepared_debug_redacts_future_aead_key"
+      ],
       "qualification": "pending_hosted_execution"
     },
     {
@@ -150,10 +159,29 @@
     },
     {
       "id": "ORI-013",
-      "property": "The initiator's final production interoperability target is xenia-wire #41 receiver semantics on the nonce-safe #37/#34/#40 lineage; source-only tests do not substitute for that cross-repository gate.",
+      "property": "The initiator's final production interoperability target is the xenia-wire #42 receiver-successor contract reconstructed on the nonce-safe #37/#34/#40 lineage; #41 is prototype reconstruction input and source-only tests do not substitute for the final cross-repository gate.",
       "source": "cross-repository",
-      "evidence": ["future:xenia-peer-xenia-wire-final-rekey-interoperability"],
+      "evidence": [
+        "future:xenia-peer-xenia-wire-final-rekey-interoperability"
+      ],
       "qualification": "blocked_on_final_wire_lineage"
+    },
+    {
+      "id": "ORI-014",
+      "property": "Before carrier delivery begins, a prepared Proposal is converted into one non-Clone linear send token mutably borrowed from its exact originating initiator, which enters DeliveryUnknown; Proposal bytes are exposed only through that token, and after reported send success consuming the same token commits to PendingAck through an infallible u64-returning API with no recoverable local Result path.",
+      "source": "apps/xenia-peer/src/operator_rekey_initiator.rs",
+      "evidence": [
+        "operator_sealed_channel::initiator::tests::begin_send_enters_delivery_unknown_and_drop_never_restores_authority",
+        "operator_sealed_channel::initiator::tests::post_send_commit_surface_is_infallible_by_construction",
+        "operator_sealed_channel::rekey_transport::tests::transport_observes_exact_old_key_proposal_before_local_commit",
+        "model:ORI-MODEL-001"
+      ],
+      "qualification": "pending_hosted_execution"
     }
-  ]
+  ],
+  "receiver_prototype": {
+    "repository": "Luminous-Dynamics/xenia-wire",
+    "pull_request": 41,
+    "role": "prototype reconstruction source only; explicitly do not merge"
+  }
 }

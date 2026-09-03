@@ -98,6 +98,80 @@ impl Drop for PreparedRekey {
     }
 }
 
+/// Linear capability proving that all fallible rekey preparation completed and
+/// the initiator has entered the non-authoritative delivery-unknown phase.
+///
+/// The token is intentionally non-`Clone`. Dropping it zeroizes the prepared
+/// future key through `PreparedRekey::drop`, while the initiator remains
+/// `DeliveryUnknown`; authority cannot silently roll back to `Stable`.
+#[must_use = "dropping a prepared rekey send token requires tearing down the channel"]
+pub(crate) struct PreparedRekeySend<'a> {
+    initiator: &'a mut OperatorRekeyInitiator,
+    prepared: PreparedRekey,
+}
+
+impl PreparedRekeySend<'_> {
+    /// Exact old-key Proposal bytes that must be handed to the carrier.
+    ///
+    /// These bytes are inaccessible until the creating initiator has already
+    /// entered `DeliveryUnknown`, so transport cannot send first and suspend
+    /// authority later.
+    pub(crate) fn proposal_envelope(&self) -> &[u8] {
+        &self.prepared.proposal_envelope
+    }
+
+    /// Epoch carried by the exact prepared Proposal.
+    pub(crate) fn key_epoch(&self) -> u64 {
+        self.prepared.key_epoch
+    }
+
+    /// Consume this exact initiator-bound token after the carrier reports
+    /// success and commit directly to PendingAck.
+    ///
+    /// There is no recoverable `Result` channel here. All fallible local work
+    /// completed before `begin_send`, and the token's mutable borrow prevents
+    /// any other access to its originating initiator while delivery is
+    /// unresolved.
+    pub(crate) fn commit(
+        mut self,
+        tx_session: &mut Session,
+        authority_rx_session: &mut Session,
+        deadline: Instant,
+    ) -> u64 {
+        let prepared = &mut self.prepared;
+        let initiator = &mut *self.initiator;
+
+        let tx_source_id = *tx_session.source_id();
+        let tx_epoch = tx_session.epoch();
+        let mut fresh_tx = Session::with_source_id(tx_source_id, tx_epoch);
+        fresh_tx.install_key(prepared.new_key);
+        *tx_session = fresh_tx;
+
+        let mut fresh_rx =
+            Session::with_source_id(initiator.peer_source_id, initiator.session_epoch);
+        fresh_rx.install_key(prepared.new_key);
+        *authority_rx_session = fresh_rx;
+
+        initiator.current_key_digest = key_digest(&prepared.new_key);
+        let key_epoch = prepared.key_epoch;
+        let epoch_hash = prepared.epoch_hash;
+        prepared.new_key.fill(0);
+
+        initiator.phase = Phase::PendingAck(PendingAck {
+            key_epoch,
+            epoch_hash,
+            deadline,
+        });
+        key_epoch
+    }
+}
+
+impl fmt::Debug for PreparedRekeySend<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.prepared.fmt(f)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct PendingAck {
     key_epoch: u64,
@@ -109,6 +183,7 @@ struct PendingAck {
 enum Phase {
     Stable,
     Prepared(PreparedRekey),
+    DeliveryUnknown,
     PendingAck(PendingAck),
 }
 
@@ -214,63 +289,25 @@ impl OperatorRekeyInitiator {
         Ok(())
     }
 
-    pub(crate) fn prepared_envelope(&self) -> Result<&[u8], RekeyInitiatorError> {
-        match &self.phase {
-            Phase::Prepared(prepared) => Ok(&prepared.proposal_envelope),
-            _ => Err(RekeyInitiatorError::ProposalNotPrepared),
-        }
-    }
-
-    pub(crate) fn prepared_epoch(&self) -> Result<u64, RekeyInitiatorError> {
-        match &self.phase {
-            Phase::Prepared(prepared) => Ok(prepared.key_epoch),
-            _ => Err(RekeyInitiatorError::ProposalNotPrepared),
-        }
-    }
-
-    /// Commit the proposed key only after `send_envelope` succeeds locally.
+    /// Consume the internal Prepared phase before transport delivery begins.
     ///
-    /// There is intentionally no inverse transition. Once the Proposal may have
-    /// escaped the process, ambiguity is resolved only by a matching new-key Ack
-    /// or by tearing down the connection and establishing a fresh handshake.
-    /// Both local sessions are *replaced*, not rekeyed in place, so they retain
-    /// no previous-key grace or obsolete traffic key after commit.
-    pub(crate) fn commit_sent(
-        &mut self,
-        tx_session: &mut Session,
-        authority_rx_session: &mut Session,
-        deadline: Instant,
-    ) -> Result<u64, RekeyInitiatorError> {
-        let prior_phase = mem::replace(&mut self.phase, Phase::Stable);
-        let mut prepared = match prior_phase {
-            Phase::Prepared(prepared) => prepared,
+    /// This is the final fallible local state operation before the carrier sees
+    /// Proposal bytes. Success returns a linear token owning the exact envelope
+    /// and future-key transition material and permanently moves the initiator to
+    /// `DeliveryUnknown`. A later transport error therefore cannot restore
+    /// application authority merely by dropping the token.
+    pub(crate) fn begin_send(&mut self) -> Result<PreparedRekeySend<'_>, RekeyInitiatorError> {
+        let prior_phase = mem::replace(&mut self.phase, Phase::DeliveryUnknown);
+        match prior_phase {
+            Phase::Prepared(prepared) => Ok(PreparedRekeySend {
+                initiator: self,
+                prepared,
+            }),
             other => {
                 self.phase = other;
-                return Err(RekeyInitiatorError::ProposalNotPrepared);
+                Err(RekeyInitiatorError::ProposalNotPrepared)
             }
-        };
-
-        let tx_source_id = *tx_session.source_id();
-        let tx_epoch = tx_session.epoch();
-        let mut fresh_tx = Session::with_source_id(tx_source_id, tx_epoch);
-        fresh_tx.install_key(prepared.new_key);
-        *tx_session = fresh_tx;
-
-        let mut fresh_rx = Session::with_source_id(self.peer_source_id, self.session_epoch);
-        fresh_rx.install_key(prepared.new_key);
-        *authority_rx_session = fresh_rx;
-
-        self.current_key_digest = key_digest(&prepared.new_key);
-        let key_epoch = prepared.key_epoch;
-        let epoch_hash = prepared.epoch_hash;
-        prepared.new_key.fill(0);
-
-        self.phase = Phase::PendingAck(PendingAck {
-            key_epoch,
-            epoch_hash,
-            deadline,
-        });
-        Ok(key_epoch)
+        }
     }
 
     pub(crate) fn ack_deadline(&self) -> Option<Instant> {
@@ -285,7 +322,7 @@ impl OperatorRekeyInitiator {
     }
 
     /// Application authority is intentionally suspended across both the local
-    /// prepared-send window and the remote-confirmation window.
+    /// prepared/delivery-unknown window and the remote-confirmation window.
     pub(crate) fn application_allowed(&self) -> bool {
         matches!(self.phase, Phase::Stable)
     }
@@ -431,9 +468,14 @@ mod tests {
 
         rekey.prepare_interval(&mut tx, &REKEY_ROOT).unwrap();
         assert!(!rekey.application_allowed());
-        assert_eq!(rekey.prepared_epoch().unwrap(), 1);
 
-        let proposal_envelope = rekey.prepared_envelope().unwrap().to_vec();
+        // The exact Proposal bytes become accessible to a transport owner only
+        // after `begin_send` has already suspended rollback by entering
+        // DeliveryUnknown. There is no public(crate) Prepared-phase envelope
+        // getter that could let another caller send first and transition later.
+        let prepared_send = rekey.begin_send().unwrap();
+        assert_eq!(prepared_send.key_epoch(), 1);
+        let proposal_envelope = prepared_send.proposal_envelope().to_vec();
         assert_eq!(&proposal_envelope[..6], &HOST_SOURCE_ID[..6]);
         assert_ne!(&HOST_SOURCE_ID[..6], &PEER_SOURCE_ID[..6]);
         let mut old_key_receiver = Session::with_source_id(PEER_SOURCE_ID, SESSION_EPOCH);
@@ -446,7 +488,7 @@ mod tests {
         ));
 
         let deadline = Instant::now() + Duration::from_secs(1);
-        assert_eq!(rekey.commit_sent(&mut tx, &mut rx, deadline).unwrap(), 1);
+        assert_eq!(prepared_send.commit(&mut tx, &mut rx, deadline), 1);
         assert!(rekey.is_pending_ack());
         assert_eq!(rekey.ack_deadline(), Some(deadline));
         assert!(!rekey.application_allowed());
@@ -468,9 +510,8 @@ mod tests {
         let mut rx = rx_session();
         let mut rekey = initiator();
         rekey.prepare_interval(&mut tx, &REKEY_ROOT).unwrap();
-        rekey
-            .commit_sent(&mut tx, &mut rx, Instant::now() + Duration::from_secs(1))
-            .unwrap();
+        let prepared_send = rekey.begin_send().unwrap();
+        prepared_send.commit(&mut tx, &mut rx, Instant::now() + Duration::from_secs(1));
         let (key_epoch, epoch_hash) = pending_identity(&rekey);
         let new_key = xenia_handshake::derive_operator_rekey_key(&REKEY_ROOT, &epoch_hash);
         let ack = peer_envelope(
@@ -493,9 +534,8 @@ mod tests {
         let mut rx = rx_session();
         let mut rekey = initiator();
         rekey.prepare_interval(&mut tx, &REKEY_ROOT).unwrap();
-        rekey
-            .commit_sent(&mut tx, &mut rx, Instant::now() + Duration::from_secs(1))
-            .unwrap();
+        let prepared_send = rekey.begin_send().unwrap();
+        prepared_send.commit(&mut tx, &mut rx, Instant::now() + Duration::from_secs(1));
         let (key_epoch, epoch_hash) = pending_identity(&rekey);
         let forged = peer_envelope(
             INITIAL_KEY,
@@ -520,9 +560,8 @@ mod tests {
         let mut rx = rx_session();
         let mut rekey = initiator();
         rekey.prepare_interval(&mut tx, &REKEY_ROOT).unwrap();
-        rekey
-            .commit_sent(&mut tx, &mut rx, Instant::now() + Duration::from_secs(1))
-            .unwrap();
+        let prepared_send = rekey.begin_send().unwrap();
+        prepared_send.commit(&mut tx, &mut rx, Instant::now() + Duration::from_secs(1));
 
         let mut old_sender = Session::with_source_id(PEER_SOURCE_ID, SESSION_EPOCH);
         old_sender.install_key(INITIAL_KEY);
@@ -539,7 +578,8 @@ mod tests {
         let mut rekey = initiator();
         rekey.prepare_interval(&mut tx, &REKEY_ROOT).unwrap();
         let deadline = Instant::now();
-        rekey.commit_sent(&mut tx, &mut rx, deadline).unwrap();
+        let prepared_send = rekey.begin_send().unwrap();
+        prepared_send.commit(&mut tx, &mut rx, deadline);
         let (key_epoch, epoch_hash) = pending_identity(&rekey);
         let new_key = xenia_handshake::derive_operator_rekey_key(&REKEY_ROOT, &epoch_hash);
         let ack = peer_envelope(
@@ -563,9 +603,8 @@ mod tests {
         let mut rx = rx_session();
         let mut rekey = initiator();
         rekey.prepare_interval(&mut tx, &REKEY_ROOT).unwrap();
-        rekey
-            .commit_sent(&mut tx, &mut rx, Instant::now() + Duration::from_secs(1))
-            .unwrap();
+        let prepared_send = rekey.begin_send().unwrap();
+        prepared_send.commit(&mut tx, &mut rx, Instant::now() + Duration::from_secs(1));
         let (key_epoch, epoch_hash) = pending_identity(&rekey);
         let new_key = xenia_handshake::derive_operator_rekey_key(&REKEY_ROOT, &epoch_hash);
         let ack = peer_envelope(
@@ -589,9 +628,8 @@ mod tests {
         let mut rx = rx_session();
         let mut rekey = initiator();
         rekey.prepare_interval(&mut tx, &REKEY_ROOT).unwrap();
-        rekey
-            .commit_sent(&mut tx, &mut rx, Instant::now() + Duration::from_secs(1))
-            .unwrap();
+        let prepared_send = rekey.begin_send().unwrap();
+        prepared_send.commit(&mut tx, &mut rx, Instant::now() + Duration::from_secs(1));
         let (key_epoch, epoch_hash) = pending_identity(&rekey);
         let new_key = xenia_handshake::derive_operator_rekey_key(&REKEY_ROOT, &epoch_hash);
         let ack = peer_envelope(
@@ -618,9 +656,8 @@ mod tests {
         let mut rx = rx_session();
         let mut rekey = initiator();
         rekey.prepare_interval(&mut tx, &REKEY_ROOT).unwrap();
-        rekey
-            .commit_sent(&mut tx, &mut rx, Instant::now() + Duration::from_secs(1))
-            .unwrap();
+        let prepared_send = rekey.begin_send().unwrap();
+        prepared_send.commit(&mut tx, &mut rx, Instant::now() + Duration::from_secs(1));
         let (_, epoch_hash) = pending_identity(&rekey);
         let new_key = xenia_handshake::derive_operator_rekey_key(&REKEY_ROOT, &epoch_hash);
         let proposal = peer_envelope(
@@ -639,6 +676,45 @@ mod tests {
             rekey.accept_ack(&mut rx, &proposal, Instant::now()),
             Err(RekeyInitiatorError::UnexpectedPeerProposal)
         );
+    }
+
+    #[test]
+    fn begin_send_enters_delivery_unknown_and_drop_never_restores_authority() {
+        let mut tx = tx_session();
+        let mut rekey = initiator();
+        rekey.prepare_interval(&mut tx, &REKEY_ROOT).unwrap();
+
+        let prepared_send = rekey.begin_send().unwrap();
+        assert_eq!(prepared_send.key_epoch(), 1);
+
+        // While `prepared_send` exists it holds the only mutable borrow of the
+        // originating initiator, so Rust itself prevents any competing state
+        // inspection or mutation during transport delivery. Dropping the token
+        // releases that borrow but deliberately leaves the initiator in the
+        // fail-closed DeliveryUnknown phase.
+        drop(prepared_send);
+        assert!(matches!(rekey.phase, Phase::DeliveryUnknown));
+        assert!(!rekey.application_allowed());
+        assert_eq!(
+            rekey.prepare_interval(&mut tx, &REKEY_ROOT),
+            Err(RekeyInitiatorError::TransitionAlreadyActive)
+        );
+    }
+
+    #[test]
+    fn post_send_commit_surface_is_infallible_by_construction() {
+        let mut tx = tx_session();
+        let mut rx = rx_session();
+        let mut rekey = initiator();
+        rekey.prepare_interval(&mut tx, &REKEY_ROOT).unwrap();
+        let prepared_send = rekey.begin_send().unwrap();
+
+        // The explicit annotation makes a future Result-returning commit API a
+        // compile failure in this regression rather than a runtime convention.
+        let committed_epoch: u64 =
+            prepared_send.commit(&mut tx, &mut rx, Instant::now() + Duration::from_secs(1));
+        assert_eq!(committed_epoch, 1);
+        assert!(rekey.is_pending_ack());
     }
 
     #[test]
