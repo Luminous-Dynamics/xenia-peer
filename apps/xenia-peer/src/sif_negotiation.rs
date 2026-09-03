@@ -10,10 +10,10 @@
 //! [`PendingSifProtectedFileChannel`] to [`NegotiatedSifProtectedFileChannel`] exposes
 //! Offer/Response/Chunk/Complete APIs.
 //!
-//! Capability traffic and protected evidence traffic use separate directional nonce
-//! domains. The pending capability carrier is dropped on successful negotiation; the
-//! protected transfer carrier (`0x33`/`0x34`) retains an independent sequence/replay
-//! lifecycle. A negotiation failure has no automatic path to legacy file transfer.
+//! Capability traffic, protected evidence traffic, and receiver custody evidence use
+//! separate directional nonce domains. The negotiated fingerprint binds all three
+//! contracts, so a peer cannot negotiate protected release while silently omitting the
+//! required receiver-signed custody closure.
 
 use thiserror::Error;
 use xenia_handshake::{RekeyEpochKeys, SessionKeySchedule};
@@ -27,16 +27,19 @@ use xenia_ledger::{
     SifProtectedFileOffer, SifProtectedFileOfferResponse,
 };
 use xenia_peer_core::{
-    MAX_SIF_CAPABILITY_SEMANTIC_BYTES, MAX_SIF_PROTECTED_FILE_CHUNK_WIRE_BYTES,
-    MAX_SIF_PROTECTED_FILE_COMPLETE_BYTES, MAX_SIF_PROTECTED_FILE_OFFER_BYTES,
-    MAX_SIF_PROTECTED_FILE_RESPONSE_BYTES, PAYLOAD_TYPE_SIF_CAPABILITY_FROM_HOST,
-    PAYLOAD_TYPE_SIF_CAPABILITY_FROM_VIEWER, PAYLOAD_TYPE_SIF_PROTECTED_FILE_FROM_HOST,
-    PAYLOAD_TYPE_SIF_PROTECTED_FILE_FROM_VIEWER, SIF_CAPABILITY_WIRE_SCHEMA_VERSION,
+    MAX_SIF_CAPABILITY_SEMANTIC_BYTES, MAX_SIF_CUSTODY_SEMANTIC_BYTES,
+    MAX_SIF_PROTECTED_FILE_CHUNK_WIRE_BYTES, MAX_SIF_PROTECTED_FILE_COMPLETE_BYTES,
+    MAX_SIF_PROTECTED_FILE_OFFER_BYTES, MAX_SIF_PROTECTED_FILE_RESPONSE_BYTES,
+    PAYLOAD_TYPE_SIF_CAPABILITY_FROM_HOST, PAYLOAD_TYPE_SIF_CAPABILITY_FROM_VIEWER,
+    PAYLOAD_TYPE_SIF_CUSTODY_FROM_HOST, PAYLOAD_TYPE_SIF_CUSTODY_FROM_VIEWER,
+    PAYLOAD_TYPE_SIF_PROTECTED_FILE_FROM_HOST, PAYLOAD_TYPE_SIF_PROTECTED_FILE_FROM_VIEWER,
+    SIF_CAPABILITY_WIRE_SCHEMA_VERSION, SIF_CUSTODY_WIRE_SCHEMA_VERSION,
     SIF_PROTECTED_FILE_WIRE_SCHEMA_VERSION, SifCapabilityWireError,
     SifProtectedFileCapabilityWireChannel, SifProtectedFileCapabilityWirePayload,
     SifProtectedFileWireRole,
 };
 
+use crate::sif_custody_wire::SIF_CUSTODY_CODEC_VERSION;
 use crate::sif_semantic_wire::{
     SIF_SEMANTIC_WIRE_CODEC_VERSION, SifProtectedFileSemanticChannel, SifSemanticWireError,
 };
@@ -46,7 +49,8 @@ pub const SIF_CAPABILITY_CODEC_VERSION: u8 = 1;
 /// Exact byte length of the v1 capability message: version + profile digest.
 pub const SIF_CAPABILITY_MESSAGE_BYTES: usize = 1 + 32;
 
-const SIF_CAPABILITY_PROFILE_DOMAIN: &[u8] = b"xenia:sif-protected-file:capability-profile:v1";
+// v2 adds mandatory receiver-signed custody closure to the exact negotiated profile.
+const SIF_CAPABILITY_PROFILE_DOMAIN: &[u8] = b"xenia:sif-protected-file:capability-profile:v2";
 
 /// Return the exact compiled protected-file profile fingerprint negotiated by this build.
 ///
@@ -68,11 +72,15 @@ pub fn current_sif_protected_file_profile_digest() -> [u8; 32] {
     push_u8(&mut hasher, SIF_SEMANTIC_WIRE_CODEC_VERSION);
     push_u16(&mut hasher, SIF_PROTECTED_FILE_WIRE_SCHEMA_VERSION);
     push_u16(&mut hasher, SIF_CAPABILITY_WIRE_SCHEMA_VERSION);
+    push_u16(&mut hasher, SIF_CUSTODY_WIRE_SCHEMA_VERSION);
     push_u8(&mut hasher, SIF_CAPABILITY_CODEC_VERSION);
+    push_u8(&mut hasher, SIF_CUSTODY_CODEC_VERSION);
     push_u8(&mut hasher, PAYLOAD_TYPE_SIF_PROTECTED_FILE_FROM_HOST);
     push_u8(&mut hasher, PAYLOAD_TYPE_SIF_PROTECTED_FILE_FROM_VIEWER);
     push_u8(&mut hasher, PAYLOAD_TYPE_SIF_CAPABILITY_FROM_HOST);
     push_u8(&mut hasher, PAYLOAD_TYPE_SIF_CAPABILITY_FROM_VIEWER);
+    push_u8(&mut hasher, PAYLOAD_TYPE_SIF_CUSTODY_FROM_HOST);
+    push_u8(&mut hasher, PAYLOAD_TYPE_SIF_CUSTODY_FROM_VIEWER);
     push_usize(&mut hasher, MAX_SIF_PROTECTED_FILE_NAME_BYTES);
     push_usize(&mut hasher, MAX_SIF_PROTECTED_FILE_REJECT_REASON_BYTES);
     push_usize(&mut hasher, MAX_SIF_PROTECTED_FILE_CHUNK_BYTES);
@@ -81,6 +89,7 @@ pub fn current_sif_protected_file_profile_digest() -> [u8; 32] {
     push_usize(&mut hasher, MAX_SIF_PROTECTED_FILE_CHUNK_WIRE_BYTES);
     push_usize(&mut hasher, MAX_SIF_PROTECTED_FILE_COMPLETE_BYTES);
     push_usize(&mut hasher, MAX_SIF_CAPABILITY_SEMANTIC_BYTES);
+    push_usize(&mut hasher, MAX_SIF_CUSTODY_SEMANTIC_BYTES);
     *hasher.finalize().as_bytes()
 }
 
@@ -225,8 +234,9 @@ impl PendingSifProtectedFileChannel {
 
 /// Capability-authenticated SIF protected-transfer channel.
 ///
-/// This is the public state that exposes protected semantic traffic. Construction is
-/// private and only reachable through an exact authenticated capability match.
+/// Construction is private to higher application typestates; successful negotiation
+/// commits the complete release+custody profile even though the custody carrier owns a
+/// separate replay/nonce domain.
 pub struct NegotiatedSifProtectedFileChannel {
     semantic: SifProtectedFileSemanticChannel,
     profile_digest: [u8; 32],
@@ -244,9 +254,6 @@ impl NegotiatedSifProtectedFileChannel {
     }
 
     /// Install the control key for a negotiated rekey epoch.
-    ///
-    /// Capability negotiation is not repeated automatically: the semantic profile is a
-    /// compile/session contract, while cryptographic key epochs rotate underneath it.
     pub fn install_rekey_keys(&mut self, keys: &RekeyEpochKeys) {
         self.semantic.install_rekey_keys(keys);
     }
