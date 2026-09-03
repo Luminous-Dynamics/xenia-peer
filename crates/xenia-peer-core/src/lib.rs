@@ -91,10 +91,13 @@ pub use receive_reservation::{
 };
 pub use session::{FrameLane, LaneSession, Session, SessionError, SessionRole};
 pub use sif_wire::{
-    MAX_SIF_PROTECTED_FILE_ENVELOPE_BYTES, MAX_SIF_PROTECTED_FILE_SEMANTIC_BYTES,
+    MAX_SIF_PROTECTED_FILE_CHUNK_WIRE_BYTES, MAX_SIF_PROTECTED_FILE_COMPLETE_BYTES,
+    MAX_SIF_PROTECTED_FILE_ENVELOPE_BYTES, MAX_SIF_PROTECTED_FILE_OFFER_BYTES,
+    MAX_SIF_PROTECTED_FILE_RESPONSE_BYTES, MAX_SIF_PROTECTED_FILE_SEMANTIC_BYTES,
     PAYLOAD_TYPE_SIF_PROTECTED_FILE_FROM_HOST, PAYLOAD_TYPE_SIF_PROTECTED_FILE_FROM_VIEWER,
     SIF_PROTECTED_FILE_WIRE_SCHEMA_VERSION, SifProtectedFileWireChannel,
-    SifProtectedFileWireError, SifProtectedFileWirePayload, SifProtectedFileWireRole,
+    SifProtectedFileWireError, SifProtectedFileWireKind, SifProtectedFileWirePayload,
+    SifProtectedFileWireRole,
 };
 pub use transfer_source::{TransferChunk, TransferSource, TransferSourceError};
 pub use xenia_handshake::{
