@@ -13,6 +13,12 @@
 //! authenticated session-transcript binding without requiring a plaintext filename
 //! or local destination path in portable audit evidence.
 //!
+//! Receipt construction derives the canonical SIF file-result commitment directly
+//! from the authenticated Offer's display name, byte length, and whole-file BLAKE3.
+//! The display name is then discarded from the portable receipt. Callers therefore
+//! cannot pair an arbitrary result commitment with unrelated file metadata through
+//! the normal construction API, while exported audit evidence remains minimized.
+//!
 //! The receipt does not self-authorize its signer. Verifiers must supply the trusted
 //! receiver public key and an explicit [`SifDeliveryReceiptExpectation`]. The signed
 //! binding contains a domain-separated receiver key ID so a receipt cannot substitute
@@ -25,6 +31,7 @@ use uuid::Uuid;
 
 use crate::binding::SessionTranscriptBinding;
 use crate::entry::TranscriptBindingError;
+use crate::file_disclosure::{FileDisclosureError, sif_file_result_digest};
 use crate::policy::EvidenceCryptoManifest;
 use crate::signature::{
     EvidenceSignatureBackend, EvidenceSignatureBackendError, SignatureEnvelope,
@@ -87,6 +94,11 @@ impl SifDeliveryReceiptBinding {
     /// Build a receiver delivery statement from exact protected-offer and local
     /// receiver observations.
     ///
+    /// `offer_display_name`, `expected_size`, and `expected_content_blake3` are the
+    /// authenticated Offer metadata. Their canonical SIF result commitment is derived
+    /// internally and retained, while the plaintext display name is deliberately not
+    /// stored in the portable receipt.
+    ///
     /// `receiver_public_key` is used only to derive the domain-separated receiver key
     /// ID committed by the statement; it is not embedded in the portable receipt.
     #[allow(clippy::too_many_arguments)]
@@ -95,7 +107,7 @@ impl SifDeliveryReceiptBinding {
         transfer_id: u64,
         session: SessionTranscriptBinding,
         sender_release_entry_hash: [u8; 32],
-        result_digest: [u8; 32],
+        offer_display_name: &str,
         expected_size: u64,
         expected_content_blake3: [u8; 32],
         receiver_signature_suite: SignatureSuite,
@@ -114,6 +126,11 @@ impl SifDeliveryReceiptBinding {
                 found: receiver_public_key.len(),
             });
         }
+        let result_digest = sif_file_result_digest(
+            offer_display_name,
+            expected_size,
+            expected_content_blake3,
+        )?;
         let binding = Self {
             schema: SIF_DELIVERY_RECEIPT_SCHEMA.to_string(),
             commitment_algorithm: SIF_DELIVERY_RECEIPT_COMMITMENT_ALGORITHM.to_string(),
@@ -158,7 +175,7 @@ impl SifDeliveryReceiptBinding {
         self.sender_release_entry_hash
     }
 
-    /// Exact SIF minimum-necessary file result commitment.
+    /// Exact SIF minimum-necessary file result commitment derived from Offer metadata.
     pub const fn result_digest(&self) -> [u8; 32] {
         self.result_digest
     }
@@ -334,8 +351,7 @@ impl SifDeliveryReceipt {
                 found: trusted_receiver_public_key.len(),
             });
         }
-        let receiver_key_id =
-            sif_delivery_receiver_key_id(suite, trusted_receiver_public_key);
+        let receiver_key_id = sif_delivery_receiver_key_id(suite, trusted_receiver_public_key);
         if receiver_key_id != self.binding.receiver_key_id
             || receiver_key_id != expectation.receiver_key_id
         {
@@ -401,10 +417,7 @@ impl SifDeliveryReceiptExpectation {
 }
 
 /// Domain-separated identifier for an externally trusted receiver verification key.
-pub fn sif_delivery_receiver_key_id(
-    suite: SignatureSuite,
-    public_key: &[u8],
-) -> [u8; 32] {
+pub fn sif_delivery_receiver_key_id(suite: SignatureSuite, public_key: &[u8]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(DELIVERY_RECEIVER_KEY_DOMAIN);
     hasher.update(&[0]);
@@ -567,6 +580,9 @@ pub enum SifDeliveryReceiptError {
     /// Nested authenticated transcript binding failed validation.
     #[error(transparent)]
     TranscriptBinding(#[from] TranscriptBindingError),
+    /// Canonical SIF file-result derivation rejected the authenticated Offer metadata.
+    #[error(transparent)]
+    FileBinding(#[from] FileDisclosureError),
     /// Signature envelope shape or suite label was invalid.
     #[error(transparent)]
     SignatureEnvelope(#[from] SignatureEnvelopeError),
@@ -657,6 +673,8 @@ mod tests {
     use super::*;
     use crate::{CURRENT_EVIDENCE_CRYPTO_MANIFEST, Ed25519EvidenceSignatureBackend};
 
+    const OFFER_NAME: &str = "report.bin";
+
     fn fixture(
         disposition: SifDeliveryDisposition,
         received_bytes: u64,
@@ -674,7 +692,7 @@ mod tests {
             7,
             session,
             [0x22; 32],
-            [0x33; 32],
+            OFFER_NAME,
             5,
             [0x55; 32],
             SignatureSuite::Ed25519Rfc8032,
@@ -699,6 +717,75 @@ mod tests {
             receiver_key_id: binding.receiver_key_id(),
         };
         (signing_key, binding, expectation)
+    }
+
+    #[test]
+    fn constructor_derives_result_commitment_from_offer_metadata() {
+        let (_, binding, _) = fixture(
+            SifDeliveryDisposition::PersistedVerified,
+            5,
+            Some([0x55; 32]),
+        );
+        assert_eq!(
+            binding.result_digest(),
+            sif_file_result_digest(OFFER_NAME, 5, [0x55; 32]).unwrap()
+        );
+
+        let signing_key = SigningKey::from_bytes(&[0x44; 32]);
+        let session = SessionTranscriptBinding::from_hash(
+            Uuid::from_u128(10),
+            [0x11; 32],
+            CURRENT_EVIDENCE_CRYPTO_MANIFEST.transcript_signature,
+        );
+        let renamed = SifDeliveryReceiptBinding::new(
+            Uuid::from_u128(20),
+            7,
+            session,
+            [0x22; 32],
+            "renamed.bin",
+            5,
+            [0x55; 32],
+            SignatureSuite::Ed25519Rfc8032,
+            &signing_key.verifying_key().to_bytes(),
+            SifDeliveryDisposition::PersistedVerified,
+            5,
+            Some([0x55; 32]),
+            1_780_000_000_000,
+            CURRENT_EVIDENCE_CRYPTO_MANIFEST,
+        )
+        .unwrap();
+        assert_ne!(binding.result_digest(), renamed.result_digest());
+    }
+
+    #[test]
+    fn empty_offer_name_is_refused_before_receipt_construction() {
+        let signing_key = SigningKey::from_bytes(&[0x44; 32]);
+        let session = SessionTranscriptBinding::from_hash(
+            Uuid::from_u128(10),
+            [0x11; 32],
+            CURRENT_EVIDENCE_CRYPTO_MANIFEST.transcript_signature,
+        );
+        assert!(matches!(
+            SifDeliveryReceiptBinding::new(
+                Uuid::from_u128(20),
+                7,
+                session,
+                [0x22; 32],
+                "",
+                5,
+                [0x55; 32],
+                SignatureSuite::Ed25519Rfc8032,
+                &signing_key.verifying_key().to_bytes(),
+                SifDeliveryDisposition::PersistedVerified,
+                5,
+                Some([0x55; 32]),
+                1_780_000_000_000,
+                CURRENT_EVIDENCE_CRYPTO_MANIFEST,
+            ),
+            Err(SifDeliveryReceiptError::FileBinding(
+                FileDisclosureError::EmptyDisplayName
+            ))
+        ));
     }
 
     #[test]
@@ -793,7 +880,7 @@ mod tests {
                 9,
                 session.clone(),
                 [0x88; 32],
-                [0x99; 32],
+                "evidence.bin",
                 10,
                 [0xAA; 32],
                 SignatureSuite::Ed25519Rfc8032,
