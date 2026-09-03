@@ -5,8 +5,17 @@
 //!
 //! A generic committed release permit becomes authority for one exact outbound file
 //! only when its minimum-necessary result commitment matches the canonical filename,
-//! byte length and BLAKE3 content digest. The resulting tracker is move-only and
-//! records only bytes whose transport send was reported successful by the caller.
+//! byte length and BLAKE3 content digest. The resulting tracker is move-only.
+//!
+//! Successful transport sends are accounted exactly. A carrier error is different:
+//! ordinary stream/message transports do not promise an all-or-nothing network write,
+//! so some prefix of the current sealed Chunk may already have left even when the send
+//! future returns an error. [`CommittedFileDisclosure::note_transport_uncertain`] lets
+//! the caller conservatively charge the full attempted file-content chunk. The numeric
+//! `Partial.bytes_released` persisted by the existing release-journal schema is then an
+//! upper bound rather than an understated exact count; [`FileDisclosureTerminal`] tells
+//! local audit code which interpretation applies. A future journal schema can encode an
+//! explicit min/max range without requiring this adapter to undercount today.
 
 use thiserror::Error;
 use uuid::Uuid;
@@ -45,16 +54,30 @@ pub fn sif_file_result_digest(
     Ok(*hasher.finalize().as_bytes())
 }
 
+/// How to interpret a terminal file byte count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileDisclosureByteAccounting {
+    /// Every accounted byte was added only after a successful carrier send.
+    Exact,
+    /// At least one failed carrier send may have emitted an unknown prefix of the
+    /// attempted Chunk. The persisted byte count conservatively includes that whole
+    /// Chunk and is therefore an upper bound on file-content bytes that may have left.
+    ConservativeUpperBound,
+}
+
 /// Move-only tracker for one already-committed file disclosure.
 ///
 /// Construction consumes [`CommittedDisclosurePermit`], so the generic release token
 /// cannot simultaneously authorize another output adapter. Call [`Self::note_emitted`]
-/// only after the transport reports a chunk send as successful.
+/// only after the transport reports a chunk send as successful. If a Chunk send itself
+/// fails ambiguously, call [`Self::note_transport_uncertain`] before consuming the
+/// tracker with [`Self::interrupted`].
 #[derive(Debug)]
 pub struct CommittedFileDisclosure {
     permit: CommittedDisclosurePermit,
     expected_size: u64,
-    emitted_bytes: u64,
+    accounted_bytes: u64,
+    byte_accounting: FileDisclosureByteAccounting,
 }
 
 impl CommittedFileDisclosure {
@@ -76,7 +99,8 @@ impl CommittedFileDisclosure {
         Ok(Self {
             permit,
             expected_size: size,
-            emitted_bytes: 0,
+            accounted_bytes: 0,
+            byte_accounting: FileDisclosureByteAccounting::Exact,
         })
     }
 
@@ -90,58 +114,92 @@ impl CommittedFileDisclosure {
         self.expected_size
     }
 
-    /// Protected file bytes successfully emitted so far.
+    /// File-content bytes currently charged to this release.
+    ///
+    /// When [`Self::byte_accounting`] is `Exact`, every byte was transport-confirmed.
+    /// After an ambiguous carrier failure this is a conservative upper bound.
     pub const fn emitted_bytes(&self) -> u64 {
-        self.emitted_bytes
+        self.accounted_bytes
     }
 
-    /// Record bytes only after the transport send succeeds.
+    /// Current interpretation of [`Self::emitted_bytes`].
+    pub const fn byte_accounting(&self) -> FileDisclosureByteAccounting {
+        self.byte_accounting
+    }
+
+    /// Record file-content bytes only after the transport send succeeds.
     pub fn note_emitted(&mut self, bytes: usize) -> Result<(), FileDisclosureError> {
+        self.add_accounted_bytes(bytes)
+    }
+
+    /// Conservatively account one Chunk whose carrier send returned an error.
+    ///
+    /// Xenia cannot in general know whether the carrier wrote none, some, or all of
+    /// that sealed envelope before failing. Charging the full attempted content chunk
+    /// prevents the durable Partial outcome from understating possible disclosure.
+    /// The session must still be treated as fatal after such a carrier error; this
+    /// method is accounting, not permission to continue sending.
+    pub fn note_transport_uncertain(&mut self, bytes: usize) -> Result<(), FileDisclosureError> {
+        if bytes == 0 {
+            return Err(FileDisclosureError::ZeroUncertainChunk);
+        }
+        self.add_accounted_bytes(bytes)?;
+        self.byte_accounting = FileDisclosureByteAccounting::ConservativeUpperBound;
+        Ok(())
+    }
+
+    fn add_accounted_bytes(&mut self, bytes: usize) -> Result<(), FileDisclosureError> {
         let bytes = u64::try_from(bytes).map_err(|_| FileDisclosureError::ByteCountOverflow)?;
-        let emitted = self
-            .emitted_bytes
+        let accounted = self
+            .accounted_bytes
             .checked_add(bytes)
             .ok_or(FileDisclosureError::ByteCountOverflow)?;
-        if emitted > self.expected_size {
+        if accounted > self.expected_size {
             return Err(FileDisclosureError::EmittedBeyondDeclaredSize {
                 declared: self.expected_size,
-                emitted,
+                emitted: accounted,
             });
         }
-        self.emitted_bytes = emitted;
+        self.accounted_bytes = accounted;
         Ok(())
     }
 
     /// Consume the tracker after the source independently verified its final length
-    /// and content hash and all protected bytes were successfully sent.
+    /// and content hash and all protected file-content bytes were successfully sent.
     pub fn completed(self) -> Result<FileDisclosureTerminal, FileDisclosureError> {
-        if self.emitted_bytes != self.expected_size {
+        if self.byte_accounting != FileDisclosureByteAccounting::Exact {
+            return Err(FileDisclosureError::CompletionAfterTransportUncertainty);
+        }
+        if self.accounted_bytes != self.expected_size {
             return Err(FileDisclosureError::IncompleteCompletion {
                 expected: self.expected_size,
-                emitted: self.emitted_bytes,
+                emitted: self.accounted_bytes,
             });
         }
         Ok(FileDisclosureTerminal {
             release_id: self.permit.release_id(),
             outcome: DisclosureReleaseOutcome::Completed,
+            byte_accounting: FileDisclosureByteAccounting::Exact,
         })
     }
 
     /// Consume the tracker when output stops before a verified complete send.
     ///
-    /// Zero emitted bytes maps to `Aborted`; otherwise the exact successful byte
-    /// count maps to `Partial`.
+    /// Zero accounted file-content bytes maps to `Aborted`; otherwise the current
+    /// count maps to `Partial`. Consult `byte_accounting` to distinguish an exact
+    /// successful-prefix count from a conservative upper bound after carrier error.
     pub fn interrupted(self) -> FileDisclosureTerminal {
-        let outcome = if self.emitted_bytes == 0 {
+        let outcome = if self.accounted_bytes == 0 {
             DisclosureReleaseOutcome::Aborted
         } else {
             DisclosureReleaseOutcome::Partial {
-                bytes_released: self.emitted_bytes,
+                bytes_released: self.accounted_bytes,
             }
         };
         FileDisclosureTerminal {
             release_id: self.permit.release_id(),
             outcome,
+            byte_accounting: self.byte_accounting,
         }
     }
 }
@@ -151,8 +209,10 @@ impl CommittedFileDisclosure {
 pub struct FileDisclosureTerminal {
     /// Release whose terminal outcome must be durably recorded.
     pub release_id: Uuid,
-    /// Exact Completed/Aborted/Partial outcome.
+    /// Completed/Aborted/Partial release-journal outcome.
     pub outcome: DisclosureReleaseOutcome,
+    /// Whether a Partial byte count is exact or a conservative upper bound.
+    pub byte_accounting: FileDisclosureByteAccounting,
 }
 
 /// File-specific disclosure binding failures.
@@ -170,17 +230,23 @@ pub enum FileDisclosureError {
     /// Permit result commitment is for different file metadata/content.
     #[error("SIF file disclosure result commitment does not match the outbound file")]
     ResultCommitmentMismatch,
-    /// Successful byte accounting overflowed.
+    /// Byte accounting overflowed.
     #[error("SIF file disclosure byte counter overflow")]
     ByteCountOverflow,
+    /// An ambiguous carrier send must correspond to a non-empty file-content Chunk.
+    #[error("SIF file disclosure uncertain transport chunk must be non-empty")]
+    ZeroUncertainChunk,
     /// Caller attempted to account more bytes than the committed file length.
-    #[error("SIF file disclosure emitted {emitted} bytes beyond declared size {declared}")]
+    #[error("SIF file disclosure accounted {emitted} bytes beyond declared size {declared}")]
     EmittedBeyondDeclaredSize {
         /// Declared file size.
         declared: u64,
-        /// Attempted successful emitted byte count.
+        /// Attempted release-accounted byte count.
         emitted: u64,
     },
+    /// Completion cannot be claimed after an ambiguous carrier write.
+    #[error("SIF file disclosure cannot claim completion after transport uncertainty")]
+    CompletionAfterTransportUncertainty,
     /// Caller attempted to mark completion before all committed bytes were emitted.
     #[error("SIF file disclosure completion is incomplete: expected {expected}, emitted {emitted}")]
     IncompleteCompletion {
@@ -217,6 +283,25 @@ mod tests {
         assert_eq!(
             sif_file_result_digest("", 0, [1u8; 32]),
             Err(FileDisclosureError::EmptyDisplayName)
+        );
+    }
+
+    #[test]
+    fn uncertain_chunk_validation_is_fail_closed() {
+        // The move-only tracker itself requires a real committed permit, which is
+        // exercised by disclosure integration tests. Freeze the new local accounting
+        // invariants here through their public error/enum semantics.
+        assert_ne!(
+            FileDisclosureByteAccounting::Exact,
+            FileDisclosureByteAccounting::ConservativeUpperBound
+        );
+        assert_eq!(
+            FileDisclosureError::ZeroUncertainChunk.to_string(),
+            "SIF file disclosure uncertain transport chunk must be non-empty"
+        );
+        assert_eq!(
+            FileDisclosureError::CompletionAfterTransportUncertainty.to_string(),
+            "SIF file disclosure cannot claim completion after transport uncertainty"
         );
     }
 }
