@@ -55,7 +55,10 @@
     "rollback_after_possible_escape": false,
     "application_authority_while_unconfirmed": false,
     "ack_must_be_first_new_key_console_envelope": true,
-    "ack_absolute_timeout_seconds": 10
+    "ack_absolute_timeout_seconds": 10,
+    "delivery_unknown_before_send": true,
+    "linear_prepared_send_token": true,
+    "post_send_commit_recoverable_error": false
   },
   "required_wire_lineage": {
     "same_key_install_nonce_fix_pr": 37,

@@ -26,12 +26,14 @@ from typing import Iterable
 class Phase(str, Enum):
     STABLE = "stable"
     PREPARED = "prepared"
+    DELIVERY_UNKNOWN = "delivery_unknown"
     PENDING_ACK = "pending_ack"
     DEAD = "dead"
 
 
 class Event(str, Enum):
     PREPARE = "prepare"
+    BEGIN_SEND = "begin_send"
     SEND_OK = "send_ok"
     SEND_FAIL_BEFORE_WRITE = "send_fail_before_write"
     SEND_FAIL_AFTER_ESCAPE = "send_fail_after_escape"
@@ -73,6 +75,9 @@ def enabled_events(state: State) -> Iterable[Event]:
         yield Event.APPLICATION_TRAFFIC
         yield Event.PEER_CLOSE
     elif state.phase is Phase.PREPARED:
+        yield Event.BEGIN_SEND
+        yield Event.PEER_CLOSE
+    elif state.phase is Phase.DELIVERY_UNKNOWN:
         yield Event.SEND_OK
         yield Event.SEND_FAIL_BEFORE_WRITE
         yield Event.SEND_FAIL_AFTER_ESCAPE
@@ -96,6 +101,15 @@ def transition(state: State, event: Event) -> State:
         return State(
             generation=state.generation,
             phase=Phase.PREPARED,
+            local_key_epoch=state.local_key_epoch,
+            confirmed_key_epoch=state.confirmed_key_epoch,
+            proposal_may_have_escaped=False,
+        )
+
+    if event is Event.BEGIN_SEND:
+        return State(
+            generation=state.generation,
+            phase=Phase.DELIVERY_UNKNOWN,
             local_key_epoch=state.local_key_epoch,
             confirmed_key_epoch=state.confirmed_key_epoch,
             proposal_may_have_escaped=False,
@@ -197,12 +211,22 @@ def assert_state_invariants(state: State) -> None:
         assert state.local_key_epoch == state.confirmed_key_epoch + 1
         assert not state.application_authority
 
-    if state.phase in (Phase.PREPARED, Phase.DEAD):
+    if state.phase in (Phase.PREPARED, Phase.DELIVERY_UNKNOWN, Phase.DEAD):
         assert not state.application_authority
 
 
 def assert_transition_invariants(step: Step) -> None:
     before, event, after = step.before, step.event, step.after
+
+    # ORI-014: transport delivery cannot begin until the model has left Prepared
+    # for the non-authoritative DeliveryUnknown phase. There is no rollback edge
+    # from DeliveryUnknown to Stable in the same connection generation.
+    if event is Event.BEGIN_SEND:
+        assert before.phase is Phase.PREPARED
+        assert after.phase is Phase.DELIVERY_UNKNOWN
+        assert not after.application_authority
+    if event in (Event.SEND_OK, Event.SEND_FAIL_BEFORE_WRITE, Event.SEND_FAIL_AFTER_ESCAPE):
+        assert before.phase is Phase.DELIVERY_UNKNOWN
 
     # ORI-002/004: the local traffic-key epoch advances only after a locally
     # successful Proposal send.  Neither kind of reported send failure commits.
