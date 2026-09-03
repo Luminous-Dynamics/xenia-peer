@@ -66,12 +66,12 @@
 //! Transport integration must carry these objects under a dedicated authenticated
 //! payload type rather than treating legacy transfer messages as SIF.
 //!
-//! Receiver-side custody is a separate claim. [`SifDeliveryReceipt`] lets an
-//! independently trusted receiver sign the exact release ID, sender Commit hash,
-//! file-result commitment, expected/observed content hash, authenticated session
-//! transcript, and persistence disposition. Verifiers must supply both the trusted
-//! receiver key and a sender-derived [`SifDeliveryReceiptExpectation`]; the receipt is
-//! never allowed to self-authorize its signer.
+//! Receiver-side custody is a separate claim. [`SifDeliveryReceipt`] is the historical
+//! v1 statement binding release/session/file custody. [`SifDeliveryReceiptV2`] retains
+//! that exact validated statement and additionally signs the authenticated SIF profile
+//! digest, allowing independent archives to prove which negotiated security contract
+//! governed the movement. Verifiers must still supply the trusted receiver key and an
+//! explicit sender-owned expectation; neither receipt version self-authorizes its signer.
 //!
 //! A downstream auditor — including a non-operator third party —
 //! can use [`Verifier::verify_chain`] to reconstruct every hash link
@@ -80,7 +80,6 @@
 //! they also re-sign every affected entry, which requires the
 //! private key and is by construction visible to anyone holding the
 //! public key.
-//!
 //! This is the "admin cannot rewrite the audit log" claim made in the
 //! Mycelix Sovereign threat model, enforced cryptographically.
 
@@ -96,6 +95,7 @@ mod chain;
 mod checkpoint;
 mod compaction;
 mod delivery_receipt;
+mod delivery_receipt_v2;
 mod disclosure_v2;
 mod entry;
 mod errors;
@@ -168,6 +168,12 @@ pub use delivery_receipt::{
     SifDeliveryReceiptError, SifDeliveryReceiptExpectation, sif_delivery_receipt_digest,
     sif_delivery_receipt_message, sif_delivery_receiver_key_id,
     sign_sif_delivery_receipt_ed25519,
+};
+pub use delivery_receipt_v2::{
+    SIF_DELIVERY_RECEIPT_V2_COMMITMENT_ALGORITHM, SIF_DELIVERY_RECEIPT_V2_SCHEMA,
+    SifDeliveryReceiptBindingV2, SifDeliveryReceiptExpectationV2, SifDeliveryReceiptV2,
+    SifDeliveryReceiptV2Error, sif_delivery_receipt_v2_digest,
+    sif_delivery_receipt_v2_message, sign_sif_delivery_receipt_v2_ed25519,
 };
 
 pub use disclosure_v2::{
