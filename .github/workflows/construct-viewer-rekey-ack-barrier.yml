@@ -1,0 +1,218 @@
+name: Construct Viewer Rekey Ack Barrier
+
+on:
+  push:
+    branches:
+      - operator-rekey-receiver-ack-barrier-constructor-v1
+
+concurrency:
+  group: construct-viewer-rekey-ack-barrier-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  construct:
+    name: Read-only construct and qualify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      BASE_SHA: 5c3c1a6559f6426a23f2cd212f8b8bd8ceb4c567
+      EXPECTED_VIEWER_BLOB: 84f959252eaa40f9438ed485ebea494db519d8d7
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+      RUSTFLAGS: -D warnings
+    outputs:
+      candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
+      candidate_tree: ${{ steps.candidate.outputs.candidate_tree }}
+    steps:
+      - name: Checkout exact constructor head without persisted credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Assert immutable qualified base and bounded constructor input
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git merge-base --is-ancestor "$BASE_SHA" HEAD
+          test "$(git rev-parse "$BASE_SHA:apps/xenia-viewer/src/main.rs")" = "$EXPECTED_VIEWER_BLOB"
+          test "$(git rev-parse HEAD:apps/xenia-viewer/src/main.rs)" = "$EXPECTED_VIEWER_BLOB"
+          test -z "$(git status --porcelain)"
+
+      - name: Construct bounded runtime candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/construct_viewer_rekey_ack_barrier.py
+          test "$(git diff --name-only)" = "apps/xenia-viewer/src/main.rs"
+          test "$(git diff --numstat | wc -l)" -eq 1
+          grep -q 'ViewerOutboundPhase::AckDeliveryPending' apps/xenia-viewer/src/main.rs
+          grep -q 'outbound_tx.send_half.send_envelope(&ack_envelope).await' apps/xenia-viewer/src/main.rs
+          ! grep -q 'let send_half = Arc::new(tokio::sync::Mutex::new(send_half));' apps/xenia-viewer/src/main.rs
+          ! grep -q 'send_half.lock().await.send_envelope(&envelope).await' apps/xenia-viewer/src/main.rs
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@33c9ab3ef95cd57c164d9d6eb1f9a46338538d41
+        with:
+          determinate: true
+          flakehub: false
+
+      - name: Normalize and verify candidate formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          nix develop .#ci --command cargo fmt --all
+          test "$(git diff --name-only)" = "apps/xenia-viewer/src/main.rs"
+          nix develop .#ci --command cargo fmt --all -- --check
+
+      - name: Check viewer boundary
+        shell: bash
+        run: nix develop .#ci --command cargo check --locked -p xenia-viewer --all-targets
+
+      - name: Clippy viewer boundary
+        shell: bash
+        run: nix develop .#ci --command cargo clippy --locked -p xenia-viewer --all-targets -- -D warnings
+
+      - name: Run outbound authority regressions
+        shell: bash
+        run: nix develop .#ci --command cargo test --locked -p xenia-viewer viewer_outbound_authority_
+
+      - name: Run viewer package tests
+        shell: bash
+        run: nix develop .#ci --command cargo test --locked -p xenia-viewer
+
+      - name: Build deterministic one-file runtime candidate
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/viewer-ack-barrier"
+          candidate_blob="$(git hash-object -w apps/xenia-viewer/src/main.rs)"
+          export GIT_INDEX_FILE="$RUNNER_TEMP/viewer-ack-barrier/candidate.index"
+          rm -f "$GIT_INDEX_FILE"
+          git read-tree "$BASE_SHA"
+          git update-index --cacheinfo "100644,$candidate_blob,apps/xenia-viewer/src/main.rs"
+          candidate_tree="$(git write-tree)"
+          unset GIT_INDEX_FILE
+
+          export GIT_AUTHOR_NAME='Xenia Security Constructor'
+          export GIT_AUTHOR_EMAIL='security-constructor@invalid.local'
+          export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+          export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+          export GIT_AUTHOR_DATE="$(git show -s --format=%cI "$GITHUB_SHA")"
+          export GIT_COMMITTER_DATE="$GIT_AUTHOR_DATE"
+          candidate_sha="$(printf '%s\n' 'fix(viewer): serialize rekey Ack before application traffic' | git commit-tree "$candidate_tree" -p "$BASE_SHA")"
+          git update-ref refs/heads/viewer-ack-barrier-candidate "$candidate_sha"
+
+          test "$(git rev-parse "$candidate_sha^")" = "$BASE_SHA"
+          test "$(git diff --name-only "$BASE_SHA" "$candidate_sha")" = "apps/xenia-viewer/src/main.rs"
+          test "$(git rev-parse "$candidate_sha^{tree}")" = "$candidate_tree"
+
+          git diff --binary "$BASE_SHA" "$candidate_sha" > "$RUNNER_TEMP/viewer-ack-barrier/CANDIDATE.patch"
+          git bundle create "$RUNNER_TEMP/viewer-ack-barrier/CANDIDATE.bundle" refs/heads/viewer-ack-barrier-candidate ^"$BASE_SHA"
+          sha256sum "$RUNNER_TEMP/viewer-ack-barrier/CANDIDATE.bundle" > "$RUNNER_TEMP/viewer-ack-barrier/CANDIDATE.bundle.sha256"
+          cp Cargo.lock "$RUNNER_TEMP/viewer-ack-barrier/Cargo.lock"
+
+          {
+            echo "schema=xenia.viewer-rekey-ack-barrier-candidate.v1"
+            echo "constructor_head=$GITHUB_SHA"
+            echo "base_sha=$BASE_SHA"
+            echo "base_tree=$(git rev-parse "$BASE_SHA^{tree}")"
+            echo "candidate_sha=$candidate_sha"
+            echo "candidate_tree=$candidate_tree"
+            echo "base_viewer_blob=$EXPECTED_VIEWER_BLOB"
+            echo "candidate_viewer_blob=$candidate_blob"
+            echo "changed_file=apps/xenia-viewer/src/main.rs"
+            echo "cargo_lock_sha256=$(sha256sum Cargo.lock | awk '{print $1}')"
+            echo "constructor_sha256=$(sha256sum scripts/construct_viewer_rekey_ack_barrier.py | awk '{print $1}')"
+            echo "workflow_sha256=$(sha256sum .github/workflows/construct-viewer-rekey-ack-barrier.yml | awk '{print $1}')"
+            echo "claim=qualified-local-outbound-ordering-containment-not-final-wire-arr011"
+          } > "$RUNNER_TEMP/viewer-ack-barrier/PROVENANCE.txt"
+
+          echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
+          echo "candidate_tree=$candidate_tree" >> "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/viewer-ack-barrier/PROVENANCE.txt"
+
+      - name: Prove constructor worktree did not absorb generated runtime changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git diff --name-only)" = "apps/xenia-viewer/src/main.rs"
+          git checkout -- apps/xenia-viewer/src/main.rs
+          test -z "$(git status --porcelain)"
+
+      - name: Retain qualified candidate capsule
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: viewer-rekey-ack-barrier-${{ github.sha }}
+          path: ${{ runner.temp }}/viewer-ack-barrier
+          if-no-files-found: error
+          retention-days: 90
+
+  publish:
+    name: Verify capsule and publish isolated candidate
+    needs: construct
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      BASE_SHA: 5c3c1a6559f6426a23f2cd212f8b8bd8ceb4c567
+      CANDIDATE_REF: refs/heads/operator-rekey-receiver-ack-barrier-v1-candidate
+      EXPECTED_CANDIDATE_SHA: ${{ needs.construct.outputs.candidate_sha }}
+      EXPECTED_CANDIDATE_TREE: ${{ needs.construct.outputs.candidate_tree }}
+    steps:
+      - name: Checkout exact qualified base for publication authority
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.BASE_SHA }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Download qualified candidate capsule
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: viewer-rekey-ack-barrier-${{ github.sha }}
+          path: ${{ runner.temp }}/viewer-ack-barrier
+
+      - name: Verify candidate without compiling or executing it
+        shell: bash
+        run: |
+          set -euo pipefail
+          capsule="$RUNNER_TEMP/viewer-ack-barrier"
+          cd "$capsule"
+          sha256sum -c CANDIDATE.bundle.sha256
+          git -C "$GITHUB_WORKSPACE" bundle verify "$capsule/CANDIDATE.bundle"
+          git -C "$GITHUB_WORKSPACE" fetch "$capsule/CANDIDATE.bundle" refs/heads/viewer-ack-barrier-candidate:refs/remotes/capsule/viewer-ack-barrier-candidate
+          candidate="$(git -C "$GITHUB_WORKSPACE" rev-parse refs/remotes/capsule/viewer-ack-barrier-candidate)"
+          test "$candidate" = "$EXPECTED_CANDIDATE_SHA"
+          test "$(git -C "$GITHUB_WORKSPACE" rev-parse "$candidate^")" = "$BASE_SHA"
+          test "$(git -C "$GITHUB_WORKSPACE" rev-parse "$candidate^{tree}")" = "$EXPECTED_CANDIDATE_TREE"
+          test "$(git -C "$GITHUB_WORKSPACE" diff --name-only "$BASE_SHA" "$candidate")" = "apps/xenia-viewer/src/main.rs"
+
+          source="$(git -C "$GITHUB_WORKSPACE" show "$candidate:apps/xenia-viewer/src/main.rs")"
+          grep -q 'ViewerOutboundPhase::AckDeliveryPending' <<<"$source"
+          grep -q 'outbound_tx.send_half.send_envelope(&ack_envelope).await' <<<"$source"
+          grep -q 'session.install_rekey_keys(&keys);' <<<"$source"
+          ! grep -q 'let send_half = Arc::new(tokio::sync::Mutex::new(send_half));' <<<"$source"
+          ! grep -q 'send_half.lock().await.send_envelope(&envelope).await' <<<"$source"
+          ! git -C "$GITHUB_WORKSPACE" ls-tree -r --name-only "$candidate" | grep -Eq 'construct_viewer_rekey_ack_barrier|construct-viewer-rekey-ack-barrier'
+
+      - name: Publish only the collision-checked isolated candidate ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate="$EXPECTED_CANDIDATE_SHA"
+          existing="$(git ls-remote origin "$CANDIDATE_REF" | awk '{print $1}')"
+          if [ -n "$existing" ] && [ "$existing" != "$candidate" ]; then
+            echo "refusing to overwrite different pre-existing candidate: $existing" >&2
+            exit 1
+          fi
+          if [ "$existing" = "$candidate" ]; then
+            echo "candidate ref already points at exact qualified commit"
+            exit 0
+          fi
+          git push origin "$candidate:$CANDIDATE_REF"
