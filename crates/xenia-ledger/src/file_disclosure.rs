@@ -109,6 +109,15 @@ impl CommittedFileDisclosure {
         self.permit.release_id()
     }
 
+    /// Signed release-journal Commit entry hash that created this output capability.
+    ///
+    /// This immutable commitment lets a protected wire Offer and later receiver
+    /// delivery receipt join back to the exact durable authorization event without
+    /// exposing any broader release-authority capability.
+    pub const fn release_entry_hash(&self) -> [u8; 32] {
+        self.permit.release_entry_hash()
+    }
+
     /// Exact file length bound by the permit.
     pub const fn expected_size(&self) -> u64 {
         self.expected_size
