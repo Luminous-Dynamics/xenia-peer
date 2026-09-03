@@ -20,7 +20,7 @@
 #![warn(missing_docs)]
 #![deny(unsafe_code)]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use thiserror::Error;
 use xenia_ledger::{
@@ -268,6 +268,7 @@ pub enum SifReceiveRuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use uuid::Uuid;
     use xenia_ledger::{
         CURRENT_EVIDENCE_CRYPTO_MANIFEST, SifDeliveryDisposition,
