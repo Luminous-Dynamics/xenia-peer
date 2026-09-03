@@ -58,6 +58,13 @@
 //! artifact exposes [`FileDisclosureByteAccounting`] so audit code never has to pretend
 //! such a Partial count is exact.
 //!
+//! Receiver-side custody is a separate claim. [`SifDeliveryReceipt`] lets an
+//! independently trusted receiver sign the exact release ID, sender Commit hash,
+//! file-result commitment, expected/observed content hash, authenticated session
+//! transcript, and persistence disposition. Verifiers must supply both the trusted
+//! receiver key and a sender-derived [`SifDeliveryReceiptExpectation`]; the receipt is
+//! never allowed to self-authorize its signer.
+//!
 //! A downstream auditor — including a non-operator third party —
 //! can use [`Verifier::verify_chain`] to reconstruct every hash link
 //! and every signature offline, using only the operator's public key.
@@ -80,6 +87,7 @@ mod binding;
 mod chain;
 mod checkpoint;
 mod compaction;
+mod delivery_receipt;
 mod disclosure_v2;
 mod entry;
 mod errors;
@@ -142,6 +150,14 @@ pub use checkpoint::{
 pub use compaction::{
     LEDGER_COMPACTION_MANIFEST_SCHEMA, LedgerCompactionError, LedgerCompactionManifest,
     ledger_compaction_manifest_message,
+};
+
+pub use delivery_receipt::{
+    SIF_DELIVERY_RECEIPT_COMMITMENT_ALGORITHM, SIF_DELIVERY_RECEIPT_SCHEMA,
+    SifDeliveryDisposition, SifDeliveryReceipt, SifDeliveryReceiptBinding,
+    SifDeliveryReceiptError, SifDeliveryReceiptExpectation, sif_delivery_receipt_digest,
+    sif_delivery_receipt_message, sif_delivery_receiver_key_id,
+    sign_sif_delivery_receipt_ed25519,
 };
 
 pub use disclosure_v2::{
