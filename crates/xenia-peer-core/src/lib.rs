@@ -60,6 +60,7 @@ pub mod m1_session;
 pub mod producer_flow;
 pub mod receive_reservation;
 mod session;
+pub mod sif_wire;
 pub mod transfer_source;
 pub mod transport;
 
@@ -89,6 +90,12 @@ pub use receive_reservation::{
     ReceiveReservation, ReceiveReservationError, ReceiveReservationPool,
 };
 pub use session::{FrameLane, LaneSession, Session, SessionError, SessionRole};
+pub use sif_wire::{
+    MAX_SIF_PROTECTED_FILE_ENVELOPE_BYTES, MAX_SIF_PROTECTED_FILE_SEMANTIC_BYTES,
+    PAYLOAD_TYPE_SIF_PROTECTED_FILE_FROM_HOST, PAYLOAD_TYPE_SIF_PROTECTED_FILE_FROM_VIEWER,
+    SIF_PROTECTED_FILE_WIRE_SCHEMA_VERSION, SifProtectedFileWireChannel,
+    SifProtectedFileWireError, SifProtectedFileWirePayload, SifProtectedFileWireRole,
+};
 pub use transfer_source::{TransferChunk, TransferSource, TransferSourceError};
 pub use xenia_handshake::{
     HandshakeManager, RekeyEpochContextV1, RekeyReason, derive_negotiated_context_key,
