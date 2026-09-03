@@ -254,11 +254,11 @@ mod tests {
         let mut chain = Chain::new(SigningKey::from_bytes(&[3; 32]));
         chain
             .append(ConsentEventRecord {
+                source_id: [11; 32],
                 session_id: Uuid::from_bytes([9; 16]),
-                consent_request_id: Uuid::from_bytes([4; 16]),
+                request_id: Uuid::from_bytes([4; 16]),
                 kind: ConsentKind::Approval,
-                source: "operator".into(),
-                detail: "bounded-agent authorization".into(),
+                scope: "bounded-agent authorization".into(),
             })
             .unwrap();
         chain
