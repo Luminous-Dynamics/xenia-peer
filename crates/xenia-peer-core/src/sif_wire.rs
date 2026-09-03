@@ -220,7 +220,8 @@ impl SifProtectedFileWireChannel {
         payload: &SifProtectedFileWirePayload,
     ) -> Result<Vec<u8>, SifProtectedFileWireError> {
         payload.validate()?;
-        Ok(seal(payload, &mut self.wire, self.outbound_payload_type())?)
+        let payload_type = self.outbound_payload_type();
+        Ok(seal(payload, &mut self.wire, payload_type)?)
     }
 
     /// Open one exact remote-direction SIF envelope.
@@ -245,6 +246,7 @@ impl SifProtectedFileWireChannel {
             return Err(SifProtectedFileWireError::UnexpectedPayloadType { expected, found });
         }
 
+        self.wire.tick();
         let payload: SifProtectedFileWirePayload = open(envelope, &mut self.wire)?;
         payload.validate()?;
         Ok(payload)
