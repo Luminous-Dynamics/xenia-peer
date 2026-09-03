@@ -21,8 +21,7 @@ use ed25519_dalek::SigningKey;
 use thiserror::Error;
 use uuid::Uuid;
 use xenia_ledger::{
-    ACCOUNTABILITY_COMMITMENT_ALGORITHM, AccountabilityBindingError,
-    AccountabilityDisclosureError, AccountabilityDisclosurePermit,
+    AccountabilityBindingError, AccountabilityDisclosureError, AccountabilityDisclosurePermit,
     AccountabilityExecutionAttestation, Chain, ConsentKind, DisclosureReleaseOutcome,
     DisclosureReleaseState, DisclosureReleaseStore, Ed25519EvidenceSignatureBackend,
     ExecutionBoundReleaseCredential, ReleaseCredentialError, ReleaseCredentialTrustPolicy,
@@ -36,6 +35,7 @@ use crate::m1_runtime::M1RuntimeSession;
 /// runtime's consent state.
 pub(crate) struct M1SifAuthoritySnapshot {
     chain: Chain,
+    ledger_public_key: [u8; 32],
     transcript: xenia_ledger::SessionTranscriptBinding,
     requester_source_id: [u8; 32],
 }
@@ -59,6 +59,7 @@ impl M1SifAuthoritySnapshot {
             .map_err(|_| M1SifAuthorityError::InvalidKeyLength)?;
         let signing_key = SigningKey::from_bytes(&seed);
         let verifying_key = signing_key.verifying_key();
+        let ledger_public_key = verifying_key.to_bytes();
 
         let entries = runtime.entries();
         Verifier::verify_chain(&entries, &verifying_key)?;
@@ -79,6 +80,7 @@ impl M1SifAuthoritySnapshot {
 
         Ok(Self {
             chain: Chain::from_entries(entries, signing_key),
+            ledger_public_key,
             transcript,
             requester_source_id: anchor.event.source_id,
         })
@@ -86,9 +88,7 @@ impl M1SifAuthoritySnapshot {
 
     /// Public key of the exact M1 authority whose signed entries were verified.
     pub(crate) fn ledger_public_key(&self) -> [u8; 32] {
-        // A signed checkpoint exposes the authority public key without widening
-        // `Chain`'s private-key API. The timestamp is not trusted or used here.
-        self.chain.sign_checkpoint(0).ledger_public_key
+        self.ledger_public_key
     }
 
     /// Build/sign the Xenia execution evidence that Mycelix/Symthaea will bind.
@@ -134,7 +134,7 @@ impl M1SifAuthoritySnapshot {
             execution,
             xenia_ledger::CURRENT_EVIDENCE_CRYPTO_MANIFEST,
             &Ed25519EvidenceSignatureBackend,
-            &self.ledger_public_key(),
+            &self.ledger_public_key,
             local_execution_trust_domain_id,
         )?)
     }
@@ -222,7 +222,7 @@ pub(crate) enum M1SifAuthorityError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xenia_peer_core::M1PermissionSet;
+    use xenia_ledger::ACCOUNTABILITY_COMMITMENT_ALGORITHM;
 
     fn temp_key(seed: [u8; 32]) -> (std::path::PathBuf, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
@@ -279,9 +279,7 @@ mod tests {
                 found: ConsentKind::Request
             })
         ));
-        runtime
-            .grant_consent_scoped(M1PermissionSet::all())
-            .unwrap();
+        runtime.grant_consent().unwrap();
         M1SifAuthoritySnapshot::from_runtime(&runtime, &path).unwrap();
         runtime.revoke().unwrap();
         assert!(matches!(
@@ -346,6 +344,7 @@ mod tests {
         assert_eq!(execution.binding.session.transcript_hash, [33u8; 32]);
         assert_eq!(execution.binding.requester_source_id, source);
         assert_eq!(execution.binding.commitment_algorithm, ACCOUNTABILITY_COMMITMENT_ALGORITHM);
+        assert_eq!(authority.ledger_public_key(), SigningKey::from_bytes(&seed).verifying_key().to_bytes());
         let _ = std::fs::remove_dir_all(dir);
     }
 }
