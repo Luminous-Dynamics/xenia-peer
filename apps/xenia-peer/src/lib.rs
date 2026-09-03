@@ -8,9 +8,14 @@
 //! different ownership/licensing boundaries. In particular, SIF protected custody
 //! combines ledger semantics with peer-core filesystem mechanics without making the
 //! permissively licensed peer core depend on the AGPL evidence layer.
+//!
+//! The raw SIF semantic carrier is intentionally crate-private. External callers reach
+//! protected Offer/Chunk APIs only through the authenticated pending→negotiated gate in
+//! [`sif_negotiation`].
 
 #![warn(missing_docs)]
 #![deny(unsafe_code)]
 
+pub mod sif_negotiation;
 pub mod sif_receive_runtime;
-pub mod sif_semantic_wire;
+mod sif_semantic_wire;
