@@ -209,6 +209,93 @@ impl AnySendHalf {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ViewerOutboundPhase {
+    #[default]
+    Stable,
+    AckDeliveryPending,
+    Dead,
+}
+
+#[derive(Debug, Default)]
+struct ViewerOutboundAuthority {
+    phase: ViewerOutboundPhase,
+}
+
+impl ViewerOutboundAuthority {
+    fn application_allowed(&self) -> bool {
+        self.phase == ViewerOutboundPhase::Stable
+    }
+
+    fn begin_ack_delivery(&mut self) -> Result<(), &'static str> {
+        if self.phase != ViewerOutboundPhase::Stable {
+            return Err("viewer outbound authority is not stable");
+        }
+        self.phase = ViewerOutboundPhase::AckDeliveryPending;
+        Ok(())
+    }
+
+    fn ack_delivered(&mut self) -> Result<(), &'static str> {
+        if self.phase != ViewerOutboundPhase::AckDeliveryPending {
+            return Err("viewer Ack delivery is not pending");
+        }
+        self.phase = ViewerOutboundPhase::Stable;
+        Ok(())
+    }
+
+    fn fail_closed(&mut self) {
+        self.phase = ViewerOutboundPhase::Dead;
+    }
+}
+
+struct ViewerOutbound {
+    send_half: AnySendHalf,
+    authority: ViewerOutboundAuthority,
+}
+
+impl ViewerOutbound {
+    fn new(send_half: AnySendHalf) -> Self {
+        Self {
+            send_half,
+            authority: ViewerOutboundAuthority::default(),
+        }
+    }
+}
+
+async fn send_viewer_application_envelope<F, E>(
+    outbound: &Arc<tokio::sync::Mutex<ViewerOutbound>>,
+    session: &Arc<tokio::sync::Mutex<LaneSession>>,
+    seal: F,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    F: FnOnce(&mut LaneSession) -> Result<Vec<u8>, E>,
+    E: std::fmt::Display,
+{
+    // This mutex is the local outbound linearization point.  Every GUI
+    // application seal+send transaction and the receiver rekey Ack transaction
+    // hold it across both nonce allocation and carrier handoff, so send order
+    // cannot diverge from the order in which new-key nonces are allocated.
+    let mut outbound = outbound.lock().await;
+    if !outbound.authority.application_allowed() {
+        return Err("viewer application authority unavailable during rekey Ack delivery".into());
+    }
+    let envelope = {
+        let mut session = session.lock().await;
+        match seal(&mut session) {
+            Ok(envelope) => envelope,
+            Err(err) => {
+                outbound.authority.fail_closed();
+                return Err(format!("failed to seal viewer application envelope: {err}").into());
+            }
+        }
+    };
+    if let Err(err) = outbound.send_half.send_envelope(&envelope).await {
+        outbound.authority.fail_closed();
+        return Err(Box::new(err));
+    }
+    Ok(())
+}
+
 /// Receive-only half of a split [`AnyTransport`].
 enum AnyRecvHalf {
     Tcp(TcpRecvHalf),
@@ -882,7 +969,7 @@ fn sanitize_transfer_filename(name: &str) -> Option<String> {
 #[allow(clippy::too_many_arguments)]
 async fn handle_file_transfer_message(
     message: xenia_peer_core::FileTransferMessage,
-    send_half: &Arc<tokio::sync::Mutex<AnySendHalf>>,
+    outbound: &Arc<tokio::sync::Mutex<ViewerOutbound>>,
     session: &Arc<tokio::sync::Mutex<LaneSession>>,
     outgoing: &mut Option<OutgoingTransfer>,
     incoming: &mut std::collections::HashMap<u64, IncomingTransfer>,
@@ -959,11 +1046,10 @@ async fn handle_file_transfer_message(
                     reason,
                 }
             };
-            let envelope = session
-                .lock()
-                .await
-                .seal_file_transfer_message(reply, false)?;
-            send_half.lock().await.send_envelope(&envelope).await?;
+            send_viewer_application_envelope(outbound, session, |session| {
+                session.seal_file_transfer_message(reply, false)
+            })
+            .await?;
         }
         xenia_peer_core::FileTransferMessage::Accept { transfer_id } => {
             let Some(transfer) = outgoing.as_mut().filter(|t| t.transfer_id == transfer_id) else {
@@ -985,18 +1071,16 @@ async fn handle_file_transfer_message(
                     offset: chunk.offset,
                     data: chunk.data,
                 };
-                let envelope = session
-                    .lock()
-                    .await
-                    .seal_file_transfer_message(msg, false)?;
-                send_half.lock().await.send_envelope(&envelope).await?;
+                send_viewer_application_envelope(outbound, session, |session| {
+                    session.seal_file_transfer_message(msg, false)
+                })
+                .await?;
             }
             let complete = xenia_peer_core::FileTransferMessage::Complete { transfer_id };
-            let envelope = session
-                .lock()
-                .await
-                .seal_file_transfer_message(complete, false)?;
-            send_half.lock().await.send_envelope(&envelope).await?;
+            send_viewer_application_envelope(outbound, session, |session| {
+                session.seal_file_transfer_message(complete, false)
+            })
+            .await?;
             info!(transfer_id, "all chunks sent, awaiting verification");
         }
         xenia_peer_core::FileTransferMessage::Reject {
@@ -1050,11 +1134,10 @@ async fn handle_file_transfer_message(
                 transfer_id,
                 ok: delivery_ok,
             };
-            let envelope = session
-                .lock()
-                .await
-                .seal_file_transfer_message(verified, false)?;
-            send_half.lock().await.send_envelope(&envelope).await?;
+            send_viewer_application_envelope(outbound, session, |session| {
+                session.seal_file_transfer_message(verified, false)
+            })
+            .await?;
         }
         xenia_peer_core::FileTransferMessage::Verified { transfer_id, ok } => {
             if outgoing
@@ -2066,14 +2149,14 @@ async fn gui_receive_loop(
     // acks and the input task's sealed events go out over it.
     let (send_half, mut recv_half) = transport.split();
     let session = Arc::new(tokio::sync::Mutex::new(session));
-    let send_half = Arc::new(tokio::sync::Mutex::new(send_half));
+    let outbound = Arc::new(tokio::sync::Mutex::new(ViewerOutbound::new(send_half)));
     // User-driven outbound application payloads remain parked until the
     // authenticated capability surface is established below.
     let (surface_ready_tx, surface_ready_rx) = tokio::sync::watch::channel(false);
 
     {
         let session = Arc::clone(&session);
-        let send_half = Arc::clone(&send_half);
+        let outbound = Arc::clone(&outbound);
         let mut surface_ready = surface_ready_rx.clone();
         tokio::spawn(async move {
             while !*surface_ready.borrow() {
@@ -2089,18 +2172,12 @@ async fn gui_receive_loop(
                         continue;
                     }
                 };
-                let envelope = {
-                    let mut session = session.lock().await;
-                    match session.seal_input_event(payload) {
-                        Ok(envelope) => envelope,
-                        Err(err) => {
-                            warn!(error = %err, "failed to seal captured input event");
-                            continue;
-                        }
-                    }
-                };
-                if let Err(err) = send_half.lock().await.send_envelope(&envelope).await {
-                    info!(error = %err, "input send loop ending (daemon disconnected)");
+                if let Err(err) = send_viewer_application_envelope(&outbound, &session, |session| {
+                    session.seal_input_event(payload)
+                })
+                .await
+                {
+                    info!(error = %err, "input send loop ending (outbound authority unavailable or daemon disconnected)");
                     break;
                 }
             }
@@ -2109,7 +2186,7 @@ async fn gui_receive_loop(
 
     if args.clipboard == ClipboardMode::Bidirectional {
         let session = Arc::clone(&session);
-        let send_half = Arc::clone(&send_half);
+        let outbound = Arc::clone(&outbound);
         let mut surface_ready = surface_ready_rx.clone();
         let poll_interval = Duration::from_millis(args.clipboard_interval_ms.max(1));
         tokio::spawn(async move {
@@ -2127,18 +2204,12 @@ async fn gui_receive_loop(
                 if Some(&text) == last_sent.as_ref() {
                     continue;
                 }
-                let envelope = {
-                    let mut session = session.lock().await;
-                    match session.seal_clipboard_event(ClipboardContent::Text(text.clone())) {
-                        Ok(envelope) => envelope,
-                        Err(err) => {
-                            warn!(error = %err, "failed to seal captured clipboard update");
-                            continue;
-                        }
-                    }
-                };
-                if let Err(err) = send_half.lock().await.send_envelope(&envelope).await {
-                    info!(error = %err, "clipboard send loop ending (daemon disconnected)");
+                if let Err(err) = send_viewer_application_envelope(&outbound, &session, |session| {
+                    session.seal_clipboard_event(ClipboardContent::Text(text.clone()))
+                })
+                .await
+                {
+                    info!(error = %err, "clipboard send loop ending (outbound authority unavailable or daemon disconnected)");
                     break;
                 }
                 last_sent = Some(text);
@@ -2244,7 +2315,7 @@ async fn gui_receive_loop(
             };
             handle_file_transfer_message(
                 message,
-                &send_half,
+                &outbound,
                 &session,
                 &mut outgoing_transfer,
                 &mut incoming_transfers,
@@ -2333,30 +2404,57 @@ async fn gui_receive_loop(
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
                     e.to_string().into()
                 })?;
-            let keys = epoch_state
-                .derive_and_install(&handshake.key_schedule, &context)
-                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                    e.to_string().into()
-                })?;
-            session.lock().await.install_rekey_keys(&keys);
-            let ack = RawRekey::Ack {
+            // Linearize the receiver transition against every GUI application
+            // seal+send transaction.  Once this lock is acquired no input,
+            // clipboard, or file-transfer envelope can allocate a new-key nonce
+            // or reach the carrier until the exact Ack send outcome is known.
+            let mut outbound_tx = outbound.lock().await;
+            if let Err(err) = outbound_tx.authority.begin_ack_delivery() {
+                outbound_tx.authority.fail_closed();
+                return Err(err.into());
+            }
+            let keys = match epoch_state.derive_and_install(&handshake.key_schedule, &context) {
+                Ok(keys) => keys,
+                Err(err) => {
+                    outbound_tx.authority.fail_closed();
+                    return Err(err.to_string().into());
+                }
+            };
+            let ack = match (RawRekey::Ack {
                 key_epoch: epoch_state.current_epoch(),
                 epoch_hash,
-            }
+            })
             .into_frame(0, 0)
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
-            let envelope = session.lock().await.seal_control_frame(&ack).map_err(
-                |e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() },
-            )?;
-            send_half
-                .lock()
-                .await
-                .send_envelope(&envelope)
-                .await
-                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                    e.to_string().into()
-                })?;
-            info!(key_epoch = epoch_state.current_epoch(), epoch_hash = ?epoch_hash, "session rekey installed");
+            {
+                Ok(ack) => ack,
+                Err(err) => {
+                    outbound_tx.authority.fail_closed();
+                    return Err(err.to_string().into());
+                }
+            };
+            let ack_envelope = {
+                let mut session = session.lock().await;
+                session.install_rekey_keys(&keys);
+                match session.seal_control_frame(&ack) {
+                    Ok(envelope) => envelope,
+                    Err(err) => {
+                        outbound_tx.authority.fail_closed();
+                        return Err(err.to_string().into());
+                    }
+                }
+            };
+            if let Err(err) = outbound_tx.send_half.send_envelope(&ack_envelope).await {
+                outbound_tx.authority.fail_closed();
+                return Err(format!(
+                    "operator rekey Ack delivery failed after local key commit; fresh handshake required: {err}"
+                )
+                .into());
+            }
+            outbound_tx
+                .authority
+                .ack_delivered()
+                .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> { err.into() })?;
+            info!(key_epoch = epoch_state.current_epoch(), epoch_hash = ?epoch_hash, "session rekey installed and Ack delivered before application authority resumed");
 
             // Now safe to send: the initial rekey handshake (the daemon's
             // blocking send-Proposal/recv-Ack pair) is fully resolved from
@@ -2372,21 +2470,24 @@ async fn gui_receive_loop(
                     size,
                     blake3_hash: source.blake3_hash(),
                 };
-                let envelope = session
-                    .lock()
-                    .await
-                    .seal_file_transfer_message(offer, false)
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                        e.to_string().into()
-                    })?;
-                send_half
-                    .lock()
-                    .await
-                    .send_envelope(&envelope)
-                    .await
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                        e.to_string().into()
-                    })?;
+                // The Ack has already been handed to the carrier under the same
+                // outbound transaction lock.  Seal and send the deferred first
+                // application offer before releasing that lock, guaranteeing it
+                // cannot overtake the Ack and must consume a later nonce.
+                let envelope = {
+                    let mut session = session.lock().await;
+                    match session.seal_file_transfer_message(offer, false) {
+                        Ok(envelope) => envelope,
+                        Err(err) => {
+                            outbound_tx.authority.fail_closed();
+                            return Err(err.to_string().into());
+                        }
+                    }
+                };
+                if let Err(err) = outbound_tx.send_half.send_envelope(&envelope).await {
+                    outbound_tx.authority.fail_closed();
+                    return Err(err.to_string().into());
+                }
                 info!(transfer_id, name, size, "file transfer offered");
                 outgoing_transfer = Some(OutgoingTransfer {
                     transfer_id,
@@ -2448,12 +2549,15 @@ async fn gui_receive_loop(
             });
         }
     }
-    send_half
-        .lock()
-        .await
-        .close()
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
+    {
+        let mut outbound = outbound.lock().await;
+        outbound.authority.fail_closed();
+        outbound
+            .send_half
+            .close()
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
+    }
     Ok(())
 }
 
@@ -2482,6 +2586,30 @@ async fn connect_transport(args: &Args) -> Result<ConnectedTransport, TransportE
 mod tests {
     use super::*;
     use xenia_peer_core::{SyntheticAudioKind, SyntheticAudioSource};
+
+    #[test]
+    fn viewer_outbound_authority_blocks_application_during_ack_delivery() {
+        let mut authority = ViewerOutboundAuthority::default();
+        assert!(authority.application_allowed());
+        authority.begin_ack_delivery().unwrap();
+        assert!(!authority.application_allowed());
+        assert_eq!(authority.phase, ViewerOutboundPhase::AckDeliveryPending);
+        assert!(authority.begin_ack_delivery().is_err());
+        authority.ack_delivered().unwrap();
+        assert!(authority.application_allowed());
+        assert_eq!(authority.phase, ViewerOutboundPhase::Stable);
+    }
+
+    #[test]
+    fn viewer_outbound_authority_is_terminal_after_ambiguous_ack_failure() {
+        let mut authority = ViewerOutboundAuthority::default();
+        authority.begin_ack_delivery().unwrap();
+        authority.fail_closed();
+        assert_eq!(authority.phase, ViewerOutboundPhase::Dead);
+        assert!(!authority.application_allowed());
+        assert!(authority.ack_delivered().is_err());
+        assert!(authority.begin_ack_delivery().is_err());
+    }
 
     #[test]
     fn to_hex_encodes_lowercase_fixed_width() {
