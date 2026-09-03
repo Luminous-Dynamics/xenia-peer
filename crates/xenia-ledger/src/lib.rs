@@ -37,6 +37,12 @@
 //! then closes the adapter boundary by requiring the signed binding to match the
 //! exact higher-layer receipt/query/purpose/policy/result commitments.
 //!
+//! A witnessed higher-layer evidence bundle can then be bound to that exact
+//! execution through [`AccountabilityDisclosurePermit`]. The permit is not itself
+//! a release token: [`DisclosureReleaseState::commit_permit_transactional`] must
+//! first durably append a signed release-journal commit before returning the
+//! move-only [`CommittedDisclosurePermit`] intended for protected-output adapters.
+//!
 //! A downstream auditor — including a non-operator third party —
 //! can use [`Verifier::verify_chain`] to reconstruct every hash link
 //! and every signature offline, using only the operator's public key.
@@ -78,6 +84,7 @@ mod binding;
 mod chain;
 mod checkpoint;
 mod compaction;
+mod disclosure;
 mod entry;
 mod errors;
 mod hash;
@@ -136,6 +143,17 @@ pub use checkpoint::{
 pub use compaction::{
     LEDGER_COMPACTION_MANIFEST_SCHEMA, LedgerCompactionError, LedgerCompactionManifest,
     ledger_compaction_manifest_message,
+};
+
+pub use disclosure::{
+    ACCOUNTABILITY_DISCLOSURE_BINDING_SCHEMA, ACCOUNTABILITY_DISCLOSURE_COMMITMENT_ALGORITHM,
+    ACCOUNTABILITY_DISCLOSURE_PERMIT_SCHEMA, ACCOUNTABILITY_RELEASE_ENTRY_SCHEMA,
+    AccountabilityDisclosureBinding, AccountabilityDisclosureError,
+    AccountabilityDisclosureExpectation, AccountabilityDisclosurePermit,
+    AccountabilityDisclosurePhase, CommittedDisclosurePermit, DisclosureReleaseEntry,
+    DisclosureReleaseEvent, DisclosureReleaseOutcome, DisclosureReleaseState,
+    TransactionalDisclosureError, accountability_disclosure_message,
+    accountability_disclosure_permit_digest, verify_disclosure_release_entries,
 };
 
 pub use entry::{
