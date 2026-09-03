@@ -49,6 +49,35 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify qualification-only diff scope
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          python3 - <<'PY'
+          import os
+          import subprocess
+
+          base = os.environ['BASE_SHA']
+          head = os.environ['HEAD_SHA']
+          changed = set(subprocess.check_output(
+              ['git', 'diff', '--name-only', base, head], text=True
+          ).splitlines())
+          allowed = {
+              '.github/workflows/ml-dsa-interop.yml',
+              'crates/xenia-handshake/tests/ml_dsa_openssl_interop.rs',
+              'crates/xenia-handshake/tests/test-vectors/OPENSSL_ML_DSA_65_V1.md',
+              'crates/xenia-handshake/tests/test-vectors/README.md',
+              'crates/xenia-handshake/tests/test-vectors/openssl-3.5.5-mldsa65-public.hex',
+              'crates/xenia-handshake/tests/test-vectors/openssl-3.5.5-mldsa65-signature.hex',
+          }
+          print('qualification changed files:', sorted(changed))
+          unexpected = changed - allowed
+          assert not unexpected, f'production or unreviewed files changed: {sorted(unexpected)!r}'
+          assert changed, 'qualification diff unexpectedly empty'
+          PY
       - name: Install exact MSRV toolchain
         run: rustup toolchain install 1.94.0 --profile minimal --component clippy
       - name: Verify exact checkout and toolchain
