@@ -44,6 +44,8 @@ pub const MAX_SIF_PROTECTED_FILE_RESPONSE_BYTES: usize = 2 * 1024;
 pub const MAX_SIF_PROTECTED_FILE_CHUNK_WIRE_BYTES: usize = 72 * 1024;
 /// Maximum encoded protected Complete bytes.
 pub const MAX_SIF_PROTECTED_FILE_COMPLETE_BYTES: usize = 1024;
+/// Maximum encoded protected capability-negotiation bytes.
+pub const MAX_SIF_PROTECTED_FILE_CAPABILITY_BYTES: usize = 512;
 /// Largest semantic message accepted by the v1 wrapper.
 pub const MAX_SIF_PROTECTED_FILE_SEMANTIC_BYTES: usize =
     MAX_SIF_PROTECTED_FILE_CHUNK_WIRE_BYTES;
@@ -83,6 +85,7 @@ impl SifProtectedFileWireRole {
 /// Coarse encrypted semantic message class carried inside the dedicated SIF domain.
 ///
 /// The numeric tags below are part of wrapper schema v1 and must not be reassigned.
+/// New variants append new tags; existing tags remain stable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SifProtectedFileWireKind {
     /// Sender's exact release-bound Offer.
@@ -93,6 +96,8 @@ pub enum SifProtectedFileWireKind {
     Chunk,
     /// Sender's release-bound no-more-chunks marker.
     Complete,
+    /// Authenticated protected-file profile negotiation before any Offer.
+    Capability,
 }
 
 impl SifProtectedFileWireKind {
@@ -102,6 +107,7 @@ impl SifProtectedFileWireKind {
             Self::Response => 2,
             Self::Chunk => 3,
             Self::Complete => 4,
+            Self::Capability => 5,
         }
     }
 
@@ -111,6 +117,7 @@ impl SifProtectedFileWireKind {
             2 => Some(Self::Response),
             3 => Some(Self::Chunk),
             4 => Some(Self::Complete),
+            5 => Some(Self::Capability),
             _ => None,
         }
     }
@@ -122,6 +129,7 @@ impl SifProtectedFileWireKind {
             Self::Response => MAX_SIF_PROTECTED_FILE_RESPONSE_BYTES,
             Self::Chunk => MAX_SIF_PROTECTED_FILE_CHUNK_WIRE_BYTES,
             Self::Complete => MAX_SIF_PROTECTED_FILE_COMPLETE_BYTES,
+            Self::Capability => MAX_SIF_PROTECTED_FILE_CAPABILITY_BYTES,
         }
     }
 }
@@ -484,6 +492,25 @@ mod tests {
             Some(PAYLOAD_TYPE_SIF_PROTECTED_FILE_FROM_VIEWER)
         );
         assert_eq!(host.open(&sealed).unwrap(), response);
+    }
+
+    #[test]
+    fn capability_class_is_small_and_append_only() {
+        assert_eq!(SifProtectedFileWireKind::Capability.tag(), 5);
+        assert_eq!(
+            SifProtectedFileWireKind::Capability.max_semantic_bytes(),
+            MAX_SIF_PROTECTED_FILE_CAPABILITY_BYTES
+        );
+        assert!(SifProtectedFileWirePayload::new(
+            SifProtectedFileWireKind::Capability,
+            vec![0x11; MAX_SIF_PROTECTED_FILE_CAPABILITY_BYTES],
+        )
+        .is_ok());
+        assert!(SifProtectedFileWirePayload::new(
+            SifProtectedFileWireKind::Capability,
+            vec![0x11; MAX_SIF_PROTECTED_FILE_CAPABILITY_BYTES + 1],
+        )
+        .is_err());
     }
 
     #[test]
