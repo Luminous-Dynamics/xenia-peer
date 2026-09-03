@@ -58,6 +58,12 @@
 //! artifact exposes [`FileDisclosureByteAccounting`] so audit code never has to pretend
 //! such a Partial count is exact.
 //!
+//! [`SifProtectedFileOffer`] defines the semantic live-transfer boundary above that
+//! durable Commit. The Offer binds the single-use release ID, signed release-entry hash,
+//! canonical file result and exact wire metadata; every response/chunk/completion binds
+//! the Offer digest. Transport integration must carry these objects under a dedicated
+//! authenticated payload type rather than treating legacy transfer messages as SIF.
+//!
 //! Receiver-side custody is a separate claim. [`SifDeliveryReceipt`] lets an
 //! independently trusted receiver sign the exact release ID, sender Commit hash,
 //! file-result commitment, expected/observed content hash, authenticated session
@@ -95,6 +101,7 @@ mod file_disclosure;
 mod hash;
 mod key_transition;
 mod policy;
+mod protected_file_protocol;
 mod release_cas;
 mod release_credential;
 mod seal;
@@ -195,6 +202,16 @@ pub use key_transition::{
 pub use policy::{
     CURRENT_EVIDENCE_CRYPTO_MANIFEST, CURRENT_LEDGER_EVIDENCE_PROFILE, CryptoPolicyProfile,
     DowngradePolicy, EvidenceCryptoManifest, EvidencePolicyError, LedgerEvidenceProfile,
+};
+
+pub use protected_file_protocol::{
+    MAX_SIF_PROTECTED_FILE_CHUNK_BYTES, MAX_SIF_PROTECTED_FILE_NAME_BYTES,
+    MAX_SIF_PROTECTED_FILE_REJECT_REASON_BYTES, SIF_PROTECTED_FILE_CHUNK_SCHEMA,
+    SIF_PROTECTED_FILE_COMPLETE_SCHEMA, SIF_PROTECTED_FILE_OFFER_DIGEST_ALGORITHM,
+    SIF_PROTECTED_FILE_OFFER_SCHEMA, SIF_PROTECTED_FILE_PROTOCOL_SCHEMA,
+    SIF_PROTECTED_FILE_RESPONSE_SCHEMA, SifProtectedFileChunk, SifProtectedFileComplete,
+    SifProtectedFileOffer, SifProtectedFileOfferDecision, SifProtectedFileOfferResponse,
+    SifProtectedFileProtocolError, sif_protected_file_offer_digest,
 };
 
 pub use release_cas::{
