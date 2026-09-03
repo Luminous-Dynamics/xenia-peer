@@ -4,14 +4,15 @@
 //! Portable SIF release-credential verification.
 //!
 //! This is the runtime trust bridge between a Mycelix
-//! `PreDisclosureVerifiedBundle` and Xenia's disclosure permit. Xenia does not trust
-//! a caller-provided bundle digest. It first verifies a canonical credential under a
-//! local threshold of configured release-authority keys/trust domains, then binds the
-//! credential to the exact cryptographically verified Xenia execution proof.
+//! `PreDisclosureVerifiedBundle` and Xenia's disclosure permit. Xenia does not
+//! trust a caller-provided bundle digest. It first verifies a canonical credential
+//! under a local threshold of configured release-authority keys/trust domains,
+//! then binds that credential to the exact cryptographically verified Xenia
+//! execution proof.
 //!
-//! The wire shape intentionally mirrors `mycelix-accountability-credential` but this
-//! crate has no source dependency on Mycelix. Interoperability is defined by the
-//! canonical v1 protocol, not Rust type identity.
+//! The wire shape intentionally mirrors `mycelix-accountability-credential` but
+//! this crate has no source dependency on Mycelix. Interoperability is defined by
+//! the canonical v1 protocol, not Rust type identity.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,9 +28,7 @@ use crate::accountability::{
 use crate::accountability_interop::accountability_verifier_key_id;
 use crate::binding::SessionTranscriptBinding;
 use crate::policy::EvidenceCryptoManifest;
-use crate::signature::{
-    EvidenceSignatureBackend, SignatureEnvelopeError, SignatureSuite,
-};
+use crate::signature::{EvidenceSignatureBackend, SignatureEnvelopeError};
 
 /// Stable schema shared with `mycelix-accountability-credential`.
 pub const SIF_RELEASE_CREDENTIAL_SCHEMA: &str = "sif-release-credential-v1";
@@ -92,7 +91,7 @@ pub struct SifReleaseCredential {
 
 /// Locally configured release-authority root.
 ///
-/// Trust-domain identity comes from Xenia configuration, not from credential input.
+/// Trust-domain identity comes from Xenia configuration, not credential input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TrustedReleaseAuthority {
     /// Raw Ed25519 public key.
@@ -142,6 +141,11 @@ impl VerifiedReleaseCredential {
     /// Frozen semantic receipt statement.
     pub const fn receipt_statement_digest(&self) -> [u8; 32] {
         self.statement.receipt_statement_digest
+    }
+
+    /// Exact semantic accountability policy authorized by Mycelix.
+    pub const fn accountability_policy_digest(&self) -> [u8; 32] {
+        self.statement.accountability_policy_digest
     }
 
     /// Distinct release-authority key roots that actually verified.
@@ -265,6 +269,9 @@ pub enum ReleaseCredentialError {
     /// Credential and execution bind different semantic receipts.
     #[error("SIF release credential receipt does not match Xenia execution")]
     ReceiptMismatch,
+    /// Credential and Xenia execution were evaluated under different policies.
+    #[error("SIF release credential accountability policy does not match Xenia execution")]
+    PolicyMismatch,
     /// Credential names a different Xenia execution proof.
     #[error("SIF release credential execution proof does not match Xenia execution")]
     ExecutionProofMismatch,
@@ -289,6 +296,7 @@ pub fn verify_release_credential(
     if policy.min_valid_signatures == 0
         || policy.min_distinct_trust_domains == 0
         || policy.min_distinct_trust_domains > policy.min_valid_signatures
+        || usize::from(policy.min_valid_signatures) > authorities.len()
     {
         return Err(ReleaseCredentialError::InvalidTrustThreshold);
     }
@@ -368,6 +376,9 @@ pub fn bind_release_credential_to_execution(
     if statement.receipt_statement_digest != binding.receipt_digest {
         return Err(ReleaseCredentialError::ReceiptMismatch);
     }
+    if statement.accountability_policy_digest != binding.policy_digest {
+        return Err(ReleaseCredentialError::PolicyMismatch);
+    }
     let execution_binding_digest = accountability_execution_binding_digest(binding);
     if statement.execution_proof_digest != execution_binding_digest {
         return Err(ReleaseCredentialError::ExecutionProofMismatch);
@@ -436,7 +447,9 @@ pub fn release_authority_key_id(public_key: &[u8; 32]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-fn validate_statement(statement: &SifReleaseCredentialStatement) -> Result<(), ReleaseCredentialError> {
+fn validate_statement(
+    statement: &SifReleaseCredentialStatement,
+) -> Result<(), ReleaseCredentialError> {
     if statement.schema != SIF_RELEASE_CREDENTIAL_SCHEMA {
         return Err(ReleaseCredentialError::UnsupportedSchema {
             schema: statement.schema.clone(),
@@ -489,6 +502,15 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
 
+    use crate::accountability::{
+        ACCOUNTABILITY_COMMITMENT_ALGORITHM, ACCOUNTABILITY_EXECUTION_BINDING_SCHEMA,
+        AccountabilityExecutionBinding, AccountabilityExecutionPhase,
+        sign_accountability_execution_ed25519,
+    };
+    use crate::{
+        CURRENT_EVIDENCE_CRYPTO_MANIFEST, Ed25519EvidenceSignatureBackend, SignatureSuite,
+    };
+
     fn statement() -> SifReleaseCredentialStatement {
         SifReleaseCredentialStatement {
             schema: SIF_RELEASE_CREDENTIAL_SCHEMA.into(),
@@ -506,11 +528,17 @@ mod tests {
         }
     }
 
-    fn sign(statement: &SifReleaseCredentialStatement, key: &SigningKey) -> SifReleaseCredentialSignature {
+    fn sign(
+        statement: &SifReleaseCredentialStatement,
+        key: &SigningKey,
+    ) -> SifReleaseCredentialSignature {
         SifReleaseCredentialSignature {
             algorithm: SIF_RELEASE_CREDENTIAL_ED25519.into(),
             signer_key_id: release_authority_key_id(&key.verifying_key().to_bytes()),
-            signature: key.sign(&release_credential_message(statement)).to_bytes().to_vec(),
+            signature: key
+                .sign(&release_credential_message(statement))
+                .to_bytes()
+                .to_vec(),
         }
     }
 
@@ -604,6 +632,59 @@ mod tests {
                 },
             ),
             Err(ReleaseCredentialError::InvalidAuthoritySignature)
+        ));
+    }
+
+    #[test]
+    fn policy_mismatch_rejects_execution_binding() {
+        let execution_key = SigningKey::from_bytes(&[7u8; 32]);
+        let session = SessionTranscriptBinding::new(
+            Uuid::from_u128(1),
+            b"release credential policy binding",
+            CURRENT_EVIDENCE_CRYPTO_MANIFEST.transcript_signature,
+        );
+        let binding = AccountabilityExecutionBinding {
+            schema: ACCOUNTABILITY_EXECUTION_BINDING_SCHEMA.into(),
+            commitment_algorithm: ACCOUNTABILITY_COMMITMENT_ALGORITHM.into(),
+            operation_id: Uuid::from_u128(2),
+            session,
+            requester_source_id: [3u8; 32],
+            query_digest: [4u8; 32],
+            purpose_digest: [5u8; 32],
+            policy_digest: [6u8; 32],
+            result_digest: Some([7u8; 32]),
+            receipt_digest: [8u8; 32],
+            ledger_entry_count: 1,
+            ledger_head_hash: [9u8; 32],
+            phase: AccountabilityExecutionPhase::PreDisclosureCommit,
+        };
+        let execution = sign_accountability_execution_ed25519(binding, &execution_key);
+        let mut statement = statement();
+        statement.receipt_statement_digest = execution.binding.receipt_digest;
+        statement.accountability_policy_digest = [99u8; 32];
+        statement.execution_proof_digest = accountability_execution_binding_digest(&execution.binding);
+        statement.execution_verifier_id = accountability_verifier_key_id(
+            SignatureSuite::Ed25519Rfc8032,
+            execution_key.verifying_key().as_bytes(),
+        );
+        statement.execution_trust_domain_id = [10u8; 32];
+        statement.result_digest = execution.binding.result_digest;
+        let verified = VerifiedReleaseCredential {
+            statement,
+            signer_key_ids: vec![[11u8; 32]],
+            signer_trust_domains: vec![[12u8; 32]],
+        };
+
+        assert!(matches!(
+            bind_release_credential_to_execution(
+                &verified,
+                &execution,
+                CURRENT_EVIDENCE_CRYPTO_MANIFEST,
+                &Ed25519EvidenceSignatureBackend,
+                execution_key.verifying_key().as_bytes(),
+                [10u8; 32],
+            ),
+            Err(ReleaseCredentialError::PolicyMismatch)
         ));
     }
 }
