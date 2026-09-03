@@ -16,14 +16,13 @@
 //! Opening is stricter than the generic `xenia_wire::open`: the cleartext nonce's
 //! payload-type byte is checked against the exact expected remote SIF direction before
 //! AEAD open or replay-window mutation. Legacy file-transfer, clipboard and opposite-
-//! direction SIF envelopes therefore never reach semantic deserialization here.
+//! direction SIF envelopes therefore never reach semantic decoding here.
 //!
-//! After AEAD verification, the wrapper also names one coarse encrypted message class
-//! (`Offer`, `Response`, `Chunk`, or `Complete`) and applies a class-specific size
-//! ceiling. Concrete release IDs, commitments and state transitions remain owned by the
-//! higher AGPL semantic layer.
+//! The encrypted wrapper uses a fixed 12-byte header rather than Serde/bincode for its
+//! own framing. The declared semantic length and class-specific ceiling are checked
+//! before allocating/copying the semantic `Vec<u8>`, so a valid-session peer cannot
+//! turn a small authenticated envelope into an attacker-chosen large allocation.
 
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use xenia_handshake::{RekeyEpochKeys, SessionKeySchedule};
 use xenia_wire::{
@@ -31,41 +30,30 @@ use xenia_wire::{
 };
 
 /// AEAD payload type for SIF protected-file messages sealed by the host.
-///
-/// `0x30` is clipboard and `0x31`/`0x32` are legacy directional file transfer;
-/// `0x33` is the next application-reserved byte.
 pub const PAYLOAD_TYPE_SIF_PROTECTED_FILE_FROM_HOST: u8 = 0x33;
-
 /// AEAD payload type for SIF protected-file messages sealed by the viewer.
 pub const PAYLOAD_TYPE_SIF_PROTECTED_FILE_FROM_VIEWER: u8 = 0x34;
 
 /// Stable opaque payload wrapper schema.
 pub const SIF_PROTECTED_FILE_WIRE_SCHEMA_VERSION: u16 = 1;
-
 /// Maximum encoded protected Offer bytes.
 pub const MAX_SIF_PROTECTED_FILE_OFFER_BYTES: usize = 4 * 1024;
 /// Maximum encoded protected Accept/Reject response bytes.
 pub const MAX_SIF_PROTECTED_FILE_RESPONSE_BYTES: usize = 2 * 1024;
 /// Maximum encoded protected Chunk semantic bytes.
-///
-/// The underlying file-content ceiling is 64 KiB; 72 KiB leaves bounded room for
-/// release IDs, Offer digest, offset and serialization overhead.
 pub const MAX_SIF_PROTECTED_FILE_CHUNK_WIRE_BYTES: usize = 72 * 1024;
 /// Maximum encoded protected Complete bytes.
 pub const MAX_SIF_PROTECTED_FILE_COMPLETE_BYTES: usize = 1024;
-
-/// Largest semantic message accepted by the v1 opaque wrapper.
+/// Largest semantic message accepted by the v1 wrapper.
 pub const MAX_SIF_PROTECTED_FILE_SEMANTIC_BYTES: usize =
     MAX_SIF_PROTECTED_FILE_CHUNK_WIRE_BYTES;
-
 /// Maximum complete sealed envelope accepted before attempting AEAD open.
-///
-/// Bincode adds a small fixed wrapper around the semantic `Vec<u8>` and the Xenia wire
-/// adds a 12-byte nonce plus 16-byte tag. The extra 64 bytes deliberately
-/// over-approximates that framing so malformed oversized traffic is rejected before
-/// decrypt while valid maximum-size Chunk payloads still fit.
 pub const MAX_SIF_PROTECTED_FILE_ENVELOPE_BYTES: usize =
     MAX_SIF_PROTECTED_FILE_SEMANTIC_BYTES + 64;
+
+const SIF_WIRE_MAGIC: [u8; 4] = *b"XSF1";
+const SIF_WIRE_HEADER_LEN: usize = 12;
+const SIF_WIRE_FLAGS_V1: u8 = 0;
 
 /// Which endpoint owns this SIF wire channel instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,9 +82,8 @@ impl SifProtectedFileWireRole {
 
 /// Coarse encrypted semantic message class carried inside the dedicated SIF domain.
 ///
-/// Variant order is part of wrapper schema v1 and must not be reordered. New classes
-/// require a new wrapper schema or append-only compatibility analysis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The numeric tags below are part of wrapper schema v1 and must not be reassigned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SifProtectedFileWireKind {
     /// Sender's exact release-bound Offer.
     Offer,
@@ -109,6 +96,25 @@ pub enum SifProtectedFileWireKind {
 }
 
 impl SifProtectedFileWireKind {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::Offer => 1,
+            Self::Response => 2,
+            Self::Chunk => 3,
+            Self::Complete => 4,
+        }
+    }
+
+    const fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            1 => Some(Self::Offer),
+            2 => Some(Self::Response),
+            3 => Some(Self::Chunk),
+            4 => Some(Self::Complete),
+            _ => None,
+        }
+    }
+
     /// Maximum opaque semantic bytes allowed for this message class.
     pub const fn max_semantic_bytes(self) -> usize {
         match self {
@@ -121,11 +127,7 @@ impl SifProtectedFileWireKind {
 }
 
 /// Bounded opaque application payload sealed in the dedicated SIF domain.
-///
-/// The bytes are produced/consumed by the higher AGPL application layer, which owns
-/// concrete SIF Offer/Response/Chunk/Complete semantics. Keeping those bytes opaque
-/// here prevents a dependency from permissive peer-core back into `xenia-ledger`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SifProtectedFileWirePayload {
     schema_version: u16,
     kind: SifProtectedFileWireKind,
@@ -162,7 +164,7 @@ impl SifProtectedFileWirePayload {
         self.semantic_bytes
     }
 
-    /// Validate schema and class-specific allocation bounds after deserialization.
+    /// Validate schema and class-specific allocation bounds.
     pub fn validate(&self) -> Result<(), SifProtectedFileWireError> {
         if self.schema_version != SIF_PROTECTED_FILE_WIRE_SCHEMA_VERSION {
             return Err(SifProtectedFileWireError::UnsupportedSchema {
@@ -187,23 +189,67 @@ impl SifProtectedFileWirePayload {
 impl Sealable for SifProtectedFileWirePayload {
     fn to_bin(&self) -> Result<Vec<u8>, WireError> {
         self.validate().map_err(WireError::encode)?;
-        bincode::serialize(self).map_err(WireError::encode)
+        let semantic_len = u32::try_from(self.semantic_bytes.len()).map_err(WireError::encode)?;
+        let mut out = Vec::with_capacity(SIF_WIRE_HEADER_LEN + self.semantic_bytes.len());
+        out.extend_from_slice(&SIF_WIRE_MAGIC);
+        out.extend_from_slice(&self.schema_version.to_be_bytes());
+        out.push(self.kind.tag());
+        out.push(SIF_WIRE_FLAGS_V1);
+        out.extend_from_slice(&semantic_len.to_be_bytes());
+        out.extend_from_slice(&self.semantic_bytes);
+        Ok(out)
     }
 
     fn from_bin(bytes: &[u8]) -> Result<Self, WireError> {
-        let payload: Self = bincode::deserialize(bytes).map_err(WireError::decode)?;
+        if bytes.len() < SIF_WIRE_HEADER_LEN {
+            return Err(WireError::decode("truncated SIF protected-file wrapper"));
+        }
+        if bytes[..4] != SIF_WIRE_MAGIC {
+            return Err(WireError::decode("bad SIF protected-file wrapper magic"));
+        }
+
+        let schema_version = u16::from_be_bytes([bytes[4], bytes[5]]);
+        if schema_version != SIF_PROTECTED_FILE_WIRE_SCHEMA_VERSION {
+            return Err(WireError::decode(format!(
+                "unsupported SIF protected-file wire schema {schema_version}"
+            )));
+        }
+        let kind = SifProtectedFileWireKind::from_tag(bytes[6])
+            .ok_or_else(|| WireError::decode("unknown SIF protected-file wire kind"))?;
+        if bytes[7] != SIF_WIRE_FLAGS_V1 {
+            return Err(WireError::decode("unsupported SIF protected-file wire flags"));
+        }
+
+        let declared_len = u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
+        let max = kind.max_semantic_bytes();
+        if declared_len == 0 {
+            return Err(WireError::decode("empty SIF protected-file semantic payload"));
+        }
+        if declared_len > max {
+            return Err(WireError::decode(format!(
+                "SIF protected-file {kind:?} semantic payload declares {declared_len} bytes; maximum is {max}"
+            )));
+        }
+        let total_len = SIF_WIRE_HEADER_LEN
+            .checked_add(declared_len)
+            .ok_or_else(|| WireError::decode("SIF protected-file wrapper length overflow"))?;
+        if bytes.len() != total_len {
+            return Err(WireError::decode(
+                "SIF protected-file wrapper length does not match authenticated bytes",
+            ));
+        }
+
+        let payload = Self {
+            schema_version,
+            kind,
+            semantic_bytes: bytes[SIF_WIRE_HEADER_LEN..].to_vec(),
+        };
         payload.validate().map_err(WireError::decode)?;
         Ok(payload)
     }
 }
 
 /// Independent SIF control channel using the negotiated Xenia control key.
-///
-/// This intentionally owns a separate [`WireSession`] from [`crate::LaneSession`].
-/// Sharing the same negotiated control key is safe because SIF uses disjoint payload
-/// types (`0x33`/`0x34`), which are embedded in Xenia's 12-byte nonce. The directional
-/// split additionally ensures that the host and viewer can both begin at sequence zero
-/// without ever producing the same `(source_id, payload_type, epoch, sequence)` nonce.
 pub struct SifProtectedFileWireChannel {
     role: SifProtectedFileWireRole,
     wire: WireSession,
@@ -219,14 +265,7 @@ impl SifProtectedFileWireChannel {
     }
 
     /// Create a deterministic channel for interoperability/nonce tests.
-    ///
-    /// Production code should prefer [`Self::new`] or explicitly reuse the same
-    /// authenticated source metadata chosen for its enclosing Xenia session.
-    pub fn with_fixture(
-        role: SifProtectedFileWireRole,
-        source_id: [u8; 8],
-        epoch: u8,
-    ) -> Self {
+    pub fn with_fixture(role: SifProtectedFileWireRole, source_id: [u8; 8], epoch: u8) -> Self {
         Self {
             role,
             wire: WireSession::with_source_id(source_id, epoch),
@@ -282,7 +321,7 @@ impl SifProtectedFileWireChannel {
     ///
     /// Size and payload type are checked before AEAD open. A legacy file-transfer
     /// envelope (`0x31`/`0x32`), clipboard envelope (`0x30`), or same-side SIF envelope
-    /// never mutates this channel's replay window and is never deserialized as SIF.
+    /// never mutates this channel's replay window and is never decoded as SIF.
     pub fn open(
         &mut self,
         envelope: &[u8],
@@ -379,6 +418,36 @@ mod tests {
     }
 
     #[test]
+    fn fixed_wrapper_roundtrips_without_serde_allocation_framing() {
+        let payload = offer_payload(b"offer");
+        let encoded = payload.to_bin().unwrap();
+        assert_eq!(&encoded[..4], b"XSF1");
+        assert_eq!(encoded[6], SifProtectedFileWireKind::Offer.tag());
+        assert_eq!(
+            <SifProtectedFileWirePayload as Sealable>::from_bin(&encoded).unwrap(),
+            payload
+        );
+    }
+
+    #[test]
+    fn declared_length_is_bounded_before_semantic_copy() {
+        let mut forged = Vec::from(SIF_WIRE_MAGIC);
+        forged.extend_from_slice(&SIF_PROTECTED_FILE_WIRE_SCHEMA_VERSION.to_be_bytes());
+        forged.push(SifProtectedFileWireKind::Offer.tag());
+        forged.push(SIF_WIRE_FLAGS_V1);
+        forged.extend_from_slice(&u32::MAX.to_be_bytes());
+        assert!(<SifProtectedFileWirePayload as Sealable>::from_bin(&forged).is_err());
+    }
+
+    #[test]
+    fn wrapper_rejects_trailing_authenticated_bytes() {
+        let payload = offer_payload(b"offer");
+        let mut encoded = payload.to_bin().unwrap();
+        encoded.push(0);
+        assert!(<SifProtectedFileWirePayload as Sealable>::from_bin(&encoded).is_err());
+    }
+
+    #[test]
     fn sif_payload_ids_are_distinct_from_legacy_application_domains() {
         assert_eq!(PAYLOAD_TYPE_SIF_PROTECTED_FILE_FROM_HOST, 0x33);
         assert_eq!(PAYLOAD_TYPE_SIF_PROTECTED_FILE_FROM_VIEWER, 0x34);
@@ -423,13 +492,9 @@ mod tests {
         let payload = offer_payload(b"same");
         let host_envelope = host.seal(&payload).unwrap();
         let viewer_envelope = viewer.seal(&payload).unwrap();
-
         assert_ne!(&host_envelope[..12], &viewer_envelope[..12]);
         assert_eq!(host_envelope[6], PAYLOAD_TYPE_SIF_PROTECTED_FILE_FROM_HOST);
-        assert_eq!(
-            viewer_envelope[6],
-            PAYLOAD_TYPE_SIF_PROTECTED_FILE_FROM_VIEWER
-        );
+        assert_eq!(viewer_envelope[6], PAYLOAD_TYPE_SIF_PROTECTED_FILE_FROM_VIEWER);
     }
 
     #[test]
@@ -453,8 +518,6 @@ mod tests {
             })
         ));
 
-        // A valid SIF envelope at the same sequence is still accepted, proving the
-        // rejected legacy envelope did not consume SIF replay-window state.
         let mut sif_sender = SifProtectedFileWireChannel::with_fixture(
             SifProtectedFileWireRole::Host,
             SOURCE_ID,
@@ -474,9 +537,7 @@ mod tests {
             EPOCH,
         );
         host_receiver.install_control_key(KEY);
-        let payload = offer_payload(b"offer");
-        let sealed = host_sender.seal(&payload).unwrap();
-
+        let sealed = host_sender.seal(&offer_payload(b"offer")).unwrap();
         assert!(matches!(
             host_receiver.open(&sealed),
             Err(SifProtectedFileWireError::UnexpectedPayloadType {
@@ -496,7 +557,6 @@ mod tests {
                 found: None,
             })
         ));
-
         let oversized = vec![0u8; MAX_SIF_PROTECTED_FILE_ENVELOPE_BYTES + 1];
         assert!(matches!(
             viewer.open(&oversized),
@@ -513,42 +573,31 @@ mod tests {
         assert!(matches!(
             SifProtectedFileWirePayload::new(
                 SifProtectedFileWireKind::Offer,
-                vec![0u8; MAX_SIF_PROTECTED_FILE_OFFER_BYTES + 1]
+                vec![0u8; MAX_SIF_PROTECTED_FILE_OFFER_BYTES + 1],
             ),
             Err(SifProtectedFileWireError::SemanticPayloadTooLarge {
                 kind: SifProtectedFileWireKind::Offer,
                 ..
             })
         ));
-        assert!(
-            SifProtectedFileWirePayload::new(
-                SifProtectedFileWireKind::Chunk,
-                vec![0u8; MAX_SIF_PROTECTED_FILE_OFFER_BYTES + 1]
-            )
-            .is_ok()
-        );
-        assert!(matches!(
-            SifProtectedFileWirePayload::new(
-                SifProtectedFileWireKind::Chunk,
-                vec![0u8; MAX_SIF_PROTECTED_FILE_CHUNK_WIRE_BYTES + 1]
-            ),
-            Err(SifProtectedFileWireError::SemanticPayloadTooLarge {
-                kind: SifProtectedFileWireKind::Chunk,
-                ..
-            })
-        ));
+        assert!(SifProtectedFileWirePayload::new(
+            SifProtectedFileWireKind::Chunk,
+            vec![0u8; MAX_SIF_PROTECTED_FILE_CHUNK_WIRE_BYTES],
+        )
+        .is_ok());
     }
 
     #[test]
-    fn rekeyed_channels_continue_only_after_both_install_the_new_control_key() {
+    fn channel_continues_after_both_sides_rekey() {
         let (mut host, mut viewer) = pair();
-        let first = offer_payload(b"before");
-        assert_eq!(viewer.open(&host.seal(&first).unwrap()).unwrap(), first);
+        let payload = offer_payload(b"after-rekey");
+        let first = host.seal(&payload).unwrap();
+        assert_eq!(viewer.open(&first).unwrap(), payload);
 
-        let next_key = [0x5A; 32];
-        host.install_control_key(next_key);
-        viewer.install_control_key(next_key);
-        let second = offer_payload(b"after");
-        assert_eq!(viewer.open(&host.seal(&second).unwrap()).unwrap(), second);
+        let new_key = [0xB6; 32];
+        host.install_control_key(new_key);
+        viewer.install_control_key(new_key);
+        let second = host.seal(&payload).unwrap();
+        assert_eq!(viewer.open(&second).unwrap(), payload);
     }
 }
