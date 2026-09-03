@@ -52,6 +52,7 @@
 #![warn(missing_docs)]
 
 pub mod advertisement;
+pub mod authenticated_payload_receipt;
 pub mod authenticated_session_evidence;
 pub mod file_transfer;
 pub mod frame;
@@ -63,6 +64,13 @@ mod session;
 pub mod transfer_source;
 pub mod transport;
 
+pub use authenticated_payload_receipt::{
+    AUTHENTICATED_PAYLOAD_RECEIPT_DOMAIN, AUTHENTICATED_PAYLOAD_RECEIPT_SCHEMA,
+    AuthenticatedOpenedPayload, AuthenticatedPayloadReceiptBodyV1,
+    AuthenticatedPayloadReceiptError, AuthenticatedPayloadReceiptV1, BoundAuthenticatedSession,
+    MAX_AUTHENTICATED_APPLICATION_PAYLOAD_BYTES, MAX_TRANSPORT_RECEIPT_LIFETIME_MS,
+    MIN_APPLICATION_PAYLOAD_TYPE, ReceiptPeerRoleV1, TransportReceiptSigner,
+};
 pub use authenticated_session_evidence::{
     AUTHENTICATED_SESSION_EVIDENCE_SCHEMA, AuthenticatedHandshakeEvidence, AuthenticatedPeerRole,
     AuthenticatedSessionEvidenceError, AuthenticatedSessionEvidenceV1,
