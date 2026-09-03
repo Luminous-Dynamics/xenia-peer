@@ -9,22 +9,24 @@
 //! combines ledger semantics with peer-core filesystem mechanics without making the
 //! permissively licensed peer core depend on the AGPL evidence layer.
 //!
-//! Both lower protected-transfer layers are intentionally crate-private. External
-//! callers reach protected Offer/Chunk traffic only through [`sif_transfer_flow`],
-//! which enforces authenticated exact-profile negotiation plus phase ordering.
-//! [`sif_custody_wire`] is a separate receipt-only verification surface and carries no
-//! authority to emit protected file content.
+//! The public protected-content authority is [`sif_accountable_transfer`]. Capability
+//! negotiation, semantic transfer, phase state and custody transport remain private
+//! implementation layers so application callers cannot bypass Accept ordering or
+//! receiver-signed custody closure.
 
 #![warn(missing_docs)]
 #![deny(unsafe_code)]
 
-pub mod sif_custody_wire;
+pub mod sif_accountable_transfer;
+mod sif_custody_wire;
 mod sif_negotiation;
 pub mod sif_receive_runtime;
 mod sif_semantic_wire;
-pub mod sif_transfer_flow;
+mod sif_transfer_flow;
 
-// Lower-layer errors remain reachable because the public phase error taxonomy retains
-// them as typed sources, while the bypass-capable channel implementations stay private.
+// Lower-layer errors remain reachable because the public accountable error taxonomy
+// retains them as typed sources, while the authority-bearing implementations stay private.
+pub use sif_custody_wire::SifCustodySemanticError;
 pub use sif_negotiation::SifNegotiationError;
 pub use sif_semantic_wire::SifSemanticWireError;
+pub use sif_transfer_flow::SifTransferFlowError;
