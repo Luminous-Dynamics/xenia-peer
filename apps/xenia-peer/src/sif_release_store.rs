@@ -3,11 +3,15 @@
 
 //! Durable compare-and-swap persistence for the SIF release journal.
 //!
-//! The data file is verified under the configured Xenia ledger key before it is
-//! trusted. On Unix, every transition holds an advisory exclusive lock on a stable
-//! sibling lock file while comparing the durable signed frontier and atomically
-//! replacing the journal. No racy read-then-rename fallback is provided on platforms
-//! without a locking backend.
+//! Every transition owns a stable sibling lock file created through
+//! `xenia-secure-file`'s atomic first-writer-wins primitive. The lock contains a
+//! fresh random owner token; only the caller that reads back its own token enters
+//! the critical section. The durable journal is then verified under the configured
+//! ledger key before comparing the signed frontier and atomically replacing it.
+//!
+//! A crash can leave a stale lock. v0.1 deliberately treats that as fail-closed
+//! operator recovery rather than guessing that a lock is stale and risking two
+//! simultaneous writers. This trades availability for the one-lineage invariant.
 
 #![allow(dead_code)]
 
@@ -24,13 +28,21 @@ const RELEASE_STORE_SCHEMA: u16 = 1;
 const RELEASE_STORE_HEADER_LEN: usize = RELEASE_STORE_MAGIC.len() + 2 + 8 + 32;
 const MAX_RELEASE_STORE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_RELEASE_STORE_ENTRIES: usize = 100_000;
+const LOCK_TOKEN_BYTES: usize = 32;
 
 /// Durable SIF release-journal storage failure.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SifReleaseStoreError {
-    /// Filesystem read/write/sync/rename/lock operation failed.
+    /// Filesystem read/write/sync/rename operation failed.
     #[error("SIF release store I/O error: {0}")]
     Io(#[from] std::io::Error),
+    /// Secure-file locking primitive rejected the path or operation.
+    #[error("SIF release store secure lock error: {0}")]
+    SecureLock(String),
+    /// Another process owns the release-journal CAS lock, including a stale lock
+    /// left after a crash that requires explicit operator recovery.
+    #[error("SIF release journal is locked by another writer")]
+    LockHeld,
     /// Bincode framing could not be encoded or decoded.
     #[error("SIF release store codec error: {0}")]
     Codec(#[from] bincode::Error),
@@ -52,9 +64,6 @@ pub(crate) enum SifReleaseStoreError {
     /// Proposed transition did not append exactly one signed journal entry.
     #[error("SIF release journal CAS transition must append exactly one entry")]
     InvalidTransitionLength,
-    /// This platform has no qualified interprocess locking backend yet.
-    #[error("SIF release CAS store is unavailable on this platform")]
-    UnsupportedPlatform,
 }
 
 /// Filesystem-backed CAS store for the signed release journal.
@@ -80,51 +89,12 @@ impl FileSifReleaseStore {
             &self.ledger_public_key,
         )?)
     }
-}
 
-impl DisclosureReleaseStore for FileSifReleaseStore {
-    type Error = SifReleaseStoreError;
-
-    fn compare_and_swap(
-        &mut self,
-        expected: DisclosureReleaseFrontier,
-        next_entries: &[DisclosureReleaseEntry],
-    ) -> Result<(), Self::Error> {
-        #[cfg(unix)]
-        {
-            self.compare_and_swap_unix(expected, next_entries)
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (expected, next_entries);
-            Err(SifReleaseStoreError::UnsupportedPlatform)
-        }
-    }
-}
-
-#[cfg(unix)]
-impl FileSifReleaseStore {
-    fn compare_and_swap_unix(
+    fn compare_and_swap_locked(
         &self,
         expected: DisclosureReleaseFrontier,
         next_entries: &[DisclosureReleaseEntry],
     ) -> Result<(), SifReleaseStoreError> {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        use rustix::fs::{FlockOperation, flock};
-
-        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
-        std::fs::create_dir_all(parent)?;
-        let lock_path = lock_path(&self.path);
-        let lock = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .mode(0o600)
-            .open(&lock_path)?;
-        flock(&lock, FlockOperation::LockExclusive)
-            .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))?;
-
         let current = read_entries(&self.path)?;
         verify_disclosure_release_entries(&current, &self.ledger_public_key)?;
         let observed = frontier(&current);
@@ -137,6 +107,55 @@ impl FileSifReleaseStore {
         verify_disclosure_release_entries(next_entries, &self.ledger_public_key)?;
         persist_entries_atomic(&self.path, next_entries)?;
         Ok(())
+    }
+}
+
+impl DisclosureReleaseStore for FileSifReleaseStore {
+    type Error = SifReleaseStoreError;
+
+    fn compare_and_swap(
+        &mut self,
+        expected: DisclosureReleaseFrontier,
+        next_entries: &[DisclosureReleaseEntry],
+    ) -> Result<(), Self::Error> {
+        let _guard = ReleaseStoreLock::acquire(&lock_path(&self.path))?;
+        self.compare_and_swap_locked(expected, next_entries)
+    }
+}
+
+struct ReleaseStoreLock {
+    path: PathBuf,
+    token: [u8; LOCK_TOKEN_BYTES],
+}
+
+impl ReleaseStoreLock {
+    fn acquire(path: &Path) -> Result<Self, SifReleaseStoreError> {
+        let token: [u8; LOCK_TOKEN_BYTES] = rand::random();
+        let observed = xenia_secure_file::load_or_create_secure_file(path, || token.to_vec())
+            .map_err(|error| SifReleaseStoreError::SecureLock(error.to_string()))?;
+        if observed.as_slice() != token {
+            return Err(SifReleaseStoreError::LockHeld);
+        }
+        Ok(Self {
+            path: path.to_path_buf(),
+            token,
+        })
+    }
+}
+
+impl Drop for ReleaseStoreLock {
+    fn drop(&mut self) {
+        // Only remove the lock if it still contains this guard's owner token. The
+        // secure parent directory is owner-only; a mismatched/missing file is left
+        // untouched and causes future acquisition to fail closed rather than this
+        // guard deleting another writer's marker.
+        let still_ours = xenia_secure_file::read_secure_file_if_exists(&self.path)
+            .ok()
+            .flatten()
+            .is_some_and(|bytes| bytes.as_slice() == self.token);
+        if still_ours {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -209,13 +228,10 @@ fn read_entries(path: &Path) -> Result<Vec<DisclosureReleaseEntry>, SifReleaseSt
     Ok(entries)
 }
 
-#[cfg(unix)]
 fn persist_entries_atomic(
     path: &Path,
     entries: &[DisclosureReleaseEntry],
 ) -> Result<(), SifReleaseStoreError> {
-    use std::os::unix::fs::OpenOptionsExt;
-
     if entries.len() > MAX_RELEASE_STORE_ENTRIES {
         return Err(SifReleaseStoreError::LimitExceeded(format!(
             "{} entries exceeds maximum {MAX_RELEASE_STORE_ENTRIES}",
@@ -249,11 +265,14 @@ fn persist_entries_atomic(
     ));
 
     let result = (|| -> Result<(), SifReleaseStoreError> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp)?;
+        #[cfg(unix)]
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&tmp)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
         std::fs::rename(&tmp, path)?;
@@ -264,14 +283,6 @@ fn persist_entries_atomic(
         let _ = std::fs::remove_file(&tmp);
     }
     result
-}
-
-#[cfg(not(unix))]
-fn persist_entries_atomic(
-    _path: &Path,
-    _entries: &[DisclosureReleaseEntry],
-) -> Result<(), SifReleaseStoreError> {
-    Err(SifReleaseStoreError::UnsupportedPlatform)
 }
 
 #[cfg(test)]
@@ -288,6 +299,25 @@ mod tests {
         let store = FileSifReleaseStore::new(path, [7u8; 32]);
         let state = store.load_state().unwrap();
         assert_eq!(state.frontier(), DisclosureReleaseFrontier::GENESIS);
+    }
+
+    #[test]
+    fn second_lock_owner_fails_closed() {
+        let dir = std::env::temp_dir().join(format!(
+            "xenia-sif-release-lock-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let path = dir.join("release.journal.lock");
+        let first = ReleaseStoreLock::acquire(&path).unwrap();
+        assert!(matches!(
+            ReleaseStoreLock::acquire(&path),
+            Err(SifReleaseStoreError::LockHeld)
+        ));
+        drop(first);
+        let second = ReleaseStoreLock::acquire(&path).unwrap();
+        drop(second);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
