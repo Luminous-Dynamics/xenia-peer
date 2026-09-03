@@ -7,25 +7,37 @@
 //! `xenia-peer-core` deliberately carries only bounded opaque semantic bytes so the
 //! permissively licensed carrier does not depend on the AGPL ledger. This module is
 //! the narrow join: concrete Offer/Response/Chunk/Complete values are validated,
-//! canonically bincode-encoded, tagged with the matching encrypted wire class, and
-//! sealed through the dedicated directional SIF channel.
+//! encoded with one fixed canonical grammar, tagged with the matching encrypted wire
+//! class, and sealed through the dedicated directional SIF channel.
 //!
-//! On receive, the carrier first enforces the dedicated `0x33`/`0x34` AEAD domain.
-//! This bridge then requires the encrypted message class expected by the caller,
-//! deserializes exactly that concrete ledger type, requires canonical byte-for-byte
-//! re-encoding, and finally validates the semantic object against the exact Offer.
+//! Generic Serde/bincode decoding is intentionally not used here. Even when an outer
+//! envelope is small, attacker-controlled collection/string length prefixes can cause
+//! a decoder to reserve much larger allocations before semantic validation runs. The
+//! codec below parses fixed-width lengths first, checks protocol ceilings, requires an
+//! exact byte count with no trailing representation, and only then allocates/copies
+//! bounded display-name, Reject-reason, or Chunk bytes.
 
-use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
+use uuid::Uuid;
 use xenia_handshake::{RekeyEpochKeys, SessionKeySchedule};
 use xenia_ledger::{
-    SifProtectedFileChunk, SifProtectedFileComplete, SifProtectedFileOffer,
+    MAX_SIF_PROTECTED_FILE_CHUNK_BYTES, MAX_SIF_PROTECTED_FILE_NAME_BYTES,
+    MAX_SIF_PROTECTED_FILE_REJECT_REASON_BYTES, SifProtectedFileChunk,
+    SifProtectedFileComplete, SifProtectedFileOffer, SifProtectedFileOfferDecision,
     SifProtectedFileOfferResponse, SifProtectedFileProtocolError,
 };
 use xenia_peer_core::{
     SifProtectedFileWireChannel, SifProtectedFileWireError, SifProtectedFileWireKind,
     SifProtectedFileWirePayload, SifProtectedFileWireRole,
 };
+
+/// Stable canonical application-layer codec carried inside SIF wire wrapper v1.
+pub const SIF_SEMANTIC_WIRE_CODEC_VERSION: u8 = 1;
+
+const OFFER_FIXED_BYTES: usize = 1 + 16 + 8 + 32 + 32 + 8 + 32 + 2;
+const RESPONSE_FIXED_BYTES: usize = 1 + 32 + 1 + 2;
+const CHUNK_FIXED_BYTES: usize = 1 + 32 + 8 + 4;
+const COMPLETE_FIXED_BYTES: usize = 1 + 32;
 
 /// Typed SIF semantic channel over the dedicated peer-core protected-file carrier.
 pub struct SifProtectedFileSemanticChannel {
@@ -81,7 +93,7 @@ impl SifProtectedFileSemanticChannel {
         offer: &SifProtectedFileOffer,
     ) -> Result<Vec<u8>, SifSemanticWireError> {
         offer.validate()?;
-        self.seal_typed(SifProtectedFileWireKind::Offer, offer)
+        self.seal_semantic(SifProtectedFileWireKind::Offer, encode_offer(offer)?)
     }
 
     /// Open and validate one exact release-bound Offer.
@@ -89,9 +101,8 @@ impl SifProtectedFileSemanticChannel {
         &mut self,
         envelope: &[u8],
     ) -> Result<SifProtectedFileOffer, SifSemanticWireError> {
-        let offer = self.open_typed(envelope, SifProtectedFileWireKind::Offer)?;
-        offer.validate()?;
-        Ok(offer)
+        let bytes = self.open_semantic(envelope, SifProtectedFileWireKind::Offer)?;
+        decode_offer(&bytes)
     }
 
     /// Validate an Accept/Reject against `offer`, then seal it as a Response.
@@ -101,7 +112,10 @@ impl SifProtectedFileSemanticChannel {
         offer: &SifProtectedFileOffer,
     ) -> Result<Vec<u8>, SifSemanticWireError> {
         response.validate_against_offer(offer)?;
-        self.seal_typed(SifProtectedFileWireKind::Response, response)
+        self.seal_semantic(
+            SifProtectedFileWireKind::Response,
+            encode_response(response)?,
+        )
     }
 
     /// Open a Response and require exact binding to `offer`.
@@ -110,9 +124,8 @@ impl SifProtectedFileSemanticChannel {
         envelope: &[u8],
         offer: &SifProtectedFileOffer,
     ) -> Result<SifProtectedFileOfferResponse, SifSemanticWireError> {
-        let response = self.open_typed(envelope, SifProtectedFileWireKind::Response)?;
-        response.validate_against_offer(offer)?;
-        Ok(response)
+        let bytes = self.open_semantic(envelope, SifProtectedFileWireKind::Response)?;
+        decode_response(&bytes, offer)
     }
 
     /// Validate one content Chunk against `offer`, then seal it as a Chunk.
@@ -122,7 +135,7 @@ impl SifProtectedFileSemanticChannel {
         offer: &SifProtectedFileOffer,
     ) -> Result<Vec<u8>, SifSemanticWireError> {
         chunk.validate_against_offer(offer)?;
-        self.seal_typed(SifProtectedFileWireKind::Chunk, chunk)
+        self.seal_semantic(SifProtectedFileWireKind::Chunk, encode_chunk(chunk)?)
     }
 
     /// Open a Chunk and require exact binding and byte-range validity against `offer`.
@@ -131,9 +144,8 @@ impl SifProtectedFileSemanticChannel {
         envelope: &[u8],
         offer: &SifProtectedFileOffer,
     ) -> Result<SifProtectedFileChunk, SifSemanticWireError> {
-        let chunk = self.open_typed(envelope, SifProtectedFileWireKind::Chunk)?;
-        chunk.validate_against_offer(offer)?;
-        Ok(chunk)
+        let bytes = self.open_semantic(envelope, SifProtectedFileWireKind::Chunk)?;
+        decode_chunk(&bytes, offer)
     }
 
     /// Validate a completion marker against `offer`, then seal it as Complete.
@@ -143,7 +155,10 @@ impl SifProtectedFileSemanticChannel {
         offer: &SifProtectedFileOffer,
     ) -> Result<Vec<u8>, SifSemanticWireError> {
         complete.validate_against_offer(offer)?;
-        self.seal_typed(SifProtectedFileWireKind::Complete, complete)
+        self.seal_semantic(
+            SifProtectedFileWireKind::Complete,
+            encode_complete(complete),
+        )
     }
 
     /// Open a Complete marker and require exact binding to `offer`.
@@ -152,26 +167,24 @@ impl SifProtectedFileSemanticChannel {
         envelope: &[u8],
         offer: &SifProtectedFileOffer,
     ) -> Result<SifProtectedFileComplete, SifSemanticWireError> {
-        let complete = self.open_typed(envelope, SifProtectedFileWireKind::Complete)?;
-        complete.validate_against_offer(offer)?;
-        Ok(complete)
+        let bytes = self.open_semantic(envelope, SifProtectedFileWireKind::Complete)?;
+        decode_complete(&bytes, offer)
     }
 
-    fn seal_typed<T: Serialize>(
+    fn seal_semantic(
         &mut self,
         kind: SifProtectedFileWireKind,
-        value: &T,
+        semantic_bytes: Vec<u8>,
     ) -> Result<Vec<u8>, SifSemanticWireError> {
-        let semantic_bytes = canonical_encode(value)?;
         let payload = SifProtectedFileWirePayload::new(kind, semantic_bytes)?;
         Ok(self.wire.seal(&payload)?)
     }
 
-    fn open_typed<T: Serialize + DeserializeOwned>(
+    fn open_semantic(
         &mut self,
         envelope: &[u8],
         expected_kind: SifProtectedFileWireKind,
-    ) -> Result<T, SifSemanticWireError> {
+    ) -> Result<Vec<u8>, SifSemanticWireError> {
         let payload = self.wire.open(envelope)?;
         if payload.kind() != expected_kind {
             return Err(SifSemanticWireError::UnexpectedSemanticKind {
@@ -179,31 +192,236 @@ impl SifProtectedFileSemanticChannel {
                 found: payload.kind(),
             });
         }
-        canonical_decode(payload.semantic_bytes())
+        Ok(payload.into_semantic_bytes())
     }
 }
 
-fn canonical_encode<T: Serialize>(value: &T) -> Result<Vec<u8>, SifSemanticWireError> {
-    bincode::serialize(value).map_err(|error| SifSemanticWireError::Codec {
-        operation: "encode",
-        message: error.to_string(),
-    })
+fn encode_offer(offer: &SifProtectedFileOffer) -> Result<Vec<u8>, SifSemanticWireError> {
+    offer.validate()?;
+    let name = offer.display_name().as_bytes();
+    let name_len = u16::try_from(name.len())
+        .map_err(|_| malformed("offer.display_name length cannot fit u16"))?;
+    let mut out = Vec::with_capacity(OFFER_FIXED_BYTES + name.len());
+    out.push(SIF_SEMANTIC_WIRE_CODEC_VERSION);
+    out.extend_from_slice(offer.release_id().as_bytes());
+    out.extend_from_slice(&offer.transfer_id().to_be_bytes());
+    out.extend_from_slice(&offer.sender_release_entry_hash());
+    out.extend_from_slice(&offer.result_digest());
+    out.extend_from_slice(&offer.size().to_be_bytes());
+    out.extend_from_slice(&offer.content_blake3());
+    out.extend_from_slice(&name_len.to_be_bytes());
+    out.extend_from_slice(name);
+    Ok(out)
 }
 
-fn canonical_decode<T: Serialize + DeserializeOwned>(
-    semantic_bytes: &[u8],
-) -> Result<T, SifSemanticWireError> {
-    let value: T = bincode::deserialize(semantic_bytes).map_err(|error| {
-        SifSemanticWireError::Codec {
-            operation: "decode",
-            message: error.to_string(),
+fn decode_offer(bytes: &[u8]) -> Result<SifProtectedFileOffer, SifSemanticWireError> {
+    let mut reader = SemanticReader::new(bytes);
+    reader.require_version()?;
+    let release_id = Uuid::from_bytes(reader.array::<16>("offer.release_id")?);
+    let transfer_id = reader.u64("offer.transfer_id")?;
+    let sender_release_entry_hash = reader.array::<32>("offer.sender_release_entry_hash")?;
+    let result_digest = reader.array::<32>("offer.result_digest")?;
+    let size = reader.u64("offer.size")?;
+    let content_blake3 = reader.array::<32>("offer.content_blake3")?;
+    let name_len = usize::from(reader.u16("offer.display_name_len")?);
+    if name_len == 0 || name_len > MAX_SIF_PROTECTED_FILE_NAME_BYTES {
+        return Err(malformed("offer.display_name length outside protocol bound"));
+    }
+    let name_bytes = reader.slice(name_len, "offer.display_name")?;
+    reader.finish()?;
+    let display_name = std::str::from_utf8(name_bytes)
+        .map_err(|_| malformed("offer.display_name is not UTF-8"))?;
+    Ok(SifProtectedFileOffer::new(
+        release_id,
+        transfer_id,
+        sender_release_entry_hash,
+        result_digest,
+        display_name.to_owned(),
+        size,
+        content_blake3,
+    )?)
+}
+
+fn encode_response(
+    response: &SifProtectedFileOfferResponse,
+) -> Result<Vec<u8>, SifSemanticWireError> {
+    let reason = response.reason().unwrap_or("").as_bytes();
+    let reason_len = u16::try_from(reason.len())
+        .map_err(|_| malformed("response.reason length cannot fit u16"))?;
+    let mut out = Vec::with_capacity(RESPONSE_FIXED_BYTES + reason.len());
+    out.push(SIF_SEMANTIC_WIRE_CODEC_VERSION);
+    out.extend_from_slice(&response.offer_digest());
+    out.push(match response.decision() {
+        SifProtectedFileOfferDecision::Accept => 0,
+        SifProtectedFileOfferDecision::Reject => 1,
+    });
+    out.extend_from_slice(&reason_len.to_be_bytes());
+    out.extend_from_slice(reason);
+    Ok(out)
+}
+
+fn decode_response(
+    bytes: &[u8],
+    offer: &SifProtectedFileOffer,
+) -> Result<SifProtectedFileOfferResponse, SifSemanticWireError> {
+    let mut reader = SemanticReader::new(bytes);
+    reader.require_version()?;
+    let offer_digest = reader.array::<32>("response.offer_digest")?;
+    require_offer_digest(offer_digest, offer)?;
+    let decision = reader.u8("response.decision")?;
+    let reason_len = usize::from(reader.u16("response.reason_len")?);
+    if reason_len > MAX_SIF_PROTECTED_FILE_REJECT_REASON_BYTES {
+        return Err(malformed("response.reason length outside protocol bound"));
+    }
+    let reason_bytes = reader.slice(reason_len, "response.reason")?;
+    reader.finish()?;
+
+    match decision {
+        0 if reason_len == 0 => Ok(SifProtectedFileOfferResponse::accept(offer)?),
+        0 => Err(malformed("Accept response carried a Reject reason")),
+        1 if reason_len == 0 => Err(malformed("Reject response omitted reason")),
+        1 => {
+            let reason = std::str::from_utf8(reason_bytes)
+                .map_err(|_| malformed("response.reason is not UTF-8"))?;
+            Ok(SifProtectedFileOfferResponse::reject(
+                offer,
+                reason.to_owned(),
+            )?)
         }
-    })?;
-    let canonical = canonical_encode(&value)?;
-    if canonical != semantic_bytes {
-        return Err(SifSemanticWireError::NonCanonicalSemanticEncoding);
+        _ => Err(malformed("response.decision tag is unknown")),
     }
-    Ok(value)
+}
+
+fn encode_chunk(chunk: &SifProtectedFileChunk) -> Result<Vec<u8>, SifSemanticWireError> {
+    let data_len = u32::try_from(chunk.data().len())
+        .map_err(|_| malformed("chunk.data length cannot fit u32"))?;
+    let mut out = Vec::with_capacity(CHUNK_FIXED_BYTES + chunk.data().len());
+    out.push(SIF_SEMANTIC_WIRE_CODEC_VERSION);
+    out.extend_from_slice(&chunk.offer_digest());
+    out.extend_from_slice(&chunk.offset().to_be_bytes());
+    out.extend_from_slice(&data_len.to_be_bytes());
+    out.extend_from_slice(chunk.data());
+    Ok(out)
+}
+
+fn decode_chunk(
+    bytes: &[u8],
+    offer: &SifProtectedFileOffer,
+) -> Result<SifProtectedFileChunk, SifSemanticWireError> {
+    let mut reader = SemanticReader::new(bytes);
+    reader.require_version()?;
+    let offer_digest = reader.array::<32>("chunk.offer_digest")?;
+    require_offer_digest(offer_digest, offer)?;
+    let offset = reader.u64("chunk.offset")?;
+    let data_len = usize::try_from(reader.u32("chunk.data_len")?)
+        .map_err(|_| malformed("chunk.data length cannot fit usize"))?;
+    if data_len == 0 || data_len > MAX_SIF_PROTECTED_FILE_CHUNK_BYTES {
+        return Err(malformed("chunk.data length outside protocol bound"));
+    }
+    let data = reader.slice(data_len, "chunk.data")?;
+    reader.finish()?;
+    Ok(SifProtectedFileChunk::new(offer, offset, data.to_vec())?)
+}
+
+fn encode_complete(complete: &SifProtectedFileComplete) -> Vec<u8> {
+    let mut out = Vec::with_capacity(COMPLETE_FIXED_BYTES);
+    out.push(SIF_SEMANTIC_WIRE_CODEC_VERSION);
+    out.extend_from_slice(&complete.offer_digest());
+    out
+}
+
+fn decode_complete(
+    bytes: &[u8],
+    offer: &SifProtectedFileOffer,
+) -> Result<SifProtectedFileComplete, SifSemanticWireError> {
+    let mut reader = SemanticReader::new(bytes);
+    reader.require_version()?;
+    let offer_digest = reader.array::<32>("complete.offer_digest")?;
+    reader.finish()?;
+    require_offer_digest(offer_digest, offer)?;
+    Ok(SifProtectedFileComplete::new(offer)?)
+}
+
+fn require_offer_digest(
+    found: [u8; 32],
+    offer: &SifProtectedFileOffer,
+) -> Result<(), SifSemanticWireError> {
+    if found != offer.offer_digest()? {
+        return Err(SifProtectedFileProtocolError::OfferDigestMismatch.into());
+    }
+    Ok(())
+}
+
+fn malformed(reason: &'static str) -> SifSemanticWireError {
+    SifSemanticWireError::MalformedSemantic { reason }
+}
+
+struct SemanticReader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> SemanticReader<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn require_version(&mut self) -> Result<(), SifSemanticWireError> {
+        if self.u8("codec.version")? != SIF_SEMANTIC_WIRE_CODEC_VERSION {
+            return Err(malformed("unsupported SIF semantic wire codec version"));
+        }
+        Ok(())
+    }
+
+    fn u8(&mut self, field: &'static str) -> Result<u8, SifSemanticWireError> {
+        Ok(self.slice(1, field)?[0])
+    }
+
+    fn u16(&mut self, field: &'static str) -> Result<u16, SifSemanticWireError> {
+        Ok(u16::from_be_bytes(self.array::<2>(field)?))
+    }
+
+    fn u32(&mut self, field: &'static str) -> Result<u32, SifSemanticWireError> {
+        Ok(u32::from_be_bytes(self.array::<4>(field)?))
+    }
+
+    fn u64(&mut self, field: &'static str) -> Result<u64, SifSemanticWireError> {
+        Ok(u64::from_be_bytes(self.array::<8>(field)?))
+    }
+
+    fn array<const N: usize>(
+        &mut self,
+        field: &'static str,
+    ) -> Result<[u8; N], SifSemanticWireError> {
+        let bytes = self.slice(N, field)?;
+        let mut out = [0u8; N];
+        out.copy_from_slice(bytes);
+        Ok(out)
+    }
+
+    fn slice(
+        &mut self,
+        len: usize,
+        field: &'static str,
+    ) -> Result<&'a [u8], SifSemanticWireError> {
+        let end = self
+            .offset
+            .checked_add(len)
+            .ok_or_else(|| malformed("semantic field length overflow"))?;
+        if end > self.bytes.len() {
+            return Err(SifSemanticWireError::TruncatedSemantic { field });
+        }
+        let out = &self.bytes[self.offset..end];
+        self.offset = end;
+        Ok(out)
+    }
+
+    fn finish(self) -> Result<(), SifSemanticWireError> {
+        if self.offset != self.bytes.len() {
+            return Err(malformed("semantic payload has trailing bytes"));
+        }
+        Ok(())
+    }
 }
 
 /// Fail-closed semantic↔wire adapter errors.
@@ -215,14 +433,6 @@ pub enum SifSemanticWireError {
     /// Concrete ledger object failed SIF protocol validation.
     #[error(transparent)]
     Protocol(#[from] SifProtectedFileProtocolError),
-    /// Bincode could not encode/decode the concrete semantic object.
-    #[error("SIF semantic {operation} failed: {message}")]
-    Codec {
-        /// Serialization phase that failed.
-        operation: &'static str,
-        /// Non-portable diagnostic detail retained for local logs.
-        message: String,
-    },
     /// Encrypted coarse class did not match the typed API the caller invoked.
     #[error("unexpected SIF semantic wire kind: expected {expected:?}, found {found:?}")]
     UnexpectedSemanticKind {
@@ -231,9 +441,18 @@ pub enum SifSemanticWireError {
         /// Authenticated encrypted class carried by the peer.
         found: SifProtectedFileWireKind,
     },
-    /// Authenticated semantic bytes were decodable but not the canonical local encoding.
-    #[error("SIF semantic payload used a non-canonical encoding")]
-    NonCanonicalSemanticEncoding,
+    /// Semantic field ended before its declared fixed/bounded length.
+    #[error("truncated SIF semantic field: {field}")]
+    TruncatedSemantic {
+        /// Field being read when authenticated bytes ended.
+        field: &'static str,
+    },
+    /// Canonical semantic grammar was violated.
+    #[error("malformed SIF semantic payload: {reason}")]
+    MalformedSemantic {
+        /// Stable local diagnostic explaining the rejected representation.
+        reason: &'static str,
+    },
 }
 
 #[cfg(test)]
@@ -241,7 +460,6 @@ mod tests {
     use super::*;
     use crate::sif_receive_runtime::{SifReceiveRuntime, SifReceiveRuntimeTerminal};
     use std::path::PathBuf;
-    use uuid::Uuid;
     use xenia_ledger::{
         CURRENT_EVIDENCE_CRYPTO_MANIFEST, SessionTranscriptBinding, SifDeliveryDisposition,
         SignatureSuite, sif_file_result_digest,
@@ -305,32 +523,35 @@ mod tests {
         let offer = offer_for(payload, 1);
         let (mut host, mut viewer) = pair();
 
-        let sealed_offer = host.seal_offer(&offer).unwrap();
-        let received_offer = viewer.open_offer(&sealed_offer).unwrap();
+        let received_offer = viewer.open_offer(&host.seal_offer(&offer).unwrap()).unwrap();
         assert_eq!(received_offer, offer);
 
         let response = SifProtectedFileOfferResponse::accept(&received_offer).unwrap();
         let sealed_response = viewer
             .seal_response_for_offer(&response, &received_offer)
             .unwrap();
-        let received_response = host
-            .open_response_for_offer(&sealed_response, &offer)
-            .unwrap();
-        assert_eq!(received_response, response);
+        assert_eq!(
+            host.open_response_for_offer(&sealed_response, &offer).unwrap(),
+            response
+        );
 
         let chunk = SifProtectedFileChunk::new(&offer, 0, payload.to_vec()).unwrap();
         let sealed_chunk = host.seal_chunk_for_offer(&chunk, &offer).unwrap();
-        let received_chunk = viewer
-            .open_chunk_for_offer(&sealed_chunk, &received_offer)
-            .unwrap();
-        assert_eq!(received_chunk, chunk);
+        assert_eq!(
+            viewer
+                .open_chunk_for_offer(&sealed_chunk, &received_offer)
+                .unwrap(),
+            chunk
+        );
 
         let complete = SifProtectedFileComplete::new(&offer).unwrap();
         let sealed_complete = host.seal_complete_for_offer(&complete, &offer).unwrap();
-        let received_complete = viewer
-            .open_complete_for_offer(&sealed_complete, &received_offer)
-            .unwrap();
-        assert_eq!(received_complete, complete);
+        assert_eq!(
+            viewer
+                .open_complete_for_offer(&sealed_complete, &received_offer)
+                .unwrap(),
+            complete
+        );
     }
 
     #[test]
@@ -340,7 +561,6 @@ mod tests {
         let other_offer = offer_for(payload, 2);
         let response = SifProtectedFileOfferResponse::accept(&offer).unwrap();
         let (mut host, _) = pair();
-
         assert!(matches!(
             host.seal_response_for_offer(&response, &other_offer),
             Err(SifSemanticWireError::Protocol(
@@ -354,20 +574,53 @@ mod tests {
         let payload = b"abcdefghij";
         let offer = offer_for(payload, 1);
         let (mut host, mut viewer) = pair();
-        let semantic_bytes = bincode::serialize(&offer).unwrap();
         let wrong_class = SifProtectedFileWirePayload::new(
             SifProtectedFileWireKind::Chunk,
-            semantic_bytes,
+            encode_offer(&offer).unwrap(),
         )
         .unwrap();
         let envelope = host.wire.seal(&wrong_class).unwrap();
-
         assert!(matches!(
             viewer.open_offer(&envelope),
             Err(SifSemanticWireError::UnexpectedSemanticKind {
                 expected: SifProtectedFileWireKind::Offer,
                 found: SifProtectedFileWireKind::Chunk,
             })
+        ));
+    }
+
+    #[test]
+    fn inner_chunk_length_bomb_is_rejected_before_data_allocation() {
+        let payload = b"abcdefghij";
+        let offer = offer_for(payload, 1);
+        let (mut host, mut viewer) = pair();
+        let mut forged = Vec::with_capacity(CHUNK_FIXED_BYTES);
+        forged.push(SIF_SEMANTIC_WIRE_CODEC_VERSION);
+        forged.extend_from_slice(&offer.offer_digest().unwrap());
+        forged.extend_from_slice(&0u64.to_be_bytes());
+        forged.extend_from_slice(&u32::MAX.to_be_bytes());
+        let wrapper =
+            SifProtectedFileWirePayload::new(SifProtectedFileWireKind::Chunk, forged).unwrap();
+        let envelope = host.wire.seal(&wrapper).unwrap();
+        assert!(matches!(
+            viewer.open_chunk_for_offer(&envelope, &offer),
+            Err(SifSemanticWireError::MalformedSemantic { .. })
+        ));
+    }
+
+    #[test]
+    fn semantic_codec_rejects_trailing_authenticated_representation() {
+        let payload = b"abcdefghij";
+        let offer = offer_for(payload, 1);
+        let (mut host, mut viewer) = pair();
+        let mut forged = encode_offer(&offer).unwrap();
+        forged.push(0);
+        let wrapper =
+            SifProtectedFileWirePayload::new(SifProtectedFileWireKind::Offer, forged).unwrap();
+        let envelope = host.wire.seal(&wrapper).unwrap();
+        assert!(matches!(
+            viewer.open_offer(&envelope),
+            Err(SifSemanticWireError::MalformedSemantic { .. })
         ));
     }
 
@@ -390,8 +643,7 @@ mod tests {
         let final_path = dir.join(received_offer.display_name());
         let mut runtime = SifReceiveRuntime::begin(received_offer.clone(), &dir).unwrap();
 
-        for (offset, bytes) in [(0u64, &payload[..6]), (6u64, &payload[6..])]
-        {
+        for (offset, bytes) in [(0u64, &payload[..6]), (6u64, &payload[6..])] {
             let chunk = SifProtectedFileChunk::new(&offer, offset, bytes.to_vec()).unwrap();
             let envelope = host.seal_chunk_for_offer(&chunk, &offer).unwrap();
             let received = viewer
@@ -427,7 +679,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(binding.disposition(), SifDeliveryDisposition::PersistedVerified);
-
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
