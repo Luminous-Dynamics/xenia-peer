@@ -1,0 +1,72 @@
+name: Authenticated Session Evidence
+
+on:
+  pull_request:
+    paths:
+      - 'crates/xenia-peer-core/src/authenticated_session_evidence.rs'
+      - 'crates/xenia-peer-core/src/lib.rs'
+      - '.github/workflows/authenticated-session-evidence.yml'
+      - 'crates/xenia-peer-core/Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: authenticated-session-evidence-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format:
+    name: Evidence source format (Rust 1.96)
+    runs-on: ubuntu-24.04
+    env:
+      RUSTUP_TOOLCHAIN: 1.96.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Install exact formatter
+        run: rustup toolchain install 1.96.0 --profile minimal --component rustfmt
+      - name: Verify exact checkout and toolchain
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+          fi
+          rustc --version | grep -F 'rustc 1.96.0'
+          cargo --version | grep -F 'cargo 1.96.0'
+      - name: Format xenia-peer-core
+        run: cargo fmt --check -p xenia-peer-core
+
+  implementation:
+    name: Evidence implementation (MSRV 1.94)
+    runs-on: ubuntu-24.04
+    env:
+      RUSTUP_TOOLCHAIN: 1.94.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Install exact MSRV toolchain
+        run: rustup toolchain install 1.94.0 --profile minimal --component clippy
+      - name: Verify exact checkout and toolchain
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+          fi
+          rustc --version | grep -F 'rustc 1.94.0'
+          cargo --version | grep -F 'cargo 1.94.0'
+      - name: Locked metadata resolves without mutation
+        run: |
+          before=$(sha256sum Cargo.lock | awk '{print $1}')
+          cargo metadata --locked --format-version 1 --no-deps >/dev/null
+          after=$(sha256sum Cargo.lock | awk '{print $1}')
+          test "$before" = "$after"
+          git diff --exit-code -- Cargo.lock
+      - name: Check xenia-peer-core
+        run: cargo check --locked -p xenia-peer-core --all-targets
+      - name: Test xenia-peer-core
+        run: cargo test --locked -p xenia-peer-core --all-targets
+      - name: Clippy xenia-peer-core
+        run: cargo clippy --locked -p xenia-peer-core --all-targets -- -D warnings
