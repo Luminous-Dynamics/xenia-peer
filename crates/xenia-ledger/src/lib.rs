@@ -48,10 +48,12 @@
 //! itself a release token. The public [`DisclosureReleaseState`] is a CAS-enforced
 //! wrapper: every Commit/Outcome transition must atomically compare the durable
 //! [`DisclosureReleaseFrontier`] before persistence. Only a successful durable Commit
-//! returns the move-only [`CommittedDisclosurePermit`] intended for protected-output
-//! adapters. One release credential is constrained to one non-branching release
-//! lineage, and the exact consent approval that anchored execution must remain current
-//! through that durable commit.
+//! returns the move-only [`CommittedDisclosurePermit`].
+//!
+//! For bounded outbound files, [`CommittedFileDisclosure`] consumes that generic
+//! permit only when [`sif_file_result_digest`] matches the exact wire-visible filename,
+//! byte length, and BLAKE3 content hash. It then accounts only transport-confirmed
+//! bytes and yields an exact Completed/Aborted/Partial terminal observation.
 //!
 //! A downstream auditor — including a non-operator third party —
 //! can use [`Verifier::verify_chain`] to reconstruct every hash link
@@ -63,25 +65,6 @@
 //!
 //! This is the "admin cannot rewrite the audit log" claim made in the
 //! Mycelix Sovereign threat model, enforced cryptographically.
-//!
-//! ## Design choices
-//!
-//! - **blake3 for the hash chain.** Modern, tree-based, much faster than
-//!   SHA-256 at large scales. The chain itself uses only the single-
-//!   shot [`blake3::hash`] API for simplicity.
-//! - **Ed25519 by default, ML-DSA behind an explicit feature.** The stable
-//!   [`Chain`] remains Ed25519 for M1 compatibility. Builds with the
-//!   `pqc-signatures` feature also expose ML-DSA-65/87 exported-evidence
-//!   chain builders so full-PQC fixtures can be produced and verified without
-//!   weakening the default hybrid/pre-PQC runtime claim.
-//! - **bincode v1 for canonical serialization.** Deterministic across
-//!   runs at a given bincode version. Version-locked via the workspace.
-//!   If we migrate to bincode v2 or a different serializer, a schema-
-//!   version field on each entry lets old ledgers verify against old
-//!   code.
-//! - **No persistence layer in this crate.** Callers decide whether to
-//!   store the chain as JSON, CBOR, a SQLite table, or Holochain
-//!   entries. `Chain::from_entries` lets any storage layer rehydrate.
 
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
@@ -97,6 +80,7 @@ mod compaction;
 mod disclosure_v2;
 mod entry;
 mod errors;
+mod file_disclosure;
 mod hash;
 mod key_transition;
 mod policy;
@@ -177,12 +161,17 @@ pub use entry::{
     new_ml_dsa_87_evidence_chain,
 };
 
+pub use errors::{EvidenceBundleVerifyError, LedgerError, TransactionalAppendError, VerifyError};
+
+pub use file_disclosure::{
+    CommittedFileDisclosure, FileDisclosureError, FileDisclosureTerminal, SIF_FILE_RESULT_PROFILE,
+    sif_file_result_digest,
+};
+
 pub use key_transition::{
     LEDGER_KEY_TRANSITION_SCHEMA, LedgerKeyTransition, LedgerKeyTransitionError,
     ledger_key_transition_message,
 };
-
-pub use errors::{EvidenceBundleVerifyError, LedgerError, TransactionalAppendError, VerifyError};
 
 pub use policy::{
     CURRENT_EVIDENCE_CRYPTO_MANIFEST, CURRENT_LEDGER_EVIDENCE_PROFILE, CryptoPolicyProfile,
