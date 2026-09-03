@@ -13,3 +13,4 @@
 #![deny(unsafe_code)]
 
 pub mod sif_receive_runtime;
+pub mod sif_semantic_wire;
