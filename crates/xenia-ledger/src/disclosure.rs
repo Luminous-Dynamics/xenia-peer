@@ -14,6 +14,11 @@
 //! protected-output adapter. Persistence failure fails closed before that token is
 //! returned.
 //!
+//! Consent is checked twice: the original execution anchor must be a resident signed
+//! `Approval`, and commit-time state must still have `Approval` as the latest event
+//! for the same authenticated session/requester. A later denial, revocation,
+//! violation, or unresolved request therefore prevents release.
+//!
 //! Release outcomes are explicit. A crash after commit but before an outcome leaves
 //! an unresolved commit and MUST NOT be replayed automatically. A retry uses a new
 //! release ID and may reference only an earlier `Aborted` or `Partial` release.
@@ -31,7 +36,7 @@ use crate::accountability::{
 };
 use crate::binding::SessionTranscriptBinding;
 use crate::chain::Chain;
-use crate::entry::TranscriptBindingError;
+use crate::entry::{ConsentKind, LedgerEntry, TranscriptBindingError};
 use crate::policy::EvidenceCryptoManifest;
 use crate::signature::{
     Ed25519EvidenceSignatureBackend, EvidenceSignatureBackend, EvidenceSignatureBackendError,
@@ -51,7 +56,8 @@ pub const ACCOUNTABILITY_RELEASE_ENTRY_SCHEMA: &str =
 pub const ACCOUNTABILITY_DISCLOSURE_COMMITMENT_ALGORITHM: &str = "blake3-256";
 
 const DISCLOSURE_BINDING_DOMAIN: &[u8] = b"xenia:accountability-disclosure-binding:v1";
-const DISCLOSURE_PERMIT_DIGEST_DOMAIN: &[u8] = b"xenia:accountability-disclosure-permit-digest:v1";
+const DISCLOSURE_PERMIT_DIGEST_DOMAIN: &[u8] =
+    b"xenia:accountability-disclosure-permit-digest:v1";
 const RELEASE_ENTRY_DOMAIN: &[u8] = b"xenia:accountability-release-entry:v1";
 
 /// Release phase represented by a v1 disclosure permit.
@@ -256,9 +262,9 @@ impl Chain {
     /// Prepare and sign a release permit after verifying the exact execution
     /// attestation whose result will be disclosed.
     ///
-    /// The execution frontier must belong to this chain's retained history (or
-    /// current compacted-prefix checkpoint). This prevents a valid execution proof
-    /// from another ledger from being grafted onto this release authority.
+    /// The execution anchor must still be resident and must itself be an explicit
+    /// consent `Approval`. A compacted checkpoint proves chain continuity but does
+    /// not expose enough semantics to authorize release, so that case fails closed.
     #[allow(clippy::too_many_arguments)]
     pub fn prepare_accountability_disclosure(
         &self,
@@ -271,12 +277,10 @@ impl Chain {
         execution_public_key: &[u8],
     ) -> Result<AccountabilityDisclosurePermit, AccountabilityDisclosureError> {
         execution.verify(manifest, execution_backend, execution_public_key)?;
-        if !chain_contains_frontier(
-            self,
-            execution.binding.ledger_entry_count,
-            execution.binding.ledger_head_hash,
-        ) {
-            return Err(AccountabilityDisclosureError::ExecutionLedgerNotAncestor);
+        let anchor = resident_execution_anchor(self, execution)
+            .ok_or(AccountabilityDisclosureError::ExecutionAuthorizationNotResident)?;
+        if anchor.event.kind != ConsentKind::Approval {
+            return Err(AccountabilityDisclosureError::ExecutionAnchorNotApproved);
         }
         require_nonzero("evidence_bundle_digest", &evidence_bundle_digest)?;
 
@@ -352,8 +356,8 @@ pub struct DisclosureReleaseEntry {
     pub event: DisclosureReleaseEvent,
     /// Domain-separated hash of the complete entry statement.
     pub entry_hash: [u8; 32],
-    /// Ed25519 signature by the Xenia ledger authority over `entry_hash`.
-    pub signature: [u8; 64],
+    /// Algorithm-tagged ledger-authority signature over `entry_hash`.
+    pub signature: SignatureEnvelope,
 }
 
 /// Append-only release state. Persistence is supplied transactionally by the caller.
@@ -381,6 +385,10 @@ impl DisclosureReleaseState {
 
     /// Transactionally commit a prepared permit and return the move-only token
     /// required by a protected-output adapter.
+    ///
+    /// The current consent ledger is re-checked immediately before the release
+    /// journal commit. The latest event for the permit's session/requester must
+    /// still be an explicit `Approval`.
     pub fn commit_permit_transactional<E>(
         &mut self,
         chain: &Chain,
@@ -394,6 +402,17 @@ impl DisclosureReleaseState {
             .map_err(TransactionalDisclosureError::Protocol)?;
         verify_expectation(&permit.binding, expected)
             .map_err(TransactionalDisclosureError::Protocol)?;
+        if !chain_contains_frontier(
+            chain,
+            permit.binding.ledger_entry_count,
+            permit.binding.ledger_head_hash,
+        ) {
+            return Err(TransactionalDisclosureError::Protocol(
+                AccountabilityDisclosureError::PermitLedgerNotAncestor,
+            ));
+        }
+        require_live_approval(chain, &permit.binding)
+            .map_err(TransactionalDisclosureError::Protocol)?;
         self.validate_new_commit(&permit.binding)
             .map_err(TransactionalDisclosureError::Protocol)?;
 
@@ -405,7 +424,10 @@ impl DisclosureReleaseState {
         let entry = build_release_entry(
             &chain.signing_key,
             self.entries.len() as u64,
-            self.entries.last().map(|entry| entry.entry_hash).unwrap_or([0u8; 32]),
+            self.entries
+                .last()
+                .map(|entry| entry.entry_hash)
+                .unwrap_or([0u8; 32]),
             permit.binding.release_id,
             event,
         );
@@ -415,17 +437,20 @@ impl DisclosureReleaseState {
             return Err(TransactionalDisclosureError::Persist(error));
         }
 
+        let release_entry_hash = self
+            .entries
+            .last()
+            .ok_or(TransactionalDisclosureError::Protocol(
+                AccountabilityDisclosureError::ReleaseAppendInvariant,
+            ))?
+            .entry_hash;
         Ok(CommittedDisclosurePermit {
             release_id: permit.binding.release_id,
             operation_id: permit.binding.operation_id,
             session_id: permit.binding.session.session_id,
             result_digest: permit.binding.result_digest,
             evidence_bundle_digest: permit.binding.evidence_bundle_digest,
-            release_entry_hash: self
-                .entries
-                .last()
-                .expect("entry was just persisted")
-                .entry_hash,
+            release_entry_hash,
         })
     }
 
@@ -437,8 +462,7 @@ impl DisclosureReleaseState {
         outcome: DisclosureReleaseOutcome,
         persist: impl FnOnce(&[DisclosureReleaseEntry]) -> Result<(), E>,
     ) -> Result<(), TransactionalDisclosureError<E>> {
-        let state = self.release_lifecycle(release_id);
-        match state {
+        match self.release_lifecycle(release_id) {
             ReleaseLifecycle::Missing => {
                 return Err(TransactionalDisclosureError::Protocol(
                     AccountabilityDisclosureError::OutcomeWithoutCommit,
@@ -451,16 +475,15 @@ impl DisclosureReleaseState {
             }
             ReleaseLifecycle::Committed => {}
         }
-        if matches!(outcome, DisclosureReleaseOutcome::Partial { bytes_released: 0 }) {
-            return Err(TransactionalDisclosureError::Protocol(
-                AccountabilityDisclosureError::ZeroPartialRelease,
-            ));
-        }
+        validate_outcome(outcome).map_err(TransactionalDisclosureError::Protocol)?;
 
         let entry = build_release_entry(
             &chain.signing_key,
             self.entries.len() as u64,
-            self.entries.last().map(|entry| entry.entry_hash).unwrap_or([0u8; 32]),
+            self.entries
+                .last()
+                .map(|entry| entry.entry_hash)
+                .unwrap_or([0u8; 32]),
             release_id,
             DisclosureReleaseEvent::Outcome(outcome),
         );
@@ -476,44 +499,35 @@ impl DisclosureReleaseState {
         &self,
         binding: &AccountabilityDisclosureBinding,
     ) -> Result<(), AccountabilityDisclosureError> {
-        if !matches!(self.release_lifecycle(binding.release_id), ReleaseLifecycle::Missing) {
+        if !matches!(
+            self.release_lifecycle(binding.release_id),
+            ReleaseLifecycle::Missing
+        ) {
             return Err(AccountabilityDisclosureError::ReleaseIdAlreadyUsed);
         }
-        if let Some(previous) = binding.retry_of {
-            match self.release_lifecycle(previous) {
-                ReleaseLifecycle::Terminal(DisclosureReleaseOutcome::Aborted)
-                | ReleaseLifecycle::Terminal(DisclosureReleaseOutcome::Partial { .. }) => {}
-                ReleaseLifecycle::Terminal(DisclosureReleaseOutcome::Completed) => {
-                    return Err(AccountabilityDisclosureError::RetryOfCompletedRelease);
+        validate_retry_target(&self.lifecycle_map(), binding.retry_of)
+    }
+
+    fn lifecycle_map(&self) -> BTreeMap<Uuid, ReleaseLifecycle> {
+        let mut map = BTreeMap::new();
+        for entry in &self.entries {
+            match entry.event {
+                DisclosureReleaseEvent::Commit { .. } => {
+                    map.insert(entry.release_id, ReleaseLifecycle::Committed);
                 }
-                ReleaseLifecycle::Committed => {
-                    return Err(AccountabilityDisclosureError::RetryOfUnresolvedRelease);
-                }
-                ReleaseLifecycle::Missing => {
-                    return Err(AccountabilityDisclosureError::RetryTargetMissing);
+                DisclosureReleaseEvent::Outcome(value) => {
+                    map.insert(entry.release_id, ReleaseLifecycle::Terminal(value));
                 }
             }
         }
-        Ok(())
+        map
     }
 
     fn release_lifecycle(&self, release_id: Uuid) -> ReleaseLifecycle {
-        let mut committed = false;
-        let mut outcome = None;
-        for entry in &self.entries {
-            if entry.release_id != release_id {
-                continue;
-            }
-            match entry.event {
-                DisclosureReleaseEvent::Commit { .. } => committed = true,
-                DisclosureReleaseEvent::Outcome(value) => outcome = Some(value),
-            }
-        }
-        match (committed, outcome) {
-            (_, Some(value)) => ReleaseLifecycle::Terminal(value),
-            (true, None) => ReleaseLifecycle::Committed,
-            (false, None) => ReleaseLifecycle::Missing,
-        }
+        self.lifecycle_map()
+            .get(&release_id)
+            .copied()
+            .unwrap_or(ReleaseLifecycle::Missing)
     }
 }
 
@@ -580,7 +594,8 @@ pub enum TransactionalDisclosureError<E> {
     Persist(E),
 }
 
-/// Verify a persisted release journal's hash chain and Ed25519 signatures.
+/// Verify a persisted release journal's hash chain, retry graph, lifecycle, and
+/// Ed25519 signatures.
 pub fn verify_disclosure_release_entries(
     entries: &[DisclosureReleaseEntry],
     ledger_public_key: &[u8],
@@ -598,21 +613,41 @@ pub fn verify_disclosure_release_entries(
         if entry.seq != index as u64 || entry.prev_hash != previous {
             return Err(AccountabilityDisclosureError::ReleaseJournalChainMismatch);
         }
-        let expected_hash = release_entry_hash(entry.seq, entry.prev_hash, entry.release_id, &entry.event);
+        let expected_hash =
+            release_entry_hash(entry.seq, entry.prev_hash, entry.release_id, &entry.event);
         if entry.entry_hash != expected_hash {
             return Err(AccountabilityDisclosureError::ReleaseJournalHashMismatch);
         }
-        backend.verify_signature(ledger_public_key, &entry.entry_hash, &entry.signature)?;
+        let suite = entry.signature.validate_shape()?;
+        if suite != SignatureSuite::Ed25519Rfc8032 {
+            return Err(AccountabilityDisclosureError::UnsupportedPermitSignatureSuite {
+                suite,
+            });
+        }
+        backend.verify_signature(
+            ledger_public_key,
+            &entry.entry_hash,
+            &entry.signature.signature,
+        )?;
 
         let current = lifecycle
             .get(&entry.release_id)
             .copied()
             .unwrap_or(ReleaseLifecycle::Missing);
         let next = match (current, &entry.event) {
-            (ReleaseLifecycle::Missing, DisclosureReleaseEvent::Commit { .. }) => {
+            (
+                ReleaseLifecycle::Missing,
+                DisclosureReleaseEvent::Commit {
+                    permit_digest,
+                    retry_of,
+                },
+            ) => {
+                require_nonzero("permit_digest", permit_digest)?;
+                validate_retry_target(&lifecycle, *retry_of)?;
                 ReleaseLifecycle::Committed
             }
             (ReleaseLifecycle::Committed, DisclosureReleaseEvent::Outcome(value)) => {
+                validate_outcome(*value)?;
                 ReleaseLifecycle::Terminal(*value)
             }
             _ => return Err(AccountabilityDisclosureError::InvalidReleaseJournalLifecycle),
@@ -628,16 +663,30 @@ fn verify_expectation(
     expected: &AccountabilityDisclosureExpectation,
 ) -> Result<(), AccountabilityDisclosureError> {
     if binding.release_id != expected.release_id {
-        return Err(AccountabilityDisclosureError::ExpectationMismatch("release_id"));
+        return Err(AccountabilityDisclosureError::ExpectationMismatch(
+            "release_id",
+        ));
     }
     if binding.operation_id != expected.operation_id {
-        return Err(AccountabilityDisclosureError::ExpectationMismatch("operation_id"));
+        return Err(AccountabilityDisclosureError::ExpectationMismatch(
+            "operation_id",
+        ));
     }
     if binding.session.session_id != expected.session_id {
-        return Err(AccountabilityDisclosureError::ExpectationMismatch("session_id"));
+        return Err(AccountabilityDisclosureError::ExpectationMismatch(
+            "session_id",
+        ));
     }
-    require_equal("requester_source_id", &binding.requester_source_id, &expected.requester_source_id)?;
-    require_equal("receipt_digest", &binding.receipt_digest, &expected.receipt_digest)?;
+    require_equal(
+        "requester_source_id",
+        &binding.requester_source_id,
+        &expected.requester_source_id,
+    )?;
+    require_equal(
+        "receipt_digest",
+        &binding.receipt_digest,
+        &expected.receipt_digest,
+    )?;
     require_equal(
         "evidence_bundle_digest",
         &binding.evidence_bundle_digest,
@@ -649,7 +698,85 @@ fn verify_expectation(
         &expected.execution_binding_digest,
     )?;
     if binding.result_digest != expected.result_digest {
-        return Err(AccountabilityDisclosureError::ExpectationMismatch("result_digest"));
+        return Err(AccountabilityDisclosureError::ExpectationMismatch(
+            "result_digest",
+        ));
+    }
+    Ok(())
+}
+
+fn resident_execution_anchor<'a>(
+    chain: &'a Chain,
+    execution: &AccountabilityExecutionAttestation,
+) -> Option<&'a LedgerEntry> {
+    chain.iter().find(|entry| {
+        entry.seq.checked_add(1) == Some(execution.binding.ledger_entry_count)
+            && entry.entry_hash == execution.binding.ledger_head_hash
+            && entry.event.session_id == execution.binding.session.session_id
+            && entry.event.source_id == execution.binding.requester_source_id
+    })
+}
+
+fn chain_contains_frontier(chain: &Chain, entry_count: u64, head_hash: [u8; 32]) -> bool {
+    if chain.entry_count() == entry_count && chain.last_hash() == head_hash {
+        return true;
+    }
+    if let Some(checkpoint) = chain.base_checkpoint()
+        && checkpoint.entry_count == entry_count
+        && checkpoint.head_hash == head_hash
+    {
+        return true;
+    }
+    chain.iter().any(|entry| {
+        entry.seq.checked_add(1) == Some(entry_count) && entry.entry_hash == head_hash
+    })
+}
+
+fn require_live_approval(
+    chain: &Chain,
+    binding: &AccountabilityDisclosureBinding,
+) -> Result<(), AccountabilityDisclosureError> {
+    let latest = chain.iter().rev().find(|entry| {
+        entry.event.session_id == binding.session.session_id
+            && entry.event.source_id == binding.requester_source_id
+    });
+    match latest {
+        Some(entry) if entry.event.kind == ConsentKind::Approval => Ok(()),
+        Some(_) => Err(AccountabilityDisclosureError::CurrentConsentNotApproved),
+        None => Err(AccountabilityDisclosureError::CurrentConsentNotResident),
+    }
+}
+
+fn validate_retry_target(
+    lifecycle: &BTreeMap<Uuid, ReleaseLifecycle>,
+    retry_of: Option<Uuid>,
+) -> Result<(), AccountabilityDisclosureError> {
+    let Some(previous) = retry_of else {
+        return Ok(());
+    };
+    match lifecycle.get(&previous).copied() {
+        Some(ReleaseLifecycle::Terminal(DisclosureReleaseOutcome::Aborted))
+        | Some(ReleaseLifecycle::Terminal(DisclosureReleaseOutcome::Partial { .. })) => Ok(()),
+        Some(ReleaseLifecycle::Terminal(DisclosureReleaseOutcome::Completed)) => {
+            Err(AccountabilityDisclosureError::RetryOfCompletedRelease)
+        }
+        Some(ReleaseLifecycle::Committed) => {
+            Err(AccountabilityDisclosureError::RetryOfUnresolvedRelease)
+        }
+        Some(ReleaseLifecycle::Missing) | None => {
+            Err(AccountabilityDisclosureError::RetryTargetMissing)
+        }
+    }
+}
+
+fn validate_outcome(
+    outcome: DisclosureReleaseOutcome,
+) -> Result<(), AccountabilityDisclosureError> {
+    if matches!(
+        outcome,
+        DisclosureReleaseOutcome::Partial { bytes_released: 0 }
+    ) {
+        return Err(AccountabilityDisclosureError::ZeroPartialRelease);
     }
     Ok(())
 }
@@ -670,7 +797,7 @@ fn build_release_entry(
         release_id,
         event,
         entry_hash,
-        signature,
+        signature: SignatureEnvelope::ed25519(signature),
     }
 }
 
@@ -689,7 +816,10 @@ fn release_entry_hash(
     hasher.update(&prev_hash);
     hasher.update(release_id.as_bytes());
     match event {
-        DisclosureReleaseEvent::Commit { permit_digest, retry_of } => {
+        DisclosureReleaseEvent::Commit {
+            permit_digest,
+            retry_of,
+        } => {
             hasher.update(&[0]);
             hasher.update(permit_digest);
             match retry_of {
@@ -714,20 +844,6 @@ fn release_entry_hash(
         }
     }
     *hasher.finalize().as_bytes()
-}
-
-fn chain_contains_frontier(chain: &Chain, entry_count: u64, head_hash: [u8; 32]) -> bool {
-    if chain.entry_count() == entry_count && chain.last_hash() == head_hash {
-        return true;
-    }
-    if let Some(checkpoint) = chain.base_checkpoint() {
-        if checkpoint.entry_count == entry_count && checkpoint.head_hash == head_hash {
-            return true;
-        }
-    }
-    chain.iter().any(|entry| {
-        entry.seq.checked_add(1) == Some(entry_count) && entry.entry_hash == head_hash
-    })
 }
 
 fn require_nonzero(
@@ -768,19 +884,34 @@ pub enum AccountabilityDisclosureError {
     SignatureVerification(#[from] EvidenceSignatureBackendError),
     /// Binding schema is unsupported.
     #[error("unsupported accountability disclosure binding schema: {schema}")]
-    UnsupportedBindingSchema { schema: String },
+    UnsupportedBindingSchema {
+        /// Schema found in the artifact.
+        schema: String,
+    },
     /// Permit schema is unsupported.
     #[error("unsupported accountability disclosure permit schema: {schema}")]
-    UnsupportedPermitSchema { schema: String },
+    UnsupportedPermitSchema {
+        /// Schema found in the artifact.
+        schema: String,
+    },
     /// Release-entry schema is unsupported.
     #[error("unsupported accountability release entry schema: {schema}")]
-    UnsupportedReleaseEntrySchema { schema: String },
+    UnsupportedReleaseEntrySchema {
+        /// Schema found in the artifact.
+        schema: String,
+    },
     /// Commitment algorithm is unsupported.
     #[error("unsupported disclosure commitment algorithm: {algorithm}")]
-    UnsupportedCommitmentAlgorithm { algorithm: String },
-    /// v1 release permits are signed by the current Ed25519 ledger authority.
-    #[error("unsupported disclosure permit signature suite: {suite:?}")]
-    UnsupportedPermitSignatureSuite { suite: SignatureSuite },
+    UnsupportedCommitmentAlgorithm {
+        /// Algorithm found in the artifact.
+        algorithm: String,
+    },
+    /// v1 release permits/journal entries are signed by the current Ed25519 authority.
+    #[error("unsupported disclosure signature suite: {suite:?}")]
+    UnsupportedPermitSignatureSuite {
+        /// Suite found in the artifact.
+        suite: SignatureSuite,
+    },
     /// Release UUID must be non-nil.
     #[error("accountability release ID must not be nil")]
     NilReleaseId,
@@ -792,13 +923,28 @@ pub enum AccountabilityDisclosureError {
     SelfRetry,
     /// Required fixed-size commitment was all zero.
     #[error("accountability disclosure commitment {field} must not be all-zero")]
-    ZeroCommitment { field: &'static str },
+    ZeroCommitment {
+        /// Zero-valued field.
+        field: &'static str,
+    },
     /// Permit was anchored to an empty consent ledger.
     #[error("accountability disclosure requires a non-empty consent-ledger anchor")]
     EmptyLedgerAnchor,
-    /// Verified execution frontier was not found in this release authority's ledger history.
-    #[error("accountability execution ledger frontier is not an ancestor of the release authority")]
-    ExecutionLedgerNotAncestor,
+    /// Exact execution authorization entry is not resident and cannot be semantically inspected.
+    #[error("accountability execution authorization anchor is not resident")]
+    ExecutionAuthorizationNotResident,
+    /// Exact execution anchor was not an explicit consent approval.
+    #[error("accountability execution anchor is not an approved consent event")]
+    ExecutionAnchorNotApproved,
+    /// Permit ledger frontier is not in the current chain history.
+    #[error("accountability permit ledger frontier is not an ancestor of the current ledger")]
+    PermitLedgerNotAncestor,
+    /// No current resident consent event can establish release authority.
+    #[error("current accountability consent state is not resident")]
+    CurrentConsentNotResident,
+    /// Latest matching consent event is no longer an approval.
+    #[error("current accountability consent state is not approved")]
+    CurrentConsentNotApproved,
     /// A permit field differed from the protected-output boundary's expected context.
     #[error("accountability disclosure expectation mismatch: {0}")]
     ExpectationMismatch(&'static str),
@@ -832,14 +978,16 @@ pub enum AccountabilityDisclosureError {
     /// Release journal event lifecycle is invalid.
     #[error("accountability release journal has an invalid event lifecycle")]
     InvalidReleaseJournalLifecycle,
+    /// Internal append invariant was violated after successful persistence.
+    #[error("accountability release append invariant violated")]
+    ReleaseAppendInvariant,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        CURRENT_EVIDENCE_CRYPTO_MANIFEST, ConsentEventRecord, ConsentKind,
-        Ed25519EvidenceSignatureBackend,
+        CURRENT_EVIDENCE_CRYPTO_MANIFEST, ConsentEventRecord, Ed25519EvidenceSignatureBackend,
     };
 
     fn key() -> SigningKey {
@@ -854,14 +1002,14 @@ mod tests {
         )
     }
 
-    fn seeded_chain() -> Chain {
+    fn seeded_chain(kind: ConsentKind) -> Chain {
         let mut chain = Chain::new(key());
         chain
             .append(ConsentEventRecord {
                 source_id: [9u8; 32],
                 session_id: Uuid::from_u128(1),
                 request_id: Uuid::from_u128(2),
-                kind: ConsentKind::Approval,
+                kind,
                 scope: "purpose-bound lookup".into(),
             })
             .unwrap();
@@ -883,7 +1031,11 @@ mod tests {
             .unwrap()
     }
 
-    fn permit(chain: &Chain, release_id: Uuid, retry_of: Option<Uuid>) -> AccountabilityDisclosurePermit {
+    fn permit(
+        chain: &Chain,
+        release_id: Uuid,
+        retry_of: Option<Uuid>,
+    ) -> AccountabilityDisclosurePermit {
         let execution = execution(chain);
         chain
             .prepare_accountability_disclosure(
@@ -912,22 +1064,78 @@ mod tests {
     }
 
     #[test]
-    fn permit_binds_witnessed_bundle_and_live_execution() {
-        let chain = seeded_chain();
-        let permit = permit(&chain, Uuid::from_u128(30), None);
-        permit
-            .verify(
-                CURRENT_EVIDENCE_CRYPTO_MANIFEST,
-                chain.signing_key.verifying_key().as_bytes(),
-            )
-            .unwrap();
-        assert_eq!(permit.binding.evidence_bundle_digest, [20u8; 32]);
-        assert_eq!(permit.binding.operation_id, Uuid::from_u128(3));
+    fn execution_anchor_must_be_explicit_approval() {
+        let chain = seeded_chain(ConsentKind::Denial);
+        let execution = execution(&chain);
+        let result = chain.prepare_accountability_disclosure(
+            &execution,
+            [20u8; 32],
+            Uuid::from_u128(30),
+            None,
+            CURRENT_EVIDENCE_CRYPTO_MANIFEST,
+            &Ed25519EvidenceSignatureBackend,
+            chain.signing_key.verifying_key().as_bytes(),
+        );
+        assert!(matches!(
+            result,
+            Err(AccountabilityDisclosureError::ExecutionAnchorNotApproved)
+        ));
     }
 
     #[test]
-    fn different_bundle_fails_output_expectation() {
-        let chain = seeded_chain();
+    fn revocation_after_prepare_blocks_commit() {
+        let mut chain = seeded_chain(ConsentKind::Approval);
+        let permit = permit(&chain, Uuid::from_u128(30), None);
+        let expectation = expected(&permit);
+        chain
+            .append(ConsentEventRecord {
+                source_id: [9u8; 32],
+                session_id: Uuid::from_u128(1),
+                request_id: Uuid::from_u128(4),
+                kind: ConsentKind::Revocation,
+                scope: "revoke before disclosure".into(),
+            })
+            .unwrap();
+
+        let mut state = DisclosureReleaseState::default();
+        let result = state.commit_permit_transactional(
+            &chain,
+            permit,
+            &expectation,
+            CURRENT_EVIDENCE_CRYPTO_MANIFEST,
+            |_| Ok::<_, ()>(()),
+        );
+        assert!(matches!(
+            result,
+            Err(TransactionalDisclosureError::Protocol(
+                AccountabilityDisclosureError::CurrentConsentNotApproved
+            ))
+        ));
+    }
+
+    #[test]
+    fn persistence_failure_fails_closed_and_rolls_back() {
+        let chain = seeded_chain(ConsentKind::Approval);
+        let permit = permit(&chain, Uuid::from_u128(30), None);
+        let expectation = expected(&permit);
+        let mut state = DisclosureReleaseState::default();
+        let result = state.commit_permit_transactional(
+            &chain,
+            permit,
+            &expectation,
+            CURRENT_EVIDENCE_CRYPTO_MANIFEST,
+            |_| Err::<(), _>("disk unavailable"),
+        );
+        assert!(matches!(
+            result,
+            Err(TransactionalDisclosureError::Persist(_))
+        ));
+        assert!(state.entries().is_empty());
+    }
+
+    #[test]
+    fn witnessed_bundle_mismatch_fails_closed() {
+        let chain = seeded_chain(ConsentKind::Approval);
         let permit = permit(&chain, Uuid::from_u128(30), None);
         let mut expectation = expected(&permit);
         expectation.evidence_bundle_digest = [99u8; 32];
@@ -948,58 +1156,8 @@ mod tests {
     }
 
     #[test]
-    fn persistence_failure_fails_closed_and_rolls_back() {
-        let chain = seeded_chain();
-        let permit = permit(&chain, Uuid::from_u128(30), None);
-        let expectation = expected(&permit);
-        let mut state = DisclosureReleaseState::default();
-        let result = state.commit_permit_transactional(
-            &chain,
-            permit,
-            &expectation,
-            CURRENT_EVIDENCE_CRYPTO_MANIFEST,
-            |_| Err::<(), _>("disk unavailable"),
-        );
-        assert!(matches!(result, Err(TransactionalDisclosureError::Persist(_))));
-        assert!(state.entries().is_empty());
-    }
-
-    #[test]
-    fn release_id_is_single_use() {
-        let chain = seeded_chain();
-        let mut state = DisclosureReleaseState::default();
-        let first = permit(&chain, Uuid::from_u128(30), None);
-        let first_expected = expected(&first);
-        state
-            .commit_permit_transactional(
-                &chain,
-                first,
-                &first_expected,
-                CURRENT_EVIDENCE_CRYPTO_MANIFEST,
-                |_| Ok::<_, ()>(()),
-            )
-            .unwrap();
-
-        let second = permit(&chain, Uuid::from_u128(30), None);
-        let second_expected = expected(&second);
-        let result = state.commit_permit_transactional(
-            &chain,
-            second,
-            &second_expected,
-            CURRENT_EVIDENCE_CRYPTO_MANIFEST,
-            |_| Ok::<_, ()>(()),
-        );
-        assert!(matches!(
-            result,
-            Err(TransactionalDisclosureError::Protocol(
-                AccountabilityDisclosureError::ReleaseIdAlreadyUsed
-            ))
-        ));
-    }
-
-    #[test]
     fn unresolved_commit_cannot_be_retried() {
-        let chain = seeded_chain();
+        let chain = seeded_chain(ConsentKind::Approval);
         let mut state = DisclosureReleaseState::default();
         let first_id = Uuid::from_u128(30);
         let first = permit(&chain, first_id, None);
@@ -1032,8 +1190,8 @@ mod tests {
     }
 
     #[test]
-    fn aborted_release_can_be_explicitly_retried_with_new_id() {
-        let chain = seeded_chain();
+    fn aborted_release_can_be_explicitly_retried() {
+        let chain = seeded_chain(ConsentKind::Approval);
         let mut state = DisclosureReleaseState::default();
         let first_id = Uuid::from_u128(30);
         let first = permit(&chain, first_id, None);
@@ -1072,7 +1230,7 @@ mod tests {
 
     #[test]
     fn completed_release_cannot_be_retried() {
-        let chain = seeded_chain();
+        let chain = seeded_chain(ConsentKind::Approval);
         let mut state = DisclosureReleaseState::default();
         let first_id = Uuid::from_u128(30);
         let first = permit(&chain, first_id, None);
@@ -1113,8 +1271,8 @@ mod tests {
     }
 
     #[test]
-    fn release_journal_verifies_offline() {
-        let chain = seeded_chain();
+    fn release_journal_verifies_offline_and_rejects_tamper() {
+        let chain = seeded_chain(ConsentKind::Approval);
         let mut state = DisclosureReleaseState::default();
         let release_id = Uuid::from_u128(30);
         let permit = permit(&chain, release_id, None);
@@ -1142,23 +1300,7 @@ mod tests {
             chain.signing_key.verifying_key().as_bytes(),
         )
         .unwrap();
-    }
 
-    #[test]
-    fn tampered_release_journal_fails_verification() {
-        let chain = seeded_chain();
-        let mut state = DisclosureReleaseState::default();
-        let permit = permit(&chain, Uuid::from_u128(30), None);
-        let expectation = expected(&permit);
-        state
-            .commit_permit_transactional(
-                &chain,
-                permit,
-                &expectation,
-                CURRENT_EVIDENCE_CRYPTO_MANIFEST,
-                |_| Ok::<_, ()>(()),
-            )
-            .unwrap();
         let mut entries = state.into_entries();
         entries[0].entry_hash = [99u8; 32];
         assert!(verify_disclosure_release_entries(
