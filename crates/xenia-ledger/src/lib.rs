@@ -64,6 +64,7 @@
 #![deny(unsafe_code)]
 
 mod agent_authority;
+mod agent_authority_proto;
 mod archive;
 mod binding;
 mod chain;
@@ -86,7 +87,7 @@ pub use agent_authority::{
     AGENT_CAPABILITY_ATTESTATION_SCHEMA, AgentCapabilityAttestationError,
     AgentCapabilityAttestationV1, verify_agent_capability_attestation,
 };
-pub use xenia_agent_authority_proto::{
+pub use agent_authority_proto::{
     AGENT_CAPABILITY_AUTHORIZATION_DOMAIN, AGENT_CAPABILITY_AUTHORIZATION_SCHEMA_VERSION,
     AgentCapabilityAuthorizationError, AgentCapabilityAuthorizationV1, AgentCheckpointAnchorV1,
     TranscriptSignatureSuiteV1,
