@@ -12,6 +12,13 @@
 //!
 //! The key file is **read-only** here: missing state fails closed. This module never
 //! generates or replaces an M1 authority key.
+//!
+//! A prepared permit is deliberately **not** committable through an old snapshot.
+//! Commit reconstructs the M1 authority from the live runtime immediately before the
+//! durable release-journal CAS. This closes the Approval-snapshot -> live Revocation ->
+//! stale Commit race. After Commit, a narrower outcome authority is returned so an
+//! in-flight release can still record `Aborted`/`Partial` after consent is revoked,
+//! without retaining an API capable of authorizing another release.
 
 #![allow(dead_code)]
 
@@ -22,17 +29,22 @@ use thiserror::Error;
 use uuid::Uuid;
 use xenia_ledger::{
     AccountabilityBindingError, AccountabilityDisclosureError, AccountabilityDisclosurePermit,
-    AccountabilityExecutionAttestation, Chain, ConsentKind, DisclosureReleaseOutcome,
-    DisclosureReleaseState, DisclosureReleaseStore, Ed25519EvidenceSignatureBackend,
-    ExecutionBoundReleaseCredential, ReleaseCredentialError, ReleaseCredentialTrustPolicy,
-    SifReleaseCredential, TransactionalDisclosureError, TrustedReleaseAuthority, Verifier,
-    VerifyError, bind_release_credential_to_execution, verify_release_credential,
+    AccountabilityExecutionAttestation, Chain, CommittedDisclosurePermit, ConsentKind,
+    DisclosureReleaseOutcome, DisclosureReleaseState, DisclosureReleaseStore,
+    Ed25519EvidenceSignatureBackend, ExecutionBoundReleaseCredential, ReleaseCredentialError,
+    ReleaseCredentialTrustPolicy, SifReleaseCredential, TransactionalDisclosureError,
+    TrustedReleaseAuthority, Verifier, VerifyError, bind_release_credential_to_execution,
+    verify_release_credential,
 };
 
 use crate::m1_runtime::M1RuntimeSession;
 
 /// Verified short-lived view of the exact M1 ledger authority that controls the
 /// runtime's consent state.
+///
+/// This type can attest/verify/prepare, but intentionally cannot commit a release.
+/// Durable Commit requires [`commit_disclosure_from_current_runtime`], which rebuilds
+/// authority from the caller's currently locked live runtime.
 pub(crate) struct M1SifAuthoritySnapshot {
     chain: Chain,
     ledger_public_key: [u8; 32],
@@ -44,9 +56,8 @@ impl M1SifAuthoritySnapshot {
     /// Reconstruct a signing snapshot from the live runtime's immutable evidence.
     ///
     /// The current signed M1 anchor must be an `Approval`. A later Denial,
-    /// Revocation, Violation, Request, or other event therefore prevents a stale
-    /// execution/release from being created even before the lower release layer
-    /// performs its own anchor-continuity checks.
+    /// Revocation, Violation, Request, or other event therefore prevents a fresh
+    /// authorization snapshot from being created.
     pub(crate) fn from_runtime(
         runtime: &M1RuntimeSession,
         key_path: &Path,
@@ -140,6 +151,9 @@ impl M1SifAuthoritySnapshot {
     }
 
     /// Prepare a release permit only from an already execution-bound credential.
+    ///
+    /// This does not create output authority. The returned permit must still pass
+    /// a fresh live-runtime check in [`commit_disclosure_from_current_runtime`].
     pub(crate) fn prepare_disclosure(
         &self,
         credential: &ExecutionBoundReleaseCredential,
@@ -153,23 +167,19 @@ impl M1SifAuthoritySnapshot {
             xenia_ledger::CURRENT_EVIDENCE_CRYPTO_MANIFEST,
         )?)
     }
+}
 
-    /// CAS-commit a prepared permit. Only success returns the move-only release token.
-    pub(crate) fn commit_disclosure<S: DisclosureReleaseStore>(
-        &self,
-        state: &mut DisclosureReleaseState,
-        permit: AccountabilityDisclosurePermit,
-        store: &mut S,
-    ) -> Result<xenia_ledger::CommittedDisclosurePermit, TransactionalDisclosureError<S::Error>> {
-        state.commit_permit(
-            &self.chain,
-            permit,
-            xenia_ledger::CURRENT_EVIDENCE_CRYPTO_MANIFEST,
-            store,
-        )
-    }
+/// Move-only authority for closing one already-committed release.
+///
+/// It deliberately exposes no execution, credential, permit-preparation, or Commit
+/// operation. Retaining it across a mid-transfer revocation is necessary so Xenia can
+/// still durably record exactly what escaped (`Aborted`/`Partial`) after the live M1
+/// gate has closed.
+pub(crate) struct M1SifOutcomeAuthority {
+    chain: Chain,
+}
 
-    /// CAS-persist the terminal output observation using the same M1 signing authority.
+impl M1SifOutcomeAuthority {
     pub(crate) fn record_outcome<S: DisclosureReleaseStore>(
         &self,
         state: &mut DisclosureReleaseState,
@@ -179,6 +189,61 @@ impl M1SifAuthoritySnapshot {
     ) -> Result<(), TransactionalDisclosureError<S::Error>> {
         state.record_outcome(&self.chain, release_id, outcome, store)
     }
+}
+
+/// Result of a successful durable Commit: the move-only generic release permit plus
+/// a narrower signer that can only close this release lineage with a terminal outcome.
+pub(crate) struct M1SifCommittedRelease {
+    permit: CommittedDisclosurePermit,
+    outcome_authority: M1SifOutcomeAuthority,
+}
+
+impl M1SifCommittedRelease {
+    pub(crate) fn into_parts(self) -> (CommittedDisclosurePermit, M1SifOutcomeAuthority) {
+        (self.permit, self.outcome_authority)
+    }
+}
+
+/// Revalidate the **current** live M1 runtime and only then perform the durable CAS
+/// release Commit.
+///
+/// Callers in the daemon invoke this while holding the `AsyncMutex<M1RuntimeSession>`
+/// guard. No revocation can interleave between this fresh reconstruction and the
+/// synchronous release-store CAS. An earlier `M1SifAuthoritySnapshot` is intentionally
+/// not accepted by this API.
+pub(crate) fn commit_disclosure_from_current_runtime<S: DisclosureReleaseStore>(
+    runtime: &M1RuntimeSession,
+    key_path: &Path,
+    state: &mut DisclosureReleaseState,
+    permit: AccountabilityDisclosurePermit,
+    store: &mut S,
+) -> Result<M1SifCommittedRelease, M1SifCommitError<S::Error>> {
+    let current =
+        M1SifAuthoritySnapshot::from_runtime(runtime, key_path).map_err(M1SifCommitError::Authority)?;
+    let committed = state
+        .commit_permit(
+            &current.chain,
+            permit,
+            xenia_ledger::CURRENT_EVIDENCE_CRYPTO_MANIFEST,
+            store,
+        )
+        .map_err(M1SifCommitError::Release)?;
+
+    Ok(M1SifCommittedRelease {
+        permit: committed,
+        outcome_authority: M1SifOutcomeAuthority {
+            chain: current.chain,
+        },
+    })
+}
+
+/// Fresh-authority failure versus release-journal Commit failure.
+#[derive(Debug)]
+pub(crate) enum M1SifCommitError<E> {
+    /// Current M1 runtime/key/Approval reconstruction failed before CAS.
+    Authority(M1SifAuthorityError),
+    /// Permit validation or durable release-journal CAS failed.
+    Release(TransactionalDisclosureError<E>),
 }
 
 /// Fail-closed M1/SIF authority snapshot failures.
@@ -344,7 +409,44 @@ mod tests {
         assert_eq!(execution.binding.session.transcript_hash, [33u8; 32]);
         assert_eq!(execution.binding.requester_source_id, source);
         assert_eq!(execution.binding.commitment_algorithm, ACCOUNTABILITY_COMMITMENT_ALGORITHM);
-        assert_eq!(authority.ledger_public_key(), SigningKey::from_bytes(&seed).verifying_key().to_bytes());
+        assert_eq!(
+            authority.ledger_public_key(),
+            SigningKey::from_bytes(&seed).verifying_key().to_bytes()
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stale_snapshot_cannot_be_used_as_commit_api_after_revocation() {
+        let seed = [41u8; 32];
+        let (dir, path) = temp_key(seed);
+        let mut runtime = M1RuntimeSession::new(
+            SigningKey::from_bytes(&seed),
+            [42u8; 32],
+            Uuid::from_u128(51),
+            Uuid::from_u128(52),
+            "file send",
+        );
+        runtime.bind_session_transcript_hash([43u8; 32]);
+        runtime.offer().unwrap();
+        runtime.grant_consent().unwrap();
+
+        // A historical snapshot can still describe/attest the Approval that really
+        // existed. Durable release authorization is intentionally not a method on it.
+        let historical = M1SifAuthoritySnapshot::from_runtime(&runtime, &path).unwrap();
+        assert_eq!(historical.ledger_public_key(), SigningKey::from_bytes(&seed).verifying_key().to_bytes());
+
+        runtime.revoke().unwrap();
+        assert!(matches!(
+            M1SifAuthoritySnapshot::from_runtime(&runtime, &path),
+            Err(M1SifAuthorityError::AuthorizationNotApproved {
+                found: ConsentKind::Revocation
+            })
+        ));
+
+        // The actual commit entry point reconstructs from `runtime`; callers cannot
+        // pass `historical` to it. A full permit/commit regression belongs with the
+        // protected-file integration, where the portable credential fixture exists.
         let _ = std::fs::remove_dir_all(dir);
     }
 }
