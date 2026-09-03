@@ -61,8 +61,10 @@
 //! [`SifProtectedFileOffer`] defines the semantic live-transfer boundary above that
 //! durable Commit. The Offer binds the single-use release ID, signed release-entry hash,
 //! canonical file result and exact wire metadata; every response/chunk/completion binds
-//! the Offer digest. Transport integration must carry these objects under a dedicated
-//! authenticated payload type rather than treating legacy transfer messages as SIF.
+//! the Offer digest. [`SifProtectedFileReceiver`] then enforces one contiguous content
+//! stream and whole-file verification before producing typed receiver observations.
+//! Transport integration must carry these objects under a dedicated authenticated
+//! payload type rather than treating legacy transfer messages as SIF.
 //!
 //! Receiver-side custody is a separate claim. [`SifDeliveryReceipt`] lets an
 //! independently trusted receiver sign the exact release ID, sender Commit hash,
@@ -102,6 +104,7 @@ mod hash;
 mod key_transition;
 mod policy;
 mod protected_file_protocol;
+mod protected_file_receiver;
 mod release_cas;
 mod release_credential;
 mod seal;
@@ -212,6 +215,12 @@ pub use protected_file_protocol::{
     SIF_PROTECTED_FILE_RESPONSE_SCHEMA, SifProtectedFileChunk, SifProtectedFileComplete,
     SifProtectedFileOffer, SifProtectedFileOfferDecision, SifProtectedFileOfferResponse,
     SifProtectedFileProtocolError, sif_protected_file_offer_digest,
+};
+
+pub use protected_file_receiver::{
+    IncompleteSifProtectedFileReceive, IntegrityMismatchSifProtectedFileReceive,
+    SifProtectedFileReceiveError, SifProtectedFileReceiveTerminal, SifProtectedFileReceiver,
+    VerifiedSifPersistenceOutcome, VerifiedSifProtectedFileReceive,
 };
 
 pub use release_cas::{
