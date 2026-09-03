@@ -37,11 +37,20 @@
 //! then closes the adapter boundary by requiring the signed binding to match the
 //! exact higher-layer receipt/query/purpose/policy/result commitments.
 //!
-//! A witnessed higher-layer evidence bundle can then be bound to that exact
-//! execution through [`AccountabilityDisclosurePermit`]. The permit is not itself
-//! a release token: [`DisclosureReleaseState::commit_permit_transactional`] must
-//! first durably append a signed release-journal commit before returning the
+//! A witnessed Mycelix bundle crosses the runtime trust boundary through
+//! [`SifReleaseCredential`]. [`verify_release_credential`] authenticates configured
+//! release-authority roots and trust domains, then
+//! [`bind_release_credential_to_execution`] proves that credential names the exact
+//! Xenia execution — including its semantic policy — before the disclosure layer can
+//! consume it.
+//!
+//! The release layer uses [`AccountabilityDisclosurePermit`], but the permit is not
+//! itself a release token: [`DisclosureReleaseState::commit_permit_transactional`]
+//! must first durably append a signed release-journal commit before returning the
 //! move-only [`CommittedDisclosurePermit`] intended for protected-output adapters.
+//! One release credential is constrained to one non-branching release lineage, and
+//! the exact consent approval that anchored execution must remain current through
+//! the durable release commit.
 //!
 //! A downstream auditor — including a non-operator third party —
 //! can use [`Verifier::verify_chain`] to reconstruct every hash link
@@ -84,12 +93,13 @@ mod binding;
 mod chain;
 mod checkpoint;
 mod compaction;
-mod disclosure;
+mod disclosure_v2;
 mod entry;
 mod errors;
 mod hash;
 mod key_transition;
 mod policy;
+mod release_credential;
 mod seal;
 mod signature;
 mod verify;
@@ -145,11 +155,10 @@ pub use compaction::{
     ledger_compaction_manifest_message,
 };
 
-pub use disclosure::{
+pub use disclosure_v2::{
     ACCOUNTABILITY_DISCLOSURE_BINDING_SCHEMA, ACCOUNTABILITY_DISCLOSURE_COMMITMENT_ALGORITHM,
     ACCOUNTABILITY_DISCLOSURE_PERMIT_SCHEMA, ACCOUNTABILITY_RELEASE_ENTRY_SCHEMA,
-    AccountabilityDisclosureBinding, AccountabilityDisclosureError,
-    AccountabilityDisclosureExpectation, AccountabilityDisclosurePermit,
+    AccountabilityDisclosureBinding, AccountabilityDisclosureError, AccountabilityDisclosurePermit,
     AccountabilityDisclosurePhase, CommittedDisclosurePermit, DisclosureReleaseEntry,
     DisclosureReleaseEvent, DisclosureReleaseOutcome, DisclosureReleaseState,
     TransactionalDisclosureError, accountability_disclosure_message,
@@ -176,6 +185,14 @@ pub use errors::{EvidenceBundleVerifyError, LedgerError, TransactionalAppendErro
 pub use policy::{
     CURRENT_EVIDENCE_CRYPTO_MANIFEST, CURRENT_LEDGER_EVIDENCE_PROFILE, CryptoPolicyProfile,
     DowngradePolicy, EvidenceCryptoManifest, EvidencePolicyError, LedgerEvidenceProfile,
+};
+
+pub use release_credential::{
+    ExecutionBoundReleaseCredential, ReleaseCredentialError, ReleaseCredentialTrustPolicy,
+    SIF_RELEASE_CREDENTIAL_CODEC, SIF_RELEASE_CREDENTIAL_ED25519, SIF_RELEASE_CREDENTIAL_SCHEMA,
+    SifReleaseCredential, SifReleaseCredentialSignature, SifReleaseCredentialStatement,
+    TrustedReleaseAuthority, VerifiedReleaseCredential, bind_release_credential_to_execution,
+    release_authority_key_id, release_credential_message, verify_release_credential,
 };
 
 pub use seal::{
