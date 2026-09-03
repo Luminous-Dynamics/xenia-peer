@@ -4,9 +4,9 @@
 //! Dedicated authenticated wire domain for SIF protected-file semantics.
 //!
 //! This module deliberately knows nothing about `xenia-ledger` types. The permissive
-//! peer-core owns only an opaque, bounded semantic byte payload and the AEAD/session
-//! mechanics needed to keep SIF traffic cryptographically non-interchangeable with
-//! legacy file transfer.
+//! peer-core owns only a typed-but-opaque, bounded semantic byte payload and the
+//! AEAD/session mechanics needed to keep SIF traffic cryptographically
+//! non-interchangeable with legacy file transfer.
 //!
 //! Host- and viewer-originated SIF envelopes use different application payload types.
 //! That preserves the same nonce-safety rule as legacy bidirectional file transfer:
@@ -17,6 +17,11 @@
 //! payload-type byte is checked against the exact expected remote SIF direction before
 //! AEAD open or replay-window mutation. Legacy file-transfer, clipboard and opposite-
 //! direction SIF envelopes therefore never reach semantic deserialization here.
+//!
+//! After AEAD verification, the wrapper also names one coarse encrypted message class
+//! (`Offer`, `Response`, `Chunk`, or `Complete`) and applies a class-specific size
+//! ceiling. Concrete release IDs, commitments and state transitions remain owned by the
+//! higher AGPL semantic layer.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -37,19 +42,28 @@ pub const PAYLOAD_TYPE_SIF_PROTECTED_FILE_FROM_VIEWER: u8 = 0x34;
 /// Stable opaque payload wrapper schema.
 pub const SIF_PROTECTED_FILE_WIRE_SCHEMA_VERSION: u16 = 1;
 
-/// Maximum encoded SIF semantic message carried inside one protected envelope.
+/// Maximum encoded protected Offer bytes.
+pub const MAX_SIF_PROTECTED_FILE_OFFER_BYTES: usize = 4 * 1024;
+/// Maximum encoded protected Accept/Reject response bytes.
+pub const MAX_SIF_PROTECTED_FILE_RESPONSE_BYTES: usize = 2 * 1024;
+/// Maximum encoded protected Chunk semantic bytes.
 ///
-/// The current semantic Chunk ceiling is 64 KiB. 96 KiB leaves bounded room for
-/// release IDs, Offer commitments, bincode enum/length metadata and future v1 fields
-/// without making one authenticated control message an unbounded allocation surface.
-pub const MAX_SIF_PROTECTED_FILE_SEMANTIC_BYTES: usize = 96 * 1024;
+/// The underlying file-content ceiling is 64 KiB; 72 KiB leaves bounded room for
+/// release IDs, Offer digest, offset and serialization overhead.
+pub const MAX_SIF_PROTECTED_FILE_CHUNK_WIRE_BYTES: usize = 72 * 1024;
+/// Maximum encoded protected Complete bytes.
+pub const MAX_SIF_PROTECTED_FILE_COMPLETE_BYTES: usize = 1024;
+
+/// Largest semantic message accepted by the v1 opaque wrapper.
+pub const MAX_SIF_PROTECTED_FILE_SEMANTIC_BYTES: usize =
+    MAX_SIF_PROTECTED_FILE_CHUNK_WIRE_BYTES;
 
 /// Maximum complete sealed envelope accepted before attempting AEAD open.
 ///
-/// Bincode currently adds a small fixed wrapper around the semantic `Vec<u8>` and the
-/// Xenia wire adds a 12-byte nonce plus 16-byte tag. The extra 64 bytes deliberately
+/// Bincode adds a small fixed wrapper around the semantic `Vec<u8>` and the Xenia wire
+/// adds a 12-byte nonce plus 16-byte tag. The extra 64 bytes deliberately
 /// over-approximates that framing so malformed oversized traffic is rejected before
-/// decrypt while valid maximum-size payloads still fit.
+/// decrypt while valid maximum-size Chunk payloads still fit.
 pub const MAX_SIF_PROTECTED_FILE_ENVELOPE_BYTES: usize =
     MAX_SIF_PROTECTED_FILE_SEMANTIC_BYTES + 64;
 
@@ -78,6 +92,34 @@ impl SifProtectedFileWireRole {
     }
 }
 
+/// Coarse encrypted semantic message class carried inside the dedicated SIF domain.
+///
+/// Variant order is part of wrapper schema v1 and must not be reordered. New classes
+/// require a new wrapper schema or append-only compatibility analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SifProtectedFileWireKind {
+    /// Sender's exact release-bound Offer.
+    Offer,
+    /// Receiver Accept/Reject response to an exact Offer.
+    Response,
+    /// One release-bound file-content Chunk.
+    Chunk,
+    /// Sender's release-bound no-more-chunks marker.
+    Complete,
+}
+
+impl SifProtectedFileWireKind {
+    /// Maximum opaque semantic bytes allowed for this message class.
+    pub const fn max_semantic_bytes(self) -> usize {
+        match self {
+            Self::Offer => MAX_SIF_PROTECTED_FILE_OFFER_BYTES,
+            Self::Response => MAX_SIF_PROTECTED_FILE_RESPONSE_BYTES,
+            Self::Chunk => MAX_SIF_PROTECTED_FILE_CHUNK_WIRE_BYTES,
+            Self::Complete => MAX_SIF_PROTECTED_FILE_COMPLETE_BYTES,
+        }
+    }
+}
+
 /// Bounded opaque application payload sealed in the dedicated SIF domain.
 ///
 /// The bytes are produced/consumed by the higher AGPL application layer, which owns
@@ -86,18 +128,28 @@ impl SifProtectedFileWireRole {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SifProtectedFileWirePayload {
     schema_version: u16,
+    kind: SifProtectedFileWireKind,
     semantic_bytes: Vec<u8>,
 }
 
 impl SifProtectedFileWirePayload {
-    /// Construct one bounded non-empty opaque semantic payload.
-    pub fn new(semantic_bytes: Vec<u8>) -> Result<Self, SifProtectedFileWireError> {
+    /// Construct one bounded non-empty opaque semantic payload of an explicit class.
+    pub fn new(
+        kind: SifProtectedFileWireKind,
+        semantic_bytes: Vec<u8>,
+    ) -> Result<Self, SifProtectedFileWireError> {
         let payload = Self {
             schema_version: SIF_PROTECTED_FILE_WIRE_SCHEMA_VERSION,
+            kind,
             semantic_bytes,
         };
         payload.validate()?;
         Ok(payload)
+    }
+
+    /// Encrypted coarse semantic message class.
+    pub const fn kind(&self) -> SifProtectedFileWireKind {
+        self.kind
     }
 
     /// Opaque higher-layer semantic bytes.
@@ -110,7 +162,7 @@ impl SifProtectedFileWirePayload {
         self.semantic_bytes
     }
 
-    /// Validate schema and allocation bounds after construction/deserialization.
+    /// Validate schema and class-specific allocation bounds after deserialization.
     pub fn validate(&self) -> Result<(), SifProtectedFileWireError> {
         if self.schema_version != SIF_PROTECTED_FILE_WIRE_SCHEMA_VERSION {
             return Err(SifProtectedFileWireError::UnsupportedSchema {
@@ -120,9 +172,11 @@ impl SifProtectedFileWirePayload {
         if self.semantic_bytes.is_empty() {
             return Err(SifProtectedFileWireError::EmptySemanticPayload);
         }
-        if self.semantic_bytes.len() > MAX_SIF_PROTECTED_FILE_SEMANTIC_BYTES {
+        let max = self.kind.max_semantic_bytes();
+        if self.semantic_bytes.len() > max {
             return Err(SifProtectedFileWireError::SemanticPayloadTooLarge {
-                max: MAX_SIF_PROTECTED_FILE_SEMANTIC_BYTES,
+                kind: self.kind,
+                max,
                 found: self.semantic_bytes.len(),
             });
         }
@@ -265,10 +319,12 @@ pub enum SifProtectedFileWireError {
     /// Semantic payloads must not be empty.
     #[error("SIF protected-file semantic payload must not be empty")]
     EmptySemanticPayload,
-    /// Semantic payload exceeded the bounded v1 envelope profile.
-    #[error("SIF protected-file semantic payload is {found} bytes; maximum is {max}")]
+    /// Semantic payload exceeded its class-specific v1 ceiling.
+    #[error("SIF protected-file {kind:?} semantic payload is {found} bytes; maximum is {max}")]
     SemanticPayloadTooLarge {
-        /// Maximum semantic payload bytes.
+        /// Coarse semantic class whose bound was exceeded.
+        kind: SifProtectedFileWireKind,
+        /// Maximum semantic payload bytes for this class.
         max: usize,
         /// Supplied semantic payload bytes.
         found: usize,
@@ -318,6 +374,10 @@ mod tests {
         (host, viewer)
     }
 
+    fn offer_payload(bytes: &[u8]) -> SifProtectedFileWirePayload {
+        SifProtectedFileWirePayload::new(SifProtectedFileWireKind::Offer, bytes.to_vec()).unwrap()
+    }
+
     #[test]
     fn sif_payload_ids_are_distinct_from_legacy_application_domains() {
         assert_eq!(PAYLOAD_TYPE_SIF_PROTECTED_FILE_FROM_HOST, 0x33);
@@ -336,7 +396,7 @@ mod tests {
     #[test]
     fn directional_sif_roundtrip_uses_exact_remote_payload_domain() {
         let (mut host, mut viewer) = pair();
-        let payload = SifProtectedFileWirePayload::new(b"offer".to_vec()).unwrap();
+        let payload = offer_payload(b"offer");
         let sealed = host.seal(&payload).unwrap();
         assert_eq!(
             envelope_payload_type(&sealed),
@@ -344,7 +404,11 @@ mod tests {
         );
         assert_eq!(viewer.open(&sealed).unwrap(), payload);
 
-        let response = SifProtectedFileWirePayload::new(b"accept".to_vec()).unwrap();
+        let response = SifProtectedFileWirePayload::new(
+            SifProtectedFileWireKind::Response,
+            b"accept".to_vec(),
+        )
+        .unwrap();
         let sealed = viewer.seal(&response).unwrap();
         assert_eq!(
             envelope_payload_type(&sealed),
@@ -356,7 +420,7 @@ mod tests {
     #[test]
     fn same_source_key_epoch_and_sequence_still_produce_distinct_bidirectional_nonces() {
         let (mut host, mut viewer) = pair();
-        let payload = SifProtectedFileWirePayload::new(b"same".to_vec()).unwrap();
+        let payload = offer_payload(b"same");
         let host_envelope = host.seal(&payload).unwrap();
         let viewer_envelope = viewer.seal(&payload).unwrap();
 
@@ -371,7 +435,7 @@ mod tests {
     #[test]
     fn legacy_file_transfer_payload_is_rejected_before_sif_open() {
         let (_, mut viewer) = pair();
-        let payload = SifProtectedFileWirePayload::new(b"not-sif-domain".to_vec()).unwrap();
+        let payload = offer_payload(b"not-sif-domain");
         let mut legacy_sender = WireSession::with_source_id(SOURCE_ID, EPOCH);
         legacy_sender.install_key(KEY);
         let legacy = seal(
@@ -410,7 +474,7 @@ mod tests {
             EPOCH,
         );
         host_receiver.install_control_key(KEY);
-        let payload = SifProtectedFileWirePayload::new(b"offer".to_vec()).unwrap();
+        let payload = offer_payload(b"offer");
         let sealed = host_sender.seal(&payload).unwrap();
 
         assert!(matches!(
@@ -441,27 +505,50 @@ mod tests {
     }
 
     #[test]
-    fn semantic_allocation_bound_is_fail_closed() {
+    fn message_classes_have_separate_allocation_bounds() {
         assert!(matches!(
-            SifProtectedFileWirePayload::new(Vec::new()),
+            SifProtectedFileWirePayload::new(SifProtectedFileWireKind::Offer, Vec::new()),
             Err(SifProtectedFileWireError::EmptySemanticPayload)
         ));
         assert!(matches!(
-            SifProtectedFileWirePayload::new(vec![0u8; MAX_SIF_PROTECTED_FILE_SEMANTIC_BYTES + 1]),
-            Err(SifProtectedFileWireError::SemanticPayloadTooLarge { .. })
+            SifProtectedFileWirePayload::new(
+                SifProtectedFileWireKind::Offer,
+                vec![0u8; MAX_SIF_PROTECTED_FILE_OFFER_BYTES + 1]
+            ),
+            Err(SifProtectedFileWireError::SemanticPayloadTooLarge {
+                kind: SifProtectedFileWireKind::Offer,
+                ..
+            })
+        ));
+        assert!(
+            SifProtectedFileWirePayload::new(
+                SifProtectedFileWireKind::Chunk,
+                vec![0u8; MAX_SIF_PROTECTED_FILE_OFFER_BYTES + 1]
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            SifProtectedFileWirePayload::new(
+                SifProtectedFileWireKind::Chunk,
+                vec![0u8; MAX_SIF_PROTECTED_FILE_CHUNK_WIRE_BYTES + 1]
+            ),
+            Err(SifProtectedFileWireError::SemanticPayloadTooLarge {
+                kind: SifProtectedFileWireKind::Chunk,
+                ..
+            })
         ));
     }
 
     #[test]
     fn rekeyed_channels_continue_only_after_both_install_the_new_control_key() {
         let (mut host, mut viewer) = pair();
-        let first = SifProtectedFileWirePayload::new(b"before".to_vec()).unwrap();
+        let first = offer_payload(b"before");
         assert_eq!(viewer.open(&host.seal(&first).unwrap()).unwrap(), first);
 
         let next_key = [0x5A; 32];
         host.install_control_key(next_key);
         viewer.install_control_key(next_key);
-        let second = SifProtectedFileWirePayload::new(b"after".to_vec()).unwrap();
+        let second = offer_payload(b"after");
         assert_eq!(viewer.open(&host.seal(&second).unwrap()).unwrap(), second);
     }
 }
