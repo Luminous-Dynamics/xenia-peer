@@ -11,10 +11,10 @@
 //! This module therefore stages the selected source into a fresh Xenia-owned private
 //! snapshot **before** release authority is bound. The snapshot bytes themselves become
 //! the object whose length/BLAKE3 are authorized. On Unix, after `TransferSource` opens
-//! the completed snapshot, the staging pathname is immediately unlinked and the private
+//! the completed snapshot, the staging pathname is immediately unlinked and its private
 //! directory is removed. The bytes remain reachable only through Xenia's owned file
-//! descriptor. On platforms where unlink-while-open is not available, the snapshot keeps
-//! a random private pathname until the owned source is dropped; this is a weaker
+//! descriptor. On platforms where unlink-while-open is unavailable, the snapshot keeps
+//! one random private pathname until the owned source is dropped; this is a weaker
 //! same-user isolation posture and is reported explicitly by [`SifStagedSourceIsolation`].
 
 use std::fs::{DirBuilder, OpenOptions};
@@ -24,9 +24,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
-use xenia_ledger::{
-    Chain, MAX_SIF_PROTECTED_FILE_NAME_BYTES, ProfileBoundFileOfferAuthority,
-};
+use xenia_ledger::{Chain, MAX_SIF_PROTECTED_FILE_NAME_BYTES, ProfileBoundFileOfferAuthority};
 use xenia_peer_core::{TransferSource, TransferSourceError};
 
 use crate::sif_accountable_transfer::ReadyAccountableSifSession;
@@ -40,26 +38,8 @@ const SNAPSHOT_ATTEMPTS: usize = 16;
 pub enum SifStagedSourceIsolation {
     /// Unix snapshot pathname was removed after opening; only the owned descriptor remains.
     UnixUnlinkedHandle,
-    /// Snapshot remains under a random private pathname until the owned source is dropped.
+    /// Snapshot remains under one random private pathname until the source is dropped.
     PrivateNamedSnapshot,
-}
-
-#[derive(Debug)]
-struct DirectoryCleanup(Option<PathBuf>);
-
-impl Drop for DirectoryCleanup {
-    fn drop(&mut self) {
-        if let Some(path) = self.0.take()
-            && let Err(error) = std::fs::remove_dir(&path)
-            && error.kind() != io::ErrorKind::NotFound
-        {
-            tracing::warn!(
-                path = %path.display(),
-                error = %error,
-                "SIF staged-source directory could not be removed"
-            );
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -73,8 +53,8 @@ impl SnapshotPathGuard {
         self.file = None;
     }
 
-    fn take_dir(&mut self) -> Option<PathBuf> {
-        self.dir.take()
+    fn disarm_dir(&mut self) {
+        self.dir = None;
     }
 }
 
@@ -97,7 +77,6 @@ impl Drop for SnapshotPathGuard {
 #[derive(Debug)]
 pub struct SifStagedSource {
     source: TransferSource,
-    cleanup_dir: DirectoryCleanup,
     display_name: String,
     size: u64,
     content_blake3: [u8; 32],
@@ -127,10 +106,10 @@ impl SifStagedSource {
             });
         }
 
-        let (dir, snapshot_path, std_output) = create_private_snapshot_path()?;
+        let (snapshot_dir, snapshot_path, std_output) = create_private_snapshot_path()?;
         let mut guard = SnapshotPathGuard {
             file: Some(snapshot_path.clone()),
-            dir: Some(dir.clone()),
+            dir: snapshot_dir.clone(),
         };
         let mut output = tokio::fs::File::from_std(std_output);
         let mut hasher = blake3::Hasher::new();
@@ -176,28 +155,20 @@ impl SifStagedSource {
         guard.disarm_file();
 
         #[cfg(unix)]
-        let (isolation, cleanup_dir) = {
+        let isolation = {
             std::fs::remove_file(&snapshot_path)?;
-            std::fs::remove_dir(&dir)?;
-            let _ = guard.take_dir();
-            (
-                SifStagedSourceIsolation::UnixUnlinkedHandle,
-                DirectoryCleanup(None),
-            )
+            if let Some(dir) = snapshot_dir {
+                std::fs::remove_dir(&dir)?;
+                guard.disarm_dir();
+            }
+            SifStagedSourceIsolation::UnixUnlinkedHandle
         };
 
         #[cfg(not(unix))]
-        let (isolation, cleanup_dir) = {
-            let retained_dir = guard.take_dir();
-            (
-                SifStagedSourceIsolation::PrivateNamedSnapshot,
-                DirectoryCleanup(retained_dir),
-            )
-        };
+        let isolation = SifStagedSourceIsolation::PrivateNamedSnapshot;
 
         Ok(Self {
             source,
-            cleanup_dir,
             display_name,
             size,
             content_blake3,
@@ -323,20 +294,19 @@ fn validate_display_name(name: &str) -> Result<(), SifStagedSourceError> {
     Ok(())
 }
 
-fn create_private_snapshot_path() -> Result<(PathBuf, PathBuf, std::fs::File), SifStagedSourceError> {
+#[cfg(unix)]
+fn create_private_snapshot_path(
+) -> Result<(Option<PathBuf>, PathBuf, std::fs::File), SifStagedSourceError> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+
     for _ in 0..SNAPSHOT_ATTEMPTS {
         let token = Uuid::new_v4();
         let dir = std::env::temp_dir().join(format!(
             ".xenia-sif-source-{}-{token}",
             std::process::id()
         ));
-
         let mut builder = DirBuilder::new();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
+        builder.mode(0o700);
         match builder.create(&dir) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -345,14 +315,9 @@ fn create_private_snapshot_path() -> Result<(PathBuf, PathBuf, std::fs::File), S
 
         let path = dir.join("source.snapshot");
         let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
+        options.write(true).create_new(true).mode(0o600);
         match options.open(&path) {
-            Ok(file) => return Ok((dir, path, file)),
+            Ok(file) => return Ok((Some(dir), path, file)),
             Err(error) => {
                 let _ = std::fs::remove_dir(&dir);
                 if error.kind() == io::ErrorKind::AlreadyExists {
@@ -360,6 +325,26 @@ fn create_private_snapshot_path() -> Result<(PathBuf, PathBuf, std::fs::File), S
                 }
                 return Err(error.into());
             }
+        }
+    }
+    Err(SifStagedSourceError::StagingPathExhausted)
+}
+
+#[cfg(not(unix))]
+fn create_private_snapshot_path(
+) -> Result<(Option<PathBuf>, PathBuf, std::fs::File), SifStagedSourceError> {
+    for _ in 0..SNAPSHOT_ATTEMPTS {
+        let path = std::env::temp_dir().join(format!(
+            ".xenia-sif-source-{}-{}.snapshot",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        match options.open(&path) {
+            Ok(file) => return Ok((None, path, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
         }
     }
     Err(SifStagedSourceError::StagingPathExhausted)
@@ -408,12 +393,15 @@ mod tests {
         let staged = SifStagedSource::stage_file(&path, "evidence.bin", 16)
             .await
             .unwrap();
-        assert_eq!(staged.isolation(), SifStagedSourceIsolation::UnixUnlinkedHandle);
+        assert_eq!(
+            staged.isolation(),
+            SifStagedSourceIsolation::UnixUnlinkedHandle
+        );
         std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
-    async fn staging_enforces_growth_beyond_limit_while_copying() {
+    async fn staging_enforces_source_limit() {
         let path = source_path("limit.bin");
         std::fs::write(&path, b"0123456789").unwrap();
         let error = SifStagedSource::stage_file(&path, "evidence.bin", 4)
