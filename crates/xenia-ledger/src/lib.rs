@@ -47,8 +47,14 @@
 //! protected-transfer profile, and [`bind_release_credential_v2_to_execution`] carries
 //! that requirement into a private profile-bound execution capability.
 //!
-//! The release layer uses [`AccountabilityDisclosurePermit`], but the permit is not
-//! itself a release token. The public [`DisclosureReleaseState`] is a CAS-enforced
+//! Historical disclosure-v2 remains available for historical evidence. High-assurance
+//! profile-required output uses [`ProfileBoundDisclosurePermit`] and
+//! [`ProfileBoundReleaseState`]. The required SIF profile is signed into the permit and
+//! redundantly committed into every durable release-lineage Commit; only atomic CAS
+//! persistence returns [`ProfileBoundCommittedDisclosurePermit`].
+//!
+//! The historical release layer uses [`AccountabilityDisclosurePermit`], but the permit
+//! is not itself a release token. The public [`DisclosureReleaseState`] is a CAS-enforced
 //! wrapper: every Commit/Outcome transition must atomically compare the durable
 //! [`DisclosureReleaseFrontier`] before persistence. Only a successful durable Commit
 //! returns the move-only [`CommittedDisclosurePermit`].
@@ -106,6 +112,7 @@ mod file_disclosure;
 mod hash;
 mod key_transition;
 mod policy;
+mod profile_disclosure;
 mod protected_file_protocol;
 mod protected_file_receiver;
 mod release_cas;
@@ -215,6 +222,17 @@ pub use key_transition::{
 pub use policy::{
     CURRENT_EVIDENCE_CRYPTO_MANIFEST, CURRENT_LEDGER_EVIDENCE_PROFILE, CryptoPolicyProfile,
     DowngradePolicy, EvidenceCryptoManifest, EvidencePolicyError, LedgerEvidenceProfile,
+};
+
+pub use profile_disclosure::{
+    PROFILE_BOUND_DISCLOSURE_BINDING_SCHEMA, PROFILE_BOUND_DISCLOSURE_COMMITMENT_ALGORITHM,
+    PROFILE_BOUND_DISCLOSURE_PERMIT_SCHEMA, PROFILE_BOUND_RELEASE_ENTRY_SCHEMA,
+    ProfileBoundCommittedDisclosurePermit, ProfileBoundDisclosureBinding,
+    ProfileBoundDisclosureError, ProfileBoundDisclosurePermit, ProfileBoundReleaseEntry,
+    ProfileBoundReleaseEvent, ProfileBoundReleaseFrontier, ProfileBoundReleaseState,
+    ProfileBoundReleaseStore, ProfileTransactionalDisclosureError,
+    profile_bound_disclosure_message, profile_bound_disclosure_permit_digest,
+    verify_profile_bound_release_entries,
 };
 
 pub use protected_file_protocol::{
