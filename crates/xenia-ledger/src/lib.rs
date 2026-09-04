@@ -42,7 +42,10 @@
 //! release-authority roots and trust domains, then
 //! [`bind_release_credential_to_execution`] proves that credential names the exact
 //! Xenia execution — including its semantic policy — before the disclosure layer can
-//! consume it.
+//! consume it. High-assurance SIF additionally uses [`SifReleaseCredentialV2`]: its
+//! authority signatures bind the complete historical v1 statement to an exact required
+//! protected-transfer profile, and [`bind_release_credential_v2_to_execution`] carries
+//! that requirement into a private profile-bound execution capability.
 //!
 //! The release layer uses [`AccountabilityDisclosurePermit`], but the permit is not
 //! itself a release token. The public [`DisclosureReleaseState`] is a CAS-enforced
@@ -107,6 +110,7 @@ mod protected_file_protocol;
 mod protected_file_receiver;
 mod release_cas;
 mod release_credential;
+mod release_credential_v2;
 mod seal;
 mod signature;
 mod verify;
@@ -240,6 +244,13 @@ pub use release_credential::{
     SifReleaseCredential, SifReleaseCredentialSignature, SifReleaseCredentialStatement,
     TrustedReleaseAuthority, VerifiedReleaseCredential, bind_release_credential_to_execution,
     release_authority_key_id, release_credential_message, verify_release_credential,
+};
+pub use release_credential_v2::{
+    ProfileBoundExecutionReleaseCredential, ReleaseCredentialV2Error,
+    SIF_RELEASE_CREDENTIAL_V2_CODEC, SIF_RELEASE_CREDENTIAL_V2_SCHEMA,
+    SifReleaseCredentialStatementV2, SifReleaseCredentialV2,
+    VerifiedProfileBoundReleaseCredential, bind_release_credential_v2_to_execution,
+    profile_bound_credential_id, release_credential_v2_message, verify_release_credential_v2,
 };
 
 pub use seal::{
