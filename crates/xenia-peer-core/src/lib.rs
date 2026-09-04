@@ -53,6 +53,7 @@
 
 pub mod advertisement;
 mod authenticated_peer_handshake;
+mod authenticated_peer_transport;
 pub mod file_transfer;
 pub mod frame;
 pub mod handshake;
@@ -65,6 +66,10 @@ pub mod transport;
 
 pub use authenticated_peer_handshake::{
     AuthenticatedPeerHandshakeV1, perform_host_handshake_authenticated_peer_v1,
+};
+pub use authenticated_peer_transport::{
+    AuthenticatedPeerTransportErrorV1, AuthenticatedPeerTransportV1, PeerBoundInboundEnvelopeV1,
+    perform_host_handshake_authenticated_transport_v1,
 };
 pub use file_transfer::{
     IncomingFileStageError, IncomingFileStager, cleanup_orphaned_receive_staging,
