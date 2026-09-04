@@ -59,6 +59,13 @@
 //! negotiated SIF profile exactly equals the upstream-required profile, so callers do
 //! not manufacture protected Offers independently of durable release authority.
 //!
+//! [`bind_profile_release_to_execution_session`] restores the complete authenticated
+//! [`SessionTranscriptBinding`] from the already-verified execution credential to that
+//! move-only durable authority. [`SessionBoundCommittedFileDisclosure`] then requires
+//! both exact live session generation and exact negotiated profile before yielding
+//! [`SessionBoundFileOfferAuthority`]. Same UUID under a different transcript generation
+//! therefore cannot authorize output.
+//!
 //! [`SifProtectedFileSendState`] adds a signed CAS write-ahead journal beneath the
 //! eventual sender typestate. A `Prepared` chunk becomes durable before carrier I/O,
 //! so crash recovery preserves a conservative possible-disclosure frontier. Exact
@@ -133,6 +140,7 @@ mod release_cas;
 mod release_credential;
 mod release_credential_v2;
 mod seal;
+mod session_bound_profile_file;
 mod signature;
 mod verify;
 mod witness;
@@ -306,6 +314,12 @@ pub use seal::{
 };
 #[cfg(feature = "pqc-signatures")]
 pub use seal::{sign_evidence_bundle_seal_ml_dsa_65, sign_evidence_bundle_seal_ml_dsa_87};
+
+pub use session_bound_profile_file::{
+    SessionBoundCommittedDisclosure, SessionBoundCommittedFileDisclosure,
+    SessionBoundFileOfferAuthority, SessionBoundProfileFileError,
+    bind_profile_release_to_execution_session,
+};
 
 pub use signature::{
     CURRENT_LEDGER_SIGNATURE_SUITE, Ed25519EvidenceSignatureBackend, EvidenceSignatureBackend,
