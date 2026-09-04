@@ -10,19 +10,20 @@
 //! permissively licensed peer core depend on the AGPL evidence layer.
 //!
 //! [`sif_authorized_transfer`] is the public durable-authority lifecycle facade.
-//! [`sif_source_bound_sender`] is the stronger outbound path that additionally binds one
-//! fresh owned [`xenia_peer_core::TransferSource`] and PR #283's durable write-ahead send
-//! journal to the actual content carrier call. The historical accountable phase engine
-//! remains crate-private beneath those facades so external callers cannot manufacture a
-//! protected Offer independently of durable profile-bound release authority. Capability
-//! negotiation, semantic transfer, phase state and custody transport also remain private
-//! implementation layers.
+//! [`sif_source_bound_sender`] additionally binds one fresh owned
+//! [`xenia_peer_core::TransferSource`] and the durable write-ahead send journal to the
+//! actual content carrier call. [`sif_context_bound_sender`] is the strongest current
+//! outbound composition: it also retains the exact authenticated transcript generation,
+//! release-ledger verifier key and signed consent anchor, and rechecks that generation
+//! while holding the authoritative live consent mutex across each novel content send.
+//! The historical accountable phase engine remains crate-private beneath these facades.
 
 #![warn(missing_docs)]
 #![deny(unsafe_code)]
 
 mod sif_accountable_transfer;
 pub mod sif_authorized_transfer;
+pub mod sif_context_bound_sender;
 mod sif_custody_wire;
 mod sif_negotiation;
 pub mod sif_receive_runtime;
