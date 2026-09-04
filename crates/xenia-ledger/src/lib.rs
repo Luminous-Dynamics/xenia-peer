@@ -59,6 +59,12 @@
 //! negotiated SIF profile exactly equals the upstream-required profile, so callers do
 //! not manufacture protected Offers independently of durable release authority.
 //!
+//! [`SifProtectedFileSendState`] adds a signed CAS write-ahead journal beneath the
+//! eventual sender typestate. A `Prepared` chunk becomes durable before carrier I/O,
+//! so crash recovery preserves a conservative possible-disclosure frontier. Exact
+//! recovery retries reuse the original durable identity and changed ranges/content fail
+//! closed; `CarrierConfirmed` remains deliberately distinct from receiver acknowledgement.
+//!
 //! The historical release layer uses [`AccountabilityDisclosurePermit`], but the permit
 //! is not itself a release token. The public [`DisclosureReleaseState`] is a CAS-enforced
 //! wrapper: every Commit/Outcome transition must atomically compare the durable
@@ -120,6 +126,7 @@ mod key_transition;
 mod policy;
 mod profile_disclosure;
 mod profile_file_disclosure;
+mod profile_file_send_journal;
 mod protected_file_protocol;
 mod protected_file_receiver;
 mod release_cas;
@@ -245,6 +252,15 @@ pub use profile_disclosure::{
 pub use profile_file_disclosure::{
     ProfileBoundCommittedFileDisclosure, ProfileBoundFileDisclosureError,
     ProfileBoundFileOfferAuthority,
+};
+pub use profile_file_send_journal::{
+    PreparedSifProtectedFileChunk, SIF_PROTECTED_FILE_SEND_COMMITMENT_ALGORITHM,
+    SIF_PROTECTED_FILE_SEND_ENTRY_SCHEMA, SifProtectedFileConfirmDisposition,
+    SifProtectedFilePrepareDisposition, SifProtectedFileSendEntry, SifProtectedFileSendError,
+    SifProtectedFileSendEvent, SifProtectedFileSendFrontier, SifProtectedFileSendState,
+    SifProtectedFileSendStore, TransactionalSifProtectedFileSendError,
+    sif_protected_file_send_chunk_digest, sif_protected_file_send_idempotency_token,
+    verify_sif_protected_file_send_entries,
 };
 
 pub use protected_file_protocol::{
