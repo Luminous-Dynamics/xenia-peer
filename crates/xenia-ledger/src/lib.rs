@@ -53,6 +53,12 @@
 //! redundantly committed into every durable release-lineage Commit; only atomic CAS
 //! persistence returns [`ProfileBoundCommittedDisclosurePermit`].
 //!
+//! [`ProfileBoundCommittedFileDisclosure`] then consumes that durable profile-bound
+//! permit only when the exact filename, byte length and BLAKE3 reproduce the committed
+//! result. It can create [`ProfileBoundFileOfferAuthority`] only when the authenticated
+//! negotiated SIF profile exactly equals the upstream-required profile, so callers do
+//! not manufacture protected Offers independently of durable release authority.
+//!
 //! The historical release layer uses [`AccountabilityDisclosurePermit`], but the permit
 //! is not itself a release token. The public [`DisclosureReleaseState`] is a CAS-enforced
 //! wrapper: every Commit/Outcome transition must atomically compare the durable
@@ -113,6 +119,7 @@ mod hash;
 mod key_transition;
 mod policy;
 mod profile_disclosure;
+mod profile_file_disclosure;
 mod protected_file_protocol;
 mod protected_file_receiver;
 mod release_cas;
@@ -233,6 +240,11 @@ pub use profile_disclosure::{
     ProfileBoundReleaseStore, ProfileTransactionalDisclosureError,
     profile_bound_disclosure_message, profile_bound_disclosure_permit_digest,
     verify_profile_bound_release_entries,
+};
+
+pub use profile_file_disclosure::{
+    ProfileBoundCommittedFileDisclosure, ProfileBoundFileDisclosureError,
+    ProfileBoundFileOfferAuthority,
 };
 
 pub use protected_file_protocol::{
