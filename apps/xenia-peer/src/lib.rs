@@ -11,9 +11,11 @@
 //!
 //! The public high-assurance protected-content authority is [`sif_authorized_transfer`].
 //! Its outbound Offer entry point consumes exact durable session/profile/file authority;
-//! the older accountable phase engine, capability negotiation, semantic carrier and
-//! custody transport remain private implementation layers so application callers cannot
-//! bypass durable Offer provenance, Accept ordering or receiver-signed custody closure.
+//! [`sif_source_authority`] additionally binds that authority to one move-only opened
+//! source whose exact length/BLAKE3 already match the Offer. The older accountable phase
+//! engine, capability negotiation, semantic carrier and custody transport remain private
+//! implementation layers so application callers cannot bypass durable Offer provenance,
+//! Accept ordering or receiver-signed custody closure.
 
 #![warn(missing_docs)]
 #![deny(unsafe_code)]
@@ -24,6 +26,7 @@ mod sif_custody_wire;
 mod sif_negotiation;
 pub mod sif_receive_runtime;
 mod sif_semantic_wire;
+pub mod sif_source_authority;
 mod sif_transfer_flow;
 
 // Lower-layer errors/evidence remain reachable because the public authorized taxonomy
