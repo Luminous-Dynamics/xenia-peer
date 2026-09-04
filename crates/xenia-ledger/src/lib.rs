@@ -58,6 +58,9 @@
 //! - **No persistence layer in this crate.** Callers decide whether to
 //!   store the chain as JSON, CBOR, a SQLite table, or Holochain
 //!   entries. `Chain::from_entries` lets any storage layer rehydrate.
+//!   Persistence backends with ambiguous commit acknowledgement should use
+//!   [`Chain::append_transactional_outcome`] and explicit reconciliation rather
+//!   than treating every storage error as proven non-persistence.
 
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
@@ -99,7 +102,10 @@ pub use binding::{
     sign_session_transcript_binding_ml_dsa_65, sign_session_transcript_binding_ml_dsa_87,
 };
 
-pub use chain::Chain;
+pub use chain::{
+    Chain, PendingPersistenceFrontier, PersistenceDisposition, PersistenceReconciliationOutcome,
+    TransactionalAppendOutcome,
+};
 
 pub use checkpoint::{
     CheckpointContinuityError, CheckpointError, CheckpointFreshnessPolicy,
