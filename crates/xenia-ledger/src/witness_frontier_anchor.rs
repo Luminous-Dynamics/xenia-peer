@@ -13,7 +13,9 @@
 //! 2. [`SignedWitnessFrontierObservationV1`] is a fresh challenge-bound statement
 //!    of what that store says is current *now*.
 //!
-//! A stored anchor alone is therefore not treated as freshness proof.
+//! A stored anchor alone is therefore not treated as freshness proof. The
+//! consent-ledger count/head carried by these records is signed context only; it
+//! is not, by itself, proof that the consent ledger was durably persisted.
 
 use ed25519_dalek::{Signature, Signer, Verifier as _, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -21,8 +23,10 @@ use thiserror::Error;
 
 use crate::{Chain, PersistenceDisposition, SignatureEnvelope, SignatureSuite};
 
-/// Schema version shared with Symthaea's witness-anchor runtime V1.
+/// Schema version for the Xenia witness-anchor protocol.
 pub const WITNESS_FRONTIER_ANCHOR_SCHEMA_VERSION: u16 = 1;
+/// Symthaea's independent V1 witness-frontier statement schema version.
+pub const SYMTHAEA_WITNESS_FRONTIER_STATEMENT_SCHEMA_VERSION: u16 = 1;
 /// Exact Symthaea operation-id domain. Cross-repository byte compatibility is normative.
 pub const SYMTHAEA_WITNESS_ANCHOR_OPERATION_DOMAIN: &[u8] =
     b"symthaea.qualification-witness.anchor-operation.v1\0";
@@ -37,6 +41,9 @@ pub const XENIA_WITNESS_FRONTIER_ANCHOR_FINGERPRINT_DOMAIN: &[u8] =
 /// Xenia signature domain for fresh current-frontier observations.
 pub const XENIA_WITNESS_FRONTIER_OBSERVATION_DOMAIN: &[u8] =
     b"xenia.witness-frontier-observation.v1\0";
+/// Xenia fingerprint domain for a complete signed current-frontier observation.
+pub const XENIA_WITNESS_FRONTIER_OBSERVATION_FINGERPRINT_DOMAIN: &[u8] =
+    b"xenia.witness-frontier-observation-fingerprint.v1\0";
 /// Domain used to derive a compact source namespace from the Xenia key + policy.
 pub const XENIA_WITNESS_FRONTIER_SOURCE_DOMAIN: &[u8] =
     b"xenia.witness-frontier-source-id.v1\0";
@@ -134,13 +141,11 @@ impl WitnessFrontierAnchorTargetV1 {
 
     /// Recompute Symthaea's canonical witness-frontier statement digest.
     pub fn recompute_frontier_statement_digest(&self) -> [u8; 32] {
-        let mut bytes = Vec::with_capacity(128);
-        bytes.extend_from_slice(SYMTHAEA_WITNESS_FRONTIER_STATEMENT_DOMAIN);
-        bytes.extend_from_slice(&WITNESS_FRONTIER_ANCHOR_SCHEMA_VERSION.to_be_bytes());
-        bytes.extend_from_slice(&self.witness_id);
-        bytes.extend_from_slice(&self.high_watermark.to_be_bytes());
-        bytes.extend_from_slice(&self.reservation_head);
-        *blake3::hash(&bytes).as_bytes()
+        witness_frontier_statement_digest(
+            self.witness_id,
+            self.high_watermark,
+            self.reservation_head,
+        )
     }
 
     /// Canonical operation bytes defined by Symthaea #457.
@@ -175,9 +180,9 @@ pub struct SignedWitnessFrontierAnchorV1 {
     pub anchor_sequence: u64,
     /// Fingerprint of the immediately previous signed anchor, or zero for sequence 1.
     pub previous_anchor_fingerprint: [u8; 32],
-    /// Xenia consent-ledger entry count at signing time.
+    /// Xenia consent-ledger entry count at signing time. Context only, not durability proof.
     pub ledger_entry_count: u64,
-    /// Xenia consent-ledger head at signing time.
+    /// Xenia consent-ledger head at signing time. Context only, not durability proof.
     pub ledger_head_hash: [u8; 32],
     /// Xenia ledger public key that signed this record.
     pub ledger_public_key: [u8; 32],
@@ -248,6 +253,13 @@ impl SignedWitnessFrontierAnchorV1 {
             return Err(WitnessFrontierAnchorError::MalformedAnchor);
         }
         self.target.validate()?;
+        let expected_source = derive_xenia_witness_frontier_source_id(
+            self.ledger_public_key,
+            self.target.anchor_policy_digest,
+        )?;
+        if self.target.source_id != expected_source {
+            return Err(WitnessFrontierAnchorError::SourceBindingMismatch);
+        }
         if self.anchor_sequence == 1 {
             if self.previous_anchor_fingerprint != ZERO32 {
                 return Err(WitnessFrontierAnchorError::PreviousAnchorMismatch);
@@ -295,9 +307,9 @@ pub struct SignedWitnessFrontierObservationV1 {
     pub observed_at_unix_s: u64,
     /// Current anchor, or `None` when this source domain has never anchored the witness.
     pub current: Option<WitnessFrontierAnchorSummaryV1>,
-    /// Current Xenia consent-ledger entry count.
+    /// Current Xenia consent-ledger entry count. Context only, not durability proof.
     pub ledger_entry_count: u64,
-    /// Current Xenia consent-ledger head.
+    /// Current Xenia consent-ledger head. Context only, not durability proof.
     pub ledger_head_hash: [u8; 32],
     /// Xenia ledger authority public key.
     pub ledger_public_key: [u8; 32],
@@ -331,6 +343,13 @@ impl SignedWitnessFrontierObservationV1 {
         {
             return Err(WitnessFrontierAnchorError::ObservationBindingMismatch);
         }
+        let expected_source = derive_xenia_witness_frontier_source_id(
+            trusted_ledger_public_key,
+            expected_anchor_policy_digest,
+        )?;
+        if expected_source != expected_source_id {
+            return Err(WitnessFrontierAnchorError::ObservationBindingMismatch);
+        }
         let oldest = now_unix_s.saturating_sub(max_age_secs);
         let latest = now_unix_s.saturating_add(max_future_skew_secs);
         if self.observed_at_unix_s < oldest || self.observed_at_unix_s > latest {
@@ -339,12 +358,45 @@ impl SignedWitnessFrontierObservationV1 {
         Ok(())
     }
 
+    /// Verify that this fresh observation names the exact durable anchor record
+    /// supplied by the caller, including its signed fingerprint and frontier.
+    pub fn verify_current_anchor(
+        &self,
+        anchor: &SignedWitnessFrontierAnchorV1,
+    ) -> Result<(), WitnessFrontierAnchorError> {
+        self.verify_signature()?;
+        anchor.verify()?;
+        let current = self
+            .current
+            .ok_or(WitnessFrontierAnchorError::ObservationCurrentAnchorMismatch)?;
+        let expected = WitnessFrontierAnchorSummaryV1 {
+            anchor_sequence: anchor.anchor_sequence,
+            anchor_fingerprint: anchor.fingerprint()?,
+            operation_id: anchor.target.operation_id,
+            high_watermark: anchor.target.high_watermark,
+            reservation_head: anchor.target.reservation_head,
+            frontier_statement_digest: anchor.target.frontier_statement_digest,
+        };
+        if current != expected
+            || anchor.ledger_public_key != self.ledger_public_key
+            || anchor.target.source_id != self.source_id
+            || anchor.target.source_epoch != self.source_epoch
+            || anchor.target.anchor_policy_digest != self.anchor_policy_digest
+            || anchor.target.witness_id != self.witness_id
+        {
+            return Err(WitnessFrontierAnchorError::ObservationCurrentAnchorMismatch);
+        }
+        Ok(())
+    }
+
     /// Stable commitment suitable for a higher-level freshness-evidence digest.
     pub fn fingerprint(&self) -> Result<[u8; 32], WitnessFrontierAnchorError> {
         self.verify_signature()?;
         let mut hasher = blake3::Hasher::new();
-        hasher.update(XENIA_WITNESS_FRONTIER_OBSERVATION_DOMAIN);
+        hasher.update(XENIA_WITNESS_FRONTIER_OBSERVATION_FINGERPRINT_DOMAIN);
         hasher.update(&self.canonical_message()?);
+        hasher.update(self.signature.algorithm.as_bytes());
+        hasher.update(&(self.signature.signature.len() as u64).to_be_bytes());
         hasher.update(&self.signature.signature);
         Ok(*hasher.finalize().as_bytes())
     }
@@ -363,6 +415,13 @@ impl SignedWitnessFrontierObservationV1 {
         {
             return Err(WitnessFrontierAnchorError::MalformedObservation);
         }
+        let expected_source = derive_xenia_witness_frontier_source_id(
+            self.ledger_public_key,
+            self.anchor_policy_digest,
+        )?;
+        if self.source_id != expected_source {
+            return Err(WitnessFrontierAnchorError::SourceBindingMismatch);
+        }
         if let Some(current) = self.current {
             if current.anchor_sequence == 0
                 || current.anchor_fingerprint == ZERO32
@@ -370,6 +429,12 @@ impl SignedWitnessFrontierObservationV1 {
                 || current.high_watermark == 0
                 || current.reservation_head == ZERO32
                 || current.frontier_statement_digest == ZERO32
+                || current.frontier_statement_digest
+                    != witness_frontier_statement_digest(
+                        self.witness_id,
+                        current.high_watermark,
+                        current.reservation_head,
+                    )
             {
                 return Err(WitnessFrontierAnchorError::MalformedObservation);
             }
@@ -481,7 +546,10 @@ pub enum WitnessFrontierAnchorReconciliationV1 {
     /// Authoritative store lookup proves the operation is absent.
     ProvenNotPersisted,
     /// Store state could not be established safely.
-    OutcomeUnknown { diagnostic_digest: [u8; 32] },
+    OutcomeUnknown {
+        /// Privacy-minimized store diagnostic commitment.
+        diagnostic_digest: [u8; 32],
+    },
 }
 
 impl Chain {
@@ -519,7 +587,7 @@ impl Chain {
             .map_err(WitnessFrontierAnchorError::PreDispatchStore)?
         {
             existing.verify()?;
-            if existing.target != target {
+            if existing.target != target || existing.ledger_public_key != ledger_public_key {
                 return Err(WitnessFrontierAnchorError::OperationIdCollision);
             }
             return Ok(WitnessFrontierAnchorAppendOutcomeV1::Persisted(existing));
@@ -532,6 +600,9 @@ impl Chain {
             None => (1, ZERO32),
             Some(previous) => {
                 previous.verify()?;
+                if previous.ledger_public_key != ledger_public_key {
+                    return Err(WitnessFrontierAnchorError::CurrentAnchorSignerMismatch);
+                }
                 validate_previous_namespace(&previous, &target)?;
                 if target.high_watermark <= previous.target.high_watermark {
                     return Err(WitnessFrontierAnchorError::NonMonotonicWitnessFrontier);
@@ -614,7 +685,10 @@ impl Chain {
         match store.lookup_operation(target.source_id, target.source_epoch, target.operation_id) {
             Ok(None) => Ok(WitnessFrontierAnchorReconciliationV1::ProvenNotPersisted),
             Ok(Some(anchor)) => {
-                if anchor.verify().is_err() || anchor.target != target {
+                if anchor.verify().is_err()
+                    || anchor.target != target
+                    || anchor.ledger_public_key != key
+                {
                     return Ok(WitnessFrontierAnchorReconciliationV1::OutcomeUnknown {
                         diagnostic_digest: diagnostic_label(b"reconcile-record-mismatch"),
                     });
@@ -654,7 +728,8 @@ impl Chain {
         let current = current
             .map(|anchor| {
                 anchor.verify()?;
-                if anchor.target.source_id != source_id
+                if anchor.ledger_public_key != ledger_public_key
+                    || anchor.target.source_id != source_id
                     || anchor.target.source_epoch != policy.source_epoch
                     || anchor.target.anchor_policy_digest != policy.anchor_policy_digest
                     || anchor.target.witness_id != witness_id
@@ -701,6 +776,20 @@ impl Chain {
         }
         Ok(())
     }
+}
+
+fn witness_frontier_statement_digest(
+    witness_id: [u8; 16],
+    high_watermark: u64,
+    reservation_head: [u8; 32],
+) -> [u8; 32] {
+    let mut bytes = Vec::with_capacity(128);
+    bytes.extend_from_slice(SYMTHAEA_WITNESS_FRONTIER_STATEMENT_DOMAIN);
+    bytes.extend_from_slice(&SYMTHAEA_WITNESS_FRONTIER_STATEMENT_SCHEMA_VERSION.to_be_bytes());
+    bytes.extend_from_slice(&witness_id);
+    bytes.extend_from_slice(&high_watermark.to_be_bytes());
+    bytes.extend_from_slice(&reservation_head);
+    *blake3::hash(&bytes).as_bytes()
 }
 
 fn validate_previous_namespace(
@@ -760,6 +849,9 @@ pub enum WitnessFrontierAnchorError {
     /// Current stored anchor belongs to another namespace.
     #[error("current witness-frontier anchor namespace mismatch")]
     CurrentAnchorNamespaceMismatch,
+    /// Current anchor was signed by a different Xenia ledger key.
+    #[error("current witness-frontier anchor signer mismatch")]
+    CurrentAnchorSignerMismatch,
     /// New witness frontier does not advance the currently anchored watermark.
     #[error("witness-frontier high watermark is not monotonic")]
     NonMonotonicWitnessFrontier,
@@ -787,6 +879,9 @@ pub enum WitnessFrontierAnchorError {
     /// Fresh observation does not bind the caller's exact expectations.
     #[error("witness-frontier observation binding mismatch")]
     ObservationBindingMismatch,
+    /// Observation does not name the exact durable anchor supplied by the verifier.
+    #[error("witness-frontier observation/current-anchor mismatch")]
+    ObservationCurrentAnchorMismatch,
     /// Observation is stale or implausibly future-dated.
     #[error("witness-frontier observation is stale or future-dated")]
     ObservationStaleOrFuture,
@@ -842,8 +937,9 @@ mod tests {
         ) -> PersistenceDisposition<[u8; 32]> {
             self.cas_calls += 1;
             if let Some(outcome) = self.next_disposition.take() {
-                if !matches!(outcome, PersistenceDisposition::Persisted) {
-                    return outcome;
+                match outcome {
+                    PersistenceDisposition::Persisted => {}
+                    other => return other,
                 }
             }
             let key = (
@@ -963,6 +1059,7 @@ mod tests {
                 1,
             )
             .unwrap();
+        observation.verify_current_anchor(&anchor).unwrap();
         assert_eq!(observation.current.unwrap().anchor_sequence, 1);
 
         assert!(observation
@@ -1064,6 +1161,16 @@ mod tests {
         let chain = seeded_chain();
         let (policy, source_id) = policy(&chain);
         let mut value = target(source_id, policy, 3, 0x33);
+        let expected_len = SYMTHAEA_WITNESS_ANCHOR_OPERATION_DOMAIN.len()
+            + 2
+            + 16
+            + 8
+            + 32
+            + 16
+            + 8
+            + 32
+            + 32;
+        assert_eq!(value.canonical_operation_message().len(), expected_len);
         value.operation_id[0] ^= 1;
         assert!(matches!(value.validate(), Err(WitnessFrontierAnchorError::OperationIdMismatch)));
 
@@ -1072,6 +1179,28 @@ mod tests {
         assert!(matches!(
             value.validate(),
             Err(WitnessFrontierAnchorError::FrontierStatementDigestMismatch)
+        ));
+    }
+
+    #[test]
+    fn signed_anchor_cannot_be_relabelled_to_another_source() {
+        let chain = seeded_chain();
+        let (policy, source_id) = policy(&chain);
+        let target = target(source_id, policy, 3, 0x33);
+        let mut store = MemoryStore::default();
+        let mut anchor = match chain
+            .append_witness_frontier_anchor_v1(target, policy, 100, &mut store)
+            .unwrap()
+        {
+            WitnessFrontierAnchorAppendOutcomeV1::Persisted(anchor) => anchor,
+            _ => panic!("expected persisted"),
+        };
+        anchor.target.source_id[0] ^= 1;
+        anchor.target.operation_id = anchor.target.recompute_operation_id();
+        assert!(matches!(
+            anchor.verify(),
+            Err(WitnessFrontierAnchorError::SourceBindingMismatch)
+                | Err(WitnessFrontierAnchorError::BadAnchorSignature)
         ));
     }
 }
