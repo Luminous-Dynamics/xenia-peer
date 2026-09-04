@@ -1,0 +1,58 @@
+name: Ledger Persistence Outcome
+
+on:
+  pull_request:
+    paths:
+      - 'crates/xenia-ledger/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/ledger-persistence-outcome.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ledger-persistence-outcome-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  source:
+    name: Outcome-aware persistence qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Format xenia-ledger
+        run: cargo fmt --check --package xenia-ledger
+
+      - name: Test xenia-ledger
+        run: cargo test --locked -p xenia-ledger
+
+      - name: Clippy xenia-ledger
+        run: cargo clippy --locked -p xenia-ledger --all-targets -- -D warnings
+
+      - name: Record exact-head evidence
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/ledger-persistence-evidence"
+          git rev-parse HEAD > "$RUNNER_TEMP/ledger-persistence-evidence/HEAD"
+          git rev-parse HEAD^{tree} > "$RUNNER_TEMP/ledger-persistence-evidence/TREE"
+          rustc -Vv > "$RUNNER_TEMP/ledger-persistence-evidence/RUSTC.txt"
+          cargo -V > "$RUNNER_TEMP/ledger-persistence-evidence/CARGO.txt"
+          sha256sum Cargo.lock > "$RUNNER_TEMP/ledger-persistence-evidence/CARGO_LOCK_SHA256.txt"
+
+      - name: Upload source evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ledger-persistence-outcome-${{ github.sha }}
+          path: ${{ runner.temp }}/ledger-persistence-evidence
+          if-no-files-found: error
+          retention-days: 14
