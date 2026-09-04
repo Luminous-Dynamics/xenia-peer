@@ -52,6 +52,7 @@
 #![warn(missing_docs)]
 
 pub mod advertisement;
+pub mod authenticated_peer_session;
 pub mod file_transfer;
 pub mod frame;
 pub mod handshake;
@@ -62,6 +63,9 @@ mod session;
 pub mod transfer_source;
 pub mod transport;
 
+pub use authenticated_peer_session::{
+    AuthenticatedPeerSessionV1, perform_host_handshake_authenticated_peer_session,
+};
 pub use file_transfer::{
     IncomingFileStageError, IncomingFileStager, cleanup_orphaned_receive_staging,
     persist_received_file,
