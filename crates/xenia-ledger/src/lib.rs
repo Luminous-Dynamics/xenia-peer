@@ -66,6 +66,13 @@
 //! [`SessionBoundFileOfferAuthority`]. Same UUID under a different transcript generation
 //! therefore cannot authorize output.
 //!
+//! [`verify_profile_release_signer_for_offer`] additionally proves that the current
+//! [`Chain`] signer verifies the complete persisted profile-release journal and that the
+//! exact Offer points at a real Commit in that journal. The resulting
+//! [`VerifiedProfileReleaseSigner`] lets the sender require release-journal signer and
+//! write-ahead send-journal signer to be the same authority without exposing the private
+//! signing key.
+//!
 //! [`SifProtectedFileSendState`] adds a signed CAS write-ahead journal beneath the
 //! eventual sender typestate. A `Prepared` chunk becomes durable before carrier I/O,
 //! so crash recovery preserves a conservative possible-disclosure frontier. Exact
@@ -134,6 +141,7 @@ mod policy;
 mod profile_disclosure;
 mod profile_file_disclosure;
 mod profile_file_send_journal;
+mod profile_release_signer;
 mod protected_file_protocol;
 mod protected_file_receiver;
 mod release_cas;
@@ -269,6 +277,10 @@ pub use profile_file_send_journal::{
     SifProtectedFileSendStore, TransactionalSifProtectedFileSendError,
     sif_protected_file_send_chunk_digest, sif_protected_file_send_idempotency_token,
     verify_sif_protected_file_send_entries,
+};
+pub use profile_release_signer::{
+    ProfileReleaseSignerError, VerifiedProfileReleaseSigner,
+    verify_profile_release_signer_for_offer,
 };
 
 pub use protected_file_protocol::{
