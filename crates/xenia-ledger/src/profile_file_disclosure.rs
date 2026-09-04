@@ -68,6 +68,16 @@ impl ProfileBoundCommittedFileDisclosure {
         self.permit.release_id()
     }
 
+    /// Authenticated Xenia session UUID carried by the durable permit.
+    ///
+    /// This is intentionally exposed so the application sender can reject moving a
+    /// profile/file authority onto a different authenticated session. The current
+    /// committed capability stores the session UUID, not the complete transcript
+    /// binding; preserving the full generation is a separate hardening step.
+    pub const fn authorized_session_id(&self) -> Uuid {
+        self.permit.session_id()
+    }
+
     /// Exact profile required by upstream authorization and the durable Commit.
     pub const fn required_sif_profile_digest(&self) -> [u8; 32] {
         self.permit.required_sif_profile_digest()
@@ -231,6 +241,16 @@ impl ProfileBoundFileOfferAuthority {
     /// Exact derived protected Offer.
     pub fn offer(&self) -> &SifProtectedFileOffer {
         &self.offer
+    }
+
+    /// Authenticated session UUID retained by the durable release authority.
+    pub const fn authorized_session_id(&self) -> Uuid {
+        self.file.authorized_session_id()
+    }
+
+    /// Exact upstream-required SIF profile retained by the durable authority.
+    pub const fn required_sif_profile_digest(&self) -> [u8; 32] {
+        self.file.required_sif_profile_digest()
     }
 
     /// Consume into the exact Offer and its associated move-only file tracker.
