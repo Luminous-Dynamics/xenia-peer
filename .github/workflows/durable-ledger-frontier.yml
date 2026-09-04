@@ -47,6 +47,9 @@ jobs:
           rustc -Vv > "$RUNNER_TEMP/durable-ledger-frontier-evidence/RUSTC.txt"
           cargo -V > "$RUNNER_TEMP/durable-ledger-frontier-evidence/CARGO.txt"
           sha256sum Cargo.lock > "$RUNNER_TEMP/durable-ledger-frontier-evidence/CARGO_LOCK_SHA256.txt"
+          sha256sum crates/xenia-ledger/src/durable_frontier.rs > "$RUNNER_TEMP/durable-ledger-frontier-evidence/DURABLE_FRONTIER_SHA256.txt"
+          sha256sum crates/xenia-ledger/src/witness_frontier_anchor.rs > "$RUNNER_TEMP/durable-ledger-frontier-evidence/WITNESS_ANCHOR_PROTOCOL_SHA256.txt"
+          sha256sum crates/xenia-ledger/tests/witness_frontier_interop.rs > "$RUNNER_TEMP/durable-ledger-frontier-evidence/WITNESS_INTEROP_VECTOR_SHA256.txt"
 
       - name: Upload source evidence
         if: always()
