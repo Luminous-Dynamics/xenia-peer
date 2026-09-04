@@ -42,8 +42,7 @@ pub const PROFILE_BOUND_DISCLOSURE_COMMITMENT_ALGORITHM: &str = "blake3-256";
 const PROFILE_DISCLOSURE_DOMAIN: &[u8] = b"xenia:accountability-profile-disclosure:v1";
 const PROFILE_PERMIT_DIGEST_DOMAIN: &[u8] =
     b"xenia:accountability-profile-disclosure-permit-digest:v1";
-const PROFILE_RELEASE_ENTRY_DOMAIN: &[u8] =
-    b"xenia:accountability-profile-release-entry:v1";
+const PROFILE_RELEASE_ENTRY_DOMAIN: &[u8] = b"xenia:accountability-profile-release-entry:v1";
 
 /// Canonical signed authorization for one exact profile-required release.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,7 +124,10 @@ impl ProfileBoundDisclosureBinding {
         }
         for (field, digest) in [
             ("credential_id", self.credential_id),
-            ("required_sif_profile_digest", self.required_sif_profile_digest),
+            (
+                "required_sif_profile_digest",
+                self.required_sif_profile_digest,
+            ),
             ("requester_source_id", self.requester_source_id),
             ("receipt_digest", self.receipt_digest),
             ("evidence_bundle_digest", self.evidence_bundle_digest),
@@ -614,7 +616,10 @@ impl ProfileBoundReleaseState {
         ledger_public_key: &[u8],
     ) -> Result<Self, ProfileBoundDisclosureError> {
         Ok(Self {
-            inner: RawProfileBoundReleaseState::from_verified_entries(entries, ledger_public_key)?,
+            inner: RawProfileBoundReleaseState::from_verified_entries(
+                entries,
+                ledger_public_key,
+            )?,
         })
     }
 
@@ -643,7 +648,10 @@ impl ProfileBoundReleaseState {
         permit: ProfileBoundDisclosurePermit,
         manifest: EvidenceCryptoManifest,
         store: &mut S,
-    ) -> Result<ProfileBoundCommittedDisclosurePermit, ProfileTransactionalDisclosureError<S::Error>> {
+    ) -> Result<
+        ProfileBoundCommittedDisclosurePermit,
+        ProfileTransactionalDisclosureError<S::Error>,
+    > {
         let expected = self.frontier();
         self.inner
             .commit_permit_transactional(chain, permit, manifest, |next_entries| {
@@ -660,10 +668,12 @@ impl ProfileBoundReleaseState {
         store: &mut S,
     ) -> Result<(), ProfileTransactionalDisclosureError<S::Error>> {
         let expected = self.frontier();
-        self.inner
-            .record_outcome_transactional(chain, release_id, outcome, |next_entries| {
-                store.compare_and_swap(expected, next_entries)
-            })
+        self.inner.record_outcome_transactional(
+            chain,
+            release_id,
+            outcome,
+            |next_entries| store.compare_and_swap(expected, next_entries),
+        )
     }
 }
 
@@ -729,39 +739,39 @@ fn apply_entry_to_index(
     index: &mut ReleaseIndex,
     entry: &ProfileBoundReleaseEntry,
 ) -> Result<(), ProfileBoundDisclosureError> {
-    match entry.event {
+    match &entry.event {
         ProfileBoundReleaseEvent::Commit {
             permit_digest,
             credential_id,
             required_sif_profile_digest,
             retry_of,
         } => {
-            require_nonzero("permit_digest", &permit_digest)?;
-            require_nonzero("credential_id", &credential_id)?;
-            require_nonzero("required_sif_profile_digest", &required_sif_profile_digest)?;
+            require_nonzero("permit_digest", permit_digest)?;
+            require_nonzero("credential_id", credential_id)?;
+            require_nonzero("required_sif_profile_digest", required_sif_profile_digest)?;
             validate_lineage_commit(
                 index,
                 entry.release_id,
-                credential_id,
-                required_sif_profile_digest,
-                retry_of,
+                *credential_id,
+                *required_sif_profile_digest,
+                *retry_of,
             )?;
             if let Some(parent) = retry_of {
-                index.retried_parents.insert(parent);
+                index.retried_parents.insert(*parent);
             } else {
-                index.credential_roots.insert(credential_id, entry.release_id);
+                index.credential_roots.insert(*credential_id, entry.release_id);
             }
             index.records.insert(
                 entry.release_id,
                 ReleaseRecord {
-                    credential_id,
-                    required_sif_profile_digest,
+                    credential_id: *credential_id,
+                    required_sif_profile_digest: *required_sif_profile_digest,
                     lifecycle: ReleaseLifecycle::Committed,
                 },
             );
         }
         ProfileBoundReleaseEvent::Outcome(outcome) => {
-            validate_outcome(outcome)?;
+            validate_outcome(*outcome)?;
             let record = index
                 .records
                 .get_mut(&entry.release_id)
@@ -769,7 +779,7 @@ fn apply_entry_to_index(
             if matches!(record.lifecycle, ReleaseLifecycle::Terminal(_)) {
                 return Err(ProfileBoundDisclosureError::DuplicateOutcome);
             }
-            record.lifecycle = ReleaseLifecycle::Terminal(outcome);
+            record.lifecycle = ReleaseLifecycle::Terminal(*outcome);
         }
     }
     Ok(())
@@ -807,7 +817,9 @@ fn validate_lineage_commit(
                 return Err(ProfileBoundDisclosureError::RetryProfileMismatch);
             }
             match parent_record.lifecycle {
-                ReleaseLifecycle::Committed => Err(ProfileBoundDisclosureError::RetryOfUnresolvedRelease),
+                ReleaseLifecycle::Committed => {
+                    Err(ProfileBoundDisclosureError::RetryOfUnresolvedRelease)
+                }
                 ReleaseLifecycle::Terminal(DisclosureReleaseOutcome::Completed) => {
                     Err(ProfileBoundDisclosureError::RetryOfCompletedRelease)
                 }
@@ -868,7 +880,10 @@ fn chain_contains_frontier(chain: &Chain, entry_count: u64, head_hash: [u8; 32])
 }
 
 fn validate_outcome(outcome: DisclosureReleaseOutcome) -> Result<(), ProfileBoundDisclosureError> {
-    if matches!(outcome, DisclosureReleaseOutcome::Partial { bytes_released: 0 }) {
+    if matches!(
+        outcome,
+        DisclosureReleaseOutcome::Partial { bytes_released: 0 }
+    ) {
         return Err(ProfileBoundDisclosureError::ZeroPartialRelease);
     }
     Ok(())
@@ -933,7 +948,9 @@ fn release_entry_hash(
         ProfileBoundReleaseEvent::Outcome(DisclosureReleaseOutcome::Aborted) => {
             hasher.update(&[1, 1]);
         }
-        ProfileBoundReleaseEvent::Outcome(DisclosureReleaseOutcome::Partial { bytes_released }) => {
+        ProfileBoundReleaseEvent::Outcome(DisclosureReleaseOutcome::Partial {
+            bytes_released,
+        }) => {
             hasher.update(&[1, 2]);
             hasher.update(&bytes_released.to_be_bytes());
         }
@@ -977,7 +994,10 @@ pub enum ProfileBoundDisclosureError {
     UnsupportedCommitmentAlgorithm,
     /// Signature suite mismatch.
     #[error("unsupported profile-bound disclosure signature suite: {suite:?}")]
-    UnsupportedSignatureSuite { suite: SignatureSuite },
+    UnsupportedSignatureSuite {
+        /// Signature suite carried by the rejected artifact.
+        suite: SignatureSuite,
+    },
     /// Nil release identifier.
     #[error("profile-bound release ID must not be nil")]
     NilReleaseId,
@@ -989,7 +1009,10 @@ pub enum ProfileBoundDisclosureError {
     SelfRetry,
     /// Required commitment used an all-zero placeholder.
     #[error("profile-bound disclosure commitment {field} must not be all-zero")]
-    ZeroCommitment { field: &'static str },
+    ZeroCommitment {
+        /// Invalid commitment field.
+        field: &'static str,
+    },
     /// Ledger anchor count/hash is empty.
     #[error("profile-bound disclosure requires non-empty ledger anchors")]
     EmptyLedgerAnchor,
@@ -1068,37 +1091,21 @@ mod tests {
     }
 
     #[test]
-    fn profile_changes_signed_binding_message() {
-        let session = SessionTranscriptBinding {
-            schema: crate::SESSION_TRANSCRIPT_BINDING_SCHEMA.to_string(),
-            session_id: Uuid::from_u128(1),
-            transcript_hash_algorithm: crate::SESSION_TRANSCRIPT_HASH_ALGORITHM.to_string(),
-            transcript_hash: [7u8; 32],
-            transcript_signature_suite: crate::CURRENT_EVIDENCE_CRYPTO_MANIFEST
-                .transcript_signature,
-        };
-        let mut binding = ProfileBoundDisclosureBinding {
-            schema: PROFILE_BOUND_DISCLOSURE_BINDING_SCHEMA.to_string(),
-            commitment_algorithm: PROFILE_BOUND_DISCLOSURE_COMMITMENT_ALGORITHM.to_string(),
-            release_id: Uuid::from_u128(2),
+    fn profile_changes_release_commit_hash() {
+        let event_p1 = ProfileBoundReleaseEvent::Commit {
+            permit_digest: [1u8; 32],
+            credential_id: [2u8; 32],
+            required_sif_profile_digest: [3u8; 32],
             retry_of: None,
-            credential_id: [1u8; 32],
-            required_sif_profile_digest: [2u8; 32],
-            operation_id: Uuid::from_u128(3),
-            session,
-            requester_source_id: [4u8; 32],
-            receipt_digest: [5u8; 32],
-            evidence_bundle_digest: [6u8; 32],
-            execution_binding_digest: [7u8; 32],
-            result_digest: Some([8u8; 32]),
-            authorization_entry_count: 1,
-            authorization_entry_hash: [9u8; 32],
-            permit_ledger_entry_count: 1,
-            permit_ledger_head_hash: [9u8; 32],
         };
-        let p1 = profile_bound_disclosure_message(&binding);
-        binding.required_sif_profile_digest = [3u8; 32];
-        let p2 = profile_bound_disclosure_message(&binding);
-        assert_ne!(p1, p2);
+        let event_p2 = ProfileBoundReleaseEvent::Commit {
+            required_sif_profile_digest: [4u8; 32],
+            ..event_p1.clone()
+        };
+        let release_id = Uuid::from_u128(1);
+        assert_ne!(
+            release_entry_hash(0, [0u8; 32], release_id, &event_p1),
+            release_entry_hash(0, [0u8; 32], release_id, &event_p2)
+        );
     }
 }
