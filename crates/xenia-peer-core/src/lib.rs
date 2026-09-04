@@ -52,6 +52,7 @@
 #![warn(missing_docs)]
 
 pub mod advertisement;
+mod authenticated_peer_application_channel;
 mod authenticated_peer_handshake;
 mod authenticated_peer_transport;
 pub mod file_transfer;
@@ -64,6 +65,10 @@ mod session;
 pub mod transfer_source;
 pub mod transport;
 
+pub use authenticated_peer_application_channel::{
+    ApplicationPayloadTypeV1, AuthenticatedPeerApplicationChannelErrorV1,
+    AuthenticatedPeerApplicationChannelV1, OpenedPeerApplicationPayloadV1,
+};
 pub use authenticated_peer_handshake::{
     AuthenticatedPeerHandshakeV1, perform_host_handshake_authenticated_peer_v1,
 };
