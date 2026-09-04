@@ -66,6 +66,8 @@
 #![warn(rust_2018_idioms)]
 #![deny(unsafe_code)]
 
+mod agent_authority;
+mod agent_authority_proto;
 mod archive;
 mod binding;
 mod chain;
@@ -80,9 +82,20 @@ mod seal;
 mod signature;
 mod verify;
 mod witness;
+mod witness_frontier_anchor;
 
 #[cfg(test)]
 mod tests;
+
+pub use agent_authority::{
+    AGENT_CAPABILITY_ATTESTATION_SCHEMA, AgentCapabilityAttestationError,
+    AgentCapabilityAttestationV1, verify_agent_capability_attestation,
+};
+pub use agent_authority_proto::{
+    AGENT_CAPABILITY_AUTHORIZATION_DOMAIN, AGENT_CAPABILITY_AUTHORIZATION_SCHEMA_VERSION,
+    AgentCapabilityAuthorizationError, AgentCapabilityAuthorizationV1, AgentCheckpointAnchorV1,
+    TranscriptSignatureSuiteV1,
+};
 
 pub use archive::{
     LEDGER_ARCHIVE_SEGMENT_SCHEMA, LedgerArchiveError, LedgerArchiveSegment,
@@ -158,6 +171,15 @@ pub use signature::{
 pub use witness::{
     CHECKPOINT_WITNESS_BUNDLE_SCHEMA, CheckpointWitnessBundle, CheckpointWitnessError,
     CheckpointWitnessSignature, MAX_CHECKPOINT_WITNESSES, checkpoint_witness_message,
+};
+pub use witness_frontier_anchor::{
+    SYMTHAEA_WITNESS_ANCHOR_OPERATION_DOMAIN, SYMTHAEA_WITNESS_FRONTIER_STATEMENT_DOMAIN,
+    SignedWitnessFrontierAnchorV1, SignedWitnessFrontierObservationV1,
+    WITNESS_FRONTIER_ANCHOR_SCHEMA_VERSION, WitnessFrontierAnchorAppendOutcomeV1,
+    WitnessFrontierAnchorError, WitnessFrontierAnchorReconciliationV1, WitnessFrontierAnchorStore,
+    WitnessFrontierAnchorSummaryV1, WitnessFrontierAnchorTargetV1,
+    XENIA_WITNESS_FRONTIER_ANCHOR_DOMAIN, XENIA_WITNESS_FRONTIER_OBSERVATION_DOMAIN,
+    XeniaWitnessFrontierSourcePolicyV1, derive_xenia_witness_frontier_source_id,
 };
 
 pub use verify::Verifier;
