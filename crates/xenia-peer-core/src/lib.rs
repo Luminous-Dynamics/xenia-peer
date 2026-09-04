@@ -52,7 +52,7 @@
 #![warn(missing_docs)]
 
 pub mod advertisement;
-pub mod authenticated_peer_handshake;
+mod authenticated_peer_handshake;
 pub mod file_transfer;
 pub mod frame;
 pub mod handshake;
