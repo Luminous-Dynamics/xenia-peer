@@ -16,14 +16,18 @@
 //! before any source Chunk becomes carrier-visible. [`sif_staged_source`] strengthens
 //! the strict file path further by copying source bytes into a private Xenia-owned
 //! snapshot before authorization; on Unix the snapshot pathname is removed after its
-//! owned streaming handle is opened. Capability negotiation, semantic transfer, phase
-//! state and custody transport remain private implementation layers so application
-//! callers cannot bypass Accept ordering or receiver-signed custody closure.
+//! owned streaming handle is opened. [`sif_crash_recovery`] defines the fail-closed
+//! process-loss rule: a verified write-ahead journal may recover conservative disclosure
+//! frontiers, but never synthesizes successful completion after the source terminal was
+//! lost. Capability negotiation, semantic transfer, phase state and custody transport
+//! remain private implementation layers so application callers cannot bypass Accept
+//! ordering or receiver-signed custody closure.
 
 #![warn(missing_docs)]
 #![deny(unsafe_code)]
 
 pub mod sif_accountable_transfer;
+pub mod sif_crash_recovery;
 mod sif_custody_wire;
 mod sif_negotiation;
 pub mod sif_profile_bound_source;
