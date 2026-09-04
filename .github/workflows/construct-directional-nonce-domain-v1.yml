@@ -1,0 +1,245 @@
+name: Construct Directional Sender Nonce Domain V1
+
+on:
+  push:
+    branches:
+      - directional-nonce-domain-v1-constructor
+
+concurrency:
+  group: construct-directional-nonce-domain-v1-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  BASE_SHA: af4fcefc6d4cc7c3f74a3ca48f26abcd97d1e930
+  EXPECTED_SESSION_BLOB: c5af3fb533652a7125b9831a0defa9e9df20320e
+  EXPECTED_DAEMON_BLOB: 8212d35f148dd8eb16248e7c7a10bdb4dce0492c
+  EXPECTED_VIEWER_BLOB: 84f959252eaa40f9438ed485ebea494db519d8d7
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: -D warnings
+
+jobs:
+  construct:
+    name: Read-only construct and qualify DND-001
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
+      candidate_tree: ${{ steps.candidate.outputs.candidate_tree }}
+    steps:
+      - name: Checkout exact constructor head without persisted credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Assert immutable main base and exact constructor inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git merge-base HEAD "$BASE_SHA")" = "$BASE_SHA"
+          test "$(git rev-parse "$BASE_SHA:crates/xenia-peer-core/src/session.rs")" = "$EXPECTED_SESSION_BLOB"
+          test "$(git rev-parse "$BASE_SHA:apps/xenia-peer/src/main.rs")" = "$EXPECTED_DAEMON_BLOB"
+          test "$(git rev-parse "$BASE_SHA:apps/xenia-viewer/src/main.rs")" = "$EXPECTED_VIEWER_BLOB"
+          test "$(git rev-parse HEAD:crates/xenia-peer-core/src/session.rs)" = "$EXPECTED_SESSION_BLOB"
+          test "$(git rev-parse HEAD:apps/xenia-peer/src/main.rs)" = "$EXPECTED_DAEMON_BLOB"
+          test "$(git rev-parse HEAD:apps/xenia-viewer/src/main.rs)" = "$EXPECTED_VIEWER_BLOB"
+          test -z "$(git status --porcelain)"
+
+      - name: Construct bounded directional-domain runtime candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/construct_directional_nonce_domain_v1.py
+          expected=$'apps/xenia-peer/src/main.rs\napps/xenia-viewer/src/main.rs\ncrates/xenia-peer-core/src/session.rs'
+          test "$(git diff --name-only | sort)" = "$expected"
+          grep -q 'HOST_SENDER_DOMAIN_TAG_V1' crates/xenia-peer-core/src/session.rs
+          grep -q 'VIEWER_SENDER_DOMAIN_TAG_V1' crates/xenia-peer-core/src/session.rs
+          grep -q 'SessionRole::Host' apps/xenia-peer/src/main.rs
+          grep -q 'SessionRole::Viewer' apps/xenia-viewer/src/main.rs
+          ! grep -q 'LaneSession::with_fixture(source_id, args.epoch)' apps/xenia-peer/src/main.rs
+          ! grep -q 'LaneSession::with_fixture(source_id, args.epoch)' apps/xenia-viewer/src/main.rs
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@33c9ab3ef95cd57c164d9d6eb1f9a46338538d41
+        with:
+          determinate: true
+          flakehub: false
+
+      - name: Normalize and prove bounded formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          nix develop .#ci --command cargo fmt --all
+          expected=$'apps/xenia-peer/src/main.rs\napps/xenia-viewer/src/main.rs\ncrates/xenia-peer-core/src/session.rs'
+          test "$(git diff --name-only | sort)" = "$expected"
+          nix develop .#ci --command cargo fmt --all -- --check
+
+      - name: Focused DND-001 nonce regression
+        run: nix develop .#ci --command cargo test --locked -p xenia-peer-core 'role_bound_'
+
+      - name: Check affected production packages
+        run: |
+          nix develop .#ci --command cargo check --locked -p xenia-peer-core --all-targets
+          nix develop .#ci --command cargo check --locked -p xenia-peer --all-targets
+          nix develop .#ci --command cargo check --locked -p xenia-viewer --all-targets
+
+      - name: Strict Clippy affected production packages
+        run: |
+          nix develop .#ci --command cargo clippy --locked -p xenia-peer-core --all-targets -- -D warnings
+          nix develop .#ci --command cargo clippy --locked -p xenia-peer --all-targets -- -D warnings
+          nix develop .#ci --command cargo clippy --locked -p xenia-viewer --all-targets -- -D warnings
+
+      - name: Run affected package tests
+        run: |
+          nix develop .#ci --command cargo test --locked -p xenia-peer-core
+          nix develop .#ci --command cargo test --locked -p xenia-peer
+          nix develop .#ci --command cargo test --locked -p xenia-viewer
+
+      - name: Build deterministic three-file runtime candidate
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/directional-nonce-domain-v1"
+          mkdir -p "$OUT"
+
+          session_blob="$(git hash-object -w crates/xenia-peer-core/src/session.rs)"
+          daemon_blob="$(git hash-object -w apps/xenia-peer/src/main.rs)"
+          viewer_blob="$(git hash-object -w apps/xenia-viewer/src/main.rs)"
+
+          export GIT_INDEX_FILE="$OUT/candidate.index"
+          rm -f "$GIT_INDEX_FILE"
+          git read-tree "$BASE_SHA"
+          git update-index --cacheinfo "100644,$session_blob,crates/xenia-peer-core/src/session.rs"
+          git update-index --cacheinfo "100644,$daemon_blob,apps/xenia-peer/src/main.rs"
+          git update-index --cacheinfo "100644,$viewer_blob,apps/xenia-viewer/src/main.rs"
+          candidate_tree="$(git write-tree)"
+          unset GIT_INDEX_FILE
+
+          export GIT_AUTHOR_NAME='Xenia Security Constructor'
+          export GIT_AUTHOR_EMAIL='security-constructor@invalid.local'
+          export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+          export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+          export GIT_AUTHOR_DATE="$(git show -s --format=%cI "$GITHUB_SHA")"
+          export GIT_COMMITTER_DATE="$GIT_AUTHOR_DATE"
+          candidate_sha="$(printf '%s\n' 'fix(session): separate host and viewer sender nonce domains' | git commit-tree "$candidate_tree" -p "$BASE_SHA")"
+          git update-ref refs/heads/directional-nonce-domain-v1-candidate-local "$candidate_sha"
+
+          test "$(git rev-parse "$candidate_sha^")" = "$BASE_SHA"
+          test "$(git rev-parse "$candidate_sha^{tree}")" = "$candidate_tree"
+          expected=$'apps/xenia-peer/src/main.rs\napps/xenia-viewer/src/main.rs\ncrates/xenia-peer-core/src/session.rs'
+          test "$(git diff --name-only "$BASE_SHA" "$candidate_sha" | sort)" = "$expected"
+
+          git diff --binary "$BASE_SHA" "$candidate_sha" > "$OUT/CANDIDATE.patch"
+          git bundle create "$OUT/CANDIDATE.bundle" refs/heads/directional-nonce-domain-v1-candidate-local ^"$BASE_SHA"
+          sha256sum "$OUT/CANDIDATE.bundle" > "$OUT/CANDIDATE.bundle.sha256"
+          cp Cargo.lock "$OUT/Cargo.lock"
+
+          {
+            echo "schema=xenia.directional-nonce-domain-v1.candidate.v1"
+            echo "issue=274"
+            echo "invariant=DND-001"
+            echo "constructor_head=$GITHUB_SHA"
+            echo "base_sha=$BASE_SHA"
+            echo "base_tree=$(git rev-parse "$BASE_SHA^{tree}")"
+            echo "candidate_sha=$candidate_sha"
+            echo "candidate_tree=$candidate_tree"
+            echo "base_session_blob=$EXPECTED_SESSION_BLOB"
+            echo "base_daemon_blob=$EXPECTED_DAEMON_BLOB"
+            echo "base_viewer_blob=$EXPECTED_VIEWER_BLOB"
+            echo "candidate_session_blob=$session_blob"
+            echo "candidate_daemon_blob=$daemon_blob"
+            echo "candidate_viewer_blob=$viewer_blob"
+            echo "changed_file=crates/xenia-peer-core/src/session.rs"
+            echo "changed_file=apps/xenia-peer/src/main.rs"
+            echo "changed_file=apps/xenia-viewer/src/main.rs"
+            echo "cargo_lock_sha256=$(sha256sum Cargo.lock | awk '{print $1}')"
+            echo "constructor_sha256=$(sha256sum scripts/construct_directional_nonce_domain_v1.py | awk '{print $1}')"
+            echo "workflow_sha256=$(sha256sum .github/workflows/construct-directional-nonce-domain-v1.yml | awk '{print $1}')"
+            echo "claim=qualified-candidate-if-and-only-if-construct-job-successful-no-promotion-claim"
+          } > "$OUT/PROVENANCE.txt"
+          cat "$OUT/PROVENANCE.txt"
+
+          echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
+          echo "candidate_tree=$candidate_tree" >> "$GITHUB_OUTPUT"
+
+      - name: Prove constructor worktree did not absorb runtime candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git checkout -- crates/xenia-peer-core/src/session.rs apps/xenia-peer/src/main.rs apps/xenia-viewer/src/main.rs
+          test -z "$(git status --porcelain)"
+
+      - name: Retain DND-001 candidate capsule
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: directional-nonce-domain-v1-${{ github.sha }}
+          path: ${{ runner.temp }}/directional-nonce-domain-v1
+          if-no-files-found: error
+          retention-days: 90
+
+  publish:
+    name: Verify capsule and publish isolated DND-001 candidate
+    needs: construct
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      CANDIDATE_REF: refs/heads/directional-nonce-domain-v1-candidate
+      EXPECTED_CANDIDATE_SHA: ${{ needs.construct.outputs.candidate_sha }}
+      EXPECTED_CANDIDATE_TREE: ${{ needs.construct.outputs.candidate_tree }}
+    steps:
+      - name: Checkout exact base with publication authority
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.BASE_SHA }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Download qualified candidate capsule
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: directional-nonce-domain-v1-${{ github.sha }}
+          path: ${{ runner.temp }}/directional-nonce-domain-v1
+
+      - name: Verify candidate capsule and bounded source delta
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/directional-nonce-domain-v1"
+          (cd "$OUT" && sha256sum -c CANDIDATE.bundle.sha256)
+          git bundle verify "$OUT/CANDIDATE.bundle"
+          git fetch "$OUT/CANDIDATE.bundle" refs/heads/directional-nonce-domain-v1-candidate-local
+          actual_sha="$(git rev-parse FETCH_HEAD)"
+          test "$actual_sha" = "$EXPECTED_CANDIDATE_SHA"
+          test "$(git rev-parse "$actual_sha^")" = "$BASE_SHA"
+          test "$(git rev-parse "$actual_sha^{tree}")" = "$EXPECTED_CANDIDATE_TREE"
+          expected=$'apps/xenia-peer/src/main.rs\napps/xenia-viewer/src/main.rs\ncrates/xenia-peer-core/src/session.rs'
+          test "$(git diff --name-only "$BASE_SHA" "$actual_sha" | sort)" = "$expected"
+          git show "$actual_sha:crates/xenia-peer-core/src/session.rs" | grep -q 'HOST_SENDER_DOMAIN_TAG_V1'
+          git show "$actual_sha:crates/xenia-peer-core/src/session.rs" | grep -q 'VIEWER_SENDER_DOMAIN_TAG_V1'
+          git show "$actual_sha:apps/xenia-peer/src/main.rs" | grep -q 'SessionRole::Host'
+          git show "$actual_sha:apps/xenia-viewer/src/main.rs" | grep -q 'SessionRole::Viewer'
+
+      - name: Publish collision-checked isolated candidate ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          existing="$(git ls-remote origin "$CANDIDATE_REF" | awk '{print $1}')"
+          if [ -n "$existing" ] && [ "$existing" != "$EXPECTED_CANDIDATE_SHA" ]; then
+            echo "ref collision: $CANDIDATE_REF already points to $existing" >&2
+            exit 1
+          fi
+          if [ "$existing" = "$EXPECTED_CANDIDATE_SHA" ]; then
+            echo "candidate ref already publishes exact qualified SHA"
+            exit 0
+          fi
+          git push origin "$EXPECTED_CANDIDATE_SHA:$CANDIDATE_REF"
