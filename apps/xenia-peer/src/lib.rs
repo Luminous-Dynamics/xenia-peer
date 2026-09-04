@@ -26,9 +26,12 @@ pub mod sif_receive_runtime;
 mod sif_semantic_wire;
 mod sif_transfer_flow;
 
-// Lower-layer errors remain reachable because the public authorized error taxonomy
-// retains them as typed sources, while the authority-bearing implementations stay private.
+// Lower-layer errors/evidence remain reachable because the public authorized taxonomy
+// retains them as typed sources. None of these re-exports can create transfer authority.
+pub use sif_accountable_transfer::AccountableSifError;
 pub use sif_custody_wire::SifCustodySemanticError;
 pub use sif_negotiation::SifNegotiationError;
 pub use sif_semantic_wire::SifSemanticWireError;
-pub use sif_transfer_flow::SifTransferFlowError;
+pub use sif_transfer_flow::{
+    SifTransferFlowError, SifTransferTransportUncertain, SifTransportUncertainPhase,
+};
