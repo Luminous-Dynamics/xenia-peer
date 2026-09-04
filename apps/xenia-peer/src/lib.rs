@@ -9,10 +9,14 @@
 //! combines ledger semantics with peer-core filesystem mechanics without making the
 //! permissively licensed peer core depend on the AGPL evidence layer.
 //!
-//! The public protected-content authority is [`sif_accountable_transfer`]. Capability
-//! negotiation, semantic transfer, phase state and custody transport remain private
-//! implementation layers so application callers cannot bypass Accept ordering or
-//! receiver-signed custody closure.
+//! The public protected-content authority is [`sif_accountable_transfer`].
+//! [`sif_profile_bound_source`] adds the stronger outbound source-owning path: exact
+//! profile-bound file authority is joined to the actual negotiated SIF profile, the
+//! same-handle [`xenia_peer_core::TransferSource`], and the crash-safe write-ahead send
+//! journal before any source Chunk becomes carrier-visible. Capability negotiation,
+//! semantic transfer, phase state and custody transport remain private implementation
+//! layers so application callers cannot bypass Accept ordering or receiver-signed
+//! custody closure.
 
 #![warn(missing_docs)]
 #![deny(unsafe_code)]
@@ -20,6 +24,7 @@
 pub mod sif_accountable_transfer;
 mod sif_custody_wire;
 mod sif_negotiation;
+pub mod sif_profile_bound_source;
 pub mod sif_receive_runtime;
 mod sif_semantic_wire;
 mod sif_transfer_flow;
