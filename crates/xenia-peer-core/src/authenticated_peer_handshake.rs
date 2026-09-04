@@ -116,3 +116,32 @@ pub async fn perform_host_handshake_authenticated_peer_v1<T: Transport>(
         peer_identity,
     ))
 }
+
+#[cfg(test)]
+pub(crate) fn test_authenticated_peer_handshake_v1(
+    transcript_hash: [u8; 32],
+) -> AuthenticatedPeerHandshakeV1 {
+    use xenia_handshake::{ML_DSA_65_PK_LEN, SessionKeySchedule};
+
+    AuthenticatedPeerHandshakeV1::from_authenticated_parts(
+        HandshakeOutcome {
+            session_key: [0x31; 32],
+            transcript_hash,
+            key_schedule: SessionKeySchedule {
+                aead: [0x41; 32],
+                control: [0x42; 32],
+                video: [0x43; 32],
+                audio: [0x44; 32],
+                telemetry: [0x45; 32],
+                rekey: [0x46; 32],
+                context: [0x47; 32],
+            },
+            negotiated_context_hash: Some([0x51; 32]),
+            host_identity_fingerprint: [0x61; 32],
+        },
+        VerifiedPeerIdentity {
+            ed25519_pk: [0x71; 32],
+            ml_dsa_pk: vec![0x72; ML_DSA_65_PK_LEN],
+        },
+    )
+}
