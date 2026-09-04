@@ -59,6 +59,11 @@
 //! negotiated SIF profile exactly equals the upstream-required profile, so callers do
 //! not manufacture protected Offers independently of durable release authority.
 //!
+//! [`ContextBoundFileOfferAuthority`] is the stronger runtime construction for live
+//! output. It retains the complete authenticated transcript generation, requester/
+//! authorization anchor and exact release-ledger verifier key beside the existing
+//! move-only file authority without changing any historical signed schema.
+//!
 //! [`SifProtectedFileSendState`] adds a signed CAS write-ahead journal beneath the
 //! eventual sender typestate. A `Prepared` chunk becomes durable before carrier I/O,
 //! so crash recovery preserves a conservative possible-disclosure frontier. Exact
@@ -125,6 +130,7 @@ mod hash;
 mod key_transition;
 mod policy;
 mod profile_disclosure;
+mod profile_file_context;
 mod profile_file_disclosure;
 mod profile_file_send_journal;
 mod protected_file_protocol;
@@ -249,6 +255,10 @@ pub use profile_disclosure::{
     verify_profile_bound_release_entries,
 };
 
+pub use profile_file_context::{
+    AuthorizedReleaseContext, ContextBoundFileCommitError, ContextBoundFileOfferAuthority,
+    CurrentReleaseAuthorizationError, commit_context_bound_file_authority,
+};
 pub use profile_file_disclosure::{
     ProfileBoundCommittedFileDisclosure, ProfileBoundFileDisclosureError,
     ProfileBoundFileOfferAuthority,
