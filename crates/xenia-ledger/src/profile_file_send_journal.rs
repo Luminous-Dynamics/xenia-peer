@@ -448,8 +448,10 @@ impl SifProtectedFileSendState {
         chain: &Chain,
         prepared: &PreparedSifProtectedFileChunk,
         store: &mut S,
-    ) -> Result<SifProtectedFileConfirmDisposition, TransactionalSifProtectedFileSendError<S::Error>>
-    {
+    ) -> Result<
+        SifProtectedFileConfirmDisposition,
+        TransactionalSifProtectedFileSendError<S::Error>,
+    > {
         self.require_same_signer(chain)
             .map_err(TransactionalSifProtectedFileSendError::Protocol)?;
         prepared
@@ -660,6 +662,16 @@ fn build_send_index(
                 }
                 require_nonzero("chunk_digest", &chunk_digest)?;
                 require_nonzero("idempotency_token", &idempotency_token)?;
+                let expected_token = sif_protected_file_send_idempotency_token(
+                    offer_digest,
+                    chunk_sequence,
+                    offset,
+                    len,
+                    chunk_digest,
+                );
+                if idempotency_token != expected_token {
+                    return Err(SifProtectedFileSendError::IdempotencyTokenMismatch);
+                }
                 index.prepared.push(PreparedRecord {
                     chunk_sequence,
                     offset,
@@ -841,6 +853,9 @@ pub enum SifProtectedFileSendError {
         /// Invalid commitment field.
         field: &'static str,
     },
+    /// Persisted token is not the canonical token for its prepared identity.
+    #[error("protected-file send idempotency token does not match prepared identity")]
+    IdempotencyTokenMismatch,
     /// Chunk content length could not be represented as `u64`.
     #[error("protected-file send chunk length overflow")]
     ChunkLengthOverflow,
@@ -1086,6 +1101,38 @@ mod tests {
         assert_eq!(second.chunk_sequence(), 1);
         assert_eq!(state.possibly_disclosed_unique_bytes().unwrap(), 8);
         assert_eq!(state.confirmed_unique_bytes().unwrap(), 4);
+    }
+
+    #[test]
+    fn verifier_rejects_noncanonical_idempotency_token() {
+        let (chain, offer, _state, _store) = fixture();
+        let offer_digest = offer.offer_digest().unwrap();
+        let chunk_digest = sif_protected_file_send_chunk_digest(offer_digest, 0, 0, b"abcd");
+        let entry = build_send_entry(
+            &chain.signing_key,
+            0,
+            [0u8; 32],
+            offer.release_id(),
+            offer.transfer_id(),
+            offer_digest,
+            SifProtectedFileSendEvent::Prepared {
+                chunk_sequence: 0,
+                offset: 0,
+                len: 4,
+                chunk_digest,
+                idempotency_token: [5u8; 32],
+            },
+        );
+        let error = verify_sif_protected_file_send_entries(
+            &[entry],
+            &offer,
+            chain.signing_key.verifying_key().as_bytes(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            SifProtectedFileSendError::IdempotencyTokenMismatch
+        ));
     }
 
     #[test]
