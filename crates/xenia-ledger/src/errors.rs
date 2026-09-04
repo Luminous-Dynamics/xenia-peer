@@ -21,6 +21,20 @@ pub enum LedgerError {
     #[error("ledger append invariant failed: pushed entry missing")]
     AppendInvariant,
 
+    /// A prior persistence attempt may have committed externally. Appending
+    /// another entry before reconciliation could extend or fork an uncertain
+    /// frontier, so the chain is latched until that outcome is resolved.
+    #[error("ledger append blocked by uncertain persistence at sequence {seq}")]
+    UncertainPersistencePending {
+        /// Sequence number of the ambiguous candidate entry.
+        seq: u64,
+    },
+
+    /// The in-memory chain no longer matched the exact candidate frontier that
+    /// was latched after an ambiguous persistence outcome.
+    #[error("ledger pending-persistence frontier invariant failed")]
+    PendingPersistenceInvariant,
+
     /// The compacted-prefix entry count plus resident entries exceeded `u64`.
     #[error("ledger sequence number overflow")]
     SequenceOverflow,
@@ -35,6 +49,10 @@ pub enum TransactionalAppendError<E> {
     Ledger(LedgerError),
     /// The append succeeded in memory but `persist` failed; the entry was
     /// rolled back and the chain is exactly as it was before this call.
+    ///
+    /// This legacy API is correct only when the persistence callback can prove
+    /// that failure means **not persisted**. Storage paths with ambiguous commit
+    /// acknowledgement must use the outcome-aware Chain API instead.
     #[error("ledger entry could not be durably persisted: {0}")]
     Persist(E),
 }
