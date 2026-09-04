@@ -11,12 +11,14 @@
 //!
 //! The public protected-content authority is [`sif_accountable_transfer`].
 //! [`sif_profile_bound_source`] adds the stronger outbound source-owning path: exact
-//! profile-bound file authority is joined to the actual negotiated SIF profile, the
-//! same-handle [`xenia_peer_core::TransferSource`], and the crash-safe write-ahead send
-//! journal before any source Chunk becomes carrier-visible. Capability negotiation,
-//! semantic transfer, phase state and custody transport remain private implementation
-//! layers so application callers cannot bypass Accept ordering or receiver-signed
-//! custody closure.
+//! profile-bound file authority is joined to the actual negotiated SIF profile, an
+//! owned [`xenia_peer_core::TransferSource`], and the crash-safe write-ahead send journal
+//! before any source Chunk becomes carrier-visible. [`sif_staged_source`] strengthens
+//! the strict file path further by copying source bytes into a private Xenia-owned
+//! snapshot before authorization; on Unix the snapshot pathname is removed after its
+//! owned streaming handle is opened. Capability negotiation, semantic transfer, phase
+//! state and custody transport remain private implementation layers so application
+//! callers cannot bypass Accept ordering or receiver-signed custody closure.
 
 #![warn(missing_docs)]
 #![deny(unsafe_code)]
@@ -27,6 +29,7 @@ mod sif_negotiation;
 pub mod sif_profile_bound_source;
 pub mod sif_receive_runtime;
 mod sif_semantic_wire;
+pub mod sif_staged_source;
 mod sif_transfer_flow;
 
 // Lower-layer errors remain reachable because the public accountable error taxonomy
