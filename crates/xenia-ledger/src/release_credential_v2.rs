@@ -188,7 +188,10 @@ pub enum ReleaseCredentialV2Error {
     NestedV1SchemaMismatch,
     /// Nested historical statement contains an all-zero required commitment.
     #[error("nested v1 release credential commitment {field} must not be all-zero")]
-    NestedV1ZeroCommitment { field: &'static str },
+    NestedV1ZeroCommitment {
+        /// Invalid nested v1 commitment field.
+        field: &'static str,
+    },
     /// High-assurance release authorization requires an explicit profile.
     #[error("required SIF profile digest must not be all-zero")]
     ZeroRequiredSifProfile,
@@ -419,7 +422,10 @@ fn validate_nested_v1_statement(
     for (field, digest) in [
         ("credential_id", statement.credential_id),
         ("receipt_statement_digest", statement.receipt_statement_digest),
-        ("pre_witness_bundle_digest", statement.pre_witness_bundle_digest),
+        (
+            "pre_witness_bundle_digest",
+            statement.pre_witness_bundle_digest,
+        ),
         (
             "finalized_evidence_bundle_digest",
             statement.finalized_evidence_bundle_digest,
@@ -505,8 +511,22 @@ mod tests {
         }
     }
 
+    fn single_authority(key: &SigningKey) -> [TrustedReleaseAuthority; 1] {
+        [TrustedReleaseAuthority {
+            public_key: key.verifying_key().to_bytes(),
+            trust_domain_id: [90u8; 32],
+        }]
+    }
+
+    const fn single_authority_policy() -> ReleaseCredentialTrustPolicy {
+        ReleaseCredentialTrustPolicy {
+            min_valid_signatures: 1,
+            min_distinct_trust_domains: 1,
+        }
+    }
+
     #[test]
-    fn mycelix_v2_semantics_profile_changes_id_and_message() {
+    fn same_v1_different_profile_changes_id_and_message() {
         let p1 = statement([20u8; 32]);
         let p2 = statement([21u8; 32]);
         assert_ne!(p1.credential_id, p2.credential_id);
@@ -518,11 +538,26 @@ mod tests {
 
     #[test]
     fn zero_profile_fails_closed() {
-        let statement = statement([0u8; 32]);
         assert!(matches!(
-            statement.validate(),
+            statement([0u8; 32]).validate(),
             Err(ReleaseCredentialV2Error::ZeroRequiredSifProfile)
         ));
+    }
+
+    #[test]
+    fn valid_v2_authority_signature_verifies() {
+        let key = SigningKey::from_bytes(&[42u8; 32]);
+        let statement = statement([20u8; 32]);
+        let credential = SifReleaseCredentialV2 {
+            statement: statement.clone(),
+            signatures: vec![v2_signature(&statement, &key)],
+        };
+        verify_release_credential_v2(
+            &credential,
+            &single_authority(&key),
+            single_authority_policy(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -531,25 +566,15 @@ mod tests {
         let p1 = statement([20u8; 32]);
         let p2 = statement([21u8; 32]);
         let credential = SifReleaseCredentialV2 {
-            statement: p1.clone(),
+            statement: p2,
             signatures: vec![v2_signature(&p1, &key)],
         };
-        let authorities = [TrustedReleaseAuthority {
-            public_key: key.verifying_key().to_bytes(),
-            trust_domain_id: [90u8; 32],
-        }];
-        let policy = ReleaseCredentialTrustPolicy {
-            min_valid_signatures: 1,
-            min_distinct_trust_domains: 1,
-        };
-        verify_release_credential_v2(&credential, &authorities, policy).unwrap();
-
-        let migrated = SifReleaseCredentialV2 {
-            statement: p2,
-            signatures: credential.signatures,
-        };
         assert!(matches!(
-            verify_release_credential_v2(&migrated, &authorities, policy),
+            verify_release_credential_v2(
+                &credential,
+                &single_authority(&key),
+                single_authority_policy()
+            ),
             Err(ReleaseCredentialV2Error::InvalidAuthoritySignature)
         ));
     }
@@ -570,16 +595,12 @@ mod tests {
             statement,
             signatures: vec![signature],
         };
-        let authorities = [TrustedReleaseAuthority {
-            public_key: key.verifying_key().to_bytes(),
-            trust_domain_id: [90u8; 32],
-        }];
-        let policy = ReleaseCredentialTrustPolicy {
-            min_valid_signatures: 1,
-            min_distinct_trust_domains: 1,
-        };
         assert!(matches!(
-            verify_release_credential_v2(&credential, &authorities, policy),
+            verify_release_credential_v2(
+                &credential,
+                &single_authority(&key),
+                single_authority_policy()
+            ),
             Err(ReleaseCredentialV2Error::InvalidAuthoritySignature)
         ));
     }
@@ -591,6 +612,26 @@ mod tests {
         assert!(matches!(
             statement.validate(),
             Err(ReleaseCredentialV2Error::CredentialIdMismatch)
+        ));
+    }
+
+    #[test]
+    fn nested_non_v1_schema_fails_closed() {
+        let mut statement = statement([20u8; 32]);
+        statement.v1.schema = "not-v1".to_string();
+        assert!(matches!(
+            statement.validate(),
+            Err(ReleaseCredentialV2Error::NestedV1SchemaMismatch)
+        ));
+    }
+
+    #[test]
+    fn changed_outer_schema_fails_closed() {
+        let mut statement = statement([20u8; 32]);
+        statement.schema = "not-v2".to_string();
+        assert!(matches!(
+            statement.validate(),
+            Err(ReleaseCredentialV2Error::UnsupportedSchema)
         ));
     }
 }
