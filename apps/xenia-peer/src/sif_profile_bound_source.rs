@@ -234,12 +234,9 @@ impl ProfileBoundOwnedSource {
         if self.candidate.is_none() {
             match self.source.next_chunk(max_chunk_size).await {
                 Ok(Some(chunk)) => {
-                    let semantic = SifProtectedFileChunk::new(
-                        &self.offer,
-                        chunk.offset,
-                        chunk.data,
-                    )
-                    .map_err(ProfileBoundOwnedSourceError::from)?;
+                    let semantic =
+                        SifProtectedFileChunk::new(&self.offer, chunk.offset, chunk.data)
+                            .map_err(ProfileBoundOwnedSourceError::from)?;
                     self.candidate = Some(semantic);
                 }
                 Ok(None) => {
@@ -296,12 +293,15 @@ impl ProfileBoundOwnedSource {
     /// The write-ahead `Prepared` entry already makes the full Chunk part of the
     /// possible-disclosure frontier. The file tracker is conservatively charged by the
     /// same complete Chunk length, and no retry/source authority is returned.
-    pub fn transport_uncertain(mut self) -> Result<ProfileBoundSourceTerminal, ProfileBoundOwnedSourceError> {
+    pub fn transport_uncertain(
+        mut self,
+    ) -> Result<ProfileBoundSourceTerminal, ProfileBoundOwnedSourceError> {
         let prepared = self
             .prepared
             .take()
             .ok_or(ProfileBoundOwnedSourceError::NoPreparedChunk)?;
-        self.file.note_transport_uncertain(prepared.chunk().data().len())?;
+        self.file
+            .note_transport_uncertain(prepared.chunk().data().len())?;
         self.into_terminal()
     }
 
@@ -315,7 +315,7 @@ impl ProfileBoundOwnedSource {
 
     /// Consume only after the owned source reached verified EOF and every source byte is
     /// both durably prepared and durably carrier-confirmed.
-    pub fn completed(mut self) -> Result<ProfileBoundSourceTerminal, ProfileBoundOwnedSourceError> {
+    pub fn completed(self) -> Result<ProfileBoundSourceTerminal, ProfileBoundOwnedSourceError> {
         if self.prepared.is_some() || self.candidate.is_some() || !self.source_exhausted {
             return Err(ProfileBoundOwnedSourceError::SourceNotExhausted);
         }
