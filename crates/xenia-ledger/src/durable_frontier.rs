@@ -182,19 +182,21 @@ impl Chain {
     /// Verify that an already-restored chain exactly matches an authoritative
     /// durable-storage view, then mint an opaque frontier witness.
     ///
-    /// `verify` is the persistence adapter's trust boundary. A successful return
-    /// means the adapter proved the exact supplied claim is durably recoverable
-    /// under `persistence_policy_digest`; an error mints no token.
+    /// `verify` is the restore adapter's reviewed trust boundary. It receives
+    /// both the restored chain and the exact durability claim so one callback can
+    /// establish durable recoverability and perform the appropriate Xenia
+    /// cryptographic restore-integrity verification before returning success.
+    /// An error mints no token.
     pub fn verify_restored_durable_frontier_v1(
         &self,
         persistence_policy_digest: [u8; 32],
-        verify: impl FnOnce(&DurableLedgerFrontierClaimV1) -> Result<(), [u8; 32]>,
+        verify: impl FnOnce(&Self, &DurableLedgerFrontierClaimV1) -> Result<(), [u8; 32]>,
     ) -> Result<DurableLedgerFrontierV1, DurableLedgerFrontierError> {
         if self.has_uncertain_persistence() {
             return Err(DurableLedgerFrontierError::PersistenceUncertain);
         }
         let before = durable_claim_for_chain(self, persistence_policy_digest)?;
-        if let Err(diagnostic_digest) = verify(&before) {
+        if let Err(diagnostic_digest) = verify(self, &before) {
             return Err(DurableLedgerFrontierError::PersistenceVerificationRejected(
                 nonzero_diagnostic(diagnostic_digest, b"restore-verifier-rejected"),
             ));
@@ -542,7 +544,7 @@ mod tests {
         assert!(matches!(outcome, DurableLedgerAppendOutcomeV1::OutcomeUnknown { .. }));
         assert!(chain.has_uncertain_persistence());
         assert!(matches!(
-            chain.verify_restored_durable_frontier_v1(PERSISTENCE_POLICY, |_| Ok(())),
+            chain.verify_restored_durable_frontier_v1(PERSISTENCE_POLICY, |_, _| Ok(())),
             Err(DurableLedgerFrontierError::PersistenceUncertain)
         ));
 
@@ -574,14 +576,21 @@ mod tests {
         let restored = Chain::from_entries(entries, SigningKey::from_bytes(&[3; 32]));
 
         assert!(matches!(
-            restored.verify_restored_durable_frontier_v1(PERSISTENCE_POLICY, |_| {
+            restored.verify_restored_durable_frontier_v1(PERSISTENCE_POLICY, |_, _| {
                 Err([0xA1; 32])
             }),
             Err(DurableLedgerFrontierError::PersistenceVerificationRejected(_))
         ));
         let token = restored
-            .verify_restored_durable_frontier_v1(PERSISTENCE_POLICY, |claim| {
-                assert_eq!(claim.entry_count, 1);
+            .verify_restored_durable_frontier_v1(PERSISTENCE_POLICY, |chain, claim| {
+                assert_eq!(chain.entry_count(), claim.entry_count);
+                assert_eq!(chain.last_hash(), claim.head_hash);
+                let resident: Vec<_> = chain.iter().cloned().collect();
+                crate::Verifier::verify_chain(
+                    &resident,
+                    &SigningKey::from_bytes(&[3; 32]).verifying_key(),
+                )
+                .map_err(|_| [0xA2; 32])?;
                 Ok(())
             })
             .unwrap();
