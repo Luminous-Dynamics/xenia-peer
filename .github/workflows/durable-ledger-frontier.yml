@@ -1,0 +1,58 @@
+name: Durable Ledger Frontier
+
+on:
+  pull_request:
+    paths:
+      - 'crates/xenia-ledger/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/durable-ledger-frontier.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: durable-ledger-frontier-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  source:
+    name: Durable frontier qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Format xenia-ledger
+        run: cargo fmt --check --package xenia-ledger
+
+      - name: Test xenia-ledger
+        run: cargo test --locked -p xenia-ledger
+
+      - name: Clippy xenia-ledger
+        run: cargo clippy --locked -p xenia-ledger --all-targets -- -D warnings
+
+      - name: Record exact-head evidence
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/durable-ledger-frontier-evidence"
+          git rev-parse HEAD > "$RUNNER_TEMP/durable-ledger-frontier-evidence/HEAD"
+          git rev-parse HEAD^{tree} > "$RUNNER_TEMP/durable-ledger-frontier-evidence/TREE"
+          rustc -Vv > "$RUNNER_TEMP/durable-ledger-frontier-evidence/RUSTC.txt"
+          cargo -V > "$RUNNER_TEMP/durable-ledger-frontier-evidence/CARGO.txt"
+          sha256sum Cargo.lock > "$RUNNER_TEMP/durable-ledger-frontier-evidence/CARGO_LOCK_SHA256.txt"
+
+      - name: Upload source evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: durable-ledger-frontier-${{ github.sha }}
+          path: ${{ runner.temp }}/durable-ledger-frontier-evidence
+          if-no-files-found: error
+          retention-days: 14
