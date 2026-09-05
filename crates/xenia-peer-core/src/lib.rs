@@ -53,6 +53,7 @@
 
 pub mod advertisement;
 mod authenticated_peer_application_channel;
+mod authenticated_peer_application_receive;
 mod authenticated_peer_handshake;
 mod authenticated_peer_transport;
 pub mod file_transfer;
@@ -68,6 +69,9 @@ pub mod transport;
 pub use authenticated_peer_application_channel::{
     ApplicationPayloadTypeV1, AuthenticatedPeerApplicationChannelErrorV1,
     AuthenticatedPeerApplicationChannelV1, OpenedPeerApplicationPayloadV1,
+};
+pub use authenticated_peer_application_receive::{
+    AuthenticatedPeerApplicationReceiveErrorV1, recv_opened_payload_before_deadline_v1,
 };
 pub use authenticated_peer_handshake::{
     AuthenticatedPeerHandshakeV1, perform_host_handshake_authenticated_peer_v1,
