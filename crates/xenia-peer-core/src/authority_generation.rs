@@ -95,8 +95,8 @@ impl PendingAuthorityGenerationV1 {
         pre_session_profile: TransportPreSessionProfileV1,
         availability_profile: TransportAvailabilityProfileV1,
     ) -> Result<Self, AuthorityGenerationBindingError> {
-        let expected_context_hash =
-            expected_context_hash.ok_or(AuthorityGenerationBindingError::MissingNegotiatedContext)?;
+        let expected_context_hash = expected_context_hash
+            .ok_or(AuthorityGenerationBindingError::MissingNegotiatedContext)?;
         let pending = PendingSessionSurface::new_with_profiles(
             Some(expected_context_hash),
             transport_profile,
@@ -192,10 +192,7 @@ mod tests {
         )
     }
 
-    fn expected_context_hash(
-        kind: TransportKind,
-        capabilities: RawCapabilities,
-    ) -> [u8; 32] {
+    fn expected_context_hash(kind: TransportKind, capabilities: RawCapabilities) -> [u8; 32] {
         let (transport, pre_session, availability) = exact_profiles(kind);
         PendingSessionSurface::new_with_profiles(None, transport, pre_session, availability)
             .unwrap()
@@ -239,7 +236,8 @@ mod tests {
     #[test]
     fn context_mismatch_fails_during_capability_authentication() {
         let capabilities = canonical_capabilities();
-        let mut wrong_context = expected_context_hash(TransportKind::WebSocket, capabilities.clone());
+        let mut wrong_context =
+            expected_context_hash(TransportKind::WebSocket, capabilities.clone());
         wrong_context[0] ^= 0xFF;
         let (transport, pre_session, availability) = exact_profiles(TransportKind::WebSocket);
         let pending = PendingAuthorityGenerationV1::new_with_values(
