@@ -9,12 +9,13 @@
 //! makes that assumption executable without changing authenticated transport
 //! profile bytes.
 //!
-//! Crucially, public admission is minted only from
-//! [`crate::handshake::AuthenticatedSessionSurface`], which retains the exact
-//! transport profile committed into the authenticated negotiated-session
-//! context. Callers cannot mint admission from a fresh post-handshake
-//! `Transport::transport_profile()` query and accidentally substitute a profile
-//! that was not the one authenticated for this session.
+//! Public admission is minted only from an
+//! [`crate::authority_generation::AuthenticatedAuthorityGenerationV1`]. That
+//! wrapper proves both that the transport profile came from a capability-
+//! authenticated session surface and that the surface belongs to one exact
+//! authenticated handshake transcript generation. Equal negotiated contexts
+//! from different handshakes therefore do not collapse into one authority
+//! generation.
 //!
 //! Current TCP, WebSocket, and QUIC profiles all expose one reliable ordered
 //! logical Xenia stream. Their `send_envelope(...).await -> Ok(())` result is a
@@ -27,7 +28,9 @@
 
 use thiserror::Error;
 
-use crate::handshake::AuthenticatedSessionSurface;
+use crate::authority_generation::{
+    AuthenticatedAuthorityGenerationV1, AuthenticatedHandshakeGenerationV1,
+};
 use crate::transport::{TransportKind, TransportProfileV1};
 
 /// Why an authenticated transport profile cannot currently host the local
@@ -56,17 +59,19 @@ pub enum AuthorityRekeyTransportAdmissionError {
     UnknownProfileRevision,
 }
 
-/// Immutable proof that one capability-authenticated session surface carries a
+/// Immutable proof that one generation-bound authenticated session carries a
 /// transport profile satisfying Xenia's current local ordering prerequisites for
 /// receiver-rekey Ack handoff.
 ///
 /// This value is **not** a writer reservation and conveys no live authority. The
-/// peer must separately hold the exclusive fail-closed writer lease across Wire
-/// commit and Ack handoff. It also does not prove remote receipt.
+/// peer must separately hold an exclusive fail-closed writer lease for the same
+/// [`AuthenticatedHandshakeGenerationV1`] across Wire commit and Ack handoff. It
+/// also does not prove remote receipt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthorityRekeyTransportAdmissionV1 {
     kind: TransportKind,
     authenticated_context_hash: [u8; 32],
+    generation: AuthenticatedHandshakeGenerationV1,
 }
 
 impl AuthorityRekeyTransportAdmissionV1 {
@@ -75,20 +80,20 @@ impl AuthorityRekeyTransportAdmissionV1 {
         self.kind
     }
 
-    /// Canonical authenticated session-context hash from the surface that
-    /// supplied the admitted profile.
-    ///
-    /// This binds the static admission record to one authenticated session
-    /// context for audit/composition. It is not itself authority to use that
-    /// session.
+    /// Canonical authenticated session-context hash from the bound surface.
     pub const fn authenticated_context_hash(self) -> [u8; 32] {
         self.authenticated_context_hash
     }
+
+    /// Exact authenticated handshake generation that owns this admission.
+    pub const fn generation(self) -> AuthenticatedHandshakeGenerationV1 {
+        self.generation
+    }
 }
 
-impl AuthenticatedSessionSurface {
-    /// Admit this authenticated session's exact bound transport profile for the
-    /// current local receiver-rekey Ack handoff barrier.
+impl AuthenticatedAuthorityGenerationV1 {
+    /// Admit this exact authenticated generation's bound transport profile for
+    /// the current local receiver-rekey Ack handoff barrier.
     ///
     /// Admission requires, in order:
     ///
@@ -103,13 +108,18 @@ impl AuthenticatedSessionSurface {
     pub fn authority_rekey_transport_admission(
         &self,
     ) -> Result<AuthorityRekeyTransportAdmissionV1, AuthorityRekeyTransportAdmissionError> {
-        admit_profile(self.transport_profile(), self.context_hash())
+        admit_profile(
+            self.surface().transport_profile(),
+            self.surface().context_hash(),
+            self.generation(),
+        )
     }
 }
 
 fn admit_profile(
     profile: &TransportProfileV1,
     authenticated_context_hash: [u8; 32],
+    generation: AuthenticatedHandshakeGenerationV1,
 ) -> Result<AuthorityRekeyTransportAdmissionV1, AuthorityRekeyTransportAdmissionError> {
     if !profile.reliable {
         return Err(AuthorityRekeyTransportAdmissionError::Unreliable);
@@ -131,6 +141,7 @@ fn admit_profile(
     Ok(AuthorityRekeyTransportAdmissionV1 {
         kind: profile.kind,
         authenticated_context_hash,
+        generation,
     })
 }
 
@@ -139,6 +150,10 @@ mod tests {
     use super::*;
 
     const CONTEXT_HASH: [u8; 32] = [0xA5; 32];
+    const GENERATION_A: AuthenticatedHandshakeGenerationV1 =
+        AuthenticatedHandshakeGenerationV1::from_test_hash([0x11; 32]);
+    const GENERATION_B: AuthenticatedHandshakeGenerationV1 =
+        AuthenticatedHandshakeGenerationV1::from_test_hash([0x22; 32]);
 
     #[test]
     fn all_current_carriers_have_one_admitted_ordering_domain() {
@@ -148,9 +163,10 @@ mod tests {
             TransportKind::Quic,
         ] {
             let profile = TransportProfileV1::current(kind);
-            let admission = admit_profile(&profile, CONTEXT_HASH).unwrap();
+            let admission = admit_profile(&profile, CONTEXT_HASH, GENERATION_A).unwrap();
             assert_eq!(admission.kind(), kind);
             assert_eq!(admission.authenticated_context_hash(), CONTEXT_HASH);
+            assert_eq!(admission.generation(), GENERATION_A);
             assert!(profile.reliable);
             assert!(profile.ordered);
             assert_eq!(profile.logical_streams, 1);
@@ -158,11 +174,24 @@ mod tests {
     }
 
     #[test]
+    fn same_context_different_handshake_generation_produces_distinct_admission() {
+        let profile = TransportProfileV1::current(TransportKind::Tcp);
+        let a = admit_profile(&profile, CONTEXT_HASH, GENERATION_A).unwrap();
+        let b = admit_profile(&profile, CONTEXT_HASH, GENERATION_B).unwrap();
+        assert_eq!(
+            a.authenticated_context_hash(),
+            b.authenticated_context_hash()
+        );
+        assert_ne!(a.generation(), b.generation());
+        assert_ne!(a, b);
+    }
+
+    #[test]
     fn unreliable_profile_fails_closed() {
         let mut profile = TransportProfileV1::current(TransportKind::Tcp);
         profile.reliable = false;
         assert_eq!(
-            admit_profile(&profile, CONTEXT_HASH),
+            admit_profile(&profile, CONTEXT_HASH, GENERATION_A),
             Err(AuthorityRekeyTransportAdmissionError::Unreliable)
         );
     }
@@ -172,7 +201,7 @@ mod tests {
         let mut profile = TransportProfileV1::current(TransportKind::WebSocket);
         profile.ordered = false;
         assert_eq!(
-            admit_profile(&profile, CONTEXT_HASH),
+            admit_profile(&profile, CONTEXT_HASH, GENERATION_A),
             Err(AuthorityRekeyTransportAdmissionError::Unordered)
         );
     }
@@ -182,7 +211,7 @@ mod tests {
         let mut profile = TransportProfileV1::current(TransportKind::Quic);
         profile.logical_streams = 2;
         assert_eq!(
-            admit_profile(&profile, CONTEXT_HASH),
+            admit_profile(&profile, CONTEXT_HASH, GENERATION_A),
             Err(
                 AuthorityRekeyTransportAdmissionError::MultipleOrderingDomains {
                     logical_streams: 2,
@@ -196,7 +225,7 @@ mod tests {
         let mut profile = TransportProfileV1::current(TransportKind::Tcp);
         profile.logical_streams = 0;
         assert_eq!(
-            admit_profile(&profile, CONTEXT_HASH),
+            admit_profile(&profile, CONTEXT_HASH, GENERATION_A),
             Err(
                 AuthorityRekeyTransportAdmissionError::MultipleOrderingDomains {
                     logical_streams: 0,
@@ -210,7 +239,7 @@ mod tests {
         let mut profile = TransportProfileV1::current(TransportKind::Quic);
         profile.protocol_version = profile.protocol_version.saturating_add(1);
         assert_eq!(
-            admit_profile(&profile, CONTEXT_HASH),
+            admit_profile(&profile, CONTEXT_HASH, GENERATION_A),
             Err(AuthorityRekeyTransportAdmissionError::UnknownProfileRevision)
         );
     }
