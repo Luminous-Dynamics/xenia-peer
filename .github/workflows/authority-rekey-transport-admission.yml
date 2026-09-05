@@ -8,6 +8,7 @@ on:
       - "flake.nix"
       - "flake.lock"
       - "crates/xenia-peer-core/Cargo.toml"
+      - "crates/xenia-peer-core/src/authority_generation.rs"
       - "crates/xenia-peer-core/src/authority_transport.rs"
       - "crates/xenia-peer-core/src/handshake.rs"
       - "crates/xenia-peer-core/src/lib.rs"
@@ -59,6 +60,7 @@ jobs:
           mkdir -p "$OUT"
           cp Cargo.lock "$OUT/Cargo.lock"
           cp .github/workflows/authority-rekey-transport-admission.yml "$OUT/"
+          cp crates/xenia-peer-core/src/authority_generation.rs "$OUT/"
           cp crates/xenia-peer-core/src/authority_transport.rs "$OUT/"
           {
             echo "profile=xenia-authority-rekey-transport-admission-v1"
@@ -71,6 +73,7 @@ jobs:
             echo "image_version=${ImageVersion:-unknown}"
             echo "kernel=$(uname -srmo)"
             echo "cargo_lock_sha256=$(sha256sum Cargo.lock | awk '{print $1}')"
+            echo "authority_generation_sha256=$(sha256sum crates/xenia-peer-core/src/authority_generation.rs | awk '{print $1}')"
             echo "authority_transport_sha256=$(sha256sum crates/xenia-peer-core/src/authority_transport.rs | awk '{print $1}')"
             echo "handshake_sha256=$(sha256sum crates/xenia-peer-core/src/handshake.rs | awk '{print $1}')"
             echo "transport_sha256=$(sha256sum crates/xenia-peer-core/src/transport.rs | awk '{print $1}')"
@@ -97,6 +100,9 @@ jobs:
 
       - name: Clippy peer-core boundary
         run: nix develop .#ci --command cargo clippy --locked -p xenia-peer-core --all-targets -- -D warnings
+
+      - name: Test authenticated generation binding
+        run: nix develop .#ci --command cargo test --locked -p xenia-peer-core 'authority_generation::tests'
 
       - name: Test authenticated transport admission
         run: nix develop .#ci --command cargo test --locked -p xenia-peer-core 'authority_transport::tests'
@@ -135,4 +141,5 @@ jobs:
           rustc -vV
           cargo -Vv
       - run: cargo check --locked -p xenia-peer-core --all-targets
+      - run: cargo test --locked -p xenia-peer-core 'authority_generation::tests'
       - run: cargo test --locked -p xenia-peer-core 'authority_transport::tests'
