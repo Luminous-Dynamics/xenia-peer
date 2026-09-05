@@ -178,7 +178,10 @@ mod tests {
         let profile = TransportProfileV1::current(TransportKind::Tcp);
         let a = admit_profile(&profile, CONTEXT_HASH, GENERATION_A).unwrap();
         let b = admit_profile(&profile, CONTEXT_HASH, GENERATION_B).unwrap();
-        assert_eq!(a.authenticated_context_hash(), b.authenticated_context_hash());
+        assert_eq!(
+            a.authenticated_context_hash(),
+            b.authenticated_context_hash()
+        );
         assert_ne!(a.generation(), b.generation());
         assert_ne!(a, b);
     }
