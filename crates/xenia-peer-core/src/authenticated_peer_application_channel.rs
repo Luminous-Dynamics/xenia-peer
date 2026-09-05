@@ -19,7 +19,10 @@
 //! application data: callers must validate its own schema/semantics before
 //! assigning higher-level authority.
 
+use std::time::Instant;
+
 use thiserror::Error;
+use tokio::time;
 use xenia_wire::{
     PAYLOAD_TYPE_APPLICATION_MIN, Session as WireSession, WireError, envelope_payload_type,
 };
@@ -75,10 +78,14 @@ pub enum AuthenticatedPeerApplicationChannelErrorV1 {
     /// channel domains.
     #[error("payload type 0x{0:02x} is reserved by Xenia; application types start at 0x30")]
     ReservedPayloadType(u8),
-    /// A previous carrier, wire, domain, or binding failure terminalized this
-    /// channel.
+    /// A previous carrier, wire, domain, deadline, or binding failure
+    /// terminalized this channel.
     #[error("authenticated peer application channel is terminal")]
     Terminal,
+    /// A caller-supplied monotonic application-send deadline expired before a
+    /// safe successful carrier send completed.
+    #[error("authenticated peer application send deadline expired")]
+    SendDeadlineExpired,
     /// Carrier evidence returned by the owned transport failed its private
     /// same-wrapper ownership check. This is an internal invariant failure and
     /// is always terminal.
@@ -243,6 +250,64 @@ impl<T: Transport> AuthenticatedPeerApplicationChannelV1<T> {
         if let Err(error) = self.transport.send_envelope(&sealed).await {
             self.terminal = true;
             return Err(error.into());
+        }
+        Ok(())
+    }
+
+    /// Seal and send one application payload only if one caller-supplied
+    /// monotonic deadline remains current through carrier completion.
+    ///
+    /// The deadline is checked before AEAD sealing and again immediately after
+    /// sealing but before carrier I/O. The carrier send itself is bounded by the
+    /// same deadline, followed by one final post-send check.
+    ///
+    /// Any deadline expiry terminalizes the channel. In particular, once AEAD
+    /// sealing has advanced wire-send state, this method never releases the
+    /// channel for ordinary reuse if the envelope cannot be safely completed
+    /// inside the caller's deadline.
+    ///
+    /// This does not claim that bytes already accepted by an operating-system
+    /// or network buffer before the deadline can be recalled afterward.
+    pub async fn send_payload_before_deadline(
+        &mut self,
+        plaintext: &[u8],
+        deadline: Instant,
+    ) -> Result<(), AuthenticatedPeerApplicationChannelErrorV1> {
+        self.ensure_active()?;
+        if Instant::now() >= deadline {
+            self.terminal = true;
+            return Err(AuthenticatedPeerApplicationChannelErrorV1::SendDeadlineExpired);
+        }
+
+        let sealed = match self.wire.seal(plaintext, self.payload_type.value()) {
+            Ok(sealed) => sealed,
+            Err(error) => {
+                self.terminal = true;
+                return Err(error.into());
+            }
+        };
+
+        if Instant::now() >= deadline {
+            self.terminal = true;
+            return Err(AuthenticatedPeerApplicationChannelErrorV1::SendDeadlineExpired);
+        }
+
+        let tokio_deadline = time::Instant::from_std(deadline);
+        match time::timeout_at(tokio_deadline, self.transport.send_envelope(&sealed)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                self.terminal = true;
+                return Err(error.into());
+            }
+            Err(_) => {
+                self.terminal = true;
+                return Err(AuthenticatedPeerApplicationChannelErrorV1::SendDeadlineExpired);
+            }
+        }
+
+        if Instant::now() >= deadline {
+            self.terminal = true;
+            return Err(AuthenticatedPeerApplicationChannelErrorV1::SendDeadlineExpired);
         }
         Ok(())
     }
