@@ -31,6 +31,33 @@ pub enum SessionRole {
     Viewer,
 }
 
+/// Version-1 sender-role tags carried in nonce byte 0.
+///
+/// `xenia-wire` authenticates a 12-byte nonce whose first six bytes are the
+/// sender source prefix. Host and viewer currently share symmetric lane keys
+/// and independent sender counters, so their sealing domains MUST be disjoint.
+/// Reserving the first carried source byte for the role makes cross-direction
+/// prefix equality impossible without changing envelope bytes or the KDF.
+const HOST_SENDER_DOMAIN_TAG_V1: u8 = 0x48;
+const VIEWER_SENDER_DOMAIN_TAG_V1: u8 = 0x56;
+
+impl SessionRole {
+    /// Derive this sealing role's literal wire `source_id` from a shared
+    /// connection source-domain root.
+    ///
+    /// Only `source_id[0..6]` is carried in the AEAD nonce. Byte 0 is therefore
+    /// overwritten with a role-exclusive tag while bytes 1..7 retain the
+    /// configured root metadata. The host/viewer nonce prefixes are disjoint
+    /// even if the two configured roots accidentally differ.
+    pub fn sender_source_id(self, mut source_domain_root: [u8; 8]) -> [u8; 8] {
+        source_domain_root[0] = match self {
+            Self::Host => HOST_SENDER_DOMAIN_TAG_V1,
+            Self::Viewer => VIEWER_SENDER_DOMAIN_TAG_V1,
+        };
+        source_domain_root
+    }
+}
+
 /// Forward-path lane used to select the AEAD key for a [`RawFrame`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameLane {
@@ -103,7 +130,25 @@ pub struct LaneSession {
 }
 
 impl LaneSession {
-    /// Construct a lane-separated session with deterministic source metadata.
+    /// Construct a production lane-separated session from a shared connection
+    /// source-domain root and the local sealing role.
+    ///
+    /// The literal `source_id` installed into every lane is role-bound before
+    /// any AEAD key is installed, satisfying xenia-wire E-03-001 directional
+    /// nonce-domain separation while keeping the existing envelope format.
+    pub fn with_source_domain_root(
+        source_domain_root: [u8; 8],
+        epoch: u8,
+        role: SessionRole,
+    ) -> Self {
+        Self::with_fixture(role.sender_source_id(source_domain_root), epoch)
+    }
+
+    /// Construct a lane-separated session with an exact literal `source_id`.
+    ///
+    /// This raw compatibility/test constructor does not provide directional
+    /// sender-domain separation by itself. Production bidirectional peers must
+    /// use [`Self::with_source_domain_root`] instead.
     pub fn with_fixture(source_id: [u8; 8], epoch: u8) -> Self {
         Self {
             control: WireSession::with_source_id(source_id, epoch),
@@ -656,6 +701,53 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn role_bound_sender_prefixes_are_unconditionally_cross_direction_disjoint() {
+        let host = SessionRole::Host.sender_source_id([0x11; 8]);
+        let viewer = SessionRole::Viewer.sender_source_id([0xEE; 8]);
+
+        assert_eq!(host[0], HOST_SENDER_DOMAIN_TAG_V1);
+        assert_eq!(viewer[0], VIEWER_SENDER_DOMAIN_TAG_V1);
+        assert_ne!(&host[..6], &viewer[..6]);
+    }
+
+    #[test]
+    fn role_bound_rekey_seq_zero_control_nonces_do_not_collide() {
+        let root = [0x78, 0x65, 0x6e, 0x69, 0x61, 0x70, 0x68, 0x01];
+        let mut host = LaneSession::with_source_domain_root(root, 0x01, SessionRole::Host);
+        let mut viewer = LaneSession::with_source_domain_root(root, 0x01, SessionRole::Viewer);
+
+        let old_key = [0x31; 32];
+        let new_key = [0x42; 32];
+        host.control.install_key(old_key);
+        viewer.control.install_key(old_key);
+
+        // Model the host Proposal under K_n before both sides install K_{n+1}.
+        let _old_proposal = host
+            .control
+            .seal(b"proposal-under-old-key", xenia_wire::PAYLOAD_TYPE_FRAME)
+            .unwrap();
+        host.control.install_key(new_key);
+        viewer.control.install_key(new_key);
+
+        // Both independent sender counters are now zero under the same key.
+        // This is the exact dangerous shape from DND-001: viewer Ack seq0 and
+        // the host's first subsequent control RawFrame seq0.
+        let viewer_ack = viewer
+            .control
+            .seal(b"viewer-ack", xenia_wire::PAYLOAD_TYPE_FRAME)
+            .unwrap();
+        let host_next_control = host
+            .control
+            .seal(b"host-next-proposal", xenia_wire::PAYLOAD_TYPE_FRAME)
+            .unwrap();
+
+        assert_eq!(&viewer_ack[6..12], &host_next_control[6..12]);
+        assert_eq!(&viewer_ack[8..12], &[0, 0, 0, 0]);
+        assert_ne!(&viewer_ack[..6], &host_next_control[..6]);
+        assert_ne!(&viewer_ack[..12], &host_next_control[..12]);
+    }
 
     fn fixture_key() -> [u8; 32] {
         [0x42; 32]
