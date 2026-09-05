@@ -1,0 +1,74 @@
+name: Content Fabric Authenticated Peer Deadline Receive CI
+
+on:
+  pull_request:
+    paths:
+      - 'crates/xenia-peer-core/**'
+      - 'docs/security/AUTHENTICATED_PEER_DEADLINE_RECEIVE_V1.md'
+      - '.github/workflows/content-fabric-authenticated-peer-deadline-receive.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/xenia-peer-core/**'
+      - 'docs/security/AUTHENTICATED_PEER_DEADLINE_RECEIVE_V1.md'
+      - '.github/workflows/content-fabric-authenticated-peer-deadline-receive.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: content-fabric-authenticated-peer-deadline-receive-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CORE_MANIFEST: crates/xenia-peer-core/Cargo.toml
+
+jobs:
+  rust-196:
+    name: Authenticated peer deadline receive / Rust 1.96
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.96.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            crates/xenia-peer-core
+      - name: Check formatting
+        run: cargo fmt --manifest-path "$CORE_MANIFEST" -- --check
+      - name: Check core
+        run: cargo check --manifest-path "$CORE_MANIFEST" --all-targets
+      - name: Clippy core
+        run: cargo clippy --manifest-path "$CORE_MANIFEST" --all-targets -- -D warnings
+      - name: Test deadline-owned receive boundary
+        run: cargo test --manifest-path "$CORE_MANIFEST" authenticated_peer_application_receive::tests -- --nocapture
+      - name: Requalify authenticated application channel
+        run: cargo test --manifest-path "$CORE_MANIFEST" authenticated_peer_application_channel::tests -- --nocapture
+      - name: Test full core
+        run: cargo test --manifest-path "$CORE_MANIFEST" --all-targets
+      - name: Docs
+        run: RUSTDOCFLAGS='-D warnings' cargo doc --manifest-path "$CORE_MANIFEST" --no-deps
+
+  msrv:
+    name: Authenticated peer deadline receive / Rust 1.94 MSRV
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: '1.94'
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            crates/xenia-peer-core
+      - name: Check core on declared MSRV
+        run: cargo check --manifest-path "$CORE_MANIFEST" --all-targets
+      - name: Test deadline-owned receive boundary on declared MSRV
+        run: cargo test --manifest-path "$CORE_MANIFEST" authenticated_peer_application_receive::tests -- --nocapture
+      - name: Requalify authenticated application channel on declared MSRV
+        run: cargo test --manifest-path "$CORE_MANIFEST" authenticated_peer_application_channel::tests -- --nocapture
