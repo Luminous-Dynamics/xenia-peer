@@ -17,6 +17,11 @@
 //! from different handshakes therefore do not collapse into one authority
 //! generation.
 //!
+//! Admission retains the exact authenticated [`TransportProfileV1`], not merely
+//! its coarse [`TransportKind`]. A future writer lease must match both this exact
+//! carrier contract and the authenticated handshake generation before receiver
+//! replay/key/authority mutation may begin.
+//!
 //! Current TCP, WebSocket, and QUIC profiles all expose one reliable ordered
 //! logical Xenia stream. Their `send_envelope(...).await -> Ok(())` result is a
 //! local handoff/completion signal for that stream; it is **not** proof that the
@@ -59,34 +64,44 @@ pub enum AuthorityRekeyTransportAdmissionError {
     UnknownProfileRevision,
 }
 
-/// Immutable proof that one generation-bound authenticated session carries a
-/// transport profile satisfying Xenia's current local ordering prerequisites for
-/// receiver-rekey Ack handoff.
+/// Immutable evidence that one generation-bound authenticated session carries
+/// an exact transport profile satisfying Xenia's current local ordering
+/// prerequisites for receiver-rekey Ack handoff.
 ///
 /// This value is **not** a writer reservation and conveys no live authority. The
 /// peer must separately hold an exclusive fail-closed writer lease for the same
-/// [`AuthenticatedHandshakeGenerationV1`] across Wire commit and Ack handoff. It
-/// also does not prove remote receipt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// [`AuthenticatedHandshakeGenerationV1`] and the same exact
+/// [`TransportProfileV1`] across Wire commit and Ack handoff. It also does not
+/// prove remote receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorityRekeyTransportAdmissionV1 {
-    kind: TransportKind,
+    authenticated_transport_profile: TransportProfileV1,
     authenticated_context_hash: [u8; 32],
     generation: AuthenticatedHandshakeGenerationV1,
 }
 
 impl AuthorityRekeyTransportAdmissionV1 {
     /// Carrier kind whose exact authenticated profile passed admission.
-    pub const fn kind(self) -> TransportKind {
-        self.kind
+    pub const fn kind(&self) -> TransportKind {
+        self.authenticated_transport_profile.kind
+    }
+
+    /// Exact authenticated carrier contract that passed admission.
+    ///
+    /// Final peer integration must compare the concrete live writer lease to
+    /// this complete profile rather than permanently reducing the check to
+    /// [`TransportKind`].
+    pub const fn authenticated_transport_profile(&self) -> &TransportProfileV1 {
+        &self.authenticated_transport_profile
     }
 
     /// Canonical authenticated session-context hash from the bound surface.
-    pub const fn authenticated_context_hash(self) -> [u8; 32] {
+    pub const fn authenticated_context_hash(&self) -> [u8; 32] {
         self.authenticated_context_hash
     }
 
     /// Exact authenticated handshake generation that owns this admission.
-    pub const fn generation(self) -> AuthenticatedHandshakeGenerationV1 {
+    pub const fn generation(&self) -> AuthenticatedHandshakeGenerationV1 {
         self.generation
     }
 }
@@ -139,7 +154,7 @@ fn admit_profile(
     }
 
     Ok(AuthorityRekeyTransportAdmissionV1 {
-        kind: profile.kind,
+        authenticated_transport_profile: profile.clone(),
         authenticated_context_hash,
         generation,
     })
@@ -156,7 +171,7 @@ mod tests {
         AuthenticatedHandshakeGenerationV1::from_test_hash([0x22; 32]);
 
     #[test]
-    fn all_current_carriers_have_one_admitted_ordering_domain() {
+    fn all_current_carriers_retain_the_exact_admitted_ordering_contract() {
         for kind in [
             TransportKind::Tcp,
             TransportKind::WebSocket,
@@ -165,6 +180,7 @@ mod tests {
             let profile = TransportProfileV1::current(kind);
             let admission = admit_profile(&profile, CONTEXT_HASH, GENERATION_A).unwrap();
             assert_eq!(admission.kind(), kind);
+            assert_eq!(admission.authenticated_transport_profile(), &profile);
             assert_eq!(admission.authenticated_context_hash(), CONTEXT_HASH);
             assert_eq!(admission.generation(), GENERATION_A);
             assert!(profile.reliable);
@@ -182,8 +198,22 @@ mod tests {
             a.authenticated_context_hash(),
             b.authenticated_context_hash()
         );
+        assert_eq!(
+            a.authenticated_transport_profile(),
+            b.authenticated_transport_profile()
+        );
         assert_ne!(a.generation(), b.generation());
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn same_kind_future_profile_is_not_the_admitted_contract() {
+        let profile = TransportProfileV1::current(TransportKind::Quic);
+        let admission = admit_profile(&profile, CONTEXT_HASH, GENERATION_A).unwrap();
+        let mut future = profile.clone();
+        future.protocol_version = future.protocol_version.saturating_add(1);
+        assert_eq!(future.kind, admission.kind());
+        assert_ne!(admission.authenticated_transport_profile(), &future);
     }
 
     #[test]
