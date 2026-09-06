@@ -73,6 +73,7 @@ mod binding;
 mod chain;
 mod checkpoint;
 mod compaction;
+mod durable_frontier;
 mod entry;
 mod errors;
 mod hash;
@@ -128,6 +129,12 @@ pub use checkpoint::{
 pub use compaction::{
     LEDGER_COMPACTION_MANIFEST_SCHEMA, LedgerCompactionError, LedgerCompactionManifest,
     ledger_compaction_manifest_message,
+};
+
+pub use durable_frontier::{
+    DURABLE_LEDGER_FRONTIER_DOMAIN, DURABLE_LEDGER_FRONTIER_SCHEMA_VERSION,
+    DurableLedgerAppendOutcomeV1, DurableLedgerFrontierClaimV1, DurableLedgerFrontierError,
+    DurableLedgerFrontierV1, DurableLedgerReconciliationOutcomeV1,
 };
 
 pub use entry::{

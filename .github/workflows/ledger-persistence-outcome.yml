@@ -6,7 +6,6 @@ on:
       - 'crates/xenia-ledger/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - 'rust-toolchain.toml'
       - '.github/workflows/ledger-persistence-outcome.yml'
   workflow_dispatch:
 
@@ -29,6 +28,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install reviewed Rust toolchain
+        uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy,rustfmt
+
       - name: Format xenia-ledger
         run: cargo fmt --check --package xenia-ledger
 
@@ -41,12 +45,15 @@ jobs:
       - name: Record exact-head evidence
         if: always()
         run: |
-          mkdir -p "$RUNNER_TEMP/ledger-persistence-evidence"
-          git rev-parse HEAD > "$RUNNER_TEMP/ledger-persistence-evidence/HEAD"
-          git rev-parse HEAD^{tree} > "$RUNNER_TEMP/ledger-persistence-evidence/TREE"
-          rustc -Vv > "$RUNNER_TEMP/ledger-persistence-evidence/RUSTC.txt"
-          cargo -V > "$RUNNER_TEMP/ledger-persistence-evidence/CARGO.txt"
-          sha256sum Cargo.lock > "$RUNNER_TEMP/ledger-persistence-evidence/CARGO_LOCK_SHA256.txt"
+          E="$RUNNER_TEMP/ledger-persistence-evidence"
+          mkdir -p "$E"
+          git rev-parse HEAD > "$E/HEAD"
+          git rev-parse HEAD^{tree} > "$E/TREE"
+          rustc -Vv > "$E/RUSTC.txt"
+          cargo -V > "$E/CARGO.txt"
+          sha256sum Cargo.lock > "$E/CARGO_LOCK_SHA256.txt"
+          sha256sum crates/xenia-ledger/src/chain.rs > "$E/OUTCOME_AWARE_CHAIN_SHA256.txt"
+          sha256sum crates/xenia-ledger/src/durable_frontier.rs > "$E/DURABLE_FRONTIER_SHA256.txt"
 
       - name: Upload source evidence
         if: always()

@@ -1,0 +1,105 @@
+name: Xenia Ledger Format Diagnostic
+
+on:
+  pull_request:
+    paths:
+      - 'crates/xenia-ledger/**'
+      - '.github/workflows/xenia-ledger-format-diagnostic.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xenia-ledger-format-diagnostic-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  diagnostic:
+    name: Cargo format + test + Clippy diagnostic
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy,rustfmt
+
+      - name: Preserve exact checked-in source
+        run: |
+          git rev-parse HEAD > "$RUNNER_TEMP/HEAD"
+          git rev-parse HEAD^{tree} > "$RUNNER_TEMP/TREE"
+          git diff --exit-code
+
+      - name: Require reviewed fail-closed source repairs
+        run: |
+          if grep -n '\.expect(' crates/xenia-ledger/src/durable_frontier.rs; then
+            echo 'runtime expect remains in durable_frontier.rs' >&2
+            exit 1
+          fi
+          grep -q 'append-internal-claim-invalid' crates/xenia-ledger/src/durable_frontier.rs
+          grep -q 'reconcile-internal-claim-invalid' crates/xenia-ledger/src/durable_frontier.rs
+          if grep -n 'allow(clippy::large_enum_variant)' crates/xenia-ledger/src/witness_frontier_anchor.rs; then
+            echo 'large reconciliation variant lint was suppressed instead of structurally repaired' >&2
+            exit 1
+          fi
+
+      - name: Let rustfmt produce the exact candidate
+        run: cargo fmt --package xenia-ledger
+
+      - name: Record rustfmt candidate patch
+        run: git --no-pager diff -- crates/xenia-ledger | tee "$RUNNER_TEMP/RUSTFMT.patch"
+
+      - name: Apply any machine-applicable Clippy suggestions
+        continue-on-error: true
+        run: cargo clippy --fix --locked -p xenia-ledger --all-targets --allow-dirty --allow-staged -- -D warnings
+
+      - name: Reformat after Clippy suggestions
+        run: cargo fmt --package xenia-ledger
+
+      - name: Print complete candidate patch
+        run: |
+          git --no-pager diff -- crates/xenia-ledger | tee "$RUNNER_TEMP/COMPLETE.patch"
+          if test ! -s "$RUNNER_TEMP/COMPLETE.patch"; then
+            echo 'checked-in xenia-ledger source is formatter/Clippy canonical'
+          fi
+
+      - name: Test candidate xenia-ledger
+        run: cargo test --locked -p xenia-ledger
+
+      - name: Strict Clippy candidate xenia-ledger
+        run: cargo clippy --locked -p xenia-ledger --all-targets -- -D warnings
+
+      - name: Record diagnostic evidence
+        if: always()
+        run: |
+          E="$RUNNER_TEMP/xenia-ledger-format-diagnostic"
+          mkdir -p "$E"
+          cp "$RUNNER_TEMP/HEAD" "$E/HEAD"
+          cp "$RUNNER_TEMP/TREE" "$E/TREE"
+          cp "$RUNNER_TEMP/RUSTFMT.patch" "$E/RUSTFMT.patch" 2>/dev/null || true
+          cp "$RUNNER_TEMP/COMPLETE.patch" "$E/COMPLETE.patch" 2>/dev/null || true
+          rustc -Vv > "$E/RUSTC.txt"
+          cargo -V > "$E/CARGO.txt"
+          sha256sum Cargo.lock > "$E/CARGO_LOCK_SHA256.txt"
+          sha256sum crates/xenia-ledger/src/durable_frontier.rs > "$E/DURABLE_FRONTIER_SHA256.txt"
+          sha256sum crates/xenia-ledger/src/witness_frontier_anchor.rs > "$E/WITNESS_FRONTIER_SHA256.txt"
+          git diff -- crates/xenia-ledger > "$E/WORKTREE_AFTER.patch"
+
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xenia-ledger-format-diagnostic-${{ github.sha }}
+          path: ${{ runner.temp }}/xenia-ledger-format-diagnostic
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Require checked-in source already canonical
+        run: test ! -s "$RUNNER_TEMP/COMPLETE.patch"

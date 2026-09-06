@@ -10,6 +10,7 @@ use ed25519_dalek::Signer;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::Chain;
 use crate::agent_authority_proto::{
     AgentCapabilityAuthorizationError, AgentCapabilityAuthorizationV1, AgentCheckpointAnchorV1,
     TranscriptSignatureSuiteV1,
@@ -24,7 +25,6 @@ use crate::signature::{
     EvidenceSignatureBackend, EvidenceSignatureBackendError, SignatureEnvelope,
     SignatureEnvelopeError, SignatureSuite,
 };
-use crate::Chain;
 
 /// Schema label for a Xenia signature over an external bounded-agent capability.
 pub const AGENT_CAPABILITY_ATTESTATION_SCHEMA: &str = "xenia-agent-capability-attestation-v1";
@@ -236,9 +236,7 @@ pub enum AgentCapabilityAttestationError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        ConsentEventRecord, ConsentKind, Ed25519EvidenceSignatureBackend, SignatureSuite,
-    };
+    use crate::{ConsentEventRecord, ConsentKind, Ed25519EvidenceSignatureBackend, SignatureSuite};
     use ed25519_dalek::SigningKey;
     use uuid::Uuid;
 
@@ -312,18 +310,20 @@ mod tests {
 
         let mut tampered = attestation.clone();
         tampered.authorization.capability_digest[0] ^= 1;
-        assert!(verify_agent_capability_attestation(
-            &tampered,
-            &session,
-            &binding,
-            &backend,
-            120,
-            authorization.capability_digest,
-            authorization.executor_workload_digest,
-            authorization.authority_epoch,
-            authorization.prior_checkpoint,
-        )
-        .is_err());
+        assert!(
+            verify_agent_capability_attestation(
+                &tampered,
+                &session,
+                &binding,
+                &backend,
+                120,
+                authorization.capability_digest,
+                authorization.executor_workload_digest,
+                authorization.authority_epoch,
+                authorization.prior_checkpoint,
+            )
+            .is_err()
+        );
     }
 
     #[test]

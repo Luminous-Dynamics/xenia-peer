@@ -1,0 +1,83 @@
+name: Durable Ledger Frontier
+
+on:
+  pull_request:
+    paths:
+      - 'crates/xenia-ledger/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/durable-ledger-frontier.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: durable-ledger-frontier-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  source:
+    name: Durable frontier qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install reviewed Rust toolchain
+        uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy,rustfmt
+
+      - name: Require fail-closed durability source invariants
+        run: |
+          if grep -n '\.expect(' crates/xenia-ledger/src/durable_frontier.rs; then
+            echo 'runtime expect remains in durable_frontier.rs' >&2
+            exit 1
+          fi
+          grep -q 'append-internal-claim-invalid' crates/xenia-ledger/src/durable_frontier.rs
+          grep -q 'reconcile-internal-claim-invalid' crates/xenia-ledger/src/durable_frontier.rs
+          if grep -n 'allow(clippy::large_enum_variant)' crates/xenia-ledger/src/witness_frontier_anchor.rs; then
+            echo 'large witness reconciliation variant lint was suppressed' >&2
+            exit 1
+          fi
+
+      - name: Format xenia-ledger
+        run: cargo fmt --check --package xenia-ledger
+
+      - name: Test xenia-ledger
+        run: cargo test --locked -p xenia-ledger
+
+      - name: Clippy xenia-ledger
+        run: cargo clippy --locked -p xenia-ledger --all-targets -- -D warnings
+
+      - name: Record exact-head evidence
+        if: always()
+        run: |
+          E="$RUNNER_TEMP/durable-ledger-frontier-evidence"
+          mkdir -p "$E"
+          git rev-parse HEAD > "$E/HEAD"
+          git rev-parse HEAD^{tree} > "$E/TREE"
+          rustc -Vv > "$E/RUSTC.txt"
+          cargo -V > "$E/CARGO.txt"
+          sha256sum Cargo.lock > "$E/CARGO_LOCK_SHA256.txt"
+          sha256sum crates/xenia-ledger/src/chain.rs > "$E/OUTCOME_AWARE_CHAIN_SHA256.txt"
+          sha256sum crates/xenia-ledger/src/agent_authority.rs > "$E/AGENT_AUTHORITY_SHA256.txt"
+          sha256sum crates/xenia-ledger/src/agent_authority_proto.rs > "$E/AGENT_AUTHORITY_PROTOCOL_SHA256.txt"
+          sha256sum crates/xenia-ledger/src/durable_frontier.rs > "$E/DURABLE_FRONTIER_SHA256.txt"
+          sha256sum crates/xenia-ledger/src/witness_frontier_anchor.rs > "$E/WITNESS_ANCHOR_PROTOCOL_SHA256.txt"
+          sha256sum crates/xenia-ledger/tests/agent_authority_interop.rs > "$E/AGENT_AUTHORITY_INTEROP_VECTOR_SHA256.txt"
+          sha256sum crates/xenia-ledger/tests/witness_frontier_interop.rs > "$E/WITNESS_INTEROP_VECTOR_SHA256.txt"
+
+      - name: Upload source evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: durable-ledger-frontier-${{ github.sha }}
+          path: ${{ runner.temp }}/durable-ledger-frontier-evidence
+          if-no-files-found: error
+          retention-days: 14
