@@ -10,13 +10,17 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: xenia-ledger-format-diagnostic-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
   diagnostic:
-    name: Reviewed repair + Cargo format + test + Clippy diagnostic
+    name: Cargo format + test + Clippy diagnostic
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -33,61 +37,26 @@ jobs:
           git rev-parse HEAD^{tree} > "$RUNNER_TEMP/TREE"
           git diff --exit-code
 
-      - name: Apply reviewed nonpanic and lint repair candidate in ephemeral checkout
+      - name: Require reviewed fail-closed source repairs
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          durable = Path('crates/xenia-ledger/src/durable_frontier.rs')
-          text = durable.read_text()
-
-          old = '''    /// Stable BLAKE3 commitment to the complete claim.\n    pub fn digest(self) -> Result<[u8; 32], DurableLedgerFrontierError> {\n        self.validate()?;\n        let mut hasher = blake3::Hasher::new();\n        hasher.update(DURABLE_LEDGER_FRONTIER_DOMAIN);\n        hasher.update(&self.schema_version.to_be_bytes());\n        hasher.update(&self.entry_count.to_be_bytes());\n        hasher.update(&self.head_hash);\n        hasher.update(&self.ledger_public_key);\n        hasher.update(&self.persistence_policy_digest);\n        Ok(*hasher.finalize().as_bytes())\n    }\n'''
-          new = '''    /// Stable BLAKE3 commitment to the complete claim.\n    pub fn digest(self) -> Result<[u8; 32], DurableLedgerFrontierError> {\n        self.validate()?;\n        Ok(durable_claim_digest(self))\n    }\n'''
-          assert old in text, 'claim digest source drifted'
-          text = text.replace(old, new, 1)
-
-          old = '''    pub fn digest(&self) -> [u8; 32] {\n        self.claim\n            .digest()\n            .expect("private durable frontier is constructed only after validation")\n    }\n'''
-          new = '''    pub fn digest(&self) -> [u8; 32] {\n        durable_claim_digest(self.claim)\n    }\n'''
-          assert old in text, 'opaque token digest source drifted'
-          text = text.replace(old, new, 1)
-
-          old = '''        let outcome = self.append_transactional_outcome(event, |chain| {\n            let claim = durable_claim_for_chain_allow_pending(chain, persistence_policy_digest)\n                .expect("outcome-aware append has already established a valid candidate frontier");\n            persist(chain, &claim)\n        })?;\n'''
-          new = '''        let outcome = self.append_transactional_outcome(event, |chain| {\n            let claim = match durable_claim_for_chain_allow_pending(chain, persistence_policy_digest) {\n                Ok(claim) => claim,\n                Err(_) => {\n                    return PersistenceDisposition::ProvenNotPersisted(nonzero_diagnostic(\n                        ZERO32,\n                        b"append-internal-claim-invalid",\n                    ));\n                }\n            };\n            persist(chain, &claim)\n        })?;\n'''
-          assert old in text, 'append callback source drifted'
-          text = text.replace(old, new, 1)
-
-          old = '''        let outcome = self.reconcile_pending_persistence(|chain, pending| {\n            let claim = durable_claim_for_chain_allow_pending(chain, persistence_policy_digest)\n                .expect("pending reconciliation has a structurally valid candidate frontier");\n            reconcile(chain, pending, &claim)\n        })?;\n'''
-          new = '''        let outcome = self.reconcile_pending_persistence(|chain, pending| {\n            let claim = match durable_claim_for_chain_allow_pending(chain, persistence_policy_digest) {\n                Ok(claim) => claim,\n                Err(_) => {\n                    return PersistenceDisposition::OutcomeUnknown(nonzero_diagnostic(\n                        ZERO32,\n                        b"reconcile-internal-claim-invalid",\n                    ));\n                }\n            };\n            reconcile(chain, pending, &claim)\n        })?;\n'''
-          assert old in text, 'reconcile callback source drifted'
-          text = text.replace(old, new, 1)
-
-          marker = '''fn durable_claim_for_chain(\n'''
-          helper = '''fn durable_claim_digest(claim: DurableLedgerFrontierClaimV1) -> [u8; 32] {\n    let mut hasher = blake3::Hasher::new();\n    hasher.update(DURABLE_LEDGER_FRONTIER_DOMAIN);\n    hasher.update(&claim.schema_version.to_be_bytes());\n    hasher.update(&claim.entry_count.to_be_bytes());\n    hasher.update(&claim.head_hash);\n    hasher.update(&claim.ledger_public_key);\n    hasher.update(&claim.persistence_policy_digest);\n    *hasher.finalize().as_bytes()\n}\n\n'''
-          assert marker in text, 'durable claim helper insertion point drifted'
-          text = text.replace(marker, helper + marker, 1)
-          durable.write_text(text)
-
-          anchor = Path('crates/xenia-ledger/src/witness_frontier_anchor.rs')
-          text = anchor.read_text()
-          old = '''        if let Some(current) = self.current {\n            if current.anchor_sequence == 0\n                || current.anchor_fingerprint == ZERO32\n                || current.operation_id == ZERO32\n                || current.high_watermark == 0\n                || current.reservation_head == ZERO32\n                || current.frontier_statement_digest == ZERO32\n                || current.frontier_statement_digest\n                    != witness_frontier_statement_digest(\n                        self.witness_id,\n                        current.high_watermark,\n                        current.reservation_head,\n                    )\n            {\n                return Err(WitnessFrontierAnchorError::MalformedObservation);\n            }\n        }\n'''
-          new = '''        if let Some(current) = self.current\n            && (current.anchor_sequence == 0\n                || current.anchor_fingerprint == ZERO32\n                || current.operation_id == ZERO32\n                || current.high_watermark == 0\n                || current.reservation_head == ZERO32\n                || current.frontier_statement_digest == ZERO32\n                || current.frontier_statement_digest\n                    != witness_frontier_statement_digest(\n                        self.witness_id,\n                        current.high_watermark,\n                        current.reservation_head,\n                    ))\n        {\n            return Err(WitnessFrontierAnchorError::MalformedObservation);\n        }\n'''
-          assert old in text, 'observation validation source drifted'
-          text = text.replace(old, new, 1)
-
-          old = '''/// Result of explicit idempotency reconciliation.\n#[derive(Debug)]\npub enum WitnessFrontierAnchorReconciliationV1 {\n'''
-          new = '''/// Result of explicit idempotency reconciliation.\n///\n/// The persisted variant intentionally carries the exact authenticated anchor inline.\n/// Reconciliation is an infrequent control-plane path, and avoiding a heap-only API\n/// is preferable here to optimizing the enum for dense collection storage.\n#[allow(clippy::large_enum_variant)]\n#[derive(Debug)]\npub enum WitnessFrontierAnchorReconciliationV1 {\n'''
-          assert old in text, 'reconciliation enum source drifted'
-          text = text.replace(old, new, 1)
-          anchor.write_text(text)
-          PY
+          if grep -n '\.expect(' crates/xenia-ledger/src/durable_frontier.rs; then
+            echo 'runtime expect remains in durable_frontier.rs' >&2
+            exit 1
+          fi
+          grep -q 'append-internal-claim-invalid' crates/xenia-ledger/src/durable_frontier.rs
+          grep -q 'reconcile-internal-claim-invalid' crates/xenia-ledger/src/durable_frontier.rs
+          if grep -n 'allow(clippy::large_enum_variant)' crates/xenia-ledger/src/witness_frontier_anchor.rs; then
+            echo 'large reconciliation variant lint was suppressed instead of structurally repaired' >&2
+            exit 1
+          fi
 
       - name: Let rustfmt produce the exact candidate
         run: cargo fmt --package xenia-ledger
 
-      - name: Record reviewed-plus-rustfmt patch
-        run: git --no-pager diff -- crates/xenia-ledger | tee "$RUNNER_TEMP/REVIEWED_RUSTFMT.patch"
+      - name: Record rustfmt candidate patch
+        run: git --no-pager diff -- crates/xenia-ledger | tee "$RUNNER_TEMP/RUSTFMT.patch"
 
-      - name: Apply any remaining machine-applicable Clippy suggestions
+      - name: Apply any machine-applicable Clippy suggestions
         continue-on-error: true
         run: cargo clippy --fix --locked -p xenia-ledger --all-targets --allow-dirty --allow-staged -- -D warnings
 
@@ -98,14 +67,7 @@ jobs:
         run: |
           git --no-pager diff -- crates/xenia-ledger | tee "$RUNNER_TEMP/COMPLETE.patch"
           if test ! -s "$RUNNER_TEMP/COMPLETE.patch"; then
-            echo 'repair/formatter/Clippy produced no source delta'
-          fi
-
-      - name: Require no runtime expect in new durable frontier source
-        run: |
-          if grep -n '\.expect(' crates/xenia-ledger/src/durable_frontier.rs; then
-            echo 'runtime expect remains in durable_frontier.rs' >&2
-            exit 1
+            echo 'checked-in xenia-ledger source is formatter/Clippy canonical'
           fi
 
       - name: Test candidate xenia-ledger
@@ -121,11 +83,13 @@ jobs:
           mkdir -p "$E"
           cp "$RUNNER_TEMP/HEAD" "$E/HEAD"
           cp "$RUNNER_TEMP/TREE" "$E/TREE"
-          cp "$RUNNER_TEMP/REVIEWED_RUSTFMT.patch" "$E/REVIEWED_RUSTFMT.patch" 2>/dev/null || true
+          cp "$RUNNER_TEMP/RUSTFMT.patch" "$E/RUSTFMT.patch" 2>/dev/null || true
           cp "$RUNNER_TEMP/COMPLETE.patch" "$E/COMPLETE.patch" 2>/dev/null || true
           rustc -Vv > "$E/RUSTC.txt"
           cargo -V > "$E/CARGO.txt"
           sha256sum Cargo.lock > "$E/CARGO_LOCK_SHA256.txt"
+          sha256sum crates/xenia-ledger/src/durable_frontier.rs > "$E/DURABLE_FRONTIER_SHA256.txt"
+          sha256sum crates/xenia-ledger/src/witness_frontier_anchor.rs > "$E/WITNESS_FRONTIER_SHA256.txt"
           git diff -- crates/xenia-ledger > "$E/WORKTREE_AFTER.patch"
 
       - name: Upload diagnostic evidence
