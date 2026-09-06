@@ -10,12 +10,11 @@
 use thiserror::Error;
 
 use crate::{
-    AgentCapabilityAttestationError, AgentCapabilityAttestationV1,
-    AgentCapabilityAuthorizationV1, Chain, LedgerError, LedgerEntry, PendingPersistenceFrontier,
-    PersistenceDisposition, PersistenceReconciliationOutcome, SessionTranscriptBinding,
+    AgentCapabilityAttestationError, AgentCapabilityAttestationV1, AgentCapabilityAuthorizationV1,
+    Chain, LedgerEntry, LedgerError, PendingPersistenceFrontier, PersistenceDisposition,
+    PersistenceReconciliationOutcome, SessionTranscriptBinding, SignedWitnessFrontierObservationV1,
     TransactionalAppendOutcome, WitnessFrontierAnchorAppendOutcomeV1, WitnessFrontierAnchorError,
-    WitnessFrontierAnchorStore, WitnessFrontierAnchorTargetV1, SignedWitnessFrontierObservationV1,
-    XeniaWitnessFrontierSourcePolicyV1,
+    WitnessFrontierAnchorStore, WitnessFrontierAnchorTargetV1, XeniaWitnessFrontierSourcePolicyV1,
 };
 
 /// Schema version for [`DurableLedgerFrontierClaimV1`].
@@ -214,10 +213,7 @@ impl Chain {
         &mut self,
         event: crate::ConsentEventRecord,
         persistence_policy_digest: [u8; 32],
-        persist: impl FnOnce(
-            &Self,
-            &DurableLedgerFrontierClaimV1,
-        ) -> PersistenceDisposition<[u8; 32]>,
+        persist: impl FnOnce(&Self, &DurableLedgerFrontierClaimV1) -> PersistenceDisposition<[u8; 32]>,
     ) -> Result<DurableLedgerAppendOutcomeV1, DurableLedgerFrontierError> {
         validate_policy_digest(persistence_policy_digest)?;
         let outcome = self.append_transactional_outcome(event, |chain| {
@@ -541,7 +537,10 @@ mod tests {
                 PersistenceDisposition::OutcomeUnknown([0xEE; 32])
             })
             .unwrap();
-        assert!(matches!(outcome, DurableLedgerAppendOutcomeV1::OutcomeUnknown { .. }));
+        assert!(matches!(
+            outcome,
+            DurableLedgerAppendOutcomeV1::OutcomeUnknown { .. }
+        ));
         assert!(chain.has_uncertain_persistence());
         assert!(matches!(
             chain.verify_restored_durable_frontier_v1(PERSISTENCE_POLICY, |_, _| Ok(())),
@@ -549,14 +548,11 @@ mod tests {
         ));
 
         let reconciled = chain
-            .reconcile_pending_persistence_durable_v1(
-                PERSISTENCE_POLICY,
-                |_, pending, claim| {
-                    assert_eq!(pending.entry_count, claim.entry_count);
-                    assert_eq!(pending.head_hash, claim.head_hash);
-                    PersistenceDisposition::Persisted
-                },
-            )
+            .reconcile_pending_persistence_durable_v1(PERSISTENCE_POLICY, |_, pending, claim| {
+                assert_eq!(pending.entry_count, claim.entry_count);
+                assert_eq!(pending.head_hash, claim.head_hash);
+                PersistenceDisposition::Persisted
+            })
             .unwrap();
         let token = match reconciled {
             DurableLedgerReconciliationOutcomeV1::Persisted {
@@ -565,7 +561,9 @@ mod tests {
             _ => panic!("expected persisted reconciliation"),
         };
         assert!(!chain.has_uncertain_persistence());
-        token.verify_against_chain(&chain, PERSISTENCE_POLICY).unwrap();
+        token
+            .verify_against_chain(&chain, PERSISTENCE_POLICY)
+            .unwrap();
     }
 
     #[test]
@@ -579,7 +577,9 @@ mod tests {
             restored.verify_restored_durable_frontier_v1(PERSISTENCE_POLICY, |_, _| {
                 Err([0xA1; 32])
             }),
-            Err(DurableLedgerFrontierError::PersistenceVerificationRejected(_))
+            Err(DurableLedgerFrontierError::PersistenceVerificationRejected(
+                _
+            ))
         ));
         let token = restored
             .verify_restored_durable_frontier_v1(PERSISTENCE_POLICY, |chain, claim| {
@@ -594,6 +594,8 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        token.verify_against_chain(&restored, PERSISTENCE_POLICY).unwrap();
+        token
+            .verify_against_chain(&restored, PERSISTENCE_POLICY)
+            .unwrap();
     }
 }
