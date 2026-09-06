@@ -28,8 +28,16 @@
 //! ```
 //!
 //! A compacted-prefix chain fails closed in V1 because the issuer cannot inspect
-//! the complete request history. Evidence chronology remains separate from
-//! execution authority.
+//! the complete request history. The complete resident history is also verified
+//! cryptographically before its consent semantics are trusted, so a permissive
+//! restore callback cannot launder tampered entries into consent-bound authority.
+//!
+//! An already-issued attestation remains replayable cryptographic evidence. A
+//! later ledger Revocation advances the frontier but cannot erase an old
+//! signature; consequential downstream admission must still establish current
+//! Xenia frontier/freshness before accepting the attestation.
+//!
+//! Evidence chronology remains separate from execution authority.
 
 use ed25519_dalek::Signer;
 use serde::{Deserialize, Serialize};
@@ -44,7 +52,7 @@ use crate::{
     DurableLedgerFrontierError, DurableLedgerFrontierV1, EVIDENCE_PUBLIC_KEY_FINGERPRINT_ALGORITHM,
     EvidencePublicKeyBinding, EvidencePublicKeyBindingError, EvidenceSignatureBackend,
     EvidenceSignatureBackendError, SessionTranscriptBinding, SignatureEnvelope,
-    SignatureEnvelopeError, SignatureSuite, TranscriptSignatureSuiteV1,
+    SignatureEnvelopeError, SignatureSuite, TranscriptSignatureSuiteV1, Verifier,
     verify_agent_capability_attestation,
 };
 
@@ -341,7 +349,8 @@ pub struct DurableConsentBoundAgentCapabilityAttestationV1 {
 }
 
 impl DurableConsentBoundAgentCapabilityAttestationV1 {
-    fn canonical_message(&self) -> Result<Vec<u8>, AgentConsentAuthorityError> {
+    /// Stable message covered by the stronger composition signature.
+    pub fn canonical_message(&self) -> Result<Vec<u8>, AgentConsentAuthorityError> {
         if self.schema_version != DURABLE_CONSENT_BOUND_AGENT_ATTESTATION_SCHEMA_VERSION {
             return Err(AgentConsentAuthorityError::UnsupportedAttestationSchema);
         }
@@ -438,6 +447,12 @@ impl Chain {
 }
 
 /// Verify the stronger consent-bound attestation for a downstream bounded agent.
+///
+/// This verifies signed evidence at the attestation's named ledger frontier. It
+/// does not prove that frontier is still current after issuance. Consequential
+/// admission must separately establish fresh Xenia ledger currentness so a later
+/// Revocation/Denial/Violation cannot be suppressed behind an older valid
+/// signature.
 #[allow(clippy::too_many_arguments)]
 pub fn verify_durable_consent_bound_agent_capability_attestation_v1(
     attestation: &DurableConsentBoundAgentCapabilityAttestationV1,
@@ -568,6 +583,10 @@ fn verify_exact_consent_history(
         return Err(AgentConsentAuthorityError::CompactedConsentHistory);
     }
 
+    let resident: Vec<_> = chain.iter().cloned().collect();
+    Verifier::verify_chain(&resident, &chain.signing_key.verifying_key())
+        .map_err(|_| AgentConsentAuthorityError::ConsentHistoryCryptographicVerificationFailed)?;
+
     let session_id = intent.session_uuid()?;
     let request_id = intent.request_id()?;
     let scope = intent.consent_scope()?;
@@ -576,7 +595,7 @@ fn verify_exact_consent_history(
     let mut request = None;
     let mut approval = None;
 
-    for entry in chain.iter() {
+    for entry in &resident {
         if entry.seq != expected_seq || entry.prev_hash != previous_hash || entry.entry_hash == ZERO32 {
             return Err(AgentConsentAuthorityError::MalformedConsentHistory);
         }
@@ -691,6 +710,9 @@ pub enum AgentConsentAuthorityError {
     /// Current chain contains a compacted/non-resident prefix that V1 cannot inspect.
     #[error("complete consent history is unavailable because the ledger is compacted")]
     CompactedConsentHistory,
+    /// Complete resident history failed sequence/hash/signature verification.
+    #[error("complete consent history failed cryptographic verification")]
+    ConsentHistoryCryptographicVerificationFailed,
     /// Complete resident history has malformed sequence/hash-link shape.
     #[error("complete consent history has malformed sequence/hash-link structure")]
     MalformedConsentHistory,
@@ -806,7 +828,7 @@ mod tests {
     fn append_durable(chain: &mut Chain, event: ConsentEventRecord) -> DurableLedgerFrontierV1 {
         match chain
             .append_transactional_outcome_durable_v1(event, PERSISTENCE_POLICY, |_, _| {
-                PersistenceDisposition::Persisted
+                crate::PersistenceDisposition::Persisted
             })
             .unwrap()
         {
@@ -904,7 +926,7 @@ mod tests {
     }
 
     #[test]
-    fn later_revocation_dominates_prior_approval() {
+    fn later_revocation_dominates_prior_approval_for_new_issuance() {
         let intent = intent();
         let (mut chain, _approved_frontier) = approved_chain();
         let mut revocation = approval_for(intent);
