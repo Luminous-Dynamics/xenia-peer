@@ -8,7 +8,11 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from xenia_scan_scope import cfg_test_only_lines, iter_repo_files
+from xenia_scan_scope import (
+    cfg_test_only_lines,
+    iter_repo_files,
+    rust_file_is_test_only,
+)
 
 
 class ScanScopeTests(unittest.TestCase):
@@ -82,6 +86,48 @@ class ScanScopeTests(unittest.TestCase):
         self.assertNotIn(5, masked)
         self.assertNotIn(6, masked)
         self.assertNotIn(12, masked)
+
+    def test_exact_file_level_cfg_test_is_authoritative(self) -> None:
+        lines = [
+            "\ufeff//! Adversarial test module.",
+            "#![allow(dead_code)]",
+            "#! [ cfg ( test ) ]",
+            "fn adversarial_fixture() { value.unwrap(); }",
+        ]
+        self.assertTrue(rust_file_is_test_only(lines))
+
+    def test_broader_file_cfg_remains_production_visible(self) -> None:
+        lines = [
+            '#![cfg(any(feature = "capture", test))]',
+            "fn maybe_runtime() { value.unwrap(); }",
+        ]
+        self.assertFalse(rust_file_is_test_only(lines))
+
+    def test_late_file_cfg_cannot_reclassify_runtime_prefix(self) -> None:
+        lines = [
+            "fn runtime_before() { value.unwrap(); }",
+            "#![cfg(test)]",
+            "fn tests_after() { value.unwrap(); }",
+        ]
+        self.assertFalse(rust_file_is_test_only(lines))
+
+    def test_comment_string_and_block_comment_do_not_prove_test_scope(self) -> None:
+        self.assertFalse(
+            rust_file_is_test_only(
+                [
+                    "// #![cfg(test)]",
+                    'const CLAIM: &str = "#![cfg(test)]";',
+                ]
+            )
+        )
+        self.assertFalse(
+            rust_file_is_test_only(
+                [
+                    "/* #![cfg(test)] */",
+                    "fn runtime() { value.unwrap(); }",
+                ]
+            )
+        )
 
 
 if __name__ == "__main__":

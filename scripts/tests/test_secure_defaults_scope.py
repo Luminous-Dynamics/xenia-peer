@@ -86,6 +86,38 @@ const RUNTIME_ENDPOINT: &str = "__ENDPOINT__";
         )
         self.assertIn("RUNTIME_ENDPOINT", combined)
 
+    def test_exact_file_cfg_test_hides_test_fixture_literals(self) -> None:
+        endpoint = "http" + "://127.0.0.1:9999"
+        source = r"""
+#![cfg(test)]
+const TEST_ENDPOINT: &str = "__ENDPOINT__";
+"""
+        result = run_scan(source.replace("__ENDPOINT__", endpoint))
+
+        combined = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, msg=combined)
+        self.assertIn(
+            "secure-default scan: hard=0 warning=0",
+            result.stdout,
+        )
+        self.assertNotIn("TEST_ENDPOINT", combined)
+
+    def test_broad_file_cfg_cannot_hide_runtime_literal(self) -> None:
+        endpoint = "http" + "://127.0.0.1:9999"
+        source = r"""
+#![cfg(any(feature = "capture", test))]
+const CONDITIONAL_ENDPOINT: &str = "__ENDPOINT__";
+"""
+        result = run_scan(source.replace("__ENDPOINT__", endpoint))
+
+        combined = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, msg=combined)
+        self.assertIn(
+            "secure-default scan: hard=0 warning=1",
+            result.stdout,
+        )
+        self.assertIn("CONDITIONAL_ENDPOINT", combined)
+
 
 if __name__ == "__main__":
     unittest.main()

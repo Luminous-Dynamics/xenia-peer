@@ -13,7 +13,11 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from xenia_scan_scope import cfg_test_only_lines, iter_repo_files
+from xenia_scan_scope import (
+    cfg_test_only_lines,
+    iter_repo_files,
+    rust_file_is_test_only,
+)
 
 TEST_PARTS = {"tests", "benches", "examples"}
 PATTERNS = {
@@ -37,17 +41,16 @@ class Finding:
 def is_test_or_example(path: Path) -> bool:
     if set(path.parts) & TEST_PARTS or path.name.endswith("_test.rs"):
         return True
-    # `tests.rs` is a module file loaded via `#[cfg(test)] mod tests;` in its
-    # parent -- e.g. crates/xenia-ledger/src/tests.rs, split out of lib.rs on
-    # 2026-07-19. Its own content has no in-file `#[cfg(test)]` marker (that
-    # attribute lives on the `mod` declaration one file up), so the
-    # first_cfg_test_line() heuristic below can't see it; the filename must
-    # be recognized directly.
+    # Legacy split-module classification. New split test modules should carry
+    # scanner-visible file provenance via `#![cfg(test)]`; this compatibility
+    # rule remains until existing `tests.rs` modules are migrated deliberately.
     if path.name == "tests.rs":
         return True
     # Smoke-test harnesses (manual, run-against-a-live-daemon binaries/
     # modules, not `#[cfg(test)]`-gated unit tests) live directly under
-    # `src/` or `src/bin/`, not under any TEST_PARTS directory.
+    # `src/` or `src/bin/`, not under any TEST_PARTS directory. This is a
+    # build-surface classification, not proof that an arbitrary split module
+    # is test-only.
     if path.name.endswith("_smoke.rs"):
         return True
     if "bin" in path.parts and "smoke" in path.name:
@@ -76,11 +79,16 @@ def main() -> int:
     findings: list[Finding] = []
 
     for path, rel in iter_rust_files(root):
-        runtime_source = "src" in rel.parts and not is_test_or_example(rel)
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
         except UnicodeDecodeError:
             continue
+        file_test_only = rust_file_is_test_only(lines)
+        runtime_source = (
+            "src" in rel.parts
+            and not is_test_or_example(rel)
+            and not file_test_only
+        )
         test_only_lines = cfg_test_only_lines(lines)
         for line_no, line in enumerate(lines, start=1):
             stripped = line.strip()

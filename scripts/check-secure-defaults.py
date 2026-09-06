@@ -20,7 +20,11 @@ import sys
 import tomllib
 from typing import Any
 
-from xenia_scan_scope import cfg_test_only_lines, iter_repo_files
+from xenia_scan_scope import (
+    cfg_test_only_lines,
+    iter_repo_files,
+    rust_file_is_test_only,
+)
 
 
 @dataclass(frozen=True)
@@ -151,6 +155,8 @@ def scan(root: Path, data: dict[str, Any]) -> list[Finding]:
             findings.append(Finding("warning", rel, 0, "unreadable", str(exc)))
             continue
         is_doc = path.suffix in doc_exts and path.suffix not in source_exts
+        if path.suffix == ".rs" and rust_file_is_test_only(lines):
+            continue
         test_only_lines = (
             cfg_test_only_lines(lines)
             if path.suffix == ".rs"
