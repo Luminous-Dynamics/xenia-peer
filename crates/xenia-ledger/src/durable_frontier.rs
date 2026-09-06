@@ -56,14 +56,7 @@ impl DurableLedgerFrontierClaimV1 {
     /// Stable BLAKE3 commitment to the complete claim.
     pub fn digest(self) -> Result<[u8; 32], DurableLedgerFrontierError> {
         self.validate()?;
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(DURABLE_LEDGER_FRONTIER_DOMAIN);
-        hasher.update(&self.schema_version.to_be_bytes());
-        hasher.update(&self.entry_count.to_be_bytes());
-        hasher.update(&self.head_hash);
-        hasher.update(&self.ledger_public_key);
-        hasher.update(&self.persistence_policy_digest);
-        Ok(*hasher.finalize().as_bytes())
+        Ok(durable_claim_digest(self))
     }
 }
 
@@ -81,9 +74,7 @@ pub struct DurableLedgerFrontierV1 {
 impl DurableLedgerFrontierV1 {
     /// Privacy-minimized commitment to the exact durable frontier and policy.
     pub fn digest(&self) -> [u8; 32] {
-        self.claim
-            .digest()
-            .expect("private durable frontier is constructed only after validation")
+        durable_claim_digest(self.claim)
     }
 
     /// Durable authenticated entry count.
@@ -217,8 +208,16 @@ impl Chain {
     ) -> Result<DurableLedgerAppendOutcomeV1, DurableLedgerFrontierError> {
         validate_policy_digest(persistence_policy_digest)?;
         let outcome = self.append_transactional_outcome(event, |chain| {
-            let claim = durable_claim_for_chain_allow_pending(chain, persistence_policy_digest)
-                .expect("outcome-aware append has already established a valid candidate frontier");
+            let claim = match durable_claim_for_chain_allow_pending(chain, persistence_policy_digest)
+            {
+                Ok(claim) => claim,
+                Err(_) => {
+                    return PersistenceDisposition::ProvenNotPersisted(nonzero_diagnostic(
+                        ZERO32,
+                        b"append-internal-claim-invalid",
+                    ));
+                }
+            };
             persist(chain, &claim)
         })?;
         match outcome {
@@ -258,8 +257,16 @@ impl Chain {
     ) -> Result<DurableLedgerReconciliationOutcomeV1, DurableLedgerFrontierError> {
         validate_policy_digest(persistence_policy_digest)?;
         let outcome = self.reconcile_pending_persistence(|chain, pending| {
-            let claim = durable_claim_for_chain_allow_pending(chain, persistence_policy_digest)
-                .expect("pending reconciliation has a structurally valid candidate frontier");
+            let claim = match durable_claim_for_chain_allow_pending(chain, persistence_policy_digest)
+            {
+                Ok(claim) => claim,
+                Err(_) => {
+                    return PersistenceDisposition::OutcomeUnknown(nonzero_diagnostic(
+                        ZERO32,
+                        b"reconcile-internal-claim-invalid",
+                    ));
+                }
+            };
             reconcile(chain, pending, &claim)
         })?;
         match outcome {
@@ -346,6 +353,17 @@ impl Chain {
         )
         .map_err(DurableLedgerFrontierError::WitnessAnchor)
     }
+}
+
+fn durable_claim_digest(claim: DurableLedgerFrontierClaimV1) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(DURABLE_LEDGER_FRONTIER_DOMAIN);
+    hasher.update(&claim.schema_version.to_be_bytes());
+    hasher.update(&claim.entry_count.to_be_bytes());
+    hasher.update(&claim.head_hash);
+    hasher.update(&claim.ledger_public_key);
+    hasher.update(&claim.persistence_policy_digest);
+    *hasher.finalize().as_bytes()
 }
 
 fn durable_claim_for_chain(
