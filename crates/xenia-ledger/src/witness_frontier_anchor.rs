@@ -45,8 +45,7 @@ pub const XENIA_WITNESS_FRONTIER_OBSERVATION_DOMAIN: &[u8] =
 pub const XENIA_WITNESS_FRONTIER_OBSERVATION_FINGERPRINT_DOMAIN: &[u8] =
     b"xenia.witness-frontier-observation-fingerprint.v1\0";
 /// Domain used to derive a compact source namespace from the Xenia key + policy.
-pub const XENIA_WITNESS_FRONTIER_SOURCE_DOMAIN: &[u8] =
-    b"xenia.witness-frontier-source-id.v1\0";
+pub const XENIA_WITNESS_FRONTIER_SOURCE_DOMAIN: &[u8] = b"xenia.witness-frontier-source-id.v1\0";
 
 const ZERO16: [u8; 16] = [0; 16];
 const ZERO32: [u8; 32] = [0; 32];
@@ -422,8 +421,8 @@ impl SignedWitnessFrontierObservationV1 {
         if self.source_id != expected_source {
             return Err(WitnessFrontierAnchorError::SourceBindingMismatch);
         }
-        if let Some(current) = self.current {
-            if current.anchor_sequence == 0
+        if let Some(current) = self.current
+            && (current.anchor_sequence == 0
                 || current.anchor_fingerprint == ZERO32
                 || current.operation_id == ZERO32
                 || current.high_watermark == 0
@@ -434,10 +433,9 @@ impl SignedWitnessFrontierObservationV1 {
                         self.witness_id,
                         current.high_watermark,
                         current.reservation_head,
-                    )
-            {
-                return Err(WitnessFrontierAnchorError::MalformedObservation);
-            }
+                    ))
+        {
+            return Err(WitnessFrontierAnchorError::MalformedObservation);
         }
         let mut bytes = Vec::with_capacity(384);
         bytes.extend_from_slice(XENIA_WITNESS_FRONTIER_OBSERVATION_DOMAIN);
@@ -542,7 +540,7 @@ pub enum WitnessFrontierAnchorAppendOutcomeV1 {
 #[derive(Debug)]
 pub enum WitnessFrontierAnchorReconciliationV1 {
     /// Exact operation is present and authenticated.
-    Persisted(SignedWitnessFrontierAnchorV1),
+    Persisted(Box<SignedWitnessFrontierAnchorV1>),
     /// Authoritative store lookup proves the operation is absent.
     ProvenNotPersisted,
     /// Store state could not be established safely.
@@ -570,8 +568,10 @@ impl Chain {
         policy.validate()?;
         self.ensure_anchor_signing_ready()?;
         let ledger_public_key = self.signing_key.verifying_key().to_bytes();
-        let expected_source_id =
-            derive_xenia_witness_frontier_source_id(ledger_public_key, policy.anchor_policy_digest)?;
+        let expected_source_id = derive_xenia_witness_frontier_source_id(
+            ledger_public_key,
+            policy.anchor_policy_digest,
+        )?;
         if target.source_id != expected_source_id
             || target.source_epoch != policy.source_epoch
             || target.anchor_policy_digest != policy.anchor_policy_digest
@@ -626,7 +626,10 @@ impl Chain {
             issued_at_unix_s,
             signature: SignatureEnvelope::ed25519([0; 64]),
         };
-        let signature = self.signing_key.sign(&candidate.canonical_message()?).to_bytes();
+        let signature = self
+            .signing_key
+            .sign(&candidate.canonical_message()?)
+            .to_bytes();
         candidate.signature = SignatureEnvelope::ed25519(signature);
         candidate.verify()?;
 
@@ -693,7 +696,9 @@ impl Chain {
                         diagnostic_digest: diagnostic_label(b"reconcile-record-mismatch"),
                     });
                 }
-                Ok(WitnessFrontierAnchorReconciliationV1::Persisted(anchor))
+                Ok(WitnessFrontierAnchorReconciliationV1::Persisted(Box::new(
+                    anchor,
+                )))
             }
             Err(diagnostic_digest) => Ok(WitnessFrontierAnchorReconciliationV1::OutcomeUnknown {
                 diagnostic_digest: if diagnostic_digest == ZERO32 {
@@ -720,8 +725,10 @@ impl Chain {
         policy.validate()?;
         self.ensure_anchor_signing_ready()?;
         let ledger_public_key = self.signing_key.verifying_key().to_bytes();
-        let source_id =
-            derive_xenia_witness_frontier_source_id(ledger_public_key, policy.anchor_policy_digest)?;
+        let source_id = derive_xenia_witness_frontier_source_id(
+            ledger_public_key,
+            policy.anchor_policy_digest,
+        )?;
         let current = store
             .current_for_witness(source_id, policy.source_epoch, witness_id)
             .map_err(WitnessFrontierAnchorError::PreDispatchStore)?;
@@ -761,7 +768,10 @@ impl Chain {
             ledger_public_key,
             signature: SignatureEnvelope::ed25519([0; 64]),
         };
-        let signature = self.signing_key.sign(&observation.canonical_message()?).to_bytes();
+        let signature = self
+            .signing_key
+            .sign(&observation.canonical_message()?)
+            .to_bytes();
         observation.signature = SignatureEnvelope::ed25519(signature);
         observation.verify_signature()?;
         Ok(observation)
@@ -927,7 +937,10 @@ mod tests {
             source_epoch: u64,
             witness_id: [u8; 16],
         ) -> Result<Option<SignedWitnessFrontierAnchorV1>, [u8; 32]> {
-            Ok(self.current.get(&(source_id, source_epoch, witness_id)).cloned())
+            Ok(self
+                .current
+                .get(&(source_id, source_epoch, witness_id))
+                .cloned())
         }
 
         fn compare_and_swap(
@@ -1041,7 +1054,10 @@ mod tests {
             _ => panic!("expected idempotent persisted anchor"),
         };
         assert_eq!(second_anchor, anchor);
-        assert_eq!(store.cas_calls, 1, "idempotent lookup must avoid a second CAS");
+        assert_eq!(
+            store.cas_calls, 1,
+            "idempotent lookup must avoid a second CAS"
+        );
 
         let observation = chain
             .observe_witness_frontier_v1([0x51; 16], [0xA5; 32], policy, 120, &mut store)
@@ -1062,19 +1078,21 @@ mod tests {
         observation.verify_current_anchor(&anchor).unwrap();
         assert_eq!(observation.current.unwrap().anchor_sequence, 1);
 
-        assert!(observation
-            .verify_fresh(
-                [0xA6; 32],
-                chain.signing_key.verifying_key().to_bytes(),
-                source_id,
-                policy.source_epoch,
-                policy.anchor_policy_digest,
-                [0x51; 16],
-                120,
-                5,
-                1,
-            )
-            .is_err());
+        assert!(
+            observation
+                .verify_fresh(
+                    [0xA6; 32],
+                    chain.signing_key.verifying_key().to_bytes(),
+                    source_id,
+                    policy.source_epoch,
+                    policy.anchor_policy_digest,
+                    [0x51; 16],
+                    120,
+                    5,
+                    1,
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -1099,7 +1117,10 @@ mod tests {
             _ => panic!("expected persisted"),
         };
         assert_eq!(second.anchor_sequence, 2);
-        assert_eq!(second.previous_anchor_fingerprint, first.fingerprint().unwrap());
+        assert_eq!(
+            second.previous_anchor_fingerprint,
+            first.fingerprint().unwrap()
+        );
 
         let lower = target(source_id, policy, 2, 0x44);
         assert!(matches!(
@@ -1161,18 +1182,14 @@ mod tests {
         let chain = seeded_chain();
         let (policy, source_id) = policy(&chain);
         let mut value = target(source_id, policy, 3, 0x33);
-        let expected_len = SYMTHAEA_WITNESS_ANCHOR_OPERATION_DOMAIN.len()
-            + 2
-            + 16
-            + 8
-            + 32
-            + 16
-            + 8
-            + 32
-            + 32;
+        let expected_len =
+            SYMTHAEA_WITNESS_ANCHOR_OPERATION_DOMAIN.len() + 2 + 16 + 8 + 32 + 16 + 8 + 32 + 32;
         assert_eq!(value.canonical_operation_message().len(), expected_len);
         value.operation_id[0] ^= 1;
-        assert!(matches!(value.validate(), Err(WitnessFrontierAnchorError::OperationIdMismatch)));
+        assert!(matches!(
+            value.validate(),
+            Err(WitnessFrontierAnchorError::OperationIdMismatch)
+        ));
 
         let mut value = target(source_id, policy, 3, 0x33);
         value.frontier_statement_digest[0] ^= 1;
