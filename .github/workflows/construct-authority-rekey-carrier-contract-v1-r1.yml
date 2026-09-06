@@ -1,0 +1,168 @@
+name: Construct Authority Rekey Carrier Contract V1 R1
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/construct-authority-rekey-carrier-contract-v1-r1.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: construct-authority-rekey-carrier-contract-v1-r1-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  PARENT_SHA: 884eb78542c04f198beddb9c4dada06d9e9fa1ed
+  HISTORICAL_BASE_SHA: 9ab13635e770b1a8ec1cb3e107a84b869ea80a10
+  HISTORICAL_HEAD_SHA: ce26e32c03a84307b4e0058e4bfd66c7813863aa
+  RUNTIME_PATH: crates/xenia-peer-core/src/authority_transport.rs
+  CONSTRUCTOR_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: -D warnings
+
+jobs:
+  construct:
+    name: Read-only construct and qualify carrier-contract r1
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.CONSTRUCTOR_SOURCE_SHA }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Assert exact tooling-only constructor source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CONSTRUCTOR_SOURCE_SHA"
+          test "$(git rev-parse HEAD^)" = "$PARENT_SHA"
+          test -z "$(git status --porcelain)"
+          mapfile -t changed < <(git diff --name-only "$PARENT_SHA" "$CONSTRUCTOR_SOURCE_SHA")
+          test "${#changed[@]}" -eq 1
+          test "${changed[0]}" = ".github/workflows/construct-authority-rekey-carrier-contract-v1-r1.yml"
+          echo "CONSTRUCTOR_HEAD=$(git rev-parse HEAD)"
+          echo "CONSTRUCTOR_TREE=$(git rev-parse HEAD^{tree})"
+
+      - name: Fetch frozen historical lineage
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$HISTORICAL_BASE_SHA" "$HISTORICAL_HEAD_SHA"
+          test "$(git rev-parse "$HISTORICAL_BASE_SHA^{commit}")" = "$HISTORICAL_BASE_SHA"
+          test "$(git rev-parse "$HISTORICAL_HEAD_SHA^{commit}")" = "$HISTORICAL_HEAD_SHA"
+          test "$(git rev-parse "$HISTORICAL_HEAD_SHA^")" = "$HISTORICAL_BASE_SHA"
+          mapfile -t historical_changed < <(git diff --name-only "$HISTORICAL_BASE_SHA" "$HISTORICAL_HEAD_SHA")
+          test "${#historical_changed[@]}" -eq 1
+          test "${historical_changed[0]}" = "$RUNTIME_PATH"
+
+      - uses: DeterminateSystems/nix-installer-action@33c9ab3ef95cd57c164d9d6eb1f9a46338538d41
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+
+      - name: Normalize frozen base and head under the qualified formatter
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          BASE_WT="$RUNNER_TEMP/historical-base"
+          HEAD_WT="$RUNNER_TEMP/historical-head"
+          git worktree add --detach "$BASE_WT" "$HISTORICAL_BASE_SHA"
+          git worktree add --detach "$HEAD_WT" "$HISTORICAL_HEAD_SHA"
+
+          (cd "$BASE_WT" && nix develop .#ci --command cargo fmt --all)
+          (cd "$HEAD_WT" && nix develop .#ci --command cargo fmt --all)
+
+          # The r1 parent must be exactly the formatter-normalized historical
+          # #260 source for both files touched by the earlier rustfmt repair.
+          cmp "$BASE_WT/crates/xenia-peer-core/src/authority_generation.rs" \
+              "$ROOT/crates/xenia-peer-core/src/authority_generation.rs"
+          cmp "$BASE_WT/$RUNTIME_PATH" "$ROOT/$RUNTIME_PATH"
+
+          mkdir -p "$RUNNER_TEMP/capsule"
+          cp "$HEAD_WT/$RUNTIME_PATH" "$RUNNER_TEMP/capsule/normalized-authority_transport.rs"
+
+      - name: Construct one-file candidate on exact r1 parent
+        shell: bash
+        run: |
+          set -euo pipefail
+          CANDIDATE_WT="$RUNNER_TEMP/candidate"
+          CAPSULE="$RUNNER_TEMP/capsule"
+          git worktree add --detach "$CANDIDATE_WT" "$PARENT_SHA"
+          cp "$CAPSULE/normalized-authority_transport.rs" "$CANDIDATE_WT/$RUNTIME_PATH"
+
+          mapfile -t changed < <(git -C "$CANDIDATE_WT" diff --name-only)
+          test "${#changed[@]}" -eq 1
+          test "${changed[0]}" = "$RUNTIME_PATH"
+          git -C "$CANDIDATE_WT" diff --check
+
+          # The candidate runtime file is exactly the frozen #268 semantics
+          # normalized by the same Nix CI formatter; no hand-authored source
+          # transformation is permitted in this constructor.
+          cmp "$CANDIDATE_WT/$RUNTIME_PATH" "$CAPSULE/normalized-authority_transport.rs"
+
+      - name: Qualify constructed candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          CANDIDATE_WT="$RUNNER_TEMP/candidate"
+          cd "$CANDIDATE_WT"
+          nix develop .#ci --command cargo fmt --all -- --check
+          nix develop .#ci --command cargo check --locked -p xenia-peer-core --all-targets
+          nix develop .#ci --command cargo clippy --locked -p xenia-peer-core --all-targets -- -D warnings
+          nix develop .#ci --command cargo test --locked -p xenia-peer-core 'authority_generation::tests'
+          nix develop .#ci --command cargo test --locked -p xenia-peer-core 'authority_transport::tests'
+          test -z "$(git diff --name-only | grep -v '^crates/xenia-peer-core/src/authority_transport.rs$' || true)"
+
+      - name: Freeze candidate tree and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          CANDIDATE_WT="$RUNNER_TEMP/candidate"
+          CAPSULE="$RUNNER_TEMP/capsule"
+          cd "$CANDIDATE_WT"
+          git add "$RUNTIME_PATH"
+          git diff --cached --check
+          git diff --cached --binary > "$CAPSULE/candidate.patch"
+          CANDIDATE_TREE="$(git write-tree)"
+
+          {
+            echo "profile=xenia-authority-rekey-carrier-contract-v1-r1-constructor"
+            echo "constructor_head=$CONSTRUCTOR_SOURCE_SHA"
+            echo "constructor_tree=$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD^{tree})"
+            echo "parent_head=$PARENT_SHA"
+            echo "parent_tree=$(git rev-parse "$PARENT_SHA^{tree}")"
+            echo "historical_base=$HISTORICAL_BASE_SHA"
+            echo "historical_head=$HISTORICAL_HEAD_SHA"
+            echo "candidate_tree=$CANDIDATE_TREE"
+            echo "runtime_path=$RUNTIME_PATH"
+            echo "historical_base_runtime_sha256=$(git show "$HISTORICAL_BASE_SHA:$RUNTIME_PATH" | sha256sum | awk '{print $1}')"
+            echo "historical_head_runtime_sha256=$(git show "$HISTORICAL_HEAD_SHA:$RUNTIME_PATH" | sha256sum | awk '{print $1}')"
+            echo "normalized_historical_head_runtime_sha256=$(sha256sum "$CAPSULE/normalized-authority_transport.rs" | awk '{print $1}')"
+            echo "candidate_runtime_sha256=$(sha256sum "$RUNTIME_PATH" | awk '{print $1}')"
+            echo "candidate_patch_sha256=$(sha256sum "$CAPSULE/candidate.patch" | awk '{print $1}')"
+            echo "cargo_lock_sha256=$(sha256sum Cargo.lock | awk '{print $1}')"
+            echo "workflow_sha256=$(sha256sum "$GITHUB_WORKSPACE/.github/workflows/construct-authority-rekey-carrier-contract-v1-r1.yml" | awk '{print $1}')"
+            echo "actions_checkout_commit=11d5960a326750d5838078e36cf38b85af677262"
+            echo "nix_installer_action_commit=33c9ab3ef95cd57c164d9d6eb1f9a46338538d41"
+            echo "rust_cache_action_commit=6323deb102c322ba6fcbdcafc7e3dddab59af2b6"
+            echo "upload_artifact_action_commit=ea165f8d65b6e75b540449e92b4886f43607fa02"
+            echo "--- nix ---"
+            nix --version
+            echo "--- rustc ---"
+            nix develop .#ci --command rustc -vV
+            echo "--- cargo ---"
+            nix develop .#ci --command cargo -Vv
+          } > "$CAPSULE/PROVENANCE.txt"
+          cat "$CAPSULE/PROVENANCE.txt"
+
+      - name: Retain constructor capsule
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: authority-rekey-carrier-contract-v1-r1-${{ env.CONSTRUCTOR_SOURCE_SHA }}
+          path: ${{ runner.temp }}/capsule
+          if-no-files-found: error
+          retention-days: 90
