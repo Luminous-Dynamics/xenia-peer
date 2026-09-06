@@ -53,6 +53,7 @@
 
 pub mod advertisement;
 pub mod device_capabilities;
+pub mod device_capability_request;
 pub mod file_transfer;
 pub mod frame;
 pub mod handshake;
@@ -63,6 +64,10 @@ mod session;
 pub mod transfer_source;
 pub mod transport;
 
+pub use device_capability_request::{
+    DEVICE_CAPABILITY_REQUEST_MAX_LIFETIME_MS, DEVICE_CAPABILITY_REQUEST_SCHEMA_VERSION,
+    DeviceCapabilityRequestError, DeviceCapabilityRequestV1,
+};
 pub use device_capabilities::{
     DEVICE_CAPABILITY_ADVERTISEMENT_SCHEMA_VERSION, DeviceCapabilityAdvertisementError,
     DeviceCapabilityAdvertisementV1, DeviceCapabilityV1, DeviceClassV1,
