@@ -22,6 +22,10 @@ from typing import Iterable
 
 
 _CFG_TEST_ONLY_RE = re.compile(r"^\s*#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*$")
+_CFG_TEST_FILE_ONLY_RE = re.compile(
+    r"^\s*#!\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*$"
+)
+_RUST_INNER_ATTR_RE = re.compile(r"^\s*#!\s*\[.*\]\s*$")
 
 # Repository-local machinery and generated/runtime state are never canonical
 # scanner input. Callers may add exclusions, but cannot accidentally omit
@@ -97,6 +101,34 @@ def iter_repo_files(
             continue
         result.append(path)
     return sorted(set(result))
+
+
+def rust_file_is_test_only(lines: list[str]) -> bool:
+    """Return whether a Rust file proves that its entire module is test-only.
+
+    Only an exact file-level ``#![cfg(test)]`` inner attribute in the module
+    preamble is authoritative. Blank lines, line comments/inner docs and other
+    inner attributes may precede it. Once ordinary Rust source begins, a later
+    ``#![cfg(test)]`` is not accepted as provenance.
+
+    This is intentionally fail-closed. In particular,
+    ``#![cfg(any(feature = \"foo\", test))]`` is not test-only, and block
+    comments are not parsed as a preamble construct: ambiguous source remains
+    visible to production scanners rather than being hidden.
+    """
+
+    for index, line in enumerate(lines):
+        if index == 0:
+            line = line.lstrip("\ufeff")
+        stripped = line.strip()
+        if not stripped or stripped.startswith("//"):
+            continue
+        if _CFG_TEST_FILE_ONLY_RE.match(line):
+            return True
+        if _RUST_INNER_ATTR_RE.match(line):
+            continue
+        return False
+    return False
 
 
 def _item_end(lines: list[str], start: int) -> int:
