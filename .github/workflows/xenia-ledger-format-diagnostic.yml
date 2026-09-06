@@ -1,0 +1,75 @@
+name: Xenia Ledger Format Diagnostic
+
+on:
+  pull_request:
+    paths:
+      - 'crates/xenia-ledger/**'
+      - '.github/workflows/xenia-ledger-format-diagnostic.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  diagnostic:
+    name: Cargo-owned format + test + Clippy diagnostic
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy,rustfmt
+
+      - name: Preserve exact checked-in source
+        run: |
+          git rev-parse HEAD > "$RUNNER_TEMP/HEAD"
+          git rev-parse HEAD^{tree} > "$RUNNER_TEMP/TREE"
+          git diff --exit-code
+
+      - name: Let rustfmt produce the exact candidate
+        run: cargo fmt --package xenia-ledger
+
+      - name: Print exact rustfmt patch
+        run: |
+          git --no-pager diff -- crates/xenia-ledger | tee "$RUNNER_TEMP/RUSTFMT.patch"
+          if test ! -s "$RUNNER_TEMP/RUSTFMT.patch"; then
+            echo 'rustfmt produced no source delta'
+          fi
+
+      - name: Test formatted xenia-ledger
+        run: cargo test --locked -p xenia-ledger
+
+      - name: Clippy formatted xenia-ledger
+        run: cargo clippy --locked -p xenia-ledger --all-targets -- -D warnings
+
+      - name: Record diagnostic evidence
+        if: always()
+        run: |
+          E="$RUNNER_TEMP/xenia-ledger-format-diagnostic"
+          mkdir -p "$E"
+          cp "$RUNNER_TEMP/HEAD" "$E/HEAD"
+          cp "$RUNNER_TEMP/TREE" "$E/TREE"
+          cp "$RUNNER_TEMP/RUSTFMT.patch" "$E/RUSTFMT.patch" 2>/dev/null || true
+          rustc -Vv > "$E/RUSTC.txt"
+          cargo -V > "$E/CARGO.txt"
+          sha256sum Cargo.lock > "$E/CARGO_LOCK_SHA256.txt"
+          git diff -- crates/xenia-ledger > "$E/WORKTREE_AFTER.patch"
+
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xenia-ledger-format-diagnostic-${{ github.sha }}
+          path: ${{ runner.temp }}/xenia-ledger-format-diagnostic
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Require checked-in source already formatted
+        run: test ! -s "$RUNNER_TEMP/RUSTFMT.patch"
