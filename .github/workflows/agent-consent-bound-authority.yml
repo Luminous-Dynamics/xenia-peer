@@ -1,0 +1,83 @@
+name: Agent Consent-Bound Authority
+
+on:
+  pull_request:
+    paths:
+      - 'crates/xenia-ledger/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/agent-consent-bound-authority.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-consent-bound-authority-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  source:
+    name: Consent-bound authority qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require closed-world source invariants
+        run: |
+          F=crates/xenia-ledger/src/agent_consent_authority.rs
+          grep -q 'CompactedConsentHistory' "$F"
+          grep -q 'ConsentKind::Denial | ConsentKind::Revocation | ConsentKind::Violation' "$F"
+          grep -q 'ApprovalWithoutRequest' "$F"
+          grep -q 'verify_exact_durable_frontier' "$F"
+          grep -q 'consent_presentation_digest' "$F"
+          if grep -n 'allow(clippy::large_enum_variant)' "$F"; then
+            echo 'large-enum lint suppression is not part of this profile' >&2
+            exit 1
+          fi
+          if grep -n '\.expect(' "$F"; then
+            echo 'runtime expect remains in consent-bound authority source' >&2
+            exit 1
+          fi
+
+      - name: Format xenia-ledger
+        run: cargo fmt --check --package xenia-ledger
+
+      - name: Test xenia-ledger
+        run: cargo test --locked -p xenia-ledger
+
+      - name: Clippy xenia-ledger
+        run: cargo clippy --locked -p xenia-ledger --all-targets -- -D warnings
+
+      - name: Record exact-head evidence
+        if: always()
+        run: |
+          E="$RUNNER_TEMP/agent-consent-bound-authority-evidence"
+          mkdir -p "$E"
+          git rev-parse HEAD > "$E/HEAD"
+          git rev-parse HEAD^{tree} > "$E/TREE"
+          rustc -Vv > "$E/RUSTC.txt"
+          cargo -V > "$E/CARGO.txt"
+          sha256sum Cargo.lock > "$E/CARGO_LOCK_SHA256.txt"
+          sha256sum crates/xenia-ledger/src/agent_consent_authority.rs > "$E/CONSENT_BOUND_AUTHORITY_SHA256.txt"
+          sha256sum crates/xenia-ledger/tests/agent_consent_authority.rs > "$E/CONSENT_BOUND_PUBLIC_TEST_SHA256.txt"
+          sha256sum crates/xenia-ledger/src/agent_authority.rs > "$E/LOW_LEVEL_AGENT_AUTHORITY_SHA256.txt"
+          sha256sum crates/xenia-ledger/src/agent_authority_proto.rs > "$E/LOW_LEVEL_AGENT_PROTOCOL_SHA256.txt"
+          sha256sum crates/xenia-ledger/src/durable_frontier.rs > "$E/DURABLE_FRONTIER_SHA256.txt"
+          sha256sum crates/xenia-ledger/src/entry.rs > "$E/CONSENT_EVENT_SCHEMA_SHA256.txt"
+          sha256sum crates/xenia-ledger/src/hash.rs > "$E/LEDGER_HASH_ENCODING_SHA256.txt"
+
+      - name: Upload source evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-consent-bound-authority-${{ github.sha }}
+          path: ${{ runner.temp }}/agent-consent-bound-authority-evidence
+          if-no-files-found: error
+          retention-days: 14
