@@ -6,7 +6,6 @@ on:
       - 'crates/xenia-ledger/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - 'rust-toolchain.toml'
       - '.github/workflows/durable-ledger-frontier.yml'
   workflow_dispatch:
 
@@ -28,6 +27,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install reviewed Rust toolchain
+        uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy,rustfmt
 
       - name: Require fail-closed durability source invariants
         run: |
