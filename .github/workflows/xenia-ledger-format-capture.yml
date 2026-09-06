@@ -1,0 +1,87 @@
+name: Xenia Ledger Format Capture
+
+on:
+  push:
+    branches:
+      - ledger/durable-frontier-witness-v1
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xenia-ledger-format-capture-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  capture:
+    name: Read-only formatter capture
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy,rustfmt
+
+      - name: Materialize canonical rustfmt after-image
+        run: cargo fmt --package xenia-ledger
+
+      - name: Capture exact formatted source and patch
+        run: |
+          E="$RUNNER_TEMP/xenia-ledger-format-capture"
+          mkdir -p "$E/crates/xenia-ledger"
+          cp -R crates/xenia-ledger/src "$E/crates/xenia-ledger/"
+          cp -R crates/xenia-ledger/tests "$E/crates/xenia-ledger/"
+          git --no-pager diff -- crates/xenia-ledger > "$E/RUSTFMT.patch"
+          git rev-parse HEAD > "$E/HEAD"
+          git rev-parse HEAD^{tree} > "$E/TREE"
+          rustc -Vv > "$E/RUSTC.txt"
+          cargo -V > "$E/CARGO.txt"
+          sha256sum Cargo.lock > "$E/CARGO_LOCK_SHA256.txt"
+
+      - name: Run Clippy against formatted after-image
+        id: clippy
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo clippy --locked -p xenia-ledger --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/clippy.log"
+          status=${PIPESTATUS[0]}
+          echo "$status" > "$RUNNER_TEMP/clippy.exit"
+          exit "$status"
+
+      - name: Run tests against formatted after-image
+        id: tests
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo test --locked -p xenia-ledger 2>&1 | tee "$RUNNER_TEMP/test.log"
+          status=${PIPESTATUS[0]}
+          echo "$status" > "$RUNNER_TEMP/test.exit"
+          exit "$status"
+
+      - name: Add qualification diagnostics to evidence
+        if: always()
+        run: |
+          E="$RUNNER_TEMP/xenia-ledger-format-capture"
+          cp "$RUNNER_TEMP/clippy.log" "$E/CLIPPY.log" 2>/dev/null || true
+          cp "$RUNNER_TEMP/clippy.exit" "$E/CLIPPY.exit" 2>/dev/null || true
+          cp "$RUNNER_TEMP/test.log" "$E/TEST.log" 2>/dev/null || true
+          cp "$RUNNER_TEMP/test.exit" "$E/TEST.exit" 2>/dev/null || true
+
+      - name: Upload exact formatter evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xenia-ledger-format-capture-${{ github.sha }}
+          path: ${{ runner.temp }}/xenia-ledger-format-capture
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Require formatted Clippy and tests
+        if: always()
+        run: |
+          test "$(cat "$RUNNER_TEMP/clippy.exit")" = 0
+          test "$(cat "$RUNNER_TEMP/test.exit")" = 0
