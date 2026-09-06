@@ -52,6 +52,7 @@
 #![warn(missing_docs)]
 
 pub mod advertisement;
+pub mod device_capabilities;
 pub mod file_transfer;
 pub mod frame;
 pub mod handshake;
@@ -62,6 +63,10 @@ mod session;
 pub mod transfer_source;
 pub mod transport;
 
+pub use device_capabilities::{
+    DEVICE_CAPABILITY_ADVERTISEMENT_SCHEMA_VERSION, DeviceCapabilityAdvertisementError,
+    DeviceCapabilityAdvertisementV1, DeviceCapabilityV1, DeviceClassV1,
+};
 pub use file_transfer::{
     IncomingFileStageError, IncomingFileStager, cleanup_orphaned_receive_staging,
     persist_received_file,
