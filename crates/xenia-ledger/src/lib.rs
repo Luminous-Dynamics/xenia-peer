@@ -68,6 +68,7 @@
 
 mod agent_authority;
 mod agent_authority_proto;
+mod agent_consent_authority;
 mod archive;
 mod binding;
 mod chain;
@@ -96,6 +97,14 @@ pub use agent_authority_proto::{
     AGENT_CAPABILITY_AUTHORIZATION_DOMAIN, AGENT_CAPABILITY_AUTHORIZATION_SCHEMA_VERSION,
     AgentCapabilityAuthorizationError, AgentCapabilityAuthorizationV1, AgentCheckpointAnchorV1,
     TranscriptSignatureSuiteV1,
+};
+pub use agent_consent_authority::{
+    AGENT_CAPABILITY_CONSENT_INTENT_DOMAIN, AGENT_CAPABILITY_CONSENT_INTENT_SCHEMA_VERSION,
+    AGENT_CAPABILITY_CONSENT_SCOPE_PREFIX, DURABLE_CONSENT_BOUND_AGENT_ATTESTATION_DOMAIN,
+    DURABLE_CONSENT_BOUND_AGENT_ATTESTATION_SCHEMA_VERSION, AgentCapabilityConsentEvidenceV1,
+    AgentCapabilityConsentIntentV1, AgentConsentAuthorityError,
+    DurableConsentBoundAgentCapabilityAttestationV1,
+    verify_durable_consent_bound_agent_capability_attestation_v1,
 };
 
 pub use archive::{
