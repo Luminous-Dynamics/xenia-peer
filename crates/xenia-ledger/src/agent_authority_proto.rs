@@ -212,9 +212,15 @@ mod tests {
     fn canonical_message_is_deterministic_and_sensitive() {
         let a = sample();
         let mut b = a.clone();
-        assert_eq!(a.canonical_message().unwrap(), b.canonical_message().unwrap());
+        assert_eq!(
+            a.canonical_message().unwrap(),
+            b.canonical_message().unwrap()
+        );
         b.executor_workload_digest[0] ^= 1;
-        assert_ne!(a.canonical_message().unwrap(), b.canonical_message().unwrap());
+        assert_ne!(
+            a.canonical_message().unwrap(),
+            b.canonical_message().unwrap()
+        );
     }
 
     #[test]
