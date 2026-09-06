@@ -307,7 +307,11 @@ impl Chain {
         persist: impl FnOnce(&Self) -> PersistenceDisposition<E>,
     ) -> Result<TransactionalAppendOutcome<E>, LedgerError> {
         self.append(event)?;
-        let candidate = self.entries.last().cloned().ok_or(LedgerError::AppendInvariant)?;
+        let candidate = self
+            .entries
+            .last()
+            .cloned()
+            .ok_or(LedgerError::AppendInvariant)?;
         let pending = self.pending_frontier_for(&candidate)?;
         self.pending_persistence = Some(pending);
 
@@ -323,7 +327,9 @@ impl Chain {
                     .entries
                     .pop()
                     .ok_or(LedgerError::PendingPersistenceInvariant)?;
-                if reverted_entry.entry_hash != pending.entry_hash || reverted_entry.seq != pending.seq {
+                if reverted_entry.entry_hash != pending.entry_hash
+                    || reverted_entry.seq != pending.seq
+                {
                     return Err(LedgerError::PendingPersistenceInvariant);
                 }
                 self.pending_persistence = None;
@@ -353,7 +359,11 @@ impl Chain {
             .pending_persistence
             .ok_or(LedgerError::PendingPersistenceInvariant)?;
         self.ensure_pending_matches(pending)?;
-        let candidate = self.entries.last().cloned().ok_or(LedgerError::PendingPersistenceInvariant)?;
+        let candidate = self
+            .entries
+            .last()
+            .cloned()
+            .ok_or(LedgerError::PendingPersistenceInvariant)?;
 
         match reconcile(self, pending) {
             PersistenceDisposition::Persisted => {
@@ -367,7 +377,9 @@ impl Chain {
                     .entries
                     .pop()
                     .ok_or(LedgerError::PendingPersistenceInvariant)?;
-                if reverted_entry.entry_hash != pending.entry_hash || reverted_entry.seq != pending.seq {
+                if reverted_entry.entry_hash != pending.entry_hash
+                    || reverted_entry.seq != pending.seq
+                {
                     return Err(LedgerError::PendingPersistenceInvariant);
                 }
                 self.pending_persistence = None;
@@ -407,7 +419,10 @@ impl Chain {
         if self.pending_persistence != Some(pending)
             || self.entry_count() != pending.entry_count
             || self.last_hash() != pending.head_hash
-            || self.entries.last().map(|entry| (entry.seq, entry.entry_hash))
+            || self
+                .entries
+                .last()
+                .map(|entry| (entry.seq, entry.entry_hash))
                 != Some((pending.seq, pending.entry_hash))
         {
             return Err(LedgerError::PendingPersistenceInvariant);
