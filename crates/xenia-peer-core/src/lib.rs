@@ -57,6 +57,7 @@ pub mod device_capability_request;
 pub mod file_transfer;
 pub mod frame;
 pub mod handshake;
+pub mod hearth_policy_mapping;
 pub mod m1_session;
 pub mod producer_flow;
 pub mod receive_reservation;
@@ -87,6 +88,11 @@ pub use frame::{
     SyntheticAudioSource, TelemetrySample, TelemetryValue,
 };
 pub use handshake::{RekeyPolicy, SessionEpochState};
+pub use hearth_policy_mapping::{
+    HEARTH_CAPABILITY_MAPPING_SCHEMA_VERSION, HearthCapabilityMappingEntryV1,
+    HearthCapabilityMappingError, HearthCapabilityMappingPolicyV1,
+    HearthCapabilityRequirementV1, ResolvedHearthRequirementsV1,
+};
 pub use m1_session::{
     M1AuditEvent, M1Permission, M1PermissionSet, M1SessionError, M1SessionMachine, M1SessionState,
 };
