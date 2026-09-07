@@ -325,4 +325,80 @@ mod tests {
             Err(DetachedMessageVerifyError::PublicKeyBinding(_))
         ));
     }
+
+    #[cfg(feature = "pqc-signatures")]
+    #[test]
+    fn ml_dsa_65_verifies_pinned_symthaea_profile_authorization_bytes() {
+        use crate::signature::MlDsa65EvidenceSignatureBackend;
+        use ml_dsa::{Keypair, MlDsa65, Signer, SigningKey};
+
+        // Exact canonical byte vector pinned by Symthaea PR #818's
+        // SafetyProfileAuthorizationSubject v1 fixture. Xenia treats the bytes as
+        // application-defined: this test proves the detached verifier authenticates
+        // that cross-project contract without importing Symthaea types.
+        let message = hex_bytes(
+            "73796d74686165613a7361666574792d70726f66696c652d617574686f72697a6174696f6e3a7631000000002873796d74686165612d7361666574792d70726f66696c652d617574686f72697a6174696f6e2d763100000006617574682d3100000006726f6f742d31000000046e6f6465000000000000000100000000000003e800000000000007d00000000f746573742d70726f66696c652d7631013333333333333333333333333333333333333333333333333333333333333333012222222222222222222222222222222222222222222222222222222222222222",
+        );
+        let seed = ml_dsa::B32::default();
+        let signing_key = SigningKey::<MlDsa65>::from_seed(&seed);
+        let public_key = signing_key.verifying_key().encode();
+        let signature = signing_key.sign(&message).encode();
+        let binding = EvidencePublicKeyBinding::new(
+            SignatureSuite::MlDsa65Fips204,
+            public_key.as_ref().to_vec(),
+        );
+        let envelope = SignatureEnvelope::new(
+            SignatureSuite::MlDsa65Fips204,
+            signature.as_ref().to_vec(),
+        );
+        let backend = MlDsa65EvidenceSignatureBackend;
+        let trusted = binding.public_key_fingerprint;
+
+        let verified = verify_detached_message(
+            SignatureSuite::MlDsa65Fips204,
+            trusted,
+            &message,
+            &envelope,
+            &binding,
+            &backend,
+        )
+        .unwrap();
+
+        assert!(verified.matches_message(&message));
+        assert_eq!(verified.signature_suite(), SignatureSuite::MlDsa65Fips204);
+        assert_eq!(verified.public_key_fingerprint(), trusted);
+
+        let mut tampered = message.clone();
+        tampered[0] ^= 0x01;
+        assert!(!verified.matches_message(&tampered));
+        assert!(matches!(
+            verify_detached_message(
+                SignatureSuite::MlDsa65Fips204,
+                trusted,
+                &tampered,
+                &envelope,
+                &binding,
+                &backend,
+            ),
+            Err(DetachedMessageVerifyError::SignatureBackend(_))
+        ));
+    }
+
+    #[cfg(feature = "pqc-signatures")]
+    fn hex_bytes(hex: &str) -> Vec<u8> {
+        assert_eq!(hex.len() % 2, 0);
+        hex.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| (from_hex(pair[0]) << 4) | from_hex(pair[1]))
+            .collect()
+    }
+
+    #[cfg(feature = "pqc-signatures")]
+    fn from_hex(byte: u8) -> u8 {
+        match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            _ => panic!("invalid hex byte"),
+        }
+    }
 }
