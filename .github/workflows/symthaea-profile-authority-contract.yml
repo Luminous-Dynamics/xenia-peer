@@ -1,0 +1,42 @@
+name: Symthaea Profile Authority Contract
+
+on:
+  pull_request:
+    paths:
+      - 'crates/xenia-ledger/**'
+      - '.github/workflows/symthaea-profile-authority-contract.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: symthaea-profile-authority-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  authority-contract:
+    name: Verify ML-DSA-65 profile authority contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy
+
+      - name: Test exact cross-project authority contract
+        run: >-
+          cargo test --locked -p xenia-ledger
+          --features pqc-signatures
+          --test symthaea_profile_authority_contract
+
+      - name: Clippy exact cross-project authority contract
+        run: >-
+          cargo clippy --locked -p xenia-ledger
+          --features pqc-signatures
+          --test symthaea_profile_authority_contract
+          -- -D warnings
