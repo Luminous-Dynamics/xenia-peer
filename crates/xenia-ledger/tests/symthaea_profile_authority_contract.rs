@@ -3,7 +3,8 @@
 use ml_dsa::{Keypair, MlDsa65, Signer, SigningKey};
 use xenia_ledger::{
     DetachedMessageVerifyError, EvidencePublicKeyBinding, MlDsa65EvidenceSignatureBackend,
-    SignatureEnvelope, SignatureSuite, compute_evidence_public_key_fingerprint,
+    SignatureEnvelope, SignatureSuite, VerifiedDetachedMessageContractError,
+    compute_evidence_public_key_fingerprint, require_verified_detached_message_contract,
     verify_detached_message,
 };
 
@@ -77,9 +78,13 @@ fn v1_authority_root_is_blake3_of_raw_ml_dsa_65_verifier_key_bytes() {
     )
     .expect("the exact Symthaea v1 authorization bytes must verify under the exact raw-key root");
 
-    assert!(verified.matches_message(&message));
-    assert_eq!(verified.signature_suite(), SignatureSuite::MlDsa65Fips204);
-    assert_eq!(verified.public_key_fingerprint(), direct_raw_key_hash);
+    require_verified_detached_message_contract(
+        &verified,
+        SignatureSuite::MlDsa65Fips204,
+        direct_raw_key_hash,
+        &message,
+    )
+    .expect("the verifier-owned proof must match the exact subject contract atomically");
 }
 
 #[test]
@@ -98,16 +103,30 @@ fn lineage_bearing_transition_is_the_runtime_authenticated_message() {
     )
     .expect("the exact Symthaea lineage-bearing transition bytes must verify");
 
-    assert!(verified.matches_message(&message));
-    assert_eq!(verified.public_key_fingerprint(), trusted_root);
+    require_verified_detached_message_contract(
+        &verified,
+        SignatureSuite::MlDsa65Fips204,
+        trusted_root,
+        &message,
+    )
+    .expect("the transition proof must satisfy message + suite + root together");
 
     // The bootstrap predecessor tag is part of the authenticated transition.
-    // Flipping any transition byte must invalidate the signature, even though the
-    // embedded profile-authorization claim remains otherwise unchanged.
+    // Flipping any transition byte must invalidate both the contract match and a
+    // fresh cryptographic verification, even though the embedded authorization
+    // claim remains otherwise unchanged.
     let mut tampered_transition = message.clone();
     let bootstrap_tag_offset = 107;
     tampered_transition[bootstrap_tag_offset] ^= 0x01;
-    assert!(!verified.matches_message(&tampered_transition));
+    assert_eq!(
+        require_verified_detached_message_contract(
+            &verified,
+            SignatureSuite::MlDsa65Fips204,
+            trusted_root,
+            &tampered_transition,
+        ),
+        Err(VerifiedDetachedMessageContractError::MessageMismatch)
+    );
     assert!(matches!(
         verify_detached_message(
             SignatureSuite::MlDsa65Fips204,
