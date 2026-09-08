@@ -120,7 +120,8 @@ pub use detached::{
 };
 
 pub use detached_contract::{
-    VerifiedDetachedMessageContractError, require_verified_detached_message_contract,
+    VerifiedDetachedMessageContractError, VerifiedDetachedMessageContractMatch,
+    require_verified_detached_message_contract,
 };
 
 pub use entry::{

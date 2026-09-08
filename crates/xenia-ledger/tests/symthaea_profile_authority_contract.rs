@@ -78,13 +78,16 @@ fn v1_authority_root_is_blake3_of_raw_ml_dsa_65_verifier_key_bytes() {
     )
     .expect("the exact Symthaea v1 authorization bytes must verify under the exact raw-key root");
 
-    require_verified_detached_message_contract(
+    let matched = require_verified_detached_message_contract(
         &verified,
         SignatureSuite::MlDsa65Fips204,
         direct_raw_key_hash,
         &message,
     )
     .expect("the verifier-owned proof must match the exact subject contract atomically");
+    assert!(matched.matches_message(&message));
+    assert_eq!(matched.signature_suite(), SignatureSuite::MlDsa65Fips204);
+    assert_eq!(matched.public_key_fingerprint(), direct_raw_key_hash);
 }
 
 #[test]
@@ -103,13 +106,15 @@ fn lineage_bearing_transition_is_the_runtime_authenticated_message() {
     )
     .expect("the exact Symthaea lineage-bearing transition bytes must verify");
 
-    require_verified_detached_message_contract(
+    let matched = require_verified_detached_message_contract(
         &verified,
         SignatureSuite::MlDsa65Fips204,
         trusted_root,
         &message,
     )
     .expect("the transition proof must satisfy message + suite + root together");
+    assert!(matched.matches_message(&message));
+    assert_eq!(matched.public_key_fingerprint(), trusted_root);
 
     // The bootstrap predecessor tag is part of the authenticated transition.
     // Flipping any transition byte must invalidate both the contract match and a
@@ -118,6 +123,7 @@ fn lineage_bearing_transition_is_the_runtime_authenticated_message() {
     let mut tampered_transition = message.clone();
     let bootstrap_tag_offset = 107;
     tampered_transition[bootstrap_tag_offset] ^= 0x01;
+    assert!(!matched.matches_message(&tampered_transition));
     assert_eq!(
         require_verified_detached_message_contract(
             &verified,
