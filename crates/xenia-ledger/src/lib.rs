@@ -68,6 +68,7 @@ mod binding;
 mod chain;
 mod checkpoint;
 mod compaction;
+mod detached;
 mod entry;
 mod errors;
 mod hash;
@@ -109,6 +110,12 @@ pub use checkpoint::{
 pub use compaction::{
     LEDGER_COMPACTION_MANIFEST_SCHEMA, LedgerCompactionError, LedgerCompactionManifest,
     ledger_compaction_manifest_message,
+};
+
+pub use detached::{
+    DetachedMessageVerifyError, VERIFIED_DETACHED_MESSAGE_DIGEST_ALGORITHM,
+    VERIFIED_DETACHED_MESSAGE_DIGEST_DOMAIN, VerifiedDetachedMessage, verify_detached_message,
+    verified_detached_message_digest,
 };
 
 pub use entry::{
