@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   authority-contract:
-    name: Verify ML-DSA-65 profile authority contract
+    name: Verify ML-DSA-65 Symthaea authority contracts
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -28,15 +28,12 @@ jobs:
         with:
           components: clippy
 
-      - name: Test exact cross-project authority contract
-        run: >-
-          cargo test --locked -p xenia-ledger
-          --features pqc-signatures
-          --test symthaea_profile_authority_contract
+      - name: Test exact cross-project authority contracts
+        run: |
+          cargo test --locked -p xenia-ledger --features pqc-signatures --test symthaea_profile_authority_contract
+          cargo test --locked -p xenia-ledger --features pqc-signatures --test symthaea_distinct_authority_pair
 
-      - name: Clippy exact cross-project authority contract
-        run: >-
-          cargo clippy --locked -p xenia-ledger
-          --features pqc-signatures
-          --test symthaea_profile_authority_contract
-          -- -D warnings
+      - name: Clippy exact cross-project authority contracts
+        run: |
+          cargo clippy --locked -p xenia-ledger --features pqc-signatures --test symthaea_profile_authority_contract -- -D warnings
+          cargo clippy --locked -p xenia-ledger --features pqc-signatures --test symthaea_distinct_authority_pair -- -D warnings
