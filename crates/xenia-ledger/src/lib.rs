@@ -70,6 +70,7 @@ mod checkpoint;
 mod compaction;
 mod detached;
 mod detached_contract;
+mod detached_pair;
 mod entry;
 mod errors;
 mod hash;
@@ -122,6 +123,11 @@ pub use detached::{
 pub use detached_contract::{
     VerifiedDetachedMessageContractError, VerifiedDetachedMessageContractMatch,
     require_verified_detached_message_contract,
+};
+
+pub use detached_pair::{
+    VerifiedDetachedMessageContractPair, VerifiedDetachedMessageContractPairError,
+    require_distinct_verified_detached_message_contract_pair,
 };
 
 pub use entry::{
