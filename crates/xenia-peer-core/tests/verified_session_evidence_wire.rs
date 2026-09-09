@@ -10,7 +10,7 @@ const EVIDENCE_FIXTURE: &str =
     include_str!("../fixtures/verified-machine-session-evidence-v1.json");
 
 #[test]
-fn portable_evidence_fixture_pins_v1_wire_shape() {
+fn portable_evidence_fixture_pins_v1_wire_shape_without_secret_material() {
     let evidence: VerifiedMachineSessionEvidenceV1 = serde_json::from_str(EVIDENCE_FIXTURE).unwrap();
 
     assert_eq!(evidence.schema, VERIFIED_MACHINE_SESSION_EVIDENCE_SCHEMA_V1);
@@ -33,6 +33,22 @@ fn portable_evidence_fixture_pins_v1_wire_shape() {
     let original: serde_json::Value = serde_json::from_str(EVIDENCE_FIXTURE).unwrap();
     let reencoded = serde_json::to_value(&evidence).unwrap();
     assert_eq!(reencoded, original);
+
+    let encoded = serde_json::to_string(&evidence).unwrap();
+    for forbidden in [
+        "session_key",
+        "key_schedule",
+        "rekey",
+        "control_key",
+        "video_key",
+        "audio_key",
+        "telemetry_key",
+    ] {
+        assert!(
+            !encoded.contains(forbidden),
+            "portable evidence leaked forbidden field name: {forbidden}"
+        );
+    }
 }
 
 #[test]
