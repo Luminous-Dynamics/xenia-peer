@@ -15,9 +15,11 @@ use thiserror::Error;
 
 use crate::binding::EvidencePublicKeyBinding;
 use crate::signature::{
-    EvidenceSignatureBackend, EvidenceSignatureBackendError, SignatureEnvelope,
-    SignatureEnvelopeError, SignatureSuite,
+    Ed25519EvidenceSignatureBackend, EvidenceSignatureBackend, EvidenceSignatureBackendError,
+    SignatureEnvelope, SignatureEnvelopeError, SignatureSuite,
 };
+#[cfg(feature = "pqc-signatures")]
+use crate::signature::{MlDsa65EvidenceSignatureBackend, MlDsa87EvidenceSignatureBackend};
 
 /// Stable schema label for generic authenticated-statement claims.
 pub const AUTHENTICATED_STATEMENT_CLAIM_SCHEMA: &str = "xenia-authenticated-statement-claim-v1";
@@ -393,12 +395,64 @@ pub fn statement_signature_message(claim: &StatementClaimV1, payload: &[u8]) -> 
     message
 }
 
-/// Verify one signed statement under an exact local policy and public-key binding.
+/// Verify one signed statement using only Xenia's built-in signature backends.
 ///
-/// Success returns a non-Serde [`AuthenticatedStatementV1`]. The verifier performs
-/// shape, policy, suite, key-fingerprint, root-epoch, challenge, payload, and
-/// cryptographic signature checks before constructing it.
+/// Callers do not supply an [`EvidenceSignatureBackend`] implementation. This is
+/// deliberate: the trait remains useful for Xenia's artifact-verification internals,
+/// but accepting an arbitrary external implementation here would let a caller provide
+/// an "always succeeds" verifier and manufacture [`AuthenticatedStatementV1`].
+///
+/// With default features, Ed25519 is supported. ML-DSA-65/87 become available only
+/// when the existing `pqc-signatures` feature compiles those built-in backends.
 pub fn verify_statement(
+    policy: &StatementVerificationPolicyV1,
+    key_binding: &EvidencePublicKeyBinding,
+    expected_transaction_challenge: [u8; 32],
+    payload: &[u8],
+    signed: &SignedStatementV1,
+) -> Result<AuthenticatedStatementV1, AuthenticatedStatementError> {
+    match policy.signature_suite() {
+        SignatureSuite::Ed25519Rfc8032 => verify_statement_with_backend(
+            policy,
+            key_binding,
+            &Ed25519EvidenceSignatureBackend,
+            expected_transaction_challenge,
+            payload,
+            signed,
+        ),
+        #[cfg(feature = "pqc-signatures")]
+        SignatureSuite::MlDsa65Fips204 => verify_statement_with_backend(
+            policy,
+            key_binding,
+            &MlDsa65EvidenceSignatureBackend,
+            expected_transaction_challenge,
+            payload,
+            signed,
+        ),
+        #[cfg(feature = "pqc-signatures")]
+        SignatureSuite::MlDsa87Fips204 => verify_statement_with_backend(
+            policy,
+            key_binding,
+            &MlDsa87EvidenceSignatureBackend,
+            expected_transaction_challenge,
+            payload,
+            signed,
+        ),
+        #[cfg(not(feature = "pqc-signatures"))]
+        SignatureSuite::MlDsa65Fips204 | SignatureSuite::MlDsa87Fips204 => {
+            Err(AuthenticatedStatementError::BuiltInSignatureSuiteUnavailable {
+                suite: policy.signature_suite(),
+            })
+        }
+        SignatureSuite::SlhDsaFips205 => {
+            Err(AuthenticatedStatementError::BuiltInSignatureSuiteUnavailable {
+                suite: policy.signature_suite(),
+            })
+        }
+    }
+}
+
+fn verify_statement_with_backend(
     policy: &StatementVerificationPolicyV1,
     key_binding: &EvidencePublicKeyBinding,
     backend: &impl EvidenceSignatureBackend,
@@ -513,6 +567,9 @@ pub enum AuthenticatedStatementError {
     /// Stored claim identity did not match its canonical fields.
     #[error("signed statement claim identity mismatch")]
     ClaimIdentityMismatch,
+    /// The requested suite has no Xenia-owned built-in statement verifier in this build.
+    #[error("built-in authenticated-statement verifier unavailable for {suite:?}")]
+    BuiltInSignatureSuiteUnavailable { suite: SignatureSuite },
     /// Current public-key binding did not satisfy the required suite/key shape.
     #[error("evidence public-key binding rejected: {0}")]
     PublicKeyBinding(#[source] crate::binding::EvidencePublicKeyBindingError),
@@ -616,10 +673,7 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
 
     use super::*;
-    use crate::{
-        Ed25519EvidenceSignatureBackend, EvidencePublicKeyBinding,
-        compute_evidence_public_key_fingerprint,
-    };
+    use crate::{EvidencePublicKeyBinding, compute_evidence_public_key_fingerprint};
 
     fn fixture() -> (
         SigningKey,
@@ -668,15 +722,7 @@ mod tests {
     fn exact_statement_authenticates() {
         let (signing_key, binding, policy, challenge, payload) = fixture();
         let signed = signed_fixture(&signing_key, &policy, challenge, &payload);
-        let authenticated = verify_statement(
-            &policy,
-            &binding,
-            &Ed25519EvidenceSignatureBackend,
-            challenge,
-            &payload,
-            &signed,
-        )
-        .unwrap();
+        let authenticated = verify_statement(&policy, &binding, challenge, &payload, &signed).unwrap();
         assert_eq!(authenticated.policy_id(), policy.id());
         assert_eq!(authenticated.claim_id(), signed.claim().id());
         assert_eq!(authenticated.payload_digest(), *blake3::hash(&payload).as_bytes());
@@ -687,15 +733,8 @@ mod tests {
     fn changed_payload_fails_before_signature_acceptance() {
         let (signing_key, binding, policy, challenge, payload) = fixture();
         let signed = signed_fixture(&signing_key, &policy, challenge, &payload);
-        let err = verify_statement(
-            &policy,
-            &binding,
-            &Ed25519EvidenceSignatureBackend,
-            challenge,
-            b"different payload",
-            &signed,
-        )
-        .unwrap_err();
+        let err = verify_statement(&policy, &binding, challenge, b"different payload", &signed)
+            .unwrap_err();
         assert!(matches!(err, AuthenticatedStatementError::PayloadDigestMismatch));
     }
 
@@ -703,15 +742,7 @@ mod tests {
     fn cross_challenge_replay_fails_closed() {
         let (signing_key, binding, policy, challenge, payload) = fixture();
         let signed = signed_fixture(&signing_key, &policy, challenge, &payload);
-        let err = verify_statement(
-            &policy,
-            &binding,
-            &Ed25519EvidenceSignatureBackend,
-            [10; 32],
-            &payload,
-            &signed,
-        )
-        .unwrap_err();
+        let err = verify_statement(&policy, &binding, [10; 32], &payload, &signed).unwrap_err();
         assert!(matches!(
             err,
             AuthenticatedStatementError::TransactionChallengeMismatch
@@ -729,15 +760,7 @@ mod tests {
             5,
         )
         .unwrap();
-        let err = verify_statement(
-            &rotated,
-            &binding,
-            &Ed25519EvidenceSignatureBackend,
-            challenge,
-            &payload,
-            &signed,
-        )
-        .unwrap_err();
+        let err = verify_statement(&rotated, &binding, challenge, &payload, &signed).unwrap_err();
         assert!(matches!(
             err,
             AuthenticatedStatementError::VerifierRootEpochMismatch
@@ -753,15 +776,8 @@ mod tests {
             SignatureSuite::Ed25519Rfc8032,
             other_key.to_vec(),
         );
-        let err = verify_statement(
-            &policy,
-            &other_binding,
-            &Ed25519EvidenceSignatureBackend,
-            challenge,
-            &payload,
-            &signed,
-        )
-        .unwrap_err();
+        let err = verify_statement(&policy, &other_binding, challenge, &payload, &signed)
+            .unwrap_err();
         assert!(matches!(
             err,
             AuthenticatedStatementError::VerifierKeyFingerprintMismatch
@@ -779,15 +795,40 @@ mod tests {
             policy.verifier_root_epoch(),
         )
         .unwrap();
-        let err = verify_statement(
-            &other_policy,
-            &binding,
-            &Ed25519EvidenceSignatureBackend,
+        let err = verify_statement(&other_policy, &binding, challenge, &payload, &signed)
+            .unwrap_err();
+        assert!(matches!(err, AuthenticatedStatementError::PurposeMismatch));
+    }
+
+    #[test]
+    fn unavailable_suite_cannot_mint_authenticated_statement() {
+        let (_, binding, _, challenge, payload) = fixture();
+        let policy = StatementVerificationPolicyV1::new(
+            "org.luminous.fixture.verification.v1",
+            SignatureSuite::SlhDsaFips205,
+            binding.public_key_fingerprint,
+            4,
+        )
+        .unwrap();
+        let claim = StatementClaimV1::new(
+            policy.purpose(),
+            policy.signature_suite(),
+            policy.verifier_key_fingerprint(),
+            policy.verifier_root_epoch(),
             challenge,
             &payload,
-            &signed,
         )
-        .unwrap_err();
-        assert!(matches!(err, AuthenticatedStatementError::PurposeMismatch));
+        .unwrap();
+        let signed = SignedStatementV1::new(
+            claim,
+            SignatureEnvelope::new(SignatureSuite::SlhDsaFips205, vec![1, 2, 3]),
+        );
+        let err = verify_statement(&policy, &binding, challenge, &payload, &signed).unwrap_err();
+        assert!(matches!(
+            err,
+            AuthenticatedStatementError::BuiltInSignatureSuiteUnavailable {
+                suite: SignatureSuite::SlhDsaFips205
+            }
+        ));
     }
 }
