@@ -10,7 +10,7 @@
 //! session to its current enrollment/revocation state before treating it as
 //! machine authority.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::handshake::{HandshakeOutcome, VerifiedPeerIdentity};
 
@@ -52,7 +52,7 @@ pub enum VerifiedSessionEvidenceError {
 /// peer has been admitted. Xenia's cryptographic handshake does not itself grant
 /// application authority. Live revocation is intentionally absent from this
 /// immutable record and must be evaluated from fresh local authority state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VerifiedMachineSessionEvidenceV1 {
     /// Stable schema label.
     pub schema: String,
@@ -72,6 +72,43 @@ pub struct VerifiedMachineSessionEvidenceV1 {
     /// Optional binding to the negotiated transport/capability context that was
     /// committed into the handshake.
     pub negotiated_context_binding: Option<String>,
+}
+
+/// Exact v1 serde surface. Keeping this separate lets deserialization validate
+/// the record before exposing the public typed value and rejects undeclared fields
+/// instead of silently carrying ambiguous evidence under the same schema label.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VerifiedMachineSessionEvidenceWireV1 {
+    schema: String,
+    session_id: String,
+    peer_identity_binding: String,
+    authenticated_at_ms: u64,
+    expires_at_ms: u64,
+    authority_epoch: u64,
+    evidence_binding: String,
+    negotiated_context_binding: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for VerifiedMachineSessionEvidenceV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = VerifiedMachineSessionEvidenceWireV1::deserialize(deserializer)?;
+        let evidence = Self {
+            schema: wire.schema,
+            session_id: wire.session_id,
+            peer_identity_binding: wire.peer_identity_binding,
+            authenticated_at_ms: wire.authenticated_at_ms,
+            expires_at_ms: wire.expires_at_ms,
+            authority_epoch: wire.authority_epoch,
+            evidence_binding: wire.evidence_binding,
+            negotiated_context_binding: wire.negotiated_context_binding,
+        };
+        evidence.validate_shape().map_err(serde::de::Error::custom)?;
+        Ok(evidence)
+    }
 }
 
 impl VerifiedMachineSessionEvidenceV1 {
@@ -114,11 +151,12 @@ impl VerifiedMachineSessionEvidenceV1 {
         Ok(evidence)
     }
 
-    /// Validate the stable portable record after deserialization or storage.
+    /// Validate the stable portable record after construction or storage.
     ///
-    /// This does **not** re-verify the handshake or grant authority. It only
-    /// rejects malformed/non-canonical serialized evidence before a higher
-    /// authority layer evaluates enrollment, revocation, epoch and trusted time.
+    /// Deserialization calls this automatically. This does **not** re-verify the
+    /// handshake or grant authority; it only guarantees the typed record is the
+    /// exact canonical v1 evidence shape before a higher authority layer evaluates
+    /// enrollment, revocation, epoch and trusted time.
     pub fn validate_shape(&self) -> Result<(), VerifiedSessionEvidenceError> {
         if self.schema != VERIFIED_MACHINE_SESSION_EVIDENCE_SCHEMA_V1 {
             return Err(VerifiedSessionEvidenceError::InvalidSchema);
@@ -283,8 +321,8 @@ mod tests {
     }
 
     #[test]
-    fn deserialized_shape_rejects_schema_and_binding_drift() {
-        let mut evidence = VerifiedMachineSessionEvidenceV1::from_verified_handshake(
+    fn deserialization_rejects_schema_binding_and_field_drift() {
+        let evidence = VerifiedMachineSessionEvidenceV1::from_verified_handshake(
             &outcome(),
             &peer(),
             "session-1",
@@ -294,17 +332,19 @@ mod tests {
         )
         .unwrap();
 
-        evidence.schema = "xenia-verified-machine-session-evidence-v2".into();
-        assert_eq!(
-            evidence.validate_shape(),
-            Err(VerifiedSessionEvidenceError::InvalidSchema)
+        let mut value = serde_json::to_value(&evidence).unwrap();
+        value["schema"] = serde_json::Value::String(
+            "xenia-verified-machine-session-evidence-v2".into(),
         );
+        assert!(serde_json::from_value::<VerifiedMachineSessionEvidenceV1>(value).is_err());
 
-        evidence.schema = VERIFIED_MACHINE_SESSION_EVIDENCE_SCHEMA_V1.into();
-        evidence.peer_identity_binding = "xenia-signing-identity-v1:blake3-256:ABC".into();
-        assert_eq!(
-            evidence.validate_shape(),
-            Err(VerifiedSessionEvidenceError::InvalidPeerIdentityBinding)
-        );
+        let mut value = serde_json::to_value(&evidence).unwrap();
+        value["peer_identity_binding"] =
+            serde_json::Value::String("xenia-signing-identity-v1:blake3-256:ABC".into());
+        assert!(serde_json::from_value::<VerifiedMachineSessionEvidenceV1>(value).is_err());
+
+        let mut value = serde_json::to_value(&evidence).unwrap();
+        value["unexpected_authority_claim"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<VerifiedMachineSessionEvidenceV1>(value).is_err());
     }
 }
