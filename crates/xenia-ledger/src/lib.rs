@@ -65,6 +65,7 @@
 
 mod archive;
 mod artifact_attestation;
+mod artifact_witness;
 mod binding;
 mod chain;
 mod checkpoint;
@@ -99,6 +100,14 @@ pub use artifact_attestation::{
 #[cfg(feature = "pqc-signatures")]
 pub use artifact_attestation::{
     sign_evidence_artifact_binding_ml_dsa_65, sign_evidence_artifact_binding_ml_dsa_87,
+};
+
+pub use artifact_witness::{
+    EVIDENCE_ARTIFACT_WITNESS_BUNDLE_SCHEMA, EVIDENCE_ARTIFACT_WITNESS_DOMAIN,
+    EVIDENCE_ARTIFACT_WITNESS_SIGNATURE_SCHEMA, EvidenceArtifactWitnessBundle,
+    EvidenceArtifactWitnessError, EvidenceArtifactWitnessSignature,
+    MAX_EVIDENCE_ARTIFACT_WITNESSES, VerifiedEvidenceArtifactWitnessBundle,
+    evidence_artifact_witness_message,
 };
 
 pub use binding::{
