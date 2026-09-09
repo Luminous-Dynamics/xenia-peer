@@ -64,6 +64,8 @@
 #![deny(unsafe_code)]
 
 mod archive;
+mod artifact_attestation;
+mod artifact_witness;
 mod binding;
 mod chain;
 mod checkpoint;
@@ -85,6 +87,27 @@ pub use archive::{
     LEDGER_ARCHIVE_SEGMENT_SCHEMA, LedgerArchiveError, LedgerArchiveSegment,
     MAX_LEDGER_ARCHIVE_SEGMENT_ENTRIES, MAX_LEDGER_ARCHIVE_SEQUENCE_SEGMENTS,
     ledger_archive_segment_digest, ledger_archive_sequence_digest,
+};
+
+pub use artifact_attestation::{
+    EVIDENCE_ARTIFACT_ATTESTATION_DOMAIN, EVIDENCE_ARTIFACT_ATTESTATION_SCHEMA,
+    EVIDENCE_ARTIFACT_BINDING_SCHEMA, EVIDENCE_ARTIFACT_DIGEST_ALGORITHM,
+    EvidenceArtifactAttestation, EvidenceArtifactAttestationError, EvidenceArtifactBinding,
+    MAX_ARTIFACT_DOMAIN_LEN, MAX_ARTIFACT_SCHEMA_LEN, MAX_ARTIFACT_SUBJECT_REF_LEN,
+    VerifiedEvidenceArtifactAttestation, compute_evidence_artifact_digest,
+    evidence_artifact_attestation_message, sign_evidence_artifact_binding_ed25519,
+};
+#[cfg(feature = "pqc-signatures")]
+pub use artifact_attestation::{
+    sign_evidence_artifact_binding_ml_dsa_65, sign_evidence_artifact_binding_ml_dsa_87,
+};
+
+pub use artifact_witness::{
+    EVIDENCE_ARTIFACT_WITNESS_BUNDLE_SCHEMA, EVIDENCE_ARTIFACT_WITNESS_DOMAIN,
+    EVIDENCE_ARTIFACT_WITNESS_SIGNATURE_SCHEMA, EvidenceArtifactWitnessBundle,
+    EvidenceArtifactWitnessError, EvidenceArtifactWitnessSignature,
+    MAX_EVIDENCE_ARTIFACT_WITNESSES, VerifiedEvidenceArtifactWitnessBundle,
+    evidence_artifact_witness_message,
 };
 
 pub use binding::{
