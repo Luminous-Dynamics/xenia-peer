@@ -18,10 +18,6 @@ use crate::handshake::{HandshakeOutcome, VerifiedPeerIdentity};
 pub const VERIFIED_MACHINE_SESSION_EVIDENCE_SCHEMA_V1: &str =
     "xenia-verified-machine-session-evidence-v1";
 
-/// Stable schema label for a current authority/revocation context evaluation.
-pub const MACHINE_SESSION_AUTHORITY_CONTEXT_SCHEMA_V1: &str =
-    "xenia-machine-session-authority-context-v1";
-
 const PEER_IDENTITY_BINDING_PREFIX: &str = "xenia-signing-identity-v1:blake3-256:";
 const TRANSCRIPT_BINDING_PREFIX: &str = "xenia-handshake-transcript-v1:blake3-256:";
 const NEGOTIATED_CONTEXT_BINDING_PREFIX: &str =
@@ -55,7 +51,7 @@ pub enum VerifiedSessionEvidenceError {
 /// `authority_epoch` is supplied by the authority owner after the authenticated
 /// peer has been admitted. Xenia's cryptographic handshake does not itself grant
 /// application authority. Live revocation is intentionally absent from this
-/// immutable record and belongs in [`MachineSessionAuthorityContextV1`].
+/// immutable record and must be evaluated from fresh local authority state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifiedMachineSessionEvidenceV1 {
     /// Stable schema label.
@@ -150,16 +146,15 @@ impl VerifiedMachineSessionEvidenceV1 {
     }
 }
 
-/// Current, point-of-use authority facts corresponding to an immutable session
-/// evidence record.
+/// Current, point-of-use authority facts corresponding to immutable session evidence.
 ///
-/// This mirrors the semantics a consumer needs to fail closed after a live
-/// revocation or authority-policy change without rewriting historical handshake
-/// evidence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Deliberately **not serializable**. This value must be freshly constructed from
+/// local trusted time and the current authority/revocation source at the moment an
+/// action is evaluated. Making it a portable wire artifact would invite replay of
+/// stale `revoked = false` state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MachineSessionAuthorityContextV1 {
-    /// Stable schema version is carried by the enclosing protocol; this type is
-    /// intentionally a compact runtime value.
+    /// Current trusted-time instant.
     pub now_ms: u64,
     /// Current authority generation for the admitted identity.
     pub authority_epoch: u64,
