@@ -8,12 +8,19 @@
 //! different: its fields are private and it implements neither `Serialize` nor
 //! `Deserialize`, so callers cannot turn untrusted wire bytes into verifier-owned
 //! authority by deserializing a success-looking object.
+//!
+//! The public success-producing verifier also deliberately does not accept a
+//! caller-supplied [`EvidenceSignatureBackend`]. Xenia selects the built-in
+//! implementation from the exact policy suite. This prevents an external trait
+//! implementation that always returns `Ok(())` from manufacturing verified state.
 
 use crate::binding::{EvidencePublicKeyBinding, EvidencePublicKeyBindingError};
 use crate::signature::{
-    EvidenceSignatureBackend, EvidenceSignatureBackendError, SignatureEnvelope,
-    SignatureEnvelopeError, SignatureSuite,
+    Ed25519EvidenceSignatureBackend, EvidenceSignatureBackend, EvidenceSignatureBackendError,
+    SignatureEnvelope, SignatureEnvelopeError, SignatureSuite,
 };
+#[cfg(feature = "pqc-signatures")]
+use crate::signature::{MlDsa65EvidenceSignatureBackend, MlDsa87EvidenceSignatureBackend};
 use thiserror::Error;
 
 /// Domain used to bind the opaque proof to the exact verified message bytes.
@@ -63,18 +70,86 @@ impl VerifiedDetachedMessage {
 /// Verify a detached signature under an explicitly trusted key fingerprint and
 /// return an opaque proof of the exact successful verification.
 ///
-/// Verification is fail-closed and ordered deliberately:
-/// 1. the signature envelope must be well-shaped and declare `expected_suite`;
-/// 2. the key binding must validate its schema, suite, key length, fingerprint,
-///    and selected backend against that same expected suite;
-/// 3. the now-validated key fingerprint must equal the externally trusted
-///    `expected_public_key_fingerprint` policy input;
-/// 4. only then does the selected backend authenticate the exact message bytes.
+/// The caller supplies policy facts (`expected_suite` and the exact trusted key
+/// fingerprint), but does **not** supply the cryptographic verifier implementation.
+/// Xenia selects the built-in backend for `expected_suite` and fails closed when
+/// that suite is not compiled/implemented.
 ///
-/// Both `expected_suite` and `expected_public_key_fingerprint` are policy inputs,
-/// not values inferred from attacker-controlled evidence. This prevents both
-/// algorithm downgrade and arbitrary-key self-authorization.
+/// Verification is ordered deliberately:
+/// 1. the signature envelope must be well-shaped and declare `expected_suite`;
+/// 2. Xenia selects its built-in backend for that suite;
+/// 3. the key binding must validate schema, suite, key length, fingerprint, and
+///    agreement with that Xenia-owned backend;
+/// 4. the validated key fingerprint must equal the externally trusted fingerprint;
+/// 5. only then does the built-in backend authenticate the exact message bytes.
 pub fn verify_detached_message(
+    expected_suite: SignatureSuite,
+    expected_public_key_fingerprint: [u8; 32],
+    message: &[u8],
+    signature: &SignatureEnvelope,
+    key_binding: &EvidencePublicKeyBinding,
+) -> Result<VerifiedDetachedMessage, DetachedMessageVerifyError> {
+    match expected_suite {
+        SignatureSuite::Ed25519Rfc8032 => verify_detached_message_with_backend(
+            expected_suite,
+            expected_public_key_fingerprint,
+            message,
+            signature,
+            key_binding,
+            &Ed25519EvidenceSignatureBackend,
+        ),
+        SignatureSuite::MlDsa65Fips204 => {
+            #[cfg(feature = "pqc-signatures")]
+            {
+                verify_detached_message_with_backend(
+                    expected_suite,
+                    expected_public_key_fingerprint,
+                    message,
+                    signature,
+                    key_binding,
+                    &MlDsa65EvidenceSignatureBackend,
+                )
+            }
+            #[cfg(not(feature = "pqc-signatures"))]
+            {
+                Err(DetachedMessageVerifyError::BuiltInVerifierUnavailable {
+                    suite: expected_suite,
+                })
+            }
+        }
+        SignatureSuite::MlDsa87Fips204 => {
+            #[cfg(feature = "pqc-signatures")]
+            {
+                verify_detached_message_with_backend(
+                    expected_suite,
+                    expected_public_key_fingerprint,
+                    message,
+                    signature,
+                    key_binding,
+                    &MlDsa87EvidenceSignatureBackend,
+                )
+            }
+            #[cfg(not(feature = "pqc-signatures"))]
+            {
+                Err(DetachedMessageVerifyError::BuiltInVerifierUnavailable {
+                    suite: expected_suite,
+                })
+            }
+        }
+        SignatureSuite::SlhDsaFips205 => {
+            Err(DetachedMessageVerifyError::BuiltInVerifierUnavailable {
+                suite: expected_suite,
+            })
+        }
+    }
+}
+
+/// Internal cryptographic composition helper.
+///
+/// Keeping the backend-taking path crate-private is part of the proof boundary:
+/// external implementations of the public backend trait cannot use it to mint a
+/// [`VerifiedDetachedMessage`].
+fn verify_detached_message_with_backend(
     expected_suite: SignatureSuite,
     expected_public_key_fingerprint: [u8; 32],
     message: &[u8],
@@ -139,6 +214,13 @@ pub enum DetachedMessageVerifyError {
         observed: SignatureSuite,
     },
 
+    /// Xenia has no built-in verifier for the policy-selected suite in this build.
+    #[error("no Xenia-owned detached-message verifier is available for {suite:?}")]
+    BuiltInVerifierUnavailable {
+        /// Suite that cannot currently mint verifier-owned detached proof.
+        suite: SignatureSuite,
+    },
+
     /// Public-key binding schema/suite/fingerprint validation failed.
     #[error(transparent)]
     PublicKeyBinding(#[from] EvidencePublicKeyBindingError),
@@ -152,7 +234,7 @@ pub enum DetachedMessageVerifyError {
         observed: [u8; 32],
     },
 
-    /// Cryptographic signature verification failed in the selected backend.
+    /// Cryptographic signature verification failed in the Xenia-selected backend.
     #[error(transparent)]
     SignatureBackend(#[from] EvidenceSignatureBackendError),
 }
@@ -161,17 +243,13 @@ pub enum DetachedMessageVerifyError {
 mod tests {
     use super::*;
     use crate::binding::EvidencePublicKeyBinding;
-    use crate::signature::{Ed25519EvidenceSignatureBackend, SignatureEnvelope};
+    use crate::signature::SignatureEnvelope;
     use ed25519_dalek::{Signer, SigningKey};
 
     fn fixture_with_seed(
         message: &[u8],
         seed_byte: u8,
-    ) -> (
-        EvidencePublicKeyBinding,
-        SignatureEnvelope,
-        Ed25519EvidenceSignatureBackend,
-    ) {
+    ) -> (EvidencePublicKeyBinding, SignatureEnvelope) {
         let signing_key = SigningKey::from_bytes(&[seed_byte; 32]);
         let signature = signing_key.sign(message).to_bytes();
         (
@@ -180,24 +258,17 @@ mod tests {
                 signing_key.verifying_key().to_bytes(),
             ),
             SignatureEnvelope::ed25519(signature),
-            Ed25519EvidenceSignatureBackend,
         )
     }
 
-    fn fixture(
-        message: &[u8],
-    ) -> (
-        EvidencePublicKeyBinding,
-        SignatureEnvelope,
-        Ed25519EvidenceSignatureBackend,
-    ) {
+    fn fixture(message: &[u8]) -> (EvidencePublicKeyBinding, SignatureEnvelope) {
         fixture_with_seed(message, 0x41)
     }
 
     #[test]
     fn genuine_signature_under_trusted_key_produces_message_bound_proof() {
         let message = b"symthaea canonical safety-profile authorization subject";
-        let (binding, signature, backend) = fixture(message);
+        let (binding, signature) = fixture(message);
         let trusted = binding.public_key_fingerprint;
 
         let verified = verify_detached_message(
@@ -206,7 +277,6 @@ mod tests {
             message,
             &signature,
             &binding,
-            &backend,
         )
         .unwrap();
 
@@ -223,7 +293,7 @@ mod tests {
     #[test]
     fn tampered_message_cannot_produce_proof() {
         let original = b"authorized subject";
-        let (binding, signature, backend) = fixture(original);
+        let (binding, signature) = fixture(original);
 
         let result = verify_detached_message(
             SignatureSuite::Ed25519Rfc8032,
@@ -231,7 +301,6 @@ mod tests {
             b"tampered subject",
             &signature,
             &binding,
-            &backend,
         );
         assert!(matches!(
             result,
@@ -242,7 +311,7 @@ mod tests {
     #[test]
     fn attacker_controlled_suite_cannot_downgrade_verifier_policy() {
         let message = b"profile authorization";
-        let (binding, signature, backend) = fixture(message);
+        let (binding, signature) = fixture(message);
 
         let result = verify_detached_message(
             SignatureSuite::MlDsa65Fips204,
@@ -250,7 +319,6 @@ mod tests {
             message,
             &signature,
             &binding,
-            &backend,
         );
         assert!(matches!(
             result,
@@ -264,9 +332,8 @@ mod tests {
     #[test]
     fn self_consistent_untrusted_key_cannot_self_authorize() {
         let message = b"profile authorization";
-        let (trusted_binding, _, _) = fixture_with_seed(message, 0x41);
-        let (attacker_binding, attacker_signature, attacker_backend) =
-            fixture_with_seed(message, 0x42);
+        let (trusted_binding, _) = fixture_with_seed(message, 0x41);
+        let (attacker_binding, attacker_signature) = fixture_with_seed(message, 0x42);
 
         let result = verify_detached_message(
             SignatureSuite::Ed25519Rfc8032,
@@ -274,7 +341,6 @@ mod tests {
             message,
             &attacker_signature,
             &attacker_binding,
-            &attacker_backend,
         );
         assert!(matches!(
             result,
@@ -285,7 +351,7 @@ mod tests {
     #[test]
     fn mutated_public_key_fingerprint_fails_before_trust_acceptance() {
         let message = b"profile authorization";
-        let (mut binding, signature, backend) = fixture(message);
+        let (mut binding, signature) = fixture(message);
         let trusted = binding.public_key_fingerprint;
         binding.public_key_fingerprint[0] ^= 0x01;
 
@@ -295,7 +361,6 @@ mod tests {
             message,
             &signature,
             &binding,
-            &backend,
         );
         assert!(matches!(
             result,
@@ -306,36 +371,31 @@ mod tests {
     }
 
     #[test]
-    fn signature_envelope_suite_must_match_backend_and_key_binding() {
+    fn unavailable_builtin_suite_fails_closed() {
         let message = b"profile authorization";
-        let (binding, mut signature, backend) = fixture(message);
-        signature.algorithm = SignatureSuite::MlDsa65Fips204.stable_label().to_owned();
-        signature.signature = vec![0u8; 3309];
+        let (binding, _) = fixture(message);
+        let signature = SignatureEnvelope::new(SignatureSuite::SlhDsaFips205, vec![1u8; 64]);
 
         let result = verify_detached_message(
-            SignatureSuite::MlDsa65Fips204,
+            SignatureSuite::SlhDsaFips205,
             binding.public_key_fingerprint,
             message,
             &signature,
             &binding,
-            &backend,
         );
         assert!(matches!(
             result,
-            Err(DetachedMessageVerifyError::PublicKeyBinding(_))
+            Err(DetachedMessageVerifyError::BuiltInVerifierUnavailable {
+                suite: SignatureSuite::SlhDsaFips205,
+            })
         ));
     }
 
     #[cfg(feature = "pqc-signatures")]
     #[test]
     fn ml_dsa_65_verifies_pinned_symthaea_profile_authorization_bytes() {
-        use crate::signature::MlDsa65EvidenceSignatureBackend;
         use ml_dsa::{Keypair, MlDsa65, Signer, SigningKey};
 
-        // Exact canonical byte vector pinned by Symthaea PR #818's
-        // SafetyProfileAuthorizationSubject v1 fixture. Xenia treats the bytes as
-        // application-defined: this test proves the detached verifier authenticates
-        // that cross-project contract without importing Symthaea types.
         let message = hex_bytes(
             "73796d74686165613a7361666574792d70726f66696c652d617574686f72697a6174696f6e3a7631000000002873796d74686165612d7361666574792d70726f66696c652d617574686f72697a6174696f6e2d763100000006617574682d3100000006726f6f742d31000000046e6f6465000000000000000100000000000003e800000000000007d00000000f746573742d70726f66696c652d7631013333333333333333333333333333333333333333333333333333333333333333012222222222222222222222222222222222222222222222222222222222222222",
         );
@@ -345,13 +405,12 @@ mod tests {
         let signature = signing_key.sign(&message).encode();
         let binding = EvidencePublicKeyBinding::new(
             SignatureSuite::MlDsa65Fips204,
-            public_key.as_ref().to_vec(),
+            public_key.iter().copied().collect::<Vec<u8>>(),
         );
         let envelope = SignatureEnvelope::new(
             SignatureSuite::MlDsa65Fips204,
-            signature.as_ref().to_vec(),
+            signature.iter().copied().collect::<Vec<u8>>(),
         );
-        let backend = MlDsa65EvidenceSignatureBackend;
         let trusted = binding.public_key_fingerprint;
 
         let verified = verify_detached_message(
@@ -360,7 +419,6 @@ mod tests {
             &message,
             &envelope,
             &binding,
-            &backend,
         )
         .unwrap();
 
@@ -378,7 +436,6 @@ mod tests {
                 &tampered,
                 &envelope,
                 &binding,
-                &backend,
             ),
             Err(DetachedMessageVerifyError::SignatureBackend(_))
         ));
