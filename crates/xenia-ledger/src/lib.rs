@@ -29,6 +29,11 @@
 //! the ledger to a stable session-transcript hash so a valid consent chain
 //! cannot be replayed beside the wrong handshake or session transcript.
 //!
+//! The crate also exposes [`verify_statement`] as a generic verifier-owned
+//! authentication boundary for exact purpose-bound bytes. That surface reuses
+//! the same signature-suite and public-key-binding machinery without granting
+//! application-specific truth or execution authority.
+//!
 //! A downstream auditor — including a non-operator third party —
 //! can use [`Verifier::verify_chain`] to reconstruct every hash link
 //! and every signature offline, using only the operator's public key.
@@ -64,6 +69,7 @@
 #![deny(unsafe_code)]
 
 mod archive;
+mod authenticated_statement;
 mod binding;
 mod chain;
 mod checkpoint;
@@ -85,6 +91,14 @@ pub use archive::{
     LEDGER_ARCHIVE_SEGMENT_SCHEMA, LedgerArchiveError, LedgerArchiveSegment,
     MAX_LEDGER_ARCHIVE_SEGMENT_ENTRIES, MAX_LEDGER_ARCHIVE_SEQUENCE_SEGMENTS,
     ledger_archive_segment_digest, ledger_archive_sequence_digest,
+};
+
+pub use authenticated_statement::{
+    AUTHENTICATED_STATEMENT_CLAIM_SCHEMA, AUTHENTICATED_STATEMENT_HASH_ALGORITHM,
+    AuthenticatedStatementError, AuthenticatedStatementId, AuthenticatedStatementV1,
+    SIGNED_STATEMENT_SCHEMA, SignedStatementV1, StatementClaimId, StatementClaimV1,
+    StatementVerificationPolicyId, StatementVerificationPolicyV1, statement_signature_message,
+    verify_statement,
 };
 
 pub use binding::{
