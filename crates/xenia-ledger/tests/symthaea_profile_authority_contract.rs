@@ -3,11 +3,12 @@
 use ml_dsa::{Keypair, MlDsa65, Signer, SigningKey};
 use xenia_ledger::{
     DetachedMessageVerifyError, EvidencePublicKeyBinding, SignatureEnvelope, SignatureSuite,
-    compute_evidence_public_key_fingerprint, verify_detached_message,
+    compute_evidence_public_key_fingerprint, require_verified_detached_message_contract,
+    verify_detached_message,
 };
 
 const SYMTHAEA_PROFILE_AUTHORIZATION_V1_HEX: &str =
-    "73796d74686165613a7361666574792d70726f66696c652d617574686f72697a6174696f6e3a7631000000002873796d74686165612d7361666574792d70726f66696c652d617574686f72697a6174696f6e2d763100000006617574682d3100000006726f6f742d31000000046e6f6465000000000000000100000000000003e800000000000007d00000000f746573742d70726f66696c652d7631013333333333333333333333333333333333333333333333333333333333333333012222222222222222222222222222222222222222222222222222222222222222";
+    "73796d74686165613a7361666574792d70726f66696c652d617574686f72697a6174696f6e3a7631000000002873796d74686165613a7361666574792d70726f66696c652d617574686f72697a6174696f6e2d763100000006617574682d3100000006726f6f742d31000000046e6f6465000000000000000100000000000003e800000000000007d00000000f746573742d70726f66696c652d7631013333333333333333333333333333333333333333333333333333333333333333012222222222222222222222222222222222222222222222222222222222222222";
 
 const SYMTHAEA_PROFILE_AUTHORIZATION_TRANSITION_V1_HEX: &str =
     "73796d74686165613a7361666574792d70726f66696c652d617574686f72697a6174696f6e2d7472616e736974696f6e3a7631000000003373796d74686165613a7361666574792d70726f66696c652d617574686f72697a6174696f6e2d7472616e736974696f6e2d763100000000de73796d74686165613a7361666574792d70726f66696c652d617574686f72697a6174696f6e3a7631000000002873796d74686165613a7361666574792d70726f66696c652d617574686f72697a6174696f6e2d763100000006617574682d3100000006726f6f742d31000000046e6f6465000000000000000100000000000003e800000000000007d00000000f746573742d70726f66696c652d7631013333333333333333333333333333333333333333333333333333333333333333012222222222222222222222222222222222222222222222222222222222222222";
@@ -60,9 +61,17 @@ fn v1_authority_root_is_blake3_of_raw_ml_dsa_65_verifier_key_bytes() {
     )
     .expect("the exact Symthaea v1 authorization bytes must verify under the exact raw-key root");
 
-    assert!(verified.matches_message(&message));
-    assert_eq!(verified.signature_suite(), SignatureSuite::MlDsa65Fips204);
-    assert_eq!(verified.public_key_fingerprint(), direct_raw_key_hash);
+    let matched = require_verified_detached_message_contract(
+        &verified,
+        SignatureSuite::MlDsa65Fips204,
+        direct_raw_key_hash,
+        &message,
+    )
+    .expect("the cryptographic proof must match the exact independently derived Symthaea contract");
+
+    assert!(matched.matches_message(&message));
+    assert_eq!(matched.signature_suite(), SignatureSuite::MlDsa65Fips204);
+    assert_eq!(matched.public_key_fingerprint(), direct_raw_key_hash);
 }
 
 #[test]
@@ -80,13 +89,21 @@ fn lineage_bearing_transition_is_the_runtime_authenticated_message() {
     )
     .expect("the exact Symthaea lineage-bearing transition bytes must verify");
 
-    assert!(verified.matches_message(&message));
-    assert_eq!(verified.public_key_fingerprint(), trusted_root);
+    let matched = require_verified_detached_message_contract(
+        &verified,
+        SignatureSuite::MlDsa65Fips204,
+        trusted_root,
+        &message,
+    )
+    .expect("the verified transition must match exact message/suite/root policy together");
+
+    assert!(matched.matches_message(&message));
+    assert_eq!(matched.public_key_fingerprint(), trusted_root);
 
     let mut tampered_transition = message.clone();
     let bootstrap_tag_offset = 107;
     tampered_transition[bootstrap_tag_offset] ^= 0x01;
-    assert!(!verified.matches_message(&tampered_transition));
+    assert!(!matched.matches_message(&tampered_transition));
     assert!(matches!(
         verify_detached_message(
             SignatureSuite::MlDsa65Fips204,
