@@ -12,6 +12,7 @@ use xenia_ledger::{
 struct Fixture {
     fixture_schema: String,
     did: String,
+    xenia_key_fingerprint_hex: String,
     xenia_signature_suite: String,
     xenia_artifact_domain: String,
     xenia_artifact_schema: String,
@@ -63,6 +64,14 @@ fn xenia_authenticates_exact_mycelix_key_did_binding_bytes() {
         SignatureSuite::Ed25519Rfc8032,
         signing_key.verifying_key().to_bytes().to_vec(),
     );
+    let embedded_fingerprint: [u8; 32] = decode_hex(&fixture.xenia_key_fingerprint_hex)
+        .try_into()
+        .expect("fixture fingerprint must be exactly 32 bytes");
+    assert_eq!(
+        embedded_fingerprint, key_binding.public_key_fingerprint,
+        "the key that signs the association must be the key fingerprint embedded in the association"
+    );
+
     let attestation = sign_evidence_artifact_binding_ed25519(binding.clone(), &signing_key)
         .expect("fixture binding must be signable");
 
@@ -81,7 +90,7 @@ fn xenia_authenticates_exact_mycelix_key_did_binding_bytes() {
     );
     assert_eq!(
         verified.signer_public_key_fingerprint(),
-        &key_binding.public_key_fingerprint
+        &embedded_fingerprint
     );
 }
 
