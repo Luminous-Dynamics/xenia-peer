@@ -1,10 +1,17 @@
 // Copyright (c) 2024-2026 Tristan Stoltz / Luminous Dynamics
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+use ed25519_dalek::SigningKey;
 use serde_json::json;
 use xenia_peer_core::{
-    MachineAuthorityHistoryEventV1, SignedMachineAuthorityHistoryHeadV1,
+    MachineAuthorityHistoryEventV1, MachineSessionAdmissionReceiptError,
+    SignedMachineAuthorityHistoryHeadV1, VerifiedMachineSessionEvidenceV1,
+    sign_machine_session_admission_receipt, verify_machine_session_admission_receipt,
 };
+
+const SESSION_FIXTURE: &str = include_str!(
+    "../../../crates/xenia-peer-core/fixtures/verified-machine-session-evidence-v1.json"
+);
 
 fn bytes32(byte: u8) -> Vec<u8> {
     vec![byte; 32]
@@ -49,4 +56,25 @@ fn portable_history_v1_rejects_unknown_signed_head_fields() {
     });
 
     assert!(serde_json::from_value::<SignedMachineAuthorityHistoryHeadV1>(signed_head).is_err());
+}
+
+#[test]
+fn deserialized_session_claims_cannot_reuse_a_provider_admission_receipt() {
+    let evidence: VerifiedMachineSessionEvidenceV1 = serde_json::from_str(SESSION_FIXTURE).unwrap();
+    let authority = SigningKey::from_bytes(&[0x42; 32]);
+    let receipt = sign_machine_session_admission_receipt(&evidence, &authority).unwrap();
+
+    let mut fabricated_value: serde_json::Value = serde_json::from_str(SESSION_FIXTURE).unwrap();
+    fabricated_value["session_id"] = json!("fabricated-session");
+    let fabricated: VerifiedMachineSessionEvidenceV1 =
+        serde_json::from_value(fabricated_value).unwrap();
+
+    assert_eq!(
+        verify_machine_session_admission_receipt(
+            &fabricated,
+            &receipt,
+            &authority.verifying_key(),
+        ),
+        Err(MachineSessionAdmissionReceiptError::EvidenceDigestMismatch)
+    );
 }
