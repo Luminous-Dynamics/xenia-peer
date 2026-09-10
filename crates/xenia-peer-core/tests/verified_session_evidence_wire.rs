@@ -13,21 +13,20 @@ const EVIDENCE_FIXTURE: &str =
 fn portable_evidence_fixture_pins_v1_wire_shape_without_secret_material() {
     let evidence: VerifiedMachineSessionEvidenceV1 = serde_json::from_str(EVIDENCE_FIXTURE).unwrap();
 
-    assert_eq!(evidence.schema, VERIFIED_MACHINE_SESSION_EVIDENCE_SCHEMA_V1);
-    assert_eq!(evidence.session_id, "session-fixture-001");
-    assert_eq!(evidence.authenticated_at_ms, 1_700_000_000_000);
-    assert_eq!(evidence.expires_at_ms, 1_700_000_060_000);
-    assert_eq!(evidence.authority_epoch, 9);
+    assert_eq!(evidence.schema(), VERIFIED_MACHINE_SESSION_EVIDENCE_SCHEMA_V1);
+    assert_eq!(evidence.session_id(), "session-fixture-001");
+    assert_eq!(evidence.authenticated_at_ms(), 1_700_000_000_000);
+    assert_eq!(evidence.expires_at_ms(), 1_700_000_060_000);
+    assert_eq!(evidence.authority_epoch(), 9);
     assert_eq!(evidence.validate_shape(), Ok(()));
     assert!(evidence
-        .peer_identity_binding
+        .peer_identity_binding()
         .starts_with("xenia-signing-identity-v1:blake3-256:"));
     assert!(evidence
-        .evidence_binding
+        .evidence_binding()
         .starts_with("xenia-handshake-transcript-v1:blake3-256:"));
     assert!(evidence
-        .negotiated_context_binding
-        .as_deref()
+        .negotiated_context_binding()
         .is_some_and(|binding| binding.starts_with("xenia-negotiated-session-context:blake3-256:")));
 
     let original: serde_json::Value = serde_json::from_str(EVIDENCE_FIXTURE).unwrap();
