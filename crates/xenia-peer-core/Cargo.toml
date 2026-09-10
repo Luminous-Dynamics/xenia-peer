@@ -29,6 +29,7 @@ opus = ["dep:opus"]
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 tracing-subscriber = "0.3"
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
