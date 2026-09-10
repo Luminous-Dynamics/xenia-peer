@@ -94,6 +94,44 @@ impl MachineAuthorityAdmissionV1 {
     }
 }
 
+/// Fresh, non-serializable authority result bound to one exact machine principal.
+///
+/// This wrapper preserves the admitted peer fingerprint alongside the current authority facts so
+/// adapters cannot accidentally pair a valid `revoked = false`/epoch result for one machine with
+/// portable session evidence belonging to another machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MachineAuthorityContextV1 {
+    peer_identity_fingerprint: [u8; 32],
+    inner: MachineSessionAuthorityContextV1,
+}
+
+impl MachineAuthorityContextV1 {
+    /// Exact hybrid signing identity whose current authority was evaluated.
+    pub const fn peer_identity_fingerprint(&self) -> [u8; 32] {
+        self.peer_identity_fingerprint
+    }
+
+    /// Current trusted-time instant supplied by machine policy.
+    pub const fn now_ms(&self) -> u64 {
+        self.inner.now_ms()
+    }
+
+    /// Current authority generation for this identity.
+    pub const fn authority_epoch(&self) -> u64 {
+        self.inner.authority_epoch()
+    }
+
+    /// Whether current time comes from an authority-approved trusted-time source.
+    pub const fn trusted_time_available(&self) -> bool {
+        self.inner.trusted_time_available()
+    }
+
+    /// Whether current policy/validity state denies use of this admission.
+    pub const fn revoked(&self) -> bool {
+        self.inner.revoked()
+    }
+}
+
 /// Machine-authority admission failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum MachineAuthorityError {
@@ -193,17 +231,18 @@ impl MachineAuthorityPolicyV1 {
     /// Missing enrollment fails closed as revoked. Epoch rotation is exposed independently so a
     /// consumer can distinguish revocation from replacement of the authority generation. The
     /// admission's own validity window is rechecked too: current policy cannot resurrect an
-    /// expired admission or make a backwards clock appear usable.
+    /// expired admission or make a backwards clock appear usable. The result retains the exact
+    /// admitted peer fingerprint to prevent cross-principal context mixups in provider adapters.
     pub fn context_for(
         &self,
         admission: &MachineAuthorityAdmissionV1,
         now_ms: u64,
         trusted_time_available: bool,
-    ) -> MachineSessionAuthorityContextV1 {
+    ) -> MachineAuthorityContextV1 {
         let admission_outside_validity =
             now_ms < admission.admitted_at_ms || now_ms >= admission.expires_at_ms;
 
-        match self.records.get(&admission.peer_identity_fingerprint) {
+        let inner = match self.records.get(&admission.peer_identity_fingerprint) {
             Some(record) => MachineSessionAuthorityContextV1::from_policy(
                 now_ms,
                 record.authority_epoch,
@@ -219,6 +258,11 @@ impl MachineAuthorityPolicyV1 {
                 trusted_time_available,
                 true,
             ),
+        };
+
+        MachineAuthorityContextV1 {
+            peer_identity_fingerprint: admission.peer_identity_fingerprint,
+            inner,
         }
     }
 }
@@ -336,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn live_context_exposes_revocation_and_epoch_rotation() {
+    fn live_context_exposes_identity_revocation_and_epoch_rotation() {
         let enrolled = peer(7);
         let handshake = outcome(0x22);
         let policy = policy_for(&enrolled);
@@ -344,6 +388,10 @@ mod tests {
             .admit_verified_session(&enrolled, &handshake, 200, true)
             .unwrap();
         let context = policy.context_for(&admission, 250, true);
+        assert_eq!(
+            context.peer_identity_fingerprint(),
+            enrolled.signing_identity_fingerprint()
+        );
         assert!(!context.revoked());
         assert_eq!(context.authority_epoch(), 9);
         assert_eq!(context.now_ms(), 250);
@@ -353,6 +401,10 @@ mod tests {
         rotated.authority_epoch = 10;
         let policy = MachineAuthorityPolicyV1::new([rotated], 100).unwrap();
         let context = policy.context_for(&admission, 250, true);
+        assert_eq!(
+            context.peer_identity_fingerprint(),
+            enrolled.signing_identity_fingerprint()
+        );
         assert!(!context.revoked());
         assert_eq!(context.authority_epoch(), 10);
 
