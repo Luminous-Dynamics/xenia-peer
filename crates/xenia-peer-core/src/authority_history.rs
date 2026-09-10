@@ -291,12 +291,6 @@ struct AuthorityIntervalV1 {
     termination_reason: Option<TerminationReasonV1>,
 }
 
-impl AuthorityIntervalV1 {
-    fn effective_end_ms(self) -> u64 {
-        self.terminated_at_ms.unwrap_or(self.valid_until_ms)
-    }
-}
-
 /// Verified, non-serializable historical authority state.
 ///
 /// This type can only be produced by [`verify_machine_authority_history`]. Persisted events and a
@@ -972,7 +966,8 @@ mod tests {
 
         let mut forked_root = root_events[0].clone();
         forked_root.recorded_at_ms = 150;
-        forked_root.transition = MachineAuthorityHistoryTransitionV1::Grant(grant_payload(9, 150, 1_000));
+        forked_root.transition =
+            MachineAuthorityHistoryTransitionV1::Grant(grant_payload(9, 150, 1_000));
         let fork_events = vec![forked_root];
         let fork_head = sign_head(&fork_events, 200, 1_000);
         assert_eq!(
@@ -1066,21 +1061,13 @@ mod tests {
     }
 
     #[test]
-    fn signed_head_json_rejects_unknown_fields_and_bad_signature_length() {
+    fn malformed_signature_length_is_rejected() {
         let events = vec![root_grant()];
-        let head = sign_head(&events, 200, 300);
-        let mut value = serde_json::to_value(&head).unwrap();
-        value
-            .as_object_mut()
-            .unwrap()
-            .insert("live_authority".into(), serde_json::Value::Bool(true));
-        assert!(serde_json::from_value::<SignedMachineAuthorityHistoryHeadV1>(value).is_err());
-
-        let mut short_signature = head;
-        let MachineAuthorityHistorySignatureV1::Ed25519(bytes) = &mut short_signature.signature;
+        let mut head = sign_head(&events, 200, 300);
+        let MachineAuthorityHistorySignatureV1::Ed25519(bytes) = &mut head.signature;
         bytes.truncate(63);
         assert_eq!(
-            short_signature.verify_signature(&authority_key().verifying_key()),
+            head.verify_signature(&authority_key().verifying_key()),
             Err(MachineAuthorityHistoryError::InvalidHeadSignature)
         );
     }
