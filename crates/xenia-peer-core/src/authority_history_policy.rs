@@ -108,22 +108,32 @@ impl AcceptedMachineAuthorityHistoryV1 {
         self.policy.max_snapshot_freshness_ms()
     }
 
-    /// Qualify one exact authority epoch from session admission through an observation time.
+    /// Qualify one exact authority epoch and exact admitted session through an observation time.
     ///
     /// Historical eligibility intentionally does not require the signed head to remain fresh at
-    /// the time of audit. It does require the head to have covered the observation, and the epoch
-    /// must not have expired, been revoked, or been superseded before that observation.
+    /// audit time. The observation must nevertheless lie inside the exact session's
+    /// `[authenticated_at, expires_at)` interval as well as inside the provider authority interval.
+    /// A long-lived authority epoch therefore cannot retrospectively extend a short-lived session.
     pub fn qualify_session_observation(
         &self,
         authority_epoch: u64,
         session_authenticated_at_ms: u64,
+        session_expires_at_ms: u64,
         observation_at_ms: u64,
-    ) -> Result<HistoricalMachineAuthorityQualificationV1, MachineAuthorityHistoryError> {
-        self.inner.qualify_session_observation(
-            authority_epoch,
-            session_authenticated_at_ms,
-            observation_at_ms,
-        )
+    ) -> Result<HistoricalMachineAuthorityQualificationV1, MachineAuthorityHistoryAcceptanceError> {
+        if session_expires_at_ms <= session_authenticated_at_ms {
+            return Err(MachineAuthorityHistoryAcceptanceError::InvalidSessionInterval);
+        }
+        if observation_at_ms >= session_expires_at_ms {
+            return Err(MachineAuthorityHistoryAcceptanceError::ObservationOutsideSession);
+        }
+        self.inner
+            .qualify_session_observation(
+                authority_epoch,
+                session_authenticated_at_ms,
+                observation_at_ms,
+            )
+            .map_err(MachineAuthorityHistoryAcceptanceError::History)
     }
 
     /// Produce a non-serializable current/offline-use qualification only while both the provider
@@ -204,6 +214,12 @@ pub enum MachineAuthorityHistoryAcceptanceError {
     /// Provider-declared freshness exceeds the deployment's local maximum.
     #[error("signed machine-authority history freshness exceeds local policy")]
     FreshnessWindowTooLong,
+    /// The admitted session has an empty or reversed validity interval.
+    #[error("historical qualification requires a positive admitted-session interval")]
+    InvalidSessionInterval,
+    /// The observation is at or beyond the exact admitted session's exclusive expiry.
+    #[error("observation lies outside the admitted session validity interval")]
+    ObservationOutsideSession,
     /// Provider history failed signature, continuity, semantic, rollback, or point-of-use checks.
     #[error(transparent)]
     History(#[from] MachineAuthorityHistoryError),
@@ -345,7 +361,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(accepted.qualify_session_observation(9, 200, 400).is_ok());
+        assert!(accepted.qualify_session_observation(9, 200, 450, 400).is_ok());
         assert!(accepted.qualify_current_snapshot(599, true).is_ok());
         assert_eq!(
             accepted.qualify_current_snapshot(600, true),
@@ -353,7 +369,32 @@ mod tests {
                 MachineAuthorityHistoryError::StaleHistoryHead
             ))
         );
-        assert!(accepted.qualify_session_observation(9, 200, 400).is_ok());
+        assert!(accepted.qualify_session_observation(9, 200, 450, 400).is_ok());
+    }
+
+    #[test]
+    fn historical_qualification_cannot_outlive_exact_admitted_session() {
+        let event = event();
+        let head = head(&event, 500, 600);
+        let policy = MachineAuthorityHistoryAcceptancePolicyV1::new(100).unwrap();
+        let accepted = verify_machine_authority_history_with_policy(
+            std::slice::from_ref(&event),
+            &head,
+            &key().verifying_key(),
+            None,
+            policy,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            accepted.qualify_session_observation(9, 200, 200, 200),
+            Err(MachineAuthorityHistoryAcceptanceError::InvalidSessionInterval)
+        ));
+        assert!(matches!(
+            accepted.qualify_session_observation(9, 200, 400, 400),
+            Err(MachineAuthorityHistoryAcceptanceError::ObservationOutsideSession)
+        ));
+        assert!(accepted.qualify_session_observation(9, 200, 401, 400).is_ok());
     }
 
     #[test]
