@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use xenia_peer_core::{
-    MachineSessionAuthorityContextV1, VERIFIED_MACHINE_SESSION_EVIDENCE_SCHEMA_V1,
-    VerifiedMachineSessionEvidenceV1,
+    MachineAuthorityPolicyV1, MachineAuthorityRecordV1,
+    VERIFIED_MACHINE_SESSION_EVIDENCE_SCHEMA_V1, VerifiedMachineSessionEvidenceV1,
 };
+use xenia_peer_core::handshake::VerifiedPeerIdentity;
 
 const EVIDENCE_FIXTURE: &str =
     include_str!("../fixtures/verified-machine-session-evidence-v1.json");
@@ -51,19 +52,29 @@ fn portable_evidence_fixture_pins_v1_wire_shape_without_secret_material() {
 }
 
 #[test]
-fn live_authority_context_is_a_local_point_of_use_value() {
-    // Intentionally constructed in-process rather than decoded from a fixture.
-    // Current revocation/time state must be refreshed locally, not replayed from
-    // a portable `revoked = false` artifact.
-    let context = MachineSessionAuthorityContextV1 {
-        now_ms: 1_700_000_030_000,
-        authority_epoch: 9,
-        trusted_time_available: true,
-        revoked: false,
+fn live_authority_context_is_minted_by_machine_policy() {
+    let peer = VerifiedPeerIdentity {
+        ed25519_pk: [0x55; 32],
+        ml_dsa_pk: vec![0x66; xenia_handshake::ML_DSA_65_PK_LEN],
     };
+    let policy = MachineAuthorityPolicyV1::new(
+        [MachineAuthorityRecordV1 {
+            peer_identity_fingerprint: peer.signing_identity_fingerprint(),
+            authority_epoch: 9,
+            valid_from_ms: 1_700_000_000_000,
+            valid_until_ms: 1_700_000_120_000,
+            revoked: false,
+        }],
+        60_000,
+    )
+    .unwrap();
+    let admission = policy
+        .admit_verified_peer(&peer, 1_700_000_000_000, true)
+        .unwrap();
+    let context = policy.context_for(&admission, 1_700_000_030_000, true);
 
-    assert_eq!(context.now_ms, 1_700_000_030_000);
-    assert_eq!(context.authority_epoch, 9);
-    assert!(context.trusted_time_available);
-    assert!(!context.revoked);
+    assert_eq!(context.now_ms(), 1_700_000_030_000);
+    assert_eq!(context.authority_epoch(), 9);
+    assert!(context.trusted_time_available());
+    assert!(!context.revoked());
 }
