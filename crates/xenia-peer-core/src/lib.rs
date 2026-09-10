@@ -56,6 +56,7 @@ pub mod file_transfer;
 pub mod frame;
 pub mod handshake;
 pub mod m1_session;
+pub mod machine_authority;
 pub mod producer_flow;
 pub mod receive_reservation;
 mod session;
@@ -80,6 +81,10 @@ pub use frame::{
 pub use handshake::{RekeyPolicy, SessionEpochState};
 pub use m1_session::{
     M1AuditEvent, M1Permission, M1PermissionSet, M1SessionError, M1SessionMachine, M1SessionState,
+};
+pub use machine_authority::{
+    MachineAuthorityAdmissionV1, MachineAuthorityError, MachineAuthorityPolicyV1,
+    MachineAuthorityRecordV1,
 };
 pub use receive_reservation::{
     ReceiveReservation, ReceiveReservationError, ReceiveReservationPool,
