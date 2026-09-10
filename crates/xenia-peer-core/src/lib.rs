@@ -52,7 +52,8 @@
 #![warn(missing_docs)]
 
 pub mod advertisement;
-pub mod authority_history;
+mod authority_history;
+pub mod authority_history_policy;
 pub mod file_transfer;
 pub mod frame;
 pub mod handshake;
@@ -66,13 +67,17 @@ pub mod transport;
 pub mod verified_session_evidence;
 
 pub use authority_history::{
-    FreshMachineAuthorityHistoryV1, HistoricalMachineAuthorityQualificationV1,
-    MACHINE_AUTHORITY_HISTORY_EVENT_SCHEMA_V1, MACHINE_AUTHORITY_HISTORY_HEAD_SCHEMA_V1,
-    MachineAuthorityGrantV1, MachineAuthorityHistoryError, MachineAuthorityHistoryEventV1,
-    MachineAuthorityHistoryHeadV1, MachineAuthorityHistorySignatureV1,
-    MachineAuthorityHistoryTransitionV1, MachineAuthorityRevocationV1,
-    MachineAuthoritySupersessionV1, SignedMachineAuthorityHistoryHeadV1,
-    VerifiedMachineAuthorityHistoryV1, verify_machine_authority_history,
+    HistoricalMachineAuthorityQualificationV1, MACHINE_AUTHORITY_HISTORY_EVENT_SCHEMA_V1,
+    MACHINE_AUTHORITY_HISTORY_HEAD_SCHEMA_V1, MachineAuthorityGrantV1,
+    MachineAuthorityHistoryError, MachineAuthorityHistoryEventV1, MachineAuthorityHistoryHeadV1,
+    MachineAuthorityHistorySignatureV1, MachineAuthorityHistoryTransitionV1,
+    MachineAuthorityRevocationV1, MachineAuthoritySupersessionV1,
+    SignedMachineAuthorityHistoryHeadV1,
+};
+pub use authority_history_policy::{
+    AcceptedMachineAuthorityHistoryV1, LocallyAcceptedFreshMachineAuthorityHistoryV1,
+    MachineAuthorityHistoryAcceptanceError, MachineAuthorityHistoryAcceptancePolicyV1,
+    verify_machine_authority_history_with_policy,
 };
 pub use file_transfer::{
     IncomingFileStageError, IncomingFileStager, cleanup_orphaned_receive_staging,
