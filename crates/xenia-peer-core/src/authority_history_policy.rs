@@ -9,6 +9,11 @@
 //! verifying a provider-signed session-admission receipt. Portable/deserialized session claims
 //! alone can therefore never become positive historical authority.
 //!
+//! V1 additionally requires the session-admission receipt and authority-history head to verify
+//! under the same authority signer. Key rotation/delegation is intentionally not inferred: a future
+//! version may admit an explicit provider-owned delegation proof, but two independently valid keys
+//! are not silently treated as the same authority domain.
+//!
 //! Historical qualification remains independent of current freshness. A correctly signed stale
 //! head can still prove a covered observation inside the exact admitted session interval, while
 //! the same head cannot mint a fresh current-use qualification after provider or local freshness
@@ -21,7 +26,9 @@ use crate::authority_history::{
     MachineAuthorityHistoryEventV1, SignedMachineAuthorityHistoryHeadV1,
     VerifiedMachineAuthorityHistoryV1, verify_machine_authority_history,
 };
-use crate::session_admission_receipt::VerifiedMachineSessionAdmissionV1;
+use crate::session_admission_receipt::{
+    VerifiedMachineSessionAdmissionV1, authority_signer_fingerprint,
+};
 
 /// Stable prefix for an opaque binding to the exact signed history head used for qualification.
 pub const MACHINE_AUTHORITY_HISTORY_BINDING_PREFIX_V1: &str =
@@ -29,8 +36,6 @@ pub const MACHINE_AUTHORITY_HISTORY_BINDING_PREFIX_V1: &str =
 const XENIA_SIGNING_IDENTITY_BINDING_PREFIX_V1: &str =
     "xenia-signing-identity-v1:blake3-256:";
 
-// Equality of the crate-private reconstructed state is the identity of the verified signed head and
-// its signed horizons, not implementation details of the rebuilt interval map.
 impl PartialEq for VerifiedMachineAuthorityHistoryV1 {
     fn eq(&self, other: &Self) -> bool {
         self.peer_identity_fingerprint() == other.peer_identity_fingerprint()
@@ -74,6 +79,7 @@ impl MachineAuthorityHistoryAcceptancePolicyV1 {
 pub struct AcceptedMachineAuthorityHistoryV1 {
     inner: VerifiedMachineAuthorityHistoryV1,
     policy: MachineAuthorityHistoryAcceptancePolicyV1,
+    authority_signer_fingerprint: [u8; 32],
 }
 
 impl AcceptedMachineAuthorityHistoryV1 {
@@ -102,6 +108,11 @@ impl AcceptedMachineAuthorityHistoryV1 {
         self.inner.head_digest()
     }
 
+    /// Domain-separated identity of the authority signer that verified this history.
+    pub const fn authority_signer_fingerprint(&self) -> [u8; 32] {
+        self.authority_signer_fingerprint
+    }
+
     /// Local maximum freshness window that admitted this signed history.
     pub const fn max_snapshot_freshness_ms(&self) -> u64 {
         self.policy.max_snapshot_freshness_ms()
@@ -109,16 +120,19 @@ impl AcceptedMachineAuthorityHistoryV1 {
 
     /// Qualify one provider-signed, independently verified Xenia session through an observation.
     ///
-    /// This method intentionally does not accept `VerifiedMachineSessionEvidenceV1` directly: that
-    /// portable type is deserializable and shape validation alone is not proof that the session was
-    /// ever admitted. Callers must first verify the companion signed admission receipt and pass the
-    /// resulting non-serializable `VerifiedMachineSessionAdmissionV1` here.
+    /// The session admission receipt and authority history must verify under the exact same v1
+    /// authority signer. This prevents two unrelated but individually trusted signing keys from
+    /// being accidentally composed into one historical-authority claim.
     pub fn qualify_verified_session_observation(
         &self,
         admission: &VerifiedMachineSessionAdmissionV1,
         observation_at_ms: u64,
     ) -> Result<HistoricallyQualifiedVerifiedMachineSessionV1, MachineAuthorityHistoryAcceptanceError>
     {
+        if admission.authority_signer_fingerprint() != self.authority_signer_fingerprint {
+            return Err(MachineAuthorityHistoryAcceptanceError::AuthoritySignerMismatch);
+        }
+
         let session = admission.evidence();
         let expected_identity = format!(
             "{XENIA_SIGNING_IDENTITY_BINDING_PREFIX_V1}{}",
@@ -141,6 +155,8 @@ impl AcceptedMachineAuthorityHistoryV1 {
             peer_identity_binding: session.peer_identity_binding().to_owned(),
             session_evidence_binding: session.evidence_binding().to_owned(),
             session_admission_receipt_digest: admission.evidence_digest(),
+            session_admission_binding: admission.admission_binding().to_owned(),
+            authority_signer_fingerprint: self.authority_signer_fingerprint,
             authority_epoch: session.authority_epoch(),
             session_authenticated_at_ms: session.authenticated_at_ms(),
             session_expires_at_ms: session.expires_at_ms(),
@@ -209,6 +225,8 @@ pub struct HistoricallyQualifiedVerifiedMachineSessionV1 {
     peer_identity_binding: String,
     session_evidence_binding: String,
     session_admission_receipt_digest: [u8; 32],
+    session_admission_binding: String,
+    authority_signer_fingerprint: [u8; 32],
     authority_epoch: u64,
     session_authenticated_at_ms: u64,
     session_expires_at_ms: u64,
@@ -230,6 +248,12 @@ impl HistoricallyQualifiedVerifiedMachineSessionV1 {
     /// Digest proven by the provider-signed session-admission receipt.
     pub const fn session_admission_receipt_digest(&self) -> [u8; 32] {
         self.session_admission_receipt_digest
+    }
+    /// Opaque provider binding to the signed session admission and its authority signer.
+    pub fn session_admission_binding(&self) -> &str { &self.session_admission_binding }
+    /// Authority signer shared by the admission receipt and historical head in v1.
+    pub const fn authority_signer_fingerprint(&self) -> [u8; 32] {
+        self.authority_signer_fingerprint
     }
     /// Authority generation carried by the exact qualified session.
     pub const fn authority_epoch(&self) -> u64 { self.authority_epoch }
@@ -283,6 +307,9 @@ pub enum MachineAuthorityHistoryAcceptanceError {
     /// Provider-declared freshness exceeds the deployment's local maximum.
     #[error("signed machine-authority history freshness exceeds local policy")]
     FreshnessWindowTooLong,
+    /// Session-admission receipt and authority history were verified under different v1 signers.
+    #[error("machine-session admission signer does not match authority-history signer")]
+    AuthoritySignerMismatch,
     /// Verified signed admission names a machine principal different from this authority history.
     #[error("verified machine-session principal does not match signed authority history")]
     SessionIdentityMismatch,
@@ -320,7 +347,11 @@ pub fn verify_machine_authority_history_with_policy(
 
     let inner = verify_machine_authority_history(events, signed_head, verifying_key, retained_head)
         .map_err(MachineAuthorityHistoryAcceptanceError::History)?;
-    Ok(AcceptedMachineAuthorityHistoryV1 { inner, policy })
+    Ok(AcceptedMachineAuthorityHistoryV1 {
+        inner,
+        policy,
+        authority_signer_fingerprint: authority_signer_fingerprint(verifying_key),
+    })
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -367,10 +398,11 @@ mod tests {
         }
     }
 
-    fn head(
+    fn head_with_key(
         event: &MachineAuthorityHistoryEventV1,
         observed_through_ms: u64,
         fresh_until_ms: u64,
+        signing_key: &SigningKey,
     ) -> SignedMachineAuthorityHistoryHeadV1 {
         MachineAuthorityHistoryHeadV1 {
             schema_version: 1,
@@ -380,8 +412,16 @@ mod tests {
             observed_through_ms,
             fresh_until_ms,
         }
-        .sign(&key())
+        .sign(signing_key)
         .unwrap()
+    }
+
+    fn head(
+        event: &MachineAuthorityHistoryEventV1,
+        observed_through_ms: u64,
+        fresh_until_ms: u64,
+    ) -> SignedMachineAuthorityHistoryHeadV1 {
+        head_with_key(event, observed_through_ms, fresh_until_ms, &key())
     }
 
     fn peer(byte: u8) -> VerifiedPeerIdentity {
@@ -402,7 +442,10 @@ mod tests {
         }
     }
 
-    fn verified_admission(peer: &VerifiedPeerIdentity) -> VerifiedMachineSessionAdmissionV1 {
+    fn verified_admission_with_key(
+        peer: &VerifiedPeerIdentity,
+        receipt_key: &SigningKey,
+    ) -> VerifiedMachineSessionAdmissionV1 {
         let outcome = outcome();
         let policy = MachineAuthorityPolicyV1::new(
             [MachineAuthorityRecordV1 {
@@ -425,9 +468,17 @@ mod tests {
             &admission,
         )
         .unwrap();
-        let receipt = sign_machine_session_admission_receipt(&evidence, &key()).unwrap();
-        verify_machine_session_admission_receipt(&evidence, &receipt, &key().verifying_key())
-            .unwrap()
+        let receipt = sign_machine_session_admission_receipt(&evidence, receipt_key).unwrap();
+        verify_machine_session_admission_receipt(
+            &evidence,
+            &receipt,
+            &receipt_key.verifying_key(),
+        )
+        .unwrap()
+    }
+
+    fn verified_admission(peer: &VerifiedPeerIdentity) -> VerifiedMachineSessionAdmissionV1 {
+        verified_admission_with_key(peer, &key())
     }
 
     fn accepted_for(
@@ -505,11 +556,28 @@ mod tests {
             qualified.session_admission_receipt_digest(),
             admission.evidence_digest()
         );
+        assert_eq!(qualified.session_admission_binding(), admission.admission_binding());
+        assert_eq!(
+            qualified.authority_signer_fingerprint(),
+            accepted.authority_signer_fingerprint()
+        );
         assert_eq!(qualified.observation_at_ms(), 249);
         assert_eq!(qualified.history_observed_through_ms(), 250);
         assert!(qualified
             .provider_history_binding()
             .starts_with(MACHINE_AUTHORITY_HISTORY_BINDING_PREFIX_V1));
+    }
+
+    #[test]
+    fn unrelated_receipt_signer_cannot_compose_with_history() {
+        let peer = peer(0x55);
+        let other_key = SigningKey::from_bytes(&[0x43; 32]);
+        let admission = verified_admission_with_key(&peer, &other_key);
+        let accepted = accepted_for(peer.signing_identity_fingerprint(), 250, 300);
+        assert_eq!(
+            accepted.qualify_verified_session_observation(&admission, 249),
+            Err(MachineAuthorityHistoryAcceptanceError::AuthoritySignerMismatch)
+        );
     }
 
     #[test]
