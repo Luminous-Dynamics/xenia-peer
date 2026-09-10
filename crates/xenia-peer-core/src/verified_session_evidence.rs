@@ -227,19 +227,51 @@ impl VerifiedMachineSessionEvidenceV1 {
 
 /// Current, point-of-use authority facts corresponding to immutable session evidence.
 ///
-/// Deliberately **not serializable**. This value must be freshly constructed from local trusted
-/// time and the current authority/revocation source at the moment an action is evaluated. Making
-/// it a portable wire artifact would invite replay of stale `revoked = false` state.
+/// This value has private fields, no public constructor and no serde implementation. Only the
+/// machine-authority module can mint it from current local policy state; application code cannot
+/// manufacture a convenient `revoked = false`/epoch snapshot and pass it off as authoritative.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MachineSessionAuthorityContextV1 {
-    /// Current trusted-time instant.
-    pub now_ms: u64,
+    now_ms: u64,
+    authority_epoch: u64,
+    trusted_time_available: bool,
+    revoked: bool,
+}
+
+impl MachineSessionAuthorityContextV1 {
+    pub(crate) const fn from_policy(
+        now_ms: u64,
+        authority_epoch: u64,
+        trusted_time_available: bool,
+        revoked: bool,
+    ) -> Self {
+        Self {
+            now_ms,
+            authority_epoch,
+            trusted_time_available,
+            revoked,
+        }
+    }
+
+    /// Current trusted-time instant supplied by the machine authority policy.
+    pub const fn now_ms(&self) -> u64 {
+        self.now_ms
+    }
+
     /// Current authority generation for the admitted identity.
-    pub authority_epoch: u64,
-    /// Whether `now_ms` comes from an authority-approved trusted-time source.
-    pub trusted_time_available: bool,
-    /// Current revocation result, evaluated at point of use.
-    pub revoked: bool,
+    pub const fn authority_epoch(&self) -> u64 {
+        self.authority_epoch
+    }
+
+    /// Whether current time comes from an authority-approved trusted-time source.
+    pub const fn trusted_time_available(&self) -> bool {
+        self.trusted_time_available
+    }
+
+    /// Current revocation result evaluated at point of use.
+    pub const fn revoked(&self) -> bool {
+        self.revoked
+    }
 }
 
 impl VerifiedPeerIdentity {
