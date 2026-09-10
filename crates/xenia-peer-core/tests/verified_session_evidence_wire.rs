@@ -48,12 +48,13 @@ fn portable_evidence_fixture_is_exact_production_constructor_output() {
     let fixture: VerifiedMachineSessionEvidenceV1 =
         serde_json::from_str(EVIDENCE_FIXTURE).unwrap();
     let peer = fixture_peer();
+    let outcome = fixture_outcome();
     let policy = fixture_policy(&peer);
     let admission = policy
-        .admit_verified_peer(&peer, 1_700_000_000_000, true)
+        .admit_verified_session(&peer, &outcome, 1_700_000_000_000, true)
         .unwrap();
     let produced = VerifiedMachineSessionEvidenceV1::from_verified_handshake(
-        &fixture_outcome(),
+        &outcome,
         &peer,
         "session-fixture-001",
         &admission,
@@ -112,9 +113,10 @@ fn portable_evidence_fixture_pins_v1_wire_shape_without_secret_material() {
 #[test]
 fn live_authority_context_is_minted_by_machine_policy() {
     let peer = fixture_peer();
+    let outcome = fixture_outcome();
     let policy = fixture_policy(&peer);
     let admission = policy
-        .admit_verified_peer(&peer, 1_700_000_000_000, true)
+        .admit_verified_session(&peer, &outcome, 1_700_000_000_000, true)
         .unwrap();
     let context = policy.context_for(&admission, 1_700_000_030_000, true);
 
