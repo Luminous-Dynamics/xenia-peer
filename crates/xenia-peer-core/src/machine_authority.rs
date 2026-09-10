@@ -187,20 +187,18 @@ impl MachineAuthorityPolicyV1 {
         trusted_time_available: bool,
     ) -> MachineSessionAuthorityContextV1 {
         match self.records.get(&admission.peer_identity_fingerprint) {
-            Some(record) => MachineSessionAuthorityContextV1 {
+            Some(record) => MachineSessionAuthorityContextV1::from_policy(
                 now_ms,
-                authority_epoch: record.authority_epoch,
+                record.authority_epoch,
                 trusted_time_available,
-                revoked: record.revoked
-                    || now_ms < record.valid_from_ms
-                    || now_ms >= record.valid_until_ms,
-            },
-            None => MachineSessionAuthorityContextV1 {
+                record.revoked || now_ms < record.valid_from_ms || now_ms >= record.valid_until_ms,
+            ),
+            None => MachineSessionAuthorityContextV1::from_policy(
                 now_ms,
-                authority_epoch: admission.authority_epoch,
+                admission.authority_epoch,
                 trusted_time_available,
-                revoked: true,
-            },
+                true,
+            ),
         }
     }
 }
@@ -288,18 +286,20 @@ mod tests {
         let policy = policy_for(&enrolled);
         let admission = policy.admit_verified_peer(&enrolled, 200, true).unwrap();
         let context = policy.context_for(&admission, 250, true);
-        assert!(!context.revoked);
-        assert_eq!(context.authority_epoch, 9);
+        assert!(!context.revoked());
+        assert_eq!(context.authority_epoch(), 9);
+        assert_eq!(context.now_ms(), 250);
+        assert!(context.trusted_time_available());
 
         let mut rotated = record_for(&enrolled);
         rotated.authority_epoch = 10;
         let policy = MachineAuthorityPolicyV1::new([rotated], 100).unwrap();
         let context = policy.context_for(&admission, 250, true);
-        assert!(!context.revoked);
-        assert_eq!(context.authority_epoch, 10);
+        assert!(!context.revoked());
+        assert_eq!(context.authority_epoch(), 10);
 
         let context = policy.context_for(&admission, 1_000, true);
-        assert!(context.revoked);
+        assert!(context.revoked());
     }
 
     #[test]
