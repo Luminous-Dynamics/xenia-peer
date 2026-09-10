@@ -52,6 +52,8 @@
 #![warn(missing_docs)]
 
 pub mod advertisement;
+mod authority_history;
+pub mod authority_history_policy;
 pub mod file_transfer;
 pub mod frame;
 pub mod handshake;
@@ -60,10 +62,25 @@ pub mod machine_authority;
 pub mod producer_flow;
 pub mod receive_reservation;
 mod session;
+pub mod session_admission_receipt;
 pub mod transfer_source;
 pub mod transport;
 pub mod verified_session_evidence;
 
+pub use authority_history::{
+    HistoricalMachineAuthorityQualificationV1, MACHINE_AUTHORITY_HISTORY_EVENT_SCHEMA_V1,
+    MACHINE_AUTHORITY_HISTORY_HEAD_SCHEMA_V1, MachineAuthorityGrantV1,
+    MachineAuthorityHistoryError, MachineAuthorityHistoryEventV1, MachineAuthorityHistoryHeadV1,
+    MachineAuthorityHistorySignatureV1, MachineAuthorityHistoryTransitionV1,
+    MachineAuthorityRevocationV1, MachineAuthoritySupersessionV1,
+    SignedMachineAuthorityHistoryHeadV1,
+};
+pub use authority_history_policy::{
+    AcceptedMachineAuthorityHistoryV1, HistoricallyQualifiedVerifiedMachineSessionV1,
+    LocallyAcceptedFreshMachineAuthorityHistoryV1, MACHINE_AUTHORITY_HISTORY_BINDING_PREFIX_V1,
+    MachineAuthorityHistoryAcceptanceError, MachineAuthorityHistoryAcceptancePolicyV1,
+    verify_machine_authority_history_with_policy,
+};
 pub use file_transfer::{
     IncomingFileStageError, IncomingFileStager, cleanup_orphaned_receive_staging,
     persist_received_file,
@@ -90,6 +107,12 @@ pub use receive_reservation::{
     ReceiveReservation, ReceiveReservationError, ReceiveReservationPool,
 };
 pub use session::{FrameLane, LaneSession, Session, SessionError, SessionRole};
+pub use session_admission_receipt::{
+    MACHINE_SESSION_ADMISSION_BINDING_PREFIX_V1, MACHINE_SESSION_ADMISSION_RECEIPT_SCHEMA_V1,
+    MachineSessionAdmissionReceiptError, MachineSessionAdmissionSignatureV1,
+    SignedMachineSessionAdmissionReceiptV1, VerifiedMachineSessionAdmissionV1,
+    sign_machine_session_admission_receipt, verify_machine_session_admission_receipt,
+};
 pub use transfer_source::{TransferChunk, TransferSource, TransferSourceError};
 pub use verified_session_evidence::{
     MachineSessionAuthorityContextV1, VERIFIED_MACHINE_SESSION_EVIDENCE_SCHEMA_V1,
