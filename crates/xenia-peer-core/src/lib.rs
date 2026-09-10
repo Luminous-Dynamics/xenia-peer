@@ -75,7 +75,8 @@ pub use authority_history::{
     SignedMachineAuthorityHistoryHeadV1,
 };
 pub use authority_history_policy::{
-    AcceptedMachineAuthorityHistoryV1, LocallyAcceptedFreshMachineAuthorityHistoryV1,
+    AcceptedMachineAuthorityHistoryV1, HistoricallyQualifiedVerifiedMachineSessionV1,
+    LocallyAcceptedFreshMachineAuthorityHistoryV1, MACHINE_AUTHORITY_HISTORY_BINDING_PREFIX_V1,
     MachineAuthorityHistoryAcceptanceError, MachineAuthorityHistoryAcceptancePolicyV1,
     verify_machine_authority_history_with_policy,
 };
