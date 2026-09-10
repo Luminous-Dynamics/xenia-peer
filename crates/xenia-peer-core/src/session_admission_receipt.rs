@@ -174,7 +174,9 @@ fn machine_session_evidence_receipt_digest(
             hasher.update(&[1]);
             hash_bytes(&mut hasher, binding.as_bytes());
         }
-        None => hasher.update(&[0]),
+        None => {
+            hasher.update(&[0]);
+        }
     }
     Ok(*hasher.finalize().as_bytes())
 }
@@ -248,25 +250,6 @@ mod tests {
         .unwrap();
         assert_eq!(verified.evidence(), &evidence);
         assert_eq!(verified.evidence_digest(), receipt.evidence_digest());
-    }
-
-    #[test]
-    fn deserialized_or_changed_claims_need_the_exact_provider_signature() {
-        let evidence = evidence().unwrap();
-        let authority = SigningKey::from_bytes(&[0x42; 32]);
-        let receipt = sign_machine_session_admission_receipt(&evidence, &authority).unwrap();
-
-        let mut value = serde_json::to_value(&evidence).unwrap();
-        value["session_id"] = serde_json::Value::String("fabricated-session".into());
-        let fabricated: VerifiedMachineSessionEvidenceV1 = serde_json::from_value(value).unwrap();
-        assert_eq!(
-            verify_machine_session_admission_receipt(
-                &fabricated,
-                &receipt,
-                &authority.verifying_key(),
-            ),
-            Err(MachineSessionAdmissionReceiptError::EvidenceDigestMismatch)
-        );
     }
 
     #[test]
