@@ -108,10 +108,10 @@ pub use receive_reservation::{
 };
 pub use session::{FrameLane, LaneSession, Session, SessionError, SessionRole};
 pub use session_admission_receipt::{
-    MACHINE_SESSION_ADMISSION_RECEIPT_SCHEMA_V1, MachineSessionAdmissionReceiptError,
-    MachineSessionAdmissionSignatureV1, SignedMachineSessionAdmissionReceiptV1,
-    VerifiedMachineSessionAdmissionV1, sign_machine_session_admission_receipt,
-    verify_machine_session_admission_receipt,
+    MACHINE_SESSION_ADMISSION_BINDING_PREFIX_V1, MACHINE_SESSION_ADMISSION_RECEIPT_SCHEMA_V1,
+    MachineSessionAdmissionReceiptError, MachineSessionAdmissionSignatureV1,
+    SignedMachineSessionAdmissionReceiptV1, VerifiedMachineSessionAdmissionV1,
+    sign_machine_session_admission_receipt, verify_machine_session_admission_receipt,
 };
 pub use transfer_source::{TransferChunk, TransferSource, TransferSourceError};
 pub use verified_session_evidence::{
