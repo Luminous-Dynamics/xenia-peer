@@ -16,9 +16,14 @@ use crate::VerifiedMachineSessionEvidenceV1;
 
 /// Exact schema version for signed session-admission receipts.
 pub const MACHINE_SESSION_ADMISSION_RECEIPT_SCHEMA_V1: u8 = 1;
+/// Stable prefix for an opaque provider-admission binding exported to downstream audit layers.
+pub const MACHINE_SESSION_ADMISSION_BINDING_PREFIX_V1: &str =
+    "xenia-machine-session-admission-v1:blake3-256:";
 
 const EVIDENCE_DIGEST_DOMAIN: &[u8] = b"xenia-machine-session-evidence-receipt-v1\0";
 const RECEIPT_SIGNATURE_DOMAIN: &[u8] = b"xenia-machine-session-admission-receipt-v1\0";
+const AUTHORITY_SIGNER_DOMAIN: &[u8] = b"xenia-machine-authority-signer-v1\0";
+const ADMISSION_BINDING_DOMAIN: &[u8] = b"xenia-machine-session-admission-binding-v1\0";
 
 /// Explicit signature suite for a session-admission receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +73,8 @@ impl SignedMachineSessionAdmissionReceiptV1 {
 pub struct VerifiedMachineSessionAdmissionV1 {
     evidence: VerifiedMachineSessionEvidenceV1,
     evidence_digest: [u8; 32],
+    authority_signer_fingerprint: [u8; 32],
+    admission_binding: String,
 }
 
 impl VerifiedMachineSessionAdmissionV1 {
@@ -79,6 +86,16 @@ impl VerifiedMachineSessionAdmissionV1 {
     /// Stable digest committed by the provider's receipt signature.
     pub const fn evidence_digest(&self) -> [u8; 32] {
         self.evidence_digest
+    }
+
+    /// Domain-separated fingerprint of the Ed25519 authority key that verified this receipt.
+    pub const fn authority_signer_fingerprint(&self) -> [u8; 32] {
+        self.authority_signer_fingerprint
+    }
+
+    /// Opaque binding to the exact evidence digest and authority signer used for admission proof.
+    pub fn admission_binding(&self) -> &str {
+        &self.admission_binding
     }
 }
 
@@ -148,10 +165,40 @@ pub fn verify_machine_session_admission_receipt(
         .verify(&receipt.signing_digest()?, &signature)
         .map_err(|_| MachineSessionAdmissionReceiptError::InvalidSignature)?;
 
+    let authority_signer_fingerprint = authority_signer_fingerprint(verifying_key);
+    let admission_binding = machine_session_admission_binding(
+        &expected_digest,
+        &authority_signer_fingerprint,
+    );
     Ok(VerifiedMachineSessionAdmissionV1 {
         evidence: evidence.clone(),
         evidence_digest: expected_digest,
+        authority_signer_fingerprint,
+        admission_binding,
     })
+}
+
+/// Domain-separated identity of an authority signer used to prevent unrelated verified artifacts
+/// from being composed merely because both signatures are individually valid.
+pub(crate) fn authority_signer_fingerprint(verifying_key: &VerifyingKey) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(AUTHORITY_SIGNER_DOMAIN);
+    hasher.update(verifying_key.as_bytes());
+    *hasher.finalize().as_bytes()
+}
+
+fn machine_session_admission_binding(
+    evidence_digest: &[u8; 32],
+    authority_signer_fingerprint: &[u8; 32],
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(ADMISSION_BINDING_DOMAIN);
+    hasher.update(evidence_digest);
+    hasher.update(authority_signer_fingerprint);
+    format!(
+        "{MACHINE_SESSION_ADMISSION_BINDING_PREFIX_V1}{}",
+        hex_lower(hasher.finalize().as_bytes())
+    )
 }
 
 fn machine_session_evidence_receipt_digest(
@@ -184,6 +231,16 @@ fn machine_session_evidence_receipt_digest(
 fn hash_bytes(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(&(bytes.len() as u64).to_le_bytes());
     hasher.update(bytes);
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -250,6 +307,13 @@ mod tests {
         .unwrap();
         assert_eq!(verified.evidence(), &evidence);
         assert_eq!(verified.evidence_digest(), receipt.evidence_digest());
+        assert_eq!(
+            verified.authority_signer_fingerprint(),
+            authority_signer_fingerprint(&authority.verifying_key())
+        );
+        assert!(verified
+            .admission_binding()
+            .starts_with(MACHINE_SESSION_ADMISSION_BINDING_PREFIX_V1));
     }
 
     #[test]
