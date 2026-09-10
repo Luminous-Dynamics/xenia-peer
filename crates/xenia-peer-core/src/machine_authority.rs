@@ -191,19 +191,27 @@ impl MachineAuthorityPolicyV1 {
     /// Re-evaluate live authority facts for a previously minted admission.
     ///
     /// Missing enrollment fails closed as revoked. Epoch rotation is exposed independently so a
-    /// consumer can distinguish revocation from replacement of the authority generation.
+    /// consumer can distinguish revocation from replacement of the authority generation. The
+    /// admission's own validity window is rechecked too: current policy cannot resurrect an
+    /// expired admission or make a backwards clock appear usable.
     pub fn context_for(
         &self,
         admission: &MachineAuthorityAdmissionV1,
         now_ms: u64,
         trusted_time_available: bool,
     ) -> MachineSessionAuthorityContextV1 {
+        let admission_outside_validity =
+            now_ms < admission.admitted_at_ms || now_ms >= admission.expires_at_ms;
+
         match self.records.get(&admission.peer_identity_fingerprint) {
             Some(record) => MachineSessionAuthorityContextV1::from_policy(
                 now_ms,
                 record.authority_epoch,
                 trusted_time_available,
-                record.revoked || now_ms < record.valid_from_ms || now_ms >= record.valid_until_ms,
+                admission_outside_validity
+                    || record.revoked
+                    || now_ms < record.valid_from_ms
+                    || now_ms >= record.valid_until_ms,
             ),
             None => MachineSessionAuthorityContextV1::from_policy(
                 now_ms,
@@ -350,6 +358,26 @@ mod tests {
 
         let context = policy.context_for(&admission, 1_000, true);
         assert!(context.revoked());
+    }
+
+    #[test]
+    fn live_context_cannot_resurrect_expired_or_not_yet_current_admission() {
+        let enrolled = peer(7);
+        let handshake = outcome(0x22);
+        let policy = policy_for(&enrolled);
+        let admission = policy
+            .admit_verified_session(&enrolled, &handshake, 200, true)
+            .unwrap();
+        assert_eq!(admission.expires_at_ms(), 300);
+
+        let before_admission = policy.context_for(&admission, 199, true);
+        assert!(before_admission.revoked());
+
+        let at_expiry = policy.context_for(&admission, 300, true);
+        assert!(at_expiry.revoked());
+
+        let after_expiry = policy.context_for(&admission, 301, true);
+        assert!(after_expiry.revoked());
     }
 
     #[test]
