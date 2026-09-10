@@ -33,7 +33,9 @@ pub struct MachineAuthorityHistoryAcceptancePolicyV1 {
 impl MachineAuthorityHistoryAcceptancePolicyV1 {
     /// Construct a local acceptance policy. Zero would deny every snapshot and is rejected as a
     /// configuration error rather than silently giving it special meaning.
-    pub fn new(max_snapshot_freshness_ms: u64) -> Result<Self, MachineAuthorityHistoryAcceptanceError> {
+    pub fn new(
+        max_snapshot_freshness_ms: u64,
+    ) -> Result<Self, MachineAuthorityHistoryAcceptanceError> {
         if max_snapshot_freshness_ms == 0 {
             return Err(MachineAuthorityHistoryAcceptanceError::InvalidMaximumSnapshotFreshness);
         }
@@ -115,7 +117,10 @@ impl AcceptedMachineAuthorityHistoryV1 {
         &self,
         now_ms: u64,
         trusted_time_available: bool,
-    ) -> Result<LocallyAcceptedFreshMachineAuthorityHistoryV1, MachineAuthorityHistoryAcceptanceError> {
+    ) -> Result<
+        LocallyAcceptedFreshMachineAuthorityHistoryV1,
+        MachineAuthorityHistoryAcceptanceError,
+    > {
         let fresh = self
             .inner
             .qualify_current_snapshot(now_ms, trusted_time_available)
@@ -299,7 +304,7 @@ mod tests {
         let head = head(&event, 200, 301);
         let policy = MachineAuthorityHistoryAcceptancePolicyV1::new(100).unwrap();
 
-        assert_eq!(
+        assert!(matches!(
             verify_machine_authority_history_with_policy(
                 std::slice::from_ref(&event),
                 &head,
@@ -308,7 +313,7 @@ mod tests {
                 policy,
             ),
             Err(MachineAuthorityHistoryAcceptanceError::FreshnessWindowTooLong)
-        );
+        ));
     }
 
     #[test]
