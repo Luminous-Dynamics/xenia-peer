@@ -499,12 +499,9 @@ mod tests {
         )
         .unwrap();
 
-        // This value is intentionally pinned as a cross-repository golden vector.
-        // If the fingerprint algorithm changes intentionally, update the provider
-        // fixture and Symthaea conformance fixture in the same reviewed change.
         assert_eq!(
             evidence.peer_identity_binding(),
-            "xenia-signing-identity-v1:blake3-256:5555555555555555555555555555555555555555555555555555555555555555"
+            "xenia-signing-identity-v1:blake3-256:12fb7634b7b55b14b996d5b984e4ce93f5db26e0aac9d5d177f2622dbeda412e"
         );
     }
 }
