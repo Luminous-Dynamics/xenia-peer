@@ -22,19 +22,21 @@
 use ed25519_dalek::VerifyingKey;
 
 use crate::authority_history::{
-    HistoricalMachineAuthorityQualificationV1, MachineAuthorityHistoryError,
-    MachineAuthorityHistoryEventV1, SignedMachineAuthorityHistoryHeadV1,
-    VerifiedMachineAuthorityHistoryV1, verify_machine_authority_history,
+    HistoricalMachineAuthorityQualificationV1, MACHINE_AUTHORITY_HISTORY_HEAD_SCHEMA_V1,
+    MachineAuthorityHistoryError, MachineAuthorityHistoryEventV1,
+    SignedMachineAuthorityHistoryHeadV1, VerifiedMachineAuthorityHistoryV1,
+    verify_machine_authority_history,
 };
 use crate::session_admission_receipt::{
     VerifiedMachineSessionAdmissionV1, authority_signer_fingerprint,
 };
 
-/// Stable prefix for an opaque binding to the exact signed history head used for qualification.
+/// Stable prefix for an opaque binding to the exact accepted signed history head.
 pub const MACHINE_AUTHORITY_HISTORY_BINDING_PREFIX_V1: &str =
     "xenia-machine-authority-history-head-v1:blake3-256:";
 const XENIA_SIGNING_IDENTITY_BINDING_PREFIX_V1: &str =
     "xenia-signing-identity-v1:blake3-256:";
+const HISTORY_BINDING_DOMAIN_V1: &[u8] = b"xenia-machine-authority-history-binding-v1\0";
 
 impl PartialEq for VerifiedMachineAuthorityHistoryV1 {
     fn eq(&self, other: &Self) -> bool {
@@ -161,13 +163,26 @@ impl AcceptedMachineAuthorityHistoryV1 {
             session_authenticated_at_ms: session.authenticated_at_ms(),
             session_expires_at_ms: session.expires_at_ms(),
             observation_at_ms,
-            provider_history_binding: format!(
-                "{MACHINE_AUTHORITY_HISTORY_BINDING_PREFIX_V1}{}",
-                hex_lower(&self.head_digest())
-            ),
+            provider_history_binding: self.exact_history_binding(),
             history_head_sequence: self.head_sequence(),
             history_observed_through_ms: self.observed_through_ms(),
         })
+    }
+
+    fn exact_history_binding(&self) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(HISTORY_BINDING_DOMAIN_V1);
+        hasher.update(&[MACHINE_AUTHORITY_HISTORY_HEAD_SCHEMA_V1]);
+        hasher.update(&self.peer_identity_fingerprint());
+        hasher.update(&self.head_sequence().to_le_bytes());
+        hasher.update(&self.head_digest());
+        hasher.update(&self.observed_through_ms().to_le_bytes());
+        hasher.update(&self.fresh_until_ms().to_le_bytes());
+        hasher.update(&self.authority_signer_fingerprint);
+        format!(
+            "{MACHINE_AUTHORITY_HISTORY_BINDING_PREFIX_V1}{}",
+            hasher.finalize().to_hex()
+        )
     }
 
     fn qualify_session_interval(
@@ -238,37 +253,74 @@ pub struct HistoricallyQualifiedVerifiedMachineSessionV1 {
 
 impl HistoricallyQualifiedVerifiedMachineSessionV1 {
     /// Exact verified-session schema carried by the qualified session.
-    pub fn provider_schema(&self) -> &str { &self.provider_schema }
+    pub fn provider_schema(&self) -> &str {
+        &self.provider_schema
+    }
+
     /// Exact non-secret session id carried by the qualified session.
-    pub fn session_id(&self) -> &str { &self.session_id }
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
     /// Exact hybrid machine-principal binding carried by the qualified session.
-    pub fn peer_identity_binding(&self) -> &str { &self.peer_identity_binding }
+    pub fn peer_identity_binding(&self) -> &str {
+        &self.peer_identity_binding
+    }
+
     /// Exact handshake/transcript evidence binding carried by the qualified session.
-    pub fn session_evidence_binding(&self) -> &str { &self.session_evidence_binding }
+    pub fn session_evidence_binding(&self) -> &str {
+        &self.session_evidence_binding
+    }
+
     /// Digest proven by the provider-signed session-admission receipt.
     pub const fn session_admission_receipt_digest(&self) -> [u8; 32] {
         self.session_admission_receipt_digest
     }
+
     /// Opaque provider binding to the signed session admission and its authority signer.
-    pub fn session_admission_binding(&self) -> &str { &self.session_admission_binding }
+    pub fn session_admission_binding(&self) -> &str {
+        &self.session_admission_binding
+    }
+
     /// Authority signer shared by the admission receipt and historical head in v1.
     pub const fn authority_signer_fingerprint(&self) -> [u8; 32] {
         self.authority_signer_fingerprint
     }
+
     /// Authority generation carried by the exact qualified session.
-    pub const fn authority_epoch(&self) -> u64 { self.authority_epoch }
+    pub const fn authority_epoch(&self) -> u64 {
+        self.authority_epoch
+    }
+
     /// Trusted admission time carried by the exact qualified session.
-    pub const fn session_authenticated_at_ms(&self) -> u64 { self.session_authenticated_at_ms }
+    pub const fn session_authenticated_at_ms(&self) -> u64 {
+        self.session_authenticated_at_ms
+    }
+
     /// Exclusive expiry carried by the exact qualified session.
-    pub const fn session_expires_at_ms(&self) -> u64 { self.session_expires_at_ms }
+    pub const fn session_expires_at_ms(&self) -> u64 {
+        self.session_expires_at_ms
+    }
+
     /// Observation instant qualified by history.
-    pub const fn observation_at_ms(&self) -> u64 { self.observation_at_ms }
-    /// Opaque binding to the exact signed history head supporting this qualification.
-    pub fn provider_history_binding(&self) -> &str { &self.provider_history_binding }
+    pub const fn observation_at_ms(&self) -> u64 {
+        self.observation_at_ms
+    }
+
+    /// Opaque binding to the complete accepted history-head semantics and authority signer.
+    pub fn provider_history_binding(&self) -> &str {
+        &self.provider_history_binding
+    }
+
     /// Sequence number of the exact signed history head supporting this qualification.
-    pub const fn history_head_sequence(&self) -> u64 { self.history_head_sequence }
+    pub const fn history_head_sequence(&self) -> u64 {
+        self.history_head_sequence
+    }
+
     /// Completeness horizon of the signed history supporting this qualification.
-    pub const fn history_observed_through_ms(&self) -> u64 { self.history_observed_through_ms }
+    pub const fn history_observed_through_ms(&self) -> u64 {
+        self.history_observed_through_ms
+    }
 }
 
 /// Non-serializable proof that a signed authority-history snapshot passed provider and local
@@ -285,17 +337,34 @@ pub struct LocallyAcceptedFreshMachineAuthorityHistoryV1 {
 
 impl LocallyAcceptedFreshMachineAuthorityHistoryV1 {
     /// Machine identity covered by this current-use qualification.
-    pub const fn peer_identity_fingerprint(&self) -> [u8; 32] { self.peer_identity_fingerprint }
+    pub const fn peer_identity_fingerprint(&self) -> [u8; 32] {
+        self.peer_identity_fingerprint
+    }
+
     /// Trusted-time instant at which freshness was evaluated.
-    pub const fn now_ms(&self) -> u64 { self.now_ms }
+    pub const fn now_ms(&self) -> u64 {
+        self.now_ms
+    }
+
     /// Provider-declared exclusive freshness horizon.
-    pub const fn fresh_until_ms(&self) -> u64 { self.fresh_until_ms }
+    pub const fn fresh_until_ms(&self) -> u64 {
+        self.fresh_until_ms
+    }
+
     /// Sequence number of the exact signed head admitted by local policy.
-    pub const fn head_sequence(&self) -> u64 { self.head_sequence }
+    pub const fn head_sequence(&self) -> u64 {
+        self.head_sequence
+    }
+
     /// Digest of the exact signed head admitted by local policy.
-    pub const fn head_digest(&self) -> [u8; 32] { self.head_digest }
+    pub const fn head_digest(&self) -> [u8; 32] {
+        self.head_digest
+    }
+
     /// Deployment-owned maximum freshness window that constrained this qualification.
-    pub const fn max_snapshot_freshness_ms(&self) -> u64 { self.max_snapshot_freshness_ms }
+    pub const fn max_snapshot_freshness_ms(&self) -> u64 {
+        self.max_snapshot_freshness_ms
+    }
 }
 
 /// Failure in the local acceptance layer above provider-owned authority history.
@@ -381,7 +450,9 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use xenia_handshake::derive_session_key_schedule;
 
-    fn key() -> SigningKey { SigningKey::from_bytes(&[0x42; 32]) }
+    fn key() -> SigningKey {
+        SigningKey::from_bytes(&[0x42; 32])
+    }
 
     fn event_for(peer_identity_fingerprint: [u8; 32]) -> MachineAuthorityHistoryEventV1 {
         MachineAuthorityHistoryEventV1 {
@@ -506,20 +577,26 @@ mod tests {
         let peer = peer(0x55);
         let event = event_for(peer.signing_identity_fingerprint());
         let policy = MachineAuthorityHistoryAcceptancePolicyV1::new(100).unwrap();
-        assert!(verify_machine_authority_history_with_policy(
-            std::slice::from_ref(&event),
-            &head(&event, 200, 300),
-            &key().verifying_key(),
-            None,
-            policy,
-        ).is_ok());
-        assert!(verify_machine_authority_history_with_policy(
-            std::slice::from_ref(&event),
-            &head(&event, 200, 250),
-            &key().verifying_key(),
-            None,
-            policy,
-        ).is_ok());
+        assert!(
+            verify_machine_authority_history_with_policy(
+                std::slice::from_ref(&event),
+                &head(&event, 200, 300),
+                &key().verifying_key(),
+                None,
+                policy,
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_machine_authority_history_with_policy(
+                std::slice::from_ref(&event),
+                &head(&event, 200, 250),
+                &key().verifying_key(),
+                None,
+                policy,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -556,16 +633,39 @@ mod tests {
             qualified.session_admission_receipt_digest(),
             admission.evidence_digest()
         );
-        assert_eq!(qualified.session_admission_binding(), admission.admission_binding());
+        assert_eq!(
+            qualified.session_admission_binding(),
+            admission.admission_binding()
+        );
         assert_eq!(
             qualified.authority_signer_fingerprint(),
             accepted.authority_signer_fingerprint()
         );
         assert_eq!(qualified.observation_at_ms(), 249);
         assert_eq!(qualified.history_observed_through_ms(), 250);
-        assert!(qualified
-            .provider_history_binding()
-            .starts_with(MACHINE_AUTHORITY_HISTORY_BINDING_PREFIX_V1));
+        assert!(
+            qualified
+                .provider_history_binding()
+                .starts_with(MACHINE_AUTHORITY_HISTORY_BINDING_PREFIX_V1)
+        );
+    }
+
+    #[test]
+    fn exact_history_binding_commits_to_signed_horizons() {
+        let peer = peer(0x55);
+        let admission = verified_admission(&peer);
+        let first = accepted_for(peer.signing_identity_fingerprint(), 250, 300)
+            .qualify_verified_session_observation(&admission, 249)
+            .unwrap();
+        let changed_freshness = accepted_for(peer.signing_identity_fingerprint(), 250, 301)
+            .qualify_verified_session_observation(&admission, 249)
+            .unwrap();
+        let changed_coverage = accepted_for(peer.signing_identity_fingerprint(), 251, 301)
+            .qualify_verified_session_observation(&admission, 249)
+            .unwrap();
+
+        assert_ne!(first.provider_history_binding(), changed_freshness.provider_history_binding());
+        assert_ne!(first.provider_history_binding(), changed_coverage.provider_history_binding());
     }
 
     #[test]
@@ -602,7 +702,11 @@ mod tests {
             accepted.qualify_verified_session_observation(&admission, 300),
             Err(MachineAuthorityHistoryAcceptanceError::ObservationOutsideSession)
         );
-        assert!(accepted.qualify_verified_session_observation(&admission, 299).is_ok());
+        assert!(
+            accepted
+                .qualify_verified_session_observation(&admission, 299)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -610,14 +714,22 @@ mod tests {
         let peer = peer(0x55);
         let admission = verified_admission(&peer);
         let accepted = accepted_for(peer.signing_identity_fingerprint(), 299, 300);
-        assert!(accepted.qualify_verified_session_observation(&admission, 250).is_ok());
+        assert!(
+            accepted
+                .qualify_verified_session_observation(&admission, 250)
+                .is_ok()
+        );
         assert_eq!(
             accepted.qualify_current_snapshot(300, true),
             Err(MachineAuthorityHistoryAcceptanceError::History(
                 MachineAuthorityHistoryError::StaleHistoryHead
             ))
         );
-        assert!(accepted.qualify_verified_session_observation(&admission, 250).is_ok());
+        assert!(
+            accepted
+                .qualify_verified_session_observation(&admission, 250)
+                .is_ok()
+        );
     }
 
     #[test]
