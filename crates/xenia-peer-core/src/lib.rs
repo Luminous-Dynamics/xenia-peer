@@ -62,6 +62,7 @@ pub mod machine_authority;
 pub mod producer_flow;
 pub mod receive_reservation;
 mod session;
+pub mod session_admission_receipt;
 pub mod transfer_source;
 pub mod transport;
 pub mod verified_session_evidence;
@@ -106,6 +107,12 @@ pub use receive_reservation::{
     ReceiveReservation, ReceiveReservationError, ReceiveReservationPool,
 };
 pub use session::{FrameLane, LaneSession, Session, SessionError, SessionRole};
+pub use session_admission_receipt::{
+    MACHINE_SESSION_ADMISSION_RECEIPT_SCHEMA_V1, MachineSessionAdmissionReceiptError,
+    MachineSessionAdmissionSignatureV1, SignedMachineSessionAdmissionReceiptV1,
+    VerifiedMachineSessionAdmissionV1, sign_machine_session_admission_receipt,
+    verify_machine_session_admission_receipt,
+};
 pub use transfer_source::{TransferChunk, TransferSource, TransferSourceError};
 pub use verified_session_evidence::{
     MachineSessionAuthorityContextV1, VERIFIED_MACHINE_SESSION_EVIDENCE_SCHEMA_V1,
