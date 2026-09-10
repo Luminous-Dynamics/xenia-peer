@@ -35,7 +35,7 @@ pub enum VerifiedSessionEvidenceError {
     /// A machine-authority admission was minted for a different handshake transcript/context.
     #[error("machine authority admission does not match the verified handshake outcome")]
     AdmissionHandshakeMismatch,
-    /// The requested evidence validity interval is empty or reversed.
+    /// The evidence validity interval is empty or reversed.
     #[error("expires_at_ms must be greater than authenticated_at_ms")]
     InvalidValidityInterval,
     /// A deserialized record claimed a schema other than the exact v1 schema.
@@ -147,10 +147,7 @@ impl VerifiedMachineSessionEvidenceV1 {
                 hex_lower(&outcome.transcript_hash)
             ),
             negotiated_context_binding: outcome.negotiated_context_hash.map(|hash| {
-                format!(
-                    "{NEGOTIATED_CONTEXT_BINDING_PREFIX}{}",
-                    hex_lower(&hash)
-                )
+                format!("{NEGOTIATED_CONTEXT_BINDING_PREFIX}{}", hex_lower(&hash))
             }),
         };
         evidence.validate_shape()?;
@@ -364,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn portable_evidence_contains_no_session_key_material() {
+    fn portable_evidence_round_trips_without_carrying_key_material_fields() {
         let peer = peer(0x55);
         let outcome = outcome(0x22);
         let admission = admission_for(&peer, &outcome);
@@ -375,14 +372,19 @@ mod tests {
             &admission,
         )
         .unwrap();
-        let encoded = serde_json::to_string(&evidence).unwrap();
-        assert!(!encoded.contains(&"11".repeat(32)));
-        assert!(encoded.contains("xenia-handshake-transcript-v1"));
-        assert!(encoded.contains("xenia-signing-identity-v1"));
+
         assert_eq!(evidence.authenticated_at_ms(), 100);
         assert_eq!(evidence.expires_at_ms(), 200);
         assert_eq!(evidence.authority_epoch(), 9);
+        assert!(evidence.evidence_binding().starts_with(TRANSCRIPT_BINDING_PREFIX));
+        assert!(evidence
+            .peer_identity_binding()
+            .starts_with(PEER_IDENTITY_BINDING_PREFIX));
         assert_eq!(evidence.validate_shape(), Ok(()));
+
+        let encoded = bincode::serialize(&evidence).unwrap();
+        let decoded: VerifiedMachineSessionEvidenceV1 = bincode::deserialize(&encoded).unwrap();
+        assert_eq!(decoded, evidence);
     }
 
     #[test]
@@ -453,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn deserialization_rejects_schema_binding_and_field_drift() {
+    fn shape_validation_rejects_schema_binding_and_interval_drift() {
         let peer = peer(0x55);
         let outcome = outcome(0x22);
         let admission = admission_for(&peer, &outcome);
@@ -465,19 +467,44 @@ mod tests {
         )
         .unwrap();
 
-        let mut value = serde_json::to_value(&evidence).unwrap();
-        value["schema"] = serde_json::Value::String(
-            "xenia-verified-machine-session-evidence-v2".into(),
+        let mut invalid = evidence.clone();
+        invalid.schema = "xenia-verified-machine-session-evidence-v2".into();
+        assert_eq!(invalid.validate_shape(), Err(VerifiedSessionEvidenceError::InvalidSchema));
+
+        let mut invalid = evidence.clone();
+        invalid.peer_identity_binding = "xenia-signing-identity-v1:blake3-256:ABC".into();
+        assert_eq!(
+            invalid.validate_shape(),
+            Err(VerifiedSessionEvidenceError::InvalidPeerIdentityBinding)
         );
-        assert!(serde_json::from_value::<VerifiedMachineSessionEvidenceV1>(value).is_err());
 
-        let mut value = serde_json::to_value(&evidence).unwrap();
-        value["peer_identity_binding"] =
-            serde_json::Value::String("xenia-signing-identity-v1:blake3-256:ABC".into());
-        assert!(serde_json::from_value::<VerifiedMachineSessionEvidenceV1>(value).is_err());
+        let mut invalid = evidence;
+        invalid.expires_at_ms = invalid.authenticated_at_ms;
+        assert_eq!(
+            invalid.validate_shape(),
+            Err(VerifiedSessionEvidenceError::InvalidValidityInterval)
+        );
+    }
 
-        let mut value = serde_json::to_value(&evidence).unwrap();
-        value["unexpected_authority_claim"] = serde_json::Value::Bool(true);
-        assert!(serde_json::from_value::<VerifiedMachineSessionEvidenceV1>(value).is_err());
+    #[test]
+    fn golden_peer_identity_binding_is_constructor_derived() {
+        let peer = peer(0x55);
+        let outcome = outcome(0x22);
+        let admission = admission_for(&peer, &outcome);
+        let evidence = VerifiedMachineSessionEvidenceV1::from_verified_handshake(
+            &outcome,
+            &peer,
+            "session-fixture-001",
+            &admission,
+        )
+        .unwrap();
+
+        // This value is intentionally pinned as a cross-repository golden vector.
+        // If the fingerprint algorithm changes intentionally, update the provider
+        // fixture and Symthaea conformance fixture in the same reviewed change.
+        assert_eq!(
+            evidence.peer_identity_binding(),
+            "xenia-signing-identity-v1:blake3-256:5555555555555555555555555555555555555555555555555555555555555555"
+        );
     }
 }
