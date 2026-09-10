@@ -6,13 +6,13 @@
 //! This module deliberately exports **claims**, never traffic keys. A caller gets
 //! the peer identity binding and canonical transcript/context bindings that were
 //! established by `crate::handshake`, but none of the AEAD/rekey secret material.
-//! Authorization is a separate layer: the daemon must bind this authenticated
-//! session to its current enrollment/revocation state before treating it as
-//! machine authority.
+//! Authorization is a separate layer: a completed handshake must first be admitted
+//! by `crate::machine_authority` before portable machine-session evidence can be minted.
 
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::handshake::{HandshakeOutcome, VerifiedPeerIdentity};
+use crate::machine_authority::MachineAuthorityAdmissionV1;
 
 /// Stable schema label for the cross-layer machine-session evidence record.
 pub const VERIFIED_MACHINE_SESSION_EVIDENCE_SCHEMA_V1: &str =
@@ -26,9 +26,12 @@ const NEGOTIATED_CONTEXT_BINDING_PREFIX: &str =
 /// Error while projecting or validating portable verified-session evidence.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum VerifiedSessionEvidenceError {
-    /// The caller supplied an empty external session identifier.
-    #[error("session_id must not be empty")]
-    EmptySessionId,
+    /// The caller supplied an empty or non-canonical external session identifier.
+    #[error("session_id must be nonempty canonical printable text")]
+    InvalidSessionId,
+    /// A machine-authority admission was minted for a different hybrid peer identity.
+    #[error("machine authority admission does not match the verified handshake peer")]
+    AdmissionIdentityMismatch,
     /// The requested evidence validity interval is empty or reversed.
     #[error("expires_at_ms must be greater than authenticated_at_ms")]
     InvalidValidityInterval,
@@ -46,32 +49,23 @@ pub enum VerifiedSessionEvidenceError {
     InvalidNegotiatedContextBinding,
 }
 
-/// Portable, immutable evidence for one authenticated machine session.
+/// Portable, immutable evidence for one authenticated **and locally admitted** machine session.
 ///
-/// `authority_epoch` is supplied by the authority owner after the authenticated
-/// peer has been admitted. Xenia's cryptographic handshake does not itself grant
-/// application authority. Live revocation is intentionally absent from this
-/// immutable record and must be evaluated from fresh local authority state.
+/// The constructor requires a [`MachineAuthorityAdmissionV1`] minted by local machine policy,
+/// so a cryptographically valid handshake cannot acquire an authority epoch or lifetime directly
+/// from its caller. The wire schema remains portable and deserializable for storage/transport;
+/// deserializing this shape alone is **not** cryptographic authentication or current authority.
+/// A consumer must establish provenance and re-evaluate live revocation/epoch/time state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VerifiedMachineSessionEvidenceV1 {
-    /// Stable schema label.
-    pub schema: String,
-    /// External session identifier. This is not a key and need not be secret.
-    pub session_id: String,
-    /// Domain-separated BLAKE3 binding to the authenticated peer's Ed25519 +
-    /// ML-DSA-65 public keys.
-    pub peer_identity_binding: String,
-    /// Trusted-time instant at which the authority owner accepted this session.
-    pub authenticated_at_ms: u64,
-    /// Hard validity horizon for this evidence.
-    pub expires_at_ms: u64,
-    /// Authority generation that admitted the peer.
-    pub authority_epoch: u64,
-    /// Binding to Xenia's canonical authenticated handshake transcript.
-    pub evidence_binding: String,
-    /// Optional binding to the negotiated transport/capability context that was
-    /// committed into the handshake.
-    pub negotiated_context_binding: Option<String>,
+    schema: String,
+    session_id: String,
+    peer_identity_binding: String,
+    authenticated_at_ms: u64,
+    expires_at_ms: u64,
+    authority_epoch: u64,
+    evidence_binding: String,
+    negotiated_context_binding: Option<String>,
 }
 
 /// Exact v1 serde surface. Keeping this separate lets deserialization validate
@@ -112,30 +106,34 @@ impl<'de> Deserialize<'de> for VerifiedMachineSessionEvidenceV1 {
 }
 
 impl VerifiedMachineSessionEvidenceV1 {
-    /// Project a completed host-side authenticated handshake into portable,
-    /// secret-free evidence.
+    /// Project a completed host-side authenticated handshake and a matching local policy
+    /// admission into portable, secret-free evidence.
     ///
     /// The peer parameter is the [`VerifiedPeerIdentity`] returned by
-    /// `perform_host_handshake_authenticating_peer`; its two signing keys have
-    /// already passed the handshake's mandatory Ed25519 + ML-DSA verification.
+    /// `perform_host_handshake_authenticating_peer`; its two signing keys have already passed the
+    /// handshake's mandatory Ed25519 + ML-DSA verification. `admission` must have been minted by
+    /// `MachineAuthorityPolicyV1` for that exact peer identity.
     pub fn from_verified_handshake(
         outcome: &HandshakeOutcome,
         peer: &VerifiedPeerIdentity,
         session_id: impl Into<String>,
-        authenticated_at_ms: u64,
-        expires_at_ms: u64,
-        authority_epoch: u64,
+        admission: &MachineAuthorityAdmissionV1,
     ) -> Result<Self, VerifiedSessionEvidenceError> {
+        let peer_fingerprint = peer.signing_identity_fingerprint();
+        if admission.peer_identity_fingerprint() != peer_fingerprint {
+            return Err(VerifiedSessionEvidenceError::AdmissionIdentityMismatch);
+        }
+
         let evidence = Self {
             schema: VERIFIED_MACHINE_SESSION_EVIDENCE_SCHEMA_V1.to_string(),
             session_id: session_id.into(),
             peer_identity_binding: format!(
                 "{PEER_IDENTITY_BINDING_PREFIX}{}",
-                hex_lower(&peer.signing_identity_fingerprint())
+                hex_lower(&peer_fingerprint)
             ),
-            authenticated_at_ms,
-            expires_at_ms,
-            authority_epoch,
+            authenticated_at_ms: admission.admitted_at_ms(),
+            expires_at_ms: admission.expires_at_ms(),
+            authority_epoch: admission.authority_epoch(),
             evidence_binding: format!(
                 "{TRANSCRIPT_BINDING_PREFIX}{}",
                 hex_lower(&outcome.transcript_hash)
@@ -151,18 +149,61 @@ impl VerifiedMachineSessionEvidenceV1 {
         Ok(evidence)
     }
 
+    /// Stable provider schema label.
+    pub fn schema(&self) -> &str {
+        &self.schema
+    }
+
+    /// External, non-secret session identifier.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Canonical binding to the authenticated hybrid signing identity.
+    pub fn peer_identity_binding(&self) -> &str {
+        &self.peer_identity_binding
+    }
+
+    /// Trusted-time instant at which local machine authority admitted this session.
+    pub const fn authenticated_at_ms(&self) -> u64 {
+        self.authenticated_at_ms
+    }
+
+    /// Exclusive hard validity horizon minted by local machine policy.
+    pub const fn expires_at_ms(&self) -> u64 {
+        self.expires_at_ms
+    }
+
+    /// Authority generation that admitted the machine identity.
+    pub const fn authority_epoch(&self) -> u64 {
+        self.authority_epoch
+    }
+
+    /// Binding to Xenia's canonical authenticated handshake transcript.
+    pub fn evidence_binding(&self) -> &str {
+        &self.evidence_binding
+    }
+
+    /// Optional binding to the negotiated transport/capability context.
+    pub fn negotiated_context_binding(&self) -> Option<&str> {
+        self.negotiated_context_binding.as_deref()
+    }
+
     /// Validate the stable portable record after construction or storage.
     ///
-    /// Deserialization calls this automatically. This does **not** re-verify the
-    /// handshake or grant authority; it only guarantees the typed record is the
-    /// exact canonical v1 evidence shape before a higher authority layer evaluates
-    /// enrollment, revocation, epoch and trusted time.
+    /// Deserialization calls this automatically. This does **not** re-verify the handshake or
+    /// prove current authority; it guarantees only that the record is the exact canonical v1
+    /// evidence shape before a higher authority layer evaluates provenance, enrollment,
+    /// revocation, epoch and trusted time.
     pub fn validate_shape(&self) -> Result<(), VerifiedSessionEvidenceError> {
         if self.schema != VERIFIED_MACHINE_SESSION_EVIDENCE_SCHEMA_V1 {
             return Err(VerifiedSessionEvidenceError::InvalidSchema);
         }
-        if self.session_id.trim().is_empty() {
-            return Err(VerifiedSessionEvidenceError::EmptySessionId);
+        if self.session_id.trim().is_empty()
+            || self.session_id.trim() != self.session_id
+            || self.session_id.chars().any(char::is_control)
+        {
+            return Err(VerifiedSessionEvidenceError::InvalidSessionId);
         }
         if self.expires_at_ms <= self.authenticated_at_ms {
             return Err(VerifiedSessionEvidenceError::InvalidValidityInterval);
@@ -186,10 +227,9 @@ impl VerifiedMachineSessionEvidenceV1 {
 
 /// Current, point-of-use authority facts corresponding to immutable session evidence.
 ///
-/// Deliberately **not serializable**. This value must be freshly constructed from
-/// local trusted time and the current authority/revocation source at the moment an
-/// action is evaluated. Making it a portable wire artifact would invite replay of
-/// stale `revoked = false` state.
+/// Deliberately **not serializable**. This value must be freshly constructed from local trusted
+/// time and the current authority/revocation source at the moment an action is evaluated. Making
+/// it a portable wire artifact would invite replay of stale `revoked = false` state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MachineSessionAuthorityContextV1 {
     /// Current trusted-time instant.
@@ -206,9 +246,9 @@ impl VerifiedPeerIdentity {
     /// Domain-separated fingerprint over the exact hybrid signing identity that
     /// passed the host-side handshake.
     ///
-    /// This is intentionally distinct from `host_identity_fingerprint`: the
-    /// latter names the host-specific TOFU use case, while this method binds an
-    /// authenticated peer on either side without relabeling it as the host.
+    /// This is intentionally distinct from `host_identity_fingerprint`: the latter names the
+    /// host-specific TOFU use case, while this method binds an authenticated peer on either side
+    /// without relabeling it as the host.
     pub fn signing_identity_fingerprint(&self) -> [u8; 32] {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"xenia-signing-identity-fingerprint-v1");
@@ -242,6 +282,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::machine_authority::{MachineAuthorityPolicyV1, MachineAuthorityRecordV1};
     use xenia_handshake::derive_session_key_schedule;
 
     fn outcome() -> HandshakeOutcome {
@@ -255,34 +296,68 @@ mod tests {
         }
     }
 
-    fn peer() -> VerifiedPeerIdentity {
+    fn peer(byte: u8) -> VerifiedPeerIdentity {
         VerifiedPeerIdentity {
-            ed25519_pk: [0x55; 32],
-            ml_dsa_pk: vec![0x66; xenia_handshake::ML_DSA_65_PK_LEN],
+            ed25519_pk: [byte; 32],
+            ml_dsa_pk: vec![byte.wrapping_add(1); xenia_handshake::ML_DSA_65_PK_LEN],
         }
+    }
+
+    fn admission_for(peer: &VerifiedPeerIdentity) -> MachineAuthorityAdmissionV1 {
+        let policy = MachineAuthorityPolicyV1::new(
+            [MachineAuthorityRecordV1 {
+                peer_identity_fingerprint: peer.signing_identity_fingerprint(),
+                authority_epoch: 9,
+                valid_from_ms: 50,
+                valid_until_ms: 1_000,
+                revoked: false,
+            }],
+            100,
+        )
+        .unwrap();
+        policy.admit_verified_peer(peer, 100, true).unwrap()
     }
 
     #[test]
     fn portable_evidence_contains_no_session_key_material() {
+        let peer = peer(0x55);
+        let admission = admission_for(&peer);
         let evidence = VerifiedMachineSessionEvidenceV1::from_verified_handshake(
             &outcome(),
-            &peer(),
+            &peer,
             "session-1",
-            100,
-            200,
-            9,
+            &admission,
         )
         .unwrap();
         let encoded = serde_json::to_string(&evidence).unwrap();
         assert!(!encoded.contains(&"11".repeat(32)));
         assert!(encoded.contains("xenia-handshake-transcript-v1"));
         assert!(encoded.contains("xenia-signing-identity-v1"));
+        assert_eq!(evidence.authenticated_at_ms(), 100);
+        assert_eq!(evidence.expires_at_ms(), 200);
+        assert_eq!(evidence.authority_epoch(), 9);
         assert_eq!(evidence.validate_shape(), Ok(()));
     }
 
     #[test]
+    fn admission_must_match_exact_verified_peer() {
+        let admitted_peer = peer(0x55);
+        let other_peer = peer(0x77);
+        let admission = admission_for(&admitted_peer);
+        assert_eq!(
+            VerifiedMachineSessionEvidenceV1::from_verified_handshake(
+                &outcome(),
+                &other_peer,
+                "session-1",
+                &admission,
+            ),
+            Err(VerifiedSessionEvidenceError::AdmissionIdentityMismatch)
+        );
+    }
+
+    #[test]
     fn peer_fingerprint_changes_if_either_verified_key_changes() {
-        let base = peer();
+        let base = peer(0x55);
         let base_fingerprint = base.signing_identity_fingerprint();
 
         let mut ed_changed = base.clone();
@@ -295,40 +370,38 @@ mod tests {
     }
 
     #[test]
-    fn invalid_validity_interval_and_empty_id_fail_closed() {
+    fn empty_or_noncanonical_session_id_fails_closed() {
+        let peer = peer(0x55);
+        let admission = admission_for(&peer);
         assert_eq!(
             VerifiedMachineSessionEvidenceV1::from_verified_handshake(
                 &outcome(),
-                &peer(),
+                &peer,
                 "",
-                100,
-                200,
-                9,
+                &admission,
             ),
-            Err(VerifiedSessionEvidenceError::EmptySessionId)
+            Err(VerifiedSessionEvidenceError::InvalidSessionId)
         );
         assert_eq!(
             VerifiedMachineSessionEvidenceV1::from_verified_handshake(
                 &outcome(),
-                &peer(),
-                "session-1",
-                200,
-                200,
-                9,
+                &peer,
+                " session-1",
+                &admission,
             ),
-            Err(VerifiedSessionEvidenceError::InvalidValidityInterval)
+            Err(VerifiedSessionEvidenceError::InvalidSessionId)
         );
     }
 
     #[test]
     fn deserialization_rejects_schema_binding_and_field_drift() {
+        let peer = peer(0x55);
+        let admission = admission_for(&peer);
         let evidence = VerifiedMachineSessionEvidenceV1::from_verified_handshake(
             &outcome(),
-            &peer(),
+            &peer,
             "session-1",
-            100,
-            200,
-            9,
+            &admission,
         )
         .unwrap();
 
