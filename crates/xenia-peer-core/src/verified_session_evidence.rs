@@ -32,6 +32,9 @@ pub enum VerifiedSessionEvidenceError {
     /// A machine-authority admission was minted for a different hybrid peer identity.
     #[error("machine authority admission does not match the verified handshake peer")]
     AdmissionIdentityMismatch,
+    /// A machine-authority admission was minted for a different handshake transcript/context.
+    #[error("machine authority admission does not match the verified handshake outcome")]
+    AdmissionHandshakeMismatch,
     /// The requested evidence validity interval is empty or reversed.
     #[error("expires_at_ms must be greater than authenticated_at_ms")]
     InvalidValidityInterval,
@@ -51,11 +54,13 @@ pub enum VerifiedSessionEvidenceError {
 
 /// Portable, immutable evidence for one authenticated **and locally admitted** machine session.
 ///
-/// The constructor requires a [`MachineAuthorityAdmissionV1`] minted by local machine policy,
-/// so a cryptographically valid handshake cannot acquire an authority epoch or lifetime directly
-/// from its caller. The wire schema remains portable and deserializable for storage/transport;
-/// deserializing this shape alone is **not** cryptographic authentication or current authority.
-/// A consumer must establish provenance and re-evaluate live revocation/epoch/time state.
+/// The constructor requires a [`MachineAuthorityAdmissionV1`] minted by local machine policy for
+/// the exact peer **and exact handshake outcome**, so a cryptographically valid handshake cannot
+/// acquire an authority epoch/lifetime directly from its caller and an old admission cannot be
+/// migrated to another session. The wire schema remains portable and deserializable for
+/// storage/transport; deserializing this shape alone is **not** cryptographic authentication or
+/// current authority. A consumer must establish provenance and re-evaluate live
+/// revocation/epoch/time state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VerifiedMachineSessionEvidenceV1 {
     schema: String,
@@ -112,7 +117,7 @@ impl VerifiedMachineSessionEvidenceV1 {
     /// The peer parameter is the [`VerifiedPeerIdentity`] returned by
     /// `perform_host_handshake_authenticating_peer`; its two signing keys have already passed the
     /// handshake's mandatory Ed25519 + ML-DSA verification. `admission` must have been minted by
-    /// `MachineAuthorityPolicyV1` for that exact peer identity.
+    /// `MachineAuthorityPolicyV1` for this exact peer and this exact handshake outcome.
     pub fn from_verified_handshake(
         outcome: &HandshakeOutcome,
         peer: &VerifiedPeerIdentity,
@@ -122,6 +127,9 @@ impl VerifiedMachineSessionEvidenceV1 {
         let peer_fingerprint = peer.signing_identity_fingerprint();
         if admission.peer_identity_fingerprint() != peer_fingerprint {
             return Err(VerifiedSessionEvidenceError::AdmissionIdentityMismatch);
+        }
+        if !admission.matches_handshake(outcome) {
+            return Err(VerifiedSessionEvidenceError::AdmissionHandshakeMismatch);
         }
 
         let evidence = Self {
@@ -317,13 +325,13 @@ mod tests {
     use crate::machine_authority::{MachineAuthorityPolicyV1, MachineAuthorityRecordV1};
     use xenia_handshake::derive_session_key_schedule;
 
-    fn outcome() -> HandshakeOutcome {
-        let transcript_hash = [0x22; 32];
+    fn outcome(byte: u8) -> HandshakeOutcome {
+        let transcript_hash = [byte; 32];
         HandshakeOutcome {
             session_key: [0x11; 32],
             transcript_hash,
             key_schedule: derive_session_key_schedule(&[0x11; 32], &transcript_hash),
-            negotiated_context_hash: Some([0x33; 32]),
+            negotiated_context_hash: Some([byte.wrapping_add(0x11); 32]),
             host_identity_fingerprint: [0x44; 32],
         }
     }
@@ -335,7 +343,10 @@ mod tests {
         }
     }
 
-    fn admission_for(peer: &VerifiedPeerIdentity) -> MachineAuthorityAdmissionV1 {
+    fn admission_for(
+        peer: &VerifiedPeerIdentity,
+        outcome: &HandshakeOutcome,
+    ) -> MachineAuthorityAdmissionV1 {
         let policy = MachineAuthorityPolicyV1::new(
             [MachineAuthorityRecordV1 {
                 peer_identity_fingerprint: peer.signing_identity_fingerprint(),
@@ -347,15 +358,18 @@ mod tests {
             100,
         )
         .unwrap();
-        policy.admit_verified_peer(peer, 100, true).unwrap()
+        policy
+            .admit_verified_session(peer, outcome, 100, true)
+            .unwrap()
     }
 
     #[test]
     fn portable_evidence_contains_no_session_key_material() {
         let peer = peer(0x55);
-        let admission = admission_for(&peer);
+        let outcome = outcome(0x22);
+        let admission = admission_for(&peer, &outcome);
         let evidence = VerifiedMachineSessionEvidenceV1::from_verified_handshake(
-            &outcome(),
+            &outcome,
             &peer,
             "session-1",
             &admission,
@@ -372,18 +386,30 @@ mod tests {
     }
 
     #[test]
-    fn admission_must_match_exact_verified_peer() {
+    fn admission_must_match_exact_verified_peer_and_handshake() {
         let admitted_peer = peer(0x55);
         let other_peer = peer(0x77);
-        let admission = admission_for(&admitted_peer);
+        let admitted_outcome = outcome(0x22);
+        let other_outcome = outcome(0x33);
+        let admission = admission_for(&admitted_peer, &admitted_outcome);
+
         assert_eq!(
             VerifiedMachineSessionEvidenceV1::from_verified_handshake(
-                &outcome(),
+                &admitted_outcome,
                 &other_peer,
                 "session-1",
                 &admission,
             ),
             Err(VerifiedSessionEvidenceError::AdmissionIdentityMismatch)
+        );
+        assert_eq!(
+            VerifiedMachineSessionEvidenceV1::from_verified_handshake(
+                &other_outcome,
+                &admitted_peer,
+                "session-1",
+                &admission,
+            ),
+            Err(VerifiedSessionEvidenceError::AdmissionHandshakeMismatch)
         );
     }
 
@@ -404,10 +430,11 @@ mod tests {
     #[test]
     fn empty_or_noncanonical_session_id_fails_closed() {
         let peer = peer(0x55);
-        let admission = admission_for(&peer);
+        let outcome = outcome(0x22);
+        let admission = admission_for(&peer, &outcome);
         assert_eq!(
             VerifiedMachineSessionEvidenceV1::from_verified_handshake(
-                &outcome(),
+                &outcome,
                 &peer,
                 "",
                 &admission,
@@ -416,7 +443,7 @@ mod tests {
         );
         assert_eq!(
             VerifiedMachineSessionEvidenceV1::from_verified_handshake(
-                &outcome(),
+                &outcome,
                 &peer,
                 " session-1",
                 &admission,
@@ -428,9 +455,10 @@ mod tests {
     #[test]
     fn deserialization_rejects_schema_binding_and_field_drift() {
         let peer = peer(0x55);
-        let admission = admission_for(&peer);
+        let outcome = outcome(0x22);
+        let admission = admission_for(&peer, &outcome);
         let evidence = VerifiedMachineSessionEvidenceV1::from_verified_handshake(
-            &outcome(),
+            &outcome,
             &peer,
             "session-1",
             &admission,
