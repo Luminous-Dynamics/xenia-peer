@@ -21,6 +21,21 @@ use crate::authority_history::{
     VerifiedMachineAuthorityHistoryV1, verify_machine_authority_history,
 };
 
+// The raw verified type is crate-internal. Equality means "same verified evidence head and signed
+// horizons" rather than comparing reconstructed implementation details. The head digest commits
+// to the complete transition chain, so this is the stable identity of a verified history state.
+impl PartialEq for VerifiedMachineAuthorityHistoryV1 {
+    fn eq(&self, other: &Self) -> bool {
+        self.peer_identity_fingerprint() == other.peer_identity_fingerprint()
+            && self.observed_through_ms() == other.observed_through_ms()
+            && self.fresh_until_ms() == other.fresh_until_ms()
+            && self.head_sequence() == other.head_sequence()
+            && self.head_digest() == other.head_digest()
+    }
+}
+
+impl Eq for VerifiedMachineAuthorityHistoryV1 {}
+
 /// Consumer-owned bound on the offline/current usefulness of a signed authority-history head.
 ///
 /// This policy deliberately has no serde surface. A remote provider may assert a shorter
