@@ -6,8 +6,8 @@
 //! A successful Xenia handshake proves control of a hybrid signing identity; it does not grant
 //! application authority. This module binds that already-verified identity to an explicit local
 //! machine policy and mints a short-lived, non-serializable admission object. Portable session
-//! evidence can then require that admission instead of accepting caller-supplied authority epochs
-//! or validity horizons.
+//! evidence can then require that admission instead of accepting caller-supplied authority epochs,
+//! time bounds, or revocation assertions.
 
 use std::collections::BTreeMap;
 
@@ -17,7 +17,7 @@ use crate::verified_session_evidence::MachineSessionAuthorityContextV1;
 /// One machine identity's current local authority record.
 ///
 /// This is policy input, not portable session evidence. Persistence/authentication of a policy
-/// file belongs to the embedding application; this type only defines the validated in-memory
+/// file belongs to the embedding application; this type defines only the validated in-memory
 /// semantics used by `xenia-peer-core`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineAuthorityRecordV1 {
@@ -44,16 +44,18 @@ impl MachineAuthorityRecordV1 {
 }
 
 /// Validated local authority policy keyed by the exact hybrid peer identity fingerprint.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct MachineAuthorityPolicyV1 {
     records: BTreeMap<[u8; 32], MachineAuthorityRecordV1>,
+    max_session_lifetime_ms: u64,
 }
 
 /// Non-serializable proof that the current policy admitted one already-verified peer.
 ///
 /// Fields are private and there is no public constructor. External code cannot manufacture an
-/// admission by supplying an epoch directly; it must ask [`MachineAuthorityPolicyV1`] to admit
-/// the exact [`VerifiedPeerIdentity`] produced by the handshake verifier.
+/// admission by supplying an epoch/time horizon directly; it must ask
+/// [`MachineAuthorityPolicyV1`] to admit the exact [`VerifiedPeerIdentity`] produced by the
+/// handshake verifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineAuthorityAdmissionV1 {
     peer_identity_fingerprint: [u8; 32],
@@ -93,6 +95,9 @@ pub enum MachineAuthorityError {
     /// A policy record has an empty or reversed validity interval.
     #[error("machine authority record must have a positive validity interval")]
     InvalidRecordValidity,
+    /// Policy configured a zero maximum session lifetime.
+    #[error("machine authority policy must have a positive maximum session lifetime")]
+    InvalidMaximumSessionLifetime,
     /// No current machine-policy record exists for the verified peer identity.
     #[error("verified peer identity is not enrolled in machine authority policy")]
     UnknownIdentity,
@@ -102,19 +107,24 @@ pub enum MachineAuthorityError {
     /// Current trusted time is outside the machine authority record's validity window.
     #[error("machine authority record is not currently valid")]
     OutsideValidity,
-    /// Requested admission lifetime was zero.
-    #[error("requested machine-session lifetime must be positive")]
-    InvalidRequestedLifetime,
-    /// Computing the requested validity horizon overflowed.
-    #[error("requested machine-session lifetime overflowed")]
+    /// Admission was attempted without an authority-approved trusted time source.
+    #[error("trusted time is required for machine authority admission")]
+    UntrustedTime,
+    /// Computing the policy-owned validity horizon overflowed.
+    #[error("machine-session validity horizon overflowed")]
     LifetimeOverflow,
 }
 
 impl MachineAuthorityPolicyV1 {
-    /// Build a policy while rejecting duplicate identities and malformed validity windows.
+    /// Build a policy while rejecting duplicate identities, malformed validity windows and a
+    /// zero session-lifetime bound.
     pub fn new(
         records: impl IntoIterator<Item = MachineAuthorityRecordV1>,
+        max_session_lifetime_ms: u64,
     ) -> Result<Self, MachineAuthorityError> {
+        if max_session_lifetime_ms == 0 {
+            return Err(MachineAuthorityError::InvalidMaximumSessionLifetime);
+        }
         let mut by_identity = BTreeMap::new();
         for record in records {
             record.validate()?;
@@ -125,21 +135,23 @@ impl MachineAuthorityPolicyV1 {
         }
         Ok(Self {
             records: by_identity,
+            max_session_lifetime_ms,
         })
     }
 
-    /// Admit an already-authenticated peer for a bounded lifetime.
+    /// Admit an already-authenticated peer using only policy-owned authority and lifetime bounds.
     ///
-    /// `requested_lifetime_ms` is clamped to the authority record's own end time; a caller cannot
-    /// extend session evidence beyond the policy that admitted the identity.
+    /// The caller supplies current time plus whether that time is actually trusted; it does not
+    /// supply an authority generation or requested lifetime. Expiry is the earlier of the
+    /// deployment's maximum session lifetime and the enrolled identity's own validity horizon.
     pub fn admit_verified_peer(
         &self,
         peer: &VerifiedPeerIdentity,
         now_ms: u64,
-        requested_lifetime_ms: u64,
+        trusted_time_available: bool,
     ) -> Result<MachineAuthorityAdmissionV1, MachineAuthorityError> {
-        if requested_lifetime_ms == 0 {
-            return Err(MachineAuthorityError::InvalidRequestedLifetime);
+        if !trusted_time_available {
+            return Err(MachineAuthorityError::UntrustedTime);
         }
         let fingerprint = peer.signing_identity_fingerprint();
         let record = self
@@ -152,10 +164,10 @@ impl MachineAuthorityPolicyV1 {
         if now_ms < record.valid_from_ms || now_ms >= record.valid_until_ms {
             return Err(MachineAuthorityError::OutsideValidity);
         }
-        let requested_until = now_ms
-            .checked_add(requested_lifetime_ms)
+        let policy_until = now_ms
+            .checked_add(self.max_session_lifetime_ms)
             .ok_or(MachineAuthorityError::LifetimeOverflow)?;
-        let expires_at_ms = requested_until.min(record.valid_until_ms);
+        let expires_at_ms = policy_until.min(record.valid_until_ms);
         Ok(MachineAuthorityAdmissionV1 {
             peer_identity_fingerprint: fingerprint,
             authority_epoch: record.authority_epoch,
@@ -214,25 +226,42 @@ mod tests {
         }
     }
 
+    fn policy_for(peer: &VerifiedPeerIdentity) -> MachineAuthorityPolicyV1 {
+        MachineAuthorityPolicyV1::new([record_for(peer)], 100).unwrap()
+    }
+
     #[test]
     fn exact_verified_identity_is_required_for_admission() {
         let enrolled = peer(7);
-        let policy = MachineAuthorityPolicyV1::new([record_for(&enrolled)]).unwrap();
-        assert!(policy.admit_verified_peer(&enrolled, 200, 100).is_ok());
+        let policy = policy_for(&enrolled);
+        assert!(policy.admit_verified_peer(&enrolled, 200, true).is_ok());
         assert_eq!(
-            policy.admit_verified_peer(&peer(8), 200, 100),
+            policy.admit_verified_peer(&peer(8), 200, true),
             Err(MachineAuthorityError::UnknownIdentity)
         );
     }
 
     #[test]
-    fn admission_is_clamped_to_policy_horizon() {
+    fn admission_lifetime_is_owned_by_policy_and_clamped_to_record_horizon() {
         let enrolled = peer(7);
-        let policy = MachineAuthorityPolicyV1::new([record_for(&enrolled)]).unwrap();
-        let admission = policy.admit_verified_peer(&enrolled, 900, 500).unwrap();
-        assert_eq!(admission.admitted_at_ms(), 900);
+        let policy = policy_for(&enrolled);
+        let admission = policy.admit_verified_peer(&enrolled, 200, true).unwrap();
+        assert_eq!(admission.admitted_at_ms(), 200);
+        assert_eq!(admission.expires_at_ms(), 300);
+
+        let admission = policy.admit_verified_peer(&enrolled, 950, true).unwrap();
         assert_eq!(admission.expires_at_ms(), 1_000);
         assert_eq!(admission.authority_epoch(), 9);
+    }
+
+    #[test]
+    fn untrusted_clock_cannot_mint_admission() {
+        let enrolled = peer(7);
+        let policy = policy_for(&enrolled);
+        assert_eq!(
+            policy.admit_verified_peer(&enrolled, 200, false),
+            Err(MachineAuthorityError::UntrustedTime)
+        );
     }
 
     #[test]
@@ -240,15 +269,15 @@ mod tests {
         let enrolled = peer(7);
         let mut record = record_for(&enrolled);
         record.revoked = true;
-        let policy = MachineAuthorityPolicyV1::new([record]).unwrap();
+        let policy = MachineAuthorityPolicyV1::new([record], 100).unwrap();
         assert_eq!(
-            policy.admit_verified_peer(&enrolled, 200, 100),
+            policy.admit_verified_peer(&enrolled, 200, true),
             Err(MachineAuthorityError::Revoked)
         );
 
-        let policy = MachineAuthorityPolicyV1::new([record_for(&enrolled)]).unwrap();
+        let policy = policy_for(&enrolled);
         assert_eq!(
-            policy.admit_verified_peer(&enrolled, 1_000, 100),
+            policy.admit_verified_peer(&enrolled, 1_000, true),
             Err(MachineAuthorityError::OutsideValidity)
         );
     }
@@ -256,15 +285,15 @@ mod tests {
     #[test]
     fn live_context_exposes_revocation_and_epoch_rotation() {
         let enrolled = peer(7);
-        let policy = MachineAuthorityPolicyV1::new([record_for(&enrolled)]).unwrap();
-        let admission = policy.admit_verified_peer(&enrolled, 200, 100).unwrap();
+        let policy = policy_for(&enrolled);
+        let admission = policy.admit_verified_peer(&enrolled, 200, true).unwrap();
         let context = policy.context_for(&admission, 250, true);
         assert!(!context.revoked);
         assert_eq!(context.authority_epoch, 9);
 
         let mut rotated = record_for(&enrolled);
         rotated.authority_epoch = 10;
-        let policy = MachineAuthorityPolicyV1::new([rotated]).unwrap();
+        let policy = MachineAuthorityPolicyV1::new([rotated], 100).unwrap();
         let context = policy.context_for(&admission, 250, true);
         assert!(!context.revoked);
         assert_eq!(context.authority_epoch, 10);
@@ -274,19 +303,23 @@ mod tests {
     }
 
     #[test]
-    fn malformed_or_duplicate_policy_records_are_rejected() {
+    fn malformed_duplicate_or_unbounded_policy_records_are_rejected() {
         let enrolled = peer(7);
         let mut invalid = record_for(&enrolled);
         invalid.valid_until_ms = invalid.valid_from_ms;
         assert!(matches!(
-            MachineAuthorityPolicyV1::new([invalid]),
+            MachineAuthorityPolicyV1::new([invalid], 100),
             Err(MachineAuthorityError::InvalidRecordValidity)
         ));
 
         let record = record_for(&enrolled);
         assert!(matches!(
-            MachineAuthorityPolicyV1::new([record.clone(), record]),
+            MachineAuthorityPolicyV1::new([record.clone(), record], 100),
             Err(MachineAuthorityError::DuplicateIdentity)
+        ));
+        assert!(matches!(
+            MachineAuthorityPolicyV1::new([record_for(&enrolled)], 0),
+            Err(MachineAuthorityError::InvalidMaximumSessionLifetime)
         ));
     }
 }
