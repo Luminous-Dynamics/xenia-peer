@@ -56,11 +56,13 @@ pub mod file_transfer;
 pub mod frame;
 pub mod handshake;
 pub mod m1_session;
+pub mod machine_authority;
 pub mod producer_flow;
 pub mod receive_reservation;
 mod session;
 pub mod transfer_source;
 pub mod transport;
+pub mod verified_session_evidence;
 
 pub use file_transfer::{
     IncomingFileStageError, IncomingFileStager, cleanup_orphaned_receive_staging,
@@ -80,11 +82,19 @@ pub use handshake::{RekeyPolicy, SessionEpochState};
 pub use m1_session::{
     M1AuditEvent, M1Permission, M1PermissionSet, M1SessionError, M1SessionMachine, M1SessionState,
 };
+pub use machine_authority::{
+    MachineAuthorityAdmissionV1, MachineAuthorityContextV1, MachineAuthorityError,
+    MachineAuthorityPolicyV1, MachineAuthorityRecordV1,
+};
 pub use receive_reservation::{
     ReceiveReservation, ReceiveReservationError, ReceiveReservationPool,
 };
 pub use session::{FrameLane, LaneSession, Session, SessionError, SessionRole};
 pub use transfer_source::{TransferChunk, TransferSource, TransferSourceError};
+pub use verified_session_evidence::{
+    MachineSessionAuthorityContextV1, VERIFIED_MACHINE_SESSION_EVIDENCE_SCHEMA_V1,
+    VerifiedMachineSessionEvidenceV1, VerifiedSessionEvidenceError,
+};
 pub use xenia_handshake::{
     HandshakeManager, RekeyEpochContextV1, RekeyReason, derive_negotiated_context_key,
     derive_rekey_epoch_keys,
