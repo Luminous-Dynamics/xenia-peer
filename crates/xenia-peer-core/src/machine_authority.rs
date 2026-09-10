@@ -4,14 +4,14 @@
 //! Local machine/peer authority admission, deliberately separate from human operator RBAC.
 //!
 //! A successful Xenia handshake proves control of a hybrid signing identity; it does not grant
-//! application authority. This module binds that already-verified identity to an explicit local
-//! machine policy and mints a short-lived, non-serializable admission object. Portable session
-//! evidence can then require that admission instead of accepting caller-supplied authority epochs,
-//! time bounds, or revocation assertions.
+//! application authority. This module binds that already-verified identity and exact handshake to
+//! an explicit local machine policy and mints a short-lived, non-serializable admission object.
+//! Portable session evidence can then require that admission instead of accepting caller-supplied
+//! authority epochs, time bounds, revocation assertions, or a reusable identity-only approval.
 
 use std::collections::BTreeMap;
 
-use crate::handshake::VerifiedPeerIdentity;
+use crate::handshake::{HandshakeOutcome, VerifiedPeerIdentity};
 use crate::verified_session_evidence::MachineSessionAuthorityContextV1;
 
 /// One machine identity's current local authority record.
@@ -50,15 +50,17 @@ pub struct MachineAuthorityPolicyV1 {
     max_session_lifetime_ms: u64,
 }
 
-/// Non-serializable proof that the current policy admitted one already-verified peer.
+/// Non-serializable proof that current policy admitted one exact verified handshake.
 ///
 /// Fields are private and there is no public constructor. External code cannot manufacture an
 /// admission by supplying an epoch/time horizon directly; it must ask
-/// [`MachineAuthorityPolicyV1`] to admit the exact [`VerifiedPeerIdentity`] produced by the
-/// handshake verifier.
+/// [`MachineAuthorityPolicyV1`] to admit the exact [`VerifiedPeerIdentity`] and
+/// [`HandshakeOutcome`] produced by the handshake verifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineAuthorityAdmissionV1 {
     peer_identity_fingerprint: [u8; 32],
+    handshake_transcript_hash: [u8; 32],
+    negotiated_context_hash: Option<[u8; 32]>,
     authority_epoch: u64,
     admitted_at_ms: u64,
     expires_at_ms: u64,
@@ -83,6 +85,12 @@ impl MachineAuthorityAdmissionV1 {
     /// Exclusive hard expiry of this admission.
     pub const fn expires_at_ms(&self) -> u64 {
         self.expires_at_ms
+    }
+
+    /// Whether this admission belongs to the exact completed handshake outcome.
+    pub(crate) fn matches_handshake(&self, outcome: &HandshakeOutcome) -> bool {
+        self.handshake_transcript_hash == outcome.transcript_hash
+            && self.negotiated_context_hash == outcome.negotiated_context_hash
     }
 }
 
@@ -139,14 +147,16 @@ impl MachineAuthorityPolicyV1 {
         })
     }
 
-    /// Admit an already-authenticated peer using only policy-owned authority and lifetime bounds.
+    /// Admit one already-authenticated handshake using only policy-owned authority/lifetime bounds.
     ///
     /// The caller supplies current time plus whether that time is actually trusted; it does not
     /// supply an authority generation or requested lifetime. Expiry is the earlier of the
     /// deployment's maximum session lifetime and the enrolled identity's own validity horizon.
-    pub fn admit_verified_peer(
+    /// The returned admission is bound to this exact transcript and negotiated context.
+    pub fn admit_verified_session(
         &self,
         peer: &VerifiedPeerIdentity,
+        outcome: &HandshakeOutcome,
         now_ms: u64,
         trusted_time_available: bool,
     ) -> Result<MachineAuthorityAdmissionV1, MachineAuthorityError> {
@@ -170,6 +180,8 @@ impl MachineAuthorityPolicyV1 {
         let expires_at_ms = policy_until.min(record.valid_until_ms);
         Ok(MachineAuthorityAdmissionV1 {
             peer_identity_fingerprint: fingerprint,
+            handshake_transcript_hash: outcome.transcript_hash,
+            negotiated_context_hash: outcome.negotiated_context_hash,
             authority_epoch: record.authority_epoch,
             admitted_at_ms: now_ms,
             expires_at_ms,
@@ -206,11 +218,23 @@ impl MachineAuthorityPolicyV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xenia_handshake::derive_session_key_schedule;
 
     fn peer(byte: u8) -> VerifiedPeerIdentity {
         VerifiedPeerIdentity {
             ed25519_pk: [byte; 32],
             ml_dsa_pk: vec![byte.wrapping_add(1); xenia_handshake::ML_DSA_65_PK_LEN],
+        }
+    }
+
+    fn outcome(byte: u8) -> HandshakeOutcome {
+        let transcript_hash = [byte; 32];
+        HandshakeOutcome {
+            session_key: [0x11; 32],
+            transcript_hash,
+            key_schedule: derive_session_key_schedule(&[0x11; 32], &transcript_hash),
+            negotiated_context_hash: Some([byte.wrapping_add(1); 32]),
+            host_identity_fingerprint: [0x44; 32],
         }
     }
 
@@ -231,23 +255,44 @@ mod tests {
     #[test]
     fn exact_verified_identity_is_required_for_admission() {
         let enrolled = peer(7);
+        let handshake = outcome(0x22);
         let policy = policy_for(&enrolled);
-        assert!(policy.admit_verified_peer(&enrolled, 200, true).is_ok());
+        assert!(policy
+            .admit_verified_session(&enrolled, &handshake, 200, true)
+            .is_ok());
         assert_eq!(
-            policy.admit_verified_peer(&peer(8), 200, true),
+            policy.admit_verified_session(&peer(8), &handshake, 200, true),
             Err(MachineAuthorityError::UnknownIdentity)
         );
     }
 
     #[test]
+    fn admission_is_bound_to_exact_handshake() {
+        let enrolled = peer(7);
+        let handshake = outcome(0x22);
+        let other_handshake = outcome(0x33);
+        let policy = policy_for(&enrolled);
+        let admission = policy
+            .admit_verified_session(&enrolled, &handshake, 200, true)
+            .unwrap();
+        assert!(admission.matches_handshake(&handshake));
+        assert!(!admission.matches_handshake(&other_handshake));
+    }
+
+    #[test]
     fn admission_lifetime_is_owned_by_policy_and_clamped_to_record_horizon() {
         let enrolled = peer(7);
+        let handshake = outcome(0x22);
         let policy = policy_for(&enrolled);
-        let admission = policy.admit_verified_peer(&enrolled, 200, true).unwrap();
+        let admission = policy
+            .admit_verified_session(&enrolled, &handshake, 200, true)
+            .unwrap();
         assert_eq!(admission.admitted_at_ms(), 200);
         assert_eq!(admission.expires_at_ms(), 300);
 
-        let admission = policy.admit_verified_peer(&enrolled, 950, true).unwrap();
+        let admission = policy
+            .admit_verified_session(&enrolled, &handshake, 950, true)
+            .unwrap();
         assert_eq!(admission.expires_at_ms(), 1_000);
         assert_eq!(admission.authority_epoch(), 9);
     }
@@ -255,9 +300,10 @@ mod tests {
     #[test]
     fn untrusted_clock_cannot_mint_admission() {
         let enrolled = peer(7);
+        let handshake = outcome(0x22);
         let policy = policy_for(&enrolled);
         assert_eq!(
-            policy.admit_verified_peer(&enrolled, 200, false),
+            policy.admit_verified_session(&enrolled, &handshake, 200, false),
             Err(MachineAuthorityError::UntrustedTime)
         );
     }
@@ -265,17 +311,18 @@ mod tests {
     #[test]
     fn revoked_or_out_of_window_identity_fails_closed() {
         let enrolled = peer(7);
+        let handshake = outcome(0x22);
         let mut record = record_for(&enrolled);
         record.revoked = true;
         let policy = MachineAuthorityPolicyV1::new([record], 100).unwrap();
         assert_eq!(
-            policy.admit_verified_peer(&enrolled, 200, true),
+            policy.admit_verified_session(&enrolled, &handshake, 200, true),
             Err(MachineAuthorityError::Revoked)
         );
 
         let policy = policy_for(&enrolled);
         assert_eq!(
-            policy.admit_verified_peer(&enrolled, 1_000, true),
+            policy.admit_verified_session(&enrolled, &handshake, 1_000, true),
             Err(MachineAuthorityError::OutsideValidity)
         );
     }
@@ -283,8 +330,11 @@ mod tests {
     #[test]
     fn live_context_exposes_revocation_and_epoch_rotation() {
         let enrolled = peer(7);
+        let handshake = outcome(0x22);
         let policy = policy_for(&enrolled);
-        let admission = policy.admit_verified_peer(&enrolled, 200, true).unwrap();
+        let admission = policy
+            .admit_verified_session(&enrolled, &handshake, 200, true)
+            .unwrap();
         let context = policy.context_for(&admission, 250, true);
         assert!(!context.revoked());
         assert_eq!(context.authority_epoch(), 9);
