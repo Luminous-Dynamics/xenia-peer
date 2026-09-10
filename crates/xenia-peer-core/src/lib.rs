@@ -83,8 +83,8 @@ pub use m1_session::{
     M1AuditEvent, M1Permission, M1PermissionSet, M1SessionError, M1SessionMachine, M1SessionState,
 };
 pub use machine_authority::{
-    MachineAuthorityAdmissionV1, MachineAuthorityError, MachineAuthorityPolicyV1,
-    MachineAuthorityRecordV1,
+    MachineAuthorityAdmissionV1, MachineAuthorityContextV1, MachineAuthorityError,
+    MachineAuthorityPolicyV1, MachineAuthorityRecordV1,
 };
 pub use receive_reservation::{
     ReceiveReservation, ReceiveReservationError, ReceiveReservationPool,
