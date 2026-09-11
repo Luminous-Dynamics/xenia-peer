@@ -29,6 +29,11 @@
 //! the ledger to a stable session-transcript hash so a valid consent chain
 //! cannot be replayed beside the wrong handshake or session transcript.
 //!
+//! Detached application evidence can use [`DetachedEvidenceAttestation`] to
+//! authenticate an exact typed 32-byte commitment without pretending that the
+//! subject is a consent-ledger event. Detached signature validity establishes
+//! neither trust nor authority; callers must apply those policies separately.
+//!
 //! A downstream auditor — including a non-operator third party —
 //! can use [`Verifier::verify_chain`] to reconstruct every hash link
 //! and every signature offline, using only the operator's public key.
@@ -64,6 +69,7 @@
 #![deny(unsafe_code)]
 
 mod archive;
+mod attestation;
 mod binding;
 mod chain;
 mod checkpoint;
@@ -85,6 +91,18 @@ pub use archive::{
     LEDGER_ARCHIVE_SEGMENT_SCHEMA, LedgerArchiveError, LedgerArchiveSegment,
     MAX_LEDGER_ARCHIVE_SEGMENT_ENTRIES, MAX_LEDGER_ARCHIVE_SEQUENCE_SEGMENTS,
     ledger_archive_segment_digest, ledger_archive_sequence_digest,
+};
+
+pub use attestation::{
+    DETACHED_EVIDENCE_ATTESTATION_MESSAGE_DOMAIN, DETACHED_EVIDENCE_ATTESTATION_SCHEMA,
+    DetachedEvidenceAttestation, DetachedEvidenceAttestationError,
+    detached_evidence_attestation_message, sign_detached_evidence_attestation_ed25519,
+    verify_detached_evidence_attestation_ed25519,
+    verify_detached_evidence_attestation_with_backend,
+};
+#[cfg(feature = "pqc-signatures")]
+pub use attestation::{
+    sign_detached_evidence_attestation_ml_dsa_65, sign_detached_evidence_attestation_ml_dsa_87,
 };
 
 pub use binding::{
