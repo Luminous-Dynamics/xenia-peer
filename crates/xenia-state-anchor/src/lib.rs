@@ -3,12 +3,12 @@
 //! Generic, purpose-separated signed state anchors for cross-system continuity.
 //!
 //! This crate is intentionally separate from `xenia-ledger`'s consent-event schema. It reuses
-//! Xenia's algorithm-tagged evidence signature verification boundary, but the signed message has a
-//! distinct domain and carries only an opaque external state commitment.
+//! Xenia's algorithm-tagged evidence-signature verification boundary while giving external state
+//! commitments their own domain, schema, continuity rules, and retained-checkpoint shape.
 //!
 //! Signed anchors prove authenticated continuity of supplied artifacts. Rollback resistance still
 //! requires an independent holder to retain the latest anchor/checkpoint (or a monotonic TPM/TEE /
-//! witness service). A signer who can rewrite its own local files is not, by itself, a rollback
+//! witness service). A signer that can rewrite its own local files is not, by itself, a rollback
 //! anchor.
 
 #![warn(missing_docs)]
@@ -38,9 +38,9 @@ const MAX_OBJECT_ID_BYTES: usize = 512;
 pub struct StateAnchorRecord {
     /// Must equal [`STATE_ANCHOR_SCHEMA`].
     pub schema: String,
-    /// Domain/purpose namespace, e.g. `symthaea.episodic-continuity`.
+    /// Domain/purpose namespace, for example `symthaea.episodic-continuity`.
     pub namespace: String,
-    /// Opaque relying-system object ID, e.g. one canonical memory-store target.
+    /// Opaque relying-system object identifier.
     pub object_id: String,
     /// Strictly monotonic revision. Genesis is revision 1.
     pub revision: u64,
@@ -55,12 +55,10 @@ pub struct StateAnchorRecord {
 }
 
 impl StateAnchorRecord {
-    /// Validate schema, identifiers, revision shape and non-placeholder commitments.
+    /// Validate schema, identifiers, revision shape, and non-placeholder commitments.
     pub fn validate(&self) -> Result<(), StateAnchorError> {
         if self.schema != STATE_ANCHOR_SCHEMA {
-            return Err(StateAnchorError::UnsupportedSchema {
-                schema: self.schema.clone(),
-            });
+            return Err(StateAnchorError::UnsupportedSchema(self.schema.clone()));
         }
         validate_text("namespace", &self.namespace, MAX_NAMESPACE_BYTES)?;
         validate_text("object_id", &self.object_id, MAX_OBJECT_ID_BYTES)?;
@@ -68,32 +66,36 @@ impl StateAnchorRecord {
             return Err(StateAnchorError::ZeroRevision);
         }
         if self.state_commitment == [0; 32] {
-            return Err(StateAnchorError::ZeroCommitment {
-                field: "state_commitment",
-            });
+            return Err(StateAnchorError::ZeroCommitment("state_commitment"));
         }
         if self.policy_commitment == Some([0; 32]) {
-            return Err(StateAnchorError::ZeroCommitment {
-                field: "policy_commitment",
-            });
+            return Err(StateAnchorError::ZeroCommitment("policy_commitment"));
         }
         match (self.revision, self.previous_anchor_fingerprint) {
             (1, None) => {}
             (1, Some(_)) => return Err(StateAnchorError::GenesisHasPrevious),
             (_, None) => return Err(StateAnchorError::MissingPrevious),
             (_, Some([0; 32])) => {
-                return Err(StateAnchorError::ZeroCommitment {
-                    field: "previous_anchor_fingerprint",
-                });
+                return Err(StateAnchorError::ZeroCommitment(
+                    "previous_anchor_fingerprint",
+                ));
             }
             (_, Some(_)) => {}
         }
         Ok(())
     }
 
-    /// Build the exact domain-separated byte message covered by the signature.
-    pub fn signing_message(&self) -> Result<Vec<u8>, StateAnchorError> {
+    /// Build the exact domain-separated message signed by a selected suite/key.
+    ///
+    /// The signature suite and signer public key are covered by the signature itself. This avoids
+    /// relying solely on verifier configuration to prevent algorithm/key-context substitution.
+    pub fn signing_message(
+        &self,
+        suite: SignatureSuite,
+        signer_public_key: &[u8],
+    ) -> Result<Vec<u8>, StateAnchorError> {
         self.validate()?;
+        validate_public_key_shape(suite, signer_public_key)?;
         let mut out = Vec::with_capacity(1024);
         out.extend_from_slice(ANCHOR_MESSAGE_DOMAIN);
         push_text(&mut out, &self.schema);
@@ -116,6 +118,8 @@ impl StateAnchorRecord {
             }
         }
         out.extend_from_slice(&self.timestamp_unix_secs.to_be_bytes());
+        push_text(&mut out, suite.stable_label());
+        push_bytes(&mut out, signer_public_key);
         Ok(out)
     }
 
@@ -135,53 +139,45 @@ impl StateAnchorRecord {
 pub struct SignedStateAnchor {
     /// Signed semantic state.
     pub record: StateAnchorRecord,
-    /// Raw signer public key bytes for the selected signature suite.
+    /// Raw signer public-key bytes for the selected signature suite.
     pub signer_public_key: Vec<u8>,
-    /// Algorithm-tagged signature over [`StateAnchorRecord::signing_message`].
+    /// Algorithm-tagged signature over the record plus suite/key context.
     pub signature: SignatureEnvelope,
 }
 
 impl SignedStateAnchor {
-    /// Validate only local artifact shape. This does not establish key trust or cryptographic
-    /// validity; use [`verify_anchor`] for that.
+    /// Validate local artifact shape only. This does not establish key trust or verify a signature.
     pub fn validate_shape(&self) -> Result<SignatureSuite, StateAnchorError> {
         self.record.validate()?;
         let suite = self.signature.validate_shape()?;
-        if let Some(expected) = suite.fixed_public_key_len() {
-            if self.signer_public_key.len() != expected {
-                return Err(StateAnchorError::BadPublicKeyLength {
-                    expected,
-                    found: self.signer_public_key.len(),
-                });
-            }
-        }
+        validate_public_key_shape(suite, &self.signer_public_key)?;
         Ok(suite)
     }
 
-    /// Fingerprint the exact signed artifact, including signature suite/key/signature bytes.
+    /// Fingerprint the exact signed artifact, including suite, key, and signature bytes.
     ///
-    /// Callers establishing security continuity should first verify the anchor against a trusted
-    /// key. The fingerprint itself is an object commitment, not signature verification.
+    /// Security-sensitive callers should first verify the anchor against an independently trusted
+    /// key. The fingerprint is an object commitment, not signature verification.
     pub fn fingerprint(&self) -> Result<[u8; 32], StateAnchorError> {
-        self.validate_shape()?;
-        let message = self.record.signing_message()?;
+        let suite = self.validate_shape()?;
+        let message = self
+            .record
+            .signing_message(suite, &self.signer_public_key)?;
         let mut hasher = blake3::Hasher::new();
         hasher.update(ANCHOR_FINGERPRINT_DOMAIN);
         hasher.update(&(message.len() as u64).to_be_bytes());
         hasher.update(&message);
         hash_bytes(&mut hasher, self.signature.algorithm.as_bytes());
-        hash_bytes(&mut hasher, &self.signer_public_key);
         hash_bytes(&mut hasher, &self.signature.signature);
         Ok(*hasher.finalize().as_bytes())
     }
 }
 
-/// Signing boundary. Operator-agent/HSM/PQC implementations may keep private key material outside
-/// this crate while returning Xenia's algorithm-tagged [`SignatureEnvelope`].
+/// Signing boundary for operator-agent, HSM, TPM, or future PQC implementations.
 pub trait StateAnchorSigner {
     /// Signature suite emitted by this signer.
     fn suite(&self) -> SignatureSuite;
-    /// Public key bytes corresponding to the signing key.
+    /// Public-key bytes corresponding to the signing key.
     fn public_key(&self) -> Vec<u8>;
     /// Sign the supplied domain-separated message.
     fn sign_state_anchor(&self, message: &[u8]) -> Result<SignatureEnvelope, String>;
@@ -192,20 +188,19 @@ pub fn sign_state_anchor<S: StateAnchorSigner>(
     record: StateAnchorRecord,
     signer: &S,
 ) -> Result<SignedStateAnchor, StateAnchorError> {
-    let message = record.signing_message()?;
+    let suite = signer.suite();
+    let signer_public_key = signer.public_key();
+    let message = record.signing_message(suite, &signer_public_key)?;
     let signature = signer
         .sign_state_anchor(&message)
         .map_err(StateAnchorError::Signer)?;
-    let declared = signature.validate_shape()?;
-    if declared != signer.suite() {
-        return Err(StateAnchorError::SignerSuiteMismatch {
-            signer: signer.suite(),
-            envelope: declared,
-        });
+    let envelope_suite = signature.validate_shape()?;
+    if envelope_suite != suite {
+        return Err(StateAnchorError::SignerSuiteMismatch(suite, envelope_suite));
     }
     let signed = SignedStateAnchor {
         record,
-        signer_public_key: signer.public_key(),
+        signer_public_key,
         signature,
     };
     signed.validate_shape()?;
@@ -220,17 +215,17 @@ pub fn verify_anchor<B: EvidenceSignatureBackend>(
 ) -> Result<(), StateAnchorVerifyError> {
     let suite = anchor.validate_shape()?;
     if suite != backend.suite() {
-        return Err(StateAnchorVerifyError::BackendSuiteMismatch {
-            envelope: suite,
-            backend: backend.suite(),
-        });
+        return Err(StateAnchorVerifyError::BackendSuiteMismatch(
+            suite,
+            backend.suite(),
+        ));
     }
     if anchor.signer_public_key != trusted_public_key {
         return Err(StateAnchorVerifyError::TrustedKeyMismatch);
     }
     backend.verify_signature(
         trusted_public_key,
-        &anchor.record.signing_message()?,
+        &anchor.record.signing_message(suite, trusted_public_key)?,
         &anchor.signature.signature,
     )?;
     Ok(())
@@ -259,19 +254,19 @@ pub fn verify_direct_successor<B: EvidenceSignatureBackend>(
         .checked_add(1)
         .ok_or(StateAnchorContinuityError::RevisionOverflow)?;
     if candidate.record.revision != expected_revision {
-        return Err(StateAnchorContinuityError::NotDirectSuccessor {
-            previous: previous.record.revision,
-            candidate: candidate.record.revision,
-        });
+        return Err(StateAnchorContinuityError::NotDirectSuccessor(
+            previous.record.revision,
+            candidate.record.revision,
+        ));
     }
     if candidate.record.previous_anchor_fingerprint != Some(previous.fingerprint()?) {
         return Err(StateAnchorContinuityError::PreviousFingerprintMismatch);
     }
     if candidate.record.timestamp_unix_secs < previous.record.timestamp_unix_secs {
-        return Err(StateAnchorContinuityError::TimestampRegressed {
-            previous: previous.record.timestamp_unix_secs,
-            candidate: candidate.record.timestamp_unix_secs,
-        });
+        return Err(StateAnchorContinuityError::TimestampRegressed(
+            previous.record.timestamp_unix_secs,
+            candidate.record.timestamp_unix_secs,
+        ));
     }
     Ok(())
 }
@@ -295,7 +290,7 @@ pub fn verify_extension<B: EvidenceSignatureBackend>(
 /// Freshness policy for signed anchors/checkpoints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StateAnchorFreshnessPolicy {
-    /// Maximum accepted age or `None` for archival acceptance.
+    /// Maximum accepted age, or `None` for archival acceptance.
     pub max_age_secs: Option<u64>,
     /// Maximum positive clock skew accepted from the signer.
     pub max_future_skew_secs: u64,
@@ -322,16 +317,16 @@ pub fn verify_anchor_freshness<B: EvidenceSignatureBackend>(
     if anchor.record.timestamp_unix_secs
         > now_unix_secs.saturating_add(policy.max_future_skew_secs)
     {
-        return Err(StateAnchorContinuityError::AnchorFromFuture {
-            anchor: anchor.record.timestamp_unix_secs,
-            now: now_unix_secs,
-            maximum_skew: policy.max_future_skew_secs,
-        });
+        return Err(StateAnchorContinuityError::AnchorFromFuture(
+            anchor.record.timestamp_unix_secs,
+            now_unix_secs,
+            policy.max_future_skew_secs,
+        ));
     }
     if let Some(maximum_age) = policy.max_age_secs {
         let age = now_unix_secs.saturating_sub(anchor.record.timestamp_unix_secs);
         if age > maximum_age {
-            return Err(StateAnchorContinuityError::AnchorTooOld { age, maximum_age });
+            return Err(StateAnchorContinuityError::AnchorTooOld(age, maximum_age));
         }
     }
     Ok(())
@@ -339,7 +334,7 @@ pub fn verify_anchor_freshness<B: EvidenceSignatureBackend>(
 
 /// Privacy-reduced retained checkpoint for one signed anchor.
 ///
-/// It omits namespace/object/state commitments. `target_fingerprint` still prevents replay of a
+/// It omits namespace/object/state commitments. `target_fingerprint` prevents replay of the
 /// retained checkpoint beside a different relying-system target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateAnchorCheckpoint {
@@ -351,84 +346,76 @@ pub struct StateAnchorCheckpoint {
     pub anchor_fingerprint: [u8; 32],
     /// Privacy-reduced fingerprint of namespace/object.
     pub target_fingerprint: [u8; 32],
-    /// Signer public key bytes.
+    /// Signer public-key bytes.
     pub signer_public_key: Vec<u8>,
     /// Unix seconds this checkpoint was produced.
     pub timestamp_unix_secs: u64,
-    /// Algorithm-tagged signature over all preceding checkpoint fields.
+    /// Algorithm-tagged signature over all preceding checkpoint fields plus suite/key context.
     pub signature: SignatureEnvelope,
 }
 
 impl StateAnchorCheckpoint {
-    /// Build the exact checkpoint signing message.
+    /// Validate shape and build the exact checkpoint signing message.
     pub fn signing_message(&self) -> Result<Vec<u8>, StateAnchorError> {
-        if self.schema != STATE_ANCHOR_CHECKPOINT_SCHEMA {
-            return Err(StateAnchorError::UnsupportedCheckpointSchema {
-                schema: self.schema.clone(),
-            });
-        }
-        if self.revision == 0 {
-            return Err(StateAnchorError::ZeroRevision);
-        }
-        if self.anchor_fingerprint == [0; 32] || self.target_fingerprint == [0; 32] {
-            return Err(StateAnchorError::ZeroCommitment {
-                field: "checkpoint_fingerprint",
-            });
-        }
         let suite = self.signature.validate_shape()?;
-        if let Some(expected) = suite.fixed_public_key_len() {
-            if self.signer_public_key.len() != expected {
-                return Err(StateAnchorError::BadPublicKeyLength {
-                    expected,
-                    found: self.signer_public_key.len(),
-                });
-            }
-        }
-        let mut out = Vec::with_capacity(512);
-        out.extend_from_slice(CHECKPOINT_MESSAGE_DOMAIN);
-        push_text(&mut out, &self.schema);
-        out.extend_from_slice(&self.revision.to_be_bytes());
-        out.extend_from_slice(&self.anchor_fingerprint);
-        out.extend_from_slice(&self.target_fingerprint);
-        hash_bytes_into_vec(&mut out, &self.signer_public_key);
-        out.extend_from_slice(&self.timestamp_unix_secs.to_be_bytes());
-        Ok(out)
+        checkpoint_message(
+            &self.schema,
+            self.revision,
+            self.anchor_fingerprint,
+            self.target_fingerprint,
+            &self.signer_public_key,
+            self.timestamp_unix_secs,
+            suite,
+        )
     }
 }
 
-/// Create a signed privacy-reduced checkpoint using the same signer identity as the anchor.
-pub fn sign_anchor_checkpoint<S: StateAnchorSigner>(
+/// Create a signed privacy-reduced checkpoint using the same verified signer identity as `anchor`.
+///
+/// The source anchor is cryptographically verified before the checkpoint is issued. This prevents
+/// an otherwise-valid signer from accidentally countersigning the fingerprint of an invalid anchor.
+pub fn sign_anchor_checkpoint<S: StateAnchorSigner, B: EvidenceSignatureBackend>(
     anchor: &SignedStateAnchor,
     signer: &S,
+    backend: &B,
     timestamp_unix_secs: u64,
 ) -> Result<StateAnchorCheckpoint, StateAnchorError> {
-    anchor.validate_shape()?;
+    let suite = signer.suite();
     let signer_public_key = signer.public_key();
-    if signer_public_key != anchor.signer_public_key || signer.suite() != anchor.signature.suite()? {
-        return Err(StateAnchorError::CheckpointSignerMismatch);
+    if suite != backend.suite() {
+        return Err(StateAnchorError::SignerSuiteMismatch(suite, backend.suite()));
     }
-    let mut checkpoint = StateAnchorCheckpoint {
-        schema: STATE_ANCHOR_CHECKPOINT_SCHEMA.into(),
-        revision: anchor.record.revision,
-        anchor_fingerprint: anchor.fingerprint()?,
-        target_fingerprint: anchor.record.target_fingerprint()?,
-        signer_public_key,
+    verify_anchor(anchor, &signer_public_key, backend)
+        .map_err(|_| StateAnchorError::CheckpointSourceVerificationFailed)?;
+
+    let schema = STATE_ANCHOR_CHECKPOINT_SCHEMA.to_string();
+    let anchor_fingerprint = anchor.fingerprint()?;
+    let target_fingerprint = anchor.record.target_fingerprint()?;
+    let message = checkpoint_message(
+        &schema,
+        anchor.record.revision,
+        anchor_fingerprint,
+        target_fingerprint,
+        &signer_public_key,
         timestamp_unix_secs,
-        // Temporary shape-valid placeholder is replaced before return.
-        signature: SignatureEnvelope::new(signer.suite(), vec![0; signer.suite().fixed_signature_len().unwrap_or(0)]),
-    };
-    let message = checkpoint.signing_message()?;
-    checkpoint.signature = signer
+        suite,
+    )?;
+    let signature = signer
         .sign_state_anchor(&message)
         .map_err(StateAnchorError::Signer)?;
-    let envelope_suite = checkpoint.signature.validate_shape()?;
-    if envelope_suite != signer.suite() {
-        return Err(StateAnchorError::SignerSuiteMismatch {
-            signer: signer.suite(),
-            envelope: envelope_suite,
-        });
+    let envelope_suite = signature.validate_shape()?;
+    if envelope_suite != suite {
+        return Err(StateAnchorError::SignerSuiteMismatch(suite, envelope_suite));
     }
-    // Rebuild/validate the final message after replacing the placeholder signature shape.
+    let checkpoint = StateAnchorCheckpoint {
+        schema,
+        revision: anchor.record.revision,
+        anchor_fingerprint,
+        target_fingerprint,
+        signer_public_key,
+        timestamp_unix_secs,
+        signature,
+    };
     checkpoint.signing_message()?;
     Ok(checkpoint)
 }
@@ -444,10 +431,10 @@ pub fn verify_anchor_checkpoint<B: EvidenceSignatureBackend>(
     }
     let suite = checkpoint.signature.validate_shape()?;
     if suite != backend.suite() {
-        return Err(StateAnchorVerifyError::BackendSuiteMismatch {
-            envelope: suite,
-            backend: backend.suite(),
-        });
+        return Err(StateAnchorVerifyError::BackendSuiteMismatch(
+            suite,
+            backend.suite(),
+        ));
     }
     backend.verify_signature(
         trusted_public_key,
@@ -471,10 +458,10 @@ pub fn verify_successor_from_checkpoint<B: EvidenceSignatureBackend>(
         .checked_add(1)
         .ok_or(StateAnchorContinuityError::RevisionOverflow)?;
     if candidate.record.revision != expected_revision {
-        return Err(StateAnchorContinuityError::NotDirectSuccessor {
-            previous: retained.revision,
-            candidate: candidate.record.revision,
-        });
+        return Err(StateAnchorContinuityError::NotDirectSuccessor(
+            retained.revision,
+            candidate.record.revision,
+        ));
     }
     if candidate.record.previous_anchor_fingerprint != Some(retained.anchor_fingerprint) {
         return Err(StateAnchorContinuityError::PreviousFingerprintMismatch);
@@ -483,10 +470,60 @@ pub fn verify_successor_from_checkpoint<B: EvidenceSignatureBackend>(
         return Err(StateAnchorContinuityError::TargetChanged);
     }
     if candidate.record.timestamp_unix_secs < retained.timestamp_unix_secs {
-        return Err(StateAnchorContinuityError::TimestampRegressed {
-            previous: retained.timestamp_unix_secs,
-            candidate: candidate.record.timestamp_unix_secs,
-        });
+        return Err(StateAnchorContinuityError::TimestampRegressed(
+            retained.timestamp_unix_secs,
+            candidate.record.timestamp_unix_secs,
+        ));
+    }
+    Ok(())
+}
+
+fn checkpoint_message(
+    schema: &str,
+    revision: u64,
+    anchor_fingerprint: [u8; 32],
+    target_fingerprint: [u8; 32],
+    signer_public_key: &[u8],
+    timestamp_unix_secs: u64,
+    suite: SignatureSuite,
+) -> Result<Vec<u8>, StateAnchorError> {
+    if schema != STATE_ANCHOR_CHECKPOINT_SCHEMA {
+        return Err(StateAnchorError::UnsupportedCheckpointSchema(
+            schema.to_string(),
+        ));
+    }
+    if revision == 0 {
+        return Err(StateAnchorError::ZeroRevision);
+    }
+    if anchor_fingerprint == [0; 32] || target_fingerprint == [0; 32] {
+        return Err(StateAnchorError::ZeroCommitment("checkpoint_fingerprint"));
+    }
+    validate_public_key_shape(suite, signer_public_key)?;
+    let mut out = Vec::with_capacity(512);
+    out.extend_from_slice(CHECKPOINT_MESSAGE_DOMAIN);
+    push_text(&mut out, schema);
+    out.extend_from_slice(&revision.to_be_bytes());
+    out.extend_from_slice(&anchor_fingerprint);
+    out.extend_from_slice(&target_fingerprint);
+    out.extend_from_slice(&timestamp_unix_secs.to_be_bytes());
+    push_text(&mut out, suite.stable_label());
+    push_bytes(&mut out, signer_public_key);
+    Ok(out)
+}
+
+fn validate_public_key_shape(
+    suite: SignatureSuite,
+    public_key: &[u8],
+) -> Result<(), StateAnchorError> {
+    if let Some(expected) = suite.fixed_public_key_len() {
+        if public_key.len() != expected {
+            return Err(StateAnchorError::BadPublicKeyLength(
+                expected,
+                public_key.len(),
+            ));
+        }
+    } else if public_key.is_empty() {
+        return Err(StateAnchorError::BadPublicKeyLength(1, 0));
     }
     Ok(())
 }
@@ -497,7 +534,7 @@ fn validate_text(field: &'static str, value: &str, max: usize) -> Result<(), Sta
         || value.len() > max
         || value.chars().any(char::is_control)
     {
-        Err(StateAnchorError::InvalidText { field })
+        Err(StateAnchorError::InvalidText(field))
     } else {
         Ok(())
     }
@@ -506,6 +543,11 @@ fn validate_text(field: &'static str, value: &str, max: usize) -> Result<(), Sta
 fn push_text(out: &mut Vec<u8>, value: &str) {
     out.extend_from_slice(&(value.len() as u64).to_be_bytes());
     out.extend_from_slice(value.as_bytes());
+}
+
+fn push_bytes(out: &mut Vec<u8>, value: &[u8]) {
+    out.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    out.extend_from_slice(value);
 }
 
 fn hash_text(hasher: &mut blake3::Hasher, value: &str) {
@@ -518,50 +560,42 @@ fn hash_bytes(hasher: &mut blake3::Hasher, value: &[u8]) {
     hasher.update(value);
 }
 
-fn hash_bytes_into_vec(out: &mut Vec<u8>, value: &[u8]) {
-    out.extend_from_slice(&(value.len() as u64).to_be_bytes());
-    out.extend_from_slice(value);
-}
-
-/// Artifact construction/shape error.
+/// Artifact construction or local-shape error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum StateAnchorError {
     /// Unknown anchor schema.
-    #[error("unsupported state-anchor schema: {schema}")]
-    UnsupportedSchema { schema: String },
+    #[error("unsupported state-anchor schema: {0}")]
+    UnsupportedSchema(String),
     /// Unknown checkpoint schema.
-    #[error("unsupported state-anchor checkpoint schema: {schema}")]
-    UnsupportedCheckpointSchema { schema: String },
+    #[error("unsupported state-anchor checkpoint schema: {0}")]
+    UnsupportedCheckpointSchema(String),
     /// Invalid namespace/object text.
-    #[error("invalid state-anchor text field `{field}`")]
-    InvalidText { field: &'static str },
+    #[error("invalid state-anchor text field `{0}`")]
+    InvalidText(&'static str),
     /// Revision zero is not valid.
     #[error("state-anchor revision must be nonzero")]
     ZeroRevision,
     /// Commitment must not be the all-zero placeholder.
-    #[error("state-anchor commitment `{field}` must not be all zero")]
-    ZeroCommitment { field: &'static str },
+    #[error("state-anchor commitment `{0}` must not be all zero")]
+    ZeroCommitment(&'static str),
     /// Genesis must not point to a predecessor.
     #[error("genesis state anchor must not contain a previous fingerprint")]
     GenesisHasPrevious,
     /// Non-genesis records must point to an exact predecessor.
     #[error("non-genesis state anchor is missing previous fingerprint")]
     MissingPrevious,
-    /// Public key length disagreed with the selected suite.
-    #[error("state-anchor public-key length mismatch: expected={expected}, found={found}")]
-    BadPublicKeyLength { expected: usize, found: usize },
+    /// Public-key length disagreed with the selected suite.
+    #[error("state-anchor public-key length mismatch: expected={0}, found={1}")]
+    BadPublicKeyLength(usize, usize),
     /// Signing backend failed.
     #[error("state-anchor signer failed: {0}")]
     Signer(String),
-    /// Signature envelope suite disagreed with signer declaration.
-    #[error("state-anchor signer suite {signer:?} disagrees with envelope {envelope:?}")]
-    SignerSuiteMismatch {
-        signer: SignatureSuite,
-        envelope: SignatureSuite,
-    },
-    /// Checkpoint was not produced under the anchor's signer identity.
-    #[error("state-anchor checkpoint signer does not match anchor signer")]
-    CheckpointSignerMismatch,
+    /// Signature envelope suite disagreed with signer/backend declaration.
+    #[error("state-anchor signature suite mismatch: expected={0:?}, actual={1:?}")]
+    SignerSuiteMismatch(SignatureSuite, SignatureSuite),
+    /// A checkpoint source anchor failed cryptographic verification under the checkpoint signer.
+    #[error("state-anchor checkpoint source failed cryptographic verification")]
+    CheckpointSourceVerificationFailed,
     /// Signature-envelope shape failed validation.
     #[error(transparent)]
     SignatureEnvelope(#[from] SignatureEnvelopeError),
@@ -574,11 +608,8 @@ pub enum StateAnchorVerifyError {
     #[error(transparent)]
     Anchor(#[from] StateAnchorError),
     /// Signature suite disagreed with the selected verifier backend.
-    #[error("state-anchor envelope suite {envelope:?} disagrees with verifier backend {backend:?}")]
-    BackendSuiteMismatch {
-        envelope: SignatureSuite,
-        backend: SignatureSuite,
-    },
+    #[error("state-anchor envelope suite {0:?} disagrees with verifier backend {1:?}")]
+    BackendSuiteMismatch(SignatureSuite, SignatureSuite),
     /// Embedded public key differed from the independently trusted key.
     #[error("state-anchor signer public key does not match trusted key")]
     TrustedKeyMismatch,
@@ -587,7 +618,7 @@ pub enum StateAnchorVerifyError {
     Signature(#[from] EvidenceSignatureBackendError),
 }
 
-/// Continuity/freshness verification error.
+/// Continuity or freshness verification error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum StateAnchorContinuityError {
     /// Signature/key verification failed.
@@ -600,8 +631,8 @@ pub enum StateAnchorContinuityError {
     #[error("state-anchor target changed")]
     TargetChanged,
     /// Candidate was not the exact next revision.
-    #[error("state-anchor is not a direct successor: previous={previous}, candidate={candidate}")]
-    NotDirectSuccessor { previous: u64, candidate: u64 },
+    #[error("state-anchor is not a direct successor: previous={0}, candidate={1}")]
+    NotDirectSuccessor(u64, u64),
     /// Revision increment overflowed.
     #[error("state-anchor revision overflow")]
     RevisionOverflow,
@@ -609,18 +640,14 @@ pub enum StateAnchorContinuityError {
     #[error("state-anchor previous fingerprint mismatch")]
     PreviousFingerprintMismatch,
     /// Signed timestamp moved backward.
-    #[error("state-anchor timestamp regressed from {previous} to {candidate}")]
-    TimestampRegressed { previous: u64, candidate: u64 },
+    #[error("state-anchor timestamp regressed from {0} to {1}")]
+    TimestampRegressed(u64, u64),
     /// Anchor timestamp exceeded configured future skew.
-    #[error("state anchor timestamp {anchor} exceeds now {now} plus allowed skew {maximum_skew}")]
-    AnchorFromFuture {
-        anchor: u64,
-        now: u64,
-        maximum_skew: u64,
-    },
+    #[error("state anchor timestamp {0} exceeds now {1} plus allowed skew {2}")]
+    AnchorFromFuture(u64, u64, u64),
     /// Anchor exceeded configured maximum age.
-    #[error("state anchor age {age} seconds exceeds maximum accepted age {maximum_age}")]
-    AnchorTooOld { age: u64, maximum_age: u64 },
+    #[error("state anchor age {0} seconds exceeds maximum accepted age {1}")]
+    AnchorTooOld(u64, u64),
 }
 
 #[cfg(test)]
@@ -684,6 +711,20 @@ mod tests {
     }
 
     #[test]
+    fn signature_binds_key_and_algorithm_context() {
+        let signer = EdSigner(SigningKey::generate(&mut OsRng));
+        let mut anchor = genesis(&signer);
+        let other = EdSigner(SigningKey::generate(&mut OsRng));
+        anchor.signer_public_key = other.public_key();
+        assert!(verify_anchor(
+            &anchor,
+            &other.public_key(),
+            &Ed25519EvidenceSignatureBackend,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn signature_cannot_be_replayed_beside_changed_state_commitment() {
         let signer = EdSigner(SigningKey::generate(&mut OsRng));
         let mut anchor = genesis(&signer);
@@ -744,7 +785,7 @@ mod tests {
                 &signer.public_key(),
                 &Ed25519EvidenceSignatureBackend,
             ),
-            Err(StateAnchorContinuityError::NotDirectSuccessor { .. })
+            Err(StateAnchorContinuityError::NotDirectSuccessor(_, _))
         ));
     }
 
@@ -767,10 +808,16 @@ mod tests {
     }
 
     #[test]
-    fn privacy_reduced_checkpoint_can_verify_direct_successor() {
+    fn privacy_reduced_checkpoint_verifies_source_and_direct_successor() {
         let signer = EdSigner(SigningKey::generate(&mut OsRng));
         let first = genesis(&signer);
-        let checkpoint = sign_anchor_checkpoint(&first, &signer, 105).unwrap();
+        let checkpoint = sign_anchor_checkpoint(
+            &first,
+            &signer,
+            &Ed25519EvidenceSignatureBackend,
+            105,
+        )
+        .unwrap();
         verify_anchor_checkpoint(
             &checkpoint,
             &signer.public_key(),
@@ -792,6 +839,22 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_refuses_invalid_source_anchor() {
+        let signer = EdSigner(SigningKey::generate(&mut OsRng));
+        let mut first = genesis(&signer);
+        first.record.state_commitment = [0x99; 32];
+        assert!(matches!(
+            sign_anchor_checkpoint(
+                &first,
+                &signer,
+                &Ed25519EvidenceSignatureBackend,
+                105,
+            ),
+            Err(StateAnchorError::CheckpointSourceVerificationFailed)
+        ));
+    }
+
+    #[test]
     fn freshness_policy_rejects_old_and_future_anchors() {
         let signer = EdSigner(SigningKey::generate(&mut OsRng));
         let anchor = genesis(&signer);
@@ -806,7 +869,7 @@ mod tests {
                     max_future_skew_secs: 5,
                 },
             ),
-            Err(StateAnchorContinuityError::AnchorTooOld { .. })
+            Err(StateAnchorContinuityError::AnchorTooOld(_, _))
         ));
 
         let future = sign_state_anchor(record(1, None, 1, 2000), &signer).unwrap();
@@ -821,7 +884,7 @@ mod tests {
                     max_future_skew_secs: 5,
                 },
             ),
-            Err(StateAnchorContinuityError::AnchorFromFuture { .. })
+            Err(StateAnchorContinuityError::AnchorFromFuture(_, _, _))
         ));
     }
 }
