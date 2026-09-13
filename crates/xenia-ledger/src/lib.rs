@@ -76,6 +76,7 @@ mod policy;
 mod seal;
 mod signature;
 mod state_witness;
+mod state_witness_policy;
 mod verify;
 mod witness;
 
@@ -158,6 +159,7 @@ pub use state_witness::{
     StateWitnessTrustKey, VerifiedStateWitness, ZERO_STATE_COMMITMENT,
     state_commitment_fingerprint, state_commitment_message, state_witness_message,
 };
+pub use state_witness_policy::{StateWitnessContextError, StateWitnessExpectation};
 
 pub use witness::{
     CHECKPOINT_WITNESS_BUNDLE_SCHEMA, CheckpointWitnessBundle, CheckpointWitnessError,
