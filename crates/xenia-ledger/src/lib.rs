@@ -75,6 +75,8 @@ mod key_transition;
 mod policy;
 mod seal;
 mod signature;
+mod state_witness;
+mod state_witness_policy;
 mod verify;
 mod witness;
 
@@ -149,6 +151,16 @@ pub use signature::{
 pub use signature::{
     MlDsa65EvidenceSignatureBackend, MlDsa87EvidenceSignatureBackend, PQC_SIGNATURE_BACKEND_STATUS,
 };
+
+pub use state_witness::{
+    MAX_STATE_NAMESPACE_BYTES, MAX_STATE_WITNESSES, STATE_COMMITMENT_SCHEMA,
+    STATE_WITNESS_BUNDLE_SCHEMA, StateCommitment, StateWitnessBundle,
+    StateWitnessContinuityError, StateWitnessError, StateWitnessSignature,
+    StateWitnessTrustKey, VerifiedStateWitness, ZERO_STATE_COMMITMENT,
+    state_commitment_fingerprint, state_commitment_message, state_witness_message,
+};
+pub use state_witness_policy::{StateWitnessContextError, StateWitnessExpectation};
+
 pub use witness::{
     CHECKPOINT_WITNESS_BUNDLE_SCHEMA, CheckpointWitnessBundle, CheckpointWitnessError,
     CheckpointWitnessSignature, MAX_CHECKPOINT_WITNESSES, checkpoint_witness_message,
