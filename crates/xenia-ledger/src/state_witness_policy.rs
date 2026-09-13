@@ -7,6 +7,12 @@
 //! commitment. Cross-system consumers also need to prove that the commitment is
 //! for the namespace, target, epoch, and trust context they intended to admit.
 //! This module makes those checks explicit before signature work.
+//!
+//! For cross-system admission, callers should prefer the `_for` verifier entry
+//! points in this module over the lower-level raw quorum verifier. The expected
+//! namespace is constrained to a small ASCII machine-identifier grammar to
+//! avoid Unicode normalization/confusable ambiguity in authority-relevant
+//! relying context.
 
 use thiserror::Error;
 
@@ -26,6 +32,12 @@ pub struct StateWitnessExpectation {
 
 impl StateWitnessExpectation {
     /// Construct an exact expected relying context.
+    ///
+    /// `namespace` is a canonical machine identifier: the first byte must be
+    /// an ASCII lowercase letter or digit; remaining bytes may additionally
+    /// contain `.`, `_`, `-`, or `:`. This is intentionally narrower than the
+    /// generic evidence carrier so first-use admission cannot depend on
+    /// visually confusable Unicode spellings.
     pub fn new(
         namespace: impl Into<String>,
         target_id: [u8; 32],
@@ -33,15 +45,7 @@ impl StateWitnessExpectation {
         trust_context_digest: [u8; 32],
     ) -> Result<Self, StateWitnessContextError> {
         let namespace = namespace.into();
-        if namespace.is_empty() {
-            return Err(StateWitnessContextError::EmptyExpectedNamespace);
-        }
-        if namespace.len() > MAX_STATE_NAMESPACE_BYTES {
-            return Err(StateWitnessContextError::ExpectedNamespaceTooLong {
-                found: namespace.len(),
-                maximum: MAX_STATE_NAMESPACE_BYTES,
-            });
-        }
+        validate_expected_namespace(&namespace)?;
         Ok(Self {
             namespace,
             target_id,
@@ -71,6 +75,31 @@ impl StateWitnessExpectation {
     }
 }
 
+fn validate_expected_namespace(namespace: &str) -> Result<(), StateWitnessContextError> {
+    if namespace.is_empty() {
+        return Err(StateWitnessContextError::EmptyExpectedNamespace);
+    }
+    if namespace.len() > MAX_STATE_NAMESPACE_BYTES {
+        return Err(StateWitnessContextError::ExpectedNamespaceTooLong {
+            found: namespace.len(),
+            maximum: MAX_STATE_NAMESPACE_BYTES,
+        });
+    }
+    let bytes = namespace.as_bytes();
+    let first = bytes[0];
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        return Err(StateWitnessContextError::NonCanonicalExpectedNamespace);
+    }
+    if !bytes.iter().all(|byte| {
+        byte.is_ascii_lowercase()
+            || byte.is_ascii_digit()
+            || matches!(*byte, b'.' | b'_' | b'-' | b':')
+    }) {
+        return Err(StateWitnessContextError::NonCanonicalExpectedNamespace);
+    }
+    Ok(())
+}
+
 fn verify_expected_context(
     bundle: &StateWitnessBundle,
     expected: &StateWitnessExpectation,
@@ -94,6 +123,8 @@ fn verify_expected_context(
 impl Verifier {
     /// Verify exact relying context, then verify witness quorum with explicit
     /// signature backends.
+    ///
+    /// This is the recommended generic cross-system admission entry point.
     pub fn verify_state_witness_quorum_for_with_backends(
         bundle: &StateWitnessBundle,
         expected: &StateWitnessExpectation,
@@ -111,6 +142,8 @@ impl Verifier {
     }
 
     /// Verify exact relying context and the current Ed25519 witness profile.
+    ///
+    /// This is the recommended Ed25519 cross-system admission entry point.
     pub fn verify_state_witness_quorum_ed25519_for(
         bundle: &StateWitnessBundle,
         expected: &StateWitnessExpectation,
@@ -140,6 +173,9 @@ pub enum StateWitnessContextError {
         /// Maximum accepted byte length.
         maximum: usize,
     },
+    /// Expected namespace was outside the canonical cross-system identifier grammar.
+    #[error("expected state-witness namespace is not a canonical ASCII machine identifier")]
+    NonCanonicalExpectedNamespace,
     /// Commitment namespace did not match the caller's expected namespace.
     #[error("state-witness namespace does not match relying context")]
     NamespaceMismatch,
@@ -204,6 +240,31 @@ mod tests {
         )
         .unwrap();
         assert_eq!(verified.commitment().namespace, "test.namespace");
+    }
+
+    #[test]
+    fn noncanonical_expected_namespaces_are_rejected() {
+        for namespace in ["Test.namespace", ".test", "tést.namespace", "test namespace"] {
+            assert_eq!(
+                StateWitnessExpectation::new(
+                    namespace,
+                    [0x10; 32],
+                    [0x20; 32],
+                    [0x30; 32],
+                )
+                .unwrap_err(),
+                StateWitnessContextError::NonCanonicalExpectedNamespace
+            );
+        }
+        for namespace in ["test", "test.namespace", "symthaea:rsk_registry-v1", "0test"] {
+            assert!(StateWitnessExpectation::new(
+                namespace,
+                [0x10; 32],
+                [0x20; 32],
+                [0x30; 32],
+            )
+            .is_ok());
+        }
     }
 
     #[test]
