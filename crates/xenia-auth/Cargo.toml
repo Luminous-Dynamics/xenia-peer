@@ -1,0 +1,18 @@
+[package]
+name = "xenia-auth"
+version = "0.0.0-m0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz <maintainer@luminousdynamics.org>"]
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Concrete Ed25519 and ML-DSA-65 adapters for Xenia generic authenticated subjects"
+publish = false
+
+[dependencies]
+xenia-auth-protocol = { path = "../xenia-auth-protocol" }
+thiserror = "1"
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+ml-dsa = { version = "0.1.1", default-features = true }
+
+[workspace]
