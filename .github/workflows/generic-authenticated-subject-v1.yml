@@ -1,0 +1,360 @@
+name: Xenia Generic Authenticated Subject v1
+
+on:
+  push:
+    branches:
+      - feat/generic-authenticated-subject-v1
+    paths:
+      - '.github/workflows/generic-authenticated-subject-v1.yml'
+      - 'crates/xenia-auth-protocol/**'
+      - 'crates/xenia-auth/**'
+  pull_request:
+    paths:
+      - '.github/workflows/generic-authenticated-subject-v1.yml'
+      - 'crates/xenia-auth-protocol/**'
+      - 'crates/xenia-auth/**'
+
+permissions:
+  contents: read
+
+env:
+  RUST_TOOLCHAIN: '1.94.0'
+  AUTH_V1_PARENT: 'af4fcefc6d4cc7c3f74a3ca48f26abcd97d1e930'
+  AUTH_PROFILE_V1_SHA256: 'e8b6ac90028c3064880bfb6b59ac7fbd1a1db04182bd3841e656bba2736d2b90'
+
+jobs:
+  qualify:
+    name: Qualify generic authenticated-subject protocol
+    if: >-
+      (github.event_name == 'push' &&
+       github.ref_name == 'feat/generic-authenticated-subject-v1') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'feat/generic-authenticated-subject-v1')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact subject head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Bind exact additive tranche
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "$AUTH_V1_PARENT"
+          test "$(git rev-list --count "$AUTH_V1_PARENT..HEAD")" -eq 1
+          mapfile -t changed < <(git diff --name-only "$AUTH_V1_PARENT" HEAD | sort)
+          expected=(
+            '.github/workflows/generic-authenticated-subject-v1.yml'
+            'crates/xenia-auth-protocol/AUTHENTICATION_PROFILE_V1.txt'
+            'crates/xenia-auth-protocol/Cargo.toml'
+            'crates/xenia-auth-protocol/src/lib.rs'
+            'crates/xenia-auth/Cargo.toml'
+            'crates/xenia-auth/src/lib.rs'
+          )
+          mapfile -t expected_sorted < <(printf '%s\n' "${expected[@]}" | sort)
+          test "${#changed[@]}" -eq "${#expected_sorted[@]}"
+          diff -u <(printf '%s\n' "${expected_sorted[@]}") <(printf '%s\n' "${changed[@]}")
+
+          # Existing proof V3 protocol/authentication implementation must remain byte-identical.
+          for path in \
+            crates/xenia-zk-protocol/Cargo.toml \
+            crates/xenia-zk-protocol/src/lib.rs \
+            crates/xenia-zk-auth/Cargo.toml \
+            crates/xenia-zk-auth/src/lib.rs
+          do
+            test "$(git rev-parse "$AUTH_V1_PARENT:$path")" = "$(git rev-parse "HEAD:$path")"
+          done
+
+      - name: Bind frozen authentication profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          profile='crates/xenia-auth-protocol/AUTHENTICATION_PROFILE_V1.txt'
+          test "$(sha256sum "$profile" | awk '{print $1}')" = "$AUTH_PROFILE_V1_SHA256"
+          test "$(wc -c < "$profile")" -eq 1120
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt,clippy
+
+      - name: Materialize deterministic ML-DSA-65 adapter corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p crates/xenia-auth/tests
+          cat > crates/xenia-auth/tests/ml_dsa_subject.rs <<'RS'
+          use ml_dsa::{
+              B32, MlDsa65, SigningKey as MlDsaSigningKey,
+              signature::{Keypair as _, Signer as _},
+          };
+          use xenia_auth::{
+              AuthenticationVerifierRegistryV1, ML_DSA_65_SIGNATURE_BYTES,
+              MlDsa65AuthenticationVerifier, SubjectAuthenticationVerificationError,
+              verify_authentication,
+          };
+          use xenia_auth_protocol::{
+              AuthenticationContextId, AuthenticationSuiteId, SubjectAuthentication,
+              SubjectAuthenticationVerifier, authenticated_subject_digest,
+          };
+
+          #[test]
+          fn deterministic_ml_dsa65_adapter_verifies_exact_generic_subject() {
+              let seed = B32::default();
+              let signing = MlDsaSigningKey::<MlDsa65>::from_seed(&seed);
+              let public = signing.verifying_key().encode();
+              let verifier = MlDsa65AuthenticationVerifier::try_from_public_key_bytes(
+                  public.as_slice(),
+              )
+              .expect("deterministic ML-DSA-65 public key must decode");
+
+              let context = AuthenticationContextId::try_new(
+                  "MYCELIX",
+                  "PublicElection",
+                  "VerifierReceipt",
+                  1,
+              )
+              .expect("fixed authentication context must be canonical");
+              let digest = authenticated_subject_digest(
+                  &context,
+                  &[0xA5; 32],
+                  AuthenticationSuiteId::ML_DSA_65_FIPS204,
+                  &verifier.signer_key_id(),
+              )
+              .expect("fixed generic subject must derive a digest");
+
+              let encoded_signature = signing.sign(&digest).encode();
+              assert_eq!(encoded_signature.as_slice().len(), ML_DSA_65_SIGNATURE_BYTES);
+
+              let authentication = SubjectAuthentication {
+                  suite: AuthenticationSuiteId::ML_DSA_65_FIPS204,
+                  signer_key_id: verifier.signer_key_id(),
+                  signature: encoded_signature.as_slice().to_vec(),
+              };
+              let registry = AuthenticationVerifierRegistryV1::try_new(vec![Box::new(verifier)])
+                  .expect("one exact verifier identity must be accepted");
+
+              assert_eq!(
+                  verify_authentication(&registry, &digest, &authentication),
+                  Ok(())
+              );
+
+              let mut changed_digest = digest;
+              changed_digest[0] ^= 1;
+              assert_eq!(
+                  verify_authentication(&registry, &changed_digest, &authentication),
+                  Err(SubjectAuthenticationVerificationError::SignatureInvalid)
+              );
+
+              let mut truncated = authentication.clone();
+              truncated.signature.pop();
+              assert_eq!(
+                  verify_authentication(&registry, &digest, &truncated),
+                  Err(SubjectAuthenticationVerificationError::SignatureInvalid)
+              );
+          }
+          RS
+
+      - name: Check production-source formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustfmt --edition 2024 --check crates/xenia-auth-protocol/src/lib.rs
+          rustfmt --edition 2024 --check crates/xenia-auth/src/lib.rs
+
+      - name: Generate dependency evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p qualification
+
+          for crate in xenia-auth-protocol xenia-auth
+          do
+            pushd "crates/$crate" >/dev/null
+            cargo generate-lockfile
+            cp Cargo.lock "../../qualification/${crate}.Cargo.lock"
+            sha256sum Cargo.lock > "../../qualification/${crate}.Cargo.lock.sha256"
+            cargo metadata --locked --format-version 1 > "../../qualification/${crate}.cargo-metadata.json"
+            popd >/dev/null
+          done
+          cp crates/xenia-auth-protocol/AUTHENTICATION_PROFILE_V1.txt qualification/
+          sha256sum crates/xenia-auth-protocol/AUTHENTICATION_PROFILE_V1.txt \
+            > qualification/AUTHENTICATION_PROFILE_V1.txt.sha256
+          sha256sum crates/xenia-auth/tests/ml_dsa_subject.rs \
+            > qualification/ml_dsa_subject.rs.sha256
+
+      - name: Execute theorem corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path crates/xenia-auth-protocol/Cargo.toml --locked \
+            2>&1 | tee qualification/xenia-auth-protocol.tests.log
+          cargo test --manifest-path crates/xenia-auth/Cargo.toml --locked \
+            2>&1 | tee qualification/xenia-auth.tests.log
+
+      - name: Run warning-fatal library Clippy
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --manifest-path crates/xenia-auth-protocol/Cargo.toml --locked --lib -- -D warnings \
+            2>&1 | tee qualification/xenia-auth-protocol.clippy.log
+          cargo clippy --manifest-path crates/xenia-auth/Cargo.toml --locked --lib -- -D warnings \
+            2>&1 | tee qualification/xenia-auth.clippy.log
+
+      - name: Independently reproduce canonical vectors
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          profile = Path('crates/xenia-auth-protocol/AUTHENTICATION_PROFILE_V1.txt').read_bytes()
+          assert len(profile) == 1120
+          assert hashlib.sha256(profile).hexdigest() == (
+              'e8b6ac90028c3064880bfb6b59ac7fbd1a1db04182bd3841e656bba2736d2b90'
+          )
+
+          registry = b'XENIA:AuthenticationSuiteRegistry:v1\n1=ed25519\n2=ml-dsa-65-fips204\n'
+          assert hashlib.sha256(registry).hexdigest() == (
+              '0255c2b3070e579d52e41ab6a9d767d1700b61fd68787bbae78bd41aa868945f'
+          )
+
+          key_domain = b'XENIA:AuthenticationSignerKeyId:v1'
+          auth_domain = b'XENIA:AuthenticatedSubject:v1'
+          subject = bytes([0xA5]) * 32
+
+          def lp64(raw):
+              return len(raw).to_bytes(8, 'little') + raw
+
+          def key_id(suite, public_key):
+              return hashlib.sha256(
+                  key_domain + suite.to_bytes(2, 'little') + lp64(public_key)
+              ).digest()
+
+          context = (
+              lp64(b'MYCELIX')
+              + lp64(b'PublicElection')
+              + lp64(b'VerifierReceipt')
+              + (1).to_bytes(4, 'little')
+          )
+
+          def auth_digest(suite, signer):
+              return hashlib.sha256(
+                  auth_domain
+                  + context
+                  + subject
+                  + suite.to_bytes(2, 'little')
+                  + signer
+              ).digest()
+
+          ed_public = bytes.fromhex(
+              '2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12'
+          )
+          ed_id = key_id(1, ed_public)
+          assert ed_id.hex() == (
+              '3c0e8bd016253bfed734ee6a24d4b4a47c2e1546bc04fa002b43229ad295e055'
+          )
+          assert auth_digest(1, ed_id).hex() == (
+              'c457f5b2eac815a0f76d0e04661537a19c6039b5499a56ab80cbdb257430114b'
+          )
+
+          ml_public = bytes([0x42]) * 1952
+          ml_id = key_id(2, ml_public)
+          assert ml_id.hex() == (
+              'ebcf9ada05d734ec989167ee612789047fa32992e81b268edecf4e803e643f07'
+          )
+          assert auth_digest(2, ml_id).hex() == (
+              '880de6d84ceab5beea8856f4c169c4dd01a6387bce9a263c17ffa177870f77c6'
+          )
+          PY
+
+      - name: Audit ownership, profile and anti-relabeling boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          profile='crates/xenia-auth-protocol/AUTHENTICATION_PROFILE_V1.txt'
+          protocol='crates/xenia-auth-protocol/src/lib.rs'
+          adapter='crates/xenia-auth/src/lib.rs'
+          ml_test='crates/xenia-auth/tests/ml_dsa_subject.rs'
+          manifests='crates/xenia-auth-protocol/Cargo.toml crates/xenia-auth/Cargo.toml'
+
+          grep -Fx 'hash=sha-256' "$profile"
+          grep -Fx 'suite-registry-sha256=0255c2b3070e579d52e41ab6a9d767d1700b61fd68787bbae78bd41aa868945f' "$profile"
+          grep -Fx 'suite.1=ed25519' "$profile"
+          grep -Fx 'suite.1.public-key=32-bytes' "$profile"
+          grep -Fx 'suite.1.signature=64-bytes' "$profile"
+          grep -Fx 'suite.1.verification=ed25519-verify-strict' "$profile"
+          grep -Fx 'suite.2=ml-dsa-65-fips204' "$profile"
+          grep -Fx 'suite.2.public-key=1952-bytes' "$profile"
+          grep -Fx 'suite.2.signature=3309-bytes' "$profile"
+          grep -Fx 'suite.2.verification=fips204-ml-dsa-65' "$profile"
+          grep -Fx 'context.component.length=1..64-bytes' "$profile"
+          grep -Fx 'signer-key-id.public-key=1..4096-bytes' "$profile"
+          grep -Fx 'signer-key-id.transcript=domain||suite||public-key-length||public-key' "$profile"
+          grep -Fx 'subject-auth.transcript=domain||ecosystem||application||purpose||context-version||subject-digest||suite||signer-key-id' "$profile"
+          grep -Fx 'detached-auth.signature=1..4096-bytes' "$profile"
+          grep -F 'XENIA:AuthenticationSignerKeyId:v1' "$profile" "$protocol"
+          grep -F 'XENIA:AuthenticatedSubject:v1' "$profile" "$protocol"
+          grep -F 'pub const MAX_CONTEXT_COMPONENT_BYTES_V1: usize = 64;' "$protocol"
+          grep -F 'pub const MAX_PUBLIC_KEY_BYTES_V1: usize = 4096;' "$protocol"
+          grep -F 'pub const MAX_SIGNATURE_BYTES_V1: usize = 4096;' "$protocol"
+          grep -F 'hasher.update(SIGNER_KEY_ID_DOMAIN)' "$protocol"
+          grep -F 'hasher.update(suite.wire_id().to_le_bytes())' "$protocol"
+          grep -F 'append_hash_len_prefixed(&mut hasher, public_key_bytes)?' "$protocol"
+          grep -F 'hasher.update(AUTHENTICATED_SUBJECT_DOMAIN)' "$protocol"
+          grep -F 'append_hash_len_prefixed(hasher, context.ecosystem.as_bytes())?' "$protocol"
+          grep -F 'append_hash_len_prefixed(hasher, context.application.as_bytes())?' "$protocol"
+          grep -F 'append_hash_len_prefixed(hasher, context.purpose.as_bytes())?' "$protocol"
+          grep -F 'hasher.update(context.version.to_le_bytes())' "$protocol"
+          grep -F 'hasher.update(subject_digest)' "$protocol"
+          grep -F 'hasher.update(signer_key_id)' "$protocol"
+          grep -F 'pub const ED25519_PUBLIC_KEY_BYTES: usize = 32;' "$adapter"
+          grep -F 'pub const ED25519_SIGNATURE_BYTES: usize = 64;' "$adapter"
+          grep -F 'pub const ML_DSA_65_PUBLIC_KEY_BYTES: usize = 1952;' "$adapter"
+          grep -F 'pub const ML_DSA_65_SIGNATURE_BYTES: usize = 3309;' "$adapter"
+          grep -F 'verify_strict' "$adapter"
+          grep -F 'MlDsaVerifyingKey::<MlDsa65>::decode' "$adapter"
+          grep -F 'ExactVerifierNotFound' "$adapter"
+          grep -F 'DuplicateVerifierIdentity' "$adapter"
+          grep -F 'MlDsaSigningKey::<MlDsa65>::from_seed(&seed)' "$ml_test"
+          grep -F 'deterministic_ml_dsa65_adapter_verifies_exact_generic_subject' "$ml_test"
+          grep -F 'changed_digest[0] ^= 1;' "$ml_test"
+          grep -F 'truncated.signature.pop();' "$ml_test"
+
+          if grep -Eiq '(xenia-zk|ProofEnvelope|ProofAuthentication)' $manifests "$protocol" "$adapter" "$profile"; then
+            echo 'generic auth tranche must not depend on or model proof envelopes' >&2
+            exit 1
+          fi
+
+      - name: Remove transient qualification inputs and prove immutable checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f crates/xenia-auth-protocol/Cargo.lock crates/xenia-auth/Cargo.lock
+          rm -f crates/xenia-auth/tests/ml_dsa_subject.rs
+          rmdir crates/xenia-auth/tests
+          test -z "$(git status --porcelain=v1 --untracked-files=all | grep -v '^?? qualification/' || true)"
+          printf '%s\n' \
+            "subject_head=$(git rev-parse HEAD)" \
+            "parent=$AUTH_V1_PARENT" \
+            "rust_toolchain=$RUST_TOOLCHAIN" \
+            "authentication_profile_v1_sha256=$AUTH_PROFILE_V1_SHA256" \
+            "ml_dsa65_deterministic_adapter_roundtrip=PASS" \
+            "proof_v3_unchanged=PASS" \
+            "immutable_checkout=PASS" \
+            > qualification/generic-authenticated-subject-v1.status.txt
+
+      - name: Upload qualification evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: generic-authenticated-subject-v1
+          path: qualification/*
+          if-no-files-found: error
+          retention-days: 30
