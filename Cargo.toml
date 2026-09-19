@@ -3,6 +3,7 @@ members = [
     "crates/xenia-peer-core",
     "crates/xenia-operator-proto",
     "crates/xenia-forge-auth-receipt",
+    "crates/xenia-forge-auth-verifier",
     "crates/xenia-operator-agent-proto",
     "apps/xenia-peer",
     "apps/xenia-viewer",
@@ -43,6 +44,7 @@ default-members = [
     "crates/xenia-peer-core",
     "crates/xenia-operator-proto",
     "crates/xenia-forge-auth-receipt",
+    "crates/xenia-forge-auth-verifier",
     "crates/xenia-operator-agent-proto",
     "apps/xenia-peer",
     "apps/xenia-viewer",
@@ -77,6 +79,7 @@ homepage = "https://github.com/Luminous-Dynamics/xenia-peer"
 xenia-wire = "0.2.0-alpha.9"
 xenia-operator-proto = { path = "crates/xenia-operator-proto" }
 xenia-forge-auth-receipt = { path = "crates/xenia-forge-auth-receipt" }
+xenia-forge-auth-verifier = { path = "crates/xenia-forge-auth-verifier" }
 xenia-operator-agent-proto = { path = "crates/xenia-operator-agent-proto" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time", "signal"] }
 bincode = "1.3"
