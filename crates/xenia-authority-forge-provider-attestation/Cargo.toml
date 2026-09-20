@@ -1,0 +1,29 @@
+# Copyright (c) 2024-2026 Tristan Stoltz / Luminous Dynamics
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[package]
+name = "xenia-forge-provider-attestation"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz / Luminous Dynamics"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Hybrid provider attestation for fresh Forge-bound Xenia authentication receipts"
+publish = false
+
+[dependencies]
+ed25519-dalek = "2"
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+xenia-forge-auth-receipt = { path = "../xenia-authority-forge-auth-receipt" }
+xenia-forge-auth-verifier = { path = "../xenia-authority-forge-auth-verifier" }
+xenia-handshake = { path = "../xenia-handshake" }
+
+[dev-dependencies]
+serde_json = "1"
+
+# Standalone qualification boundary. The public attestor consumes the positive
+# fresh-verification type, so arbitrary receipt-shaped data cannot enter the
+# provider-signing API through this crate.
+[workspace]

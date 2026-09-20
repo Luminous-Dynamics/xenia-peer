@@ -1,0 +1,46 @@
+name: Xenia Forge Provider Attestation
+
+on:
+  pull_request:
+    paths:
+      - "crates/xenia-authority-forge-provider-attestation/**"
+      - ".github/workflows/authority-forge-provider-attestation.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/xenia-authority-forge-provider-attestation/**"
+      - ".github/workflows/authority-forge-provider-attestation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: forge-provider-attestation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  provider-attestation:
+    name: Forge provider provenance
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/xenia-authority-forge-provider-attestation
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust 1.94
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: rustfmt, clippy
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test hybrid provider provenance
+        run: cargo test --all-features
