@@ -1,0 +1,232 @@
+name: Xenia SymEval Receipt Statement v1
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/eval-attestation-statement-v1.yml'
+      - 'crates/xenia-eval-attestation-protocol/**'
+  workflow_dispatch:
+
+# Keep only the newest subject for this theorem lane on a given PR/ref.
+# Include github.workflow so unrelated qualification workflows cannot cancel
+# each other: concurrency group names are repository-global.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  RUST_TOOLCHAIN: '1.94.0'
+  EVAL_ATTEST_PARENT: 'e589b65b11f54590a3e5f1883c0581a2b272af0a'
+  EVAL_STATEMENT_PROFILE_SHA256: '52a93990214f5662fb15def488cdfff7d9e68d3511fc1c877eb6603741076a8a'
+  EVAL_STATEMENT_PROFILE_BYTES: '1652'
+  AUTH_PROFILE_SHA256: 'e8b6ac90028c3064880bfb6b59ac7fbd1a1db04182bd3841e656bba2736d2b90'
+
+jobs:
+  qualify:
+    name: Qualify evaluation receipt statement protocol
+    if: >-
+      (github.event_name == 'workflow_dispatch' &&
+       github.ref_name == 'feat/eval-attestation-statement-v1') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'feat/eval-attestation-statement-v1')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact subject head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Bind exact stacked tranche
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "$EVAL_ATTEST_PARENT"
+          test "$(git rev-list --count "$EVAL_ATTEST_PARENT..HEAD")" -eq 1
+          mapfile -t changed < <(git diff --name-only "$EVAL_ATTEST_PARENT" HEAD | sort)
+          expected=(
+            '.github/workflows/eval-attestation-statement-v1.yml'
+            'crates/xenia-eval-attestation-protocol/Cargo.toml'
+            'crates/xenia-eval-attestation-protocol/EVALUATION_RECEIPT_STATEMENT_PROFILE_V1.txt'
+            'crates/xenia-eval-attestation-protocol/src/lib.rs'
+          )
+          mapfile -t expected_sorted < <(printf '%s\n' "${expected[@]}" | sort)
+          test "${#changed[@]}" -eq "${#expected_sorted[@]}"
+          diff -u <(printf '%s\n' "${expected_sorted[@]}") <(printf '%s\n' "${changed[@]}")
+
+          # The qualified generic-authentication substrate is consumed byte-for-byte.
+          for path in \
+            crates/xenia-auth-protocol/AUTHENTICATION_PROFILE_V1.txt \
+            crates/xenia-auth-protocol/Cargo.toml \
+            crates/xenia-auth-protocol/src/lib.rs \
+            crates/xenia-auth/Cargo.toml \
+            crates/xenia-auth/src/lib.rs
+          do
+            test "$(git rev-parse "$EVAL_ATTEST_PARENT:$path")" = "$(git rev-parse "HEAD:$path")"
+          done
+
+      - name: Bind frozen protocol profiles
+        shell: bash
+        run: |
+          set -euo pipefail
+          profile='crates/xenia-eval-attestation-protocol/EVALUATION_RECEIPT_STATEMENT_PROFILE_V1.txt'
+          test "$(sha256sum "$profile" | awk '{print $1}')" = "$EVAL_STATEMENT_PROFILE_SHA256"
+          test "$(wc -c < "$profile")" -eq "$EVAL_STATEMENT_PROFILE_BYTES"
+          test "$(sha256sum crates/xenia-auth-protocol/AUTHENTICATION_PROFILE_V1.txt | awk '{print $1}')" = "$AUTH_PROFILE_SHA256"
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt,clippy
+
+      - name: Check production-source formatting
+        shell: bash
+        run: rustfmt --edition 2024 --check crates/xenia-eval-attestation-protocol/src/lib.rs
+
+      - name: Generate dependency evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p qualification
+          pushd crates/xenia-eval-attestation-protocol >/dev/null
+          cargo generate-lockfile
+          cp Cargo.lock ../../qualification/xenia-eval-attestation-protocol.Cargo.lock
+          sha256sum Cargo.lock > ../../qualification/xenia-eval-attestation-protocol.Cargo.lock.sha256
+          cargo metadata --locked --format-version 1 > ../../qualification/xenia-eval-attestation-protocol.cargo-metadata.json
+          popd >/dev/null
+          cp crates/xenia-eval-attestation-protocol/EVALUATION_RECEIPT_STATEMENT_PROFILE_V1.txt qualification/
+          sha256sum crates/xenia-eval-attestation-protocol/EVALUATION_RECEIPT_STATEMENT_PROFILE_V1.txt \
+            > qualification/EVALUATION_RECEIPT_STATEMENT_PROFILE_V1.txt.sha256
+
+      - name: Execute protocol theorem corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path crates/xenia-eval-attestation-protocol/Cargo.toml --locked \
+            2>&1 | tee qualification/xenia-eval-attestation-protocol.tests.log
+
+      - name: Run warning-fatal library Clippy
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --manifest-path crates/xenia-eval-attestation-protocol/Cargo.toml --locked --lib -- -D warnings \
+            2>&1 | tee qualification/xenia-eval-attestation-protocol.clippy.log
+
+      - name: Independently reproduce canonical vectors
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          profile = Path(
+              'crates/xenia-eval-attestation-protocol/EVALUATION_RECEIPT_STATEMENT_PROFILE_V1.txt'
+          ).read_bytes()
+          assert len(profile) == 1652
+          assert hashlib.sha256(profile).hexdigest() == (
+              '52a93990214f5662fb15def488cdfff7d9e68d3511fc1c877eb6603741076a8a'
+          )
+
+          def lp(raw):
+              return len(raw).to_bytes(8, 'little') + raw
+
+          statement = hashlib.sha256(
+              b'XENIA:SymEvalReceiptStatement:v1'
+              + bytes([1])
+              + lp(b'SYM-EVAL-001C-RUN-0001')
+              + lp(b'sym-eval.evidence-receipt.v1')
+              + (1).to_bytes(4, 'little')
+              + lp(b'sym-eval.evidence-event.v1')
+              + (1).to_bytes(4, 'little')
+              + (42).to_bytes(8, 'little')
+              + bytes([0x11]) * 32
+              + bytes([1])
+              + bytes([0x22]) * 32
+              + bytes([1]) + bytes([0x33]) * 32
+              + bytes([1]) + bytes([0x44]) * 32
+              + bytes([0x55]) * 32
+              + bytes([0x66]) * 32
+              + bytes([0x77]) * 32
+          ).digest()
+          assert statement.hex() == (
+              '0f932e35a7788a95595406831c551c6b9896d27e81437ceebc0720cbbacec842'
+          )
+
+          auth_context = (
+              lp(b'XENIA')
+              + lp(b'SymEval')
+              + lp(b'ReceiptAttestation')
+              + (1).to_bytes(4, 'little')
+          )
+          signer = bytes([0x88]) * 32
+
+          def auth_digest(suite):
+              return hashlib.sha256(
+                  b'XENIA:AuthenticatedSubject:v1'
+                  + auth_context
+                  + statement
+                  + suite.to_bytes(2, 'little')
+                  + signer
+              ).hexdigest()
+
+          assert auth_digest(1) == (
+              'c2cb0124e6d83c96a4ad1eb90ad623023866595fd9e6992c88fd294dc1469f96'
+          )
+          assert auth_digest(2) == (
+              'e65658316680326fb87b5331a6a6c9b994b49f777b592185a15dff0ee8c58fe6'
+          )
+          PY
+
+      - name: Audit semantic and authority boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          profile='crates/xenia-eval-attestation-protocol/EVALUATION_RECEIPT_STATEMENT_PROFILE_V1.txt'
+          source='crates/xenia-eval-attestation-protocol/src/lib.rs'
+          manifest='crates/xenia-eval-attestation-protocol/Cargo.toml'
+
+          grep -Fx 'statement.domain=XENIA:SymEvalReceiptStatement:v1' "$profile"
+          grep -Fx 'assurance.1=typed-statement-signed' "$profile"
+          grep -Fx 'assurance.2=receipt-verified-and-signed' "$profile"
+          grep -Fx 'authentication.context=XENIA:SymEval:ReceiptAttestation:v1' "$profile"
+          grep -F 'EVALUATION_RECEIPT_STATEMENT_DOMAIN_V1' "$source"
+          grep -F 'authenticated_subject_digest' "$source"
+          grep -F 'deserialization_revalidates_invariants' "$source"
+          grep -F 'statement_digest_binds_every_semantic_field' "$source"
+
+          # This tranche contains no signing implementation or crypto-provider dependency.
+          ! grep -Eq 'ed25519-dalek|ml-dsa|ml_dsa' "$manifest"
+          ! grep -Eq 'SigningKey|sign_arbitrary|sign_raw|sign_hash' "$source"
+
+      - name: Record immutable qualification status
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f crates/xenia-eval-attestation-protocol/Cargo.lock
+          test -z "$(git status --porcelain)"
+          printf '%s\n' \
+            "subject_head=$(git rev-parse HEAD)" \
+            "subject_parent=$(git rev-parse HEAD^)" \
+            "statement_profile_sha256=$EVAL_STATEMENT_PROFILE_SHA256" \
+            "generic_auth_parent=$EVAL_ATTEST_PARENT" \
+            "canonical_vectors=PASS" \
+            "validated_deserialization=PASS" \
+            "no_signing_or_key_custody=PASS" \
+            "immutable_checkout=PASS" \
+            > qualification/eval-attestation-statement-v1.status.txt
+
+      - name: Upload qualification evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: eval-attestation-statement-v1
+          path: qualification/*
+          if-no-files-found: error
+          retention-days: 30
