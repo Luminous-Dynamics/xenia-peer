@@ -1,0 +1,41 @@
+name: Xenia Evidence Auth Verifier
+
+on:
+  pull_request:
+    paths:
+      - "crates/xenia-authority-evidence-auth-verifier/**"
+      - ".github/workflows/authority-evidence-auth-verifier.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: evidence-auth-verifier-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verifier:
+    name: Context-bound hybrid evidence auth verifier
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: crates/xenia-authority-evidence-auth-verifier
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Install pinned Rust 1.94
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: rustfmt, clippy
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test real crypto
+        run: cargo test --all-features
