@@ -31,6 +31,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use xenia_forge_auth_verifier::{
+    EnrolledForgeIdentityV1, ForgeAuthFreshnessError, ForgeChallengeStoreV1, SignedForgeAuthV1,
+    VerifiedFreshForgeAuthenticationV1, verify_fresh_forge_authentication_with_resolver_v1,
+};
 use xenia_handshake::ML_DSA_65_PK_LEN;
 use xenia_wire::handshake_highsec::ML_DSA_87_PK_LEN;
 
@@ -220,6 +224,38 @@ impl OperatorPolicy {
             // but a plain slice comparison is exact and simple.
             op.ml_dsa_pubkey.as_slice() == ml_dsa_pubkey
         })
+    }
+
+    /// Verify one fresh Forge authentication proof against this policy's
+    /// exact current hybrid enrollment state.
+    ///
+    /// The verifier consumes freshness and validates both signatures before
+    /// invoking this policy as the trusted enrollment resolver. Therefore an
+    /// unenrolled or rotated-away key pair is still a post-consumption denial:
+    /// it cannot preserve a challenge for retry, and caller data never gets to
+    /// manufacture the authoritative `EnrolledForgeIdentityV1`.
+    pub(crate) fn verify_fresh_forge_authentication(
+        &self,
+        challenges: &mut ForgeChallengeStoreV1,
+        now: u64,
+        signed: SignedForgeAuthV1,
+    ) -> Result<VerifiedFreshForgeAuthenticationV1, ForgeAuthFreshnessError> {
+        verify_fresh_forge_authentication_with_resolver_v1(
+            challenges,
+            now,
+            signed,
+            |ed25519_pubkey, ml_dsa_65_pubkey| {
+                self.lookup_verified(ed25519_pubkey, ml_dsa_65_pubkey)
+                    .map(|op| {
+                        EnrolledForgeIdentityV1::new(
+                            op.operator_id,
+                            op.ed25519_pubkey,
+                            op.ml_dsa_pubkey,
+                            op.ml_dsa_87_pubkey,
+                        )
+                    })
+            },
+        )
     }
 
     /// [`Self::lookup_verified`]'s counterpart for the high-security sealed
