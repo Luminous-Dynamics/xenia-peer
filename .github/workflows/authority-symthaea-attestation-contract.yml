@@ -1,0 +1,46 @@
+name: Xenia Symthaea Attestation Contract
+
+on:
+  pull_request:
+    paths:
+      - "crates/xenia-authority-symthaea-attestation-contract/**"
+      - ".github/workflows/authority-symthaea-attestation-contract.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/xenia-authority-symthaea-attestation-contract/**"
+      - ".github/workflows/authority-symthaea-attestation-contract.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: symthaea-attestation-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: Symthaea attestation byte contract
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/xenia-authority-symthaea-attestation-contract
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust 1.94
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: rustfmt, clippy
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Frozen cross-repository vectors
+        run: cargo test --all-features
