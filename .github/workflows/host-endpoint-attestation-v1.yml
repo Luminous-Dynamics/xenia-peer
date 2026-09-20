@@ -1,0 +1,173 @@
+name: Host Endpoint Attestation V1
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - '.github/workflows/host-endpoint-attestation-v1.yml'
+      - 'crates/xenia-peer-core/src/host_endpoint_attestation.rs'
+      - 'crates/xenia-peer-core/src/lib.rs'
+      - 'crates/xenia-peer-core/src/handshake.rs'
+      - 'crates/xenia-handshake/**'
+      - 'Cargo.lock'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: host-endpoint-attestation-v1-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  host-endpoint-attestation-v1:
+    name: Exact host endpoint attestation V1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout exact event subject
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact source lineage and tranche scope
+        env:
+          BASELINE: af4fcefc6d4cc7c3f74a3ca48f26abcd97d1e930
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            test "$(git rev-parse HEAD)" = "${EXPECTED_HEAD}"
+          fi
+          git cat-file -e "${BASELINE}^{commit}"
+          git merge-base --is-ancestor "${BASELINE}" HEAD
+          python3 - <<'PY'
+          import subprocess
+
+          baseline = 'af4fcefc6d4cc7c3f74a3ca48f26abcd97d1e930'
+          allowed = {
+              '.github/workflows/host-endpoint-attestation-v1.yml',
+              'crates/xenia-peer-core/src/host_endpoint_attestation.rs',
+              'crates/xenia-peer-core/src/lib.rs',
+          }
+          changed = set(
+              subprocess.check_output(
+                  ['git', 'diff', '--name-only', f'{baseline}..HEAD'], text=True
+              ).splitlines()
+          )
+          unexpected = sorted(changed - allowed)
+          if unexpected:
+              raise SystemExit('unexpected XENIA-EXEC-ID-001 paths: ' + ', '.join(unexpected))
+          missing = sorted(allowed - changed)
+          if missing:
+              raise SystemExit('missing exact tranche paths: ' + ', '.join(missing))
+          PY
+
+      - name: Enforce identity and claim-boundary ratchets
+        run: |
+          set -euo pipefail
+          SRC=crates/xenia-peer-core/src/host_endpoint_attestation.rs
+          ROOT=crates/xenia-peer-core/src/lib.rs
+
+          grep -Fq 'pub mod host_endpoint_attestation;' "${ROOT}"
+          grep -Fq 'pub struct XeniaHostEndpointProofV1' "${SRC}"
+          grep -Fq 'pub struct VerifiedXeniaHostEndpointV1' "${SRC}"
+          grep -Fq 'pub struct ExpectedHostEndpointSessionV1' "${SRC}"
+          grep -Fq 'pub fn attest_host_endpoint' "${SRC}"
+          grep -Fq 'pub fn verify_host_endpoint_proof' "${SRC}"
+          grep -Fq 'HandshakeManager::verify(' "${SRC}"
+          grep -Fq 'HandshakeManager::verify_ml_dsa(' "${SRC}"
+          grep -Fq 'host_identity_fingerprint(&proof.ed25519_public_key, &proof.ml_dsa_public_key)' "${SRC}"
+          grep -Fq 'ManagerOutcomeIdentityMismatch' "${SRC}"
+          grep -Fq 'ChallengeMismatch' "${SRC}"
+          grep -Fq 'TranscriptMismatch' "${SRC}"
+          grep -Fq 'NegotiatedContextMismatch' "${SRC}"
+          grep -Fq 'WrongEndpointRole' "${SRC}"
+          grep -Fq 'PolicyProfileMismatch' "${SRC}"
+          grep -Fq 'MissingNegotiatedContext' "${SRC}"
+
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          src = Path('crates/xenia-peer-core/src/host_endpoint_attestation.rs').read_text()
+
+          proof = re.search(
+              r'#\[derive\(([^)]*)\)\]\s*pub struct XeniaHostEndpointProofV1', src, re.S
+          )
+          if not proof:
+              raise SystemExit('missing explicit proof derive surface')
+          proof_derives = {part.strip() for part in proof.group(1).split(',')}
+          if not {'Serialize', 'Deserialize'} <= proof_derives:
+              raise SystemExit('serializable evidence proof lost its storage-only Serde surface')
+
+          verified = re.search(
+              r'#\[derive\(([^)]*)\)\]\s*pub struct VerifiedXeniaHostEndpointV1', src, re.S
+          )
+          if not verified:
+              raise SystemExit('missing explicit verified-result derive surface')
+          verified_derives = {part.strip() for part in verified.group(1).split(',')}
+          forbidden = {'Clone', 'Copy', 'Serialize', 'Deserialize'} & verified_derives
+          if forbidden:
+              raise SystemExit(
+                  'live verified endpoint result must remain opaque/non-bearer; found '
+                  + ', '.join(sorted(forbidden))
+              )
+
+          impl = re.search(
+              r'impl VerifiedXeniaHostEndpointV1\s*\{(.*?)\n\}', src, re.S
+          )
+          if not impl:
+              raise SystemExit('missing VerifiedXeniaHostEndpointV1 impl')
+          if re.search(r'pub\s+(?:const\s+)?fn\s+(?:new|from_|deserialize|restore|unchecked)', impl.group(1)):
+              raise SystemExit('live verified endpoint result gained a public reconstruction path')
+
+          signature = re.search(
+              r'pub fn verify_host_endpoint_proof\s*\((.*?)\)\s*->', src, re.S
+          )
+          if not signature or 'expected_session: ExpectedHostEndpointSessionV1' not in signature.group(1):
+              raise SystemExit('proof verification must require independent expected live-session state')
+
+          if 'negotiated_context_hash\n        .ok_or(HostEndpointProofError::MissingNegotiatedContext)' not in src:
+              raise SystemExit('attestation must fail closed when negotiated session context is absent')
+          PY
+
+      - name: Setup pinned Rust
+        uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Record clean source baseline
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain=v1)"
+          cp Cargo.lock /tmp/Cargo.lock.before
+
+      - name: Format focused crate
+        run: |
+          set -euo pipefail
+          cargo fmt -p xenia-peer-core -- --check
+
+      - name: Focused compile, hostile tests, and strict Clippy
+        run: |
+          set -euo pipefail
+          cargo check --locked -p xenia-peer-core --all-targets
+          cargo test --locked -p xenia-peer-core host_endpoint_attestation
+          cargo clippy --locked -p xenia-peer-core --all-targets -- -D warnings
+          cmp -s /tmp/Cargo.lock.before Cargo.lock || {
+            echo 'Cargo.lock changed during focused qualification' >&2
+            diff -u /tmp/Cargo.lock.before Cargo.lock || true
+            exit 1
+          }
+
+      - name: Prove qualification did not mutate source
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain=v1)"
