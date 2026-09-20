@@ -1,0 +1,21 @@
+[package]
+name = "xenia-eval-attestation-protocol"
+version = "0.0.0-m0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz <maintainer@luminousdynamics.org>"]
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Canonical evaluation-receipt attestation statements for Xenia"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+thiserror = "1"
+xenia-auth-protocol = { path = "../xenia-auth-protocol" }
+
+[dev-dependencies]
+serde_json = "1"
+
+[workspace]
