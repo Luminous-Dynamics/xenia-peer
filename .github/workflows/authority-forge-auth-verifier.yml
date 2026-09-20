@@ -1,0 +1,46 @@
+name: Xenia Forge Auth Verifier
+
+on:
+  pull_request:
+    paths:
+      - "crates/xenia-authority-forge-auth-verifier/**"
+      - ".github/workflows/authority-forge-auth-verifier.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/xenia-authority-forge-auth-verifier/**"
+      - ".github/workflows/authority-forge-auth-verifier.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: forge-auth-verifier-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verifier:
+    name: Forge-bound hybrid auth verifier
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/xenia-authority-forge-auth-verifier
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust 1.94
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: rustfmt, clippy
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test real crypto
+        run: cargo test --all-features
