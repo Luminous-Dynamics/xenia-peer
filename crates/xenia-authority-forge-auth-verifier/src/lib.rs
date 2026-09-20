@@ -3,16 +3,13 @@
 
 //! Real-cryptography verification for Forge-bound Xenia operator authentication.
 //!
-//! The crate exposes three deliberately separate theorems:
+//! The crate exposes deliberately separate theorems:
 //!
 //! 1. both Ed25519 and ML-DSA-65 signatures verify over one exact Forge-bound transcript;
-//! 2. that exact verified key pair equals one supplied current enrollment;
-//! 3. an integrated one-time challenge verifier consumes freshness first and only
-//!    then mints the portable Xenia receipt.
-//!
-//! The supplied enrollment is still an input. The eventual daemon adapter is
-//! responsible for sourcing it from Xenia's live `OperatorPolicy` rather than
-//! from caller-controlled data.
+//! 2. that exact verified key pair equals one current enrollment;
+//! 3. an integrated one-time challenge verifier consumes freshness first;
+//! 4. a trusted enrollment resolver can be invoked only after freshness + crypto succeed,
+//!    allowing a daemon to source current enrollment from live policy rather than caller data.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -48,7 +45,7 @@ pub struct SignedForgeAuthV1 {
     pub ml_dsa_65_signature: [u8; ML_DSA_65_SIG_LEN],
 }
 
-/// Authoritative enrolled logical identity supplied by the caller.
+/// One already-validated logical identity returned by a trusted enrollment source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnrolledForgeIdentityV1 {
     operator_id: String,
@@ -188,7 +185,7 @@ impl ForgeChallengeStoreV1 {
 }
 
 /// Positive result proving fresh, one-time, real-crypto verification against
-/// one supplied current enrollment and carrying the portable receipt.
+/// one current enrollment and carrying the portable receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedFreshForgeAuthenticationV1 {
     operator_id: String,
@@ -246,7 +243,7 @@ pub fn verify_forge_auth_signatures_v1(
     Ok(VerifiedForgeAuthSignaturesV1 { signed, transcript })
 }
 
-/// Bind already-verified signatures to one exact supplied enrollment record.
+/// Bind already-verified signatures to one exact current enrollment record.
 pub fn bind_verified_forge_auth_to_enrollment_v1(
     verified: VerifiedForgeAuthSignaturesV1,
     enrollment: &EnrolledForgeIdentityV1,
@@ -276,17 +273,22 @@ pub fn bind_verified_forge_auth_to_enrollment_v1(
     })
 }
 
-/// Consume one exact challenge first, then verify signatures + enrollment and
-/// mint the portable receipt.
+/// Consume one exact challenge first, verify both signatures, resolve current
+/// enrollment from a trusted source, bind that exact pair, and mint a receipt.
 ///
-/// A failed signature or enrollment check still burns the challenge. This is
-/// deliberate and matches Xenia's existing daemon authentication semantics.
-pub fn verify_fresh_forge_authentication_v1(
+/// `resolve_enrollment` is deliberately invoked only after the challenge is
+/// consumed and both signatures verify. Returning `None` is a denial and the
+/// challenge remains burned. This ordering lets daemon policy be authoritative
+/// without making policy lookups caller-controlled or retryable.
+pub fn verify_fresh_forge_authentication_with_resolver_v1<F>(
     challenges: &mut ForgeChallengeStoreV1,
     now: u64,
     signed: SignedForgeAuthV1,
-    enrollment: &EnrolledForgeIdentityV1,
-) -> Result<VerifiedFreshForgeAuthenticationV1, ForgeAuthFreshnessError> {
+    resolve_enrollment: F,
+) -> Result<VerifiedFreshForgeAuthenticationV1, ForgeAuthFreshnessError>
+where
+    F: FnOnce(&[u8; 32], &[u8]) -> Option<EnrolledForgeIdentityV1>,
+{
     let forge_request_sha256 = signed.forge_request_sha256;
     let challenge = signed.challenge;
     if !challenges.consume(&challenge, now) {
@@ -294,7 +296,12 @@ pub fn verify_fresh_forge_authentication_v1(
     }
 
     let verified = verify_forge_auth_signatures_v1(signed)?;
-    let bound = bind_verified_forge_auth_to_enrollment_v1(verified, enrollment)?;
+    let enrollment = resolve_enrollment(
+        &verified.signed().ed25519_pubkey,
+        &verified.signed().ml_dsa_65_pubkey,
+    )
+    .ok_or(ForgeAuthFreshnessError::EnrollmentUnavailable)?;
+    let bound = bind_verified_forge_auth_to_enrollment_v1(verified, &enrollment)?;
 
     let challenge_consumption_evidence =
         challenge_consumption_evidence(&forge_request_sha256, &challenge, now);
@@ -319,6 +326,28 @@ pub fn verify_fresh_forge_authentication_v1(
         operator_id: bound.operator_id().to_string(),
         receipt,
     })
+}
+
+/// Consume one exact challenge first, then verify signatures against one
+/// supplied current enrollment and mint the portable receipt.
+///
+/// This compatibility entry point is useful for callers that already hold a
+/// trusted enrollment. Daemon integrations should prefer
+/// [`verify_fresh_forge_authentication_with_resolver_v1`] so the enrollment
+/// is read from live policy after freshness + crypto have succeeded.
+pub fn verify_fresh_forge_authentication_v1(
+    challenges: &mut ForgeChallengeStoreV1,
+    now: u64,
+    signed: SignedForgeAuthV1,
+    enrollment: &EnrolledForgeIdentityV1,
+) -> Result<VerifiedFreshForgeAuthenticationV1, ForgeAuthFreshnessError> {
+    let enrollment = enrollment.clone();
+    verify_fresh_forge_authentication_with_resolver_v1(
+        challenges,
+        now,
+        signed,
+        move |_, _| Some(enrollment),
+    )
 }
 
 fn cryptographic_evidence(
@@ -376,7 +405,7 @@ pub enum ForgeAuthVerifierError {
     /// ML-DSA-65 verification failed.
     #[error("Forge authentication ML-DSA-65 verification failed")]
     MlDsaVerifyFailed,
-    /// The verified pair does not equal the supplied enrollment.
+    /// The verified pair does not equal the resolved current enrollment.
     #[error("verified Forge authentication key pair does not match enrollment")]
     EnrollmentMismatch,
     /// Portable receipt/transcript canonicalization failed.
@@ -390,6 +419,9 @@ pub enum ForgeAuthFreshnessError {
     /// Challenge is unknown, already consumed, or expired.
     #[error("unknown, used, or expired Forge authentication challenge")]
     UnknownOrExpiredChallenge,
+    /// The trusted current-enrollment source had no matching live enrollment.
+    #[error("no current Forge enrollment matched the verified key pair")]
+    EnrollmentUnavailable,
     /// Cryptographic/enrollment verification failed after the challenge was consumed.
     #[error(transparent)]
     Verifier(#[from] ForgeAuthVerifierError),
@@ -556,6 +588,50 @@ mod tests {
 
         assert!(matches!(
             verify_fresh_forge_authentication_v1(&mut challenges, 2_010, bad, &enrollment),
+            Err(ForgeAuthFreshnessError::Verifier(
+                ForgeAuthVerifierError::Ed25519VerifyFailed
+            ))
+        ));
+        assert!(challenges.is_empty());
+    }
+
+    #[test]
+    fn missing_resolved_enrollment_still_burns_challenge() {
+        let operator = HandshakeManager::from_identity_seeds([0x83; 32], [0x84; 32]);
+        let challenge = [0x4c; 32];
+        let proof = signed(&operator, [0x5b; 32], challenge);
+        let mut challenges = ForgeChallengeStoreV1::new();
+        challenges.issue(challenge, 2_100, 60);
+
+        assert_eq!(
+            verify_fresh_forge_authentication_with_resolver_v1(
+                &mut challenges,
+                2_110,
+                proof,
+                |_, _| None,
+            )
+            .unwrap_err(),
+            ForgeAuthFreshnessError::EnrollmentUnavailable
+        );
+        assert!(challenges.is_empty());
+    }
+
+    #[test]
+    fn enrollment_resolver_is_not_called_before_signature_verification() {
+        let operator = HandshakeManager::from_identity_seeds([0x85; 32], [0x86; 32]);
+        let challenge = [0x4d; 32];
+        let mut bad = signed(&operator, [0x5c; 32], challenge);
+        bad.ed25519_signature[0] ^= 1;
+        let mut challenges = ForgeChallengeStoreV1::new();
+        challenges.issue(challenge, 2_200, 60);
+
+        assert!(matches!(
+            verify_fresh_forge_authentication_with_resolver_v1(
+                &mut challenges,
+                2_210,
+                bad,
+                |_, _| panic!("resolver must not run before crypto succeeds"),
+            ),
             Err(ForgeAuthFreshnessError::Verifier(
                 ForgeAuthVerifierError::Ed25519VerifyFailed
             ))
