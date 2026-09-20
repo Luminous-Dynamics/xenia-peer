@@ -1,0 +1,23 @@
+# Copyright (c) 2024-2026 Tristan Stoltz / Luminous Dynamics
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[package]
+name = "xenia-forge-auth-verifier"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz / Luminous Dynamics"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Forge-bound Xenia hybrid-authentication verifier engine"
+publish = false
+
+[dependencies]
+ed25519-dalek = "2"
+xenia-handshake = { path = "../xenia-handshake" }
+xenia-forge-auth-receipt = { path = "../xenia-authority-forge-auth-receipt" }
+thiserror = "1"
+
+[dev-dependencies]
+rand = "0.8"
+
+[workspace]
