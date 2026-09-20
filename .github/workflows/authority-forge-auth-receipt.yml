@@ -1,0 +1,50 @@
+name: Xenia Forge Auth Receipt Contract
+
+on:
+  pull_request:
+    paths:
+      - "crates/xenia-authority-forge-auth-receipt/**"
+      - ".github/workflows/forge-auth-receipt.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/xenia-authority-forge-auth-receipt/**"
+      - ".github/workflows/forge-auth-receipt.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: forge-auth-receipt-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: Forge-bound hybrid auth receipt
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/xenia-authority-forge-auth-receipt
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust 1.94
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test frozen vectors
+        run: cargo test --all-features
+
+      - name: wasm32 portability
+        run: cargo check --all-features --target wasm32-unknown-unknown
