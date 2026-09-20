@@ -1,0 +1,96 @@
+name: State Witness R2 Formatting Workbench
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/state-witness-r2-workbench.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact scratch head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Install Rust 1.94
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.94.0
+          components: rustfmt,clippy
+
+      - name: Repair only the witness-time fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('crates/xenia-ledger/src/state_witness.rs')
+          s = p.read_text()
+          old = '''        let mut bundle = StateWitnessBundle::new(commitment).unwrap();
+          bundle.sign_with_ed25519(&first, 101).unwrap();
+          bundle.sign_with_ed25519(&second, 102).unwrap();'''
+          new = '''        let witness_base = commitment.timestamp_unix_secs;
+          let mut bundle = StateWitnessBundle::new(commitment).unwrap();
+          bundle
+              .sign_with_ed25519(&first, witness_base.saturating_add(1))
+              .unwrap();
+          bundle
+              .sign_with_ed25519(&second, witness_base.saturating_add(2))
+              .unwrap();'''
+          if s.count(old) != 1:
+              raise SystemExit('expected exactly one witness helper fixture')
+          p.write_text(s.replace(old, new, 1))
+          PY
+
+      - name: Apply Rust 1.94 formatting
+        run: cargo fmt --package xenia-ledger
+
+      - name: Prove formatter/repair touched only the expected source surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --name-only HEAD -- crates/xenia-ledger/src | LC_ALL=C sort > /tmp/actual.txt
+          cat > /tmp/expected.txt <<'EOF'
+          crates/xenia-ledger/src/lib.rs
+          crates/xenia-ledger/src/state_witness.rs
+          crates/xenia-ledger/src/state_witness_policy.rs
+          EOF
+          diff -u /tmp/expected.txt /tmp/actual.txt
+
+      - name: Run xenia-ledger library tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p xenia-ledger --lib 2>&1 | tee /tmp/xenia-ledger-tests.log
+
+      - name: Verify formatted subject
+        run: cargo fmt --package xenia-ledger -- --check
+
+      - name: Stage exact formatted artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/state-witness-r2/crates/xenia-ledger/src
+          cp crates/xenia-ledger/src/lib.rs /tmp/state-witness-r2/crates/xenia-ledger/src/lib.rs
+          cp crates/xenia-ledger/src/state_witness.rs /tmp/state-witness-r2/crates/xenia-ledger/src/state_witness.rs
+          cp crates/xenia-ledger/src/state_witness_policy.rs /tmp/state-witness-r2/crates/xenia-ledger/src/state_witness_policy.rs
+          git diff HEAD -- crates/xenia-ledger/src > /tmp/state-witness-r2/repair.patch
+          cp /tmp/xenia-ledger-tests.log /tmp/state-witness-r2/xenia-ledger-tests.log
+          (cd /tmp/state-witness-r2 && sha256sum crates/xenia-ledger/src/*.rs repair.patch xenia-ledger-tests.log > SHA256SUMS)
+
+      - name: Upload formatter/test workbench artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: state-witness-r2-formatted
+          path: /tmp/state-witness-r2
+          if-no-files-found: error
+          retention-days: 3
