@@ -1,0 +1,50 @@
+name: Xenia Symthaea Attestation Authority
+
+on:
+  pull_request:
+    paths:
+      - "crates/xenia-authority-symthaea-attestation-contract/**"
+      - "crates/xenia-authority-symthaea-attestation-verifier/**"
+      - "crates/xenia-authority-symthaea-attestation-authority/**"
+      - ".github/workflows/authority-symthaea-attestation-authority.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/xenia-authority-symthaea-attestation-contract/**"
+      - "crates/xenia-authority-symthaea-attestation-verifier/**"
+      - "crates/xenia-authority-symthaea-attestation-authority/**"
+      - ".github/workflows/authority-symthaea-attestation-authority.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: symthaea-attestation-authority-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  authority:
+    name: Symthaea attestation enrollment and scope binding
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/xenia-authority-symthaea-attestation-authority
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust 1.94
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: rustfmt, clippy
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test enrollment and scope binding
+        run: cargo test --all-features
