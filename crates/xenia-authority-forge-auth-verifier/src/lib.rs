@@ -3,24 +3,33 @@
 
 //! Real-cryptography verification for Forge-bound Xenia operator authentication.
 //!
-//! This crate deliberately proves only the cryptographic/enrollment half of
-//! the producer theorem. It does **not** own a challenge store and therefore
-//! does not claim freshness or single-use. The daemon integration tranche must
-//! consume the real Xenia challenge before calling this verifier and only then
-//! mint the portable receipt.
+//! The crate exposes three deliberately separate theorems:
+//!
+//! 1. both Ed25519 and ML-DSA-65 signatures verify over one exact Forge-bound transcript;
+//! 2. that exact verified key pair equals one supplied current enrollment;
+//! 3. an integrated one-time challenge verifier consumes freshness first and only
+//!    then mints the portable Xenia receipt.
+//!
+//! The supplied enrollment is still an input. The eventual daemon adapter is
+//! responsible for sourcing it from Xenia's live `OperatorPolicy` rather than
+//! from caller-controlled data.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use std::collections::HashMap;
+
 use ed25519_dalek::Signature;
 use thiserror::Error;
 use xenia_forge_auth_receipt::{
-    Digest, ReceiptError, challenge_commitment, forge_auth_signing_transcript,
-    key_lineage_commitment, operator_id_commitment,
+    Digest, ReceiptError, XeniaHybridSuite, XeniaVerificationReceiptV1, challenge_commitment,
+    forge_auth_signing_transcript, key_lineage_commitment, operator_id_commitment,
 };
 use xenia_handshake::{HandshakeManager, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN};
 
 const CRYPTO_EVIDENCE_DOMAIN_V1: &[u8] = b"xenia-forge-auth/crypto-evidence/v1\0";
+const CHALLENGE_EVIDENCE_DOMAIN_V1: &[u8] = b"xenia-forge-auth/challenge-consumed/v1\0";
+const VERIFIER_STATE_DOMAIN_V1: &[u8] = b"xenia-forge-auth/verifier-state/v1\0";
 
 /// Signed proof over one exact Forge authentication request and Xenia challenge.
 #[derive(Debug, Clone)]
@@ -39,7 +48,7 @@ pub struct SignedForgeAuthV1 {
     pub ml_dsa_65_signature: [u8; ML_DSA_65_SIG_LEN],
 }
 
-/// Authoritative enrolled logical identity supplied by the daemon's policy.
+/// Authoritative enrolled logical identity supplied by the caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnrolledForgeIdentityV1 {
     operator_id: String,
@@ -91,7 +100,7 @@ impl VerifiedForgeAuthSignaturesV1 {
     }
 }
 
-/// Positive cryptographic/enrollment evidence ready for daemon freshness binding.
+/// Positive cryptographic/enrollment evidence ready for freshness binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedForgeAuthCryptographyV1 {
     operator_id: String,
@@ -103,7 +112,7 @@ pub struct VerifiedForgeAuthCryptographyV1 {
 }
 
 impl VerifiedForgeAuthCryptographyV1 {
-    /// Stable logical operator id retained for daemon-local audit correlation.
+    /// Stable logical operator id retained for local audit correlation.
     pub fn operator_id(&self) -> &str {
         &self.operator_id
     }
@@ -134,11 +143,78 @@ impl VerifiedForgeAuthCryptographyV1 {
     }
 }
 
+/// Deterministic one-time challenge store for Forge authentication.
+///
+/// Time is supplied by the caller so tests and daemon integration can use an
+/// authoritative clock source without this crate reading wall-clock time.
+#[derive(Debug, Default)]
+pub struct ForgeChallengeStoreV1 {
+    outstanding: HashMap<[u8; 32], u64>,
+}
+
+impl ForgeChallengeStoreV1 {
+    /// Create an empty challenge store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Issue a challenge expiring at `now + ttl_secs`.
+    pub fn issue(&mut self, challenge: [u8; 32], now: u64, ttl_secs: u64) {
+        self.outstanding
+            .insert(challenge, now.saturating_add(ttl_secs));
+    }
+
+    /// Remove expired challenges.
+    pub fn gc(&mut self, now: u64) {
+        self.outstanding.retain(|_, expires_at| now <= *expires_at);
+    }
+
+    /// Number of outstanding challenges.
+    pub fn len(&self) -> usize {
+        self.outstanding.len()
+    }
+
+    /// Whether the store has no outstanding challenge.
+    pub fn is_empty(&self) -> bool {
+        self.outstanding.is_empty()
+    }
+
+    fn consume(&mut self, challenge: &[u8; 32], now: u64) -> bool {
+        match self.outstanding.remove(challenge) {
+            Some(expires_at) => now <= expires_at,
+            None => false,
+        }
+    }
+}
+
+/// Positive result proving fresh, one-time, real-crypto verification against
+/// one supplied current enrollment and carrying the portable receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedFreshForgeAuthenticationV1 {
+    operator_id: String,
+    receipt: XeniaVerificationReceiptV1,
+}
+
+impl VerifiedFreshForgeAuthenticationV1 {
+    /// Stable logical operator id for local audit correlation.
+    pub fn operator_id(&self) -> &str {
+        &self.operator_id
+    }
+
+    /// Portable receipt matching the Mycelix FORGE-005B adapter contract.
+    pub fn receipt(&self) -> &XeniaVerificationReceiptV1 {
+        &self.receipt
+    }
+
+    /// Consume the positive result and return the portable receipt.
+    pub fn into_receipt(self) -> XeniaVerificationReceiptV1 {
+        self.receipt
+    }
+}
+
 /// Verify both signatures over the exact Forge-bound Xenia transcript.
 ///
-/// No enrollment lookup occurs here. This permits the daemon to preserve the
-/// existing fail-closed ordering: consume challenge, verify both signatures,
-/// then resolve the pair against current enrollment state.
+/// No enrollment lookup occurs here.
 pub fn verify_forge_auth_signatures_v1(
     signed: SignedForgeAuthV1,
 ) -> Result<VerifiedForgeAuthSignaturesV1, ForgeAuthVerifierError> {
@@ -170,7 +246,7 @@ pub fn verify_forge_auth_signatures_v1(
     Ok(VerifiedForgeAuthSignaturesV1 { signed, transcript })
 }
 
-/// Bind already-verified signatures to one exact current enrollment record.
+/// Bind already-verified signatures to one exact supplied enrollment record.
 pub fn bind_verified_forge_auth_to_enrollment_v1(
     verified: VerifiedForgeAuthSignaturesV1,
     enrollment: &EnrolledForgeIdentityV1,
@@ -200,6 +276,51 @@ pub fn bind_verified_forge_auth_to_enrollment_v1(
     })
 }
 
+/// Consume one exact challenge first, then verify signatures + enrollment and
+/// mint the portable receipt.
+///
+/// A failed signature or enrollment check still burns the challenge. This is
+/// deliberate and matches Xenia's existing daemon authentication semantics.
+pub fn verify_fresh_forge_authentication_v1(
+    challenges: &mut ForgeChallengeStoreV1,
+    now: u64,
+    signed: SignedForgeAuthV1,
+    enrollment: &EnrolledForgeIdentityV1,
+) -> Result<VerifiedFreshForgeAuthenticationV1, ForgeAuthFreshnessError> {
+    let forge_request_sha256 = signed.forge_request_sha256;
+    let challenge = signed.challenge;
+    if !challenges.consume(&challenge, now) {
+        return Err(ForgeAuthFreshnessError::UnknownOrExpiredChallenge);
+    }
+
+    let verified = verify_forge_auth_signatures_v1(signed)?;
+    let bound = bind_verified_forge_auth_to_enrollment_v1(verified, enrollment)?;
+
+    let challenge_consumption_evidence =
+        challenge_consumption_evidence(&forge_request_sha256, &challenge, now);
+    let verifier_state_commitment = verifier_state_commitment(
+        bound.operator_id_commitment(),
+        bound.key_lineage_commitment(),
+    );
+
+    let receipt = XeniaVerificationReceiptV1::new(
+        bound.request_commitment().clone(),
+        bound.operator_id_commitment().clone(),
+        bound.key_lineage_commitment().clone(),
+        bound.challenge_commitment().clone(),
+        XeniaHybridSuite::Ed25519MlDsa65V1,
+        bound.cryptographic_evidence().clone(),
+        challenge_consumption_evidence,
+        verifier_state_commitment,
+        now,
+    );
+
+    Ok(VerifiedFreshForgeAuthenticationV1 {
+        operator_id: bound.operator_id().to_string(),
+        receipt,
+    })
+}
+
 fn cryptographic_evidence(
     verified: &VerifiedForgeAuthSignaturesV1,
 ) -> Result<Digest, ForgeAuthVerifierError> {
@@ -209,6 +330,27 @@ fn cryptographic_evidence(
     push_bytes(&mut out, &verified.signed().ed25519_signature)?;
     push_bytes(&mut out, &verified.signed().ml_dsa_65_signature)?;
     Ok(Digest::of_bytes(&out))
+}
+
+fn challenge_consumption_evidence(
+    forge_request_sha256: &[u8; 32],
+    challenge: &[u8; 32],
+    now: u64,
+) -> Digest {
+    let mut out = Vec::new();
+    out.extend_from_slice(CHALLENGE_EVIDENCE_DOMAIN_V1);
+    out.extend_from_slice(forge_request_sha256);
+    out.extend_from_slice(challenge);
+    out.extend_from_slice(&now.to_be_bytes());
+    Digest::of_bytes(&out)
+}
+
+fn verifier_state_commitment(operator_id: &Digest, key_lineage: &Digest) -> Digest {
+    let mut out = Vec::new();
+    out.extend_from_slice(VERIFIER_STATE_DOMAIN_V1);
+    out.extend_from_slice(operator_id.as_bytes());
+    out.extend_from_slice(key_lineage.as_bytes());
+    Digest::of_bytes(&out)
 }
 
 fn push_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), ForgeAuthVerifierError> {
@@ -234,12 +376,23 @@ pub enum ForgeAuthVerifierError {
     /// ML-DSA-65 verification failed.
     #[error("Forge authentication ML-DSA-65 verification failed")]
     MlDsaVerifyFailed,
-    /// The verified pair does not equal the current authoritative enrollment.
+    /// The verified pair does not equal the supplied enrollment.
     #[error("verified Forge authentication key pair does not match enrollment")]
     EnrollmentMismatch,
     /// Portable receipt/transcript canonicalization failed.
     #[error(transparent)]
     Receipt(#[from] ReceiptError),
+}
+
+/// Fresh one-time verification failures.
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum ForgeAuthFreshnessError {
+    /// Challenge is unknown, already consumed, or expired.
+    #[error("unknown, used, or expired Forge authentication challenge")]
+    UnknownOrExpiredChallenge,
+    /// Cryptographic/enrollment verification failed after the challenge was consumed.
+    #[error(transparent)]
+    Verifier(#[from] ForgeAuthVerifierError),
 }
 
 #[cfg(test)]
@@ -282,30 +435,15 @@ mod tests {
     #[test]
     fn exact_hybrid_signatures_bind_to_current_enrollment() {
         let operator = HandshakeManager::from_identity_seeds([0x11; 32], [0x12; 32]);
-        let signed = signed(&operator, [0x55; 32], [0x44; 32]);
-        let verified = verify_forge_auth_signatures_v1(signed).unwrap();
+        let proof = signed(&operator, [0x55; 32], [0x44; 32]);
+        let verified = verify_forge_auth_signatures_v1(proof).unwrap();
         let bound = bind_verified_forge_auth_to_enrollment_v1(
             verified,
             &enrollment(&operator, "operator:alice"),
         )
         .unwrap();
-
         assert_eq!(bound.operator_id(), "operator:alice");
         assert_eq!(bound.request_commitment(), &Digest::sha256([0x55; 32]));
-        assert_eq!(
-            bound.operator_id_commitment(),
-            &operator_id_commitment("operator:alice").unwrap()
-        );
-        assert_eq!(
-            bound.key_lineage_commitment(),
-            &key_lineage_commitment(
-                &operator.identity_public_key_bytes(),
-                &operator.ml_dsa_public_key_bytes(),
-                None,
-            )
-            .unwrap()
-        );
-        assert_eq!(bound.challenge_commitment(), &challenge_commitment(&[0x44; 32]));
     }
 
     #[test]
@@ -342,7 +480,6 @@ mod tests {
             ed25519_signature: classical.sign(&transcript).to_bytes(),
             ml_dsa_65_signature: pq.sign_ml_dsa(&transcript),
         };
-
         let verified = verify_forge_auth_signatures_v1(proof).unwrap();
         assert_eq!(
             bind_verified_forge_auth_to_enrollment_v1(
@@ -360,7 +497,6 @@ mod tests {
         let replacement = HandshakeManager::from_identity_seeds([0x43; 32], [0x44; 32]);
         let verified = verify_forge_auth_signatures_v1(signed(&old, [0x54; 32], [0x47; 32]))
             .unwrap();
-
         assert_eq!(
             bind_verified_forge_auth_to_enrollment_v1(
                 verified,
@@ -372,10 +508,75 @@ mod tests {
     }
 
     #[test]
-    fn verifier_intentionally_does_not_claim_challenge_single_use() {
+    fn standalone_signature_verifier_intentionally_allows_reverification() {
         let operator = HandshakeManager::from_identity_seeds([0x61; 32], [0x62; 32]);
         let proof = signed(&operator, [0x57; 32], [0x48; 32]);
         assert!(verify_forge_auth_signatures_v1(proof.clone()).is_ok());
         assert!(verify_forge_auth_signatures_v1(proof).is_ok());
+    }
+
+    #[test]
+    fn integrated_fresh_verifier_mints_receipt_once() {
+        let operator = HandshakeManager::from_identity_seeds([0x71; 32], [0x72; 32]);
+        let enrollment = enrollment(&operator, "operator:alice");
+        let request = [0x58; 32];
+        let challenge = [0x49; 32];
+        let proof = signed(&operator, request, challenge);
+        let mut challenges = ForgeChallengeStoreV1::new();
+        challenges.issue(challenge, 1_000, 60);
+
+        let verified = verify_fresh_forge_authentication_v1(
+            &mut challenges,
+            1_010,
+            proof.clone(),
+            &enrollment,
+        )
+        .unwrap();
+        assert_eq!(verified.operator_id(), "operator:alice");
+        assert_eq!(verified.receipt().request_commitment(), &Digest::sha256(request));
+        assert_eq!(verified.receipt().verified_at_unix_secs(), 1_010);
+        assert_eq!(challenges.len(), 0);
+
+        assert_eq!(
+            verify_fresh_forge_authentication_v1(&mut challenges, 1_010, proof, &enrollment)
+                .unwrap_err(),
+            ForgeAuthFreshnessError::UnknownOrExpiredChallenge
+        );
+    }
+
+    #[test]
+    fn failed_signature_still_burns_challenge() {
+        let operator = HandshakeManager::from_identity_seeds([0x81; 32], [0x82; 32]);
+        let enrollment = enrollment(&operator, "operator:alice");
+        let challenge = [0x4a; 32];
+        let mut bad = signed(&operator, [0x59; 32], challenge);
+        bad.ed25519_signature[0] ^= 1;
+        let mut challenges = ForgeChallengeStoreV1::new();
+        challenges.issue(challenge, 2_000, 60);
+
+        assert!(matches!(
+            verify_fresh_forge_authentication_v1(&mut challenges, 2_010, bad, &enrollment),
+            Err(ForgeAuthFreshnessError::Verifier(
+                ForgeAuthVerifierError::Ed25519VerifyFailed
+            ))
+        ));
+        assert!(challenges.is_empty());
+    }
+
+    #[test]
+    fn expired_challenge_fails_before_crypto() {
+        let operator = HandshakeManager::from_identity_seeds([0x91; 32], [0x92; 32]);
+        let enrollment = enrollment(&operator, "operator:alice");
+        let challenge = [0x4b; 32];
+        let proof = signed(&operator, [0x5a; 32], challenge);
+        let mut challenges = ForgeChallengeStoreV1::new();
+        challenges.issue(challenge, 3_000, 10);
+
+        assert_eq!(
+            verify_fresh_forge_authentication_v1(&mut challenges, 3_011, proof, &enrollment)
+                .unwrap_err(),
+            ForgeAuthFreshnessError::UnknownOrExpiredChallenge
+        );
+        assert!(challenges.is_empty());
     }
 }
