@@ -1,0 +1,22 @@
+[package]
+name = "xenia-auth-lineage"
+version = "0.0.0-m0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz <maintainer@luminousdynamics.org>"]
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Historical hybrid-key lineage verification for Xenia authenticated subjects"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+thiserror = "1"
+xenia-auth-protocol = { path = "../xenia-auth-protocol" }
+xenia-auth = { path = "../xenia-auth" }
+
+[dev-dependencies]
+xenia-handshake = { path = "../xenia-handshake" }
+
+[workspace]

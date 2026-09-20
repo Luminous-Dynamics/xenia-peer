@@ -1,0 +1,150 @@
+name: Xenia Historical Key Lineage v1
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/historical-key-lineage-v1.yml'
+      - 'crates/xenia-auth-lineage/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: historical-key-lineage-v1-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_TOOLCHAIN: '1.94.0'
+  LINEAGE_PARENT: 'e589b65b11f54590a3e5f1883c0581a2b272af0a'
+  LINEAGE_PROFILE_SHA256: 'e2ba31e1f6f4c7fbe2ff6875df440d5dba860041c0297b318d14e196b6b060d7'
+
+jobs:
+  qualify:
+    name: Qualify historical hybrid-key lineage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact subject head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Bind exact additive tranche
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "$LINEAGE_PARENT"
+          test "$(git rev-list --count "$LINEAGE_PARENT..HEAD")" -eq 1
+          mapfile -t changed < <(git diff --name-only "$LINEAGE_PARENT" HEAD | sort)
+          expected=(
+            '.github/workflows/historical-key-lineage-v1.yml'
+            'crates/xenia-auth-lineage/Cargo.toml'
+            'crates/xenia-auth-lineage/HISTORICAL_KEY_LINEAGE_V1.txt'
+            'crates/xenia-auth-lineage/src/canonical.rs'
+            'crates/xenia-auth-lineage/src/lib.rs'
+            'crates/xenia-auth-lineage/src/model.rs'
+            'crates/xenia-auth-lineage/src/tests.rs'
+            'crates/xenia-auth-lineage/src/verify.rs'
+          )
+          mapfile -t expected_sorted < <(printf '%s\n' "${expected[@]}" | sort)
+          diff -u <(printf '%s\n' "${expected_sorted[@]}") <(printf '%s\n' "${changed[@]}")
+
+          # Qualified generic-auth substrate remains byte-identical.
+          for path in \
+            crates/xenia-auth-protocol/Cargo.toml \
+            crates/xenia-auth-protocol/src/lib.rs \
+            crates/xenia-auth/Cargo.toml \
+            crates/xenia-auth/src/lib.rs
+          do
+            test "$(git rev-parse "$LINEAGE_PARENT:$path")" = "$(git rev-parse "HEAD:$path")"
+          done
+
+      - name: Bind frozen lineage profile and source bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(sha256sum crates/xenia-auth-lineage/HISTORICAL_KEY_LINEAGE_V1.txt | awk '{print $1}')" = "$LINEAGE_PROFILE_SHA256"
+          test "$(wc -c < crates/xenia-auth-lineage/HISTORICAL_KEY_LINEAGE_V1.txt)" -eq 1574
+          test "$(sha256sum crates/xenia-auth-lineage/Cargo.toml | awk '{print $1}')" = '76bc1ef9f7d103eded650846050c9279fbee6348772aea8cff2f0c47358470d6'
+          test "$(sha256sum crates/xenia-auth-lineage/src/lib.rs | awk '{print $1}')" = '0edcda8cbc0564cc27436e1f4c9c0f0a2664e40f9d495d69ab5aab9ad72681ed'
+          test "$(sha256sum crates/xenia-auth-lineage/src/model.rs | awk '{print $1}')" = '9416e8d56c450024bbbdffa6a3d0cbe7b6f8e35aa0f497f3b422b5817780a79e'
+          test "$(sha256sum crates/xenia-auth-lineage/src/verify.rs | awk '{print $1}')" = '984430e692fb6a101f0de88f7d5a348281c2a861928792860ce7a31ab4f62b8c'
+          test "$(sha256sum crates/xenia-auth-lineage/src/canonical.rs | awk '{print $1}')" = 'c0e3fe429e5a2ee2a0ce55f0a5e70426ffbb2813c523c737645546a654246923'
+          test "$(sha256sum crates/xenia-auth-lineage/src/tests.rs | awk '{print $1}')" = 'd4133861011874190c2fe8a4ff4d79c46b7fcf3f06567e039c05e987839cb572'
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt,clippy
+
+      - name: Record toolchain and dependency evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p qualification
+          rustc -vV | tee qualification/rustc-vV.txt
+          cargo -Vv | tee qualification/cargo-Vv.txt
+          pushd crates/xenia-auth-lineage >/dev/null
+          cargo generate-lockfile
+          sha256sum Cargo.lock | tee ../../qualification/xenia-auth-lineage.Cargo.lock.sha256
+          cargo metadata --locked --format-version 1 > ../../qualification/xenia-auth-lineage.cargo-metadata.json
+          popd >/dev/null
+
+      - name: Format, test, and warning-fatal Clippy
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --manifest-path crates/xenia-auth-lineage/Cargo.toml --all -- --check
+          cargo test --manifest-path crates/xenia-auth-lineage/Cargo.toml --locked --all-features \
+            2>&1 | tee qualification/xenia-auth-lineage.tests.log
+          cargo clippy --manifest-path crates/xenia-auth-lineage/Cargo.toml --locked --all-targets --all-features -- -D warnings \
+            2>&1 | tee qualification/xenia-auth-lineage.clippy.log
+
+      - name: Audit authority separation and transition classes
+        shell: bash
+        run: |
+          set -euo pipefail
+          src_dir='crates/xenia-auth-lineage/src'
+          profile='crates/xenia-auth-lineage/HISTORICAL_KEY_LINEAGE_V1.txt'
+          grep -RF 'XENIA:HistoricalKeyTransition:v1\0' "$src_dir" "$profile"
+          grep -RF 'XENIA:HistoricalKeyTransitionCertificate:v1\0' "$src_dir" "$profile"
+          grep -RF 'HistoricalKeyTransitionKindV1::Rotate' "$src_dir"
+          grep -RF 'HistoricalKeyTransitionKindV1::RecoverCompromise' "$src_dir"
+          grep -RF 'RotationHasCompromiseCutoff' "$src_dir"
+          grep -RF 'RecoveryAuthorityOverlap' "$src_dir"
+          grep -RF 'InvalidCompromiseCutoff' "$src_dir"
+          grep -RF 'PredecessorCertificateMismatch' "$src_dir"
+          grep -RF 'AuthenticationSetMismatch' "$src_dir"
+          grep -RF 'historical_resolution_is_not_trusted_time' "$src_dir"
+          grep -Fx 'trusted-time=not-established' "$profile"
+          grep -Fx 'current-authorization=not-established' "$profile"
+          grep -Fx 'evidence-truth=not-established' "$profile"
+          grep -Fx 'application-authority=not-established' "$profile"
+
+      - name: Prove immutable source checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f crates/xenia-auth-lineage/Cargo.lock
+          git diff --check "$LINEAGE_PARENT" HEAD
+          test -z "$(git status --porcelain=v1 --untracked-files=all | grep -v '^?? qualification/' || true)"
+          printf '%s\n' \
+            "subject_head=$(git rev-parse HEAD)" \
+            "parent=$LINEAGE_PARENT" \
+            "rust_toolchain=$RUST_TOOLCHAIN" \
+            "lineage_profile_sha256=$LINEAGE_PROFILE_SHA256" \
+            "generic_auth_parent_qualified_head=$LINEAGE_PARENT" \
+            "immutable_checkout=PASS" \
+            > qualification/historical-key-lineage-v1.status.txt
+
+      - name: Upload qualification evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: historical-key-lineage-v1
+          path: qualification/*
+          if-no-files-found: error
+          retention-days: 30
