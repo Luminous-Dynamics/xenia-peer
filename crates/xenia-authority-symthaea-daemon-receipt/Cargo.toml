@@ -1,0 +1,24 @@
+# Copyright (c) 2024-2026 Tristan Stoltz / Luminous Dynamics
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[package]
+name = "xenia-symthaea-daemon-authority-receipt"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz / Luminous Dynamics"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Portable daemon-signed authorization receipt contract for Symthaea attestations"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+xenia-symthaea-attestation-contract = { path = "../xenia-authority-symthaea-attestation-contract" }
+
+[dev-dependencies]
+serde_json = "1"
+
+# Standalone byte-contract boundary. Real daemon crypto and live policy wiring are later tranches.
+[workspace]
