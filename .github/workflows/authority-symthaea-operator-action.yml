@@ -1,0 +1,32 @@
+name: Xenia Symthaea Operator Authorization Action
+
+on:
+  pull_request:
+    paths:
+      - "crates/xenia-authority-symthaea-operator-action/**"
+      - ".github/workflows/authority-symthaea-operator-action.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  operator-action:
+    name: Exact hybrid operator action approval
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/xenia-authority-symthaea-operator-action
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust 1.94
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Test exact action transcript and hybrid verification
+        run: cargo test --all-features
