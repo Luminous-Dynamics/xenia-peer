@@ -1,0 +1,22 @@
+# Copyright (c) 2024-2026 Tristan Stoltz / Luminous Dynamics
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[package]
+name = "xenia-symthaea-attestation-rbac"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz / Luminous Dynamics"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Fail-closed Xenia role policy for Symthaea verification-receipt attestation"
+publish = false
+
+[dependencies]
+xenia-operator-proto = { path = "../xenia-operator-proto" }
+xenia-symthaea-attestation-authority = { path = "../xenia-authority-symthaea-attestation-authority" }
+
+[dev-dependencies]
+
+# Standalone policy boundary. Live daemon-policy integration is a later tranche.
+[workspace]
