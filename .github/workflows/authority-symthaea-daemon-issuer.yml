@@ -1,0 +1,58 @@
+name: Xenia Symthaea Daemon Issuer Authentication
+
+on:
+  pull_request:
+    paths:
+      - "crates/xenia-authority-symthaea-attestation-contract/**"
+      - "crates/xenia-authority-symthaea-daemon-receipt/**"
+      - "crates/xenia-authority-symthaea-daemon-crypto/**"
+      - "crates/xenia-authority-symthaea-daemon-issuer/**"
+      - "crates/xenia-operator-proto/**"
+      - "crates/xenia-handshake/**"
+      - ".github/workflows/authority-symthaea-daemon-issuer.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: symthaea-daemon-issuer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  issuer:
+    name: Symthaea delegated daemon issuer authentication
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/xenia-authority-symthaea-daemon-issuer
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert exact stacked subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "46a1f565674f0a13940ebbd97a28c27ab96b85ba"
+          actual="$(git diff --name-only HEAD^ HEAD | sort)"
+          expected="$(printf '%s\n' \
+            '.github/workflows/authority-symthaea-daemon-issuer.yml' \
+            'crates/xenia-authority-symthaea-daemon-issuer/Cargo.toml' \
+            'crates/xenia-authority-symthaea-daemon-issuer/src/lib.rs' | sort)"
+          test "$actual" = "$expected"
+
+      - name: Install pinned Rust 1.94
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: rustfmt, clippy
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test delegated daemon issuer authentication
+        run: cargo test --all-features

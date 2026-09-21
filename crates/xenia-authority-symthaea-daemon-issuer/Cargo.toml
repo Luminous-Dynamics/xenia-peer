@@ -1,0 +1,28 @@
+# Copyright (c) 2024-2026 Tristan Stoltz / Luminous Dynamics
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[package]
+name = "xenia-symthaea-daemon-authority-issuer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz / Luminous Dynamics"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Delegated Xenia daemon issuer authentication for Symthaea authority receipts"
+publish = false
+
+[dependencies]
+ed25519-dalek = "2"
+hex = "0.4"
+thiserror = "1"
+xenia-handshake = { path = "../xenia-handshake" }
+xenia-operator-proto = { path = "../xenia-operator-proto" }
+xenia-symthaea-daemon-authority-crypto = { path = "../xenia-authority-symthaea-daemon-crypto" }
+
+[dev-dependencies]
+xenia-symthaea-attestation-contract = { path = "../xenia-authority-symthaea-attestation-contract" }
+xenia-symthaea-daemon-authority-receipt = { path = "../xenia-authority-symthaea-daemon-receipt" }
+
+# Standalone issuer-authentication boundary. Evidence admission remains downstream.
+[workspace]
