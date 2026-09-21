@@ -1,0 +1,29 @@
+name: Xenia Symthaea Revocation State Semantics
+
+on:
+  pull_request:
+    paths:
+      - "apps/xenia-peer/src/operator_revocations.rs"
+      - ".github/workflows/authority-symthaea-revocation-state.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  revocation-state:
+    name: Revocation semantic change and snapshots
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust 1.94
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy xenia-peer
+        run: cargo clippy -p xenia-peer --all-targets --all-features -- -D warnings
+      - name: Test operator revocation semantics
+        run: cargo test -p xenia-peer operator_revocations::tests --all-features
