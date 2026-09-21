@@ -1,0 +1,50 @@
+name: Xenia Symthaea Daemon Authority Crypto
+
+on:
+  pull_request:
+    paths:
+      - "crates/xenia-authority-symthaea-attestation-contract/**"
+      - "crates/xenia-authority-symthaea-daemon-receipt/**"
+      - "crates/xenia-authority-symthaea-daemon-crypto/**"
+      - ".github/workflows/authority-symthaea-daemon-crypto.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/xenia-authority-symthaea-attestation-contract/**"
+      - "crates/xenia-authority-symthaea-daemon-receipt/**"
+      - "crates/xenia-authority-symthaea-daemon-crypto/**"
+      - ".github/workflows/authority-symthaea-daemon-crypto.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: symthaea-daemon-authority-crypto-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  crypto:
+    name: Symthaea daemon authority hybrid crypto
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/xenia-authority-symthaea-daemon-crypto
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust 1.94
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: rustfmt, clippy
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test real hybrid daemon authority crypto
+        run: cargo test --all-features
