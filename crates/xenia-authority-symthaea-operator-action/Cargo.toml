@@ -1,0 +1,27 @@
+# Copyright (c) 2024-2026 Tristan Stoltz / Luminous Dynamics
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[package]
+name = "xenia-symthaea-operator-authorization-action"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz / Luminous Dynamics"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Exact per-action operator authorization contract for Symthaea receipt attestation issuance"
+publish = false
+
+[dependencies]
+ed25519-dalek = "2"
+sha2 = "0.10"
+thiserror = "1"
+xenia-handshake = { path = "../xenia-handshake" }
+xenia-symthaea-attestation-contract = { path = "../xenia-authority-symthaea-attestation-contract" }
+xenia-symthaea-attestation-authority = { path = "../xenia-authority-symthaea-attestation-authority" }
+xenia-symthaea-authorization-receipt = { path = "../xenia-authority-symthaea-authorization-receipt" }
+
+[dev-dependencies]
+
+# Standalone action-proof boundary. Session-token verification remains daemon-owned.
+[workspace]
