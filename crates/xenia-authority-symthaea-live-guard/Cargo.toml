@@ -1,0 +1,22 @@
+# Copyright (c) 2024-2026 Tristan Stoltz / Luminous Dynamics
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[package]
+name = "xenia-symthaea-live-authority-guard"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz / Luminous Dynamics"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Fail-closed live mutation guard over Xenia Symthaea authority generation"
+publish = false
+
+[dependencies]
+xenia-symthaea-authority-generation = { path = "../xenia-authority-symthaea-generation" }
+
+[dev-dependencies]
+tempfile = "3"
+
+# Standalone guard boundary. Live daemon wiring is a later child.
+[workspace]
