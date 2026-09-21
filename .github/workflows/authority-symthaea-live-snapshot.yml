@@ -1,0 +1,32 @@
+name: Xenia Symthaea Live Authority Snapshot
+
+on:
+  pull_request:
+    paths:
+      - "crates/xenia-authority-symthaea-live-snapshot/**"
+      - ".github/workflows/authority-symthaea-live-snapshot.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-snapshot:
+    name: Coherent committed authority snapshot
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/xenia-authority-symthaea-live-snapshot
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust 1.94
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Test coherent authority snapshot semantics
+        run: cargo test --all-features
