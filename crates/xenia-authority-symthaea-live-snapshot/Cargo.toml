@@ -1,0 +1,28 @@
+# Copyright (c) 2024-2026 Tristan Stoltz / Luminous Dynamics
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[package]
+name = "xenia-symthaea-live-authority-snapshot"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz / Luminous Dynamics"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Coherent committed Xenia authority snapshots for Symthaea authorization receipts"
+publish = false
+
+[dependencies]
+xenia-operator-proto = { path = "../xenia-operator-proto" }
+xenia-symthaea-attestation-authority = { path = "../xenia-authority-symthaea-attestation-authority" }
+xenia-symthaea-rbac = { package = "xenia-symthaea-attestation-rbac", path = "../xenia-authority-symthaea-rbac" }
+xenia-symthaea-authority-state-commitment = { path = "../xenia-authority-symthaea-state-commitment" }
+xenia-symthaea-live-authority-guard = { path = "../xenia-authority-symthaea-live-guard" }
+xenia-symthaea-authority-generation = { path = "../xenia-authority-symthaea-generation" }
+
+[dev-dependencies]
+xenia-handshake = { path = "../xenia-handshake" }
+tempfile = "3"
+
+# Standalone composition boundary. Daemon adapters supply authoritative owned material later.
+[workspace]
