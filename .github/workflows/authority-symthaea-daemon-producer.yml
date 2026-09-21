@@ -1,0 +1,71 @@
+name: Xenia Symthaea Daemon Authority Producer
+
+on:
+  pull_request:
+    paths:
+      - "crates/xenia-authority-symthaea-attestation-authority/**"
+      - "crates/xenia-authority-symthaea-attestation-contract/**"
+      - "crates/xenia-authority-symthaea-attestation-verifier/**"
+      - "crates/xenia-authority-symthaea-daemon-receipt/**"
+      - "crates/xenia-authority-symthaea-daemon-crypto/**"
+      - "crates/xenia-authority-symthaea-daemon-producer/**"
+      - "crates/xenia-handshake/**"
+      - ".github/workflows/authority-symthaea-daemon-producer.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: symthaea-daemon-producer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  producer:
+    name: Symthaea producer-gated daemon signing
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/xenia-authority-symthaea-daemon-producer
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert exact stacked subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "eeb191f015671c918da03cb895891300e1fffd11"
+          actual="$(git diff --name-only HEAD^ HEAD | sort)"
+          expected="$(printf '%s\n' \
+            '.github/workflows/authority-symthaea-daemon-producer.yml' \
+            'crates/xenia-authority-symthaea-daemon-producer/Cargo.toml' \
+            'crates/xenia-authority-symthaea-daemon-producer/src/lib.rs' | sort)"
+          test "$actual" = "$expected"
+
+      - name: Assert D2 exposes no arbitrary production signer
+        shell: bash
+        working-directory: .
+        run: |
+          set -euo pipefail
+          if grep -R --line-number --fixed-string \
+            'pub fn sign_xenia_symthaea_daemon_authorization_v1' \
+            crates/xenia-authority-symthaea-daemon-crypto/src; then
+            echo 'D2 must not expose a public raw-decision signing API' >&2
+            exit 1
+          fi
+
+      - name: Install pinned Rust 1.94
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: rustfmt, clippy
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test producer-gated signing
+        run: cargo test --all-features
