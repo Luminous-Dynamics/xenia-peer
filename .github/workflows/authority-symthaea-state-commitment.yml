@@ -1,0 +1,46 @@
+name: Xenia Symthaea Authority State Commitment
+
+on:
+  pull_request:
+    paths:
+      - "crates/xenia-authority-symthaea-state-commitment/**"
+      - ".github/workflows/authority-symthaea-state-commitment.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/xenia-authority-symthaea-state-commitment/**"
+      - ".github/workflows/authority-symthaea-state-commitment.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: symthaea-state-commitment-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: Symthaea enrollment and effective-policy commitment contract
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/xenia-authority-symthaea-state-commitment
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust 1.94
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: rustfmt, clippy
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Frozen authority-state commitments
+        run: cargo test --all-features

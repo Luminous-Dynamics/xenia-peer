@@ -1,0 +1,24 @@
+# Copyright (c) 2024-2026 Tristan Stoltz / Luminous Dynamics
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[package]
+name = "xenia-symthaea-authority-state-commitment"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz / Luminous Dynamics"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Canonical enrollment and effective-policy commitments for Symthaea attestation authority"
+publish = false
+
+[dependencies]
+sha2 = "0.10"
+xenia-handshake = { path = "../xenia-handshake" }
+xenia-operator-proto = { path = "../xenia-operator-proto" }
+xenia-symthaea-rbac = { package = "xenia-symthaea-attestation-rbac", path = "../xenia-authority-symthaea-rbac" }
+
+[dev-dependencies]
+
+# Standalone authority-state byte contract. Live daemon snapshotting is later.
+[workspace]
