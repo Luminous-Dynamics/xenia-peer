@@ -22,6 +22,21 @@ Xenia owns remote-session security and concrete session-bound access authority. 
 
 A valid Xenia operator session must never become a generic root/admin bypass around Nixward.
 
+## Authority ownership matrix
+
+| Concern | Canonical owner | Remote-admin rule |
+|---|---|---|
+| display/input/audio/clipboard/file support powers | current M1 permission model | reuse; no new capability enum |
+| command vs interactive terminal authority | #173 execution sidecar | default-off; never inherited from historical broad M1 consent |
+| execution advertisement / authenticated session binding | #174 + negotiated-context line | reuse/version; no parallel handshake metadata |
+| concrete privileged service/resource authority | #175 `CapabilityGrantV1` / `CapabilityUseV1` | reuse for SSH/RDP/OOB/Nixward-request adapters |
+| exact one-shot native execution semantics | #172 `xenia-exec-proto` | direct structured invocation; no implicit shell |
+| admission/use-slot persistence and receipts | #178 onward | must precede consequential adapter effects |
+| authority epoch/global revoke/recovery | #190 onward | adapters consume current authority; they do not invent recovery semantics |
+| effect-start/revocation linearization | #201 | required before real privileged side effects |
+| causal/negotiated transport authority | xenia-wire authority line | consume typed verified state; no generic bearer-token replacement |
+| Luminous Edge system/network mutation | Nixward | Xenia may transport/request; Nixward independently authorizes |
+
 ## Existing live support-session authority — reuse as-is
 
 Current `xenia-peer-core` already has a direction-separated `M1PermissionSet` for ordinary support-session powers:
