@@ -218,6 +218,31 @@ Mutate         -> exact OOB configuration change where separately admitted
 
 Redfish already appears in the #175 resource model; do not create a second recovery grant system.
 
+## Adapter contract
+
+Every new compatibility adapter must be deliberately boring. It receives already-validated authority and narrows it into one protocol operation; it does not define policy.
+
+Minimum adapter inputs should be conceptually equivalent to:
+
+```text
+verified live session/context
++ exact CapabilityUse / current authority chain
++ exact adapter request digest
++ endpoint identity/configuration
++ current revoke/expiry/epoch state
+```
+
+Every adapter must declare:
+
+- the exact irreversible/start boundary;
+- whether the operation is replayable, idempotent, transaction-recoverable, or non-replayable;
+- what positive evidence can prove `NotStarted`, `Started`, `Completed`, `FailedKnown`, or `OutcomeUnknown`;
+- what is payload/content and therefore excluded from ordinary receipts;
+- what credential material it needs, if any, and whether it can use it without disclosure;
+- what teardown means when Xenia authority is revoked mid-operation.
+
+An adapter may not weaken the parent authority contract merely because its underlying protocol is broad.
+
 ## Luminous Edge / Nixward boundary
 
 For an Edge appliance:
