@@ -27,6 +27,7 @@ A valid Xenia operator session must never become a generic root/admin bypass aro
 | Concern | Canonical owner | Remote-admin rule |
 |---|---|---|
 | display/input/audio/clipboard/file support powers | current M1 permission model | reuse; no new capability enum |
+| protected file transfer/disclosure | existing file-transfer + SIF/secure-file lines | reuse; do not build a remote-admin uploader |
 | command vs interactive terminal authority | #173 execution sidecar | default-off; never inherited from historical broad M1 consent |
 | execution advertisement / authenticated session binding | #174 + negotiated-context line | reuse/version; no parallel handshake metadata |
 | concrete privileged service/resource authority | #175 `CapabilityGrantV1` / `CapabilityUseV1` | reuse for SSH/RDP/OOB/Nixward-request adapters |
@@ -52,7 +53,7 @@ Current `xenia-peer-core` already has a direction-separated `M1PermissionSet` fo
 
 These permissions are enforced at use sites and are cleared on revoke/end/failure. View-only remains a first-class session.
 
-The clipboard and file protocols, lane-separated sealed transport, file hashes, transfer staging, ledger/evidence, secure-file work, and platform capture/input abstractions are existing providers. Remote admin must not define parallel versions.
+The clipboard and file protocols, lane-separated sealed transport, file hashes, transfer staging, ledger/evidence, secure-file work, and the later SIF protected-file authority/disclosure line are existing providers. Remote admin must not define parallel versions.
 
 ## Existing draft execution/operation authority — canonical direction
 
@@ -294,7 +295,7 @@ Default-off content retention:
 - audio recording;
 - clipboard content logging;
 - keystroke logging;
-- transferred-file plaintext duplication beyond the file-transfer/storage contract;
+- transferred-file plaintext duplication beyond the existing file-transfer/SIF storage contract;
 - terminal/stdout content unless an explicit evidence profile requires it.
 
 Content recording is a separate visible, retention-bounded policy and must not be inferred from session authorization.
@@ -305,7 +306,7 @@ Do not start with a new generic session-intent crate.
 
 1. Reconcile and qualify the existing #172 -> #175 authority stack against current main.
 2. Converge #178 -> #201 into the smallest current privileged-effect lineage required before a real adapter can act.
-3. Preserve existing M1 permissions for screen/input/audio/clipboard/file.
+3. Preserve existing M1 permissions and existing file/clipboard authority for support content.
 4. Land the first adapter as an exact `ConnectService` proof — SSH is preferred because it tests service tunneling without needing a new desktop protocol implementation.
 5. Add RDP as another `ConnectService` adapter with redirection policy and Windows-specific qualification.
 6. Add Redfish/OOB recovery adapters using the existing resource/action classes.
@@ -340,6 +341,7 @@ The same evidence discipline applies transitively to stacked children: parent so
 - reimplement RDP;
 - replace SSH endpoint authentication;
 - create a second generic Xenia grant/capability system;
+- create a second clipboard/file-transfer security model;
 - merge support-session permissions and privileged-effect authority into one broad role;
 - make Xenia an alternate Nixward execution engine;
 - provide invisible/permanent unattended access;
