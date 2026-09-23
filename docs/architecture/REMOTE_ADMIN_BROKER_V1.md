@@ -8,6 +8,8 @@ Xenia should be the canonical remote-access and session-security broker for Lumi
 
 This document therefore freezes a **convergence architecture**: reuse the live support-session permission model plus the existing draft privileged-operation stack, then add only protocol/adaptor-specific integration for SSH, RDP, OOB recovery, and Nixward request handoff.
 
+The broader authority-stack ordering and consolidation work belongs to existing authority-convergence PR #216. This remote-admin tranche consumes that convergence; it does not create another consolidation roadmap.
+
 ## Core authority theorem
 
 ```text
@@ -35,6 +37,7 @@ A valid Xenia operator session must never become a generic root/admin bypass aro
 | admission/use-slot persistence and receipts | #178 onward | must precede consequential adapter effects |
 | authority epoch/global revoke/recovery | #190 onward | adapters consume current authority; they do not invent recovery semantics |
 | effect-start/revocation linearization | #201 | required before real privileged side effects |
+| cross-cutting authority convergence | #216 | remote admin follows this ordering rather than defining another stack |
 | causal/negotiated transport authority | xenia-wire authority line | consume typed verified state; no generic bearer-token replacement |
 | Luminous Edge system/network mutation | Nixward | Xenia may transport/request; Nixward independently authorizes |
 
@@ -127,15 +130,9 @@ The privileged-operation line already goes beyond authorization into durable eff
 
 These drafts are not all qualified/merged, but they are the existing semantic lineage. Remote administration must converge on them instead of starting another PAM/JIT authority stack.
 
-## Existing xenia-wire authority — do not duplicate
+## No new generic remote-admin authority schema
 
-The wire repository already has draft request-bound causal authority, negotiated capability/context evidence, owned negotiated-authority typestates, rekey lineage, and exact-action commitments.
-
-Remote administration consumes those results when they mature; it must not create a parallel generic bearer-token or tunnel-authority protocol.
-
-## No new `RemoteSessionIntentV1`
-
-The earlier draft of this document proposed a generic `RemoteSessionIntentV1` plus another `RemoteCapability` enum. That would duplicate existing authority concepts and is withdrawn.
+The earlier draft proposed a generic `RemoteSessionIntentV1` plus another `RemoteCapability` enum. That would duplicate existing authority concepts and is withdrawn.
 
 Remote administration instead composes three existing layers:
 
@@ -150,201 +147,67 @@ privileged adapters / services / recovery / credentials
     -> CapabilityGrantV1 + exact CapabilityUseV1 (#175 lineage)
 ```
 
-Human-readable support purpose and consent scope still matter, but enforcement authority comes from the existing canonical typed contracts.
-
 ## Access modes
 
-### 1. Native Xenia support
+### Native Xenia support
 
-Use the existing M1 permission model for display/input/audio/clipboard/file capabilities. No new remote-admin capability enum is required.
+Reuse M1 plus existing capture/input/video/clipboard/file/ledger providers. For one-shot command or interactive terminal, consume the execution sidecar and the eventual qualified privileged-effect path.
 
-For native one-shot command or interactive terminal, consume the separate execution sidecar and the privileged-operation durability gates before any runtime effect is enabled.
+### SSH compatibility adapter
 
-### 2. SSH compatibility adapter
+SSH remains an interoperability edge. Use an exact `ConnectService` grant to one authenticated SSH endpoint. `ConnectService` does not imply native `Execute`, arbitrary port forwarding, or credential disclosure. Revoke/expiry tears down the bridge.
 
-SSH remains an interoperability edge.
+### RDP compatibility adapter
 
-Target shape:
+Use the same `ConnectService` family. Windows/RDP retains endpoint and user authentication. Clipboard, drives, devices/printers, audio and credential/smart-card redirection are separately policy-gated. Restricted Admin and Remote Credential Guard require separate qualification.
 
-```text
-live authenticated Xenia session
-  + CapabilityGrantV1
-      resource = exact tcp-service / SSH endpoint
-      class = ConnectService
-      exact request commitment
-  -> ephemeral SSH bridge
-  -> SSH performs endpoint/user authentication
-```
+### OOB recovery adapters
 
-Properties:
-
-- no public persistent port 22 is required by the product;
-- exact endpoint/host-key policy is separately validated;
-- `ConnectService` does not imply shell/native-exec authority;
-- credential use, if provided later, requires a separate `UseCredential` rule and never implies credential disclosure;
-- generic port forwarding is not inherited from SSH merely because the bridge is authorized;
-- revoke/expiry tears down the bridge.
-
-### 3. RDP compatibility adapter
-
-RDP uses the same `ConnectService` authority shape rather than inventing `TunnelRdp` as a generic Xenia power.
-
-Windows/RDP remains responsible for endpoint/user authentication and RDP security semantics.
-
-Separate adapter policy gates must cover:
-
-- exact target/service;
-- clipboard redirection;
-- drive redirection;
-- printer/device redirection;
-- audio;
-- smart-card/credential behavior;
-- session lifetime and teardown.
-
-Restricted Admin and Remote Credential Guard are separate qualification profiles. Tunnel existence does not prove either one.
-
-### 4. Out-of-band recovery adapters
-
-Redfish, IPMI, AMT/vPro, KVM-over-IP, serial console and smart-PDU operations should map onto existing privileged-operation resource/action classes.
-
-Examples:
-
-```text
-Observe        -> read chassis/health state
-ConnectService -> bounded console/KVM access
-Recover        -> approved reset/recovery operation
-UseCredential  -> bounded credential use without disclosure
-Mutate         -> exact OOB configuration change where separately admitted
-```
-
-Redfish already appears in the #175 resource model; do not create a second recovery grant system.
+Map Redfish/BMC, AMT/vPro, KVM-over-IP, serial and smart-power operations onto existing `Observe`, `ConnectService`, `Recover`, `UseCredential` and exact `Mutate` classes rather than defining another recovery grant system.
 
 ## Adapter contract
 
-Every new compatibility adapter must be deliberately boring. It receives already-validated authority and narrows it into one protocol operation; it does not define policy.
+Adapters receive already-validated authority and narrow it to one protocol operation. They do not define policy.
 
-Minimum adapter inputs should be conceptually equivalent to:
+Every adapter must identify its exact start/irreversible boundary, replay/idempotency class, outcome evidence, content-vs-receipt boundary, credential requirements, and revoke-time teardown semantics.
 
-```text
-verified live session/context
-+ exact CapabilityUse / current authority chain
-+ exact adapter request digest
-+ endpoint identity/configuration
-+ current revoke/expiry/epoch state
-```
-
-Every adapter must declare:
-
-- the exact irreversible/start boundary;
-- whether the operation is replayable, idempotent, transaction-recoverable, or non-replayable;
-- what positive evidence can prove `NotStarted`, `Started`, `Completed`, `FailedKnown`, or `OutcomeUnknown`;
-- what is payload/content and therefore excluded from ordinary receipts;
-- what credential material it needs, if any, and whether it can use it without disclosure;
-- what teardown means when Xenia authority is revoked mid-operation.
-
-An adapter may not weaken the parent authority contract merely because its underlying protocol is broad.
-
-## Luminous Edge / Nixward boundary
-
-For an Edge appliance:
+## Luminous Edge / Nixward handoff
 
 ```text
 operator
   -> Xenia authentication / host evidence / session consent
-  -> exact Xenia grant/use permits submission of one request
-  -> typed Nixward request
+  -> exact Xenia grant/use permits submission of one administrative request
   -> Nixward independently validates current subject/state/authority
   -> Nixward realizes or rejects
   -> Nixward terminal receipt
   -> Xenia displays/binds receipt reference
 ```
 
-The Xenia grant authorizes **request delivery/use of the administrative channel**. It does not convert into Nixward authority by reinterpretation.
+The Xenia grant authorizes request delivery/use of the channel. It does not become Nixward authority by reinterpretation.
 
-A direct unrestricted root shell is not the normal Edge administration path. If an emergency recovery shell is ever supported, it is a separately governed break-glass profile and cannot silently preserve normal production assurance.
+## Unattended and break-glass
 
-## Unattended support
+Unattended support is an explicit enrollment/issuance policy producing fresh short-lived sessions/grants; it is not permanent access.
 
-Do not implement unattended support as a permanent session or evergreen bearer credential.
-
-Preferred shape:
-
-```text
-explicit device enrollment
-  + policy identifying eligible operators/actions/time bounds
-  -> fresh authenticated Xenia session
-  -> fresh short-lived grant derived under that policy
-  -> normal live reevaluation / revoke / receipt path
-```
-
-The enrollment authorizes issuance conditions; it is not itself an active remote-control session.
-
-## Break-glass
-
-Break-glass is also an **issuance/recovery policy**, not a separate bypass authority model.
-
-It should require stronger approval/evidence, a very short validity window, explicit reason/purpose commitment, visible state, and post-event receipt/review. On a Nixward-managed Edge device, break-glass that bypasses normal realization must downgrade/void the relevant production assurance until requalification.
+Break-glass is an exceptional issuance/recovery policy over the same authority system. If it bypasses normal Nixward realization on a managed Edge device, affected production assurance must be downgraded until requalification.
 
 ## Content retention
 
-Default durable evidence should contain authority/session metadata and operation receipts, not support-session content.
-
-Default-off content retention:
-
-- screen recording;
-- audio recording;
-- clipboard content logging;
-- keystroke logging;
-- transferred-file plaintext duplication beyond the existing file-transfer/SIF storage contract;
-- terminal/stdout content unless an explicit evidence profile requires it.
-
-Content recording is a separate visible, retention-bounded policy and must not be inferred from session authorization.
+Default durable evidence records authority/session metadata and terminal operation receipts, not screen/audio/clipboard/keystroke/terminal content. Protected file transfer reuses the existing file/SIF/secure-file line.
 
 ## Revised implementation sequence
 
-Do not start with a new generic session-intent crate.
-
-1. Reconcile and qualify the existing #172 -> #175 authority stack against current main.
-2. Converge #178 -> #201 into the smallest current privileged-effect lineage required before a real adapter can act.
-3. Preserve existing M1 permissions and existing file/clipboard authority for support content.
-4. Land the first adapter as an exact `ConnectService` proof — SSH is preferred because it tests service tunneling without needing a new desktop protocol implementation.
-5. Add RDP as another `ConnectService` adapter with redirection policy and Windows-specific qualification.
-6. Add Redfish/OOB recovery adapters using the existing resource/action classes.
-7. Add Xenia -> Nixward request handoff, with Nixward independently authorizing every managed Edge mutation.
-8. Only then define unattended and break-glass issuance profiles on top of the same authority stack.
-
-## Required negative tests
-
-- historical broad M1 consent cannot gain execute/terminal/service-connect authority;
-- view-only cannot inject input or transfer files;
-- `ConnectService` cannot become `Execute`;
-- SSH service grant cannot open an arbitrary target/port;
-- RDP grant cannot silently enable clipboard/drive/device redirection;
-- `UseCredential` never permits credential disclosure;
-- expired/revoked session invalidates adapter use;
-- stale authority epoch invalidates outstanding privileged grants;
-- crash/ambiguous external effect does not trigger blind retry;
-- Xenia-authorized request rejected by Nixward does not execute anyway;
-- direct shell mutation of a managed Edge cannot be represented as a successful Nixward receipt;
-- break-glass use invalidates normal assurance until explicit requalification where applicable.
+1. Let #216 own cross-cutting authority convergence and current-base ordering.
+2. Reconcile/qualify the minimum #172/#173/#174/#175 surface required for remote adapters.
+3. Consume the minimum durable-effect/recovery chain selected by #216 before consequential adapter effects.
+4. Implement SSH as the first exact `ConnectService` adapter.
+5. Implement RDP as another adapter with Windows-specific redirection/security qualification.
+6. Add Redfish/OOB adapters.
+7. Add Xenia -> Nixward exact-request handoff.
+8. Add unattended/break-glass issuance profiles only after the same authority stack is working.
 
 ## Qualification boundary
 
-Many of the execution/operation components above are open draft stacks rather than merged production authority. Their existence is implementation/review input, not a production-readiness claim.
+The execution/operation components referenced here are largely open draft stacks, not merged production authority. The current #175 head has workflow runs that are not an all-green qualification result. Remote admin must not promote those semantics merely by referencing them.
 
-The current #175 head (`75fe52b1...`) has workflow runs whose conclusion is not an all-green qualification result; for example some checks currently report `action_required`. Therefore remote-admin integration must not promote those draft semantics merely by depending on them.
-
-The same evidence discipline applies transitively to stacked children: parent source/qualification does not automatically transfer to a later adapter or current-base composition.
-
-## Non-goals
-
-- reimplement RDP;
-- replace SSH endpoint authentication;
-- create a second generic Xenia grant/capability system;
-- create a second clipboard/file-transfer security model;
-- merge support-session permissions and privileged-effect authority into one broad role;
-- make Xenia an alternate Nixward execution engine;
-- provide invisible/permanent unattended access;
-- claim adapter or Windows credential-security behavior before platform qualification.
-
-Related: #172, #173, #174, #175, #178, #201, #216, #392 and xenia-wire causal/negotiated-authority work.
+Related: #172, #173, #174, #175, #178, #201, #216 and #392.
