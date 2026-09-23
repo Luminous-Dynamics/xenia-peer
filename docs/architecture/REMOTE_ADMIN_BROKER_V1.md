@@ -331,7 +331,9 @@ Do not start with a new generic session-intent crate.
 
 Many of the execution/operation components above are open draft stacks rather than merged production authority. Their existence is implementation/review input, not a production-readiness claim.
 
-In particular, the current #175 exact head has not earned a complete green qualification result. Remote-admin integration must not promote those draft semantics merely by depending on them.
+The current #175 head (`75fe52b1...`) has workflow runs whose conclusion is not an all-green qualification result; for example some checks currently report `action_required`. Therefore remote-admin integration must not promote those draft semantics merely by depending on them.
+
+The same evidence discipline applies transitively to stacked children: parent source/qualification does not automatically transfer to a later adapter or current-base composition.
 
 ## Non-goals
 
