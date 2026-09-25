@@ -1,0 +1,61 @@
+{
+  "schema": "xenia-mlkem-oracle-pin-v1",
+  "assurance_scope": "oracle-identity-and-boundary-only",
+  "oracle": {
+    "repository": "pq-code-package/mlkem-native",
+    "tag": "v2.0.0",
+    "commit": "d1b2fe782888bdb761a50336012923180be7f502",
+    "parameter_set": "ML-KEM-768",
+    "role": "test-only-independent-oracle",
+    "production_dependency": false,
+    "source_licenses": ["Apache-2.0", "ISC", "MIT"]
+  },
+  "dimensions": {
+    "public_key_bytes": 1184,
+    "ciphertext_bytes": 1088,
+    "shared_secret_bytes": 32,
+    "keygen_randomness_bytes": 64,
+    "encapsulation_randomness_bytes": 32
+  },
+  "required_public_api": [
+    "keypair_derand",
+    "enc_derand",
+    "dec",
+    "check_pk"
+  ],
+  "required_error_identity": "MLK_ERR_INVALID_PK",
+  "documented_assurance_boundary": {
+    "portable_c": [
+      "cbmc-memory-safety",
+      "cbmc-type-safety"
+    ],
+    "x86_64_aarch64_assembly": [
+      "hol-light-functional-correctness",
+      "hol-light-memory-safety",
+      "hol-light-secret-independent-timing"
+    ],
+    "explicit_exclusions": [
+      "power-side-channels",
+      "electromagnetic-side-channels",
+      "speculative-microarchitectural-side-channels",
+      "fault-injection",
+      "xenia-protocol-security",
+      "xenia-provider-equivalence",
+      "xenia-production-authorization"
+    ]
+  },
+  "upstream_evidence": {
+    "release_published": "2026-08-07",
+    "release_notes": "https://github.com/pq-code-package/mlkem-native/releases/tag/v2.0.0",
+    "readme_at_tag": "https://github.com/pq-code-package/mlkem-native/blob/v2.0.0/README.md",
+    "public_api_at_tag": "https://github.com/pq-code-package/mlkem-native/blob/v2.0.0/mlkem/mlkem_native.h"
+  },
+  "xenia_dependencies": {
+    "provider_identity_issue": 409,
+    "provider_identity_pr": 410,
+    "external_evidence_issue": 411,
+    "external_evidence_pr": 412,
+    "oracle_corpus_issue": 420
+  },
+  "claim_ceiling": "This manifest pins one external test oracle identity and conservative published assurance boundary. It does not execute the oracle, prove equivalence with RustCrypto, prove Xenia protocol security, establish compiled behavior for Xenia, or authorize a provider migration."
+}
