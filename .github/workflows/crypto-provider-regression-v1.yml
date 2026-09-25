@@ -1,0 +1,86 @@
+name: Crypto Provider Regression V1
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "crates/xenia-handshake/**"
+      - "docs/crypto/provider_assurance_v1.json"
+      - "docs/crypto/provider_external_evidence_v1.json"
+      - "docs/crypto/PROVIDER_REGRESSION_V1.md"
+      - "scripts/validate_crypto_provider_assurance_v1.py"
+      - "scripts/validate_crypto_provider_external_evidence_v1.py"
+      - ".github/workflows/crypto-provider-regression-v1.yml"
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.lock"
+      - "crates/xenia-handshake/**"
+      - "docs/crypto/provider_assurance_v1.json"
+      - "docs/crypto/provider_external_evidence_v1.json"
+      - "docs/crypto/PROVIDER_REGRESSION_V1.md"
+      - "scripts/validate_crypto_provider_assurance_v1.py"
+      - "scripts/validate_crypto_provider_external_evidence_v1.py"
+      - ".github/workflows/crypto-provider-regression-v1.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  c1-ml-kem-boundary:
+    name: C1 ML-KEM non-canonical key boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+
+      - name: Exact subject identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'HEAD=%s\n' "$(git rev-parse HEAD)"
+          printf 'TREE=%s\n' "$(git rev-parse HEAD^{tree})"
+          rustc -Vv
+          cargo -V
+          git status --short
+
+      - name: Revalidate provider identity root
+        run: python3 scripts/validate_crypto_provider_assurance_v1.py .
+
+      - name: Revalidate dated external-evidence snapshot
+        run: python3 scripts/validate_crypto_provider_external_evidence_v1.py .
+
+      - name: Prove required regression tests are discoverable
+        shell: bash
+        run: |
+          set -euo pipefail
+          TESTS=$(cargo test --locked -p xenia-handshake --test provider_regression_v1 -- --list)
+          printf '%s\n' "$TESTS"
+          grep -Fq 'generated_ml_kem_key_is_accepted_and_installs_session_state: test' <<<"$TESTS"
+          grep -Fq 'full_length_noncanonical_ml_kem_key_is_rejected_before_session_install: test' <<<"$TESTS"
+
+      - name: Execute exact C1 regression corpus
+        run: cargo test --locked -p xenia-handshake --test provider_regression_v1 -- --nocapture
+
+      - name: Retain deterministic subject digests in log
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum \
+            Cargo.lock \
+            docs/crypto/provider_assurance_v1.json \
+            docs/crypto/provider_external_evidence_v1.json \
+            docs/crypto/PROVIDER_REGRESSION_V1.md \
+            crates/xenia-handshake/tests/provider_regression_v1.rs
+
+      - name: Postflight checkout immutability
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          test -z "$(git status --porcelain)"
