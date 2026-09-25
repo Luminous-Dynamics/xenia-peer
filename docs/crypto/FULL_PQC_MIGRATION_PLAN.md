@@ -2,143 +2,137 @@
 
 Status: post-RC1 hardening plan.
 
-Xenia can move to a full post-quantum posture, but it should do so as a staged
-migration rather than by relabeling the current stack. Today, `xenia-handshake`
-uses ML-KEM-768 for key establishment and Ed25519 for identity/transcript
-authentication. `xenia-ledger` uses Ed25519 signatures over BLAKE3 hash-chain
-entries. That is a strong hybrid/pre-PQC foundation, but it is not full-PQC.
+Xenia is in a **mixed migration state**, not one global crypto profile. The current live handshake uses ML-KEM-768 plus mandatory Ed25519 AND ML-DSA-65 transcript authentication under `hybrid-pq-transcript-v1`. The stable consent-ledger/evidence append path remains Ed25519 by default under `hybrid-pre-pqc-v1`, with optional ML-DSA evidence capabilities behind an explicit feature. Aggregate `full-pqc` remains false.
+
+`CURRENT_CRYPTO_SURFACE_V1.md` and `current_crypto_surface_v1.json` are the source-bound current-state census for these distinctions.
 
 ## Claim boundary
 
 Use these terms consistently:
 
-| Term | Meaning in Xenia | Safe claim |
+| Term | Meaning in Xenia | Current status |
 |---|---|---|
-| Classical | RSA/ECC signatures or key exchange only. | Avoid for new privileged-access surfaces. |
-| PQ key establishment | Session secrecy comes from ML-KEM-derived key material. | Safe for passive harvest-now-decrypt-later mitigation when transcript binding is correct. |
-| Hybrid PQ/T | PQ and traditional algorithms are both present. | Safe current direction for compatibility and migration. |
-| Full-PQC | Key establishment and authentication/signatures are post-quantum. | Future target, not current status. |
+| Classical | Classical-only signature/key-exchange surface. | Historical/compatibility only for new privileged handshake auth; still present on default ledger append. |
+| PQ key establishment | Session key material derives from ML-KEM. | Current live handshake. |
+| Hybrid PQ/T | Classical and PQ algorithms are both present in an authenticated construction. | Current live handshake. |
+| Full-PQC | PQ key establishment plus PQ-only authority/signature surfaces under the full profile. | Future target; not current aggregate status. |
 
-Do not claim "entirely PQC", "full-PQC", or "PQC at every layer" until all
-signature-bearing surfaces below have PQ verification paths and downgrade tests.
+Do not claim `full-pqc-v1`, “entirely PQC,” or “PQC at every layer” until every required authority-bearing surface and downgrade rule has qualified evidence.
 
 ## Required algorithm baseline
 
-- **Key establishment:** ML-KEM-768 baseline; ML-KEM-1024 option for high-sensitivity profiles.
-- **Online signatures:** ML-DSA-65 baseline; ML-DSA-87 option for high-sensitivity profiles.
-- **Offline/root signatures:** SLH-DSA as an optional conservative root or release-signing profile where signature size/performance is acceptable.
-- **Symmetric sealing:** Continue ChaCha20-Poly1305 or move to AES-256-GCM where platform acceleration/certification requires it. Symmetric crypto is not "PQC" in the same sense, but 256-bit symmetric security is the conservative quantum-era target.
-- **Hashing:** Keep BLAKE3 for internal hash-chain performance only if the threat model accepts a non-FIPS hash. Use SHA-384/SHA-512/Shake-based transcript hashes for compliance profiles if required.
+- Key establishment: ML-KEM-768 baseline; stronger profiles may be evaluated separately.
+- Online signatures: ML-DSA-65 baseline; ML-DSA-87 for higher-sensitivity profiles where justified.
+- Offline/root signatures: SLH-DSA may be evaluated for conservative roots/release signing.
+- Symmetric sealing: ChaCha20-Poly1305 remains acceptable for the current transport profile; alternative compliance profiles are separate work.
+- Hashing: BLAKE3 remains the current internal transcript/hash-chain choice unless a compliance profile explicitly requires another hash.
 
 ## Migration stages
 
-### Stage 0 — honest hybrid status
+### Stage 0 — honest scoped status
 
-Goal: prevent accidental overclaiming.
+Goal: prevent crypto-claim drift.
 
-- Document that ML-KEM protects session key establishment, while Ed25519 still authenticates peers and signs consent/ledger records.
-- Add checks that block marketing/compliance phrases such as "entirely PQC" outside migration documents.
-- Keep current Ed25519 formats stable while adding version fields for future signature agility.
+Current state:
+
+- the live handshake is no longer Ed25519-only;
+- the stable default ledger/evidence path is still Ed25519 by default;
+- aggregate Xenia is not full-PQC.
+
+A single global “current profile” must not collapse those surfaces.
 
 ### Stage 1 — signature agility types
 
-Goal: make signatures versioned before adding new crypto crates.
+Goal: version signature artifacts before changing authority policy.
 
-- Replace fixed `signature: [u8; 64]` fields in ledger/export formats with a tagged signature envelope.
-- Add algorithm identifiers such as `ed25519-v1`, `ml-dsa-65-v1`, `ml-dsa-87-v1`, `slh-dsa-sha2-128s-v1`.
-- Keep Ed25519 verification as the default compatibility mode.
-- Add test vectors for unknown algorithms, wrong algorithm labels, and mixed-chain rejection.
+Implemented foundations include algorithm-tagged `SignatureEnvelope` support and stable signature-suite labels. Historical Ed25519 evidence must remain verifiable under its original semantics.
 
 ### Stage 2 — PQ transcript authentication
 
-Goal: prevent quantum-era active impersonation.
+Goal: prevent acceptance of the live handshake when only one side of the hybrid authentication policy verifies.
 
-- Add ML-DSA verification over the handshake transcript.
-- Bind both peers' ML-KEM public keys, nonces, consent request ID, wire session fingerprint, and chosen transport into the signed transcript.
-- Add downgrade resistance: if a peer advertises full-PQC support, a classical-only transcript must fail unless explicitly permitted by policy.
+**Current status:** native dual signing is implemented. The live native handshake requires both Ed25519 and ML-DSA-65 transcript signatures (AND composition, no classical-only fallback) under `hybrid-pq-transcript-v1`.
 
-**Status (2026-07-02): native handshake done, browser not started.** `xenia-handshake`'s
-`HandshakeManager` and the live `xenia-peer-core` driver
-(`perform_host_handshake_with_transcript_and_context`/
-`perform_viewer_handshake_with_transcript`) now dual-sign every handshake:
-`HostHello`/`ViewerResponse`/`HostFinalize` carry ML-DSA-65 public keys and
-signatures alongside Ed25519, both signature transcripts bind the new
-fields, and verification requires both algorithms (AND composition, no
-classical-only fallback) — see ROADMAP.md row B4. This covers native
-`xenia-peer`/`xenia-viewer` only. `xenia-viewer-web`'s `WasmHandshake`
-still speaks the Ed25519-only transcript and will not interoperate with a
-dual-signing native peer until it is updated to match — that work has not
-started. Downgrade-resistance policy (classical-only transcript rejection
-when a peer advertises full-PQC support) is also not yet implemented; today
-both algorithms are simply always required.
+A WASM-capable viewer-side handshake implementation also exists in `Luminous-Dynamics/xenia-wire` and targets the same ML-KEM-768 + Ed25519 AND ML-DSA-65 semantics. That is an external cross-repository implementation boundary: existence and cross-compatibility evidence do not by themselves prove every browser/operator deployment qualified. XEN-CRYPTO-FV-004 / issue #399 owns the stronger native↔WASM conformance lane.
 
-### Stage 3 — PQ ledger signatures
+Remaining Stage-2 proof work includes exact transcript refinement, protocol proofs under compromise, and explicit downgrade/composition theorems.
 
-Goal: make consent evidence quantum-resistant.
+### Stage 3 — PQ ledger/evidence signatures
 
-- Add `xenia-ledger` support for ML-DSA-signed entries.
-- Keep verifier support for historical Ed25519 chains.
-- Require new chains to declare a chain signature policy at genesis: `classical`, `hybrid`, or `full-pqc`.
-- Add migration evidence: one Ed25519 historical chain, one hybrid chain, one full-PQC chain, and tamper tests for each.
+Goal: make long-lived consent evidence quantum-resistant without rewriting history.
 
-### Stage 4 — PQ identity and admin policy
+Current status:
 
-Goal: remove Ed25519 as an authority root for full-PQC deployments.
+- the stable `Chain::append` path remains Ed25519 by default;
+- ML-DSA-65/87 evidence verification/building support exists behind the optional `pqc-signatures` feature;
+- optional PQ evidence capability does not make the default ledger append path PQ;
+- historical Ed25519 chains remain first-class historical evidence.
 
-- Add PQ DID key material and key-rotation ceremonies.
-- Require admin policy, mitigation rules, release artifacts, and operator enrollment records to verify under PQ signatures.
-- Keep bridge records that map historical Ed25519 identities to PQ identities with dual-signed migration events.
+Future production migration should define explicit chain/evidence policy at creation time and bind it into exported evidence.
+
+### Stage 4 — PQ identity and admin authority
+
+Goal: remove Ed25519 as a required authority root in deployments that claim full-PQC.
+
+Still incomplete. Required work includes PQ identity material, key rotation/transition evidence, admin/policy authority, release artifacts, operator enrollment, and bridge records for historical identities.
 
 ### Stage 5 — full-PQC profile gate
 
-Goal: make `--crypto-profile full-pqc` meaningful.
+Goal: make `full-pqc-v1` an enforceable profile rather than a label.
 
-The profile should require:
+A qualified full-PQC profile must require at least:
 
 - ML-KEM session establishment;
-- ML-DSA or SLH-DSA transcript authentication;
-- ML-DSA or SLH-DSA consent/ledger signatures;
-- PQ-signed policy bundles;
-- no silent fallback to Ed25519;
-- evidence export that states the negotiated algorithms.
+- PQ-only accepted transcript authentication under the declared full profile;
+- PQ consent/ledger signatures;
+- PQ-signed policy/admin authority where in scope;
+- no silent Ed25519 fallback on authority-bearing surfaces;
+- evidence export that binds negotiated algorithms/profile identities;
+- negative controls proving downgrade rejection.
+
+## Evidence-model evolution
+
+The current live handshake acceptance rule is composite:
+
+```text
+Ed25519 valid AND ML-DSA-65 valid
+```
+
+The long-lived evidence v1 transcript-signature artifact currently models one `SignatureSuite`. Those are different boundaries. XEN-CRYPTO-FV-008 tracks a versioned composite-authentication evidence shape so future proof receipts can represent `AllOf(Ed25519, ML-DSA-65)` without silently changing v1 evidence semantics.
 
 ## Acceptance tests
 
-A full-PQC PR is not done until these fail/pass conditions exist:
+A full-PQC claim is not qualified until tests/receipts establish, at minimum:
 
-1. A full-PQC peer refuses a classical-only signature chain.
-2. A full-PQC peer refuses a downgraded handshake after advertising PQ support.
-3. A verifier reports the algorithm used for every ledger entry.
-4. A tampered ML-DSA ledger entry fails with the same severity as a bad Ed25519 entry.
-5. A historical Ed25519 chain remains verifiable but is labeled `classical-signature`.
-6. A session evidence export includes KEM, signature, hash, AEAD, and transcript labels.
+1. classical-only handshake authentication is rejected under the full profile;
+2. classical-only ledger/evidence authority is rejected under the full profile;
+3. every authority-bearing signature artifact reports its algorithm/policy identity;
+4. tampered ML-DSA evidence fails closed;
+5. historical Ed25519 evidence remains verifiable but cannot be relabeled as full-PQC;
+6. algorithm/profile changes alter the bound evidence identity;
+7. missing one member of an `AllOf` authentication policy fails verification;
+8. admin/root/policy surfaces meet the same declared full-profile boundary.
 
 ## Product wording
 
 Safe now:
 
-> Xenia is building toward a full-PQC remote-session profile. The current
-> pre-alpha stack uses ML-KEM-based key establishment with classical Ed25519
-> authentication/signatures, plus an explicit migration path to ML-DSA/SLH-DSA.
+> Xenia's live handshake uses ML-KEM-768 with mandatory Ed25519 + ML-DSA-65 transcript authentication, while the stable ledger/evidence append path remains Ed25519 by default. Xenia is still migrating other authority surfaces toward a future full-PQC profile.
 
-Safe after Stage 5 only:
+Safe only after Stage 5 qualification:
 
-> Xenia supports a full-PQC profile with post-quantum key establishment,
-> transcript authentication, consent-ledger signatures, and policy signatures.
+> Xenia supports a full-PQC profile with post-quantum key establishment, authentication, consent-ledger signatures, and policy/admin authority under the qualified profile.
 
+## Formal-verification path
 
-## Next implementation bridge: signature envelopes
+The formal lane should preserve these proof classes separately:
 
-The first code-level bridge toward full-PQC ledger verification is
-`SignatureEnvelope` in `xenia-ledger`. It keeps the M1 append path compatible
-with fixed-size Ed25519 entries, while exported evidence uses a tagged shape:
+- provider/primitive assurance;
+- exact transcript and KDF refinement;
+- symbolic protocol security;
+- native/WASM conformance;
+- replay/epoch state-machine proofs;
+- computational construction proofs;
+- compiled/constant-time and erasure evidence.
 
-```text
-algorithm = ed25519-rfc8032 | ml-dsa-65-fips204 | ml-dsa-87-fips204 | slh-dsa-fips205
-signature = raw signature bytes
-```
-
-Do not add an ML-DSA dependency until the verifier can be paired with FIPS
-204-compatible test vectors and downgrade tests. Until then, the exported shape
-may carry PQ signature labels, but the current verifier must reject them as
-unsupported rather than pretending to verify them.
+No one result should be relabeled as repository-wide “formally verified cryptography.”

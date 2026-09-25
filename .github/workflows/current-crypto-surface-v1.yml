@@ -4,23 +4,31 @@ on:
   pull_request:
     paths:
       - "crates/xenia-handshake/src/lib.rs"
+      - "crates/xenia-handshake/Cargo.toml"
       - "crates/xenia-ledger/src/policy.rs"
       - "crates/xenia-ledger/src/signature.rs"
       - "crates/xenia-ledger/Cargo.toml"
+      - "docs/crypto/CANONICAL_HANDSHAKE_TRANSCRIPT.md"
+      - "docs/crypto/FULL_PQC_MIGRATION_PLAN.md"
       - "docs/crypto/CURRENT_CRYPTO_SURFACE_V1.md"
       - "docs/crypto/current_crypto_surface_v1.json"
       - "scripts/validate_current_crypto_surface_v1.py"
+      - "scripts/check_crypto_documentation_claims_v1.py"
       - ".github/workflows/current-crypto-surface-v1.yml"
   push:
     branches: [main]
     paths:
       - "crates/xenia-handshake/src/lib.rs"
+      - "crates/xenia-handshake/Cargo.toml"
       - "crates/xenia-ledger/src/policy.rs"
       - "crates/xenia-ledger/src/signature.rs"
       - "crates/xenia-ledger/Cargo.toml"
+      - "docs/crypto/CANONICAL_HANDSHAKE_TRANSCRIPT.md"
+      - "docs/crypto/FULL_PQC_MIGRATION_PLAN.md"
       - "docs/crypto/CURRENT_CRYPTO_SURFACE_V1.md"
       - "docs/crypto/current_crypto_surface_v1.json"
       - "scripts/validate_current_crypto_surface_v1.py"
+      - "scripts/check_crypto_documentation_claims_v1.py"
       - ".github/workflows/current-crypto-surface-v1.yml"
   workflow_dispatch:
 
@@ -49,6 +57,9 @@ jobs:
       - name: Validate current crypto surface and negative controls
         run: python3 scripts/validate_current_crypto_surface_v1.py .
 
+      - name: Validate authoritative crypto documentation claims
+        run: python3 scripts/check_crypto_documentation_claims_v1.py .
+
       - name: Retain deterministic contract digests in log
         shell: bash
         run: |
@@ -56,7 +67,11 @@ jobs:
           sha256sum \
             docs/crypto/CURRENT_CRYPTO_SURFACE_V1.md \
             docs/crypto/current_crypto_surface_v1.json \
-            scripts/validate_current_crypto_surface_v1.py
+            docs/crypto/CANONICAL_HANDSHAKE_TRANSCRIPT.md \
+            docs/crypto/FULL_PQC_MIGRATION_PLAN.md \
+            crates/xenia-handshake/Cargo.toml \
+            scripts/validate_current_crypto_surface_v1.py \
+            scripts/check_crypto_documentation_claims_v1.py
 
       - name: Postflight checkout immutability
         shell: bash

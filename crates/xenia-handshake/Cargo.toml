@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license = "Apache-2.0 OR MIT"
-description = "ML-KEM-768 session key establishment with classical Ed25519 transcript authentication for the Xenia remote-session stack. Final PQ authentication via ML-DSA/SLH-DSA is a future migration lane."
+description = "ML-KEM-768 session key establishment with mandatory Ed25519 + ML-DSA-65 transcript authentication for Xenia's hybrid-pq-transcript-v1 handshake. Full-PQC remains a separately gated future profile."
 repository.workspace = true
 homepage.workspace = true
 publish = false
@@ -26,4 +26,3 @@ hkdf = "0.12"
 sha2 = "0.10"
 rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }
-
