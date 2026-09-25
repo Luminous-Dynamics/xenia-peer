@@ -1,0 +1,75 @@
+{
+  "schema": "xenia-formal-crypto-evidence-planes-v1",
+  "status": "architecture-only",
+  "global_evidence_vocabulary": "SYM-FV-compatible; crypto planes are facets, not replacement evidence classes",
+  "planes": [
+    {
+      "id": "P1",
+      "name": "PrimitiveProviderAssurance",
+      "subjects": ["ML-KEM", "ML-DSA", "Ed25519", "HKDF-SHA256", "BLAKE3", "ChaCha20-Poly1305"],
+      "requires": ["exact provider/version/checksum", "standard revision", "test-vector status", "known advisories", "formal-proof boundary", "side-channel status"],
+      "nonclaims": ["Xenia protocol proved", "compiled binary universally verified"]
+    },
+    {
+      "id": "P2",
+      "name": "ProtocolSymbolicSecurity",
+      "canonical_tool": "Tamarin",
+      "subjects": ["handshake", "TOFU", "compromise", "downgrade", "replay", "rekey", "lane derivation"],
+      "requires": ["explicit primitive equations/assumptions", "non-vacuity traces", "compromise model", "retained counterexamples"],
+      "nonclaims": ["primitive implementation correctness", "concrete serialization correctness", "side-channel safety"]
+    },
+    {
+      "id": "P3",
+      "name": "EncodingTranscriptRefinement",
+      "preferred_tools": ["Aeneas+Lean", "hax+F*"],
+      "subjects": ["signature transcript", "canonical transcript", "identity fingerprint", "root key schedule", "lane key schedule", "rekey context"],
+      "requires": ["production-path source", "exact encoding subject", "domain labels", "source/formal artifact binding", "negative controls"],
+      "nonclaims": ["primitive security theorem", "protocol authentication theorem", "compiled side-channel theorem"]
+    },
+    {
+      "id": "P4",
+      "name": "StateMachineDeductiveProof",
+      "preferred_tools": ["Verus", "Kani", "Aeneas+Lean"],
+      "subjects": ["nonce state", "replay windows", "key epochs", "ephemeral key lifetime", "rekey transitions", "lane isolation"],
+      "requires": ["exact source subject", "tool/solver pins", "trusted assumption census", "mutation controls"],
+      "nonclaims": ["primitive cryptographic hardness", "protocol theorem", "compiler correctness"]
+    },
+    {
+      "id": "P5",
+      "name": "CompiledSideChannelRuntimeBoundary",
+      "subjects": ["secret independence", "constant time", "compiled assembly", "zeroization", "target-specific implementations"],
+      "requires": ["target/toolchain profile", "evidence method", "provider boundary", "residual side-channel classes"],
+      "nonclaims": ["power/EM resistance", "fault-injection resistance", "physical erasure guarantee"]
+    }
+  ],
+  "required_non_equivalences": [
+    "primitive proof != protocol proof",
+    "protocol proof != transcript/serialization proof",
+    "transcript refinement != primitive security proof",
+    "functional correctness != constant time",
+    "source secret independence != compiler-preserved constant time",
+    "cross-implementation conformance != primitive correctness",
+    "symbolic theorem != concrete runtime refinement",
+    "hybrid PQ transcript authentication != full-PQC system",
+    "verified dependency != verified application",
+    "formal verification != runtime authorization"
+  ],
+  "required_assumption_classes": [
+    "primitive cryptographic assumptions",
+    "hash/KDF/AEAD symbolic assumptions",
+    "OS/browser RNG quality",
+    "ephemeral/private key erasure",
+    "TOFU pin storage integrity",
+    "compiler/CPU side-channel boundary",
+    "formal translator/prover/solver trust"
+  ],
+  "initial_trackers": {
+    "architecture": 395,
+    "provider_inventory": 396,
+    "transcript_refinement": 397,
+    "protocol_tamarin": 398,
+    "native_wasm_conformance": 399,
+    "side_channel": 400,
+    "profile_drift": 401
+  }
+}
