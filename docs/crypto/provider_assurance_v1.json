@@ -1,0 +1,160 @@
+{
+  "schema": "xenia-crypto-provider-assurance-v1",
+  "assurance_scope": "identity-only",
+  "baseline_main_sha_at_freeze": "af4fcefc6d4cc7c3f74a3ca48f26abcd97d1e930",
+  "lockfile": {
+    "path": "Cargo.lock",
+    "format_version": 4,
+    "registry_source": "registry+https://github.com/rust-lang/crates.io-index"
+  },
+  "providers": [
+    {
+      "name": "ml-kem",
+      "version": "0.3.0-rc.2",
+      "checksum": "04437cb1a66c0b78740927b76cc61f218344b9f6ef3dd430e283274a718ef0e9",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "roles": ["kem-provider", "native-handshake", "xenia-wire"]
+    },
+    {
+      "name": "ml-dsa",
+      "version": "0.1.1",
+      "checksum": "add6b9d92e496f16f4526d68ff29da1483aba4b119baeab8bed3b9e3544a6f3d",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "roles": ["pq-signature-provider", "native-handshake", "optional-ledger-evidence", "xenia-wire"]
+    },
+    {
+      "name": "ed25519-dalek",
+      "version": "2.2.0",
+      "checksum": "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "roles": ["classical-signature-provider", "native-handshake", "default-ledger", "xenia-wire"]
+    },
+    {
+      "name": "hkdf",
+      "version": "0.12.4",
+      "checksum": "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "roles": ["kdf-provider", "native-handshake", "xenia-wire"]
+    },
+    {
+      "name": "sha2",
+      "version": "0.10.9",
+      "checksum": "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "roles": ["hash-prf-provider", "native-handshake", "xenia-wire"]
+    },
+    {
+      "name": "blake3",
+      "version": "1.8.5",
+      "checksum": "0aa83c34e62843d924f905e0f5c866eb1dd6545fc4d719e803d9ba6030371fce",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "roles": ["transcript-hash", "identity-fingerprint", "ledger-hash-chain", "xenia-wire"]
+    },
+    {
+      "name": "rand",
+      "version": "0.8.7",
+      "checksum": "22f6172bdec972074665ed81ed53b71da00bfc44b65a753cfde883ec4c702a1a",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "roles": ["rng-abstraction", "native-handshake"]
+    },
+    {
+      "name": "rand_core",
+      "version": "0.6.4",
+      "checksum": "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "roles": ["rng-interface", "os-rng-path"]
+    },
+    {
+      "name": "getrandom",
+      "version": "0.2.17",
+      "checksum": "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "roles": ["os-entropy-provider", "os-rng-path"]
+    },
+    {
+      "name": "zeroize",
+      "version": "1.9.0",
+      "checksum": "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "roles": ["secret-erasure-support", "native-handshake", "xenia-wire"]
+    },
+    {
+      "name": "chacha20poly1305",
+      "version": "0.10.1",
+      "checksum": "10cd79432192d1c0f4e1a0fef9527696cc039165d729fb41b3f4f4f354c2dc35",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "roles": ["aead-provider", "xenia-wire"]
+    },
+    {
+      "name": "xenia-wire",
+      "version": "0.2.0-alpha.9",
+      "checksum": "3f58c7d213540e4f487a76629d746a789ba05c9f46ae3dd7bf4e0c9bb3f44667",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "roles": ["transport-crypto-wrapper"],
+      "required_crypto_dependencies": [
+        "blake3",
+        "chacha20poly1305",
+        "ed25519-dalek 2.2.0",
+        "hkdf",
+        "ml-dsa",
+        "ml-kem",
+        "rand 0.8.7",
+        "sha2 0.10.9",
+        "zeroize"
+      ]
+    }
+  ],
+  "direct_requirements": [
+    {
+      "path": "crates/xenia-handshake/Cargo.toml",
+      "dependencies": {
+        "blake3": {"version": "1.5"},
+        "ml-kem": {"version": "0.3.0-rc.2", "default_features": false, "features": ["getrandom", "zeroize"]},
+        "ed25519-dalek": {"version": "2", "default_features": false, "features": ["rand_core", "std"]},
+        "ml-dsa": {"version": "0.1.1", "default_features": true},
+        "hkdf": {"version": "0.12"},
+        "sha2": {"version": "0.10"},
+        "rand": {"version": "0.8"},
+        "zeroize": {"version": "1", "features": ["derive"]}
+      }
+    },
+    {
+      "path": "crates/xenia-ledger/Cargo.toml",
+      "dependencies": {
+        "blake3": {"version": "1.5"},
+        "ed25519-dalek": {"version": "2", "default_features": false, "features": ["serde", "std"]},
+        "ml-dsa": {"version": "0.1.1", "default_features": true, "optional": true}
+      },
+      "features": {
+        "pqc-signatures": ["dep:ml-dsa"]
+      }
+    },
+    {
+      "path": "Cargo.toml",
+      "workspace_dependencies": {
+        "xenia-wire": {"version": "0.2.0-alpha.9"}
+      }
+    }
+  ],
+  "external_assurance": {
+    "status": "not-bound-in-001a",
+    "successor": "XEN-CRYPTO-FV-001B",
+    "fields_deferred": [
+      "standards-and-errata",
+      "independent-audits",
+      "test-vectors",
+      "known-advisories",
+      "formal-verification-boundaries",
+      "constant-time-and-side-channel-evidence",
+      "provider-alternatives",
+      "native-wasm-differences"
+    ]
+  },
+  "non_equivalences": [
+    "Cargo requirement != resolved package",
+    "resolved package != audited package",
+    "resolved package != formally verified package",
+    "provider identity != protocol security",
+    "provider upgrade != stronger assurance until requalified"
+  ]
+}
