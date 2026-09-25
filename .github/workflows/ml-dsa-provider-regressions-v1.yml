@@ -1,0 +1,64 @@
+name: ML-DSA Provider Regressions V1
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "crates/xenia-ledger/Cargo.toml"
+      - "crates/xenia-ledger/src/**"
+      - "crates/xenia-ledger/tests/ml_dsa_provider_regressions.rs"
+      - "crates/xenia-ledger/tests/fixtures/mldsa65_repeated_hint_wycheproof_v1.json"
+      - ".github/workflows/ml-dsa-provider-regressions-v1.yml"
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.lock"
+      - "crates/xenia-ledger/Cargo.toml"
+      - "crates/xenia-ledger/src/**"
+      - "crates/xenia-ledger/tests/ml_dsa_provider_regressions.rs"
+      - "crates/xenia-ledger/tests/fixtures/mldsa65_repeated_hint_wycheproof_v1.json"
+      - ".github/workflows/ml-dsa-provider-regressions-v1.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mldsa65-regressions:
+    name: Verify pinned ML-DSA-65 regressions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Exact subject identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'HEAD=%s\n' "$(git rev-parse HEAD)"
+          printf 'TREE=%s\n' "$(git rev-parse HEAD^{tree})"
+          git status --short
+
+      - name: Run pinned ML-DSA provider regressions
+        run: cargo test --locked -p xenia-ledger --features pqc-signatures --test ml_dsa_provider_regressions -- --nocapture
+
+      - name: Retain fixture and subject digests in log
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum \
+            Cargo.lock \
+            crates/xenia-ledger/Cargo.toml \
+            crates/xenia-ledger/src/signature.rs \
+            crates/xenia-ledger/tests/ml_dsa_provider_regressions.rs \
+            crates/xenia-ledger/tests/fixtures/mldsa65_repeated_hint_wycheproof_v1.json
+
+      - name: Postflight checkout immutability
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          test -z "$(git status --porcelain)"
