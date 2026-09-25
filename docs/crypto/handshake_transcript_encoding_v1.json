@@ -1,0 +1,64 @@
+{
+  "schema": "xenia-handshake-transcript-encoding-census-v1",
+  "subject": {
+    "repository": "Luminous-Dynamics/xenia-peer",
+    "base_commit": "c7926eea5642ca7f6ca1ad61be8e9cf317a17ceb",
+    "source_path": "crates/xenia-handshake/src/lib.rs",
+    "transcript_schema": "xenia-handshake-transcript-v1",
+    "hash_algorithm": "blake3-256",
+    "serialization_call": "bincode::serialize(transcript)"
+  },
+  "serializer": {
+    "bincode": {
+      "version": "1.3.3",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad",
+      "api": "root-helper-bincode::serialize"
+    },
+    "serde": {
+      "version": "1.0.228",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
+    },
+    "serde_core": {
+      "version": "1.0.228",
+      "checksum": "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad"
+    },
+    "serde_derive": {
+      "version": "1.0.228",
+      "checksum": "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
+    }
+  },
+  "field_order": [
+    ["schema", "String"],
+    ["kem", "String"],
+    ["transcript_signature", "String"],
+    ["kdf", "String"],
+    ["negotiated_context_hash", "Option<[u8; 32]>"],
+    ["host_ed25519_pk", "[u8; 32]"],
+    ["viewer_ed25519_pk", "[u8; 32]"],
+    ["host_ml_dsa_pk", "Vec<u8>"],
+    ["viewer_ml_dsa_pk", "Vec<u8>"],
+    ["host_kem_pk", "Vec<u8>"],
+    ["kem_ciphertext", "Vec<u8>"],
+    ["host_nonce", "[u8; 32]"],
+    ["viewer_nonce", "[u8; 32]"],
+    ["viewer_signature", "Vec<u8>"],
+    ["host_signature", "Vec<u8>"],
+    ["viewer_ml_dsa_signature", "Vec<u8>"],
+    ["host_ml_dsa_signature", "Vec<u8>"]
+  ],
+  "claim_ceiling": [
+    "exact-serializer-identity-census",
+    "exact-struct-field-order-census",
+    "fail-closed-transcript-format-drift-gate"
+  ],
+  "not_claimed": [
+    "universal-bincode-refinement",
+    "blake3-collision-resistance-proof",
+    "signature-security-proof",
+    "handshake-authentication-theorem",
+    "native-wasm-byte-equivalence",
+    "compiled-code-proof"
+  ]
+}

@@ -1,0 +1,69 @@
+name: Handshake Transcript Encoding V1
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/xenia-handshake/**"
+      - "docs/crypto/HANDSHAKE_TRANSCRIPT_ENCODING_V1.md"
+      - "docs/crypto/handshake_transcript_encoding_v1.json"
+      - "scripts/validate_handshake_transcript_encoding_v1.py"
+      - ".github/workflows/handshake-transcript-encoding-v1.yml"
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/xenia-handshake/**"
+      - "docs/crypto/HANDSHAKE_TRANSCRIPT_ENCODING_V1.md"
+      - "docs/crypto/handshake_transcript_encoding_v1.json"
+      - "scripts/validate_handshake_transcript_encoding_v1.py"
+      - ".github/workflows/handshake-transcript-encoding-v1.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  census:
+    name: Validate transcript encoding census
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Exact subject identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'HEAD=%s\n' "$(git rev-parse HEAD)"
+          printf 'TREE=%s\n' "$(git rev-parse HEAD^{tree})"
+          git status --short
+
+      - name: Validate exact serializer and field-order census
+        run: python3 scripts/validate_handshake_transcript_encoding_v1.py .
+
+      - name: Exercise current xenia-handshake implementation
+        run: cargo test --locked -p xenia-handshake
+
+      - name: Retain assurance digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum \
+            Cargo.lock \
+            crates/xenia-handshake/src/lib.rs \
+            docs/crypto/HANDSHAKE_TRANSCRIPT_ENCODING_V1.md \
+            docs/crypto/handshake_transcript_encoding_v1.json \
+            scripts/validate_handshake_transcript_encoding_v1.py
+
+      - name: Postflight checkout immutability
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          test -z "$(git status --porcelain)"
