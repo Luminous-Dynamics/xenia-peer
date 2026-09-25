@@ -1,0 +1,41 @@
+{
+  "schema": "xenia-wycheproof-mldsa65-regression-v1",
+  "upstream": {
+    "repository": "C2SP/wycheproof",
+    "commit": "3fa63dd0344abb611f1fb1d77e119938603ea230",
+    "root_tree": "a774df247e34ac2c414a55913f58d70ca37af29f",
+    "testvectors_v1_tree": "8486adbdb050483c5a450d650466f0123c488976",
+    "path": "testvectors_v1/mldsa_65_verify_test.json",
+    "git_blob": "049f74be9785af926623e56530ab3aa9384179e8",
+    "raw_url": "https://raw.githubusercontent.com/C2SP/wycheproof/3fa63dd0344abb611f1fb1d77e119938603ea230/testvectors_v1/mldsa_65_verify_test.json",
+    "license": "Apache-2.0",
+    "license_blob": "7a4a3ea2424c09fbe48d455aed1eaa94d9124835"
+  },
+  "case": {
+    "algorithm": "ML-DSA-65",
+    "type": "MlDsaVerify",
+    "tc_id": 19,
+    "comment": "signature with a repeated hint",
+    "message_hex": "0100000000000000000000000000000000000000000000000000000000000000",
+    "expected_result": "invalid",
+    "required_flags": ["InvalidHintsEncoding"],
+    "public_key_bytes": 1952,
+    "signature_bytes": 3309,
+    "message_bytes": 32
+  },
+  "xenia_boundary": {
+    "crate": "xenia-handshake",
+    "api": "HandshakeManager::verify_ml_dsa",
+    "provider_identity": {
+      "name": "ml-dsa",
+      "version": "0.1.1",
+      "checksum": "add6b9d92e496f16f4526d68ff29da1483aba4b119baeab8bed3b9e3544a6f3d"
+    }
+  },
+  "advisory_context": {
+    "id": "GHSA-5x2r-hc65-25f9",
+    "url": "https://github.com/RustCrypto/signatures/security/advisories/GHSA-5x2r-hc65-25f9",
+    "scope": "provenance-context-only; the executable invariant is the pinned vector rejection"
+  },
+  "claim_ceiling": "A passing C2 run establishes rejection of this exact pinned repeated-hint vector by the exact Xenia verifier/provider subject on the recorded build target; it is not complete FIPS 204 or primitive-security proof."
+}
