@@ -1,0 +1,116 @@
+name: Crypto Provider Regression C2
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "crates/xenia-handshake/examples/verify_wycheproof_mldsa65_tc19.rs"
+      - "docs/crypto/provider_assurance_v1.json"
+      - "docs/crypto/provider_external_evidence_v1.json"
+      - "docs/crypto/wycheproof_mldsa65_tc19_v1.json"
+      - "docs/crypto/PROVIDER_REGRESSION_C2.md"
+      - "scripts/extract_wycheproof_mldsa65_tc19.py"
+      - ".github/workflows/crypto-provider-regression-c2.yml"
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.lock"
+      - "crates/xenia-handshake/examples/verify_wycheproof_mldsa65_tc19.rs"
+      - "docs/crypto/provider_assurance_v1.json"
+      - "docs/crypto/provider_external_evidence_v1.json"
+      - "docs/crypto/wycheproof_mldsa65_tc19_v1.json"
+      - "docs/crypto/PROVIDER_REGRESSION_C2.md"
+      - "scripts/extract_wycheproof_mldsa65_tc19.py"
+      - ".github/workflows/crypto-provider-regression-c2.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  WYCHEPROOF_COMMIT: 3fa63dd0344abb611f1fb1d77e119938603ea230
+  WYCHEPROOF_VECTOR_URL: https://raw.githubusercontent.com/C2SP/wycheproof/3fa63dd0344abb611f1fb1d77e119938603ea230/testvectors_v1/mldsa_65_verify_test.json
+
+jobs:
+  c2-mldsa-repeated-hint:
+    name: C2 ML-DSA repeated-hint rejection
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+
+      - name: Exact subject identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'HEAD=%s\n' "$(git rev-parse HEAD)"
+          printf 'TREE=%s\n' "$(git rev-parse HEAD^{tree})"
+          rustc -Vv
+          cargo -V
+          git status --short
+
+      - name: Revalidate provider identity root
+        run: python3 scripts/validate_crypto_provider_assurance_v1.py .
+
+      - name: Revalidate dated external-evidence snapshot
+        run: python3 scripts/validate_crypto_provider_external_evidence_v1.py .
+
+      - name: Fetch immutable Wycheproof ML-DSA-65 corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/xenia-c2"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --retry 3 --retry-all-errors \
+            "$WYCHEPROOF_VECTOR_URL" \
+            -o "$RUNNER_TEMP/xenia-c2/mldsa_65_verify_test.json"
+
+      - name: Authenticate corpus, extract tcId 19, and run extractor negative controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/extract_wycheproof_mldsa65_tc19.py \
+            docs/crypto/wycheproof_mldsa65_tc19_v1.json \
+            "$RUNNER_TEMP/xenia-c2/mldsa_65_verify_test.json" \
+            "$RUNNER_TEMP/xenia-c2/extracted" \
+            | tee "$RUNNER_TEMP/xenia-c2/extraction.log"
+          cat "$RUNNER_TEMP/xenia-c2/extracted/receipt.json"
+
+      - name: Build C2 evidence runner under the frozen lockfile
+        run: cargo build --locked -p xenia-handshake --example verify_wycheproof_mldsa65_tc19
+
+      - name: Execute exact Xenia positive/repeated-hint regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --locked -p xenia-handshake \
+            --example verify_wycheproof_mldsa65_tc19 -- \
+            "$RUNNER_TEMP/xenia-c2/extracted/public_key.bin" \
+            "$RUNNER_TEMP/xenia-c2/extracted/message.bin" \
+            "$RUNNER_TEMP/xenia-c2/extracted/signature.bin"
+
+      - name: Retain deterministic subject and receipt digests in log
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum \
+            Cargo.lock \
+            docs/crypto/provider_assurance_v1.json \
+            docs/crypto/provider_external_evidence_v1.json \
+            docs/crypto/wycheproof_mldsa65_tc19_v1.json \
+            docs/crypto/PROVIDER_REGRESSION_C2.md \
+            scripts/extract_wycheproof_mldsa65_tc19.py \
+            crates/xenia-handshake/examples/verify_wycheproof_mldsa65_tc19.rs \
+            "$RUNNER_TEMP/xenia-c2/mldsa_65_verify_test.json" \
+            "$RUNNER_TEMP/xenia-c2/extracted/receipt.json"
+
+      - name: Postflight checkout immutability
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          test -z "$(git status --porcelain)"
