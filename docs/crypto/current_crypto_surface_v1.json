@@ -1,0 +1,74 @@
+{
+  "schema": "xenia-current-crypto-surface-v1",
+  "subject_scope": "source-declared-current-state",
+  "native_handshake": {
+    "repository": "Luminous-Dynamics/xenia-peer",
+    "source": "crates/xenia-handshake/src/lib.rs",
+    "profile": "hybrid-pq-transcript-v1",
+    "kem": "ml-kem-768-fips203",
+    "transcript_authentication": {
+      "mode": "all-of",
+      "suites": [
+        "ed25519-rfc8032",
+        "ml-dsa-65-fips204"
+      ],
+      "combined_label": "ed25519-rfc8032+ml-dsa-65-fips204"
+    },
+    "kdf": "hkdf-sha256",
+    "transcript_schema": "xenia-handshake-transcript-v1",
+    "transcript_hash": "blake3-256",
+    "full_pqc": false
+  },
+  "wasm_viewer_handshake": {
+    "repository": "Luminous-Dynamics/xenia-wire",
+    "source": "src/handshake.rs",
+    "relationship": "external-cross-repo-conformance-required",
+    "expected_profile": "hybrid-pq-transcript-v1",
+    "expected_transcript_authentication": {
+      "mode": "all-of",
+      "suites": [
+        "ed25519-rfc8032",
+        "ml-dsa-65-fips204"
+      ]
+    },
+    "qualification_dependency": "Luminous-Dynamics/xenia-peer#399",
+    "locally_proven": false
+  },
+  "ledger_evidence_default": {
+    "repository": "Luminous-Dynamics/xenia-peer",
+    "policy_source": "crates/xenia-ledger/src/policy.rs",
+    "signature_source": "crates/xenia-ledger/src/signature.rs",
+    "cargo_source": "crates/xenia-ledger/Cargo.toml",
+    "policy_profile": "hybrid-pre-pqc-v1",
+    "default_evidence_transcript_signature": "ed25519-rfc8032",
+    "default_ledger_signature": "ed25519-rfc8032",
+    "hash_chain": "blake3-256",
+    "optional_pq_backend": {
+      "feature": "pqc-signatures",
+      "provider": "ml-dsa",
+      "suites": [
+        "ml-dsa-65-fips204",
+        "ml-dsa-87-fips204"
+      ],
+      "changes_default_append_path": false
+    },
+    "full_pqc": false
+  },
+  "aggregate": {
+    "status": "mixed-migration-v1",
+    "full_pqc": false,
+    "reasons": [
+      "Ed25519 remains part of the live hybrid handshake authority identity",
+      "the stable default ledger append path remains Ed25519",
+      "PQ ledger/evidence backends are optional capabilities rather than the default append authority",
+      "admin/root/policy authority migration is separately gated"
+    ]
+  },
+  "non_equivalences": [
+    "handshake profile != ledger/evidence profile",
+    "hybrid PQ transcript authentication != full-PQC authority",
+    "optional PQ evidence backend != PQ default ledger append",
+    "external cross-repository implementation claim != local source proof",
+    "source/profile consistency != cryptographic security theorem"
+  ]
+}
