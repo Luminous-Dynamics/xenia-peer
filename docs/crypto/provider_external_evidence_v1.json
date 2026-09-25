@@ -1,0 +1,175 @@
+{
+  "schema": "xenia-crypto-provider-external-evidence-v1",
+  "observed_at": "2026-09-25",
+  "assurance_scope": "dated-external-evidence-only",
+  "identity_manifest": "docs/crypto/provider_assurance_v1.json",
+  "identity_schema": "xenia-crypto-provider-assurance-v1",
+  "refresh_policy": {
+    "live_network_in_ci": false,
+    "review_after_days": 90,
+    "rule": "Mutable external claims must be re-researched and reviewed; CI validates the frozen snapshot structure and identity binding only."
+  },
+  "records": [
+    {
+      "id": "nist-fips-203-final-errata-state-2026-09-25",
+      "evidence_class": "standard",
+      "provider_ref": null,
+      "applicability": "algorithm-standard",
+      "source_url": "https://csrc.nist.gov/pubs/fips/203/final",
+      "observed_claim": "FIPS 203 is final, published 2024-08-13; NIST carries a 2025-11-17 planning note that an identified issue is intended for a future update/revision and links potential errata.",
+      "disposition": "standard-with-open-errata-state",
+      "claim_ceiling": "Does not establish correctness of any Xenia provider implementation."
+    },
+    {
+      "id": "nist-fips-204-final-errata-state-2026-09-25",
+      "evidence_class": "standard",
+      "provider_ref": null,
+      "applicability": "algorithm-standard",
+      "source_url": "https://csrc.nist.gov/pubs/fips/204/final",
+      "observed_claim": "FIPS 204 is final, published 2024-08-13; NIST carries a 2026-07-31 planning note pointing to several minor potential errata for a future update/revision.",
+      "disposition": "standard-with-open-errata-state",
+      "claim_ceiling": "Does not establish correctness of any Xenia provider implementation."
+    },
+    {
+      "id": "rustcrypto-ml-kem-0.3.0-rc.2-audit-status",
+      "evidence_class": "audit",
+      "provider_ref": {
+        "name": "ml-kem",
+        "version": "0.3.0-rc.2",
+        "checksum": "04437cb1a66c0b78740927b76cc61f218344b9f6ef3dd430e283274a718ef0e9"
+      },
+      "applicability": "exact-version",
+      "source_url": "https://docs.rs/crate/ml-kem/0.3.0-rc.2",
+      "observed_claim": "The crate documentation states that the implementation has never been independently audited.",
+      "disposition": "independent-audit-not-established",
+      "claim_ceiling": "Absence of an independent audit is not evidence that the implementation is insecure; it is an assurance gap."
+    },
+    {
+      "id": "rustcrypto-ml-kem-0.3.x-validation-delta",
+      "evidence_class": "test-vector",
+      "provider_ref": {
+        "name": "ml-kem",
+        "version": "0.3.0-rc.2",
+        "checksum": "04437cb1a66c0b78740927b76cc61f218344b9f6ef3dd430e283274a718ef0e9"
+      },
+      "applicability": "reference-only",
+      "source_url": "https://docs.rs/crate/ml-kem/latest/source/CHANGELOG.md",
+      "observed_claim": "The final 0.3.0 changelog records Wycheproof validation additions and fixes for encapsulation-key and expanded-decapsulation-key validation; current observed stable is 0.3.2.",
+      "disposition": "exact-rc2-applicability-unresolved",
+      "claim_ceiling": "Do not infer that the rc.2 artifact contains or lacks every final-0.3.0 fix; establish exact ancestry or executable differential evidence before an upgrade/security claim."
+    },
+    {
+      "id": "rustcrypto-ml-dsa-0.1.1-audit-status",
+      "evidence_class": "audit",
+      "provider_ref": {
+        "name": "ml-dsa",
+        "version": "0.1.1",
+        "checksum": "add6b9d92e496f16f4526d68ff29da1483aba4b119baeab8bed3b9e3544a6f3d"
+      },
+      "applicability": "exact-version",
+      "source_url": "https://docs.rs/crate/ml-dsa/0.1.1",
+      "observed_claim": "The crate documentation states that the implementation has never been independently audited.",
+      "disposition": "independent-audit-not-established",
+      "claim_ceiling": "This does not negate test, review, or upstream security work; it forbids calling the locked provider independently audited without new evidence."
+    },
+    {
+      "id": "rustcrypto-ml-dsa-ghsa-hcp2-x6j4-29j7",
+      "evidence_class": "advisory",
+      "provider_ref": {
+        "name": "ml-dsa",
+        "version": "0.1.1",
+        "checksum": "add6b9d92e496f16f4526d68ff29da1483aba4b119baeab8bed3b9e3544a6f3d"
+      },
+      "applicability": "version-range",
+      "source_url": "https://github.com/RustCrypto/signatures/security/advisories/GHSA-hcp2-x6j4-29j7",
+      "observed_claim": "Published affected range is before 0.1.0-rc.3; patched versions begin at 0.1.0-rc.3.",
+      "published_affected_range_assessment": "locked-version-outside-published-affected-range",
+      "disposition": "range-only-non-applicability",
+      "claim_ceiling": "Outside a published affected range is not a general constant-time or security proof."
+    },
+    {
+      "id": "rustcrypto-ml-dsa-ghsa-5x2r-hc65-25f9",
+      "evidence_class": "advisory",
+      "provider_ref": {
+        "name": "ml-dsa",
+        "version": "0.1.1",
+        "checksum": "add6b9d92e496f16f4526d68ff29da1483aba4b119baeab8bed3b9e3544a6f3d"
+      },
+      "applicability": "version-range",
+      "source_url": "https://github.com/RustCrypto/signatures/security/advisories/GHSA-5x2r-hc65-25f9",
+      "observed_claim": "Published affected versions are through 0.1.0-rc.3; patched versions begin at 0.1.0-rc.4.",
+      "published_affected_range_assessment": "locked-version-outside-published-affected-range",
+      "disposition": "range-only-non-applicability",
+      "claim_ceiling": "Does not prove canonical signature handling beyond this published advisory range."
+    },
+    {
+      "id": "rustcrypto-ml-dsa-ghsa-h37v-hp6w-2pp8",
+      "evidence_class": "advisory",
+      "provider_ref": {
+        "name": "ml-dsa",
+        "version": "0.1.1",
+        "checksum": "add6b9d92e496f16f4526d68ff29da1483aba4b119baeab8bed3b9e3544a6f3d"
+      },
+      "applicability": "version-range",
+      "source_url": "https://github.com/advisories/GHSA-h37v-hp6w-2pp8",
+      "observed_claim": "Published affected versions are through 0.1.0-rc.4; patched version is 0.1.0-rc.5.",
+      "published_affected_range_assessment": "locked-version-outside-published-affected-range",
+      "disposition": "range-only-non-applicability",
+      "claim_ceiling": "Does not prove FIPS compliance or absence of other implementation defects."
+    },
+    {
+      "id": "mlkem-native-proof-boundary-2026-09-25",
+      "evidence_class": "formal-proof",
+      "provider_ref": null,
+      "applicability": "oracle-candidate",
+      "source_url": "https://github.com/pq-code-package/mlkem-native",
+      "observed_claim": "Project documentation reports CBMC memory/type-safety proofs for its C code and HOL Light functional-correctness, memory-safety, and secret-independent-timing proofs for AArch64/x86_64 assembly, with separate soundness/scope documentation and other side-channel classes out of scope.",
+      "disposition": "independent-ml-kem-oracle-candidate",
+      "claim_ceiling": "Proofs apply to the documented mlkem-native implementation/boundaries, not RustCrypto ML-KEM, Xenia integration, FFI safety, or the Xenia protocol."
+    },
+    {
+      "id": "rust-libcrux-ml-kem-proof-boundary-2026-09-25",
+      "evidence_class": "formal-proof",
+      "provider_ref": null,
+      "applicability": "oracle-candidate",
+      "source_url": "https://github.com/pq-code-package/rust-libcrux",
+      "observed_claim": "Project documentation reports hax/F* verification for portable and AVX2 portions covering field/NTT arithmetic, serialization, and generic high-level algorithms, with claims including panic freedom, correctness, and secret independence for documented code paths.",
+      "disposition": "independent-rust-ml-kem-oracle-candidate",
+      "claim_ceiling": "Bind an exact release/commit and proof coverage before using as qualification evidence; project-level verification does not transfer to Xenia automatically."
+    },
+    {
+      "id": "libcrux-ml-dsa-ghsa-fhvh-vw7h-9xf3",
+      "evidence_class": "advisory",
+      "provider_ref": null,
+      "applicability": "oracle-candidate-history",
+      "source_url": "https://github.com/advisories/GHSA-fhvh-vw7h-9xf3",
+      "observed_claim": "A 2026 advisory reports an AVX2 ML-DSA verification edge-case bug in libcrux-ml-dsa versions before 0.0.9, patched in 0.0.9.",
+      "disposition": "verification-boundary-caution",
+      "claim_ceiling": "A formally verified project may still contain uncovered, incorrectly modeled, or regressed boundaries; exact release and proof coverage remain mandatory."
+    },
+    {
+      "id": "hacl-evercrypt-supported-verified-algorithms-2026-09-25",
+      "evidence_class": "formal-proof",
+      "provider_ref": null,
+      "applicability": "oracle-candidate",
+      "source_url": "https://hacl-star.github.io/Supported.html",
+      "observed_claim": "The HACL*/EverCrypt supported-algorithms table states it lists algorithms for which verification is complete and includes Ed25519, SHA2-256/384/512, HKDF, ChaCha20-Poly1305, and Poly1305 among the supported verified implementations.",
+      "disposition": "classical-primitive-reference-oracle-candidate",
+      "claim_ceiling": "Useful for independent cross-vectors/reference comparison; not evidence that Xenia's Rust providers are themselves verified."
+    }
+  ],
+  "required_followups": [
+    "Bind exact source commit ancestry for ml-kem 0.3.0-rc.2 versus final 0.3.0 validation/vector changes.",
+    "Build deterministic ML-KEM cross-provider vectors against at least one independently version-pinned oracle.",
+    "Add ML-DSA regression vectors for published 2026 advisory classes against the locked 0.1.1 provider.",
+    "Keep constant-time/compiled-target evidence separate from functional correctness and advisory-range checks.",
+    "Require native/WASM transcript and key-schedule conformance independently of primitive-provider evidence."
+  ],
+  "non_equivalences": [
+    "published advisory range says not affected != independently audited",
+    "formal proof of provider component != proof of provider integration != proof of Xenia protocol",
+    "cross-provider vector agreement != computational security proof",
+    "newer provider version != stronger assurance until requalified",
+    "external evidence snapshot != live current truth after its review horizon"
+  ]
+}
