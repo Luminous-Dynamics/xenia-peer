@@ -1199,7 +1199,10 @@ struct Args {
     #[arg(long)]
     host_fingerprint: Option<String>,
 
-    /// Fixed source_id (hex, 16 chars). MUST match daemon.
+    /// Shared connection source-domain root (hex, 16 chars). Keep this root in
+    /// sync with the daemon, but it is NOT installed literally as the viewer's
+    /// AEAD sender source ID: byte 0 is replaced by the Viewer role tag so the
+    /// two sealing directions have disjoint nonce prefixes.
     #[arg(long, default_value = "7878656e69617068")]
     source_id_hex: String,
 
@@ -1686,7 +1689,11 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         transcript_hash = ?handshake.transcript_hash,
         "viewer handshake transcript bound"
     );
-    let mut session = LaneSession::with_fixture(source_id, args.epoch);
+    let mut session = LaneSession::with_source_domain_root(
+        source_id,
+        args.epoch,
+        xenia_peer_core::SessionRole::Viewer,
+    );
     session.install_schedule(&handshake.key_schedule);
 
     // A requested frame-0 synthetic input is held until the one sealed
@@ -2050,7 +2057,11 @@ async fn gui_receive_loop(
         transcript_hash = ?handshake.transcript_hash,
         "viewer handshake transcript bound"
     );
-    let mut session = LaneSession::with_fixture(source_id, args.epoch);
+    let mut session = LaneSession::with_source_domain_root(
+        source_id,
+        args.epoch,
+        xenia_peer_core::SessionRole::Viewer,
+    );
     session.install_schedule(&handshake.key_schedule);
     let negotiated_transport = transport.negotiated_transport();
     let transport_profile = transport.transport_profile();

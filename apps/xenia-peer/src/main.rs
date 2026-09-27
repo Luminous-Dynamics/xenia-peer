@@ -153,6 +153,10 @@ struct Args {
     #[arg(long, default_value = "auto")]
     transport: TransportChoice,
 
+    /// Shared connection source-domain root (hex, 16 chars). The daemon does
+    /// not install this literal value as its AEAD sender source ID: byte 0 is
+    /// replaced by the Host role tag before sealing. Use the same root on the
+    /// viewer so future strict expected-domain checks can derive each role.
     #[arg(long, default_value = "7878656e69617068")]
     source_id_hex: String,
 
@@ -6186,7 +6190,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let transport_profile = transport.transport_profile();
         let pre_session_profile = transport.pre_session_profile();
         let availability_profile = transport.availability_profile();
-        let mut session = LaneSession::with_fixture(source_id, args.epoch);
+        let mut session = LaneSession::with_source_domain_root(
+            source_id,
+            args.epoch,
+            xenia_peer_core::SessionRole::Host,
+        );
         let frame_format = codec_to_frame_format(args.codec);
         let capabilities = session_capabilities_frame(
             session.next_frame_id(),
