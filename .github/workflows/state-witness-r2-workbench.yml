@@ -36,15 +36,15 @@ jobs:
           p = Path('crates/xenia-ledger/src/state_witness.rs')
           s = p.read_text()
           old = '''        let mut bundle = StateWitnessBundle::new(commitment).unwrap();
-          bundle.sign_with_ed25519(&first, 101).unwrap();
-          bundle.sign_with_ed25519(&second, 102).unwrap();'''
+        bundle.sign_with_ed25519(&first, 101).unwrap();
+        bundle.sign_with_ed25519(&second, 102).unwrap();'''
           new = '''        let witness_base = commitment.timestamp_unix_secs;
-          let mut bundle = StateWitnessBundle::new(commitment).unwrap();
-          bundle
-              .sign_with_ed25519(&first, witness_base.saturating_add(1))
+        let mut bundle = StateWitnessBundle::new(commitment).unwrap();
+        bundle
+            .sign_with_ed25519(&first, witness_base.saturating_add(1))
               .unwrap();
-          bundle
-              .sign_with_ed25519(&second, witness_base.saturating_add(2))
+        bundle
+            .sign_with_ed25519(&second, witness_base.saturating_add(2))
               .unwrap();'''
           if s.count(old) != 1:
               raise SystemExit('expected exactly one witness helper fixture')
