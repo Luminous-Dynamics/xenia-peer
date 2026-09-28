@@ -31,6 +31,13 @@ jobs:
           toolchain: 1.94.0
           components: rustfmt,clippy
 
+      - name: Capture repair preimage
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum crates/xenia-ledger/src/state_witness.rs > /tmp/state-witness-r2-preimage.sha256
+          git rev-parse HEAD > /tmp/state-witness-r2-head.txt
+
       - name: Repair only the witness-time fixture
         shell: bash
         run: |
