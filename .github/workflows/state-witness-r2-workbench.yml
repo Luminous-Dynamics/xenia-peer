@@ -53,7 +53,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git diff --name-only HEAD -- crates/xenia-ledger/src | LC_ALL=C sort > /tmp/actual.txt
+          git diff --name-only HEAD | LC_ALL=C sort > /tmp/actual.txt
           cat > /tmp/expected.txt <<'EOF'
           crates/xenia-ledger/src/lib.rs
           crates/xenia-ledger/src/state_witness.rs
@@ -80,7 +80,36 @@ jobs:
           cp crates/xenia-ledger/src/state_witness_policy.rs /tmp/state-witness-r2/crates/xenia-ledger/src/state_witness_policy.rs
           git diff HEAD -- crates/xenia-ledger/src > /tmp/state-witness-r2/repair.patch
           cp /tmp/xenia-ledger-tests.log /tmp/state-witness-r2/xenia-ledger-tests.log
-          (cd /tmp/state-witness-r2 && sha256sum crates/xenia-ledger/src/*.rs repair.patch xenia-ledger-tests.log > SHA256SUMS)
+          cp /tmp/state-witness-r2-preimage.sha256 /tmp/state-witness-r2/preimage.sha256
+          cp /tmp/state-witness-r2-head.txt /tmp/state-witness-r2/checkout_head.txt
+          (cd /tmp/state-witness-r2 && sha256sum crates/xenia-ledger/src/*.rs repair.patch xenia-ledger-tests.log preimage.sha256 checkout_head.txt > SHA256SUMS)
+
+      - name: Emit auditable repair handoff manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          target=crates/xenia-ledger/src/state_witness.rs
+          preimage_sha256=$(cut -d' ' -f1 /tmp/state-witness-r2-preimage.sha256)
+          postimage_sha256=$(sha256sum "$target" | cut -d' ' -f1)
+          patch_sha256=$(sha256sum /tmp/state-witness-r2/repair.patch | cut -d' ' -f1)
+          {
+            printf 'manifest_version=1\n'
+            printf 'qualification_base_commit=a5edc86c3a6dc947eb31a188fd49a416ed4ce870\n'
+            printf 'workbench_checkout_commit=%s\n' "$(cat /tmp/state-witness-r2-head.txt)"
+            printf 'github_sha=%s\n' "$GITHUB_SHA"
+            printf 'github_run_id=%s\n' "$GITHUB_RUN_ID"
+            printf 'github_run_attempt=%s\n' "$GITHUB_RUN_ATTEMPT"
+            printf 'github_ref=%s\n' "$GITHUB_REF"
+            printf 'target_path=%s\n' "$target"
+            printf 'preimage_sha256=%s\n' "$preimage_sha256"
+            printf 'postimage_sha256=%s\n' "$postimage_sha256"
+            printf 'repair_patch_sha256=%s\n' "$patch_sha256"
+            printf 'rustc=%s\n' "$(rustc --version)"
+            printf 'cargo=%s\n' "$(cargo --version)"
+            printf 'fixture_contract=exactly_one_replacement_of_fixed_101_102_witness_helper\n'
+            printf 'qualification_status=workbench_only_not_qualification_evidence\n'
+          } > /tmp/state-witness-r2/REPAIR_MANIFEST
+          (cd /tmp/state-witness-r2 && sha256sum REPAIR_MANIFEST >> SHA256SUMS)
 
       - name: Upload formatter/test workbench artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
