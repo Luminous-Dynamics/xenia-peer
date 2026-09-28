@@ -4,6 +4,9 @@ on:
   pull_request:
     paths:
       - '.github/workflows/state-witness-r2-workbench.yml'
+  push:
+    branches:
+      - scratch/state-witness-r2-workbench
   workflow_dispatch:
 
 permissions:
