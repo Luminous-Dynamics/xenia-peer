@@ -1,5 +1,9 @@
 name: State Witness R2 Formatting Workbench
 
+concurrency:
+  group: state-witness-r2-workbench-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 on:
   pull_request:
     paths:
