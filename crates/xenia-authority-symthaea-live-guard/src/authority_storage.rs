@@ -227,6 +227,27 @@ impl AuthorityStorageTrust {
                 ),
             ));
         }
+
+        // Generation and issuance paths are durable authority objects. If an
+        // object already exists at the configured child path, it must itself
+        // be a regular, non-symlink file. Otherwise a read/open operation
+        // could follow the link outside the trusted root before the durable
+        // authority boundary gets a chance to reject it.
+        if let Ok(metadata) = std::fs::symlink_metadata(path) {
+            if metadata.file_type().is_symlink() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("{label} must not be a symlink: {}", path.display()),
+                ));
+            }
+            if !metadata.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{label} is not a regular file: {}", path.display()),
+                ));
+            }
+        }
+
         Ok(())
     }
 
@@ -370,6 +391,31 @@ mod tests {
             error.kind(),
             io::ErrorKind::PermissionDenied | io::ErrorKind::Other
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_child_paths_reject_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let trust = AuthorityStorageTrust::validate(root.path()).unwrap();
+
+        let generation_target = root.path().join("generation-target.bin");
+        std::fs::write(&generation_target, b"generation").unwrap();
+        let generation = root.path().join("authority-generation.bin");
+        std::os::unix::fs::symlink(&generation_target, &generation).unwrap();
+        assert_eq!(
+            trust.validate_generation_path(&generation).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+
+        let issuance_target = root.path().join("issuance-target.bin");
+        std::fs::write(&issuance_target, b"issuance").unwrap();
+        let issuance = root.path().join("issuance-journal.bin");
+        std::os::unix::fs::symlink(&issuance_target, &issuance).unwrap();
+        assert_eq!(
+            trust.validate_issuance_path(&issuance).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 
     #[cfg(unix)]
