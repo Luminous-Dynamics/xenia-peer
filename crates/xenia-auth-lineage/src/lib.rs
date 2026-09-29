@@ -13,9 +13,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use xenia_auth::{
-    AuthenticationAdapterError, AuthenticationVerifierRegistryV1,
-    Ed25519AuthenticationVerifier, MlDsa65AuthenticationVerifier,
-    SubjectAuthenticationVerificationError, verify_authentication,
+    AuthenticationAdapterError, AuthenticationVerifierRegistryV1, Ed25519AuthenticationVerifier,
+    MlDsa65AuthenticationVerifier, SubjectAuthenticationVerificationError, verify_authentication,
 };
 use xenia_auth_protocol::{
     AuthenticationContextId, AuthenticationProtocolError, AuthenticationSuiteId,
