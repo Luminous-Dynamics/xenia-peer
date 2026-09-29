@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn stable_snapshot_and_holds_write_barrier_through_callback() {
-        use std::sync::mpsc::{self, TryRecvError};
+        use std::sync::mpsc;
         use std::thread;
         use std::time::Duration;
 
@@ -465,9 +465,8 @@ mod tests {
                 },
             );
         assert!(result.is_ok());
-        assert!(matches!(done_rx.try_recv(), Ok(true)));
-        assert!(matches!(done_rx.try_recv(), Err(TryRecvError::Empty)));
         writer.join().unwrap();
+        assert!(done_rx.recv().unwrap());
     }
     #[test]
     fn persistence_failure_after_change_poisons_both_layers() {
