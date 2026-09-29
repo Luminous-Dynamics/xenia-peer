@@ -6111,15 +6111,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // enforce (fail-closed).
     let revocations = match &args.revoked_operators_file {
         Some(path) => {
-            let r = crate::operator_revocations::OperatorRevocations::from_file(path).map_err(
-                |err| -> Box<dyn std::error::Error> {
-                    format!(
-                        "failed to load --revoked-operators-file {}: {err}",
-                        path.display()
-                    )
-                    .into()
-                },
-            )?;
+            let r = match authority_storage_trust.as_ref() {
+                Some(trust) => crate::operator_revocations::OperatorRevocations::from_trusted_file(
+                    path,
+                    trust.clone(),
+                ),
+                None => crate::operator_revocations::OperatorRevocations::from_file(path),
+            }
+            .map_err(|err| -> Box<dyn std::error::Error> {
+                format!(
+                    "failed to load --revoked-operators-file {}: {err}",
+                    path.display()
+                )
+                .into()
+            })?;
             info!(path = %path.display(), revoked = r.len(), "loaded operator revocation list");
             r
         }
