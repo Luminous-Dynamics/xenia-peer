@@ -21,7 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -1218,6 +1218,7 @@ pub(crate) fn router(
                     "/operator/symthaea/authorization-receipt",
                     post(symthaea_authorization_handler),
                 )
+                .layer(DefaultBodyLimit::max(64 * 1024))
                 .with_state(state.clone()),
         )
         .merge(
