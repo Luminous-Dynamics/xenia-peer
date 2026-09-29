@@ -23,7 +23,7 @@ use axum::{
     Json, Router,
     extract::State,
     http::{HeaderMap, HeaderValue, Method, StatusCode},
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use ed25519_dalek::SigningKey;
