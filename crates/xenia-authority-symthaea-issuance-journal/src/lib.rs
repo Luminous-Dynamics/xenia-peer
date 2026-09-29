@@ -323,7 +323,8 @@ impl IssuanceJournal {
 
         let record =
             encode_record(JournalRecordState::Aborted, nonce, binding_digest, &[])?;
-        if let Err(error) = append_and_sync(&self.path, &record) {
+        self.ensure_storage_identity()?;
+        if let Err(error) = append_and_sync(&self.file, &record) {
             state.poisoned = true;
             return Err(error);
         }
