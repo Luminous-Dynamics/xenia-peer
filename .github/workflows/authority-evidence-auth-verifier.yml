@@ -140,6 +140,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          qualification_base=e9c4456d957574163a9ea571523bcc13bc4ad10a
           rm -f Cargo.lock
           git diff --check "$qualification_base" HEAD
           test -z "$(git status --porcelain=v1 --untracked-files=all | grep -v '^?? qualification/' || true)"
@@ -150,6 +151,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p qualification
           printf 'job_status=%s\n' "${{ job.status }}" >> qualification/qualification-manifest.env
           printf 'qualification_result=%s\n' "${{ job.status == 'success' && 'candidate-executed' || 'not-qualified' }}" >> qualification/qualification-manifest.env
 
