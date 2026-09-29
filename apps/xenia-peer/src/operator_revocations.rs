@@ -19,7 +19,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock};\n\nuse xenia_symthaea_live_authority_guard::AuthoritySourceIdentity;
 
 /// Whether an operation changed the **effective** revoked-operator set.
 ///
@@ -56,7 +56,7 @@ pub(crate) struct OperatorRevocations {
     revoked: Arc<RwLock<HashSet<String>>>,
     /// The file the set is (re)loaded from, if any — kept so a SIGHUP handler
     /// can reload without re-plumbing the path.
-    path: Option<PathBuf>,
+    path: Option<PathBuf>,\n    /// Identity of the source object last trusted by the daemon.\n    source_identity: Arc<RwLock<Option<AuthoritySourceIdentity>>>,
 }
 
 impl OperatorRevocations {
@@ -138,7 +138,7 @@ impl OperatorRevocations {
         // A configured file disappearing after successful startup is a real
         // error. Do not route through `read_revocations`, whose initial-load
         // semantics intentionally treat an absent file as an empty set.
-        let text = std::fs::read_to_string(path)?;
+        if let Some(identity) = self\n            .source_identity\n            .read()\n            .map_err(|_| std::io::Error::other("operator revocation source identity lock poisoned"))?\n            .as_ref()\n            .copied()\n        {\n            identity.verify(path)?;\n        } else if path.exists() {\n            let identity = AuthoritySourceIdentity::capture(path)?;\n            *self\n                .source_identity\n                .write()\n                .map_err(|_| std::io::Error::other("operator revocation source identity lock poisoned"))? = Some(identity);\n        }\n\n        let text = std::fs::read_to_string(path)?;
         let fresh = parse_revocations(&text);
         let mut current = self
             .revoked
@@ -217,7 +217,7 @@ impl OperatorRevocations {
         if !bytes.is_empty() {
             bytes.push(b'\n');
         }
-        write_atomic_durable(path, &bytes)
+        write_atomic_durable(path, &bytes)?;\n        let identity = AuthoritySourceIdentity::capture(path)?;\n        *self\n            .source_identity\n            .write()\n            .map_err(|_| std::io::Error::other("operator revocation source identity lock poisoned"))? = Some(identity);\n        Ok(())
     }
 
     /// The number of currently-revoked operators.
