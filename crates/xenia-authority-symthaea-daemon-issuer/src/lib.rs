@@ -203,7 +203,7 @@ mod tests {
     use xenia_handshake::{ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN};
     use xenia_operator_proto::OperatorRole;
     use xenia_symthaea_authority_state_commitment::SymthaeaEnrollmentCommitmentInputV1;
-    use xenia_symthaea_live_authority_guard::LiveAuthorityGuard;
+    use xenia_symthaea_live_authority_guard::{AuthorityMutation, LiveAuthorityGuard};
     use xenia_symthaea_live_authority_snapshot::{
         AuthoritySnapshotMaterialV1, read_coherent_symthaea_authority_snapshot_v1,
     };
