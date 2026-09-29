@@ -1,0 +1,32 @@
+# Copyright (c) 2024-2026 Tristan Stoltz / Luminous Dynamics
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[package]
+name = "xenia-symthaea-daemon-authorization-issuer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz / Luminous Dynamics"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Core issuer for hybrid-signed Xenia daemon authorization receipts consumed by Symthaea"
+publish = false
+
+[dependencies]
+ed25519-dalek = "2"
+thiserror = "1"
+xenia-handshake = { path = "../xenia-handshake" }
+xenia-symthaea-attestation-contract = { path = "../xenia-authority-symthaea-attestation-contract" }
+xenia-symthaea-attestation-authority = { path = "../xenia-authority-symthaea-attestation-authority" }
+xenia-symthaea-authorization-receipt = { path = "../xenia-authority-symthaea-authorization-receipt" }
+xenia-symthaea-live-authority-snapshot = { path = "../xenia-authority-symthaea-live-snapshot" }
+xenia-symthaea-authority-generation = { path = "../xenia-authority-symthaea-generation" }
+
+[dev-dependencies]
+tempfile = "3"
+xenia-operator-proto = { path = "../xenia-operator-proto" }
+xenia-symthaea-authority-state-commitment = { path = "../xenia-authority-symthaea-state-commitment" }
+xenia-symthaea-live-authority-guard = { path = "../xenia-authority-symthaea-live-guard" }
+
+# Standalone issuer core. HTTP/request authentication integration is a later child.
+[workspace]
