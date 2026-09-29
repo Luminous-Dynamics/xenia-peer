@@ -1354,7 +1354,6 @@ mod tests {
 
     #[test]
     fn symthaea_request_parser_rejects_zero_nonce() {
-        let op = HandshakeManager::new();
         let daemon = SigningKey::generate(&mut rand::thread_rng());
         let daemon_ml_dsa = test_daemon_ml_dsa();
         let token = crate::operator_auth::issue_token(
@@ -1379,7 +1378,6 @@ mod tests {
         });
         let error = parse_authenticated_symthaea_authorization(&dto.to_string()).unwrap_err();
         assert!(error.contains("request nonce must be nonzero"));
-        let _ = op;
     }
     #[test]
     fn symthaea_authority_requires_explicit_bootstrap() {
