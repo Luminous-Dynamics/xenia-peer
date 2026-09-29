@@ -59,6 +59,28 @@ impl AuthoritySourceIdentity {
         }
     }
 
+    /// Capture identity from an already-open file handle.
+    ///
+    /// This is the stronger read boundary: the caller can open with
+    /// platform-specific no-follow semantics and then inspect the object that
+    /// will actually be parsed, eliminating a pathname reopen between the
+    /// identity check and the read.
+    #[cfg(unix)]
+    pub fn capture_file(file: &std::fs::File) -> io::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "authority source is not a regular file",
+            ));
+        }
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
     /// Re-check that the named source is still the same filesystem object.
     pub fn verify(&self, path: &Path) -> io::Result<()> {
         let current = Self::capture(path)?;
