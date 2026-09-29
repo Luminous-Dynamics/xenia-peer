@@ -13,6 +13,7 @@ description = "Durable single-use issuance state and replay journal for Xenia Sy
 publish = false
 
 [dependencies]
+same-file = "1.0.6"
 sha2 = "0.10"
 thiserror = "1"
 
