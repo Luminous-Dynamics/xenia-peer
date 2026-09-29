@@ -38,7 +38,7 @@ use xenia_symthaea_live_snapshot::{
     coherent_symthaea_authority_snapshot_v1,
 };
 use xenia_symthaea_authority_state_commitment::EffectiveSymthaeaPolicyCommitmentInputV1;
-use xenia_symthaea_attestation_authority::SymthaeaAuthorityScopeV1;
+use xenia_symthaea_attestation_authority::{SymthaeaAuthorityScopeV1, symthaea_key_lineage_commitment_v1};
 use xenia_symthaea_authorization_receipt::{
     MAX_AUTHORIZATION_TTL_SECS_V1,
 };
@@ -682,6 +682,16 @@ async fn symthaea_authorization_handler(
     let result = authority.with_coherent_snapshot(&operator_id, |snapshot| {
         if authority.revocations.is_revoked(&operator_id) {
             return Err("operator was revoked before coherent issuance snapshot commit".to_string());
+        }
+        let snapshot_key_lineage = symthaea_key_lineage_commitment_v1(
+            &snapshot.value().operator().ed25519_pubkey,
+            &snapshot.value().operator().ml_dsa_65_pubkey,
+        )
+        .map_err(|error| format!("coherent operator key lineage is malformed: {error}"))?;
+        if snapshot_key_lineage != authorized.authenticated_key_lineage_commitment {
+            return Err(
+                "operator key lineage changed after authentication; refusing issuance".to_string(),
+            );
         }
         let request_for_issuer = DaemonSymthaeaAuthorizationRequestV1 {
             operator_id: operator_id.clone(),
