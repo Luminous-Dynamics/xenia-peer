@@ -993,7 +993,7 @@ async fn replace_operator_key_handler(
             match authority.policy.replace_operator_key(&target, new_ed, new_ml, new_ml87) {
                 Err(error) => LiveAuthorityMutation::failed_before_change(error.to_string()),
                 Ok(()) => {
-                    if let Err(error) = authority.policy.persist_to(path) {
+                    if let Err(error) = authority.policy.persist_to_trusted(path) {
                         return LiveAuthorityMutation::failed_after_change(error.to_string());
                     }
                     authority.changed(())
