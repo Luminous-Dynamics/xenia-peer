@@ -24,9 +24,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use same_file::Handle as FileIdentity;
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions, TryLockError};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -109,6 +110,15 @@ pub enum IssuanceJournalError {
     /// Another process already owns the journal's exclusive writer lock.
     #[error("issuance journal is already owned by another process")]
     JournalBusy,
+    /// The configured journal parent is not a trusted private storage root.
+    #[error("issuance journal storage root is not trusted")]
+    StorageRootUntrusted,
+    /// The journal path no longer resolves to the object owned by this instance.
+    #[error("issuance journal storage object identity changed")]
+    StorageIdentityMismatch,
+    /// The journal storage identity could not be established or rechecked.
+    #[error("issuance journal storage identity failure: {0}")]
+    StorageIdentityUnavailable(String),
     /// A prior write failed after the journal may have been partially changed.
     #[error("issuance journal is poisoned after a persistence failure")]
     JournalPoisoned,
@@ -126,6 +136,8 @@ pub enum IssuanceJournalError {
 #[derive(Clone, Debug)]
 pub struct IssuanceJournal {
     file: Arc<File>,
+    path: PathBuf,
+    identity: Arc<FileIdentity>,
     state: Arc<Mutex<JournalState>>,
 }
 
@@ -152,6 +164,7 @@ impl IssuanceJournal {
     /// Create a new empty journal. Existing files are never silently reused.
     pub fn bootstrap_new(path: impl AsRef<Path>) -> Result<Self, IssuanceJournalError> {
         let path = path.as_ref().to_path_buf();
+        validate_storage_root(&path)?;
         let mut options = secure_open_options();
         options.read(true).append(true).create_new(true);
         let file = options
@@ -163,8 +176,14 @@ impl IssuanceJournal {
 
         acquire_exclusive_lock(&file)?;
         sync_parent_directory(&path)?;
+        let canonical_path = canonicalize_journal_path(&path)?;
+        validate_storage_root(&canonical_path)?;
+        let identity = capture_identity(&file)?;
+        ensure_path_identity(&canonical_path, &identity)?;
         Ok(Self {
             file: Arc::new(file),
+            path: canonical_path,
+            identity: Arc::new(identity),
             state: Arc::new(Mutex::new(JournalState::default())),
         })
     }
@@ -175,6 +194,9 @@ impl IssuanceJournal {
     /// or impossible transition fails closed.
     pub fn open_existing(path: impl AsRef<Path>) -> Result<Self, IssuanceJournalError> {
         let path = path.as_ref().to_path_buf();
+        validate_storage_root(&path)?;
+        let canonical_path = canonicalize_journal_path(&path)?;
+        validate_storage_root(&canonical_path)?;
         let mut options = secure_open_options();
         options.read(true).append(true);
         let mut file = options.open(&path).map_err(|error| match error.kind() {
@@ -188,9 +210,13 @@ impl IssuanceJournal {
         file.read_to_end(&mut bytes)
             .map_err(|error| IssuanceJournalError::Io(error.to_string()))?;
 
+        let identity = capture_identity(&file)?;
+        ensure_path_identity(&canonical_path, &identity)?;
         let state = decode_journal(&bytes)?;
         Ok(Self {
             file: Arc::new(file),
+            path: canonical_path,
+            identity: Arc::new(identity),
             state: Arc::new(Mutex::new(state)),
         })
     }
@@ -206,6 +232,7 @@ impl IssuanceJournal {
         binding_digest: [u8; DIGEST_LEN],
     ) -> Result<ReserveOutcome, IssuanceJournalError> {
         validate_nonce_and_binding(&nonce, &binding_digest)?;
+        self.ensure_storage_identity()?;
 
         let mut state = self.lock_state()?;
         ensure_healthy(&state)?;
@@ -233,7 +260,12 @@ impl IssuanceJournal {
             binding_digest,
             &[],
         )?;
+        self.ensure_storage_identity()?;
         if let Err(error) = append_and_sync(&self.file, &record) {
+            state.poisoned = true;
+            return Err(error);
+        }
+        if let Err(error) = self.ensure_storage_identity() {
             state.poisoned = true;
             return Err(error);
         }
@@ -258,6 +290,7 @@ impl IssuanceJournal {
         receipt: &[u8],
     ) -> Result<(), IssuanceJournalError> {
         validate_nonce_and_binding(&nonce, &binding_digest)?;
+        self.ensure_storage_identity()?;
         if receipt.is_empty() {
             return Err(IssuanceJournalError::MalformedJournal);
         }
@@ -285,7 +318,12 @@ impl IssuanceJournal {
             binding_digest,
             receipt,
         )?;
+        self.ensure_storage_identity()?;
         if let Err(error) = append_and_sync(&self.file, &record) {
+            state.poisoned = true;
+            return Err(error);
+        }
+        if let Err(error) = self.ensure_storage_identity() {
             state.poisoned = true;
             return Err(error);
         }
@@ -306,6 +344,7 @@ impl IssuanceJournal {
         binding_digest: [u8; DIGEST_LEN],
     ) -> Result<(), IssuanceJournalError> {
         validate_nonce_and_binding(&nonce, &binding_digest)?;
+        self.ensure_storage_identity()?;
 
         let mut state = self.lock_state()?;
         ensure_healthy(&state)?;
@@ -328,6 +367,10 @@ impl IssuanceJournal {
             state.poisoned = true;
             return Err(error);
         }
+        if let Err(error) = self.ensure_storage_identity() {
+            state.poisoned = true;
+            return Err(error);
+        }
 
         if let Some(entry) = state.entries.get_mut(&nonce) {
             entry.state = JournalEntryState::Aborted;
@@ -343,6 +386,7 @@ impl IssuanceJournal {
         if *nonce == [0; NONCE_LEN] {
             return Err(IssuanceJournalError::ZeroNonce);
         }
+        self.ensure_storage_identity()?;
         let state = self.lock_state()?;
         ensure_healthy(&state)?;
         Ok(state.entries.get(nonce).map(|entry| match &entry.state {
@@ -356,6 +400,7 @@ impl IssuanceJournal {
 
     /// Number of permanently retained request nonces.
     pub fn len(&self) -> Result<usize, IssuanceJournalError> {
+        self.ensure_storage_identity()?;
         let state = self.lock_state()?;
         ensure_healthy(&state)?;
         Ok(state.entries.len())
@@ -364,6 +409,10 @@ impl IssuanceJournal {
     /// Whether no request nonce has yet been recorded.
     pub fn is_empty(&self) -> Result<bool, IssuanceJournalError> {
         Ok(self.len()? == 0)
+    }
+
+    fn ensure_storage_identity(&self) -> Result<(), IssuanceJournalError> {
+        ensure_path_identity(&self.path, &self.identity)
     }
 
     fn lock_state(
@@ -568,6 +617,54 @@ fn apply_record(
         },
     );
     Ok(())
+}
+
+fn canonicalize_journal_path(path: &Path) -> Result<PathBuf, IssuanceJournalError> {
+    fs::canonicalize(path)
+        .map_err(|error| IssuanceJournalError::StorageIdentityUnavailable(error.to_string()))
+}
+
+fn validate_storage_root(path: &Path) -> Result<(), IssuanceJournalError> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let metadata = fs::symlink_metadata(parent)
+        .map_err(|error| IssuanceJournalError::StorageIdentityUnavailable(error.to_string()))?;
+    if !metadata.is_dir() {
+        return Err(IssuanceJournalError::StorageRootUntrusted);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o022 != 0 {
+            return Err(IssuanceJournalError::StorageRootUntrusted);
+        }
+    }
+
+    Ok(())
+}
+
+fn capture_identity(file: &File) -> Result<FileIdentity, IssuanceJournalError> {
+    let cloned = file
+        .try_clone()
+        .map_err(|error| IssuanceJournalError::StorageIdentityUnavailable(error.to_string()))?;
+    FileIdentity::from_file(cloned)
+        .map_err(|error| IssuanceJournalError::StorageIdentityUnavailable(error.to_string()))
+}
+
+fn ensure_path_identity(
+    path: &Path,
+    expected: &FileIdentity,
+) -> Result<(), IssuanceJournalError> {
+    let current = FileIdentity::from_path(path)
+        .map_err(|error| IssuanceJournalError::StorageIdentityUnavailable(error.to_string()))?;
+    if current == *expected {
+        Ok(())
+    } else {
+        Err(IssuanceJournalError::StorageIdentityMismatch)
+    }
 }
 
 fn acquire_exclusive_lock(file: &File) -> Result<(), IssuanceJournalError> {
@@ -817,6 +914,46 @@ mod tests {
         );
         assert_eq!(journal.len().unwrap(), 1);
     }
+
+
+    #[cfg(unix)]
+    #[test]
+    fn path_replacement_fails_closed_for_live_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = path(&dir);
+        let journal = IssuanceJournal::bootstrap_new(&journal_path).unwrap();
+        journal.reserve(nonce(1), binding(2)).unwrap();
+
+        let moved_path = dir.path().join("moved.bin");
+        std::fs::rename(&journal_path, &moved_path).unwrap();
+        std::fs::write(&journal_path, b"replacement").unwrap();
+
+        assert_eq!(
+            journal.reserve(nonce(3), binding(4)).unwrap_err(),
+            IssuanceJournalError::StorageIdentityMismatch
+        );
+        assert_eq!(
+            journal.len().unwrap_err(),
+            IssuanceJournalError::StorageIdentityMismatch
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_storage_root_is_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut permissions = std::fs::metadata(dir.path()).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(dir.path(), permissions).unwrap();
+
+        assert_eq!(
+            IssuanceJournal::bootstrap_new(path(&dir)).unwrap_err(),
+            IssuanceJournalError::StorageRootUntrusted
+        );
+    }
+
 
     #[test]
     fn concurrent_clones_serialize_reservations() {
