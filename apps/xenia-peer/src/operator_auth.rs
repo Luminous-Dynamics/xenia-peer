@@ -1007,6 +1007,47 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn authed_symthaea_authorization(
+        op: &HandshakeManager,
+        daemon: &SigningKey,
+        daemon_ml_dsa: &MlDsaIdentity,
+        receipt_id: [u8; 16],
+        receipt_digest: [u8; 32],
+        request_nonce: [u8; 32],
+        now: u64,
+    ) -> AuthenticatedSymthaeaAuthorization {
+        let authed = AuthenticatedOperator {
+            operator_id: "op".to_string(),
+            role: OperatorRole::Admin,
+        };
+        let signed = issue_token(
+            daemon,
+            daemon_ml_dsa,
+            &authed,
+            now,
+            TOKEN_TTL_SECS,
+            [0x5Au8; 16],
+        );
+        let scope = SymthaeaAuthorityScopeV1::VerificationReceiptAttestationV1;
+        let transcript = symthaea_authorization_transcript(
+            &signed.token.operator_id,
+            scope.id(),
+            &receipt_id,
+            &receipt_digest,
+            &request_nonce,
+            &signed.token.token_nonce,
+        );
+        AuthenticatedSymthaeaAuthorization {
+            token: signed,
+            authority_scope: scope,
+            symthaea_receipt_id: receipt_id,
+            symthaea_receipt_digest_sha256: receipt_digest,
+            request_nonce,
+            action_signature: op.sign(&transcript).to_bytes(),
+            ml_dsa_action_signature: op.sign_ml_dsa(&transcript),
+        }
+    }
     /// Build a signed operator-revocation request: `op` (role `role`) authorizes
     /// revoking `target`.
     fn authed_revocation(
@@ -1406,6 +1447,43 @@ mod tests {
         assert_eq!(authorized.role, OperatorRole::Approver);
     }
 
+    #[test]
+    fn symthaea_authorization_binds_authenticated_key_lineage() {
+        let op = HandshakeManager::new();
+        let (daemon, daemon_ml_dsa) = test_daemon();
+        let policy = policy_with(&op, OperatorRole::Admin);
+        let request = authed_symthaea_authorization(
+            &op,
+            &daemon,
+            &daemon_ml_dsa,
+            [0x11; 16],
+            [0x22; 32],
+            [0x33; 32],
+            3000,
+        );
+        let authorized = authorize_symthaea_authorization(
+            &policy,
+            &daemon.verifying_key(),
+            &daemon_ml_dsa.public_key_bytes(),
+            3010,
+            &request,
+        )
+        .unwrap();
+        let expected = symthaea_key_lineage_commitment_v1(
+            &op.identity_public_key_bytes(),
+            &op.ml_dsa_public_key_bytes(),
+        )
+        .unwrap();
+        assert_eq!(authorized.authenticated_key_lineage_commitment, expected);
+
+        let replacement = HandshakeManager::new();
+        let replacement_lineage = symthaea_key_lineage_commitment_v1(
+            &replacement.identity_public_key_bytes(),
+            &replacement.ml_dsa_public_key_bytes(),
+        )
+        .unwrap();
+        assert_ne!(authorized.authenticated_key_lineage_commitment, replacement_lineage);
+    }
     #[test]
     fn consent_action_denied_for_insufficient_role() {
         let op = HandshakeManager::new();
