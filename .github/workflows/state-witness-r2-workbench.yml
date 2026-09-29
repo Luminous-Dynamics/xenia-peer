@@ -1,4 +1,5 @@
 name: State Witness R2 Formatting Workbench
+# Re-arm only after provenance hardening; this push intentionally executes the hardened workbench.
 run-name: state-witness-r2-workbench @ ${{ github.sha }}
 
 concurrency:
