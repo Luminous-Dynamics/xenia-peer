@@ -544,7 +544,19 @@ async fn revoke_operator_handler(
                     ));
                 }
                 let target = authorized.target_operator_id.clone();
+                let acting_operator = authorized.operator_id.clone();
                 let result = authority.mutate(|| {
+                    // Re-check under the same authority write barrier that
+                    // serializes revocation mutations. The pre-guard check
+                    // above is only a fast reject: without this second check,
+                    // an already-authorized admin could race a concurrent
+                    // revocation and still mutate authority after losing its
+                    // own authorization.
+                    if authority.revocations.is_revoked(&acting_operator) {
+                        return LiveAuthorityMutation::failed_before_change(
+                            "acting operator was revoked before mutation commit".to_string(),
+                        );
+                    }
                     match authority.revocations.revoke_with_outcome(&target) {
                         Err(error) => LiveAuthorityMutation::failed_before_change(error.to_string()),
                         Ok(RevocationMutation::Unchanged { count }) => {
@@ -692,10 +704,20 @@ async fn replace_operator_key_handler(
             ));
         };
         let target = authorized.target_operator_id.clone();
+        let acting_operator = authorized.operator_id.clone();
         let new_ed = authorized.new_ed25519_pubkey;
         let new_ml = authorized.new_ml_dsa_pubkey.clone();
         let new_ml87 = authorized.new_ml_dsa_87_pubkey.clone();
         let result = authority.mutate(|| {
+            // The authorization check outside the guard can race a concurrent
+            // revocation. Re-check while holding the sole authority mutation
+            // barrier so a revoked operator can never commit a privileged
+            // mutation after its revocation wins the ordering race.
+            if authority.revocations.is_revoked(&acting_operator) {
+                return LiveAuthorityMutation::failed_before_change(
+                    "acting operator was revoked before mutation commit".to_string(),
+                );
+            }
             match authority.policy.replace_operator_key(&target, new_ed, new_ml, new_ml87) {
                 Err(error) => LiveAuthorityMutation::failed_before_change(error.to_string()),
                 Ok(()) => {
