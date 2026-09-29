@@ -51,10 +51,11 @@ impl AuthoritySourceIdentity {
         #[cfg(not(unix))]
         {
             let _ = metadata;
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "live authority source identity is not qualified on this platform",
-            ))
+            // Windows live-authority startup is rejected by validate() until
+            // ACL ownership verification is qualified. Keeping this value
+            // constructible preserves the legacy revocation API outside the
+            // live-authority feature boundary.
+            Ok(Self {})
         }
     }
 
