@@ -1,0 +1,40 @@
+name: Xenia Symthaea Live Authority Issuance
+
+on:
+  pull_request:
+    paths:
+      - "apps/xenia-peer/Cargo.toml"
+      - "apps/xenia-peer/src/main.rs"
+      - "apps/xenia-peer/src/operator.rs"
+      - "apps/xenia-peer/src/operator_auth.rs"
+      - "apps/xenia-peer/src/operator_http.rs"
+      - "crates/xenia-operator-proto/**"
+      - "crates/xenia-authority-symthaea-live-guard/**"
+      - "crates/xenia-authority-symthaea-live-snapshot/**"
+      - "crates/xenia-authority-symthaea-daemon-issuer/**"
+      - "crates/xenia-authority-symthaea-authorization-receipt/**"
+      - "crates/xenia-authority-symthaea-issuance-journal/**"
+      - "crates/xenia-authority-symthaea-daemon-certificate/**"
+      - ".github/workflows/authority-symthaea-live-issuance.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-issuance:
+    name: Authenticated durable live issuance adapter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust 1.94
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: rustfmt, clippy
+      - name: Format daemon package
+        run: cargo fmt --manifest-path apps/xenia-peer/Cargo.toml -- --check
+      - name: Clippy daemon package
+        run: cargo clippy --locked -p xenia-peer --lib -- -D warnings
+      - name: Test daemon authority/authentication surface
+        run: cargo test --locked -p xenia-peer --lib
