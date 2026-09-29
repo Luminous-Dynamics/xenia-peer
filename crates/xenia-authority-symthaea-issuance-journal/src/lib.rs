@@ -285,7 +285,7 @@ impl IssuanceJournal {
             binding_digest,
             receipt,
         )?;
-        if let Err(error) = append_and_sync(&self.path, &record) {
+        if let Err(error) = append_and_sync(&self.file, &record) {
             state.poisoned = true;
             return Err(error);
         }
