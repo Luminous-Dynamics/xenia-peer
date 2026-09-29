@@ -1,14 +1,14 @@
 name: State Witness R2 Formatting Workbench
+run-name: state-witness-r2-workbench @ ${{ github.sha }}
 
 concurrency:
-  group: state-witness-r2-workbench-${{ github.head_ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 on:
   push:
     branches:
       - scratch/state-witness-r2-workbench
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -22,7 +22,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 2
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install Rust 1.94
@@ -31,6 +31,13 @@ jobs:
           toolchain: 1.94.0
           components: rustfmt,clippy
 
+      - name: Prove qualification base ancestry
+        shell: bash
+        run: |
+          set -euo pipefail
+          qualification_base=a5edc86c3a6dc947eb31a188fd49a416ed4ce870
+          git cat-file -e "${qualification_base}^{commit}"
+          git merge-base --is-ancestor "$qualification_base" HEAD
       - name: Capture repair preimage
         shell: bash
         run: |
@@ -102,6 +109,7 @@ jobs:
           {
             printf 'manifest_version=1\n'
             printf 'qualification_base_commit=a5edc86c3a6dc947eb31a188fd49a416ed4ce870\n'
+            printf 'qualification_base_is_ancestor=true\n'
             printf 'workbench_checkout_commit=%s\n' "$(cat /tmp/state-witness-r2-head.txt)"
             printf 'github_sha=%s\n' "$GITHUB_SHA"
             printf 'github_run_id=%s\n' "$GITHUB_RUN_ID"
