@@ -219,12 +219,12 @@ impl OperatorRevocations {
         }
         write_atomic_durable(path, &bytes)
     }
+
     /// The number of currently-revoked operators.
     pub(crate) fn len(&self) -> usize {
         self.revoked.read().map(|s| s.len()).unwrap_or(0)
     }
 }
-
 
 fn write_atomic_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::fs::OpenOptions;
