@@ -1378,6 +1378,11 @@ mod tests {
         });
         let error = parse_authenticated_symthaea_authorization(&dto.to_string()).unwrap_err();
         assert!(error.contains("request nonce must be nonzero"));
+
+        let mut wrong_scope = dto;
+        wrong_scope["authority_scope"] = serde_json::Value::String("wrong-scope".to_string());
+        let error = parse_authenticated_symthaea_authorization(&wrong_scope.to_string()).unwrap_err();
+        assert!(error.contains("unsupported Symthaea authority scope"));
     }
     #[test]
     fn symthaea_authority_requires_explicit_bootstrap() {
