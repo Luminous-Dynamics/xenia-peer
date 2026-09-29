@@ -1088,6 +1088,15 @@ struct Args {
     #[arg(long)]
     symthaea_authority_generation_path: Option<std::path::PathBuf>,
 
+    /// Explicit trusted storage root for the live Symthaea authority state.
+    /// When live authority generation is enabled, this root must be a real,
+    /// daemon-owned, non-group/world-writable directory on Unix. Policy,
+    /// revocation, generation-ledger, and issuance-journal paths must be direct
+    /// children of this root. Windows live-authority startup currently fails
+    /// closed until an explicit ACL ownership verifier is qualified.
+    #[arg(long)]
+    symthaea_authority_storage_root: Option<std::path::PathBuf>,
+
     /// Explicitly allow first-run creation of the Symthaea authority-generation
     /// ledger. Without this flag a missing ledger fails closed rather than
     /// silently rebooting the authority generation.
@@ -6003,6 +6012,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     bridge.start_signal_listener();
     bridge.broadcast("daemon ready");
 
+    let authority_storage_trust = match (
+        &args.symthaea_authority_generation_path,
+        &args.symthaea_authority_storage_root,
+    ) {
+        (Some(_), Some(root)) => {
+            let trust = xenia_symthaea_live_authority_guard::AuthorityStorageTrust::validate(root)
+                .map_err(|error| -> Box<dyn std::error::Error> {
+                    format!("untrusted Symthaea authority storage root {}: {error}", root.display()).into()
+                })?;
+            Some(trust)
+        }
+        (Some(_), None) => {
+            return Err(
+                "--symthaea-authority-generation-path requires --symthaea-authority-storage-root"
+                    .into(),
+            );
+        }
+        (None, Some(_)) => {
+            return Err(
+                "--symthaea-authority-storage-root requires --symthaea-authority-generation-path"
+                    .into(),
+            );
+        }
+        (None, None) => None,
+    };
+
+    if let Some(trust) = authority_storage_trust.as_ref() {
+        if let Some(path) = args.operators_file.as_deref() {
+            trust.validate_source_path(path).map_err(|error| -> Box<dyn std::error::Error> {
+                format!("untrusted --operators-file {}: {error}", path.display()).into()
+            })?;
+        }
+        if let Some(path) = args.revoked_operators_file.as_deref() {
+            trust.validate_source_path(path).map_err(|error| -> Box<dyn std::error::Error> {
+                format!("untrusted --revoked-operators-file {}: {error}", path.display()).into()
+            })?;
+        }
+        let generation = args.symthaea_authority_generation_path.as_ref().unwrap();
+        trust.validate_generation_path(generation).map_err(|error| -> Box<dyn std::error::Error> {
+            format!("untrusted Symthaea authority generation path {}: {error}", generation.display()).into()
+        })?;
+        if let Some(journal) = args.symthaea_issuance_journal_path.as_deref() {
+            trust.validate_issuance_path(journal).map_err(|error| -> Box<dyn std::error::Error> {
+                format!("untrusted Symthaea issuance journal path {}: {error}", journal.display()).into()
+            })?;
+        }
+    }
+
     // Operator-auth state: the enrolled-operator policy (empty = deny all if
     // no --operators-file), a challenge store, and the daemon's key for
     // signing issued tokens.
@@ -6065,10 +6122,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.symthaea_authority_bootstrap && args.symthaea_authority_generation_path.is_none() {
         return Err("--symthaea-authority-bootstrap requires --symthaea-authority-generation-path".into());
     }
-    let _symthaea_authority_owner = args
-        .symthaea_authority_generation_path
+    let _symthaea_authority_owner = authority_storage_trust
         .as_ref()
-        .map(xenia_symthaea_live_authority_guard::AuthorityOwnerLock::acquire_for_generation_path)
+        .map(|trust| xenia_symthaea_live_authority_guard::AuthorityOwnerLock::acquire(trust.root()))
         .transpose()
         .map_err(|error| -> Box<dyn std::error::Error> {
             format!("failed to acquire live Symthaea authority owner lock: {error}").into()
