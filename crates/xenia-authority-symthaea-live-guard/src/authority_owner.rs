@@ -19,6 +19,9 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// Stable filename for the cross-process authority owner lock.
+const OWNER_LOCK_FILE: &str = ".xenia-symthaea-authority.owner.lock";
+
 /// Durable cross-process owner lock for one live authority storage root.
 #[derive(Debug)]
 pub struct AuthorityOwnerLock {
@@ -42,12 +45,32 @@ impl AuthorityOwnerLock {
             ));
         }
 
-        let path = root.join(".xenia-symthaea-authority.owner.lock");
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&path)?;
+        let path = root.join(OWNER_LOCK_FILE);
+        if let Ok(metadata) = std::fs::symlink_metadata(&path) {
+            if metadata.file_type().is_symlink() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("authority owner lock must not be a symlink: {}", path.display()),
+                ));
+            }
+            if !metadata.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("authority owner lock is not a regular file: {}", path.display()),
+                ));
+            }
+        }
+
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // O_NOFOLLOW closes the final-component symlink-following gap
+            // between the metadata check above and the actual open.
+            options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+        }
+        let file = options.open(&path)?;
         file.try_lock().map_err(|error| match error {
             std::fs::TryLockError::WouldBlock => io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -59,7 +82,16 @@ impl AuthorityOwnerLock {
         Ok(Self { file, path })
     }
 
-    /// Acquire ownership using the parent directory of a generation ledger path.\n    ///\n    /// This keeps generation state and its live owner in the same storage root.\n    pub fn acquire_for_generation_path(path: impl AsRef<Path>) -> io::Result<Self> {\n        let path = path.as_ref();\n        let root = path.parent().unwrap_or_else(|| Path::new("."));\n        Self::acquire(root)\n    }\n\n    /// Return the exact lock path held by this owner.
+    /// Acquire ownership using the parent directory of a generation ledger path.
+    ///
+    /// This keeps generation state and its live owner in the same storage root.
+    pub fn acquire_for_generation_path(path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref();
+        let root = path.parent().unwrap_or_else(|| Path::new("."));
+        Self::acquire(root)
+    }
+
+    /// Return the exact lock path held by this owner.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -96,13 +128,24 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_lock_path() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("outside.lock");
+        std::fs::write(&target, b"sentinel").unwrap();
+        let lock_path = root.path().join(OWNER_LOCK_FILE);
+        std::os::unix::fs::symlink(&target, &lock_path).unwrap();
+
+        let error = AuthorityOwnerLock::acquire(root.path()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(std::fs::read(&target).unwrap(), b"sentinel");
+    }
+
     #[test]
     fn lock_path_is_stable_and_root_scoped() {
         let root = tempfile::tempdir().unwrap();
         let owner = AuthorityOwnerLock::acquire(root.path()).unwrap();
-        assert_eq!(
-            owner.path(),
-            root.path().join(".xenia-symthaea-authority.owner.lock")
-        );
+        assert_eq!(owner.path(), root.path().join(OWNER_LOCK_FILE));
     }
 }
