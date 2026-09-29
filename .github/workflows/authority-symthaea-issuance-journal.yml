@@ -12,8 +12,12 @@ permissions:
 
 jobs:
   journal:
-    name: Durable single-use issuance journal
-    runs-on: ubuntu-latest
+    name: Durable single-use issuance journal (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: crates/xenia-authority-symthaea-issuance-journal
