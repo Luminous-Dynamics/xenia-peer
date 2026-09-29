@@ -59,7 +59,7 @@ impl AuthorityOwnerLock {
         Ok(Self { file, path })
     }
 
-    /// Return the exact lock path held by this owner.
+    /// Acquire ownership using the parent directory of a generation ledger path.\n    ///\n    /// This keeps generation state and its live owner in the same storage root.\n    pub fn acquire_for_generation_path(path: impl AsRef<Path>) -> io::Result<Self> {\n        let path = path.as_ref();\n        let root = path.parent().unwrap_or_else(|| Path::new("."));\n        Self::acquire(root)\n    }\n\n    /// Return the exact lock path held by this owner.
     pub fn path(&self) -> &Path {
         &self.path
     }
