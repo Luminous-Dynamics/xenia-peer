@@ -131,21 +131,19 @@ impl SymthaeaAuthorityState {
     ) -> Result<
         StableAuthoritySnapshot<CoherentSymthaeaAuthoritySnapshotV1>,
         LiveAuthorityGuardError<
-            xenia_symthaea_live_snapshot::AuthoritySnapshotReadError<std::convert::Infallible>,
+            xenia_symthaea_live_snapshot::AuthoritySnapshotReadError<String>,
         >,
     > {
         read_coherent_symthaea_authority_snapshot_v1(&self.guard, operator_id, || {
-            Ok::<_, std::convert::Infallible>(AuthoritySnapshotMaterialV1 {
+            Ok(AuthoritySnapshotMaterialV1 {
                 enrollments: self
                     .policy
                     .symthaea_snapshot_material()
-                    .map_err(|error| std::convert::Infallible)?,
-                revoked_operator_ids: self.revocations.snapshot_sorted().map_err(|_| {
-                    // The closure's error type is intentionally infallible at the
-                    // source boundary; lock poisoning is represented by a source
-                    // adapter failure below instead.
-                    std::convert::Infallible
-                })?,
+                    .map_err(|error| error.to_string())?,
+                revoked_operator_ids: self
+                    .revocations
+                    .snapshot_sorted()
+                    .map_err(|error| error.to_string())?,
             })
         })
     }
