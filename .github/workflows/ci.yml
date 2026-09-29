@@ -76,7 +76,8 @@ jobs:
                       for dep in p["dependencies"]: print(f"    {dep!r},")
                       print("]")
                   print()
-          PY      - name: Clippy
+          PY
+      - name: Clippy
         run: nix develop .#ci --command cargo clippy --locked --all-targets -- -D warnings
       - name: Transport/session source + model contracts
         run: nix develop .#ci --command bash scripts/run_transport_session_contracts.sh
