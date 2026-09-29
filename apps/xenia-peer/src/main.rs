@@ -6065,6 +6065,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.symthaea_authority_bootstrap && args.symthaea_authority_generation_path.is_none() {
         return Err("--symthaea-authority-bootstrap requires --symthaea-authority-generation-path".into());
     }
+    let _symthaea_authority_owner = args
+        .symthaea_authority_generation_path
+        .as_ref()
+        .map(xenia_symthaea_live_authority_guard::AuthorityOwnerLock::acquire_for_generation_path)
+        .transpose()
+        .map_err(|error| -> Box<dyn std::error::Error> {
+            format!("failed to acquire live Symthaea authority owner lock: {error}").into()
+        })?;
+
     if let Some(path) = &args.symthaea_authority_generation_path {
         let authority = crate::operator_http::SymthaeaAuthorityState::open_or_bootstrap(
             operator_auth_state.policy.clone(),
