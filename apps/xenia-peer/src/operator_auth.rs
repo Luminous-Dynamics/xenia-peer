@@ -39,6 +39,7 @@ use xenia_symthaea_rbac::permit_symthaea_attestation_scope_v1;
 pub(crate) use xenia_operator_proto::{
     ConsentAction, OperatorAction, challenge_transcript, consent_action_transcript,
     operator_token_canonical_bytes, replace_operator_key_transcript, revoke_operator_transcript,
+    symthaea_authorization_transcript,
 };
 
 /// Default lifetime of an issued challenge (seconds). Short: a challenge is
