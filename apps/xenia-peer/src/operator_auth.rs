@@ -29,7 +29,9 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use xenia_handshake::{HandshakeManager, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN, MlDsaIdentity};
 
 use crate::operator::{OperatorPolicy, OperatorRole};
-use xenia_symthaea_attestation_authority::SymthaeaAuthorityScopeV1;
+use xenia_symthaea_attestation_authority::{
+    SymthaeaAuthorityScopeV1, symthaea_key_lineage_commitment_v1,
+};
 use xenia_symthaea_rbac::permit_symthaea_attestation_scope_v1;
 
 // The challenge/consent transcripts and the consent-action model come from the
@@ -361,6 +363,10 @@ pub(crate) struct AuthorizedSymthaeaAuthorization {
     pub(crate) symthaea_receipt_id: [u8; 16],
     pub(crate) symthaea_receipt_digest_sha256: [u8; 32],
     pub(crate) request_nonce: [u8; 32],
+    /// Key-lineage commitment for the exact enrolled keys that authenticated
+    /// this request. The live issuance adapter compares it with the coherent
+    /// snapshot so a key replacement cannot race authentication into issuance.
+    pub(crate) authenticated_key_lineage_commitment: String,
 }
 
 /// Authenticate one Symthaea authority-receipt issuance request.
@@ -411,12 +417,16 @@ pub(crate) fn authorize_symthaea_authorization(
     )
     .map_err(|_| AuthError::MlDsaVerifyFailed)?;
 
+    let authenticated_key_lineage_commitment =
+        symthaea_key_lineage_commitment_v1(&operator.ed25519_pubkey, &operator.ml_dsa_pubkey)
+            .map_err(|_| AuthError::MalformedKey)?;
     Ok(AuthorizedSymthaeaAuthorization {
         operator_id: token.operator_id,
         authority_scope: scope_permit.scope(),
         symthaea_receipt_id: request.symthaea_receipt_id,
         symthaea_receipt_digest_sha256: request.symthaea_receipt_digest_sha256,
         request_nonce: request.request_nonce,
+        authenticated_key_lineage_commitment,
     })
 }
 
