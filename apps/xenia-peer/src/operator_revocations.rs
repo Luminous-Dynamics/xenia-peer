@@ -315,6 +315,16 @@ mod tests {
     }
 
     #[test]
+    fn persist_writes_sorted_effective_set_durably() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("revoked.txt");
+        let r = OperatorRevocations::from_file(&path).unwrap();
+        r.revoke_with_outcome("bob").unwrap();
+        r.revoke_with_outcome("alice").unwrap();
+        r.persist().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "alice\nbob\n");
+    }
+    #[test]
     fn parses_file_ignoring_blanks_and_comments() {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         writeln!(f, "# revoked operators").unwrap();
