@@ -674,16 +674,21 @@ async fn symthaea_authorization_handler(
         }
     }
 
-    let result = authority.with_coherent_snapshot(&authorized.operator_id, |snapshot| {
-        if authority.revocations.is_revoked(&authorized.operator_id) {
+    let operator_id = authorized.operator_id.clone();
+    let authority_scope = authorized.authority_scope.clone();
+    let symthaea_receipt_id = authorized.symthaea_receipt_id;
+    let symthaea_receipt_digest_sha256 = authorized.symthaea_receipt_digest_sha256;
+    let request_nonce = authorized.request_nonce;
+    let result = authority.with_coherent_snapshot(&operator_id, |snapshot| {
+        if authority.revocations.is_revoked(&operator_id) {
             return Err("operator was revoked before coherent issuance snapshot commit".to_string());
         }
         let request_for_issuer = DaemonSymthaeaAuthorizationRequestV1 {
-            operator_id: authorized.operator_id.clone(),
-            authority_scope: authorized.authority_scope,
-            symthaea_receipt_id: authorized.symthaea_receipt_id,
-            symthaea_receipt_digest_sha256: authorized.symthaea_receipt_digest_sha256,
-            request_nonce: authorized.request_nonce,
+            operator_id: operator_id.clone(),
+            authority_scope,
+            symthaea_receipt_id,
+            symthaea_receipt_digest_sha256,
+            request_nonce,
         };
         let daemon_certificate_commitment = daemon_certificate_commitment_sha256_v1(
             &state.daemon_certificate,
@@ -707,7 +712,7 @@ async fn symthaea_authorization_handler(
             .map_err(|error| format!("failed to serialize signed Symthaea receipt: {error}"))?;
         issuance
             .journal
-            .record_issued(authorized.request_nonce, binding_digest, &receipt_bytes)
+            .record_issued(request_nonce, binding_digest, &receipt_bytes)
             .map_err(|error| format!("failed to durably retain signed Symthaea receipt: {error}"))?;
         Ok(receipt_bytes)
     });
@@ -721,7 +726,7 @@ async fn symthaea_authorization_handler(
             // than ever reopening the nonce.
             if let Err(abort_error) = issuance
                 .journal
-                .record_aborted(authorized.request_nonce, binding_digest)
+                .record_aborted(request_nonce, binding_digest)
             {
                 tracing::error!(?abort_error, "failed to durably abort failed Symthaea issuance");
             }
