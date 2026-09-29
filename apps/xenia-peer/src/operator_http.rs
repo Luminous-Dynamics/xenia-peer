@@ -48,8 +48,10 @@ use xenia_wire::handshake_highsec::ML_DSA_87_PK_LEN;
 use crate::operator::{OperatorPolicy, OperatorRole};
 use crate::operator_auth::{
     AuthenticatedConsentAction, AuthenticatedKeyReplacement, AuthenticatedRevocation,
+    AuthenticatedSymthaeaAuthorization,
     CHALLENGE_TTL_SECS, ChallengeResponse, ChallengeStore, ConsentAction, OperatorToken,
     RateLimiter, SignedOperatorToken, TOKEN_TTL_SECS, issue_token, verify_challenge_response,
+    symthaea_authorization_binding_digest,
 };
 use crate::operator_revocations::{OperatorRevocations, RevocationMutation};
 
@@ -519,6 +521,52 @@ struct AuthenticatedRevocationDto {
     ml_dsa_action_signature: String,
 }
 
+/// Wire form of a live Symthaea authority-receipt issuance request.
+#[derive(Deserialize)]
+struct AuthenticatedSymthaeaAuthorizationDto {
+    token: TokenDto,
+    /// Must equal the canonical typed Symthaea attestation scope.
+    authority_scope: String,
+    symthaea_receipt_id: String,
+    symthaea_receipt_digest_sha256: String,
+    request_nonce: String,
+    action_signature: String,
+    ml_dsa_action_signature: String,
+}
+
+/// Parse the live Symthaea authority-receipt issuance request.
+pub(crate) fn parse_authenticated_symthaea_authorization(
+    json: &str,
+) -> Result<AuthenticatedSymthaeaAuthorization, String> {
+    let dto: AuthenticatedSymthaeaAuthorizationDto =
+        serde_json::from_str(json).map_err(|e| e.to_string())?;
+    if dto.authority_scope
+        != xenia_symthaea_attestation_authority::SYMTHAEA_RECEIPT_ATTESTATION_SCOPE_V1
+    {
+        return Err("unsupported Symthaea authority scope".to_string());
+    }
+    let symthaea_receipt_id = decode_fixed::<16>(&dto.symthaea_receipt_id)
+        .map_err(|(_, message)| message)?;
+    let symthaea_receipt_digest_sha256 = decode_fixed::<32>(&dto.symthaea_receipt_digest_sha256)
+        .map_err(|(_, message)| message)?;
+    let request_nonce = decode_fixed::<32>(&dto.request_nonce).map_err(|(_, message)| message)?;
+    if request_nonce == [0; 32] {
+        return Err("request nonce must be nonzero".to_string());
+    }
+    let action_signature = decode_fixed::<64>(&dto.action_signature)
+        .map_err(|(_, message)| message)?;
+    let ml_dsa_action_signature = decode_fixed::<ML_DSA_65_SIG_LEN>(&dto.ml_dsa_action_signature)
+        .map_err(|(_, message)| message)?;
+    Ok(AuthenticatedSymthaeaAuthorization {
+        token: dto.token.into_signed()?,
+        authority_scope: SymthaeaAuthorityScopeV1::VerificationReceiptAttestationV1,
+        symthaea_receipt_id,
+        symthaea_receipt_digest_sha256,
+        request_nonce,
+        action_signature,
+        ml_dsa_action_signature,
+    })
+}
 /// Parse the JSON body of a `/operator/revoke` request into an
 /// [`AuthenticatedRevocation`], mirroring [`parse_authenticated_consent_action`].
 pub(crate) fn parse_authenticated_revocation(
