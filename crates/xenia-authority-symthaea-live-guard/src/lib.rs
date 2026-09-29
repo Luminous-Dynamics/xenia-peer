@@ -20,6 +20,10 @@
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
+mod authority_owner;
+
+pub use authority_owner::AuthorityOwnerLock;
+
 use xenia_symthaea_authority_generation::{
     AuthorityGenerationError, AuthorityMutation, AuthorityStateCoordinator, AuthorityVersionV1,
     SHA256_LEN, StableAuthoritySnapshot,
