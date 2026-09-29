@@ -230,6 +230,43 @@ impl AuthorityStorageTrust {
         Ok(())
     }
 
+    /// Open a trusted source and return its exact bytes plus the filesystem
+    /// identity of the object that was actually opened.
+    ///
+    /// On Unix the final path component is opened with O_NOFOLLOW, then the
+    /// identity is captured from the open handle and the bytes are read from
+    /// that same handle. This removes the verify-then-reopen pathname race.
+    /// The optional expected identity must match the opened object when
+    /// present; callers can install the returned identity only after a
+    /// successful initial load.
+    #[cfg(unix)]
+    pub fn read_source(
+        &self,
+        path: &Path,
+        expected: Option<AuthoritySourceIdentity>,
+    ) -> io::Result<(String, AuthoritySourceIdentity)> {
+        self.validate_source_path(path)?;
+        use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)?;
+        let actual = AuthoritySourceIdentity::capture_file(&file)?;
+        if let Some(expected) = expected {
+            if expected != actual {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("authority source object identity changed: {}", path.display()),
+                ));
+            }
+        }
+        let mut text = String::new();
+        (&file).read_to_string(&mut text)?;
+        Ok((text, actual))
+    }
+
     /// Return the Unix owner uid captured at validation time.
     #[cfg(unix)]
     pub fn owner_uid(&self) -> u32 {
