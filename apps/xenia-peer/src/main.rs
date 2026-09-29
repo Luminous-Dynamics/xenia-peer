@@ -6081,6 +6081,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!(path = %path.display(), "live Symthaea authority guard enabled");
     }
 
+    if args.symthaea_issuance_journal_bootstrap && args.symthaea_issuance_journal_path.is_none() {
+        return Err(
+            "--symthaea-issuance-journal-bootstrap requires --symthaea-issuance-journal-path"
+                .into(),
+        );
+    }
+    if args.symthaea_verifier_artifact_commitment_sha256.is_some()
+        && args.symthaea_issuance_journal_path.is_none()
+    {
+        return Err(
+            "--symthaea-verifier-artifact-commitment-sha256 requires --symthaea-issuance-journal-path"
+                .into(),
+        );
+    }
+    if let Some(journal_path) = &args.symthaea_issuance_journal_path {
+        if args.symthaea_authority_generation_path.is_none() {
+            return Err(
+                "--symthaea-issuance-journal-path requires --symthaea-authority-generation-path"
+                    .into(),
+            );
+        }
+        let commitment_text = args
+            .symthaea_verifier_artifact_commitment_sha256
+            .as_deref()
+            .ok_or(
+                "--symthaea-issuance-journal-path requires --symthaea-verifier-artifact-commitment-sha256"
+            )?;
+        let verifier_artifact_commitment_sha256 = parse_sha256_hex(commitment_text)
+            .map_err(|error| format!("invalid Symthaea verifier artifact commitment: {error}"))?;
+        let journal = if args.symthaea_issuance_journal_bootstrap {
+            xenia_symthaea_issuance_journal::IssuanceJournal::bootstrap_new(journal_path)
+        } else {
+            xenia_symthaea_issuance_journal::IssuanceJournal::open_existing(journal_path)
+        }
+        .map_err(|error| format!("failed to initialize Symthaea issuance journal: {error}"))?;
+        operator_auth_state
+            .set_symthaea_issuance(Arc::new(crate::operator_http::SymthaeaIssuanceState::new(
+                journal,
+                verifier_artifact_commitment_sha256,
+            )))
+            .map_err(|_| "Symthaea issuance state was initialized more than once")?;
+        info!(path = %journal_path.display(), "live Symthaea authority issuance enabled");
+    }
     // Reload the revocation file on SIGHUP (no restart), only when a file is
     // configured so SIGHUP disposition is otherwise unchanged. When the live
     // Symthaea authority guard is enabled, the reload is itself a guarded
