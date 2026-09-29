@@ -6078,9 +6078,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Some(authority) => {
                         let result = authority.mutate(|| {
                             match reload.reload_with_outcome() {
-                                Err(error) => LiveAuthorityMutation::failed_before_change(error.to_string()),
+                                Err(error) => xenia_symthaea_live_authority_guard::LiveAuthorityMutation::failed_before_change(error.to_string()),
                                 Ok(crate::operator_revocations::RevocationMutation::Unchanged { count }) =>
-                                    LiveAuthorityMutation::unchanged(count),
+                                    xenia_symthaea_live_authority_guard::LiveAuthorityMutation::unchanged(count),
                                 Ok(crate::operator_revocations::RevocationMutation::Changed { count }) =>
                                     authority.changed(count),
                             }
