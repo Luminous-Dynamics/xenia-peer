@@ -1093,6 +1093,22 @@ struct Args {
     #[arg(long)]
     symthaea_authority_bootstrap: bool,
 
+    /// Durable single-use journal for live Symthaea authority-receipt issuance.
+    /// Setting this enables the issuance endpoint only when the D3A1 authority
+    /// generation ledger and verifier-artifact commitment are also configured.
+    #[arg(long)]
+    symthaea_issuance_journal_path: Option<std::path::PathBuf>,
+
+    /// Explicitly allow first-run creation of the live Symthaea issuance journal.
+    /// Existing journals are never silently reused as new state.
+    #[arg(long)]
+    symthaea_issuance_journal_bootstrap: bool,
+
+    /// SHA-256 commitment of the exact verifier/runtime artifact associated with
+    /// the live Symthaea issuance decision. This is daemon-owned startup state,
+    /// never caller-supplied request material.
+    #[arg(long)]
+    symthaea_verifier_artifact_commitment_sha256: Option<String>,
     /// Require an authenticated, role-authorized operator token for consent
     /// decisions. When off (default), the consent port accepts the legacy
     /// plain-text `Approve`/`Deny`/`Revoke` (backward compatible). When on,
@@ -1484,6 +1500,12 @@ async fn accept_transport(
     }
 }
 
+fn parse_sha256_hex(value: &str) -> Result<[u8; 32], String> {
+    let bytes = hex::decode(value.trim()).map_err(|error| error.to_string())?;
+    bytes
+        .try_into()
+        .map_err(|_| "expected exactly 32 decoded bytes".to_string())
+}
 fn parse_source_id(hex: &str) -> Result<[u8; 8], String> {
     let bytes = hex::decode(hex).map_err(|e| e.to_string())?;
     bytes
