@@ -148,6 +148,12 @@ where
     })
 }
 
+/// Validate and construct the canonical coherent Symthaea authority snapshot
+/// from one durable authority version and one owned material set.
+///
+/// This function performs no I/O and does not itself establish the lifetime of
+/// the authority barrier; callers that need issuance-time stability must invoke
+/// it inside the live guard's stable-snapshot operation.
 pub fn coherent_symthaea_authority_snapshot_v1(
     version: AuthorityVersionV1,
     operator_id: &str,
