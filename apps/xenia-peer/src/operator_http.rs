@@ -40,7 +40,7 @@ use xenia_symthaea_live_snapshot::{
 use xenia_symthaea_authority_state_commitment::EffectiveSymthaeaPolicyCommitmentInputV1;
 use xenia_symthaea_attestation_authority::SymthaeaAuthorityScopeV1;
 use xenia_symthaea_authorization_receipt::{
-    MAX_AUTHORIZATION_TTL_SECS_V1, SignedXeniaSymthaeaAuthorizationReceiptV1,
+    MAX_AUTHORIZATION_TTL_SECS_V1,
 };
 use xenia_symthaea_daemon_certificate::daemon_certificate_commitment_sha256_v1;
 use xenia_symthaea_daemon_issuer::{
