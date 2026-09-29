@@ -525,12 +525,6 @@ async fn revoke_operator_handler(
         &request,
     ) {
         Ok(authorized) => {
-            // A revoked admin's token is otherwise still cryptographically
-            // valid (revocation != de-enrollment) -- without this check
-            // they could keep revoking (or un-revoking, by replacing keys)
-            // other operators indefinitely after being revoked themselves.
-            // Mirrors main.rs's identical check on the plaintext consent
-            // path.
             if state.revocations.is_revoked(&authorized.operator_id) {
                 tracing::warn!(
                     operator = %authorized.operator_id,
@@ -538,7 +532,38 @@ async fn revoke_operator_handler(
                 );
                 return Err((StatusCode::FORBIDDEN, "revocation refused".to_string()));
             }
-            state.revocations.revoke(&authorized.target_operator_id);
+
+            if let Some(authority) = state.auth.symthaea_authority.get().cloned() {
+                if !authority.revocations.has_backing_file() {
+                    return Err((
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "revocation persistence is required while live Symthaea authority is enabled"
+                            .to_string(),
+                    ));
+                }
+                let target = authorized.target_operator_id.clone();
+                let result = authority.mutate(|| {
+                    match authority.revocations.revoke_with_outcome(&target) {
+                        Err(error) => LiveAuthorityMutation::failed_before_change(error.to_string()),
+                        Ok(RevocationMutation::Unchanged { count }) => {
+                            LiveAuthorityMutation::unchanged(count)
+                        }
+                        Ok(RevocationMutation::Changed { count }) => {
+                            if let Err(error) = authority.revocations.persist() {
+                                return LiveAuthorityMutation::failed_after_change(error.to_string());
+                            }
+                            authority.changed(count)
+                        }
+                    }
+                });
+                if let Err(error) = result {
+                    tracing::error!(?error, target = %target, "guarded operator revocation failed");
+                    return Err((StatusCode::SERVICE_UNAVAILABLE, "revocation refused".to_string()));
+                }
+            } else {
+                state.revocations.revoke(&authorized.target_operator_id);
+            }
+
             tracing::warn!(
                 target = %authorized.target_operator_id,
                 by = %authorized.operator_id,
@@ -651,10 +676,6 @@ async fn replace_operator_key_handler(
         }
     };
 
-    // See the identical check in revoke_operator_handler: a revoked admin's
-    // token is otherwise still valid, and this endpoint's blast radius is
-    // worse -- it lets the caller seize any other enrolled operator's
-    // (including other admins') identity.
     if state.revocations.is_revoked(&authorized.operator_id) {
         tracing::warn!(
             operator = %authorized.operator_id,
@@ -663,30 +684,59 @@ async fn replace_operator_key_handler(
         return Err((StatusCode::FORBIDDEN, "key replacement refused".to_string()));
     }
 
-    if let Err(err) = state.auth.policy.replace_operator_key(
-        &authorized.target_operator_id,
-        authorized.new_ed25519_pubkey,
-        authorized.new_ml_dsa_pubkey,
-        authorized.new_ml_dsa_87_pubkey,
-    ) {
-        tracing::warn!(
-            error = %err,
-            target = %authorized.target_operator_id,
-            "operator key replacement refused"
-        );
-        return Err((StatusCode::FORBIDDEN, "key replacement refused".to_string()));
-    }
+    if let Some(authority) = state.auth.symthaea_authority.get().cloned() {
+        let Some(path) = state.operators_file.as_ref() else {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "operator-policy persistence is required while live Symthaea authority is enabled"
+                    .to_string(),
+            ));
+        };
+        let target = authorized.target_operator_id.clone();
+        let new_ed = authorized.new_ed25519_pubkey;
+        let new_ml = authorized.new_ml_dsa_pubkey.clone();
+        let new_ml87 = authorized.new_ml_dsa_87_pubkey.clone();
+        let result = authority.mutate(|| {
+            match authority.policy.replace_operator_key(&target, new_ed, new_ml, new_ml87) {
+                Err(error) => LiveAuthorityMutation::failed_before_change(error.to_string()),
+                Ok(()) => {
+                    if let Err(error) = authority.policy.persist_to(path) {
+                        return LiveAuthorityMutation::failed_after_change(error.to_string());
+                    }
+                    authority.changed(())
+                }
+            }
+        });
+        if let Err(error) = result {
+            tracing::error!(?error, target = %target, "guarded operator key replacement failed");
+            return Err((StatusCode::SERVICE_UNAVAILABLE, "key replacement refused".to_string()));
+        }
+    } else {
+        if let Err(err) = state.auth.policy.replace_operator_key(
+            &authorized.target_operator_id,
+            authorized.new_ed25519_pubkey,
+            authorized.new_ml_dsa_pubkey,
+            authorized.new_ml_dsa_87_pubkey,
+        ) {
+            tracing::warn!(
+                error = %err,
+                target = %authorized.target_operator_id,
+                "operator key replacement refused"
+            );
+            return Err((StatusCode::FORBIDDEN, "key replacement refused".to_string()));
+        }
 
-    if let Some(path) = &state.operators_file
-        && let Err(err) = state.auth.policy.persist_to(path)
-    {
-        tracing::error!(
-            error = %err,
-            path = %path.display(),
-            target = %authorized.target_operator_id,
-            "failed to persist operator policy after key replacement -- \
-             the replacement is live but will not survive a restart until fixed"
-        );
+        if let Some(path) = &state.operators_file
+            && let Err(err) = state.auth.policy.persist_to(path)
+        {
+            tracing::error!(
+                error = %err,
+                path = %path.display(),
+                target = %authorized.target_operator_id,
+                "failed to persist operator policy after key replacement -- \
+                 the replacement is live but will not survive a restart until fixed"
+            );
+        }
     }
 
     tracing::warn!(
