@@ -1200,6 +1200,14 @@ pub(crate) fn router(
         )
         .merge(
             Router::new()
+                .route(
+                    "/operator/symthaea/authorization-receipt",
+                    post(symthaea_authorization_handler),
+                )
+                .with_state(state.clone()),
+        )
+        .merge(
+            Router::new()
                 .route("/v1/audit/checkpoint", get(audit_checkpoint_handler))
                 .route("/v1/audit/ledger", get(audit_ledger_handler))
                 .with_state(audit),
