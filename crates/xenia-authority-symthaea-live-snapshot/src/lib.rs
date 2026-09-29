@@ -143,12 +143,12 @@ where
 {
     guard.with_stable_snapshot(|version| {
         let material = read_material().map_err(AuthoritySnapshotReadError::Source)?;
-        coherent_from_material(version, operator_id, material)
+        coherent_symthaea_authority_snapshot_v1(version, operator_id, material)
             .map_err(AuthoritySnapshotReadError::Validation)
     })
 }
 
-fn coherent_from_material(
+pub fn coherent_symthaea_authority_snapshot_v1(
     version: AuthorityVersionV1,
     operator_id: &str,
     material: AuthoritySnapshotMaterialV1,
