@@ -1,0 +1,23 @@
+# Copyright (c) 2024-2026 Tristan Stoltz / Luminous Dynamics
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[package]
+name = "xenia-symthaea-issuance-journal"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Tristan Stoltz / Luminous Dynamics"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Luminous-Dynamics/xenia-peer"
+description = "Durable single-use issuance state and replay journal for Xenia Symthaea authority receipts"
+publish = false
+
+[dependencies]
+sha2 = "0.10"
+thiserror = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+# Standalone durable replay boundary. HTTP/authentication integration is a later child.
+[workspace]
