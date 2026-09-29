@@ -327,6 +327,53 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn read_source_parses_from_the_opened_object() {
+        let root = tempfile::tempdir().unwrap();
+        let trust = AuthorityStorageTrust::validate(root.path()).unwrap();
+        let source = root.path().join("operators.json");
+        std::fs::write(&source, b"{\"version\":1}").unwrap();
+
+        let (text, identity) = trust.read_source(&source, None).unwrap();
+        assert_eq!(text, "{\"version\":1}");
+        assert_eq!(identity, AuthoritySourceIdentity::capture(&source).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_source_rejects_replaced_object() {
+        let root = tempfile::tempdir().unwrap();
+        let trust = AuthorityStorageTrust::validate(root.path()).unwrap();
+        let source = root.path().join("operators.json");
+        std::fs::write(&source, b"old").unwrap();
+        let expected = AuthoritySourceIdentity::capture(&source).unwrap();
+
+        let replacement = root.path().join("replacement.json");
+        std::fs::write(&replacement, b"new").unwrap();
+        std::fs::rename(&replacement, &source).unwrap();
+
+        let error = trust.read_source(&source, Some(expected)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_source_rejects_final_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let trust = AuthorityStorageTrust::validate(root.path()).unwrap();
+        let target = root.path().join("target");
+        std::fs::write(&target, b"target").unwrap();
+        let source = root.path().join("operators.json");
+        std::os::unix::fs::symlink(&target, &source).unwrap();
+
+        let error = trust.read_source(&source, None).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            io::ErrorKind::PermissionDenied | io::ErrorKind::Other
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn source_replacement_is_detected() {
         let root = tempfile::tempdir().unwrap();
         let trust = AuthorityStorageTrust::validate(root.path()).unwrap();
