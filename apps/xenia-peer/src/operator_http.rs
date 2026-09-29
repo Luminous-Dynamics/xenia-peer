@@ -35,7 +35,7 @@ use xenia_ledger::{Chain, LedgerCheckpoint, LedgerEntry};
 use xenia_symthaea_authority_generation::{AuthorityGenerationError, StableAuthoritySnapshot};
 use xenia_symthaea_live_snapshot::{
     AuthoritySnapshotMaterialV1, CoherentSymthaeaAuthoritySnapshotV1,
-    read_coherent_symthaea_authority_snapshot_v1,
+    coherent_symthaea_authority_snapshot_v1,
 };
 use xenia_symthaea_authority_state_commitment::EffectiveSymthaeaPolicyCommitmentInputV1;
 use xenia_symthaea_live_authority_guard::{
@@ -123,29 +123,34 @@ impl SymthaeaAuthorityState {
         }))
     }
 
-    /// Read one coherent, committed Symthaea authority snapshot for an
-    /// authenticated operator.
-    pub(crate) fn coherent_snapshot(
+    /// Run one coherent Symthaea snapshot operation while the live authority
+    /// read barrier remains held through the caller's use of the snapshot.
+    pub(crate) fn with_coherent_snapshot<T, F>(
         &self,
         operator_id: &str,
-    ) -> Result<
-        StableAuthoritySnapshot<CoherentSymthaeaAuthoritySnapshotV1>,
-        LiveAuthorityGuardError<
-            xenia_symthaea_live_snapshot::AuthoritySnapshotReadError<String>,
-        >,
-    > {
-        read_coherent_symthaea_authority_snapshot_v1(&self.guard, operator_id, || {
-            Ok(AuthoritySnapshotMaterialV1 {
-                enrollments: self
-                    .policy
-                    .symthaea_snapshot_material()
-                    .map_err(|error| error.to_string())?,
-                revoked_operator_ids: self
-                    .revocations
-                    .snapshot_sorted()
-                    .map_err(|error| error.to_string())?,
-            })
-        })
+        use_snapshot: F,
+    ) -> Result<T, LiveAuthorityGuardError<String>>
+    where
+        F: FnOnce(&StableAuthoritySnapshot<CoherentSymthaeaAuthoritySnapshotV1>)
+            -> Result<T, String>,
+    {
+        self.guard.with_stable_snapshot_and(
+            |version| {
+                let material = AuthoritySnapshotMaterialV1 {
+                    enrollments: self
+                        .policy
+                        .symthaea_snapshot_material()
+                        .map_err(|error| error.to_string())?,
+                    revoked_operator_ids: self
+                        .revocations
+                        .snapshot_sorted()
+                        .map_err(|error| error.to_string())?,
+                };
+                coherent_symthaea_authority_snapshot_v1(version, operator_id, material)
+                    .map_err(|error| error.to_string())
+            },
+            |snapshot| use_snapshot(&snapshot),
+        )
     }
     /// Execute a live authority mutation through the sole D3A1 guard.
     pub(crate) fn mutate<T, E, F>(&self, mutation: F) -> Result<T, LiveAuthorityGuardError<E>>
