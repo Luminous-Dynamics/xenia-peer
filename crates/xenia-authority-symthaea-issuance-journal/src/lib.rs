@@ -26,7 +26,7 @@
 
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -106,18 +106,26 @@ pub enum IssuanceJournalError {
     /// The caller attempted to mark a reservation with the wrong binding.
     #[error("issuance reservation binding does not match")]
     ReservationBindingMismatch,
+    /// Another process already owns the journal's exclusive writer lock.
+    #[error("issuance journal is already owned by another process")]
+    JournalBusy,
     /// A prior write failed after the journal may have been partially changed.
     #[error("issuance journal is poisoned after a persistence failure")]
     JournalPoisoned,
 }
 
-/// Durable one-process owner of the issuance journal.
+/// Durable exclusive owner of the issuance journal.
 ///
-/// Clones share the same in-process state lock. The file path must not be
-/// concurrently owned by another daemon process.
+/// Clones share the same in-process state lock and the same OS file handle.
+/// The handle holds the exclusive journal lock for the lifetime of the
+/// journal, so a second daemon process cannot admit the same journal path.
+///
+/// All durable appends use this already-locked handle. Reopening the path for
+/// individual writes would defeat the ownership theorem because filesystem
+/// locks are attached to file handles, not to the path string.
 #[derive(Clone, Debug)]
 pub struct IssuanceJournal {
-    path: Arc<PathBuf>,
+    file: Arc<File>,
     state: Arc<Mutex<JournalState>>,
 }
 
@@ -145,17 +153,18 @@ impl IssuanceJournal {
     pub fn bootstrap_new(path: impl AsRef<Path>) -> Result<Self, IssuanceJournalError> {
         let path = path.as_ref().to_path_buf();
         let mut options = secure_open_options();
-        options.write(true).create_new(true);
-        options
+        options.read(true).append(true).create_new(true);
+        let file = options
             .open(&path)
             .map_err(|error| match error.kind() {
                 ErrorKind::AlreadyExists => IssuanceJournalError::JournalAlreadyExists,
                 _ => IssuanceJournalError::Io(error.to_string()),
             })?;
 
+        acquire_exclusive_lock(&file)?;
         sync_parent_directory(&path)?;
         Ok(Self {
-            path: Arc::new(path),
+            file: Arc::new(file),
             state: Arc::new(Mutex::new(JournalState::default())),
         })
     }
@@ -166,10 +175,14 @@ impl IssuanceJournal {
     /// or impossible transition fails closed.
     pub fn open_existing(path: impl AsRef<Path>) -> Result<Self, IssuanceJournalError> {
         let path = path.as_ref().to_path_buf();
-        let mut file = File::open(&path).map_err(|error| match error.kind() {
+        let mut options = secure_open_options();
+        options.read(true).append(true);
+        let mut file = options.open(&path).map_err(|error| match error.kind() {
             ErrorKind::NotFound => IssuanceJournalError::JournalMissing,
             _ => IssuanceJournalError::Io(error.to_string()),
         })?;
+
+        acquire_exclusive_lock(&file)?;
 
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)
@@ -177,7 +190,7 @@ impl IssuanceJournal {
 
         let state = decode_journal(&bytes)?;
         Ok(Self {
-            path: Arc::new(path),
+            file: Arc::new(file),
             state: Arc::new(Mutex::new(state)),
         })
     }
@@ -220,7 +233,7 @@ impl IssuanceJournal {
             binding_digest,
             &[],
         )?;
-        if let Err(error) = append_and_sync(&self.path, &record) {
+        if let Err(error) = append_and_sync(&self.file, &record) {
             state.poisoned = true;
             return Err(error);
         }
@@ -556,12 +569,17 @@ fn apply_record(
     Ok(())
 }
 
-fn append_and_sync(path: &Path, record: &[u8]) -> Result<(), IssuanceJournalError> {
-    let mut options = secure_open_options();
-    options.append(true);
-    let mut file = options
-        .open(path)
-        .map_err(|error| IssuanceJournalError::Io(error.to_string()))?;
+fn acquire_exclusive_lock(file: &File) -> Result<(), IssuanceJournalError> {
+    match file.try_lock() {
+        Ok(()) => Ok(()),
+        Err(TryLockError::WouldBlock) => Err(IssuanceJournalError::JournalBusy),
+        Err(TryLockError::Error(error)) => {
+            Err(IssuanceJournalError::Io(error.to_string()))
+        }
+    }
+}
+
+fn append_and_sync(file: &File, record: &[u8]) -> Result<(), IssuanceJournalError> {
     file.write_all(record)
         .map_err(|error| IssuanceJournalError::Io(error.to_string()))?;
     file.sync_all()
@@ -787,20 +805,16 @@ mod tests {
     }
 
     #[test]
-    fn missing_journal_after_bootstrap_poisons_future_issuance() {
+    fn second_process_owner_is_rejected_before_state_admission() {
         let dir = tempfile::tempdir().unwrap();
         let journal = IssuanceJournal::bootstrap_new(path(&dir)).unwrap();
         journal.reserve(nonce(1), binding(2)).unwrap();
 
-        std::fs::remove_file(path(&dir)).unwrap();
-        assert!(matches!(
-            journal.record_issued(nonce(1), binding(2), b"receipt"),
-            Err(IssuanceJournalError::Io(_))
-        ));
         assert_eq!(
-            journal.reserve(nonce(2), binding(3)).unwrap_err(),
-            IssuanceJournalError::JournalPoisoned
+            IssuanceJournal::open_existing(path(&dir)).unwrap_err(),
+            IssuanceJournalError::JournalBusy
         );
+        assert_eq!(journal.len().unwrap(), 1);
     }
 
     #[test]
