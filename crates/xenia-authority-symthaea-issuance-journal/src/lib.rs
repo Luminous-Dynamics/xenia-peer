@@ -362,7 +362,12 @@ impl IssuanceJournal {
 
         let record =
             encode_record(JournalRecordState::Aborted, nonce, binding_digest, &[])?;
-        if let Err(error) = append_and_sync(&self.path, &record) {
+        self.ensure_storage_identity()?;
+        if let Err(error) = append_and_sync(&self.file, &record) {
+            state.poisoned = true;
+            return Err(error);
+        }
+        if let Err(error) = self.ensure_storage_identity() {
             state.poisoned = true;
             return Err(error);
         }
@@ -909,6 +914,46 @@ mod tests {
         );
         assert_eq!(journal.len().unwrap(), 1);
     }
+
+
+    #[cfg(unix)]
+    #[test]
+    fn path_replacement_fails_closed_for_live_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = path(&dir);
+        let journal = IssuanceJournal::bootstrap_new(&journal_path).unwrap();
+        journal.reserve(nonce(1), binding(2)).unwrap();
+
+        let moved_path = dir.path().join("moved.bin");
+        std::fs::rename(&journal_path, &moved_path).unwrap();
+        std::fs::write(&journal_path, b"replacement").unwrap();
+
+        assert_eq!(
+            journal.reserve(nonce(3), binding(4)).unwrap_err(),
+            IssuanceJournalError::StorageIdentityMismatch
+        );
+        assert_eq!(
+            journal.len().unwrap_err(),
+            IssuanceJournalError::StorageIdentityMismatch
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_storage_root_is_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut permissions = std::fs::metadata(dir.path()).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(dir.path(), permissions).unwrap();
+
+        assert_eq!(
+            IssuanceJournal::bootstrap_new(path(&dir)).unwrap_err(),
+            IssuanceJournalError::StorageRootUntrusted
+        );
+    }
+
 
     #[test]
     fn concurrent_clones_serialize_reservations() {
