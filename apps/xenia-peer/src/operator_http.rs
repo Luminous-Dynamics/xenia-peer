@@ -645,15 +645,12 @@ pub(crate) fn parse_authenticated_key_replacement(
 /// over the exact target and new key material may replace it; every auth
 /// failure returns `403` without disclosing which check failed.
 ///
-/// On success the live policy is also persisted back to `--operators-file`
-/// (if the daemon was given one) so the replacement survives a restart --
-/// unlike [`crate::operator_revocations::OperatorRevocations::revoke`],
-/// whose own doc comment accepts that gap for revocation. A persist
-/// failure (e.g. a full or read-only disk) is logged but does not undo the
-/// already-applied in-process mutation or fail the request: the operator
-/// is unblocked immediately, which is the whole point of recovery, and a
-/// failed durability write is an operational issue for the daemon operator
-/// to fix, not a reason to leave the recovering operator locked out.
+/// When the D3A1 live authority guard is enabled, the live policy is persisted
+/// back to `--operators-file` before the authority-generation transition is
+/// recorded. A persistence failure is treated as a post-change failure and
+/// poisons the guard, so a portable Symthaea authority receipt can never be
+/// issued from a state that is only in memory. Without the guard, the legacy
+/// recovery behavior remains unchanged.
 async fn replace_operator_key_handler(
     State(state): State<AdminMutationState>,
     body: String,
