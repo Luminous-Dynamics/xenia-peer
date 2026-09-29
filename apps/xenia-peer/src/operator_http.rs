@@ -558,6 +558,12 @@ pub(crate) fn parse_authenticated_symthaea_authorization(
         .map_err(|(_, message)| message)?;
     let symthaea_receipt_digest_sha256 = decode_fixed::<32>(&dto.symthaea_receipt_digest_sha256)
         .map_err(|(_, message)| message)?;
+    if symthaea_receipt_id == [0; 16] {
+        return Err("Symthaea receipt id must be nonzero".to_string());
+    }
+    if symthaea_receipt_digest_sha256 == [0; 32] {
+        return Err("Symthaea receipt digest must be nonzero".to_string());
+    }
     let request_nonce = decode_fixed::<32>(&dto.request_nonce).map_err(|(_, message)| message)?;
     if request_nonce == [0; 32] {
         return Err("request nonce must be nonzero".to_string());
