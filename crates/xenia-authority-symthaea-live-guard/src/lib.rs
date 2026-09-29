@@ -203,6 +203,52 @@ impl LiveAuthorityGuard {
         }
     }
 
+    /// Run an operation while the outer live-authority read barrier remains
+    /// held for the entire operation.
+    ///
+    /// This is stronger than [`Self::with_stable_snapshot`]: the returned
+    /// snapshot is normally released when that method returns, whereas this
+    /// callback executes before the guard's read barrier is dropped. No guarded
+    /// authority mutation can therefore interleave between snapshot creation
+    /// and receipt construction/retention.
+    pub fn with_stable_snapshot_and<S, T, E, F, G>(
+        &self,
+        snapshot_fn: F,
+        use_snapshot: G,
+    ) -> Result<T, LiveAuthorityGuardError<E>>
+    where
+        F: FnOnce(AuthorityVersionV1) -> Result<S, E>,
+        G: FnOnce(StableAuthoritySnapshot<S>) -> Result<T, E>,
+    {
+        let guard = self
+            .gate
+            .read()
+            .map_err(|_| LiveAuthorityGuardError::GuardLockPoisoned)?;
+        if guard.poisoned {
+            return Err(LiveAuthorityGuardError::GuardPoisoned);
+        }
+
+        let mut callback_error = None;
+        let result = self.inner.with_stable_snapshot(|version| match snapshot_fn(version) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                callback_error = Some(error);
+                Err(AuthorityGenerationError::MutationFailed(
+                    "live authority snapshot construction failed".to_string(),
+                ))
+            }
+        });
+        let snapshot = match result {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return match callback_error {
+                    Some(error) => Err(LiveAuthorityGuardError::Snapshot(error)),
+                    None => Err(LiveAuthorityGuardError::Generation(error)),
+                };
+            }
+        };
+        use_snapshot(snapshot).map_err(LiveAuthorityGuardError::Snapshot)
+    }
     /// Execute one live authority mutation with explicit pre/post-change failure
     /// semantics.
     ///
