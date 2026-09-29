@@ -122,6 +122,7 @@ pub(crate) struct EnrolledOperator {
 pub(crate) struct OperatorPolicy {
     by_ed25519: Arc<RwLock<HashMap<[u8; 32], EnrolledOperator>>>,
     source_identity: Arc<RwLock<Option<AuthoritySourceIdentity>>>,
+    storage_trust: Arc<RwLock<Option<AuthorityStorageTrust>>>,
 }
 
 impl OperatorPolicy {
@@ -138,6 +139,7 @@ impl OperatorPolicy {
         Ok(Self {
             by_ed25519: Arc::new(RwLock::new(by_ed25519)),
             source_identity: Arc::new(RwLock::new(None)),
+            storage_trust: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -200,6 +202,10 @@ impl OperatorPolicy {
         debug_assert_eq!(expected, actual);
         restrict_permissions(path);
         let policy = Self::from_json(text.as_bytes())?;
+        *policy
+            .storage_trust
+            .write()
+            .map_err(|_| OperatorPolicyError::Io("operator policy storage trust lock poisoned".to_string()))? = Some(trust.clone());
         *policy
             .source_identity
             .write()
@@ -413,11 +419,13 @@ impl OperatorPolicy {
     /// stale authority process from overwriting an object that was replaced
     /// underneath it. After the durable rename succeeds, the new object
     /// identity is recorded for the next guarded mutation.
-    pub(crate) fn persist_to_trusted(
-        &self,
-        path: &Path,
-        trust: &AuthorityStorageTrust,
-    ) -> std::io::Result<()> {
+    pub(crate) fn persist_to_trusted(&self, path: &Path) -> std::io::Result<()> {
+        let trust = self
+            .storage_trust
+            .read()
+            .map_err(|_| std::io::Error::other("operator policy storage trust lock poisoned"))?
+            .clone()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Unsupported, "operator policy has no trusted storage boundary"))?;
         trust.validate_source_path(path)?;
         let expected = self
             .source_identity
