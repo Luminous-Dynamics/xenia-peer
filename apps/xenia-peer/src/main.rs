@@ -6064,15 +6064,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // no --operators-file), a challenge store, and the daemon's key for
     // signing issued tokens.
     let operator_policy = match &args.operators_file {
-        Some(path) => match crate::operator::OperatorPolicy::load(path) {
-            Ok(policy) => {
-                info!(operators = policy.len(), path = %path.display(), "operator policy loaded");
-                policy
-            }
-            Err(err) => {
-                return Err(
-                    format!("failed to load --operators-file {}: {err}", path.display()).into(),
-                );
+        Some(path) => {
+            let loaded = match authority_storage_trust.as_ref() {
+                Some(trust) => crate::operator::OperatorPolicy::load_trusted(path, trust),
+                None => crate::operator::OperatorPolicy::load(path),
+            };
+            match loaded {
+                Ok(policy) => {
+                    info!(operators = policy.len(), path = %path.display(), "operator policy loaded");
+                    policy
+                }
+                Err(err) => {
+                    return Err(
+                        format!("failed to load --operators-file {}: {err}", path.display()).into(),
+                    );
+                }
             }
         },
         None => crate::operator::OperatorPolicy::default(),
