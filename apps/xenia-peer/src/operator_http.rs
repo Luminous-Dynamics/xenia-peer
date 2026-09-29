@@ -1048,6 +1048,50 @@ mod tests {
         ))))
     }
 
+    #[test]
+    fn symthaea_authority_requires_explicit_bootstrap() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger_path = dir.path().join("authority-generation.bin");
+        let policy = OperatorPolicy::default();
+        let revocations = OperatorRevocations::empty();
+        let host_fingerprint = [0x11u8; 32];
+
+        assert!(
+            SymthaeaAuthorityState::open_or_bootstrap(
+                policy.clone(),
+                revocations.clone(),
+                host_fingerprint,
+                &ledger_path,
+                false,
+            )
+            .is_err()
+        );
+
+        let authority = SymthaeaAuthorityState::open_or_bootstrap(
+            policy.clone(),
+            revocations.clone(),
+            host_fingerprint,
+            &ledger_path,
+            true,
+        )
+        .unwrap();
+        assert!(ledger_path.is_file());
+
+        let reopened = SymthaeaAuthorityState::open_or_bootstrap(
+            policy.clone(),
+            revocations.clone(),
+            host_fingerprint,
+            &ledger_path,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            SymthaeaAuthorityState::current_commitment(&policy, &revocations).unwrap(),
+            SymthaeaAuthorityState::current_commitment(&reopened.policy, &reopened.revocations)
+                .unwrap()
+        );
+        assert!(authority.guard.current_generation().is_ok());
+    }
     #[tokio::test]
     async fn verify_is_rate_limited() {
         let op = HandshakeManager::new();
