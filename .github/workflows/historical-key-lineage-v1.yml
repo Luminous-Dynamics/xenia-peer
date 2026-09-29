@@ -90,11 +90,11 @@ jobs:
           test "$(sha256sum crates/xenia-auth-lineage/HISTORICAL_KEY_LINEAGE_V1.txt | awk '{print $1}')" = "$LINEAGE_PROFILE_SHA256"
           test "$(wc -c < crates/xenia-auth-lineage/HISTORICAL_KEY_LINEAGE_V1.txt)" -eq 1574
           test "$(sha256sum crates/xenia-auth-lineage/Cargo.toml | awk '{print $1}')" = '76bc1ef9f7d103eded650846050c9279fbee6348772aea8cff2f0c47358470d6'
-          test "$(sha256sum crates/xenia-auth-lineage/src/lib.rs | awk '{print $1}')" = '0edcda8cbc0564cc27436e1f4c9c0f0a2664e40f9d495d69ab5aab9ad72681ed'
+          test "$(sha256sum crates/xenia-auth-lineage/src/lib.rs | awk '{print $1}')" = 'b23afdce5bb6af02262cc629332461239edcf5d5e50a3329b3e59ffe095b9f1e'
           test "$(sha256sum crates/xenia-auth-lineage/src/model.rs | awk '{print $1}')" = '9416e8d56c450024bbbdffa6a3d0cbe7b6f8e35aa0f497f3b422b5817780a79e'
           test "$(sha256sum crates/xenia-auth-lineage/src/verify.rs | awk '{print $1}')" = '984430e692fb6a101f0de88f7d5a348281c2a861928792860ce7a31ab4f62b8c'
           test "$(sha256sum crates/xenia-auth-lineage/src/canonical.rs | awk '{print $1}')" = 'c0e3fe429e5a2ee2a0ce55f0a5e70426ffbb2813c523c737645546a654246923'
-          test "$(sha256sum crates/xenia-auth-lineage/src/tests.rs | awk '{print $1}')" = 'd4133861011874190c2fe8a4ff4d79c46b7fcf3f06567e039c05e987839cb572'
+          test "$(sha256sum crates/xenia-auth-lineage/src/tests.rs | awk '{print $1}')" = '60c5ab96711ee676b6db60a8cc34da44c2c9a654a97d306d8466167399b9256d'
 
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
