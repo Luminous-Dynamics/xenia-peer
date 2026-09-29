@@ -1093,6 +1093,22 @@ struct Args {
     #[arg(long)]
     symthaea_authority_bootstrap: bool,
 
+    /// Durable single-use journal for live Symthaea authority-receipt issuance.
+    /// Setting this enables the issuance endpoint only when the D3A1 authority
+    /// generation ledger and verifier-artifact commitment are also configured.
+    #[arg(long)]
+    symthaea_issuance_journal_path: Option<std::path::PathBuf>,
+
+    /// Explicitly allow first-run creation of the live Symthaea issuance journal.
+    /// Existing journals are never silently reused as new state.
+    #[arg(long)]
+    symthaea_issuance_journal_bootstrap: bool,
+
+    /// SHA-256 commitment of the exact verifier/runtime artifact associated with
+    /// the live Symthaea issuance decision. This is daemon-owned startup state,
+    /// never caller-supplied request material.
+    #[arg(long)]
+    symthaea_verifier_artifact_commitment_sha256: Option<String>,
     /// Require an authenticated, role-authorized operator token for consent
     /// decisions. When off (default), the consent port accepts the legacy
     /// plain-text `Approve`/`Deny`/`Revoke` (backward compatible). When on,
@@ -1484,6 +1500,12 @@ async fn accept_transport(
     }
 }
 
+fn parse_sha256_hex(value: &str) -> Result<[u8; 32], String> {
+    let bytes = hex::decode(value.trim()).map_err(|error| error.to_string())?;
+    bytes
+        .try_into()
+        .map_err(|_| "expected exactly 32 decoded bytes".to_string())
+}
 fn parse_source_id(hex: &str) -> Result<[u8; 8], String> {
     let bytes = hex::decode(hex).map_err(|e| e.to_string())?;
     bytes
@@ -6059,6 +6081,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!(path = %path.display(), "live Symthaea authority guard enabled");
     }
 
+    if args.symthaea_issuance_journal_bootstrap && args.symthaea_issuance_journal_path.is_none() {
+        return Err(
+            "--symthaea-issuance-journal-bootstrap requires --symthaea-issuance-journal-path"
+                .into(),
+        );
+    }
+    if args.symthaea_verifier_artifact_commitment_sha256.is_some()
+        && args.symthaea_issuance_journal_path.is_none()
+    {
+        return Err(
+            "--symthaea-verifier-artifact-commitment-sha256 requires --symthaea-issuance-journal-path"
+                .into(),
+        );
+    }
+    if let Some(journal_path) = &args.symthaea_issuance_journal_path {
+        if args.symthaea_authority_generation_path.is_none() {
+            return Err(
+                "--symthaea-issuance-journal-path requires --symthaea-authority-generation-path"
+                    .into(),
+            );
+        }
+        let commitment_text = args
+            .symthaea_verifier_artifact_commitment_sha256
+            .as_deref()
+            .ok_or(
+                "--symthaea-issuance-journal-path requires --symthaea-verifier-artifact-commitment-sha256"
+            )?;
+        let verifier_artifact_commitment_sha256 = parse_sha256_hex(commitment_text)
+            .map_err(|error| format!("invalid Symthaea verifier artifact commitment: {error}"))?;
+        let journal = if args.symthaea_issuance_journal_bootstrap {
+            xenia_symthaea_issuance_journal::IssuanceJournal::bootstrap_new(journal_path)
+        } else {
+            xenia_symthaea_issuance_journal::IssuanceJournal::open_existing(journal_path)
+        }
+        .map_err(|error| format!("failed to initialize Symthaea issuance journal: {error}"))?;
+        operator_auth_state
+            .set_symthaea_issuance(Arc::new(crate::operator_http::SymthaeaIssuanceState::new(
+                journal,
+                verifier_artifact_commitment_sha256,
+            )))
+            .map_err(|_| "Symthaea issuance state was initialized more than once")?;
+        info!(path = %journal_path.display(), "live Symthaea authority issuance enabled");
+    }
     // Reload the revocation file on SIGHUP (no restart), only when a file is
     // configured so SIGHUP disposition is otherwise unchanged. When the live
     // Symthaea authority guard is enabled, the reload is itself a guarded

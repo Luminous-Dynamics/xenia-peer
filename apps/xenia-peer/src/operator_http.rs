@@ -21,9 +21,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode},
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use ed25519_dalek::SigningKey;
@@ -32,8 +32,21 @@ use tokio::sync::Mutex;
 
 use xenia_handshake::{HandshakeManager, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN, MlDsaIdentity};
 use xenia_ledger::{Chain, LedgerCheckpoint, LedgerEntry};
-use xenia_symthaea_authority_generation::AuthorityGenerationError;
+use xenia_symthaea_authority_generation::{AuthorityGenerationError, StableAuthoritySnapshot};
+use xenia_symthaea_live_snapshot::{
+    AuthoritySnapshotMaterialV1, CoherentSymthaeaAuthoritySnapshotV1,
+    coherent_symthaea_authority_snapshot_v1,
+};
 use xenia_symthaea_authority_state_commitment::EffectiveSymthaeaPolicyCommitmentInputV1;
+use xenia_symthaea_attestation_authority::{SymthaeaAuthorityScopeV1, symthaea_key_lineage_commitment_v1};
+use xenia_symthaea_authorization_receipt::{
+    MAX_AUTHORIZATION_TTL_SECS_V1,
+};
+use xenia_symthaea_daemon_certificate::daemon_certificate_commitment_sha256_v1;
+use xenia_symthaea_daemon_issuer::{
+    DaemonSymthaeaAuthorizationRequestV1, issue_symthaea_authorization_receipt_v1,
+};
+use xenia_symthaea_issuance_journal::{IssuanceJournal, ReserveOutcome};
 use xenia_symthaea_live_authority_guard::{
     LiveAuthorityGuard, LiveAuthorityGuardError, LiveAuthorityMutation,
 };
@@ -44,8 +57,10 @@ use xenia_wire::handshake_highsec::ML_DSA_87_PK_LEN;
 use crate::operator::{OperatorPolicy, OperatorRole};
 use crate::operator_auth::{
     AuthenticatedConsentAction, AuthenticatedKeyReplacement, AuthenticatedRevocation,
+    AuthenticatedSymthaeaAuthorization,
     CHALLENGE_TTL_SECS, ChallengeResponse, ChallengeStore, ConsentAction, OperatorToken,
     RateLimiter, SignedOperatorToken, TOKEN_TTL_SECS, issue_token, verify_challenge_response,
+    symthaea_authorization_binding_digest,
 };
 use crate::operator_revocations::{OperatorRevocations, RevocationMutation};
 
@@ -119,6 +134,35 @@ impl SymthaeaAuthorityState {
         }))
     }
 
+    /// Run one coherent Symthaea snapshot operation while the live authority
+    /// read barrier remains held through the caller's use of the snapshot.
+    pub(crate) fn with_coherent_snapshot<T, F>(
+        &self,
+        operator_id: &str,
+        use_snapshot: F,
+    ) -> Result<T, LiveAuthorityGuardError<String>>
+    where
+        F: FnOnce(&StableAuthoritySnapshot<CoherentSymthaeaAuthoritySnapshotV1>)
+            -> Result<T, String>,
+    {
+        self.guard.with_stable_snapshot_and(
+            |version| {
+                let material = AuthoritySnapshotMaterialV1 {
+                    enrollments: self
+                        .policy
+                        .symthaea_snapshot_material()
+                        .map_err(|error| error.to_string())?,
+                    revoked_operator_ids: self
+                        .revocations
+                        .snapshot_sorted()
+                        .map_err(|error| error.to_string())?,
+                };
+                coherent_symthaea_authority_snapshot_v1(version, operator_id, material)
+                    .map_err(|error| error.to_string())
+            },
+            |snapshot| use_snapshot(&snapshot),
+        )
+    }
     /// Execute a live authority mutation through the sole D3A1 guard.
     pub(crate) fn mutate<T, E, F>(&self, mutation: F) -> Result<T, LiveAuthorityGuardError<E>>
     where
@@ -173,6 +217,9 @@ pub(crate) struct OperatorAuthState {
     /// Optional D3A1 live authority guard. Production authority issuance is
     /// unavailable until this is explicitly initialized from durable state.
     pub(crate) symthaea_authority: OnceLock<Arc<SymthaeaAuthorityState>>,
+    /// Durable single-use issuance state; installed only when the live adapter
+    /// is explicitly configured with its journal and verifier commitment.
+    pub(crate) symthaea_issuance: OnceLock<Arc<SymthaeaIssuanceState>>,
 }
 
 impl OperatorAuthState {
@@ -213,6 +260,7 @@ impl OperatorAuthState {
             host_identity,
             daemon_certificate,
             symthaea_authority: OnceLock::new(),
+            symthaea_issuance: OnceLock::new(),
         }
     }
 
@@ -223,6 +271,14 @@ impl OperatorAuthState {
         authority: Arc<SymthaeaAuthorityState>,
     ) -> Result<(), Arc<SymthaeaAuthorityState>> {
         self.symthaea_authority.set(authority)
+    }
+
+    /// Install the durable live issuance journal exactly once.
+    pub(crate) fn set_symthaea_issuance(
+        &self,
+        issuance: Arc<SymthaeaIssuanceState>,
+    ) -> Result<(), Arc<SymthaeaIssuanceState>> {
+        self.symthaea_issuance.set(issuance)
     }
 }
 
@@ -474,6 +530,58 @@ struct AuthenticatedRevocationDto {
     ml_dsa_action_signature: String,
 }
 
+/// Wire form of a live Symthaea authority-receipt issuance request.
+#[derive(Deserialize)]
+struct AuthenticatedSymthaeaAuthorizationDto {
+    token: TokenDto,
+    /// Must equal the canonical typed Symthaea attestation scope.
+    authority_scope: String,
+    symthaea_receipt_id: String,
+    symthaea_receipt_digest_sha256: String,
+    request_nonce: String,
+    action_signature: String,
+    ml_dsa_action_signature: String,
+}
+
+/// Parse the live Symthaea authority-receipt issuance request.
+pub(crate) fn parse_authenticated_symthaea_authorization(
+    json: &str,
+) -> Result<AuthenticatedSymthaeaAuthorization, String> {
+    let dto: AuthenticatedSymthaeaAuthorizationDto =
+        serde_json::from_str(json).map_err(|e| e.to_string())?;
+    if dto.authority_scope
+        != xenia_symthaea_attestation_authority::SYMTHAEA_RECEIPT_ATTESTATION_SCOPE_V1
+    {
+        return Err("unsupported Symthaea authority scope".to_string());
+    }
+    let symthaea_receipt_id = decode_fixed::<16>(&dto.symthaea_receipt_id)
+        .map_err(|(_, message)| message)?;
+    let symthaea_receipt_digest_sha256 = decode_fixed::<32>(&dto.symthaea_receipt_digest_sha256)
+        .map_err(|(_, message)| message)?;
+    if symthaea_receipt_id == [0; 16] {
+        return Err("Symthaea receipt id must be nonzero".to_string());
+    }
+    if symthaea_receipt_digest_sha256 == [0; 32] {
+        return Err("Symthaea receipt digest must be nonzero".to_string());
+    }
+    let request_nonce = decode_fixed::<32>(&dto.request_nonce).map_err(|(_, message)| message)?;
+    if request_nonce == [0; 32] {
+        return Err("request nonce must be nonzero".to_string());
+    }
+    let action_signature = decode_fixed::<64>(&dto.action_signature)
+        .map_err(|(_, message)| message)?;
+    let ml_dsa_action_signature = decode_fixed::<ML_DSA_65_SIG_LEN>(&dto.ml_dsa_action_signature)
+        .map_err(|(_, message)| message)?;
+    Ok(AuthenticatedSymthaeaAuthorization {
+        token: dto.token.into_signed()?,
+        authority_scope: SymthaeaAuthorityScopeV1::VerificationReceiptAttestationV1,
+        symthaea_receipt_id,
+        symthaea_receipt_digest_sha256,
+        request_nonce,
+        action_signature,
+        ml_dsa_action_signature,
+    })
+}
 /// Parse the JSON body of a `/operator/revoke` request into an
 /// [`AuthenticatedRevocation`], mirroring [`parse_authenticated_consent_action`].
 pub(crate) fn parse_authenticated_revocation(
@@ -491,6 +599,170 @@ pub(crate) fn parse_authenticated_revocation(
     })
 }
 
+/// Return the exact retained receipt bytes as the HTTP representation.
+fn symthaea_receipt_response(bytes: Vec<u8>) -> Response {
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        bytes,
+    )
+        .into_response()
+}
+
+fn token_is_current_at_issuance(token: &OperatorToken, now: u64) -> bool {
+    token.issued_at <= now && now <= token.expires_at
+}
+
+/// `POST /operator/symthaea/authorization-receipt` -- authenticate one exact
+/// operator request, durably reserve its nonce, obtain a coherent D3A1 snapshot,
+/// issue through the frozen D1 issuer, and retain the exact response bytes.
+async fn symthaea_authorization_handler(
+    State(state): State<Arc<OperatorAuthState>>,
+    body: String,
+) -> Result<Response, (StatusCode, String)> {
+    let request = parse_authenticated_symthaea_authorization(&body).map_err(|error| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("malformed Symthaea authorization request: {error}"),
+        )
+    })?;
+
+    let authorized = crate::operator_auth::authorize_symthaea_authorization(
+        &state.policy,
+        &state.daemon_key.verifying_key(),
+        &state.daemon_ml_dsa.public_key_bytes(),
+        unix_now_secs(),
+        &request,
+    )
+    .map_err(|error| {
+        tracing::warn!(error = %error, "Symthaea authority issuance refused at authentication");
+        (StatusCode::FORBIDDEN, "Symthaea authority issuance refused".to_string())
+    })?;
+
+    let authority = state.symthaea_authority.get().cloned().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "live Symthaea authority is not enabled".to_string(),
+        )
+    })?;
+    let issuance = state.symthaea_issuance.get().cloned().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "live Symthaea issuance journal is not enabled".to_string(),
+        )
+    })?;
+
+    // Fast reject only. The coherent-snapshot path below rechecks the effective
+    // revocation state while the same authority read barrier remains held.
+    if authority.revocations.is_revoked(&authorized.operator_id) {
+        tracing::warn!(operator = %authorized.operator_id, "Symthaea authority issuance refused: operator revoked");
+        return Err((StatusCode::FORBIDDEN, "Symthaea authority issuance refused".to_string()));
+    }
+
+    let binding_digest = symthaea_authorization_binding_digest(&request);
+    match issuance.journal.reserve(authorized.request_nonce, binding_digest) {
+        Ok(ReserveOutcome::AlreadyIssued { receipt }) => {
+            return Ok(symthaea_receipt_response(receipt));
+        }
+        Ok(ReserveOutcome::DeliveryUnknown) => {
+            return Err((
+                StatusCode::CONFLICT,
+                "issuance outcome is delivery-unknown; reuse the exact request nonce only after operator recovery inspects the journal"
+                    .to_string(),
+            ));
+        }
+        Ok(ReserveOutcome::Aborted) => {
+            return Err((
+                StatusCode::CONFLICT,
+                "issuance request nonce is permanently aborted".to_string(),
+            ));
+        }
+        Ok(ReserveOutcome::Reserved) => {}
+        Err(error) => {
+            tracing::error!(?error, "failed to reserve Symthaea issuance nonce");
+            return Err((StatusCode::SERVICE_UNAVAILABLE, "Symthaea issuance unavailable".to_string()));
+        }
+    }
+
+    let operator_id = authorized.operator_id.clone();
+    let authority_scope = authorized.authority_scope.clone();
+    let symthaea_receipt_id = authorized.symthaea_receipt_id;
+    let symthaea_receipt_digest_sha256 = authorized.symthaea_receipt_digest_sha256;
+    let request_nonce = authorized.request_nonce;
+    let result = authority.with_coherent_snapshot(&operator_id, |snapshot| {
+        // The token was checked before journal reservation. Re-check its
+        // validity interval at the coherent-snapshot boundary so a long-running
+        // snapshot/signing operation cannot turn an expired/future operator
+        // session into a fresh portable authority receipt.
+        let authorized_at_unix_s = unix_now_secs();
+        if !token_is_current_at_issuance(&request.token.token, authorized_at_unix_s) {
+            return Err("operator token is not current at coherent issuance snapshot".to_string());
+        }
+        if authority.revocations.is_revoked(&operator_id) {
+            return Err("operator was revoked before coherent issuance snapshot commit".to_string());
+        }
+        let snapshot_key_lineage = symthaea_key_lineage_commitment_v1(
+            &snapshot.value().operator().ed25519_pubkey,
+            &snapshot.value().operator().ml_dsa_65_pubkey,
+        )
+        .map_err(|error| format!("coherent operator key lineage is malformed: {error}"))?;
+        if snapshot_key_lineage != authorized.authenticated_key_lineage_commitment {
+            return Err(
+                "operator key lineage changed after authentication; refusing issuance".to_string(),
+            );
+        }
+        let request_for_issuer = DaemonSymthaeaAuthorizationRequestV1 {
+            operator_id: operator_id.clone(),
+            authority_scope,
+            symthaea_receipt_id,
+            symthaea_receipt_digest_sha256,
+            request_nonce,
+        };
+        let daemon_certificate_commitment = daemon_certificate_commitment_sha256_v1(
+            &state.daemon_certificate,
+        )
+        .ok_or_else(|| "daemon delegation certificate is structurally invalid".to_string())?;
+        let signed = issue_symthaea_authorization_receipt_v1(
+            &request_for_issuer,
+            snapshot,
+            authorized_at_unix_s,
+            MAX_AUTHORIZATION_TTL_SECS_V1,
+            daemon_certificate_commitment,
+            issuance.verifier_artifact_commitment_sha256,
+            &state.daemon_key,
+            &state.daemon_ml_dsa,
+        )
+        .map_err(|error| error.to_string())?;
+        if !signed.validate_structure() {
+            return Err("issued Symthaea authorization receipt failed structural validation".to_string());
+        }
+        let receipt_bytes = serde_json::to_vec(&signed)
+            .map_err(|error| format!("failed to serialize signed Symthaea receipt: {error}"))?;
+        issuance
+            .journal
+            .record_issued(request_nonce, binding_digest, &receipt_bytes)
+            .map_err(|error| format!("failed to durably retain signed Symthaea receipt: {error}"))?;
+        Ok(receipt_bytes)
+    });
+
+    match result {
+        Ok(receipt_bytes) => Ok(symthaea_receipt_response(receipt_bytes)),
+        Err(error) => {
+            // A pre-issuance failure must consume the reservation permanently.
+            // If the journal itself reports a persistence/identity failure, it
+            // will refuse the abort and retain DeliveryUnknown, which is safer
+            // than ever reopening the nonce.
+            if let Err(abort_error) = issuance
+                .journal
+                .record_aborted(request_nonce, binding_digest)
+            {
+                tracing::error!(?abort_error, "failed to durably abort failed Symthaea issuance");
+            }
+            tracing::error!(?error, "Symthaea authority issuance failed after reservation");
+            Err((StatusCode::SERVICE_UNAVAILABLE, "Symthaea issuance unavailable".to_string()))
+        }
+    }
+}
 /// State for privileged admin mutation routes that need both the auth state and
 /// the live revocation list.
 #[derive(Clone)]
@@ -544,7 +816,19 @@ async fn revoke_operator_handler(
                     ));
                 }
                 let target = authorized.target_operator_id.clone();
+                let acting_operator = authorized.operator_id.clone();
                 let result = authority.mutate(|| {
+                    // Re-check under the same authority write barrier that
+                    // serializes revocation mutations. The pre-guard check
+                    // above is only a fast reject: without this second check,
+                    // an already-authorized admin could race a concurrent
+                    // revocation and still mutate authority after losing its
+                    // own authorization.
+                    if authority.revocations.is_revoked(&acting_operator) {
+                        return LiveAuthorityMutation::failed_before_change(
+                            "acting operator was revoked before mutation commit".to_string(),
+                        );
+                    }
                     match authority.revocations.revoke_with_outcome(&target) {
                         Err(error) => LiveAuthorityMutation::failed_before_change(error.to_string()),
                         Ok(RevocationMutation::Unchanged { count }) => {
@@ -692,10 +976,20 @@ async fn replace_operator_key_handler(
             ));
         };
         let target = authorized.target_operator_id.clone();
+        let acting_operator = authorized.operator_id.clone();
         let new_ed = authorized.new_ed25519_pubkey;
         let new_ml = authorized.new_ml_dsa_pubkey.clone();
         let new_ml87 = authorized.new_ml_dsa_87_pubkey.clone();
         let result = authority.mutate(|| {
+            // The authorization check outside the guard can race a concurrent
+            // revocation. Re-check while holding the sole authority mutation
+            // barrier so a revoked operator can never commit a privileged
+            // mutation after its revocation wins the ordering race.
+            if authority.revocations.is_revoked(&acting_operator) {
+                return LiveAuthorityMutation::failed_before_change(
+                    "acting operator was revoked before mutation commit".to_string(),
+                );
+            }
             match authority.policy.replace_operator_key(&target, new_ed, new_ml, new_ml87) {
                 Err(error) => LiveAuthorityMutation::failed_before_change(error.to_string()),
                 Ok(()) => {
@@ -744,6 +1038,25 @@ async fn replace_operator_key_handler(
         "operator key replaced via admin endpoint"
     );
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Durable configuration/state for the live Symthaea authority-receipt adapter.
+#[derive(Debug)]
+pub(crate) struct SymthaeaIssuanceState {
+    pub(crate) journal: IssuanceJournal,
+    pub(crate) verifier_artifact_commitment_sha256: [u8; 32],
+}
+
+impl SymthaeaIssuanceState {
+    pub(crate) fn new(
+        journal: IssuanceJournal,
+        verifier_artifact_commitment_sha256: [u8; 32],
+    ) -> Self {
+        Self {
+            journal,
+            verifier_artifact_commitment_sha256,
+        }
+    }
 }
 
 /// State for the `/v1/audit/*` routes: the auth state (token/role
@@ -929,6 +1242,15 @@ pub(crate) fn router(
         )
         .merge(
             Router::new()
+                .route(
+                    "/operator/symthaea/authorization-receipt",
+                    post(symthaea_authorization_handler),
+                )
+                .layer(DefaultBodyLimit::max(64 * 1024))
+                .with_state(state.clone()),
+        )
+        .merge(
+            Router::new()
                 .route("/v1/audit/checkpoint", get(audit_checkpoint_handler))
                 .route("/v1/audit/ledger", get(audit_ledger_handler))
                 .with_state(audit),
@@ -1048,6 +1370,38 @@ mod tests {
         ))))
     }
 
+    #[test]
+    fn symthaea_request_parser_rejects_zero_nonce() {
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let daemon_ml_dsa = test_daemon_ml_dsa();
+        let token = crate::operator_auth::issue_token(
+            &daemon,
+            &daemon_ml_dsa,
+            &crate::operator_auth::AuthenticatedOperator {
+                operator_id: "alice".to_string(),
+                role: OperatorRole::Admin,
+            },
+            1000,
+            crate::operator_auth::TOKEN_TTL_SECS,
+            [0x44; 16],
+        );
+        let dto = serde_json::json!({
+            "token": TokenDto::from_signed(&token),
+            "authority_scope": xenia_symthaea_attestation_authority::SYMTHAEA_RECEIPT_ATTESTATION_SCOPE_V1,
+            "symthaea_receipt_id": hex::encode([0x11u8; 16]),
+            "symthaea_receipt_digest_sha256": hex::encode([0x22u8; 32]),
+            "request_nonce": hex::encode([0u8; 32]),
+            "action_signature": hex::encode([0u8; 64]),
+            "ml_dsa_action_signature": hex::encode([0u8; ML_DSA_65_SIG_LEN]),
+        });
+        let error = parse_authenticated_symthaea_authorization(&dto.to_string()).unwrap_err();
+        assert!(error.contains("request nonce must be nonzero"));
+
+        let mut wrong_scope = dto;
+        wrong_scope["authority_scope"] = serde_json::Value::String("wrong-scope".to_string());
+        let error = parse_authenticated_symthaea_authorization(&wrong_scope.to_string()).unwrap_err();
+        assert!(error.contains("unsupported Symthaea authority scope"));
+    }
     #[test]
     fn symthaea_authority_requires_explicit_bootstrap() {
         let dir = tempfile::tempdir().unwrap();

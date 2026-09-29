@@ -203,6 +203,52 @@ impl LiveAuthorityGuard {
         }
     }
 
+    /// Run an operation while the outer live-authority read barrier remains
+    /// held for the entire operation.
+    ///
+    /// This is stronger than [`Self::with_stable_snapshot`]: the returned
+    /// snapshot is normally released when that method returns, whereas this
+    /// callback executes before the guard's read barrier is dropped. No guarded
+    /// authority mutation can therefore interleave between snapshot creation
+    /// and receipt construction/retention.
+    pub fn with_stable_snapshot_and<S, T, E, F, G>(
+        &self,
+        snapshot_fn: F,
+        use_snapshot: G,
+    ) -> Result<T, LiveAuthorityGuardError<E>>
+    where
+        F: FnOnce(AuthorityVersionV1) -> Result<S, E>,
+        G: FnOnce(StableAuthoritySnapshot<S>) -> Result<T, E>,
+    {
+        let guard = self
+            .gate
+            .read()
+            .map_err(|_| LiveAuthorityGuardError::GuardLockPoisoned)?;
+        if guard.poisoned {
+            return Err(LiveAuthorityGuardError::GuardPoisoned);
+        }
+
+        let mut callback_error = None;
+        let result = self.inner.with_stable_snapshot(|version| match snapshot_fn(version) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                callback_error = Some(error);
+                Err(AuthorityGenerationError::MutationFailed(
+                    "live authority snapshot construction failed".to_string(),
+                ))
+            }
+        });
+        let snapshot = match result {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return match callback_error {
+                    Some(error) => Err(LiveAuthorityGuardError::Snapshot(error)),
+                    None => Err(LiveAuthorityGuardError::Generation(error)),
+                };
+            }
+        };
+        use_snapshot(snapshot).map_err(LiveAuthorityGuardError::Snapshot)
+    }
     /// Execute one live authority mutation with explicit pre/post-change failure
     /// semantics.
     ///
@@ -384,6 +430,44 @@ mod tests {
         assert_eq!(guard.current_version().unwrap().generation, 1);
     }
 
+    #[test]
+    fn stable_snapshot_and_holds_write_barrier_through_callback() {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let guard = guard(&dir);
+        let writer_guard = guard.clone();
+        let (start_tx, start_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+
+        let writer = thread::spawn(move || {
+            start_rx.recv().unwrap();
+            let result = writer_guard.with_mutation(|| {
+                LiveAuthorityMutation::unchanged(())
+            });
+            done_tx.send(result.is_ok()).unwrap();
+        });
+
+        let result: Result<(), LiveAuthorityGuardError<&'static str>> =
+            guard.with_stable_snapshot_and(
+                |_| Ok(()),
+                |_snapshot| {
+                    start_tx.send(()).unwrap();
+                    match done_rx.recv_timeout(Duration::from_millis(100)) {
+                        Err(mpsc::RecvTimeoutError::Timeout) => Ok(()),
+                        Ok(_) => Err("writer acquired mutation barrier too early"),
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            Err("writer thread disconnected")
+                        }
+                    }
+                },
+            );
+        assert!(result.is_ok());
+        writer.join().unwrap();
+        assert!(done_rx.recv().unwrap());
+    }
     #[test]
     fn persistence_failure_after_change_poisons_both_layers() {
         let dir = tempfile::tempdir().unwrap();

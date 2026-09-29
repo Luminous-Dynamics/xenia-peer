@@ -29,6 +29,10 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use xenia_handshake::{HandshakeManager, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN, MlDsaIdentity};
 
 use crate::operator::{OperatorPolicy, OperatorRole};
+use xenia_symthaea_attestation_authority::{
+    SymthaeaAuthorityScopeV1, symthaea_key_lineage_commitment_v1,
+};
+use xenia_symthaea_rbac::permit_symthaea_attestation_scope_v1;
 
 // The challenge/consent transcripts and the consent-action model come from the
 // shared `xenia-operator-proto` crate so the console signs exactly the bytes
@@ -37,6 +41,7 @@ use crate::operator::{OperatorPolicy, OperatorRole};
 pub(crate) use xenia_operator_proto::{
     ConsentAction, OperatorAction, challenge_transcript, consent_action_transcript,
     operator_token_canonical_bytes, replace_operator_key_transcript, revoke_operator_transcript,
+    symthaea_authorization_transcript,
 };
 
 /// Default lifetime of an issued challenge (seconds). Short: a challenge is
@@ -332,6 +337,123 @@ pub(crate) struct AuthenticatedConsentAction {
     pub(crate) ml_dsa_action_signature: [u8; ML_DSA_65_SIG_LEN],
 }
 
+/// An authenticated Symthaea authority-receipt issuance request.
+pub(crate) struct AuthenticatedSymthaeaAuthorization {
+    /// The daemon-signed operator session token.
+    pub(crate) token: SignedOperatorToken,
+    /// Exact typed Symthaea authority scope.
+    pub(crate) authority_scope: SymthaeaAuthorityScopeV1,
+    /// Exact Symthaea verification-receipt UUID.
+    pub(crate) symthaea_receipt_id: [u8; 16],
+    /// SHA-256 of the exact canonical Symthaea verification-receipt bytes.
+    pub(crate) symthaea_receipt_digest_sha256: [u8; 32],
+    /// Single-use issuance nonce.
+    pub(crate) request_nonce: [u8; 32],
+    /// Ed25519 signature over the exact issuance transcript.
+    pub(crate) action_signature: [u8; 64],
+    /// ML-DSA-65 signature over the exact issuance transcript.
+    pub(crate) ml_dsa_action_signature: [u8; ML_DSA_65_SIG_LEN],
+}
+
+/// An issuance request authenticated to one exact enrolled Xenia operator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuthorizedSymthaeaAuthorization {
+    pub(crate) operator_id: String,
+    pub(crate) authority_scope: SymthaeaAuthorityScopeV1,
+    pub(crate) symthaea_receipt_id: [u8; 16],
+    pub(crate) symthaea_receipt_digest_sha256: [u8; 32],
+    pub(crate) request_nonce: [u8; 32],
+    /// Key-lineage commitment for the exact enrolled keys that authenticated
+    /// this request. The live issuance adapter compares it with the coherent
+    /// snapshot so a key replacement cannot race authentication into issuance.
+    pub(crate) authenticated_key_lineage_commitment: String,
+}
+
+/// Authenticate one Symthaea authority-receipt issuance request.
+///
+/// The operator id is derived from the daemon-signed token and the exact
+/// enrolled key pair is reloaded from the current policy. The requested scope
+/// is authorized by the canonical Xenia→Symthaea RBAC mapping; no caller role
+/// or operator id is trusted.
+pub(crate) fn authorize_symthaea_authorization(
+    policy: &OperatorPolicy,
+    daemon_pubkey: &VerifyingKey,
+    daemon_ml_dsa_pubkey: &[u8; ML_DSA_65_PK_LEN],
+    now: u64,
+    request: &AuthenticatedSymthaeaAuthorization,
+) -> Result<AuthorizedSymthaeaAuthorization, AuthError> {
+    let token = verify_token(daemon_pubkey, daemon_ml_dsa_pubkey, now, &request.token)?;
+    let Some(scope_permit) = permit_symthaea_attestation_scope_v1(
+        token.role,
+        request.authority_scope,
+    ) else {
+        return Err(AuthError::RoleNotPermitted);
+    };
+    let operator = policy
+        .lookup_by_id(&token.operator_id)
+        .ok_or(AuthError::NotEnrolled)?;
+    let transcript = symthaea_authorization_transcript(
+        &token.operator_id,
+        scope_permit.scope().id(),
+        &request.symthaea_receipt_id,
+        &request.symthaea_receipt_digest_sha256,
+        &request.request_nonce,
+        &token.token_nonce,
+    );
+    let ed_vk = HandshakeManager::parse_peer_public_key(&operator.ed25519_pubkey)
+        .map_err(|_| AuthError::MalformedKey)?;
+    let ed_sig = Signature::from_bytes(&request.action_signature);
+    HandshakeManager::verify(&ed_vk, &transcript, &ed_sig)
+        .map_err(|_| AuthError::Ed25519VerifyFailed)?;
+    let operator_ml_dsa_pubkey: [u8; ML_DSA_65_PK_LEN] = operator
+        .ml_dsa_pubkey
+        .as_slice()
+        .try_into()
+        .map_err(|_| AuthError::MalformedKey)?;
+    MlDsaIdentity::verify(
+        &operator_ml_dsa_pubkey,
+        &transcript,
+        &request.ml_dsa_action_signature,
+    )
+    .map_err(|_| AuthError::MlDsaVerifyFailed)?;
+
+    let authenticated_key_lineage_commitment =
+        symthaea_key_lineage_commitment_v1(&operator.ed25519_pubkey, &operator.ml_dsa_pubkey)
+            .map_err(|_| AuthError::MalformedKey)?;
+    Ok(AuthorizedSymthaeaAuthorization {
+        operator_id: token.operator_id,
+        authority_scope: scope_permit.scope(),
+        symthaea_receipt_id: request.symthaea_receipt_id,
+        symthaea_receipt_digest_sha256: request.symthaea_receipt_digest_sha256,
+        request_nonce: request.request_nonce,
+        authenticated_key_lineage_commitment,
+    })
+}
+
+/// Canonical SHA-256 binding for durable issuance replay state.
+///
+/// The binding deliberately covers the authenticated token's canonical bytes
+/// plus the exact action transcript. It does not include the signatures, so a
+/// deterministic semantic retry with a re-encoded request remains the same
+/// idempotency object, while a different token or subject cannot be transplanted.
+pub(crate) fn symthaea_authorization_binding_digest(
+    request: &AuthenticatedSymthaeaAuthorization,
+) -> [u8; 32] {
+    use sha2::{Digest as _, Sha256};
+    let transcript = symthaea_authorization_transcript(
+        &request.token.token.operator_id,
+        request.authority_scope.id(),
+        &request.symthaea_receipt_id,
+        &request.symthaea_receipt_digest_sha256,
+        &request.request_nonce,
+        &request.token.token.token_nonce,
+    );
+    let mut bytes = Vec::with_capacity(32 + transcript.len() + 16);
+    bytes.extend_from_slice(b"xenia-symthaea-issuance-binding-v1\0");
+    bytes.extend_from_slice(&request.token.token.canonical_bytes());
+    bytes.extend_from_slice(&transcript);
+    Sha256::digest(bytes).into()
+}
 /// A consent action authorized to a specific operator, ready to apply + audit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AuthorizedConsentAction {
@@ -885,6 +1007,47 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn authed_symthaea_authorization(
+        op: &HandshakeManager,
+        daemon: &SigningKey,
+        daemon_ml_dsa: &MlDsaIdentity,
+        receipt_id: [u8; 16],
+        receipt_digest: [u8; 32],
+        request_nonce: [u8; 32],
+        now: u64,
+    ) -> AuthenticatedSymthaeaAuthorization {
+        let authed = AuthenticatedOperator {
+            operator_id: "op".to_string(),
+            role: OperatorRole::Admin,
+        };
+        let signed = issue_token(
+            daemon,
+            daemon_ml_dsa,
+            &authed,
+            now,
+            TOKEN_TTL_SECS,
+            [0x5Au8; 16],
+        );
+        let scope = SymthaeaAuthorityScopeV1::VerificationReceiptAttestationV1;
+        let transcript = symthaea_authorization_transcript(
+            &signed.token.operator_id,
+            scope.id(),
+            &receipt_id,
+            &receipt_digest,
+            &request_nonce,
+            &signed.token.token_nonce,
+        );
+        AuthenticatedSymthaeaAuthorization {
+            token: signed,
+            authority_scope: scope,
+            symthaea_receipt_id: receipt_id,
+            symthaea_receipt_digest_sha256: receipt_digest,
+            request_nonce,
+            action_signature: op.sign(&transcript).to_bytes(),
+            ml_dsa_action_signature: op.sign_ml_dsa(&transcript),
+        }
+    }
     /// Build a signed operator-revocation request: `op` (role `role`) authorizes
     /// revoking `target`.
     fn authed_revocation(
@@ -1284,6 +1447,43 @@ mod tests {
         assert_eq!(authorized.role, OperatorRole::Approver);
     }
 
+    #[test]
+    fn symthaea_authorization_binds_authenticated_key_lineage() {
+        let op = HandshakeManager::new();
+        let (daemon, daemon_ml_dsa) = test_daemon();
+        let policy = policy_with(&op, OperatorRole::Admin);
+        let request = authed_symthaea_authorization(
+            &op,
+            &daemon,
+            &daemon_ml_dsa,
+            [0x11; 16],
+            [0x22; 32],
+            [0x33; 32],
+            3000,
+        );
+        let authorized = authorize_symthaea_authorization(
+            &policy,
+            &daemon.verifying_key(),
+            &daemon_ml_dsa.public_key_bytes(),
+            3010,
+            &request,
+        )
+        .unwrap();
+        let expected = symthaea_key_lineage_commitment_v1(
+            &op.identity_public_key_bytes(),
+            &op.ml_dsa_public_key_bytes(),
+        )
+        .unwrap();
+        assert_eq!(authorized.authenticated_key_lineage_commitment, expected);
+
+        let replacement = HandshakeManager::new();
+        let replacement_lineage = symthaea_key_lineage_commitment_v1(
+            &replacement.identity_public_key_bytes(),
+            &replacement.ml_dsa_public_key_bytes(),
+        )
+        .unwrap();
+        assert_ne!(authorized.authenticated_key_lineage_commitment, replacement_lineage);
+    }
     #[test]
     fn consent_action_denied_for_insufficient_role() {
         let op = HandshakeManager::new();

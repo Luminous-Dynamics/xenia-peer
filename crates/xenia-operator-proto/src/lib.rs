@@ -55,6 +55,9 @@ pub const OPERATOR_TOKEN_DOMAIN: &[u8] = b"xenia-operator-token-v1";
 /// `/operator/replace-key` admin action -- operator-key recovery).
 pub const REPLACE_OPERATOR_KEY_DOMAIN: &[u8] = b"xenia-operator-replace-key-v1";
 
+/// Domain-separation tag for an operator-authorized Symthaea authority-receipt issuance request.
+pub const SYMTHAEA_AUTHORIZATION_DOMAIN: &[u8] = b"xenia-operator-symthaea-authorization-v1";
+
 /// An operator's role. Strictly hierarchical: a higher role can do everything
 /// a lower one can, plus more (see [`OperatorRole::rank`]). Serializes to the
 /// variant name (`"Viewer"`, `"Admin"`, …) — the console gates its UI on the
@@ -273,6 +276,43 @@ pub fn revoke_operator_transcript(target_operator_id: &str, token_nonce: &[u8; 1
     t
 }
 
+/// The bytes an Admin signs to authorize one Symthaea verification-receipt
+/// authority decision.
+///
+/// The transcript binds the authenticated operator identity carried by the
+/// daemon-signed token, the exact typed scope, the exact Symthaea receipt
+/// subject/digest, the single-use issuance nonce, and the token nonce.
+///
+/// Layout: `SYMTHAEA_AUTHORIZATION_DOMAIN || len(operator_id)(4, be) ||
+/// operator_id || len(scope)(4, be) || scope || receipt_id(16) ||
+/// receipt_digest(32) || issuance_nonce(32) || token_nonce(16)`.
+pub fn symthaea_authorization_transcript(
+    operator_id: &str,
+    authority_scope: &str,
+    symthaea_receipt_id: &[u8; 16],
+    symthaea_receipt_digest_sha256: &[u8; 32],
+    issuance_nonce: &[u8; 32],
+    token_nonce: &[u8; 16],
+) -> Vec<u8> {
+    let operator = operator_id.as_bytes();
+    let scope = authority_scope.as_bytes();
+    let mut t = Vec::with_capacity(
+        SYMTHAEA_AUTHORIZATION_DOMAIN.len()
+            + 4 + operator.len()
+            + 4 + scope.len()
+            + 16 + 32 + 32 + 16,
+    );
+    t.extend_from_slice(SYMTHAEA_AUTHORIZATION_DOMAIN);
+    t.extend_from_slice(&(operator.len() as u32).to_be_bytes());
+    t.extend_from_slice(operator);
+    t.extend_from_slice(&(scope.len() as u32).to_be_bytes());
+    t.extend_from_slice(scope);
+    t.extend_from_slice(symthaea_receipt_id);
+    t.extend_from_slice(symthaea_receipt_digest_sha256);
+    t.extend_from_slice(issuance_nonce);
+    t.extend_from_slice(token_nonce);
+    t
+}
 /// The bytes an Admin signs to authorize replacing `target_operator_id`'s
 /// enrolled key material -- operator-key recovery: an operator who lost
 /// their signing key gets a fresh identity re-enrolled under the same id
@@ -727,6 +767,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn symthaea_authorization_transcript_binds_identity_scope_subject_and_nonce() {
+        let base = symthaea_authorization_transcript(
+            "alice",
+            "attest:symthaea-verification-receipt:v1",
+            &[1; 16],
+            &[2; 32],
+            &[3; 32],
+            &[4; 16],
+        );
+        assert!(base.starts_with(SYMTHAEA_AUTHORIZATION_DOMAIN));
+        assert_ne!(
+            base,
+            symthaea_authorization_transcript(
+                "bob",
+                "attest:symthaea-verification-receipt:v1",
+                &[1; 16],
+                &[2; 32],
+                &[3; 32],
+                &[4; 16],
+            )
+        );
+        assert_ne!(
+            base,
+            symthaea_authorization_transcript(
+                "alice",
+                "wrong",
+                &[1; 16],
+                &[2; 32],
+                &[3; 32],
+                &[4; 16],
+            )
+        );
+        assert_ne!(
+            base,
+            symthaea_authorization_transcript(
+                "alice",
+                "attest:symthaea-verification-receipt:v1",
+                &[9; 16],
+                &[2; 32],
+                &[3; 32],
+                &[4; 16],
+            )
+        );
+        assert_ne!(
+            base,
+            symthaea_authorization_transcript(
+                "alice",
+                "attest:symthaea-verification-receipt:v1",
+                &[1; 16],
+                &[2; 32],
+                &[9; 32],
+                &[4; 16],
+            )
+        );
+    }
     #[test]
     fn replace_operator_key_transcript_is_domain_separated_and_field_bound() {
         let ed = [1u8; 32];
