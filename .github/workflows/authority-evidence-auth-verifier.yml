@@ -1,0 +1,165 @@
+name: Xenia Evidence Auth Verifier
+
+on:
+  pull_request:
+    paths:
+      - "crates/xenia-authority-evidence-auth-verifier/**"
+      - ".github/workflows/authority-evidence-auth-verifier.yml"
+permissions:
+  contents: read
+
+concurrency:
+  group: evidence-auth-verifier-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verifier:
+    name: Context-bound hybrid evidence auth verifier
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: crates/xenia-authority-evidence-auth-verifier
+
+    steps:
+      - name: Checkout exact subject head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind frozen qualification subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          qualification_base=e9c4456d957574163a9ea571523bcc13bc4ad10a
+          qualification_subject=ec84129a9ffb329f2e295ec0021311ace16f7396
+          expected_head="${{ github.event.pull_request.head.sha || github.sha }}"
+
+          # The workflow definition is supplied by the event commit. Prove that the
+          # runner checked out that exact PR head before freezing the implementation
+          # subject that is actually being qualified.
+          test "$(git rev-parse HEAD)" = "$expected_head"
+
+          # Later workflow-only control-plane commits must not become qualification
+          # subjects. Freeze the repaired implementation stack itself.
+          git cat-file -e "$qualification_subject^{commit}"
+          test "$(git merge-base "$qualification_base" "$qualification_subject")" = "$qualification_base"
+          test "$(git rev-parse "$qualification_subject^")" = "73231705a66c58064bfb40e5ee074267823ff593"
+
+          expected_commits=(
+            '73231705a66c58064bfb40e5ee074267823ff593'
+            'ec84129a9ffb329f2e295ec0021311ace16f7396'
+          )
+          mapfile -t qualified_commits < <(git rev-list --reverse "$qualification_base..$qualification_subject")
+          diff -u <(printf '%s\n' "${expected_commits[@]}") <(printf '%s\n' "${qualified_commits[@]}")
+
+          mapfile -t changed < <(git diff --name-only "$qualification_base" "$qualification_subject" | sort)
+          expected=(
+            '.github/workflows/authority-evidence-auth-verifier.yml'
+            'crates/xenia-authority-evidence-auth-verifier/Cargo.toml'
+            'crates/xenia-authority-evidence-auth-verifier/src/lib.rs'
+          )
+          mapfile -t expected_sorted < <(printf '%s\n' "${expected[@]}" | sort)
+          diff -u <(printf '%s\n' "${expected_sorted[@]}") <(printf '%s\n' "${changed[@]}")
+
+          # All qualification gates below must execute against the frozen repaired
+          # implementation subject, not against a later workflow-only commit.
+          git checkout --detach "$qualification_subject"
+          test "$(git rev-parse HEAD)" = "$qualification_subject"
+
+      - name: Bind frozen source bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD:crates/xenia-authority-evidence-auth-verifier/Cargo.toml)" = 'bc677da04058158c693facc312450fdf98a09471'
+          test "$(git rev-parse HEAD:crates/xenia-authority-evidence-auth-verifier/src/lib.rs)" = '93e019c860ca2cd576bf48e0554d9fa71213bc65'
+          test "$(git rev-parse HEAD:.github/workflows/authority-evidence-auth-verifier.yml)" = 'c32a0bfb81826f261edadb0d5a9e99d3305cbedf'
+          test "$(sha256sum crates/xenia-authority-evidence-auth-verifier/Cargo.toml | awk '{print $1}')" = '78c218ac013ccf8cd230e3b0197315ea413ab3ea34c5e519dd4b4a1a8359685e'
+          test "$(sha256sum crates/xenia-authority-evidence-auth-verifier/src/lib.rs | awk '{print $1}')" = 'b5884faaee012c1fdaa23e5ba40e3c116038dadcbeeb400a4498296085921922'
+          test "$(sha256sum .github/workflows/authority-evidence-auth-verifier.yml | awk '{print $1}')" = '1be03bcedc11c2d2a859180a14ddf3c3ff5b02e34dc53bedfe09fa9034ff3573'
+
+      - name: Initialize qualification evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p qualification
+          {
+            printf '%s\n' 'manifest_version=2'
+            printf 'qualification_base=%s\n' 'e9c4456d957574163a9ea571523bcc13bc4ad10a'
+            printf 'qualification_subject=%s\n' 'ec84129a9ffb329f2e295ec0021311ace16f7396'
+            printf 'event_head=%s\n' "${{ github.event.pull_request.head.sha || github.sha }}"
+            printf 'workflow_sha=%s\n' "${GITHUB_WORKFLOW_SHA}"
+            printf 'run_id=%s\n' "${GITHUB_RUN_ID}"
+            printf 'run_attempt=%s\n' "${GITHUB_RUN_ATTEMPT}"
+            printf 'event=%s\n' "${GITHUB_EVENT_NAME}"
+            printf 'ref=%s\n' "${GITHUB_REF}"
+            printf 'base_ref=%s\n' "${GITHUB_BASE_REF}"
+            printf 'head_ref=%s\n' "${GITHUB_HEAD_REF}"
+            printf 'subject_checkout_head=%s\n' "$(git rev-parse HEAD)"
+            printf 'cargo_toml_sha256=%s\n' '78c218ac013ccf8cd230e3b0197315ea413ab3ea34c5e519dd4b4a1a8359685e'
+            printf 'lib_rs_sha256=%s\n' 'b5884faaee012c1fdaa23e5ba40e3c116038dadcbeeb400a4498296085921922'
+            printf 'workflow_sha256=%s\n' '1be03bcedc11c2d2a859180a14ddf3c3ff5b02e34dc53bedfe09fa9034ff3573'
+          } > qualification/qualification-manifest.env
+
+
+      - name: Install pinned Rust 1.94
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.94.0
+          components: rustfmt, clippy
+
+      - name: Record toolchain and metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustc -vV | tee qualification/rustc-vV.txt
+          cargo -Vv | tee qualification/cargo-Vv.txt
+          cargo metadata --format-version 1 > qualification/cargo-metadata.json
+
+      - name: Format
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check 2>&1 | tee qualification/cargo-fmt.log
+
+      - name: Clippy
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --all-targets --all-features -- -D warnings 2>&1 | tee qualification/cargo-clippy.log
+
+      - name: Test real crypto
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --all-features 2>&1 | tee qualification/cargo-test.log
+
+      - name: Prove immutable qualified checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          qualification_base=e9c4456d957574163a9ea571523bcc13bc4ad10a
+          rm -f Cargo.lock
+          git diff --check "$qualification_base" HEAD
+          test -z "$(git status --porcelain=v1 --untracked-files=all | grep -v '^?? qualification/' || true)"
+          printf '%s\n' "immutable_checkout=PASS" >> qualification/qualification-manifest.env
+
+      - name: Finalize qualification evidence
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p qualification
+          printf 'job_status=%s\n' "${{ job.status }}" >> qualification/qualification-manifest.env
+          printf 'qualification_result=%s\n' "${{ job.status == 'success' && 'candidate-executed' || 'not-qualified' }}" >> qualification/qualification-manifest.env
+
+      - name: Upload qualification evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: evidence-auth-verifier-qualification-${{ github.run_id }}
+          path: qualification/*
+          if-no-files-found: error
+          retention-days: 30
