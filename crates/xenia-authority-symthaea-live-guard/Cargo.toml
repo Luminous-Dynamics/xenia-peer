@@ -13,7 +13,8 @@ description = "Fail-closed live mutation guard over Xenia Symthaea authority gen
 publish = false
 
 [dependencies]
-xenia-symthaea-authority-generation = { path = "../xenia-authority-symthaea-generation" }\nlibc = "0.2"
+xenia-symthaea-authority-generation = { path = "../xenia-authority-symthaea-generation" }
+libc = "0.2"
 rustix = { version = "0.38.44", features = ["process"] }
 
 [dev-dependencies]
