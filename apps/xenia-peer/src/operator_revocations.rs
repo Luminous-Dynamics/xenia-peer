@@ -164,7 +164,7 @@ impl OperatorRevocations {
                 .map_err(|_| std::io::Error::other("operator revocation source identity lock poisoned"))? = Some(identity);
         }
 
-        let text = std::fs::read_to_string(path)?;
+        let text = read_trusted_source(path, self.source_identity.clone())?;
         let fresh = parse_revocations(&text);
         let mut current = self
             .revoked
@@ -297,6 +297,44 @@ fn write_atomic_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// load. Missing file -> empty set (there is nothing to have been revoked
 /// yet). [`OperatorRevocations::reload`] deliberately does not use this --
 /// see its doc comment for why "missing" means something different there.
+fn read_trusted_source(
+    path: &Path,
+    identity: Arc<RwLock<Option<AuthoritySourceIdentity>>>,
+) -> std::io::Result<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)?;
+        let actual = AuthoritySourceIdentity::capture_file(&file)?;
+        {
+            let expected = identity
+                .read()
+                .map_err(|_| std::io::Error::other("operator revocation source identity lock poisoned"))?;
+            if let Some(expected) = expected.as_ref() {
+                if *expected != actual {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        format!("authority source object identity changed: {}", path.display()),
+                    ));
+                }
+            }
+        }
+        let mut text = String::new();
+        use std::io::Read;
+        (&file).read_to_string(&mut text)?;
+        Ok(text)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = identity;
+        std::fs::read_to_string(path)
+    }
+}
+
 fn read_revocations(path: &Path) -> std::io::Result<HashSet<String>> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
