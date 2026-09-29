@@ -15,7 +15,8 @@
 //! operator-authentication surface without changing any existing behavior --
 //! enforcement of the returned token on privileged actions is Phase 3b.
 
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
@@ -31,6 +32,12 @@ use tokio::sync::Mutex;
 
 use xenia_handshake::{HandshakeManager, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN, MlDsaIdentity};
 use xenia_ledger::{Chain, LedgerCheckpoint, LedgerEntry};
+use xenia_symthaea_authority_generation::AuthorityGenerationError;
+use xenia_symthaea_authority_state_commitment::EffectiveSymthaeaPolicyCommitmentInputV1;
+use xenia_symthaea_live_authority_guard::{
+    LiveAuthorityGuard, LiveAuthorityGuardError, LiveAuthorityMutation,
+};
+use xenia_symthaea_rbac::SYMTHAEA_ATTESTATION_RBAC_POLICY_VERSION_V1;
 use xenia_operator_proto::{DaemonIdentityCertificate, challenge_host_attestation_transcript};
 use xenia_wire::handshake_highsec::ML_DSA_87_PK_LEN;
 
@@ -40,7 +47,95 @@ use crate::operator_auth::{
     CHALLENGE_TTL_SECS, ChallengeResponse, ChallengeStore, ConsentAction, OperatorToken,
     RateLimiter, SignedOperatorToken, TOKEN_TTL_SECS, issue_token, verify_challenge_response,
 };
-use crate::operator_revocations::OperatorRevocations;
+use crate::operator_revocations::{OperatorRevocations, RevocationMutation};
+
+/// Sole live guard for the Symthaea-relevant operator authority state.
+///
+/// The guard owns shared clones of the canonical operator policy and revocation
+/// set. Those clones point at the same interior state as OperatorAuthState
+/// and the sealed-channel state, so every guarded mutation updates the same
+/// authority view that authentication already consumes.
+#[derive(Clone)]
+pub(crate) struct SymthaeaAuthorityState {
+    pub(crate) guard: LiveAuthorityGuard,
+    pub(crate) policy: OperatorPolicy,
+    pub(crate) revocations: OperatorRevocations,
+}
+
+impl SymthaeaAuthorityState {
+    /// Compute the exact D3B effective-policy commitment from live Xenia state.
+    pub(crate) fn current_commitment(
+        policy: &OperatorPolicy,
+        revocations: &OperatorRevocations,
+    ) -> Result<[u8; 32], String> {
+        let input = EffectiveSymthaeaPolicyCommitmentInputV1 {
+            rbac_policy_version: SYMTHAEA_ATTESTATION_RBAC_POLICY_VERSION_V1,
+            enrollments: policy
+                .symthaea_snapshot_material()
+                .map_err(|e| e.to_string())?,
+            revoked_operator_ids: revocations
+                .snapshot_sorted()
+                .map_err(|e| e.to_string())?,
+        };
+        input
+            .sha256()
+            .ok_or_else(|| "invalid effective Symthaea policy commitment input".to_string())
+    }
+
+    /// Open an existing durable authority-generation ledger, or explicitly
+    /// bootstrap a missing one when the operator supplied the bootstrap flag.
+    /// A missing ledger is never silently treated as a fresh generation.
+    pub(crate) fn open_or_bootstrap(
+        policy: OperatorPolicy,
+        revocations: OperatorRevocations,
+        host_fingerprint: [u8; 32],
+        ledger_path: &Path,
+        bootstrap_if_missing: bool,
+    ) -> Result<Arc<Self>, String> {
+        let commitment = Self::current_commitment(&policy, &revocations)?;
+        let guard = match LiveAuthorityGuard::open_existing(
+            ledger_path,
+            host_fingerprint,
+            commitment,
+        ) {
+            Ok(guard) => guard,
+            Err(LiveAuthorityGuardError::Generation(AuthorityGenerationError::LedgerMissing))
+                if bootstrap_if_missing => LiveAuthorityGuard::bootstrap_new(
+                ledger_path,
+                host_fingerprint,
+                commitment,
+            )
+            .map_err(|e| format!("failed to bootstrap Symthaea authority generation: {e:?}"))?,
+            Err(error) => {
+                return Err(format!(
+                    "failed to open Symthaea authority generation: {error:?}"
+                ));
+            }
+        };
+        Ok(Arc::new(Self {
+            guard,
+            policy,
+            revocations,
+        }))
+    }
+
+    /// Execute a live authority mutation through the sole D3A1 guard.
+    pub(crate) fn mutate<T, E, F>(&self, mutation: F) -> Result<T, LiveAuthorityGuardError<E>>
+    where
+        F: FnOnce() -> LiveAuthorityMutation<T, E>,
+    {
+        self.guard.with_mutation(mutation)
+    }
+
+    /// Mark a semantic state change only after the live policy/revocation state
+    /// has changed and its exact post-state commitment is available.
+    pub(crate) fn changed<T>(&self, value: T) -> LiveAuthorityMutation<T, String> {
+        match Self::current_commitment(&self.policy, &self.revocations) {
+            Ok(commitment) => LiveAuthorityMutation::changed(value, commitment),
+            Err(error) => LiveAuthorityMutation::failed_after_change(error),
+        }
+    }
+}
 
 /// Shared state for the operator-auth routes.
 pub(crate) struct OperatorAuthState {
@@ -75,6 +170,9 @@ pub(crate) struct OperatorAuthState {
     /// computed once at startup and served verbatim over
     /// `GET /auth/daemon-identity`.
     pub(crate) daemon_certificate: DaemonIdentityCertificate,
+    /// Optional D3A1 live authority guard. Production authority issuance is
+    /// unavailable until this is explicitly initialized from durable state.
+    pub(crate) symthaea_authority: OnceLock<Arc<SymthaeaAuthorityState>>,
 }
 
 impl OperatorAuthState {
@@ -114,7 +212,17 @@ impl OperatorAuthState {
             rate_limiter: Mutex::new(RateLimiter::new(rate_limit_max, rate_limit_window_secs)),
             host_identity,
             daemon_certificate,
+            symthaea_authority: OnceLock::new(),
         }
+    }
+
+    /// Install the D3A1 live authority guard exactly once after startup has
+    /// loaded the canonical operator policy and revocation state.
+    pub(crate) fn set_symthaea_authority(
+        &self,
+        authority: Arc<SymthaeaAuthorityState>,
+    ) -> Result<(), Arc<SymthaeaAuthorityState>> {
+        self.symthaea_authority.set(authority)
     }
 }
 
@@ -419,12 +527,6 @@ async fn revoke_operator_handler(
         &request,
     ) {
         Ok(authorized) => {
-            // A revoked admin's token is otherwise still cryptographically
-            // valid (revocation != de-enrollment) -- without this check
-            // they could keep revoking (or un-revoking, by replacing keys)
-            // other operators indefinitely after being revoked themselves.
-            // Mirrors main.rs's identical check on the plaintext consent
-            // path.
             if state.revocations.is_revoked(&authorized.operator_id) {
                 tracing::warn!(
                     operator = %authorized.operator_id,
@@ -432,7 +534,38 @@ async fn revoke_operator_handler(
                 );
                 return Err((StatusCode::FORBIDDEN, "revocation refused".to_string()));
             }
-            state.revocations.revoke(&authorized.target_operator_id);
+
+            if let Some(authority) = state.auth.symthaea_authority.get().cloned() {
+                if !authority.revocations.has_backing_file() {
+                    return Err((
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "revocation persistence is required while live Symthaea authority is enabled"
+                            .to_string(),
+                    ));
+                }
+                let target = authorized.target_operator_id.clone();
+                let result = authority.mutate(|| {
+                    match authority.revocations.revoke_with_outcome(&target) {
+                        Err(error) => LiveAuthorityMutation::failed_before_change(error.to_string()),
+                        Ok(RevocationMutation::Unchanged { count }) => {
+                            LiveAuthorityMutation::unchanged(count)
+                        }
+                        Ok(RevocationMutation::Changed { count }) => {
+                            if let Err(error) = authority.revocations.persist() {
+                                return LiveAuthorityMutation::failed_after_change(error.to_string());
+                            }
+                            authority.changed(count)
+                        }
+                    }
+                });
+                if let Err(error) = result {
+                    tracing::error!(?error, target = %target, "guarded operator revocation failed");
+                    return Err((StatusCode::SERVICE_UNAVAILABLE, "revocation refused".to_string()));
+                }
+            } else {
+                state.revocations.revoke(&authorized.target_operator_id);
+            }
+
             tracing::warn!(
                 target = %authorized.target_operator_id,
                 by = %authorized.operator_id,
@@ -512,15 +645,12 @@ pub(crate) fn parse_authenticated_key_replacement(
 /// over the exact target and new key material may replace it; every auth
 /// failure returns `403` without disclosing which check failed.
 ///
-/// On success the live policy is also persisted back to `--operators-file`
-/// (if the daemon was given one) so the replacement survives a restart --
-/// unlike [`crate::operator_revocations::OperatorRevocations::revoke`],
-/// whose own doc comment accepts that gap for revocation. A persist
-/// failure (e.g. a full or read-only disk) is logged but does not undo the
-/// already-applied in-process mutation or fail the request: the operator
-/// is unblocked immediately, which is the whole point of recovery, and a
-/// failed durability write is an operational issue for the daemon operator
-/// to fix, not a reason to leave the recovering operator locked out.
+/// When the D3A1 live authority guard is enabled, the live policy is persisted
+/// back to `--operators-file` before the authority-generation transition is
+/// recorded. A persistence failure is treated as a post-change failure and
+/// poisons the guard, so a portable Symthaea authority receipt can never be
+/// issued from a state that is only in memory. Without the guard, the legacy
+/// recovery behavior remains unchanged.
 async fn replace_operator_key_handler(
     State(state): State<AdminMutationState>,
     body: String,
@@ -545,10 +675,6 @@ async fn replace_operator_key_handler(
         }
     };
 
-    // See the identical check in revoke_operator_handler: a revoked admin's
-    // token is otherwise still valid, and this endpoint's blast radius is
-    // worse -- it lets the caller seize any other enrolled operator's
-    // (including other admins') identity.
     if state.revocations.is_revoked(&authorized.operator_id) {
         tracing::warn!(
             operator = %authorized.operator_id,
@@ -557,30 +683,59 @@ async fn replace_operator_key_handler(
         return Err((StatusCode::FORBIDDEN, "key replacement refused".to_string()));
     }
 
-    if let Err(err) = state.auth.policy.replace_operator_key(
-        &authorized.target_operator_id,
-        authorized.new_ed25519_pubkey,
-        authorized.new_ml_dsa_pubkey,
-        authorized.new_ml_dsa_87_pubkey,
-    ) {
-        tracing::warn!(
-            error = %err,
-            target = %authorized.target_operator_id,
-            "operator key replacement refused"
-        );
-        return Err((StatusCode::FORBIDDEN, "key replacement refused".to_string()));
-    }
+    if let Some(authority) = state.auth.symthaea_authority.get().cloned() {
+        let Some(path) = state.operators_file.as_ref() else {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "operator-policy persistence is required while live Symthaea authority is enabled"
+                    .to_string(),
+            ));
+        };
+        let target = authorized.target_operator_id.clone();
+        let new_ed = authorized.new_ed25519_pubkey;
+        let new_ml = authorized.new_ml_dsa_pubkey.clone();
+        let new_ml87 = authorized.new_ml_dsa_87_pubkey.clone();
+        let result = authority.mutate(|| {
+            match authority.policy.replace_operator_key(&target, new_ed, new_ml, new_ml87) {
+                Err(error) => LiveAuthorityMutation::failed_before_change(error.to_string()),
+                Ok(()) => {
+                    if let Err(error) = authority.policy.persist_to(path) {
+                        return LiveAuthorityMutation::failed_after_change(error.to_string());
+                    }
+                    authority.changed(())
+                }
+            }
+        });
+        if let Err(error) = result {
+            tracing::error!(?error, target = %target, "guarded operator key replacement failed");
+            return Err((StatusCode::SERVICE_UNAVAILABLE, "key replacement refused".to_string()));
+        }
+    } else {
+        if let Err(err) = state.auth.policy.replace_operator_key(
+            &authorized.target_operator_id,
+            authorized.new_ed25519_pubkey,
+            authorized.new_ml_dsa_pubkey,
+            authorized.new_ml_dsa_87_pubkey,
+        ) {
+            tracing::warn!(
+                error = %err,
+                target = %authorized.target_operator_id,
+                "operator key replacement refused"
+            );
+            return Err((StatusCode::FORBIDDEN, "key replacement refused".to_string()));
+        }
 
-    if let Some(path) = &state.operators_file
-        && let Err(err) = state.auth.policy.persist_to(path)
-    {
-        tracing::error!(
-            error = %err,
-            path = %path.display(),
-            target = %authorized.target_operator_id,
-            "failed to persist operator policy after key replacement -- \
-             the replacement is live but will not survive a restart until fixed"
-        );
+        if let Some(path) = &state.operators_file
+            && let Err(err) = state.auth.policy.persist_to(path)
+        {
+            tracing::error!(
+                error = %err,
+                path = %path.display(),
+                target = %authorized.target_operator_id,
+                "failed to persist operator policy after key replacement -- \
+                 the replacement is live but will not survive a restart until fixed"
+            );
+        }
     }
 
     tracing::warn!(
@@ -893,6 +1048,50 @@ mod tests {
         ))))
     }
 
+    #[test]
+    fn symthaea_authority_requires_explicit_bootstrap() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger_path = dir.path().join("authority-generation.bin");
+        let policy = OperatorPolicy::default();
+        let revocations = OperatorRevocations::empty();
+        let host_fingerprint = [0x11u8; 32];
+
+        assert!(
+            SymthaeaAuthorityState::open_or_bootstrap(
+                policy.clone(),
+                revocations.clone(),
+                host_fingerprint,
+                &ledger_path,
+                false,
+            )
+            .is_err()
+        );
+
+        let authority = SymthaeaAuthorityState::open_or_bootstrap(
+            policy.clone(),
+            revocations.clone(),
+            host_fingerprint,
+            &ledger_path,
+            true,
+        )
+        .unwrap();
+        assert!(ledger_path.is_file());
+
+        let reopened = SymthaeaAuthorityState::open_or_bootstrap(
+            policy.clone(),
+            revocations.clone(),
+            host_fingerprint,
+            &ledger_path,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            SymthaeaAuthorityState::current_commitment(&policy, &revocations).unwrap(),
+            SymthaeaAuthorityState::current_commitment(&reopened.policy, &reopened.revocations)
+                .unwrap()
+        );
+        assert!(authority.guard.current_version().is_ok());
+    }
     #[tokio::test]
     async fn verify_is_rate_limited() {
         let op = HandshakeManager::new();

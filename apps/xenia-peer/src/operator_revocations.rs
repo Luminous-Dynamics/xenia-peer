@@ -188,12 +188,77 @@ impl OperatorRevocations {
         Ok(ids)
     }
 
+    /// Whether this revocation set has a durable backing file.
+    pub(crate) fn has_backing_file(&self) -> bool {
+        self.path.is_some()
+    }
+
+    /// Persist the current effective revocation set atomically and durably.
+    ///
+    /// This is required before a guarded authority-generation transition is
+    /// recorded: the generation ledger must never claim a revocation that a
+    /// restart could silently lose.
+    pub(crate) fn persist(&self) -> std::io::Result<()> {
+        let Some(path) = &self.path else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "no revocation backing file configured",
+            ));
+        };
+        let mut ids = self
+            .revoked
+            .read()
+            .map_err(|_| std::io::Error::other("operator revocation lock poisoned"))?
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        ids.sort();
+        let mut bytes = ids.join("\n").into_bytes();
+        if !bytes.is_empty() {
+            bytes.push(b'\n');
+        }
+        write_atomic_durable(path, &bytes)
+    }
+
     /// The number of currently-revoked operators.
     pub(crate) fn len(&self) -> usize {
         self.revoked.read().map(|s| s.len()).unwrap_or(0)
     }
 }
 
+fn write_atomic_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("revoked-operators.txt");
+    let tmp = parent.join(format!(".{name}.tmp-{}", std::process::id()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&tmp)?;
+    if let Err(error) = (|| -> std::io::Result<()> {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)?;
+        let dir = std::fs::File::open(parent)?;
+        dir.sync_all()
+    })() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
+    Ok(())
+}
 /// Read a revocation file into a set of `operator_id`s for the *initial*
 /// load. Missing file -> empty set (there is nothing to have been revoked
 /// yet). [`OperatorRevocations::reload`] deliberately does not use this --
@@ -249,6 +314,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn persist_writes_sorted_effective_set_durably() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("revoked.txt");
+        let r = OperatorRevocations::from_file(&path).unwrap();
+        r.revoke_with_outcome("bob").unwrap();
+        r.revoke_with_outcome("alice").unwrap();
+        r.persist().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "alice\nbob\n");
+    }
     #[test]
     fn parses_file_ignoring_blanks_and_comments() {
         let mut f = tempfile::NamedTempFile::new().unwrap();
