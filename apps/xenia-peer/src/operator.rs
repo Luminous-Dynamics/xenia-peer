@@ -129,6 +129,16 @@ impl OperatorPolicy {
     ) -> Result<Self, OperatorPolicyError> {
         let mut by_ed25519 = HashMap::new();
         for op in operators {
+            // Operator ids are the stable identity used by token/action
+            // authorization and by the Symthaea authority snapshots. They
+            // must therefore be unique independently of the Ed25519 map key;
+            // otherwise lookup_by_id() would have ambiguous, HashMap-order-
+            // dependent semantics.
+            if by_ed25519.values().any(|existing: &EnrolledOperator| {
+                existing.operator_id == op.operator_id
+            }) {
+                return Err(OperatorPolicyError::DuplicateOperatorId(op.operator_id));
+            }
             if by_ed25519.insert(op.ed25519_pubkey, op.clone()).is_some() {
                 return Err(OperatorPolicyError::DuplicateKey(op.operator_id));
             }
@@ -464,6 +474,8 @@ pub(crate) enum OperatorPolicyError {
     Parse(String),
     /// A record's public key was malformed or the wrong length.
     BadKey(String),
+    /// Two records claim the same stable operator id.
+    DuplicateOperatorId(String),
     /// Two records share an Ed25519 public key.
     DuplicateKey(String),
     /// [`OperatorPolicy::replace_operator_key`] was asked to replace an
@@ -478,6 +490,9 @@ impl std::fmt::Display for OperatorPolicyError {
             OperatorPolicyError::Parse(e) => write!(f, "operator policy parse error: {e}"),
             OperatorPolicyError::BadKey(id) => {
                 write!(f, "operator {id:?} has a malformed/wrong-length public key")
+            }
+            OperatorPolicyError::DuplicateOperatorId(id) => {
+                write!(f, "operator id {id:?} is assigned to multiple enrollment records")
             }
             OperatorPolicyError::DuplicateKey(id) => {
                 write!(
@@ -587,6 +602,44 @@ mod tests {
         ])
         .unwrap_err();
         assert!(matches!(err, OperatorPolicyError::DuplicateKey(_)));
+    }
+
+    #[test]
+    fn duplicate_operator_ids_are_rejected_even_when_keys_differ() {
+        let first = record("alice", [7u8; 32], OperatorRole::Admin);
+        let second = record("alice", [8u8; 32], OperatorRole::Viewer);
+
+        let err = OperatorPolicy::from_operators(vec![first.clone(), second.clone()])
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            OperatorPolicyError::DuplicateOperatorId(id) if id == "alice"
+        ));
+
+        // Reordering the ambiguous input cannot make one record win.
+        let reversed = OperatorPolicy::from_operators(vec![second, first]).unwrap_err();
+        assert!(matches!(
+            reversed,
+            OperatorPolicyError::DuplicateOperatorId(id) if id == "alice"
+        ));
+    }
+
+    #[test]
+    fn json_rejects_duplicate_operator_ids() {
+        let ed_a = "01".repeat(32);
+        let ed_b = "02".repeat(32);
+        let ml_a = "ab".repeat(ML_DSA_65_PK_LEN);
+        let ml_b = "cd".repeat(ML_DSA_65_PK_LEN);
+        let json = format!(
+            r#"{{"operators":[
+                {{"operator_id":"alice","ed25519_pubkey":"{ed_a}","ml_dsa_pubkey":"{ml_a}","role":"Admin"}},
+                {{"operator_id":"alice","ed25519_pubkey":"{ed_b}","ml_dsa_pubkey":"{ml_b}","role":"Viewer"}}
+            ]}}"#
+        );
+        assert!(matches!(
+            OperatorPolicy::from_json(json.as_bytes()),
+            Err(OperatorPolicyError::DuplicateOperatorId(id)) if id == "alice"
+        ));
     }
 
     #[test]
