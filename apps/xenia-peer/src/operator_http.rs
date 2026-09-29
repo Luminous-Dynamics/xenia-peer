@@ -138,7 +138,8 @@ impl SymthaeaAuthorityState {
 }
 
 /// Shared state for the operator-auth routes.
-pub(crate) struct OperatorAuthState {    pub(crate) policy: OperatorPolicy,
+pub(crate) struct OperatorAuthState {
+    pub(crate) policy: OperatorPolicy,
     pub(crate) challenges: Mutex<ChallengeStore>,
     /// The daemon's own signing key, used to sign issued tokens. Also the
     /// key `xenia_ledger::Chain` signs the consent hash-chain with -- it
@@ -225,7 +226,8 @@ impl OperatorAuthState {
     }
 }
 
-fn unix_now_secs() -> u64 {    SystemTime::now()
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
