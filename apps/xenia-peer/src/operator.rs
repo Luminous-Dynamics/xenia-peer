@@ -180,6 +180,26 @@ impl OperatorPolicy {
         Self::from_json(&bytes)
     }
 
+    /// Load a policy through the trusted authority-source boundary.
+    ///
+    /// The source is opened once with no-follow semantics, its filesystem
+    /// identity is captured from the opened handle, and the JSON is parsed
+    /// from those exact bytes. This is the live-authority path; the legacy
+    /// load method remains for non-live callers.
+    pub(crate) fn load_trusted(
+        path: &Path,
+        trust: &xenia_symthaea_live_authority_guard::AuthorityStorageTrust,
+    ) -> Result<Self, OperatorPolicyError> {
+        let expected = xenia_symthaea_live_authority_guard::AuthoritySourceIdentity::capture(path)
+            .map_err(|e| OperatorPolicyError::Io(e.to_string()))?;
+        let (text, actual) = trust
+            .read_source(path, Some(expected))
+            .map_err(|e| OperatorPolicyError::Io(e.to_string()))?;
+        debug_assert_eq!(expected, actual);
+        restrict_permissions(path);
+        Self::from_json(text.as_bytes())
+    }
+
     /// Look up an enrolled operator by Ed25519 public key.
     ///
     /// This alone is **not sufficient for hybrid authentication** -- it only
