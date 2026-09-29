@@ -283,6 +283,25 @@ impl OperatorRevocations {
                 "no revocation backing file configured",
             ));
         };
+        if let Some(trust) = &self.trust {
+            trust.validate_source_path(path)?;
+            let expected = self
+                .source_identity
+                .read()
+                .map_err(|_| {
+                    std::io::Error::other(
+                        "operator revocation source identity lock poisoned",
+                    )
+                })?
+                .as_ref()
+                .copied();
+            if let Some(expected) = expected {
+                expected.verify(path)?;
+            } else {
+                let _ = AuthoritySourceIdentity::capture(path)?;
+            }
+        }
+
         let mut ids = self
             .revoked
             .read()
@@ -291,8 +310,7 @@ impl OperatorRevocations {
             .cloned()
             .collect::<Vec<_>>();
         ids.sort();
-        let mut bytes = ids.join("
-").into_bytes();
+        let mut bytes = ids.join("\n").into_bytes();
         if !bytes.is_empty() {
             bytes.push(b'
 ');
@@ -446,10 +464,32 @@ mod tests {
         r.revoke_with_outcome("bob").unwrap();
         r.revoke_with_outcome("alice").unwrap();
         r.persist().unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "alice
-bob
-");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "alice\\nbob\\n");
     }
+    #[cfg(unix)]
+    #[test]
+    fn trusted_persist_refuses_replaced_revocation_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("revoked.txt");
+        std::fs::write(&path, b"alice\\n").unwrap();
+
+        let trust =
+            xenia_symthaea_live_authority_guard::AuthorityStorageTrust::validate(dir.path())
+                .unwrap();
+        let revocations =
+            OperatorRevocations::from_trusted_file(&path, trust).unwrap();
+
+        revocations.revoke("bob");
+        let replacement = dir.path().join("replacement.txt");
+        std::fs::write(&replacement, b"mallory\\n").unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+
+        revocations
+            .persist()
+            .expect_err("stale revocation identity must refuse overwrite");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "mallory\\n");
+    }
+
     #[test]
     fn parses_file_ignoring_blanks_and_comments() {
         let mut f = tempfile::NamedTempFile::new().unwrap();
@@ -487,20 +527,13 @@ bob
         let r = OperatorRevocations::from_file(f.path()).unwrap();
 
         // Different ordering/comments/duplicates, identical effective set.
-        std::fs::write(f.path(), "# reordered
-bob
-alice
-alice
-").unwrap();
+        std::fs::write(f.path(), "# reordered\\nbob\\nalice\\nalice\\n").unwrap();
         assert_eq!(
             r.reload_with_outcome().unwrap(),
             RevocationMutation::Unchanged { count: 2 }
         );
 
-        std::fs::write(f.path(), "alice
-bob
-carol
-").unwrap();
+        std::fs::write(f.path(), "alice\\nbob\\ncarol\\n").unwrap();
         assert_eq!(
             r.reload_with_outcome().unwrap(),
             RevocationMutation::Changed { count: 3 }
@@ -522,8 +555,7 @@ carol
     #[test]
     fn reload_fails_closed_and_keeps_prior_revocations_when_file_vanishes() {
         let f = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(f.path(), "alice
-").unwrap();
+        std::fs::write(f.path(), "alice\\n").unwrap();
         let r = OperatorRevocations::from_file(f.path()).unwrap();
         assert!(r.is_revoked("alice"));
 
