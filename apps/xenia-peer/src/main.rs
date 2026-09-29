@@ -1080,6 +1080,19 @@ struct Args {
     #[arg(long)]
     revoked_operators_file: Option<std::path::PathBuf>,
 
+    /// Durable D3A1 authority-generation ledger used to serialize the live
+    /// operator policy/revocation state consumed by Symthaea. When unset,
+    /// legacy operator mutations remain available but no future live Symthaea
+    /// authority issuance path may treat the state as coherently guarded.
+    #[arg(long)]
+    symthaea_authority_generation_path: Option<std::path::PathBuf>,
+
+    /// Explicitly allow first-run creation of the Symthaea authority-generation
+    /// ledger. Without this flag a missing ledger fails closed rather than
+    /// silently rebooting the authority generation.
+    #[arg(long)]
+    symthaea_authority_bootstrap: bool,
+
     /// Require an authenticated, role-authorized operator token for consent
     /// decisions. When off (default), the consent port accepts the legacy
     /// plain-text `Approve`/`Deny`/`Revoke` (backward compatible). When on,
@@ -5994,6 +6007,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // rather than trust a caller-supplied daemon identity. See
     // `DaemonIdentityCertificate`'s doc comment in `xenia_operator_proto`.
     let operator_auth_host_identity = load_or_create_host_identity(&args.host_identity_key_path)?;
+    let operator_auth_host_fingerprint = operator_auth_host_identity.identity_fingerprint();
     let http_auth_ml_dsa_seed = load_or_create_ml_dsa_seed(&args.http_auth_ml_dsa_key_path)?;
     let http_auth_ml_dsa = xenia_handshake::MlDsaIdentity::from_seed(http_auth_ml_dsa_seed);
     let operator_auth_state = Arc::new(crate::operator_http::OperatorAuthState::new(
@@ -6025,22 +6039,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         None => crate::operator_revocations::OperatorRevocations::empty(),
     };
+    if args.symthaea_authority_bootstrap && args.symthaea_authority_generation_path.is_none() {
+        return Err("--symthaea-authority-bootstrap requires --symthaea-authority-generation-path".into());
+    }
+    if let Some(path) = &args.symthaea_authority_generation_path {
+        let authority = crate::operator_http::SymthaeaAuthorityState::open_or_bootstrap(
+            operator_auth_state.policy.clone(),
+            revocations.clone(),
+            operator_auth_host_fingerprint,
+            path,
+            args.symthaea_authority_bootstrap,
+        )
+        .map_err(|error| -> Box<dyn std::error::Error> {
+            format!("failed to initialize live Symthaea authority: {error}").into()
+        })?;
+        operator_auth_state
+            .set_symthaea_authority(authority)
+            .map_err(|_| "Symthaea authority was initialized more than once")?;
+        info!(path = %path.display(), "live Symthaea authority guard enabled");
+    }
+
     // Reload the revocation file on SIGHUP (no restart), only when a file is
-    // configured so SIGHUP disposition is otherwise unchanged.
+    // configured so SIGHUP disposition is otherwise unchanged. When the live
+    // Symthaea authority guard is enabled, the reload is itself a guarded
+    // durable authority mutation; generation persistence failure poisons the
+    // guard instead of leaving an apparently healthy split-brain state.
     #[cfg(unix)]
     if args.revoked_operators_file.is_some() {
         let reload = revocations.clone();
+        let authority = operator_auth_state.symthaea_authority.get().cloned();
         tokio::spawn(async move {
-            use tokio::signal::unix::{SignalKind, signal};
+            use tokio::signal::unix::{signal, SignalKind};
             let Ok(mut hup) = signal(SignalKind::hangup()) else {
                 return;
             };
             while hup.recv().await.is_some() {
-                match reload.reload() {
-                    Ok(n) => info!(revoked = n, "reloaded operator revocation list on SIGHUP"),
-                    Err(err) => {
-                        tracing::error!(error = %err, "failed to reload revocation list on SIGHUP")
+                match authority.as_ref() {
+                    Some(authority) => {
+                        let result = authority.mutate(|| {
+                            match reload.reload_with_outcome() {
+                                Err(error) => LiveAuthorityMutation::failed_before_change(error.to_string()),
+                                Ok(crate::operator_revocations::RevocationMutation::Unchanged { count }) =>
+                                    LiveAuthorityMutation::unchanged(count),
+                                Ok(crate::operator_revocations::RevocationMutation::Changed { count }) =>
+                                    authority.changed(count),
+                            }
+                        });
+                        match result {
+                            Ok(count) => info!(revoked = count, "guarded operator revocation reload completed on SIGHUP"),
+                            Err(error) => tracing::error!(?error, "guarded revocation reload failed on SIGHUP"),
+                        }
                     }
+                    None => match reload.reload() {
+                        Ok(n) => info!(revoked = n, "reloaded operator revocation list on SIGHUP"),
+                        Err(err) => {
+                            tracing::error!(error = %err, "failed to reload revocation list on SIGHUP")
+                        }
+                    },
                 }
             }
         });
