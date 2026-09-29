@@ -32,6 +32,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use xenia_handshake::ML_DSA_65_PK_LEN;
+use xenia_symthaea_authority_state_commitment::SymthaeaEnrollmentCommitmentInputV1;
 use xenia_wire::handshake_highsec::ML_DSA_87_PK_LEN;
 
 // The role/action model + fail-closed authorization logic now live in the
@@ -270,6 +271,26 @@ impl OperatorPolicy {
                 role: op.role,
             },
         }
+    }
+
+    /// Deterministic owned enrollment material for the Symthaea authority-state
+    /// commitment boundary. The internal map and lock remain private; callers
+    /// receive only the exact Xenia identity fields that D3B commits.
+    pub(crate) fn symthaea_snapshot_material(&self) -> Result<Vec<SymthaeaEnrollmentCommitmentInputV1>, OperatorPolicyError> {
+        let map = self
+            .read_map()
+            .ok_or_else(|| OperatorPolicyError::Io("operator policy lock poisoned".to_string()))?;
+        let mut enrollments: Vec<_> = map
+            .values()
+            .map(|op| SymthaeaEnrollmentCommitmentInputV1 {
+                operator_id: op.operator_id.clone(),
+                ed25519_pubkey: op.ed25519_pubkey,
+                ml_dsa_65_pubkey: op.ml_dsa_pubkey.clone(),
+                role: op.role,
+            })
+            .collect();
+        enrollments.sort_by(|a, b| a.operator_id.cmp(&b.operator_id));
+        Ok(enrollments)
     }
 
     /// Number of enrolled operators.
