@@ -217,7 +217,7 @@ impl LiveAuthorityGuard {
     /// not retain a snapshot and use it later as a substitute for this barrier.
     /// A returned receipt/value is therefore the output of one coherent
     /// authority interval rather than an independently live snapshot handle.
-
+    ///
     /// Run an operation while the outer live-authority read barrier remains
     /// held for the entire operation.
     ///
