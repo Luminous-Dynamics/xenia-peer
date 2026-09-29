@@ -140,7 +140,7 @@ impl AuthorityStorageTrust {
             }
             // libc is used only for the process identity comparison. The
             // filesystem metadata itself is obtained through safe std APIs.
-            let owner_uid = unsafe { libc::geteuid() };
+            let owner_uid = rustix::process::geteuid().as_raw();
             if metadata.uid() != owner_uid {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
