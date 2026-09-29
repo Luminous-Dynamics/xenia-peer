@@ -121,6 +121,7 @@ pub(crate) struct EnrolledOperator {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct OperatorPolicy {
     by_ed25519: Arc<RwLock<HashMap<[u8; 32], EnrolledOperator>>>,
+    source_identity: Arc<RwLock<Option<AuthoritySourceIdentity>>>,
 }
 
 impl OperatorPolicy {
@@ -399,6 +400,39 @@ impl OperatorPolicy {
     /// doc comment flags and accepts for revocation: without this, a live
     /// [`Self::replace_operator_key`] would vanish on the next restart or
     /// reload from `path`.
+    /// Persist through the live trusted-source boundary.
+    ///
+    /// The source identity is checked before replacement, preventing a
+    /// stale authority process from overwriting an object that was replaced
+    /// underneath it. After the durable rename succeeds, the new object
+    /// identity is recorded for the next guarded mutation.
+    pub(crate) fn persist_to_trusted(
+        &self,
+        path: &Path,
+        trust: &AuthorityStorageTrust,
+    ) -> std::io::Result<()> {
+        trust.validate_source_path(path)?;
+        let expected = self
+            .source_identity
+            .read()
+            .map_err(|_| std::io::Error::other("operator policy source identity lock poisoned"))?
+            .as_ref()
+            .copied();
+        if let Some(expected) = expected {
+            expected.verify(path)?;
+        } else {
+            let _ = AuthoritySourceIdentity::capture(path)?;
+        }
+        self.persist_to(path)?;
+        let actual = AuthoritySourceIdentity::capture(path)?;
+        *self
+            .source_identity
+            .write()
+            .map_err(|_| std::io::Error::other("operator policy source identity lock poisoned"))? =
+            Some(actual);
+        Ok(())
+    }
+
     pub(crate) fn persist_to(&self, path: &Path) -> std::io::Result<()> {
         let file = {
             let map = self
