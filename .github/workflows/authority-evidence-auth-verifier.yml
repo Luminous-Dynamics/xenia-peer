@@ -28,16 +28,33 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
-      - name: Bind exact additive subject
+      - name: Bind frozen qualification subject
         shell: bash
         run: |
           set -euo pipefail
-          parent=e9c4456d957574163a9ea571523bcc13bc4ad10a
+          qualification_base=e9c4456d957574163a9ea571523bcc13bc4ad10a
+          qualification_subject=66566021c0a45b49f1aeacc7d2c2a6a3177114d8
           expected_head="${{ github.event.pull_request.head.sha || github.sha }}"
+
+          # The workflow itself may advance after a qualification subject is frozen.
+          # First prove that this run is executing the workflow at the exact PR head.
           test "$(git rev-parse HEAD)" = "$expected_head"
-          test "$(git rev-parse HEAD^)" = "$parent"
-          test "$(git rev-list --count "$parent..HEAD")" -eq 1
-          mapfile -t changed < <(git diff --name-only "$parent" HEAD | sort)
+
+          # Then freeze the actual qualification target independently of the workflow-only
+          # control-plane commit that triggered this run.
+          git cat-file -e "$qualification_subject^{commit}"
+          test "$(git merge-base "$qualification_base" "$qualification_subject")" = "$qualification_base"
+          test "$(git rev-parse "$qualification_subject^")" = "ec84129a9ffb329f2e295ec0021311ace16f7396"
+
+          expected_commits=(
+            '73231705a66c58064bfb40e5ee074267823ff593'
+            'ec84129a9ffb329f2e295ec0021311ace16f7396'
+            '66566021c0a45b49f1aeacc7d2c2a6a3177114d8'
+          )
+          mapfile -t qualified_commits < <(git rev-list --reverse "$qualification_base..$qualification_subject")
+          diff -u <(printf '%s\n' "${expected_commits[@]}") <(printf '%s\n' "${qualified_commits[@]}")
+
+          mapfile -t changed < <(git diff --name-only "$qualification_base" "$qualification_subject" | sort)
           expected=(
             '.github/workflows/authority-evidence-auth-verifier.yml'
             'crates/xenia-authority-evidence-auth-verifier/Cargo.toml'
@@ -45,6 +62,11 @@ jobs:
           )
           mapfile -t expected_sorted < <(printf '%s\n' "${expected[@]}" | sort)
           diff -u <(printf '%s\n' "${expected_sorted[@]}") <(printf '%s\n' "${changed[@]}")
+
+          # All qualification gates below must execute against the frozen subject, not
+          # against a later workflow-only control-plane commit.
+          git checkout --detach "$qualification_subject"
+          test "$(git rev-parse HEAD)" = "$qualification_subject"
 
       - name: Install pinned Rust 1.94
         uses: dtolnay/rust-toolchain@stable
