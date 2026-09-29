@@ -713,7 +713,15 @@ fn ensure_path_identity(
     path: &Path,
     expected: &FileIdentity,
 ) -> Result<(), IssuanceJournalError> {
-    let file = File::open(path)
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
         .map_err(|error| IssuanceJournalError::StorageIdentityUnavailable(error.to_string()))?;
     let current = capture_identity(&file)?;
     if current == *expected {
