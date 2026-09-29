@@ -5,8 +5,6 @@ on:
     paths:
       - "crates/xenia-authority-evidence-auth-verifier/**"
       - ".github/workflows/authority-evidence-auth-verifier.yml"
-  workflow_dispatch:
-
 permissions:
   contents: read
 
@@ -23,7 +21,30 @@ jobs:
         working-directory: crates/xenia-authority-evidence-auth-verifier
 
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Checkout exact subject head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Bind exact additive subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          parent=e9c4456d957574163a9ea571523bcc13bc4ad10a
+          expected_head="${{ github.event.pull_request.head.sha || github.sha }}"
+          test "$(git rev-parse HEAD)" = "$expected_head"
+          test "$(git rev-parse HEAD^)" = "$parent"
+          test "$(git rev-list --count "$parent..HEAD")" -eq 1
+          mapfile -t changed < <(git diff --name-only "$parent" HEAD | sort)
+          expected=(
+            '.github/workflows/authority-evidence-auth-verifier.yml'
+            'crates/xenia-authority-evidence-auth-verifier/Cargo.toml'
+            'crates/xenia-authority-evidence-auth-verifier/src/lib.rs'
+          )
+          mapfile -t expected_sorted < <(printf '%s\n' "${expected[@]}" | sort)
+          diff -u <(printf '%s\n' "${expected_sorted[@]}") <(printf '%s\n' "${changed[@]}")
 
       - name: Install pinned Rust 1.94
         uses: dtolnay/rust-toolchain@stable
