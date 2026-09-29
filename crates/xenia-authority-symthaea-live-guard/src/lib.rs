@@ -20,9 +20,9 @@
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-mod authority_owner;
+mod authority_owner;\nmod authority_storage;
 
-pub use authority_owner::AuthorityOwnerLock;
+pub use authority_owner::AuthorityOwnerLock;\npub use authority_storage::{AuthoritySourceIdentity, AuthorityStorageTrust};
 
 use xenia_symthaea_authority_generation::{
     AuthorityGenerationError, AuthorityMutation, AuthorityStateCoordinator, AuthorityVersionV1,
