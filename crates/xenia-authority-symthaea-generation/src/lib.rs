@@ -165,9 +165,6 @@ impl AuthorityStateCoordinator {
         initial_state_commitment_sha256: [u8; SHA256_LEN],
     ) -> Result<Self, AuthorityGenerationError> {
         let path = ledger_path.as_ref().to_path_buf();
-        if path.exists() {
-            return Err(AuthorityGenerationError::LedgerAlreadyExists);
-        }
         let version = AuthorityVersionV1 {
             daemon_host_fingerprint,
             generation: FIRST_AUTHORITY_GENERATION_V1,
@@ -424,10 +421,6 @@ fn persist_replace(
 ) -> Result<(), AuthorityGenerationError> {
     let bytes = encode_record(version)?;
     let parent = parent_directory(path)?;
-    if !parent.exists() {
-        return Err(AuthorityGenerationError::LedgerStorageUnavailable);
-    }
-
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
