@@ -61,6 +61,8 @@ pub(crate) struct OperatorRevocations {
     path: Option<PathBuf>,
     /// Identity of the source object last trusted by the daemon.
     source_identity: Arc<RwLock<Option<AuthoritySourceIdentity>>>,
+    /// Trusted authority storage boundary, present for live-authority deployments.
+    trust: Option<xenia_symthaea_live_authority_guard::AuthorityStorageTrust>,
 }
 
 impl OperatorRevocations {
@@ -84,7 +86,35 @@ impl OperatorRevocations {
             revoked: Arc::new(RwLock::new(set)),
             path: Some(path.to_path_buf()),
             source_identity: Arc::new(RwLock::new(identity)),
+            trust: None,
         })
+    }
+
+    /// Load a revocation list through the trusted authority-source boundary.
+    ///
+    /// A missing file retains the historical initial-load meaning of an empty
+    /// revocation set. If the file exists, its identity and parsed bytes come
+    /// from the same opened object.
+    pub(crate) fn from_trusted_file(
+        path: &Path,
+        trust: xenia_symthaea_live_authority_guard::AuthorityStorageTrust,
+    ) -> std::io::Result<Self> {
+        trust.validate_source_path(path)?;
+        match trust.read_source(path, None) {
+            Ok((text, identity)) => Ok(Self {
+                revoked: Arc::new(RwLock::new(parse_revocations(&text))),
+                path: Some(path.to_path_buf()),
+                source_identity: Arc::new(RwLock::new(Some(identity))),
+                trust: Some(trust),
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self {
+                revoked: Arc::new(RwLock::new(HashSet::new())),
+                path: Some(path.to_path_buf()),
+                source_identity: Arc::new(RwLock::new(None)),
+                trust: Some(trust),
+            }),
+            Err(error) => Err(error),
+        }
     }
 
     /// Whether `operator_id` is currently revoked. Cheap read-lock; the lock is
@@ -164,7 +194,29 @@ impl OperatorRevocations {
                 .map_err(|_| std::io::Error::other("operator revocation source identity lock poisoned"))? = Some(identity);
         }
 
-        let text = read_trusted_source(path, self.source_identity.clone())?;
+        let expected = self
+            .source_identity
+            .read()
+            .map_err(|_| std::io::Error::other("operator revocation source identity lock poisoned"))?
+            .as_ref()
+            .copied();
+        let text = if let Some(trust) = &self.trust {
+            match trust.read_source(path, expected) {
+                Ok((text, actual)) => {
+                    if expected.is_none() {
+                        *self
+                            .source_identity
+                            .write()
+                            .map_err(|_| std::io::Error::other("operator revocation source identity lock poisoned"))? =
+                            Some(actual);
+                    }
+                    text
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            read_trusted_source(path, self.source_identity.clone())?
+        };
         let fresh = parse_revocations(&text);
         let mut current = self
             .revoked
