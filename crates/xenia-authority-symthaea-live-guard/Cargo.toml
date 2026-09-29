@@ -13,7 +13,7 @@ description = "Fail-closed live mutation guard over Xenia Symthaea authority gen
 publish = false
 
 [dependencies]
-xenia-symthaea-authority-generation = { path = "../xenia-authority-symthaea-generation" }
+xenia-symthaea-authority-generation = { path = "../xenia-authority-symthaea-generation" }\nlibc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
