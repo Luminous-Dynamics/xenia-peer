@@ -52,11 +52,7 @@ pub struct EnrolledEvidenceIdentityV1 {
 
 impl EnrolledEvidenceIdentityV1 {
     /// Construct from one already-validated current enrollment record.
-    pub fn new(
-        identity_id: String,
-        ed25519_pubkey: [u8; 32],
-        ml_dsa_65_pubkey: Vec<u8>,
-    ) -> Self {
+    pub fn new(identity_id: String, ed25519_pubkey: [u8; 32], ml_dsa_65_pubkey: Vec<u8>) -> Self {
         Self {
             identity_id,
             ed25519_pubkey,
@@ -241,14 +237,12 @@ fn cryptographic_evidence(
     )
 }
 
-fn domain_hash(
-    domain: &[u8],
-    fields: &[&[u8]],
-) -> Result<[u8; 32], EvidenceAuthVerifierError> {
+fn domain_hash(domain: &[u8], fields: &[&[u8]]) -> Result<[u8; 32], EvidenceAuthVerifierError> {
     let mut hasher = Sha256::new();
     hasher.update(domain);
     for field in fields {
-        let len = u32::try_from(field.len()).map_err(|_| EvidenceAuthVerifierError::FieldTooLarge)?;
+        let len =
+            u32::try_from(field.len()).map_err(|_| EvidenceAuthVerifierError::FieldTooLarge)?;
         hasher.update(len.to_be_bytes());
         hasher.update(field);
     }
@@ -260,8 +254,10 @@ fn push_bytes(
     label: &[u8],
     bytes: &[u8],
 ) -> Result<(), EvidenceAuthVerifierError> {
-    let label_len = u16::try_from(label.len()).map_err(|_| EvidenceAuthVerifierError::FieldTooLarge)?;
-    let bytes_len = u32::try_from(bytes.len()).map_err(|_| EvidenceAuthVerifierError::FieldTooLarge)?;
+    let label_len =
+        u16::try_from(label.len()).map_err(|_| EvidenceAuthVerifierError::FieldTooLarge)?;
+    let bytes_len =
+        u32::try_from(bytes.len()).map_err(|_| EvidenceAuthVerifierError::FieldTooLarge)?;
     out.extend_from_slice(&label_len.to_be_bytes());
     out.extend_from_slice(label);
     out.extend_from_slice(&bytes_len.to_be_bytes());
@@ -411,13 +407,9 @@ mod tests {
     fn rotation_invalidates_old_pair_against_current_enrollment() {
         let old = HandshakeManager::from_identity_seeds([0x41; 32], [0x42; 32]);
         let replacement = HandshakeManager::from_identity_seeds([0x43; 32], [0x44; 32]);
-        let verified = verify_evidence_auth_signatures_v1(signed(
-            &old,
-            [0x36; 32],
-            [0x46; 32],
-            [0x56; 32],
-        ))
-        .unwrap();
+        let verified =
+            verify_evidence_auth_signatures_v1(signed(&old, [0x36; 32], [0x46; 32], [0x56; 32]))
+                .unwrap();
         assert_eq!(
             bind_verified_evidence_auth_to_enrollment_v1(
                 verified,
