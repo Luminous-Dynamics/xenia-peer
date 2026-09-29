@@ -21,6 +21,7 @@ xenia-inject = { path = "../../crates/xenia-inject" }
 xenia-operator-proto = { workspace = true }
 xenia-secure-file = { path = "../../crates/xenia-secure-file" }
 xenia-symthaea-authority-state-commitment = { path = "../../crates/xenia-authority-symthaea-state-commitment" }
+xenia-symthaea-rbac = { package = "xenia-symthaea-attestation-rbac", path = "../../crates/xenia-authority-symthaea-rbac" }
 xenia-symthaea-live-authority-guard = { path = "../../crates/xenia-authority-symthaea-live-guard" }
 tokio-tungstenite = "0.24"
 
