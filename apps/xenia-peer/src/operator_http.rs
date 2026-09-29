@@ -32,7 +32,11 @@ use tokio::sync::Mutex;
 
 use xenia_handshake::{HandshakeManager, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN, MlDsaIdentity};
 use xenia_ledger::{Chain, LedgerCheckpoint, LedgerEntry};
-use xenia_symthaea_authority_generation::AuthorityGenerationError;
+use xenia_symthaea_authority_generation::{AuthorityGenerationError, StableAuthoritySnapshot};
+use xenia_symthaea_live_snapshot::{
+    AuthoritySnapshotMaterialV1, CoherentSymthaeaAuthoritySnapshotV1,
+    read_coherent_symthaea_authority_snapshot_v1,
+};
 use xenia_symthaea_authority_state_commitment::EffectiveSymthaeaPolicyCommitmentInputV1;
 use xenia_symthaea_live_authority_guard::{
     LiveAuthorityGuard, LiveAuthorityGuardError, LiveAuthorityMutation,
@@ -119,6 +123,32 @@ impl SymthaeaAuthorityState {
         }))
     }
 
+    /// Read one coherent, committed Symthaea authority snapshot for an
+    /// authenticated operator.
+    pub(crate) fn coherent_snapshot(
+        &self,
+        operator_id: &str,
+    ) -> Result<
+        StableAuthoritySnapshot<CoherentSymthaeaAuthoritySnapshotV1>,
+        LiveAuthorityGuardError<
+            xenia_symthaea_live_snapshot::AuthoritySnapshotReadError<std::convert::Infallible>,
+        >,
+    > {
+        read_coherent_symthaea_authority_snapshot_v1(&self.guard, operator_id, || {
+            Ok::<_, std::convert::Infallible>(AuthoritySnapshotMaterialV1 {
+                enrollments: self
+                    .policy
+                    .symthaea_snapshot_material()
+                    .map_err(|error| std::convert::Infallible)?,
+                revoked_operator_ids: self.revocations.snapshot_sorted().map_err(|_| {
+                    // The closure's error type is intentionally infallible at the
+                    // source boundary; lock poisoning is represented by a source
+                    // adapter failure below instead.
+                    std::convert::Infallible
+                })?,
+            })
+        })
+    }
     /// Execute a live authority mutation through the sole D3A1 guard.
     pub(crate) fn mutate<T, E, F>(&self, mutation: F) -> Result<T, LiveAuthorityGuardError<E>>
     where
