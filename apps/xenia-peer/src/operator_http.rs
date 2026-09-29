@@ -1090,7 +1090,7 @@ mod tests {
             SymthaeaAuthorityState::current_commitment(&reopened.policy, &reopened.revocations)
                 .unwrap()
         );
-        assert!(authority.guard.current_generation().is_ok());
+        assert!(authority.guard.current_version().is_ok());
     }
     #[tokio::test]
     async fn verify_is_rate_limited() {
