@@ -19,7 +19,9 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};\n\nuse xenia_symthaea_live_authority_guard::AuthoritySourceIdentity;
+use std::sync::{Arc, RwLock};
+
+use xenia_symthaea_live_authority_guard::AuthoritySourceIdentity;
 
 /// Whether an operation changed the **effective** revoked-operator set.
 ///
@@ -56,7 +58,9 @@ pub(crate) struct OperatorRevocations {
     revoked: Arc<RwLock<HashSet<String>>>,
     /// The file the set is (re)loaded from, if any — kept so a SIGHUP handler
     /// can reload without re-plumbing the path.
-    path: Option<PathBuf>,\n    /// Identity of the source object last trusted by the daemon.\n    source_identity: Arc<RwLock<Option<AuthoritySourceIdentity>>>,
+    path: Option<PathBuf>,
+    /// Identity of the source object last trusted by the daemon.
+    source_identity: Arc<RwLock<Option<AuthoritySourceIdentity>>>,
 }
 
 impl OperatorRevocations {
@@ -71,9 +75,15 @@ impl OperatorRevocations {
     /// path for later [`OperatorRevocations::reload`].
     pub(crate) fn from_file(path: &Path) -> std::io::Result<Self> {
         let set = read_revocations(path)?;
+        let identity = if path.exists() {
+            Some(AuthoritySourceIdentity::capture(path)?)
+        } else {
+            None
+        };
         Ok(Self {
             revoked: Arc::new(RwLock::new(set)),
             path: Some(path.to_path_buf()),
+            source_identity: Arc::new(RwLock::new(identity)),
         })
     }
 
@@ -138,7 +148,23 @@ impl OperatorRevocations {
         // A configured file disappearing after successful startup is a real
         // error. Do not route through `read_revocations`, whose initial-load
         // semantics intentionally treat an absent file as an empty set.
-        if let Some(identity) = self\n            .source_identity\n            .read()\n            .map_err(|_| std::io::Error::other("operator revocation source identity lock poisoned"))?\n            .as_ref()\n            .copied()\n        {\n            identity.verify(path)?;\n        } else if path.exists() {\n            let identity = AuthoritySourceIdentity::capture(path)?;\n            *self\n                .source_identity\n                .write()\n                .map_err(|_| std::io::Error::other("operator revocation source identity lock poisoned"))? = Some(identity);\n        }\n\n        let text = std::fs::read_to_string(path)?;
+        if let Some(identity) = self
+            .source_identity
+            .read()
+            .map_err(|_| std::io::Error::other("operator revocation source identity lock poisoned"))?
+            .as_ref()
+            .copied()
+        {
+            identity.verify(path)?;
+        } else if path.exists() {
+            let identity = AuthoritySourceIdentity::capture(path)?;
+            *self
+                .source_identity
+                .write()
+                .map_err(|_| std::io::Error::other("operator revocation source identity lock poisoned"))? = Some(identity);
+        }
+
+        let text = std::fs::read_to_string(path)?;
         let fresh = parse_revocations(&text);
         let mut current = self
             .revoked
@@ -213,11 +239,19 @@ impl OperatorRevocations {
             .cloned()
             .collect::<Vec<_>>();
         ids.sort();
-        let mut bytes = ids.join("\n").into_bytes();
+        let mut bytes = ids.join("
+").into_bytes();
         if !bytes.is_empty() {
-            bytes.push(b'\n');
+            bytes.push(b'
+');
         }
-        write_atomic_durable(path, &bytes)?;\n        let identity = AuthoritySourceIdentity::capture(path)?;\n        *self\n            .source_identity\n            .write()\n            .map_err(|_| std::io::Error::other("operator revocation source identity lock poisoned"))? = Some(identity);\n        Ok(())
+        write_atomic_durable(path, &bytes)?;
+        let identity = AuthoritySourceIdentity::capture(path)?;
+        *self
+            .source_identity
+            .write()
+            .map_err(|_| std::io::Error::other("operator revocation source identity lock poisoned"))? = Some(identity);
+        Ok(())
     }
 
     /// The number of currently-revoked operators.
@@ -322,7 +356,9 @@ mod tests {
         r.revoke_with_outcome("bob").unwrap();
         r.revoke_with_outcome("alice").unwrap();
         r.persist().unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "alice\nbob\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "alice
+bob
+");
     }
     #[test]
     fn parses_file_ignoring_blanks_and_comments() {
@@ -361,13 +397,20 @@ mod tests {
         let r = OperatorRevocations::from_file(f.path()).unwrap();
 
         // Different ordering/comments/duplicates, identical effective set.
-        std::fs::write(f.path(), "# reordered\nbob\nalice\nalice\n").unwrap();
+        std::fs::write(f.path(), "# reordered
+bob
+alice
+alice
+").unwrap();
         assert_eq!(
             r.reload_with_outcome().unwrap(),
             RevocationMutation::Unchanged { count: 2 }
         );
 
-        std::fs::write(f.path(), "alice\nbob\ncarol\n").unwrap();
+        std::fs::write(f.path(), "alice
+bob
+carol
+").unwrap();
         assert_eq!(
             r.reload_with_outcome().unwrap(),
             RevocationMutation::Changed { count: 3 }
@@ -389,7 +432,8 @@ mod tests {
     #[test]
     fn reload_fails_closed_and_keeps_prior_revocations_when_file_vanishes() {
         let f = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(f.path(), "alice\n").unwrap();
+        std::fs::write(f.path(), "alice
+").unwrap();
         let r = OperatorRevocations::from_file(f.path()).unwrap();
         assert!(r.is_revoked("alice"));
 
