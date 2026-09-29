@@ -66,8 +66,7 @@ impl DaemonSymthaeaAuthorizationRequestV1 {
     pub fn validate_structure(&self) -> bool {
         !self.operator_id.trim().is_empty()
             && self.operator_id.len() <= MAX_REQUEST_OPERATOR_ID_BYTES
-            && self.authority_scope
-                == SymthaeaAuthorityScopeV1::VerificationReceiptAttestationV1
+            && self.authority_scope == SymthaeaAuthorityScopeV1::VerificationReceiptAttestationV1
             && self.symthaea_receipt_id != [0; 16]
             && nonzero32(&self.symthaea_receipt_digest_sha256)
             && nonzero32(&self.request_nonce)
@@ -148,11 +147,9 @@ pub fn issue_symthaea_authorization_receipt_v1(
         return Err(DaemonAuthorizationIssuerError::SnapshotCommitmentMismatch);
     }
 
-    let operator_key_lineage_commitment = symthaea_key_lineage_commitment_v1(
-        &operator.ed25519_pubkey,
-        &operator.ml_dsa_65_pubkey,
-    )
-    .map_err(|_| DaemonAuthorizationIssuerError::KeyLineage)?;
+    let operator_key_lineage_commitment =
+        symthaea_key_lineage_commitment_v1(&operator.ed25519_pubkey, &operator.ml_dsa_65_pubkey)
+            .map_err(|_| DaemonAuthorizationIssuerError::KeyLineage)?;
 
     let expires_at_unix_s = authorized_at_unix_s
         .checked_add(ttl_secs)
@@ -279,7 +276,10 @@ mod tests {
 
         assert_eq!(signed.receipt.operator_id, "alice");
         assert_eq!(signed.receipt.operator_role, OperatorRole::Admin);
-        assert_eq!(signed.receipt.authority_state_epoch, snapshot.version().generation);
+        assert_eq!(
+            signed.receipt.authority_state_epoch,
+            snapshot.version().generation
+        );
         assert_eq!(signed.receipt.daemon_host_fingerprint, HOST);
         assert_eq!(
             signed.receipt.policy_commitment_sha256,
@@ -290,16 +290,14 @@ mod tests {
 
         let transcript = signed.receipt.canonical_signing_transcript().unwrap();
         let ed_signature = Signature::from_bytes(&signed.signatures.ed25519);
-        assert!(ed.verifying_key().verify(&transcript, &ed_signature).is_ok());
-        let ml_signature: [u8; ML_DSA_65_SIG_LEN] = signed
-            .signatures
-            .ml_dsa_65
-            .clone()
-            .try_into()
-            .unwrap();
         assert!(
-            MlDsaIdentity::verify(&ml.public_key_bytes(), &transcript, &ml_signature).is_ok()
+            ed.verifying_key()
+                .verify(&transcript, &ed_signature)
+                .is_ok()
         );
+        let ml_signature: [u8; ML_DSA_65_SIG_LEN] =
+            signed.signatures.ml_dsa_65.clone().try_into().unwrap();
+        assert!(MlDsaIdentity::verify(&ml.public_key_bytes(), &transcript, &ml_signature).is_ok());
     }
 
     #[test]
@@ -326,7 +324,14 @@ mod tests {
         for ttl in [0, MAX_AUTHORIZATION_TTL_SECS_V1 + 1] {
             assert_eq!(
                 issue_symthaea_authorization_receipt_v1(
-                    &request(), &snapshot, 1_000, ttl, CERT, VERIFIER, &ed, &ml
+                    &request(),
+                    &snapshot,
+                    1_000,
+                    ttl,
+                    CERT,
+                    VERIFIER,
+                    &ed,
+                    &ml
                 )
                 .unwrap_err(),
                 DaemonAuthorizationIssuerError::InvalidTtl
