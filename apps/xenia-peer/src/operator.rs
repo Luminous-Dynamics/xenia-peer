@@ -137,6 +137,7 @@ impl OperatorPolicy {
         }
         Ok(Self {
             by_ed25519: Arc::new(RwLock::new(by_ed25519)),
+            source_identity: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -198,7 +199,13 @@ impl OperatorPolicy {
             .map_err(|e| OperatorPolicyError::Io(e.to_string()))?;
         debug_assert_eq!(expected, actual);
         restrict_permissions(path);
-        Self::from_json(text.as_bytes())
+        let policy = Self::from_json(text.as_bytes())?;
+        *policy
+            .source_identity
+            .write()
+            .map_err(|_| OperatorPolicyError::Io("operator policy source identity lock poisoned".to_string()))? =
+            Some(actual);
+        Ok(policy)
     }
 
     /// Look up an enrolled operator by Ed25519 public key.
