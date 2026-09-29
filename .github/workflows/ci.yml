@@ -57,8 +57,26 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: Swatinem/rust-cache@v2
       - name: Generate Cargo.lock diagnostic
-        run: nix develop .#ci --command bash -c 'cargo generate-lockfile && git diff -- Cargo.lock'
-      - name: Clippy
+        run: |
+          nix develop .#ci --command bash -c 'cargo generate-lockfile'
+          python3 - <<'PY'
+          import subprocess, tomllib
+          old = tomllib.loads(subprocess.check_output(["git", "show", "HEAD:Cargo.lock"], text=True))
+          new = tomllib.load(open("Cargo.lock", "rb"))
+          old_pkgs = {(p["name"], p["version"], p.get("source")): p for p in old.get("package", [])}
+          for p in new.get("package", []):
+              key = (p["name"], p["version"], p.get("source"))
+              if key not in old_pkgs:
+                  print("[[package]]")
+                  print(f'name = {p["name"]!r}')
+                  print(f'version = {p["version"]!r}')
+                  if p.get("source"): print(f'source = {p["source"]!r}')
+                  if p.get("dependencies"):
+                      print("dependencies = [")
+                      for dep in p["dependencies"]: print(f"    {dep!r},")
+                      print("]")
+                  print()
+          PY      - name: Clippy
         run: nix develop .#ci --command cargo clippy --locked --all-targets -- -D warnings
       - name: Transport/session source + model contracts
         run: nix develop .#ci --command bash scripts/run_transport_session_contracts.sh
