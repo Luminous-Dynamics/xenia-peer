@@ -24,13 +24,12 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use same_file::Handle as FileIdentity;
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 use thiserror::Error;
 
 /// Current durable issuance-journal format version.
@@ -119,6 +118,9 @@ pub enum IssuanceJournalError {
     /// The journal storage identity could not be established or rechecked.
     #[error("issuance journal storage identity failure: {0}")]
     StorageIdentityUnavailable(String),
+    /// A prior storage-identity failure permanently poisoned this journal owner.
+    #[error("issuance journal storage identity is poisoned")]
+    StorageIdentityPoisoned,
     /// A prior write failed after the journal may have been partially changed.
     #[error("issuance journal is poisoned after a persistence failure")]
     JournalPoisoned,
@@ -137,7 +139,8 @@ pub enum IssuanceJournalError {
 pub struct IssuanceJournal {
     file: Arc<File>,
     path: PathBuf,
-    identity: Arc<FileIdentity>,
+    identity: FileIdentity,
+    storage_identity_poisoned: Arc<AtomicBool>,
     state: Arc<Mutex<JournalState>>,
 }
 
@@ -183,7 +186,8 @@ impl IssuanceJournal {
         Ok(Self {
             file: Arc::new(file),
             path: canonical_path,
-            identity: Arc::new(identity),
+            identity,
+            storage_identity_poisoned: Arc::new(AtomicBool::new(false)),
             state: Arc::new(Mutex::new(JournalState::default())),
         })
     }
@@ -216,7 +220,8 @@ impl IssuanceJournal {
         Ok(Self {
             file: Arc::new(file),
             path: canonical_path,
-            identity: Arc::new(identity),
+            identity,
+            storage_identity_poisoned: Arc::new(AtomicBool::new(false)),
             state: Arc::new(Mutex::new(state)),
         })
     }
@@ -412,7 +417,20 @@ impl IssuanceJournal {
     }
 
     fn ensure_storage_identity(&self) -> Result<(), IssuanceJournalError> {
-        ensure_path_identity(&self.path, &self.identity)
+        if self
+            .storage_identity_poisoned
+            .load(Ordering::Acquire)
+        {
+            return Err(IssuanceJournalError::StorageIdentityPoisoned);
+        }
+
+        match ensure_path_identity(&self.path, &self.identity) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.storage_identity_poisoned.store(true, Ordering::Release);
+                Err(error)
+            }
+        }
     }
 
     fn lock_state(
@@ -619,6 +637,18 @@ fn apply_record(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileIdentity {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(windows)]
+    volume_serial: u64,
+    #[cfg(windows)]
+    file_index: u64,
+}
+
 fn canonicalize_journal_path(path: &Path) -> Result<PathBuf, IssuanceJournalError> {
     fs::canonicalize(path)
         .map_err(|error| IssuanceJournalError::StorageIdentityUnavailable(error.to_string()))
@@ -647,19 +677,45 @@ fn validate_storage_root(path: &Path) -> Result<(), IssuanceJournalError> {
 }
 
 fn capture_identity(file: &File) -> Result<FileIdentity, IssuanceJournalError> {
-    let cloned = file
-        .try_clone()
+    let metadata = file
+        .metadata()
         .map_err(|error| IssuanceJournalError::StorageIdentityUnavailable(error.to_string()))?;
-    FileIdentity::from_file(cloned)
-        .map_err(|error| IssuanceJournalError::StorageIdentityUnavailable(error.to_string()))
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(FileIdentity {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        })
+    }
+
+    #[cfg(windows)]
+    {
+        let info = winapi_util::file::information(file)
+            .map_err(|error| IssuanceJournalError::StorageIdentityUnavailable(error.to_string()))?;
+        Ok(FileIdentity {
+            volume_serial: info.volume_serial_number(),
+            file_index: info.file_index(),
+        })
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = metadata;
+        Err(IssuanceJournalError::StorageIdentityUnavailable(
+            "stable storage-object identity is unsupported on this target".into(),
+        ))
+    }
 }
 
 fn ensure_path_identity(
     path: &Path,
     expected: &FileIdentity,
 ) -> Result<(), IssuanceJournalError> {
-    let current = FileIdentity::from_path(path)
+    let file = File::open(path)
         .map_err(|error| IssuanceJournalError::StorageIdentityUnavailable(error.to_string()))?;
+    let current = capture_identity(&file)?;
     if current == *expected {
         Ok(())
     } else {
@@ -916,6 +972,23 @@ mod tests {
     }
 
 
+
+    #[test]
+    fn repeated_durable_writes_preserve_storage_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = IssuanceJournal::bootstrap_new(path(&dir)).unwrap();
+
+        journal.reserve(nonce(7), binding(8)).unwrap();
+        journal.record_issued(nonce(7), binding(8), b"stable-receipt").unwrap();
+
+        assert_eq!(
+            journal.reserve(nonce(7), binding(8)).unwrap(),
+            ReserveOutcome::AlreadyIssued {
+                receipt: b"stable-receipt".to_vec()
+            }
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn path_replacement_fails_closed_for_live_owner() {
@@ -932,9 +1005,13 @@ mod tests {
             journal.reserve(nonce(3), binding(4)).unwrap_err(),
             IssuanceJournalError::StorageIdentityMismatch
         );
+
+        std::fs::remove_file(&journal_path).unwrap();
+        std::fs::rename(&moved_path, &journal_path).unwrap();
+
         assert_eq!(
             journal.len().unwrap_err(),
-            IssuanceJournalError::StorageIdentityMismatch
+            IssuanceJournalError::StorageIdentityPoisoned
         );
     }
 
