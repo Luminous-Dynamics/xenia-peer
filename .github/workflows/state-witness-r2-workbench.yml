@@ -39,6 +39,13 @@ jobs:
           qualification_base=a5edc86c3a6dc947eb31a188fd49a416ed4ce870
           git cat-file -e "${qualification_base}^{commit}"
           git merge-base --is-ancestor "$qualification_base" HEAD
+      - name: Prove event head identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_EVENT_NAME" = "push"
+
       - name: Capture repair preimage
         shell: bash
         run: |
@@ -86,6 +93,7 @@ jobs:
         run: cargo fmt --package xenia-ledger -- --check
 
       - name: Stage exact formatted artifacts
+        if: ${{ always() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -100,7 +108,10 @@ jobs:
           (cd /tmp/state-witness-r2 && sha256sum crates/xenia-ledger/src/*.rs repair.patch xenia-ledger-tests.log preimage.sha256 checkout_head.txt > SHA256SUMS)
 
       - name: Emit auditable repair handoff manifest
+        if: ${{ always() }}
         shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
         run: |
           set -euo pipefail
           target=crates/xenia-ledger/src/state_witness.rs
@@ -113,6 +124,8 @@ jobs:
             printf 'qualification_base_is_ancestor=true\n'
             printf 'workbench_checkout_commit=%s\n' "$(cat /tmp/state-witness-r2-head.txt)"
             printf 'github_sha=%s\n' "$GITHUB_SHA"
+            printf 'github_workflow_sha=%s\n' "$GITHUB_WORKFLOW_SHA"
+            printf 'github_event_name=%s\n' "$GITHUB_EVENT_NAME"
             printf 'github_run_id=%s\n' "$GITHUB_RUN_ID"
             printf 'github_run_attempt=%s\n' "$GITHUB_RUN_ATTEMPT"
             printf 'github_ref=%s\n' "$GITHUB_REF"
@@ -123,14 +136,16 @@ jobs:
             printf 'rustc=%s\n' "$(rustc --version)"
             printf 'cargo=%s\n' "$(cargo --version)"
             printf 'fixture_contract=exactly_one_replacement_of_fixed_101_102_witness_helper\n'
+            printf 'job_status=%s\n' "$JOB_STATUS"
             printf 'qualification_status=workbench_only_not_qualification_evidence\n'
           } > /tmp/state-witness-r2/REPAIR_MANIFEST
           (cd /tmp/state-witness-r2 && sha256sum REPAIR_MANIFEST >> SHA256SUMS)
 
       - name: Upload formatter/test workbench artifacts
+        if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: state-witness-r2-formatted
+          name: state-witness-r2-formatted-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/state-witness-r2
           if-no-files-found: error
           retention-days: 3
