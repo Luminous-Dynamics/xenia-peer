@@ -905,6 +905,33 @@ mod tests {
         assert_eq!(policy.lookup(&ed).unwrap().ml_dsa_pubkey, new_ml);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn trusted_persist_refuses_replaced_policy_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("operators.json");
+        let policy = OperatorPolicy::from_operators(vec![
+            record("alice", [8u8; 32], OperatorRole::Admin),
+        ])
+        .unwrap();
+        policy.persist_to(&path).unwrap();
+
+        let trust =
+            xenia_symthaea_live_authority_guard::AuthorityStorageTrust::validate(dir.path())
+                .unwrap();
+        let trusted = OperatorPolicy::load_trusted(&path, &trust).unwrap();
+
+        let replacement = dir.path().join("replacement.json");
+        std::fs::write(&replacement, b"{\"operators\":[]}").unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+
+        trusted
+            .persist_to_trusted(&path)
+            .expect_err("stale policy identity must refuse overwrite");
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes, b"{\"operators\":[]}");
+    }
+
     #[test]
     fn persist_to_round_trips_through_load() {
         let dir = std::env::temp_dir().join(format!(
