@@ -105,6 +105,7 @@ mod operator_live_smoke;
 #[cfg(test)]
 mod operator_rbac_smoke;
 mod operator_revocations;
+// Cross-process authority ownership is acquired before durable D3A1 state opens.
 mod operator_sealed_channel;
 #[cfg(test)]
 mod operator_sealed_smoke;
