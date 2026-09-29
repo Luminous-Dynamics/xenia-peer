@@ -1353,6 +1353,35 @@ mod tests {
     }
 
     #[test]
+    fn symthaea_request_parser_rejects_zero_nonce() {
+        let op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let daemon_ml_dsa = test_daemon_ml_dsa();
+        let token = crate::operator_auth::issue_token(
+            &daemon,
+            &daemon_ml_dsa,
+            &crate::operator_auth::AuthenticatedOperator {
+                operator_id: "alice".to_string(),
+                role: OperatorRole::Admin,
+            },
+            1000,
+            crate::operator_auth::TOKEN_TTL_SECS,
+            [0x44; 16],
+        );
+        let dto = serde_json::json!({
+            "token": TokenDto::from_signed(&token),
+            "authority_scope": xenia_symthaea_attestation_authority::SYMTHAEA_RECEIPT_ATTESTATION_SCOPE_V1,
+            "symthaea_receipt_id": hex::encode([0x11u8; 16]),
+            "symthaea_receipt_digest_sha256": hex::encode([0x22u8; 32]),
+            "request_nonce": hex::encode([0u8; 32]),
+            "action_signature": hex::encode([0u8; 64]),
+            "ml_dsa_action_signature": hex::encode([0u8; ML_DSA_65_SIG_LEN]),
+        });
+        let error = parse_authenticated_symthaea_authorization(&dto.to_string()).unwrap_err();
+        assert!(error.contains("request nonce must be nonzero"));
+        let _ = op;
+    }
+    #[test]
     fn symthaea_authority_requires_explicit_bootstrap() {
         let dir = tempfile::tempdir().unwrap();
         let ledger_path = dir.path().join("authority-generation.bin");
