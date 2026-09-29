@@ -28,6 +28,10 @@ xenia-symthaea-live-snapshot = { path = "../../crates/xenia-authority-symthaea-l
 xenia-symthaea-daemon-issuer = { path = "../../crates/xenia-authority-symthaea-daemon-issuer" }
 xenia-symthaea-issuance-journal = { path = "../../crates/xenia-authority-symthaea-issuance-journal" }
 xenia-symthaea-daemon-certificate = { path = "../../crates/xenia-authority-symthaea-daemon-certificate" }
+xenia-symthaea-live-snapshot = { path = "../../crates/xenia-authority-symthaea-live-snapshot" }
+xenia-symthaea-daemon-issuer = { path = "../../crates/xenia-authority-symthaea-daemon-issuer" }
+xenia-symthaea-issuance-journal = { path = "../../crates/xenia-authority-symthaea-issuance-journal" }
+xenia-symthaea-daemon-certificate = { path = "../../crates/xenia-authority-symthaea-daemon-certificate" }
 tokio-tungstenite = "0.24"
 
 xenia-wire = { workspace = true, features = ["consent", "reference-frame", "operator-rekey", "handshake"] }
