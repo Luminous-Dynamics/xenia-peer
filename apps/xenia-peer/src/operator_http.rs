@@ -206,6 +206,9 @@ pub(crate) struct OperatorAuthState {
     /// Optional D3A1 live authority guard. Production authority issuance is
     /// unavailable until this is explicitly initialized from durable state.
     pub(crate) symthaea_authority: OnceLock<Arc<SymthaeaAuthorityState>>,
+    /// Durable single-use issuance state; installed only when the live adapter
+    /// is explicitly configured with its journal and verifier commitment.
+    pub(crate) symthaea_issuance: OnceLock<Arc<SymthaeaIssuanceState>>,
 }
 
 impl OperatorAuthState {
@@ -246,6 +249,7 @@ impl OperatorAuthState {
             host_identity,
             daemon_certificate,
             symthaea_authority: OnceLock::new(),
+            symthaea_issuance: OnceLock::new(),
         }
     }
 
@@ -256,6 +260,14 @@ impl OperatorAuthState {
         authority: Arc<SymthaeaAuthorityState>,
     ) -> Result<(), Arc<SymthaeaAuthorityState>> {
         self.symthaea_authority.set(authority)
+    }
+
+    /// Install the durable live issuance journal exactly once.
+    pub(crate) fn set_symthaea_issuance(
+        &self,
+        issuance: Arc<SymthaeaIssuanceState>,
+    ) -> Result<(), Arc<SymthaeaIssuanceState>> {
+        self.symthaea_issuance.set(issuance)
     }
 }
 
@@ -799,6 +811,25 @@ async fn replace_operator_key_handler(
         "operator key replaced via admin endpoint"
     );
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Durable configuration/state for the live Symthaea authority-receipt adapter.
+#[derive(Debug)]
+pub(crate) struct SymthaeaIssuanceState {
+    pub(crate) journal: IssuanceJournal,
+    pub(crate) verifier_artifact_commitment_sha256: [u8; 32],
+}
+
+impl SymthaeaIssuanceState {
+    pub(crate) fn new(
+        journal: IssuanceJournal,
+        verifier_artifact_commitment_sha256: [u8; 32],
+    ) -> Self {
+        Self {
+            journal,
+            verifier_artifact_commitment_sha256,
+        }
+    }
 }
 
 /// State for the `/v1/audit/*` routes: the auth state (token/role
