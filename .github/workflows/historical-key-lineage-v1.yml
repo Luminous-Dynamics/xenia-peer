@@ -83,6 +83,26 @@ jobs:
           git checkout --detach "$qualification_subject"
           test "$(git rev-parse HEAD)" = "$qualification_subject"
 
+      - name: Initialize qualification evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p qualification
+          {
+            printf '%s\n' 'manifest_version=2'
+            printf 'qualification_base=%s\n' "$LINEAGE_PARENT"
+            printf 'qualification_subject=%s\n' 'cd32063ad3c970955c17178a89fe8fe837f0090d'
+            printf 'event_head=%s\n' "${{ github.event.pull_request.head.sha || github.sha }}"
+            printf 'workflow_sha=%s\n' "${GITHUB_WORKFLOW_SHA}"
+            printf 'run_id=%s\n' "${GITHUB_RUN_ID}"
+            printf 'run_attempt=%s\n' "${GITHUB_RUN_ATTEMPT}"
+            printf 'event=%s\n' "${GITHUB_EVENT_NAME}"
+            printf 'ref=%s\n' "${GITHUB_REF}"
+            printf 'base_ref=%s\n' "${GITHUB_BASE_REF}"
+            printf 'head_ref=%s\n' "${GITHUB_HEAD_REF}"
+            printf 'subject_checkout_head=%s\n' "$(git rev-parse HEAD)"
+          } > qualification/qualification-manifest.env
+
       - name: Bind frozen lineage profile and source bytes
         shell: bash
         run: |
@@ -162,10 +182,19 @@ jobs:
             "immutable_checkout=PASS" \
             > qualification/historical-key-lineage-v1.status.txt
 
+      - name: Finalize qualification evidence
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p qualification
+          printf 'job_status=%s\n' "${{ job.status }}" >> qualification/qualification-manifest.env
+          printf 'qualification_result=%s\n' "${{ job.status == 'success' && 'candidate-executed' || 'not-qualified' }}" >> qualification/qualification-manifest.env
+
       - name: Upload qualification evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
         with:
-          name: historical-key-lineage-v1
+          name: historical-key-lineage-v1-qualification-${{ github.run_id }}
           path: qualification/*
           if-no-files-found: error
           retention-days: 30
