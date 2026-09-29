@@ -431,6 +431,45 @@ mod tests {
     }
 
     #[test]
+    fn stable_snapshot_and_holds_write_barrier_through_callback() {
+        use std::sync::mpsc::{self, TryRecvError};
+        use std::thread;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let guard = guard(&dir);
+        let writer_guard = guard.clone();
+        let (start_tx, start_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+
+        let writer = thread::spawn(move || {
+            start_rx.recv().unwrap();
+            let result = writer_guard.with_mutation(|| {
+                LiveAuthorityMutation::unchanged(())
+            });
+            done_tx.send(result.is_ok()).unwrap();
+        });
+
+        let result: Result<(), LiveAuthorityGuardError<&'static str>> =
+            guard.with_stable_snapshot_and(
+                |_| Ok(()),
+                |_snapshot| {
+                    start_tx.send(()).unwrap();
+                    match done_rx.recv_timeout(Duration::from_millis(100)) {
+                        Err(mpsc::RecvTimeoutError::Timeout) => Ok(()),
+                        Ok(_) => Err("writer acquired mutation barrier too early"),
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            Err("writer thread disconnected")
+                        }
+                    }
+                },
+            );
+        assert!(result.is_ok());
+        assert!(matches!(done_rx.try_recv(), Ok(true)));
+        assert!(matches!(done_rx.try_recv(), Err(TryRecvError::Empty)));
+        writer.join().unwrap();
+    }
+    #[test]
     fn persistence_failure_after_change_poisons_both_layers() {
         let dir = tempfile::tempdir().unwrap();
         let path = ledger_path(&dir);
