@@ -1719,6 +1719,118 @@ mod tests {
         assert!(reloaded.lookup(&new_admin_op.identity_public_key_bytes()).is_some());
     }
 
+    /// If revocation changes in-memory authority state but its durable source
+    /// disappears before commit, the live guard must poison and later issuance
+    /// must fail closed. This is the revocation counterpart to the key-replacement
+    /// persistence theorem.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn integrated_revocation_persistence_failure_poison_fails_closed() {
+        let admin_op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let seed_state = state_with(&admin_op, daemon.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let operators_file = dir.path().join("operators.json");
+        seed_state.policy.persist_to(&operators_file).unwrap();
+        let revocation_path = dir.path().join("revoked-operators.txt");
+        std::fs::write(&revocation_path, b"").unwrap();
+        let trust =
+            xenia_symthaea_live_authority_guard::AuthorityStorageTrust::validate(dir.path())
+                .unwrap();
+        let policy = OperatorPolicy::load_trusted(&operators_file, &trust).unwrap();
+        let revocations = OperatorRevocations::from_trusted_file(&revocation_path, trust.clone())
+            .unwrap();
+        let authority = SymthaeaAuthorityState::open_or_bootstrap(
+            policy.clone(),
+            revocations.clone(),
+            [0x11; 32],
+            &dir.path().join("authority-generation.bin"),
+            true,
+        )
+        .unwrap();
+        let issuance = Arc::new(SymthaeaIssuanceState::new(
+            IssuanceJournal::bootstrap_new(&dir.path().join("issuance.journal")).unwrap(),
+            [0x22; 32],
+        ));
+        let state = Arc::new(OperatorAuthState::new(
+            policy,
+            daemon.clone(),
+            test_daemon_ml_dsa(),
+            HandshakeManager::new(),
+            crate::operator_auth::AUTH_RATE_MAX,
+            crate::operator_auth::AUTH_RATE_WINDOW_SECS,
+        ));
+        state.symthaea_authority.set(authority.clone()).unwrap();
+        state.symthaea_issuance.set(issuance.clone()).unwrap();
+
+        // Remove the trusted revocation source after startup. The in-memory
+        // mutation can happen, but its required durable persistence must refuse
+        // the stale source identity and poison the authority guard.
+        std::fs::remove_file(&revocation_path).unwrap();
+
+        let now = now_secs();
+        let (revoke_token, revoke_nonce) = token_json_for(&daemon, OperatorRole::Admin, now);
+        let revoke_body = revoke_body(&admin_op, revoke_token, "mallory", &revoke_nonce);
+        let router = router(
+            state.clone(),
+            revocations.clone(),
+            empty_ledger(),
+            Arc::new(Vec::new()),
+            Some(operators_file.clone()),
+        );
+
+        let (revoke_status, revoke_response) =
+            post_json(&router, "/operator/revoke", revoke_body).await;
+        assert_eq!(
+            revoke_status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "revocation must fail closed when durable persistence fails: {revoke_response}"
+        );
+        assert!(revocations.is_revoked("mallory"));
+        assert!(authority.guard.is_poisoned());
+        assert!(matches!(
+            authority.guard.current_version(),
+            Err(xenia_symthaea_live_authority_guard::LiveAuthorityGuardError::GuardPoisoned)
+        ));
+        assert_eq!(authority.guard.current_version().unwrap_or_else(|_| unreachable!()).generation, 1);
+
+        let (token_json, token_nonce) = token_json_for(&daemon, OperatorRole::Admin, now);
+        let receipt_id = [0xa1u8; 16];
+        let receipt_digest = [0xa2u8; 32];
+        let request_nonce = [0xa3u8; 32];
+        let transcript = crate::operator_auth::symthaea_authorization_transcript(
+            "alice",
+            SymthaeaAuthorityScopeV1::VerificationReceiptAttestationV1.id(),
+            &receipt_id,
+            &receipt_digest,
+            &request_nonce,
+            &token_nonce,
+        );
+        let issuance_body = serde_json::json!({
+            "token": token_json,
+            "authority_scope": xenia_symthaea_attestation_authority::SYMTHAEA_RECEIPT_ATTESTATION_SCOPE_V1,
+            "symthaea_receipt_id": hex::encode(receipt_id),
+            "symthaea_receipt_digest_sha256": hex::encode(receipt_digest),
+            "request_nonce": hex::encode(request_nonce),
+            "action_signature": hex::encode(admin_op.sign(&transcript).to_bytes()),
+            "ml_dsa_action_signature": hex::encode(admin_op.sign_ml_dsa(&transcript)),
+        })
+        .to_string();
+
+        let (issuance_status, issuance_response) =
+            post_json(&router, "/operator/symthaea/authorization-receipt", issuance_body)
+                .await;
+        assert_eq!(
+            issuance_status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "issuance must fail closed after revocation persistence uncertainty: {issuance_response}"
+        );
+        assert_eq!(
+            issuance.journal.reserve_status(&request_nonce).unwrap(),
+            Some(ReserveOutcome::Aborted)
+        );
+        assert!(!issuance_response.contains("\\"operator_id\\""));
+    }
+
     /// If key replacement changes in-memory authority state but cannot persist
     /// the authoritative policy, the live guard must poison and subsequent
     /// issuance must fail closed rather than mint from uncertain state.
