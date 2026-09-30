@@ -178,6 +178,26 @@ generation remains N+1
 
 The same theorem now has an integrated operator-key replacement regression, \`integrated_issuance_cannot_straddle_concurrent_key_replacement\`. It runs the real \`/operator/replace-key\` endpoint against a trusted durable \`operators.json\` while issuance is paused after its coherent snapshot. The replacement is proven to have reached the guarded mutation boundary while generation remains unchanged; only after issuance releases its read barrier does the replacement commit as the next generation. The test then reloads the durable policy and confirms the replacement survived restart semantics. This closes the important enrollment-commitment case: an issuance receipt cannot retain the pre-replacement enrollment commitment while the live and durable operator policy have already moved to the replacement.
 
+The persistence-failure theorem now covers both mutable authority surfaces. The integrated regression
+\`integrated_revocation_persistence_failure_poison_fails_closed\` removes the trusted revocation
+source after startup, drives the real \`/operator/revoke\` endpoint, and proves that the in-memory
+revocation may change but durable persistence refuses the stale source identity. The guarded
+mutation therefore poisons the live authority instead of advancing generation. A subsequent real
+issuance is refused, records its nonce as terminal \`Aborted\`, and exposes no receipt. This is the
+revocation counterpart to \`integrated_key_replacement_persistence_failure_poison_fails_closed\`.
+
+Together these tests establish the mutation-side fail-closed rule:
+
+\`\`\`text
+semantic mutation
+      |
+      +-- durable persistence succeeds --> generation N -> N+1
+      |
+      +-- durable persistence is uncertain --> GuardPoisoned
+                                                   |
+                                                   +--> no subsequent issuance
+\`\`\`
+
 integrated HTTP regression \`integrated_issuance_cannot_straddle_concurrent_revocation\`
 holds the real issuance handler immediately after coherent snapshot construction, starts
 a real /operator/revoke mutation concurrently, and proves the authority generation and
