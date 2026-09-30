@@ -678,6 +678,8 @@ async fn symthaea_authorization_handler(
             "live Symthaea issuance journal is not enabled".to_string(),
         )
     })?;
+    #[cfg(test)]
+    issuance.maybe_pause_after_authentication();
 
     // Fast reject only. The coherent-snapshot path below rechecks the effective
     // revocation state while the same authority read barrier remains held.
@@ -1105,6 +1107,8 @@ pub(crate) struct SymthaeaIssuanceState {
     fault_point: StdMutex<IssuanceFaultPoint>,
     #[cfg(test)]
     snapshot_pause: StdMutex<Option<Arc<IssuanceSnapshotPause>>>,
+    #[cfg(test)]
+    authentication_pause: StdMutex<Option<Arc<IssuanceAuthenticationPause>>>,
 }
 
 impl SymthaeaIssuanceState {
@@ -1118,6 +1122,8 @@ impl SymthaeaIssuanceState {
             fault_point: StdMutex::new(IssuanceFaultPoint::Never),
             #[cfg(test)]
             snapshot_pause: StdMutex::new(None),
+            #[cfg(test)]
+            authentication_pause: StdMutex::new(None),
         }
     }
 
@@ -1152,6 +1158,27 @@ impl SymthaeaIssuanceState {
     }
 
     #[cfg(test)]
+    fn set_authentication_pause(&self, pause: Option<Arc<IssuanceAuthenticationPause>>) {
+        *self
+            .authentication_pause
+            .lock()
+            .expect("issuance authentication pause mutex must not be poisoned") = pause;
+    }
+
+    #[cfg(test)]
+    fn maybe_pause_after_authentication(&self) {
+        let pause = self
+            .authentication_pause
+            .lock()
+            .expect("issuance authentication pause mutex must not be poisoned")
+            .clone();
+        if let Some(pause) = pause {
+            pause.entered.wait();
+            pause.release.wait();
+        }
+    }
+
+    #[cfg(test)]
     fn maybe_pause_after_snapshot(&self) {
         let pause = self
             .snapshot_pause
@@ -1161,6 +1188,23 @@ impl SymthaeaIssuanceState {
         if let Some(pause) = pause {
             pause.entered.wait();
             pause.release.wait();
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct IssuanceAuthenticationPause {
+    entered: Barrier,
+    release: Barrier,
+}
+
+#[cfg(test)]
+impl IssuanceAuthenticationPause {
+    fn new() -> Self {
+        Self {
+            entered: Barrier::new(2),
+            release: Barrier::new(2),
         }
     }
 }
@@ -1584,6 +1628,95 @@ mod tests {
         );
 
         (router, issuance, request_nonce, body, conflicting_body, journal_path, dir)
+    }
+
+    /// Freeze the real request immediately after successful authentication,
+    /// replace that authenticated operator's keys through the real mutation
+    /// endpoint, and prove the later coherent lineage check rejects the stale
+    /// authentication rather than issuing under the replaced identity.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn integrated_issuance_rejects_post_authentication_key_replacement() {
+        let admin_op = HandshakeManager::new();
+        let target_op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let seed_state = state_with_target(&admin_op, daemon.clone(), &target_op, OperatorRole::Viewer);
+        let dir = tempfile::tempdir().unwrap();
+        let operators_file = dir.path().join("operators.json");
+        seed_state.policy.persist_to(&operators_file).unwrap();
+        let trust = xenia_symthaea_live_authority_guard::AuthorityStorageTrust::validate(dir.path()).unwrap();
+        let policy = OperatorPolicy::load_trusted(&operators_file, &trust).unwrap();
+        let state = Arc::new(OperatorAuthState::new(
+            policy, daemon.clone(), test_daemon_ml_dsa(), HandshakeManager::new(),
+            crate::operator_auth::AUTH_RATE_MAX, crate::operator_auth::AUTH_RATE_WINDOW_SECS,
+        ));
+        let revocations = OperatorRevocations::empty();
+        let authority = SymthaeaAuthorityState::open_or_bootstrap(
+            state.policy.clone(), revocations.clone(), [0x11; 32],
+            &dir.path().join("authority-generation.bin"), true,
+        ).unwrap();
+        let issuance = Arc::new(SymthaeaIssuanceState::new(
+            IssuanceJournal::bootstrap_new(&dir.path().join("issuance.journal")).unwrap(),
+            [0x22; 32],
+        ));
+        let authentication_pause = Arc::new(IssuanceAuthenticationPause::new());
+        issuance.set_authentication_pause(Some(authentication_pause.clone()));
+        state.symthaea_authority.set(authority.clone()).unwrap();
+        state.symthaea_issuance.set(issuance.clone()).unwrap();
+
+        let now = now_secs();
+        let (token_json, token_nonce) = token_json_for(&daemon, OperatorRole::Admin, now);
+        let receipt_id = [0x81u8; 16];
+        let receipt_digest = [0x82u8; 32];
+        let request_nonce = [0x83u8; 32];
+        let transcript = crate::operator_auth::symthaea_authorization_transcript(
+            "alice", SymthaeaAuthorityScopeV1::VerificationReceiptAttestationV1.id(),
+            &receipt_id, &receipt_digest, &request_nonce, &token_nonce,
+        );
+        let issuance_body = serde_json::json!({
+            "token": token_json,
+            "authority_scope": xenia_symthaea_attestation_authority::SYMTHAEA_RECEIPT_ATTESTATION_SCOPE_V1,
+            "symthaea_receipt_id": hex::encode(receipt_id),
+            "symthaea_receipt_digest_sha256": hex::encode(receipt_digest),
+            "request_nonce": hex::encode(request_nonce),
+            "action_signature": hex::encode(admin_op.sign(&transcript).to_bytes()),
+            "ml_dsa_action_signature": hex::encode(admin_op.sign_ml_dsa(&transcript)),
+        }).to_string();
+
+        let new_admin_op = HandshakeManager::new();
+        let (replacement_token, replacement_nonce) = token_json_for(&daemon, OperatorRole::Admin, now);
+        let replacement_body = replace_key_body(
+            &admin_op, replacement_token, "alice",
+            new_admin_op.identity_public_key_bytes(), &new_admin_op.ml_dsa_public_key_bytes(),
+            None, &replacement_nonce,
+        );
+        let router = router(
+            state.clone(), revocations, empty_ledger(), Arc::new(Vec::new()),
+            Some(operators_file.clone()),
+        );
+        let issuance_task = tokio::spawn({
+            let router = router.clone();
+            async move { post_json(&router, "/operator/symthaea/authorization-receipt", issuance_body).await }
+        });
+        authentication_pause.entered.wait();
+
+        let replacement_task = tokio::spawn({
+            let router = router.clone();
+            async move { post_json(&router, "/operator/replace-key", replacement_body).await }
+        });
+        let (replacement_status, replacement_response) = replacement_task.await.unwrap();
+        assert_eq!(replacement_status, StatusCode::NO_CONTENT, "replacement body: {replacement_response}");
+        assert_eq!(authority.guard.current_version().unwrap().generation, 2);
+        assert!(state.policy.lookup(&admin_op.identity_public_key_bytes()).is_none());
+        assert!(state.policy.lookup(&new_admin_op.identity_public_key_bytes()).is_some());
+
+        authentication_pause.release.wait();
+        let (issuance_status, issuance_response) = issuance_task.await.unwrap();
+        assert_eq!(issuance_status, StatusCode::SERVICE_UNAVAILABLE, "stale issuance must be refused: {issuance_response}");
+        assert_eq!(issuance.journal.reserve_status(&request_nonce).unwrap(), Some(ReserveOutcome::Aborted));
+        assert!(!issuance_response.contains("\"operator_id\""));
+        let reloaded = OperatorPolicy::load_trusted(&operators_file, &trust).unwrap();
+        assert!(reloaded.lookup(&admin_op.identity_public_key_bytes()).is_none());
+        assert!(reloaded.lookup(&new_admin_op.identity_public_key_bytes()).is_some());
     }
 
     /// The issuance read barrier is the concurrency linearization boundary:
