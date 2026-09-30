@@ -45,6 +45,35 @@ Authentication is not itself a linearization point. A successfully authenticated
 
 The exact operation-specific outcome may vary with the target operator used by a test, but the provenance rule must not. For permutations beginning with a mutation, the test must use an issuance request whose authenticated authority is invalidated by that mutation.
 
+## Mutation target versus mutation author
+
+The matrix must keep **the identity being changed** separate from **the identity authorizing the change**.
+
+A mutation-first case must not accidentally turn into an authorization test in which the first mutation revokes or replaces the credentials of the same principal needed to perform the second mutation. For example, if R targets the issuance principal, a later K operation must be authorized by a separate still-authorized actor. Likewise, the fixture must make the intended mutation target explicit rather than relying on whichever operator happens to be the test harness identity.
+
+For every permutation:
+
+1. Define the **issuance principal** whose authenticated request is under test.
+2. Define the **mutation target** for R and K independently.
+3. Define the **mutation author** independently for every mutation.
+4. Ensure each mutation reaches the real guarded mutation boundary before the test asserts its ordering.
+5. Ensure a rejection caused by stale lineage or revocation is distinguishable from a rejection caused merely by insufficient mutation authorization.
+
+This separation matters because the theorem being qualified is:
+
+```text
+authority state transition ordering
+    + coherent issuance observation
+    + durable provenance
+
+not merely:
+
+```text
+revoked/replaced principal cannot authorize another mutation
+```
+
+The fixture should therefore use a second authorized admin actor where necessary, while keeping the issuance principal's credentials as the object whose freshness is being tested.
+
 ## Generation accounting
 
 For an initial authority generation N:
