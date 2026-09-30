@@ -146,7 +146,9 @@ For any issuance I and guarded authority mutation M:
       -> no receipt may combine a pre-M generation/commitment with post-M authority
 \`\`\`
 
-The integrated HTTP regression \`integrated_issuance_cannot_straddle_concurrent_revocation\`
+The The same theorem now has an integrated operator-key replacement regression, \`integrated_issuance_cannot_straddle_concurrent_key_replacement\`. It runs the real \`/operator/replace-key\` endpoint against a trusted durable \`operators.json\` while issuance is paused after its coherent snapshot. The replacement is proven to have reached the guarded mutation boundary while generation remains unchanged; only after issuance releases its read barrier does the replacement commit as the next generation. The test then reloads the durable policy and confirms the replacement survived restart semantics. This closes the important enrollment-commitment case: an issuance receipt cannot retain the pre-replacement enrollment commitment while the live and durable operator policy have already moved to the replacement.
+
+integrated HTTP regression \`integrated_issuance_cannot_straddle_concurrent_revocation\`
 holds the real issuance handler immediately after coherent snapshot construction, starts
 a real /operator/revoke mutation concurrently, and proves the authority generation and
 revocation set remain unchanged until issuance releases its read barrier. The mutation then
