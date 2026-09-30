@@ -1426,6 +1426,7 @@ mod tests {
         Arc<SymthaeaIssuanceState>,
         [u8; 32],
         String,
+        String,
         std::path::PathBuf,
         tempfile::TempDir,
     ) {
@@ -1477,6 +1478,29 @@ mod tests {
         })
         .to_string();
 
+        // Same nonce, same token, but a different receipt digest with a freshly
+        // valid operator signature. The journal binding must reject this as a
+        // different operation attempting to reuse an idempotency nonce.
+        let conflicting_digest = [0x52u8; 32];
+        let conflicting_transcript = crate::operator_auth::symthaea_authorization_transcript(
+            "alice",
+            xenia_symthaea_attestation_authority::SymthaeaAuthorityScopeV1::VerificationReceiptAttestationV1.id(),
+            &receipt_id,
+            &conflicting_digest,
+            &request_nonce,
+            &token_nonce,
+        );
+        let conflicting_body = serde_json::json!({
+            "token": token_json,
+            "authority_scope": xenia_symthaea_attestation_authority::SYMTHAEA_RECEIPT_ATTESTATION_SCOPE_V1,
+            "symthaea_receipt_id": hex::encode(receipt_id),
+            "symthaea_receipt_digest_sha256": hex::encode(conflicting_digest),
+            "request_nonce": hex::encode(request_nonce),
+            "action_signature": hex::encode(operator.sign(&conflicting_transcript).to_bytes()),
+            "ml_dsa_action_signature": hex::encode(operator.sign_ml_dsa(&conflicting_transcript)),
+        })
+        .to_string();
+
         let router = router(
             state,
             revocations,
@@ -1485,7 +1509,7 @@ mod tests {
             None,
         );
 
-        (router, issuance, request_nonce, body, journal_path, dir)
+        (router, issuance, request_nonce, body, conflicting_body, journal_path, dir)
     }
 
     #[tokio::test]
@@ -1503,7 +1527,7 @@ mod tests {
         ];
 
         for (point, expected_issued) in cases {
-            let (router, issuance, nonce, body, journal_path, _dir) =
+            let (router, issuance, nonce, body, _conflicting_body, journal_path, _dir) =
                 configured_issuance_fault_fixture(point);
 
             let join = tokio::spawn(async move {
@@ -1562,7 +1586,7 @@ mod tests {
 
     #[tokio::test]
     async fn integrated_issuance_without_fault_replays_exact_receipt_bytes() {
-        let (router, issuance, nonce, body, _journal_path, _dir) =
+        let (router, issuance, nonce, body, conflicting_body, _journal_path, _dir) =
             configured_issuance_fault_fixture(IssuanceFaultPoint::Never);
 
         let (first_status, first_body) = post_json(
@@ -1590,6 +1614,24 @@ mod tests {
         assert_eq!(
             second_body, first_body,
             "idempotent replay must return the exact retained receipt bytes"
+        );
+
+        let (conflict_status, _) = post_json(
+            &router,
+            "/operator/symthaea/authorization-receipt",
+            conflicting_body,
+        )
+        .await;
+        assert_ne!(
+            conflict_status,
+            StatusCode::OK,
+            "the same nonce must not authorize a different receipt binding"
+        );
+        assert_eq!(
+            issuance.journal.reserve_status(&nonce).unwrap(),
+            Some(ReserveOutcome::AlreadyIssued {
+                receipt: first_body.as_bytes().to_vec(),
+            })
         );
     }
 
