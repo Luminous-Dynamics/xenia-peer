@@ -103,10 +103,14 @@ deterministic handler-level fault-injection seam exercises them.
 
 The trusted-root design relies on a daemon-owned directory that is not group/world
 writable, direct-child durable paths, no-follow opens for final path components,
-stable identity checks on opened files, and (on Unix) a kernel lock held on the
-trusted root directory inode itself. The root-directory lock avoids the
+stable identity checks on opened files, a pinned trusted-root directory identity,
+and (on Unix) a kernel lock held on the trusted root directory inode itself. The root-directory lock avoids the
 replaceable-child-lock-file problem: replacing a child pathname cannot transfer
-ownership to another inode while the first owner remains alive. These checks reduce path substitution risk,
+ownership to another inode while the first owner remains alive. The retained root
+identity also makes pathname-based operations fail closed if the configured root
+directory itself is replaced after startup. This does not eliminate every pathname
+race, because portable path-based writes still lack a stable directory-fd resolution
+primitive. These checks reduce path substitution risk,
 but final-component no-follow flags do not constrain every intermediate component.
 A Linux-specific `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` implementation may
 strengthen path resolution, but should be introduced only with platform-specific tests
