@@ -1426,7 +1426,7 @@ mod tests {
         Arc<SymthaeaIssuanceState>,
         [u8; 32],
         String,
-        tempfile::TempDir,
+        std::path::PathBuf,
     ) {
         let operator = HandshakeManager::new();
         let daemon = SigningKey::generate(&mut rand::thread_rng());
@@ -1484,7 +1484,7 @@ mod tests {
             None,
         );
 
-        (router, issuance, request_nonce, body, dir)
+        (router, issuance, request_nonce, body, journal_path)
     }
 
     #[tokio::test]
@@ -1502,7 +1502,7 @@ mod tests {
         ];
 
         for (point, expected_issued) in cases {
-            let (router, issuance, nonce, body, _dir) =
+            let (router, issuance, nonce, body, journal_path) =
                 configured_issuance_fault_fixture(point);
 
             let join = tokio::spawn(async move {
@@ -1533,12 +1533,35 @@ mod tests {
                     ),
                 },
             }
+
+            // A crash is not complete until the next process can reopen the
+            // durable journal. Drop every owner of the journal lock first,
+            // then inspect the on-disk state from a fresh Journal instance.
+            drop(router);
+            drop(issuance);
+            let reopened = IssuanceJournal::open_existing(&journal_path).unwrap();
+            let reopened_status = reopened.reserve_status(&nonce).unwrap();
+            match expected_issued {
+                None => assert!(reopened_status.is_none()),
+                Some(false) => assert_eq!(
+                    reopened_status,
+                    Some(ReserveOutcome::DeliveryUnknown)
+                ),
+                Some(true) => match reopened_status {
+                    Some(ReserveOutcome::AlreadyIssued { receipt }) => {
+                        assert!(!receipt.is_empty());
+                    }
+                    other => panic!(
+                        "reopened journal lost terminal state at {point:?}: {other:?}"
+                    ),
+                },
+            }
         }
     }
 
     #[tokio::test]
     async fn integrated_issuance_without_fault_replays_exact_receipt_bytes() {
-        let (router, issuance, nonce, body, _dir) =
+        let (router, issuance, nonce, body, _journal_path) =
             configured_issuance_fault_fixture(IssuanceFaultPoint::Never);
 
         let (first_status, first_body) = post_json(
