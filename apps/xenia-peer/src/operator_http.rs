@@ -17,6 +17,7 @@
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
+use std::sync::Mutex as StdMutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
@@ -660,6 +661,7 @@ async fn symthaea_authorization_handler(
     }
 
     let binding_digest = symthaea_authorization_binding_digest(&request);
+    issuance.maybe_crash(IssuanceFaultPoint::BeforeReservation);
     match issuance.journal.reserve(authorized.request_nonce, binding_digest) {
         Ok(ReserveOutcome::AlreadyIssued { receipt }) => {
             return Ok(symthaea_receipt_response(receipt));
@@ -677,7 +679,9 @@ async fn symthaea_authorization_handler(
                 "issuance request nonce is permanently aborted".to_string(),
             ));
         }
-        Ok(ReserveOutcome::Reserved) => {}
+        Ok(ReserveOutcome::Reserved) => {
+            issuance.maybe_crash(IssuanceFaultPoint::AfterReservation);
+        }
         Err(error) => {
             tracing::error!(?error, "failed to reserve Symthaea issuance nonce");
             return Err((StatusCode::SERVICE_UNAVAILABLE, "Symthaea issuance unavailable".to_string()));
@@ -689,7 +693,9 @@ async fn symthaea_authorization_handler(
     let symthaea_receipt_id = authorized.symthaea_receipt_id;
     let symthaea_receipt_digest_sha256 = authorized.symthaea_receipt_digest_sha256;
     let request_nonce = authorized.request_nonce;
+    issuance.maybe_crash(IssuanceFaultPoint::BeforeSnapshot);
     let result = authority.with_coherent_snapshot(&operator_id, |snapshot| {
+        issuance.maybe_crash(IssuanceFaultPoint::AfterSnapshot);
         // The token was checked before journal reservation. Re-check its
         // validity interval at the coherent-snapshot boundary so a long-running
         // snapshot/signing operation cannot turn an expired/future operator
@@ -722,6 +728,7 @@ async fn symthaea_authorization_handler(
             &state.daemon_certificate,
         )
         .ok_or_else(|| "daemon delegation certificate is structurally invalid".to_string())?;
+        issuance.maybe_crash(IssuanceFaultPoint::BeforeSigning);
         let signed = issue_symthaea_authorization_receipt_v1(
             &request_for_issuer,
             snapshot,
@@ -733,20 +740,26 @@ async fn symthaea_authorization_handler(
             &state.daemon_ml_dsa,
         )
         .map_err(|error| error.to_string())?;
+        issuance.maybe_crash(IssuanceFaultPoint::AfterSigning);
         if !signed.validate_structure() {
             return Err("issued Symthaea authorization receipt failed structural validation".to_string());
         }
         let receipt_bytes = serde_json::to_vec(&signed)
             .map_err(|error| format!("failed to serialize signed Symthaea receipt: {error}"))?;
+        issuance.maybe_crash(IssuanceFaultPoint::BeforeTerminalRecord);
         issuance
             .journal
             .record_issued(request_nonce, binding_digest, &receipt_bytes)
             .map_err(|error| format!("failed to durably retain signed Symthaea receipt: {error}"))?;
+        issuance.maybe_crash(IssuanceFaultPoint::AfterTerminalRecord);
         Ok(receipt_bytes)
     });
 
     match result {
-        Ok(receipt_bytes) => Ok(symthaea_receipt_response(receipt_bytes)),
+        Ok(receipt_bytes) => {
+            issuance.maybe_crash(IssuanceFaultPoint::BeforeResponse);
+            Ok(symthaea_receipt_response(receipt_bytes))
+        },
         Err(error) => {
             // A pre-issuance failure must consume the reservation permanently.
             // If the journal itself reports a persistence/identity failure, it
@@ -1040,11 +1053,28 @@ async fn replace_operator_key_handler(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Deterministic crash-cut used only by in-crate issuance tests.
+///
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IssuanceFaultPoint {
+    Never,
+    BeforeReservation,
+    AfterReservation,
+    BeforeSnapshot,
+    AfterSnapshot,
+    BeforeSigning,
+    AfterSigning,
+    BeforeTerminalRecord,
+    AfterTerminalRecord,
+    BeforeResponse,
+}
+
 /// Durable configuration/state for the live Symthaea authority-receipt adapter.
 #[derive(Debug)]
 pub(crate) struct SymthaeaIssuanceState {
     pub(crate) journal: IssuanceJournal,
     pub(crate) verifier_artifact_commitment_sha256: [u8; 32],
+    fault_point: StdMutex<IssuanceFaultPoint>,
 }
 
 impl SymthaeaIssuanceState {
@@ -1055,7 +1085,26 @@ impl SymthaeaIssuanceState {
         Self {
             journal,
             verifier_artifact_commitment_sha256,
+            fault_point: StdMutex::new(IssuanceFaultPoint::Never),
         }
+    }
+
+    fn maybe_crash(&self, point: IssuanceFaultPoint) {
+        let configured = self
+            .fault_point
+            .lock()
+            .expect("issuance fault mutex must not be poisoned");
+        if *configured == point {
+            panic!("deterministic Symthaea issuance crash cut: {:?}", point);
+        }
+    }
+
+    #[cfg(test)]
+    fn set_fault_point(&self, point: IssuanceFaultPoint) {
+        *self
+            .fault_point
+            .lock()
+            .expect("issuance fault mutex must not be poisoned") = point;
     }
 }
 
