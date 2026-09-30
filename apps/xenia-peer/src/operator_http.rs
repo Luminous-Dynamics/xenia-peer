@@ -1592,6 +1592,157 @@ mod tests {
     /// has failed. This test holds the real HTTP issuance path at that point,
     /// starts a real revoke mutation concurrently, and proves the mutation only
     /// becomes visible after issuance completes.
+    /// The key-replacement counterpart to the revocation linearization theorem:
+    /// a coherent issuance snapshot and an operator-key mutation are ordered by
+    /// the same live authority barrier, so a receipt can never carry the old
+    /// enrollment commitment while the durable policy has already committed
+    /// the replacement.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn integrated_issuance_cannot_straddle_concurrent_key_replacement() {
+        let admin_op = HandshakeManager::new();
+        let target_op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let seed_state = state_with_target(
+            &admin_op,
+            daemon.clone(),
+            &target_op,
+            OperatorRole::Viewer,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let operators_file = dir.path().join("operators.json");
+        seed_state.policy.persist_to(&operators_file).unwrap();
+        let trust = xenia_symthaea_live_authority_guard::AuthorityStorageTrust::validate(dir.path())
+            .unwrap();
+        let policy = OperatorPolicy::load_trusted(&operators_file, &trust).unwrap();
+        let state = Arc::new(OperatorAuthState::new(
+            policy,
+            daemon.clone(),
+            test_daemon_ml_dsa(),
+            HandshakeManager::new(),
+            crate::operator_auth::AUTH_RATE_MAX,
+            crate::operator_auth::AUTH_RATE_WINDOW_SECS,
+        ));
+        let revocations = OperatorRevocations::empty();
+        let generation_path = dir.path().join("authority-generation.bin");
+        let journal_path = dir.path().join("issuance.journal");
+        let authority = SymthaeaAuthorityState::open_or_bootstrap(
+            state.policy.clone(),
+            revocations.clone(),
+            [0x11; 32],
+            &generation_path,
+            true,
+        )
+        .unwrap();
+        let issuance = Arc::new(SymthaeaIssuanceState::new(
+            IssuanceJournal::bootstrap_new(&journal_path).unwrap(),
+            [0x22; 32],
+        ));
+        let pause = Arc::new(IssuanceSnapshotPause::new());
+        issuance.set_snapshot_pause(Some(pause.clone()));
+        let mutation_probe = Arc::new(Barrier::new(2));
+        authority.set_mutation_probe(Some(mutation_probe.clone()));
+        state.symthaea_authority.set(authority.clone()).unwrap();
+        state.symthaea_issuance.set(issuance.clone()).unwrap();
+
+        let now = now_secs();
+        let (token_json, token_nonce) = token_json_for(&daemon, OperatorRole::Admin, now);
+        let receipt_id = [0x61u8; 16];
+        let receipt_digest = [0x62u8; 32];
+        let request_nonce = [0x63u8; 32];
+        let transcript = crate::operator_auth::symthaea_authorization_transcript(
+            "alice",
+            SymthaeaAuthorityScopeV1::VerificationReceiptAttestationV1.id(),
+            &receipt_id,
+            &receipt_digest,
+            &request_nonce,
+            &token_nonce,
+        );
+        let issuance_body = serde_json::json!({
+            "token": token_json,
+            "authority_scope": xenia_symthaea_attestation_authority::SYMTHAEA_RECEIPT_ATTESTATION_SCOPE_V1,
+            "symthaea_receipt_id": hex::encode(receipt_id),
+            "symthaea_receipt_digest_sha256": hex::encode(receipt_digest),
+            "request_nonce": hex::encode(request_nonce),
+            "action_signature": hex::encode(admin_op.sign(&transcript).to_bytes()),
+            "ml_dsa_action_signature": hex::encode(admin_op.sign_ml_dsa(&transcript)),
+        })
+        .to_string();
+
+        let new_ed = [0x71u8; 32];
+        let new_ml = vec![0x72u8; ML_DSA_65_PK_LEN];
+        let (replacement_token, replacement_nonce) =
+            token_json_for(&daemon, OperatorRole::Admin, now);
+        let replacement_body = replace_key_body(
+            &admin_op,
+            replacement_token,
+            "mallory",
+            new_ed,
+            &new_ml,
+            None,
+            &replacement_nonce,
+        );
+
+        let router = router(
+            state.clone(),
+            revocations,
+            empty_ledger(),
+            Arc::new(Vec::new()),
+            Some(operators_file.clone()),
+        );
+        let issuance_task = tokio::spawn({
+            let router = router.clone();
+            async move {
+                post_json(
+                    &router,
+                    "/operator/symthaea/authorization-receipt",
+                    issuance_body,
+                )
+                .await
+            }
+        });
+
+        pause.entered.wait();
+
+        let replacement_task = tokio::spawn({
+            let router = router.clone();
+            async move {
+                post_json(&router, "/operator/replace-key", replacement_body).await
+            }
+        });
+
+        mutation_probe.wait();
+        assert_eq!(authority.guard.current_version().unwrap().generation, 1);
+        assert!(state.policy.lookup(&target_op.identity_public_key_bytes()).is_some());
+        assert!(state.policy.lookup(&new_ed).is_none());
+
+        mutation_probe.wait();
+        pause.release.wait();
+
+        let (issuance_status, issuance_response) = issuance_task.await.unwrap();
+        assert_eq!(issuance_status, StatusCode::OK, "issuance body: {issuance_response}");
+        assert!(!issuance_response.is_empty());
+
+        let (replacement_status, replacement_response) = replacement_task.await.unwrap();
+        assert_eq!(
+            replacement_status,
+            StatusCode::NO_CONTENT,
+            "replacement body: {replacement_response}"
+        );
+        assert_eq!(authority.guard.current_version().unwrap().generation, 2);
+        assert!(state.policy.lookup(&target_op.identity_public_key_bytes()).is_none());
+        assert!(state.policy.lookup(&new_ed).is_some());
+        assert_eq!(
+            issuance.journal.reserve_status(&request_nonce).unwrap(),
+            Some(ReserveOutcome::AlreadyIssued {
+                receipt: issuance_response.as_bytes().to_vec(),
+            })
+        );
+
+        let reloaded = OperatorPolicy::load_trusted(&operators_file, &trust).unwrap();
+        assert!(reloaded.lookup(&target_op.identity_public_key_bytes()).is_none());
+        assert!(reloaded.lookup(&new_ed).is_some());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn integrated_issuance_cannot_straddle_concurrent_revocation() {
         let operator = HandshakeManager::new();
