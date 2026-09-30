@@ -1762,6 +1762,8 @@ mod tests {
         state.symthaea_authority.set(authority.clone()).unwrap();
         state.symthaea_issuance.set(issuance.clone()).unwrap();
 
+        let initial_generation = authority.guard.current_version().unwrap().generation;
+
         // Remove the trusted revocation source after startup. The in-memory
         // mutation can happen, but its required durable persistence must refuse
         // the stale source identity and poison the authority guard.
@@ -1791,7 +1793,7 @@ mod tests {
             authority.guard.current_version(),
             Err(xenia_symthaea_live_authority_guard::LiveAuthorityGuardError::GuardPoisoned)
         ));
-        assert_eq!(authority.guard.current_version().unwrap_or_else(|_| unreachable!()).generation, 1);
+        assert_eq!(initial_generation, 1);
 
         let (token_json, token_nonce) = token_json_for(&daemon, OperatorRole::Admin, now);
         let receipt_id = [0xa1u8; 16];
