@@ -146,7 +146,37 @@ For any issuance I and guarded authority mutation M:
       -> no receipt may combine a pre-M generation/commitment with post-M authority
 \`\`\`
 
-The The same theorem now has an integrated operator-key replacement regression, \`integrated_issuance_cannot_straddle_concurrent_key_replacement\`. It runs the real \`/operator/replace-key\` endpoint against a trusted durable \`operators.json\` while issuance is paused after its coherent snapshot. The replacement is proven to have reached the guarded mutation boundary while generation remains unchanged; only after issuance releases its read barrier does the replacement commit as the next generation. The test then reloads the durable policy and confirms the replacement survived restart semantics. This closes the important enrollment-commitment case: an issuance receipt cannot retain the pre-replacement enrollment commitment while the live and durable operator policy have already moved to the replacement.
+Authentication has its own distinct race boundary. The new integrated regression
+`integrated_issuance_rejects_post_authentication_key_replacement` freezes the real HTTP
+request immediately after successful operator authentication and before nonce reservation
+and coherent snapshotting. A real `/operator/replace-key` then replaces the authenticated
+operator's Ed25519 and ML-DSA-65 enrollment and commits the next authority generation.
+When issuance resumes, its coherent snapshot contains the new key-lineage commitment, which
+cannot equal the lineage authenticated before the replacement. The issuance therefore
+rejects, durably records the nonce as `Aborted`, and returns no receipt. The replacement is
+also reloaded from the trusted durable policy source. This proves the post-authentication
+TOCTOU window itself rather than merely proving that replacement and issuance serialize once
+a snapshot has already been acquired.
+
+The resulting stale-authentication theorem is:
+
+```text
+Authenticate(I, generation=N, lineage=L_old)
+        |
+        | key replacement commits
+        v
+CoherentSnapshot(I) = generation=N+1, lineage=L_new
+        |
+        v
+L_old != L_new
+        |
+        v
+NO RECEIPT
+nonce -> terminal Aborted
+generation remains N+1
+```
+
+The same theorem now has an integrated operator-key replacement regression, \`integrated_issuance_cannot_straddle_concurrent_key_replacement\`. It runs the real \`/operator/replace-key\` endpoint against a trusted durable \`operators.json\` while issuance is paused after its coherent snapshot. The replacement is proven to have reached the guarded mutation boundary while generation remains unchanged; only after issuance releases its read barrier does the replacement commit as the next generation. The test then reloads the durable policy and confirms the replacement survived restart semantics. This closes the important enrollment-commitment case: an issuance receipt cannot retain the pre-replacement enrollment commitment while the live and durable operator policy have already moved to the replacement.
 
 integrated HTTP regression \`integrated_issuance_cannot_straddle_concurrent_revocation\`
 holds the real issuance handler immediately after coherent snapshot construction, starts
