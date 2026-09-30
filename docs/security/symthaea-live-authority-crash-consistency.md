@@ -45,7 +45,9 @@ production transaction boundaries. The fault point defaults permanently to
 handler task rather than entering the ordinary error path, so the test does
 not accidentally call `record_aborted` after simulating a process crash.
 
-The integrated matrix covers:
+The integrated matrix covers the crash cuts, and a separate no-fault integration test proves that a normal issuance reaches durable `Issued` and that a retry returns the exact retained receipt bytes.
+
+The integrated crash matrix covers:
 
 1. before reservation -> no journal entry
 2. after reservation -> durable `Reserved` / `DeliveryUnknown`
