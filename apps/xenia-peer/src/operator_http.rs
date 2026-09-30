@@ -79,7 +79,7 @@ pub(crate) struct SymthaeaAuthorityState {
     pub(crate) policy: OperatorPolicy,
     pub(crate) revocations: OperatorRevocations,
     #[cfg(test)]
-    mutation_probe: StdMutex<Option<Arc<Barrier>>>,
+    mutation_probe: Arc<StdMutex<Option<Arc<Barrier>>>>,
 }
 
 impl SymthaeaAuthorityState {
@@ -137,7 +137,7 @@ impl SymthaeaAuthorityState {
             policy,
             revocations,
             #[cfg(test)]
-            mutation_probe: StdMutex::new(None),
+            mutation_probe: Arc::new(StdMutex::new(None)),
         }))
     }
 
