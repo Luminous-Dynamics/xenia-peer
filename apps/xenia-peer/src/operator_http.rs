@@ -1795,8 +1795,10 @@ mod tests {
             "replacement must fail closed when durable policy persistence fails: {replacement_response}"
         );
         assert!(authority.guard.is_poisoned());
-        assert_eq!(authority.guard.current_version().unwrap_err(),
-            xenia_symthaea_live_authority_guard::LiveAuthorityGuardError::GuardPoisoned);
+        assert!(matches!(
+            authority.guard.current_version(),
+            Err(xenia_symthaea_live_authority_guard::LiveAuthorityGuardError::GuardPoisoned)
+        ));
 
         let (token_json, token_nonce) = token_json_for(&daemon, OperatorRole::Admin, now);
         let receipt_id = [0x91u8; 16];
