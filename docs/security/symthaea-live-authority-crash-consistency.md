@@ -178,6 +178,25 @@ generation remains N+1
 
 The same theorem now has an integrated operator-key replacement regression, \`integrated_issuance_cannot_straddle_concurrent_key_replacement\`. It runs the real \`/operator/replace-key\` endpoint against a trusted durable \`operators.json\` while issuance is paused after its coherent snapshot. The replacement is proven to have reached the guarded mutation boundary while generation remains unchanged; only after issuance releases its read barrier does the replacement commit as the next generation. The test then reloads the durable policy and confirms the replacement survived restart semantics. This closes the important enrollment-commitment case: an issuance receipt cannot retain the pre-replacement enrollment commitment while the live and durable operator policy have already moved to the replacement.
 
+The post-authentication race theorem is now symmetric as well. The integrated regression
+`integrated_issuance_rejects_post_authentication_revocation` freezes a real HTTP issuance
+immediately after successful operator authentication, then commits a real `/operator/revoke`
+against the authenticated operator before the issuance reaches its coherent snapshot.
+When issuance resumes, the snapshot observes the revoked authority state, so the previously
+valid authentication cannot be reused to mint a receipt. The request is rejected, its nonce
+becomes terminal `Aborted`, and the durable revocation source reloads with the operator revoked.
+
+Together with `integrated_issuance_rejects_post_authentication_key_replacement`, this closes
+both principal post-authentication authority races:
+
+```text
+Authenticate(I)
+      |
+      +--> REVOKE commits ------> snapshot sees revoked ------> NO RECEIPT
+      |
+      +--> REPLACE-KEY commits -> snapshot sees new lineage -> NO RECEIPT
+```
+
 The persistence-failure theorem now covers both mutable authority surfaces. The integrated regression
 \`integrated_revocation_persistence_failure_poison_fails_closed\` removes the trusted revocation
 source after startup, drives the real \`/operator/revoke\` endpoint, and proves that the in-memory
