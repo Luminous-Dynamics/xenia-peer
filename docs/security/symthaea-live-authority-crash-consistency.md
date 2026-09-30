@@ -37,6 +37,34 @@ The coherent snapshot barrier must remain held through receipt construction, sig
 and terminal journal retention. A copied snapshot retained after the barrier is released
 is historical provenance, not a lease to issue against current authority state.
 
+## Integrated deterministic crash-cut coverage
+
+The daemon issuance handler now has a test-only crash-cut harness at the exact
+production transaction boundaries. The fault point defaults permanently to
+`Never`; only in-crate tests can select a cut. A selected cut panics the
+handler task rather than entering the ordinary error path, so the test does
+not accidentally call `record_aborted` after simulating a process crash.
+
+The integrated matrix covers:
+
+1. before reservation -> no journal entry
+2. after reservation -> durable `Reserved` / `DeliveryUnknown`
+3. before/after coherent snapshot -> `DeliveryUnknown`
+4. before/after signing -> `DeliveryUnknown`
+5. before terminal record -> `DeliveryUnknown`
+6. after terminal record -> durable `Issued` / exact replay
+7. before HTTP response -> durable `Issued` / exact replay
+
+This is intentionally different from a failure-injection test that merely
+returns an error: a real crash does not execute the post-error abort handler.
+The test therefore verifies the crash theorem at the production HTTP
+transaction boundary rather than only at the journal API.
+
+The remaining distinction is operational rather than semantic: an in-process
+panic is a deterministic simulation of process termination, while power-loss
+durability still depends on the journal's existing file and directory
+synchronization guarantees.
+
 ## Crash-cut matrix
 
 | Cut point | Durable state on restart | Required behavior |
