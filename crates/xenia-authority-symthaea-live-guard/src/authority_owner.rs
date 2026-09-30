@@ -34,8 +34,8 @@ pub struct AuthorityOwnerLock {
 impl AuthorityOwnerLock {
     /// Acquire the exclusive owner lock for root.
     ///
-    /// root must already exist and be a directory. The lock file is created
-    /// inside that directory and is never replaced while this type is alive.
+    /// root must already exist and be a directory. On Unix the directory inode
+    /// itself is locked; on other targets a private child lock file is used.
     /// Failure to acquire the lock is fatal to authority initialization.
     pub fn acquire(root: impl AsRef<Path>) -> io::Result<Self> {
         let root = root.as_ref();
