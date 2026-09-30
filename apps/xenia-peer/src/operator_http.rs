@@ -1536,6 +1536,39 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn integrated_issuance_without_fault_replays_exact_receipt_bytes() {
+        let (router, issuance, nonce, body, _dir) =
+            configured_issuance_fault_fixture(IssuanceFaultPoint::Never);
+
+        let (first_status, first_body) = post_json(
+            &router,
+            "/operator/symthaea/authorization-receipt",
+            body.clone(),
+        )
+        .await;
+        assert_eq!(first_status, StatusCode::OK);
+        assert!(!first_body.is_empty());
+        assert_eq!(
+            issuance.journal.reserve_status(&nonce).unwrap(),
+            Some(ReserveOutcome::AlreadyIssued {
+                receipt: first_body.as_bytes().to_vec(),
+            })
+        );
+
+        let (second_status, second_body) = post_json(
+            &router,
+            "/operator/symthaea/authorization-receipt",
+            body,
+        )
+        .await;
+        assert_eq!(second_status, StatusCode::OK);
+        assert_eq!(
+            second_body, first_body,
+            "idempotent replay must return the exact retained receipt bytes"
+        );
+    }
+
     #[test]
     fn symthaea_request_parser_rejects_zero_nonce() {
         let daemon = SigningKey::generate(&mut rand::thread_rng());
