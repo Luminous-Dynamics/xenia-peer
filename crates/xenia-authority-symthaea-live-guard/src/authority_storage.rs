@@ -99,7 +99,47 @@ impl AuthoritySourceIdentity {
 pub struct AuthorityStorageTrust {
     root: PathBuf,
     #[cfg(unix)]
+    root_identity: AuthorityStorageIdentity,
+    #[cfg(unix)]
     owner_uid: u32,
+}
+
+/// Stable identity of the trusted storage directory itself.
+///
+/// The owner lock pins one opened directory inode, while this identity lets
+/// pathname-based operations fail closed if the configured root name is
+/// replaced or redirected after startup.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AuthorityStorageIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+impl AuthorityStorageIdentity {
+    fn capture(path: &Path) -> io::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("authority storage root is no longer a real directory: {}", path.display()),
+            ));
+        }
+        Ok(Self { device: metadata.dev(), inode: metadata.ino() })
+    }
+
+    fn verify(&self, path: &Path) -> io::Result<()> {
+        let current = Self::capture(path)?;
+        if current != *self {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("authority storage root object identity changed: {}", path.display()),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl AuthorityStorageTrust {
@@ -153,6 +193,7 @@ impl AuthorityStorageTrust {
             }
             return Ok(Self {
                 root: root.to_path_buf(),
+                root_identity: AuthorityStorageIdentity::capture(root)?,
                 owner_uid,
             });
         }
@@ -172,11 +213,25 @@ impl AuthorityStorageTrust {
         &self.root
     }
 
+    /// Revalidate that the configured root still names the directory whose
+    /// inode was trusted at startup.
+    ///
+    /// This is intentionally separate from the owner lock: the lock pins the
+    /// original directory handle, while this check detects a pathname that was
+    /// replaced underneath a long-running daemon.
+    #[cfg(unix)]
+    pub fn verify_root(&self) -> io::Result<()> {
+        self.root_identity.verify(&self.root)
+    }
+
     /// Validate that a configured source is a direct child of the trusted
     /// root and is not a symlink. A missing source is allowed here so callers
     /// can preserve their existing initial-load semantics; capture its
     /// identity when the source must exist.
     pub fn validate_source_path(&self, path: &Path) -> io::Result<()> {
+        #[cfg(unix)]
+        self.verify_root()?;
+
         if path.parent() != Some(self.root.as_path()) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -217,6 +272,9 @@ impl AuthorityStorageTrust {
     }
 
     fn validate_child_path(&self, path: &Path, label: &str) -> io::Result<()> {
+        #[cfg(unix)]
+        self.verify_root()?;
+
         if path.parent() != Some(self.root.as_path()) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -416,6 +474,22 @@ mod tests {
             trust.validate_issuance_path(&issuance).unwrap_err().kind(),
             io::ErrorKind::PermissionDenied
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_replaced_root_identity() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("authority");
+        std::fs::create_dir(&root).unwrap();
+        let trust = AuthorityStorageTrust::validate(&root).unwrap();
+
+        let replacement = parent.path().join("replacement");
+        std::fs::create_dir(&replacement).unwrap();
+        std::fs::rename(&replacement, &root).unwrap();
+
+        let error = trust.verify_root().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     }
 
     #[cfg(unix)]
