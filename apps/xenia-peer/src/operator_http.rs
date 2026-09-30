@@ -1719,6 +1719,124 @@ mod tests {
         assert!(reloaded.lookup(&new_admin_op.identity_public_key_bytes()).is_some());
     }
 
+    /// If key replacement changes in-memory authority state but cannot persist
+    /// the authoritative policy, the live guard must poison and subsequent
+    /// issuance must fail closed rather than mint from uncertain state.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn integrated_key_replacement_persistence_failure_poison_fails_closed() {
+        let admin_op = HandshakeManager::new();
+        let target_op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let seed_state =
+            state_with_target(&admin_op, daemon.clone(), &target_op, OperatorRole::Viewer);
+        let dir = tempfile::tempdir().unwrap();
+        let operators_file = dir.path().join("operators.json");
+        seed_state.policy.persist_to(&operators_file).unwrap();
+        let trust =
+            xenia_symthaea_live_authority_guard::AuthorityStorageTrust::validate(dir.path())
+                .unwrap();
+        let policy = OperatorPolicy::load_trusted(&operators_file, &trust).unwrap();
+        let state = Arc::new(OperatorAuthState::new(
+            policy,
+            daemon.clone(),
+            test_daemon_ml_dsa(),
+            HandshakeManager::new(),
+            crate::operator_auth::AUTH_RATE_MAX,
+            crate::operator_auth::AUTH_RATE_WINDOW_SECS,
+        ));
+        let revocations = OperatorRevocations::empty();
+        let authority = SymthaeaAuthorityState::open_or_bootstrap(
+            state.policy.clone(),
+            revocations.clone(),
+            [0x11; 32],
+            &dir.path().join("authority-generation.bin"),
+            true,
+        )
+        .unwrap();
+        let issuance = Arc::new(SymthaeaIssuanceState::new(
+            IssuanceJournal::bootstrap_new(&dir.path().join("issuance.journal")).unwrap(),
+            [0x22; 32],
+        ));
+        state.symthaea_authority.set(authority.clone()).unwrap();
+        state.symthaea_issuance.set(issuance.clone()).unwrap();
+
+        // Remove the trusted policy file before the live mutation. The mutation
+        // can still change the in-memory policy, but its required durable write
+        // must fail and poison the live authority guard.
+        std::fs::remove_file(&operators_file).unwrap();
+
+        let new_target_op = HandshakeManager::new();
+        let now = now_secs();
+        let (replacement_token, replacement_nonce) =
+            token_json_for(&daemon, OperatorRole::Admin, now);
+        let replacement_body = replace_key_body(
+            &admin_op,
+            replacement_token,
+            "mallory",
+            new_target_op.identity_public_key_bytes(),
+            &new_target_op.ml_dsa_public_key_bytes(),
+            None,
+            &replacement_nonce,
+        );
+
+        let router = router(
+            state.clone(),
+            revocations,
+            empty_ledger(),
+            Arc::new(Vec::new()),
+            Some(operators_file.clone()),
+        );
+
+        let (replacement_status, replacement_response) =
+            post_json(&router, "/operator/replace-key", replacement_body).await;
+        assert_eq!(
+            replacement_status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "replacement must fail closed when durable policy persistence fails: {replacement_response}"
+        );
+        assert!(authority.guard.is_poisoned());
+        assert_eq!(authority.guard.current_version().unwrap_err(),
+            xenia_symthaea_live_authority_guard::LiveAuthorityGuardError::GuardPoisoned);
+
+        let (token_json, token_nonce) = token_json_for(&daemon, OperatorRole::Admin, now);
+        let receipt_id = [0x91u8; 16];
+        let receipt_digest = [0x92u8; 32];
+        let request_nonce = [0x93u8; 32];
+        let transcript = crate::operator_auth::symthaea_authorization_transcript(
+            "alice",
+            SymthaeaAuthorityScopeV1::VerificationReceiptAttestationV1.id(),
+            &receipt_id,
+            &receipt_digest,
+            &request_nonce,
+            &token_nonce,
+        );
+        let issuance_body = serde_json::json!({
+            "token": token_json,
+            "authority_scope": xenia_symthaea_attestation_authority::SYMTHAEA_RECEIPT_ATTESTATION_SCOPE_V1,
+            "symthaea_receipt_id": hex::encode(receipt_id),
+            "symthaea_receipt_digest_sha256": hex::encode(receipt_digest),
+            "request_nonce": hex::encode(request_nonce),
+            "action_signature": hex::encode(admin_op.sign(&transcript).to_bytes()),
+            "ml_dsa_action_signature": hex::encode(admin_op.sign_ml_dsa(&transcript)),
+        })
+        .to_string();
+
+        let (issuance_status, issuance_response) =
+            post_json(&router, "/operator/symthaea/authorization-receipt", issuance_body)
+                .await;
+        assert_eq!(
+            issuance_status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "issuance must fail closed after mutation persistence uncertainty: {issuance_response}"
+        );
+        assert_eq!(
+            issuance.journal.reserve_status(&request_nonce).unwrap(),
+            Some(ReserveOutcome::Aborted)
+        );
+        assert!(!issuance_response.contains(""operator_id""));
+        assert_eq!(authority.guard.current_version().unwrap().generation, 1);
+    }
+
     /// The issuance read barrier is the concurrency linearization boundary:
     /// once a coherent snapshot exists, a guarded authority mutation cannot
     /// commit until the receipt has either been durably retained or issuance
