@@ -78,6 +78,8 @@ pub(crate) struct SymthaeaAuthorityState {
     pub(crate) guard: LiveAuthorityGuard,
     pub(crate) policy: OperatorPolicy,
     pub(crate) revocations: OperatorRevocations,
+    #[cfg(test)]
+    mutation_probe: StdMutex<Option<Arc<Barrier>>>,
 }
 
 impl SymthaeaAuthorityState {
@@ -134,6 +136,8 @@ impl SymthaeaAuthorityState {
             guard,
             policy,
             revocations,
+            #[cfg(test)]
+            mutation_probe: StdMutex::new(None),
         }))
     }
 
@@ -171,7 +175,27 @@ impl SymthaeaAuthorityState {
     where
         F: FnOnce() -> LiveAuthorityMutation<T, E>,
     {
+        #[cfg(test)]
+        if let Some(probe) = self
+            .mutation_probe
+            .lock()
+            .expect("authority mutation probe mutex must not be poisoned")
+            .clone()
+        {
+            // Signal that the real mutation endpoint reached the sole guarded
+            // mutation boundary, then wait for the test to release us. The
+            // production lock acquisition happens only after this rendezvous.
+            probe.wait();
+        }
         self.guard.with_mutation(mutation)
+    }
+
+    #[cfg(test)]
+    fn set_mutation_probe(&self, probe: Option<Arc<Barrier>>) {
+        *self
+            .mutation_probe
+            .lock()
+            .expect("authority mutation probe mutex must not be poisoned") = probe;
     }
 
     /// Mark a semantic state change only after the live policy/revocation state
@@ -1594,6 +1618,8 @@ mod tests {
         ));
         let pause = Arc::new(IssuanceSnapshotPause::new());
         issuance.set_snapshot_pause(Some(pause.clone()));
+        let mutation_probe = Arc::new(Barrier::new(2));
+        authority.set_mutation_probe(Some(mutation_probe.clone()));
         state.symthaea_authority.set(authority.clone()).unwrap();
         state.symthaea_issuance.set(issuance.clone()).unwrap();
 
@@ -1657,14 +1683,19 @@ mod tests {
             }
         });
 
-        // The mutation cannot have committed while the issuance barrier is
-        // held. No scheduler sleep is needed: the only path to a revocation
-        // is through the guarded write side, and the generation must remain at
-        // its pre-mutation value until the issuance releases its read side.
+        // Prove the concurrent mutation request has reached the real guarded
+        // mutation boundary before making any ordering assertion. The probe
+        // then holds it immediately before write-lock acquisition, eliminating
+        // scheduler-dependent false positives in this concurrency theorem.
+        mutation_probe.wait();
         assert_eq!(authority.guard.current_version().unwrap().generation, 1);
         assert!(!revocations.is_revoked("mallory"));
+        assert!(!revocations.is_revoked("mallory"));
 
-        // Release issuance and let the waiting mutation linearize afterwards.
+        // Release the mutation probe first; it now contends on the live
+        // authority write barrier while issuance still holds the read barrier.
+        // Then release issuance so the blocked writer can linearize afterwards.
+        mutation_probe.wait();
         pause.release.wait();
         let (issuance_status, issuance_body) = issuance_task.await.unwrap();
         assert_eq!(issuance_status, StatusCode::OK, "issuance body: {issuance_body}");
