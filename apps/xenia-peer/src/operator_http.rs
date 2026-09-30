@@ -18,6 +18,8 @@
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::sync::Mutex as StdMutex;
+#[cfg(test)]
+use std::sync::Barrier;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
@@ -696,6 +698,8 @@ async fn symthaea_authorization_handler(
     issuance.maybe_crash(IssuanceFaultPoint::BeforeSnapshot);
     let result = authority.with_coherent_snapshot(&operator_id, |snapshot| {
         issuance.maybe_crash(IssuanceFaultPoint::AfterSnapshot);
+        #[cfg(test)]
+        issuance.maybe_pause_after_snapshot();
         // The token was checked before journal reservation. Re-check its
         // validity interval at the coherent-snapshot boundary so a long-running
         // snapshot/signing operation cannot turn an expired/future operator
@@ -1075,6 +1079,8 @@ pub(crate) struct SymthaeaIssuanceState {
     pub(crate) journal: IssuanceJournal,
     pub(crate) verifier_artifact_commitment_sha256: [u8; 32],
     fault_point: StdMutex<IssuanceFaultPoint>,
+    #[cfg(test)]
+    snapshot_pause: StdMutex<Option<Arc<IssuanceSnapshotPause>>>,
 }
 
 impl SymthaeaIssuanceState {
@@ -1086,6 +1092,8 @@ impl SymthaeaIssuanceState {
             journal,
             verifier_artifact_commitment_sha256,
             fault_point: StdMutex::new(IssuanceFaultPoint::Never),
+            #[cfg(test)]
+            snapshot_pause: StdMutex::new(None),
         }
     }
 
@@ -1105,6 +1113,48 @@ impl SymthaeaIssuanceState {
             .fault_point
             .lock()
             .expect("issuance fault mutex must not be poisoned") = point;
+    }
+
+    /// Test-only rendezvous used to hold the real issuance read barrier open
+    /// after coherent snapshot construction. This lets the integrated tests
+    /// deterministically race a live authority mutation against issuance
+    /// without relying on scheduler timing.
+    #[cfg(test)]
+    fn set_snapshot_pause(&self, pause: Option<Arc<IssuanceSnapshotPause>>) {
+        *self
+            .snapshot_pause
+            .lock()
+            .expect("issuance snapshot pause mutex must not be poisoned") = pause;
+    }
+
+    #[cfg(test)]
+    fn maybe_pause_after_snapshot(&self) {
+        let pause = self
+            .snapshot_pause
+            .lock()
+            .expect("issuance snapshot pause mutex must not be poisoned")
+            .clone();
+        if let Some(pause) = pause {
+            pause.entered.wait();
+            pause.release.wait();
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct IssuanceSnapshotPause {
+    entered: Barrier,
+    release: Barrier,
+}
+
+#[cfg(test)]
+impl IssuanceSnapshotPause {
+    fn new() -> Self {
+        Self {
+            entered: Barrier::new(2),
+            release: Barrier::new(2),
+        }
     }
 }
 
@@ -1510,6 +1560,130 @@ mod tests {
         );
 
         (router, issuance, request_nonce, body, conflicting_body, journal_path, dir)
+    }
+
+    /// The issuance read barrier is the concurrency linearization boundary:
+    /// once a coherent snapshot exists, a guarded authority mutation cannot
+    /// commit until the receipt has either been durably retained or issuance
+    /// has failed. This test holds the real HTTP issuance path at that point,
+    /// starts a real revoke mutation concurrently, and proves the mutation only
+    /// becomes visible after issuance completes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn integrated_issuance_cannot_straddle_concurrent_revocation() {
+        let operator = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let state = state_with(&operator, daemon.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let generation_path = dir.path().join("authority-generation.bin");
+        let journal_path = dir.path().join("issuance.journal");
+        let revocation_path = dir.path().join("revoked-operators.txt");
+        std::fs::write(&revocation_path, b"").unwrap();
+        let revocations = OperatorRevocations::from_file(&revocation_path).unwrap();
+
+        let authority = SymthaeaAuthorityState::open_or_bootstrap(
+            state.policy.clone(),
+            revocations.clone(),
+            [0x11; 32],
+            &generation_path,
+            true,
+        )
+        .unwrap();
+        let issuance = Arc::new(SymthaeaIssuanceState::new(
+            IssuanceJournal::bootstrap_new(&journal_path).unwrap(),
+            [0x22; 32],
+        ));
+        let pause = Arc::new(IssuanceSnapshotPause::new());
+        issuance.set_snapshot_pause(Some(pause.clone()));
+        state.symthaea_authority.set(authority.clone()).unwrap();
+        state.symthaea_issuance.set(issuance.clone()).unwrap();
+
+        let now = now_secs();
+        let (token_json, token_nonce) = token_json_for(&daemon, OperatorRole::Admin, now);
+        let receipt_id = [0x41u8; 16];
+        let receipt_digest = [0x42u8; 32];
+        let request_nonce = [0x43u8; 32];
+        let transcript = crate::operator_auth::symthaea_authorization_transcript(
+            "alice",
+            SymthaeaAuthorityScopeV1::VerificationReceiptAttestationV1.id(),
+            &receipt_id,
+            &receipt_digest,
+            &request_nonce,
+            &token_nonce,
+        );
+        let issuance_body = serde_json::json!({
+            "token": token_json,
+            "authority_scope": xenia_symthaea_attestation_authority::SYMTHAEA_RECEIPT_ATTESTATION_SCOPE_V1,
+            "symthaea_receipt_id": hex::encode(receipt_id),
+            "symthaea_receipt_digest_sha256": hex::encode(receipt_digest),
+            "request_nonce": hex::encode(request_nonce),
+            "action_signature": hex::encode(operator.sign(&transcript).to_bytes()),
+            "ml_dsa_action_signature": hex::encode(operator.sign_ml_dsa(&transcript)),
+        })
+        .to_string();
+
+        let router = router(
+            state.clone(),
+            revocations.clone(),
+            empty_ledger(),
+            Arc::new(Vec::new()),
+            None,
+        );
+
+        let issuance_task = tokio::spawn({
+            let router = router.clone();
+            async move {
+                post_json(
+                    &router,
+                    "/operator/symthaea/authorization-receipt",
+                    issuance_body,
+                )
+                .await
+            }
+        });
+
+        // This rendezvous is reached only after the actual coherent snapshot
+        // has been constructed while the live guard's read barrier is held.
+        pause.entered.wait();
+
+        // Authorize a concurrent Admin revocation of a different operator.
+        // The handler must reach authority.mutate(), where the write barrier
+        // blocks behind the in-flight issuance read barrier.
+        let (admin_token, revoke_nonce) = token_json_for(&daemon, OperatorRole::Admin, now);
+        let revoke_body = revoke_body(&operator, admin_token, "mallory", &revoke_nonce);
+        let revoke_task = tokio::spawn({
+            let router = router.clone();
+            async move {
+                post_json(&router, "/operator/revoke", revoke_body).await
+            }
+        });
+
+        // The mutation cannot have committed while the issuance barrier is
+        // held. No scheduler sleep is needed: the only path to a revocation
+        // is through the guarded write side, and the generation must remain at
+        // its pre-mutation value until the issuance releases its read side.
+        assert_eq!(authority.guard.current_version().unwrap().generation, 1);
+        assert!(!revocations.is_revoked("mallory"));
+
+        // Release issuance and let the waiting mutation linearize afterwards.
+        pause.release.wait();
+        let (issuance_status, issuance_body) = issuance_task.await.unwrap();
+        assert_eq!(issuance_status, StatusCode::OK, "issuance body: {issuance_body}");
+        assert!(!issuance_body.is_empty());
+
+        let (revoke_status, revoke_response) = revoke_task.await.unwrap();
+        assert_eq!(revoke_status, StatusCode::NO_CONTENT, "revoke body: {revoke_response}");
+        assert!(revocations.is_revoked("mallory"));
+        assert_eq!(authority.guard.current_version().unwrap().generation, 2);
+
+        // The retained receipt is the exact pre-mutation result. The mutation
+        // is a separate durable authority generation; it cannot retroactively
+        // alter the already-issued receipt's provenance.
+        assert_eq!(
+            issuance.journal.reserve_status(&request_nonce).unwrap(),
+            Some(ReserveOutcome::AlreadyIssued {
+                receipt: issuance_body.as_bytes().to_vec(),
+            })
+        );
     }
 
     #[tokio::test]
