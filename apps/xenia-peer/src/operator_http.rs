@@ -1425,6 +1425,8 @@ mod tests {
         Router,
         Arc<SymthaeaIssuanceState>,
         [u8; 32],
+        String,
+        tempfile::TempDir,
     ) {
         let operator = HandshakeManager::new();
         let daemon = SigningKey::generate(&mut rand::thread_rng());
@@ -1432,13 +1434,6 @@ mod tests {
         let revocations = OperatorRevocations::empty();
 
         let dir = tempfile::tempdir().unwrap();
-        let generation_path = dir.path().join("authority-generation.bin");
-        let journal_path = dir.path().join("issuance.journal");
-
-        // Leak the fixture directory for the duration of this in-process crash
-        // simulation: the journal remains open after the spawned handler task
-        // panics, so cleanup must happen only after the assertions below.
-        let dir = Box::leak(Box::new(dir));
         let generation_path = dir.path().join("authority-generation.bin");
         let journal_path = dir.path().join("issuance.journal");
 
@@ -1453,16 +1448,12 @@ mod tests {
         state.symthaea_authority.set(authority).unwrap();
 
         let journal = IssuanceJournal::bootstrap_new(&journal_path).unwrap();
-        let issuance = Arc::new(SymthaeaIssuanceState::new(
-            journal,
-            [0x22; 32],
-        ));
+        let issuance = Arc::new(SymthaeaIssuanceState::new(journal, [0x22; 32]));
         issuance.set_fault_point(point);
         state.symthaea_issuance.set(issuance.clone()).unwrap();
 
         let now = now_secs();
-        let (token_json, token_nonce) =
-            token_json_for(&daemon, OperatorRole::Admin, now);
+        let (token_json, token_nonce) = token_json_for(&daemon, OperatorRole::Admin, now);
         let receipt_id = [0x31u8; 16];
         let receipt_digest = [0x32u8; 32];
         let request_nonce = [0x33u8; 32];
@@ -1493,50 +1484,55 @@ mod tests {
             None,
         );
 
-        (router, issuance, request_nonce)
+        (router, issuance, request_nonce, body, dir)
     }
 
     #[tokio::test]
     async fn integrated_issuance_crash_cuts_preserve_only_unknown_or_exact_replay() {
         let cases = [
             (IssuanceFaultPoint::BeforeReservation, None),
-            (IssuanceFaultPoint::AfterReservation, Some(ReserveOutcome::DeliveryUnknown)),
-            (IssuanceFaultPoint::BeforeSnapshot, Some(ReserveOutcome::DeliveryUnknown)),
-            (IssuanceFaultPoint::AfterSnapshot, Some(ReserveOutcome::DeliveryUnknown)),
-            (IssuanceFaultPoint::BeforeSigning, Some(ReserveOutcome::DeliveryUnknown)),
-            (IssuanceFaultPoint::AfterSigning, Some(ReserveOutcome::DeliveryUnknown)),
-            (IssuanceFaultPoint::BeforeTerminalRecord, Some(ReserveOutcome::DeliveryUnknown)),
-            (IssuanceFaultPoint::AfterTerminalRecord, None),
-            (IssuanceFaultPoint::BeforeResponse, None),
+            (IssuanceFaultPoint::AfterReservation, Some(false)),
+            (IssuanceFaultPoint::BeforeSnapshot, Some(false)),
+            (IssuanceFaultPoint::AfterSnapshot, Some(false)),
+            (IssuanceFaultPoint::BeforeSigning, Some(false)),
+            (IssuanceFaultPoint::AfterSigning, Some(false)),
+            (IssuanceFaultPoint::BeforeTerminalRecord, Some(false)),
+            (IssuanceFaultPoint::AfterTerminalRecord, Some(true)),
+            (IssuanceFaultPoint::BeforeResponse, Some(true)),
         ];
 
-        for (point, expected) in cases {
-            let (router, issuance, nonce) = configured_issuance_fault_fixture(point);
-            let request = serde_json::json!({});
-            let body = {
-                // Rebuild the exact body through the fixture helper's request
-                // path by extracting it from the authenticated transcript is
-                // intentionally avoided; the fixture below uses a dedicated
-                // local request builder to keep signatures bound to the nonce.
-                // This branch is replaced immediately below.
-                request.to_string()
-            };
-            let _ = body;
+        for (point, expected_issued) in cases {
+            let (router, issuance, nonce, body, _dir) =
+                configured_issuance_fault_fixture(point);
 
-            // The fixture's router is already configured with the fault point.
-            // Build the real signed request independently so the production
-            // handler, rather than a semantic test double, crosses every cut.
-            let operator = HandshakeManager::new();
-            let _ = operator;
+            let join = tokio::spawn(async move {
+                let _ = post_json(
+                    &router,
+                    "/operator/symthaea/authorization-receipt",
+                    body,
+                )
+                .await;
+            });
+            let error = join.await.expect_err("fault injection must terminate the handler task");
+            assert!(error.is_panic(), "fault point {point:?} did not simulate a crash");
 
-            // This test is completed in the next hardening pass once the
-            // request-builder helper is shared with the fixture.
-            let _ = request;
-            let _ = expected;
-            let _ = issuance;
-            let _ = nonce;
-            let _ = router;
-            let _ = point;
+            let status = issuance.journal.reserve_status(&nonce).unwrap();
+            match expected_issued {
+                None => assert!(status.is_none(), "pre-reservation crash must not consume the nonce"),
+                Some(false) => assert_eq!(
+                    status,
+                    Some(ReserveOutcome::DeliveryUnknown),
+                    "pre-terminal crash must leave a durable unresolved reservation"
+                ),
+                Some(true) => match status {
+                    Some(ReserveOutcome::AlreadyIssued { receipt }) => {
+                        assert!(!receipt.is_empty(), "terminal replay must retain exact receipt bytes");
+                    }
+                    other => panic!(
+                        "terminal crash cut {point:?} did not retain an Issued receipt: {other:?}"
+                    ),
+                },
+            }
         }
     }
 
