@@ -121,6 +121,47 @@ currently authorized. Consumers must separately define whether they require hist
 signature validity, freshness, or current authorization, and enforce that policy at
 their own acceptance boundary.
 
+
+## Concurrency linearization
+
+Crash consistency is only half of the transaction theorem. The integrated issuance path
+also treats the coherent live-authority read barrier as the issuance linearization
+boundary: once the snapshot is constructed, the barrier remains held through token,
+revocation, and key-lineage rechecks, receipt signing, and durable terminal journal
+retention. A guarded authority mutation requires the corresponding write barrier, so it
+cannot commit inside that interval.
+
+The resulting ordering theorem is:
+
+\`\`\`text
+For any issuance I and guarded authority mutation M:
+
+  I completes before M commits
+      -> receipt is provenance-valid for the pre-M authority generation
+
+  M commits before I reaches its coherent snapshot
+      -> I observes the post-M authority and either issues from it or rejects
+
+  no receipt may straddle M
+      -> no receipt may combine a pre-M generation/commitment with post-M authority
+\`\`\`
+
+The integrated HTTP regression \`integrated_issuance_cannot_straddle_concurrent_revocation\`
+holds the real issuance handler immediately after coherent snapshot construction, starts
+a real /operator/revoke mutation concurrently, and proves the authority generation and
+revocation set remain unchanged until issuance releases its read barrier. The mutation then
+commits as a separate generation. This is stronger than a unit test of the lock itself:
+it exercises authentication, reservation, coherent snapshotting, signing, terminal journal
+retention, and the live mutation endpoint in one race.
+
+The test uses deterministic synchronization rather than scheduler sleeps. This matters
+because Rust's RwLock guarantees exclusive writers versus readers but intentionally does
+not promise a particular fairness policy; the test therefore synchronizes on the exact
+application-level transaction boundary rather than relying on lock scheduling. The Rust
+standard library also explicitly warns that filesystem metadata checks can race later use,
+which is why the durable storage boundary remains a separate theorem from this in-memory
+authority linearization boundary.
+
 ## Regression-test contract
 
 The following behaviors should be tested at the narrowest deterministic seam available:
