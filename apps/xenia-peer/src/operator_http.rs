@@ -1719,6 +1719,124 @@ mod tests {
         assert!(reloaded.lookup(&new_admin_op.identity_public_key_bytes()).is_some());
     }
 
+    /// An operator authenticated successfully, but its authority is revoked
+    /// before the coherent issuance snapshot. The stale authenticated request must
+    /// not cross that revocation boundary and mint a receipt.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn integrated_issuance_rejects_post_authentication_revocation() {
+        let admin_op = HandshakeManager::new();
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let seed_state = state_with(&admin_op, daemon.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let operators_file = dir.path().join("operators.json");
+        seed_state.policy.persist_to(&operators_file).unwrap();
+        let trust =
+            xenia_symthaea_live_authority_guard::AuthorityStorageTrust::validate(dir.path())
+                .unwrap();
+        let policy = OperatorPolicy::load_trusted(&operators_file, &trust).unwrap();
+        let revocation_path = dir.path().join("revoked-operators.txt");
+        std::fs::write(&revocation_path, b"").unwrap();
+        let revocations =
+            OperatorRevocations::from_trusted_file(&revocation_path, trust.clone()).unwrap();
+        let state = Arc::new(OperatorAuthState::new(
+            policy,
+            daemon.clone(),
+            test_daemon_ml_dsa(),
+            HandshakeManager::new(),
+            crate::operator_auth::AUTH_RATE_MAX,
+            crate::operator_auth::AUTH_RATE_WINDOW_SECS,
+        ));
+        let authority = SymthaeaAuthorityState::open_or_bootstrap(
+            state.policy.clone(),
+            revocations.clone(),
+            [0x11; 32],
+            &dir.path().join("authority-generation.bin"),
+            true,
+        )
+        .unwrap();
+        let issuance = Arc::new(SymthaeaIssuanceState::new(
+            IssuanceJournal::bootstrap_new(&dir.path().join("issuance.journal")).unwrap(),
+            [0x22; 32],
+        ));
+        let authentication_pause = Arc::new(IssuanceAuthenticationPause::new());
+        issuance.set_authentication_pause(Some(authentication_pause.clone()));
+        state.symthaea_authority.set(authority.clone()).unwrap();
+        state.symthaea_issuance.set(issuance.clone()).unwrap();
+
+        let now = now_secs();
+        let (token_json, token_nonce) = token_json_for(&daemon, OperatorRole::Admin, now);
+        let receipt_id = [0x91u8; 16];
+        let receipt_digest = [0x92u8; 32];
+        let request_nonce = [0x93u8; 32];
+        let transcript = crate::operator_auth::symthaea_authorization_transcript(
+            "alice",
+            SymthaeaAuthorityScopeV1::VerificationReceiptAttestationV1.id(),
+            &receipt_id,
+            &receipt_digest,
+            &request_nonce,
+            &token_nonce,
+        );
+        let issuance_body = serde_json::json!({
+            "token": token_json,
+            "authority_scope": xenia_symthaea_attestation_authority::SYMTHAEA_RECEIPT_ATTESTATION_SCOPE_V1,
+            "symthaea_receipt_id": hex::encode(receipt_id),
+            "symthaea_receipt_digest_sha256": hex::encode(receipt_digest),
+            "request_nonce": hex::encode(request_nonce),
+            "action_signature": hex::encode(admin_op.sign(&transcript).to_bytes()),
+            "ml_dsa_action_signature": hex::encode(admin_op.sign_ml_dsa(&transcript)),
+        })
+        .to_string();
+
+        let (revoke_token, revoke_nonce) = token_json_for(&daemon, OperatorRole::Admin, now);
+        let revoke_body = revoke_body(&admin_op, revoke_token, "alice", &revoke_nonce);
+        let router = router(
+            state.clone(),
+            revocations.clone(),
+            empty_ledger(),
+            Arc::new(Vec::new()),
+            Some(operators_file.clone()),
+        );
+
+        let issuance_task = tokio::spawn({
+            let router = router.clone();
+            async move {
+                post_json(
+                    &router,
+                    "/operator/symthaea/authorization-receipt",
+                    issuance_body,
+                )
+                .await
+            }
+        });
+        authentication_pause.entered.wait();
+
+        let (revoke_status, revoke_response) =
+            post_json(&router, "/operator/revoke", revoke_body).await;
+        assert_eq!(
+            revoke_status,
+            StatusCode::NO_CONTENT,
+            "revocation body: {revoke_response}"
+        );
+        assert!(revocations.is_revoked("alice"));
+        assert_eq!(authority.guard.current_version().unwrap().generation, 2);
+
+        authentication_pause.release.wait();
+        let (issuance_status, issuance_response) = issuance_task.await.unwrap();
+        assert_eq!(
+            issuance_status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "stale issuance must be refused: {issuance_response}"
+        );
+        assert_eq!(
+            issuance.journal.reserve_status(&request_nonce).unwrap(),
+            Some(ReserveOutcome::Aborted)
+        );
+        assert!(!issuance_response.contains("\"operator_id\""));
+
+        let reloaded = OperatorRevocations::from_trusted_file(&revocation_path, trust).unwrap();
+        assert!(reloaded.is_revoked("alice"));
+    }
+
     /// If revocation changes in-memory authority state but its durable source
     /// disappears before commit, the live guard must poison and later issuance
     /// must fail closed. This is the revocation counterpart to the key-replacement
