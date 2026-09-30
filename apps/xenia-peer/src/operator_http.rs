@@ -1427,6 +1427,7 @@ mod tests {
         [u8; 32],
         String,
         std::path::PathBuf,
+        tempfile::TempDir,
     ) {
         let operator = HandshakeManager::new();
         let daemon = SigningKey::generate(&mut rand::thread_rng());
@@ -1484,7 +1485,7 @@ mod tests {
             None,
         );
 
-        (router, issuance, request_nonce, body, journal_path)
+        (router, issuance, request_nonce, body, journal_path, dir)
     }
 
     #[tokio::test]
@@ -1502,7 +1503,7 @@ mod tests {
         ];
 
         for (point, expected_issued) in cases {
-            let (router, issuance, nonce, body, journal_path) =
+            let (router, issuance, nonce, body, journal_path, _dir) =
                 configured_issuance_fault_fixture(point);
 
             let join = tokio::spawn(async move {
@@ -1561,7 +1562,7 @@ mod tests {
 
     #[tokio::test]
     async fn integrated_issuance_without_fault_replays_exact_receipt_bytes() {
-        let (router, issuance, nonce, body, _journal_path) =
+        let (router, issuance, nonce, body, _journal_path, _dir) =
             configured_issuance_fault_fixture(IssuanceFaultPoint::Never);
 
         let (first_status, first_body) = post_json(
