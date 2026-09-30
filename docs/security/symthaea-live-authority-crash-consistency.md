@@ -92,10 +92,12 @@ The following behaviors should be tested at the narrowest deterministic seam ava
     by each downstream acceptance policy.
 
 Existing crate-level tests cover journal restart/idempotency, unresolved reservations,
-terminal transitions, nonce binding, and snapshot/provenance invariants. These tests do
-not by themselves prove every integrated HTTP-handler crash cut. The integrated cases
-above remain explicit acceptance criteria until a deterministic handler-level fault
-injection seam exercises them.
+terminal transitions, nonce binding, and snapshot/provenance invariants. The daemon
+package now also carries `apps/xenia-peer/tests/symthaea_crash_cuts.rs`, a cross-crate
+regression matrix that reopens the real public journal boundary after Reserved, Issued,
+and Aborted cuts. These tests do not by themselves prove every integrated HTTP-handler
+crash cut. The integrated cases above remain explicit acceptance criteria until a
+deterministic handler-level fault-injection seam exercises them.
 
 ## Filesystem assumptions and limits
 
