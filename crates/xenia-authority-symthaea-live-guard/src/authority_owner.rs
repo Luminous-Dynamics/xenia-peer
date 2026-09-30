@@ -7,10 +7,11 @@
 //! one daemon. This type establishes the outer ownership theorem: exactly one
 //! live process may own a configured authority root at a time.
 //!
-//! The lock is deliberately held by an owned std::fs::File for the lifetime
-//! of AuthorityOwnerLock. Rust's standard-library file locking is used rather
-//! than a PID file: the kernel releases the lock when the owner closes the
-//! handle or the process exits.
+//! The lock is deliberately held by an owned `std::fs::File` for the lifetime
+//! of `AuthorityOwnerLock`. On Unix, the lock is placed on the trusted root
+//! directory itself, avoiding a replaceable pathname that could otherwise point
+//! at a different inode while the first owner still holds its old lock. On
+//! other targets the legacy lock-file representation is retained.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -20,6 +21,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// Stable filename for the cross-process authority owner lock.
+#[cfg(not(unix))]
 const OWNER_LOCK_FILE: &str = ".xenia-symthaea-authority.owner.lock";
 
 /// Durable cross-process owner lock for one live authority storage root.
@@ -45,41 +47,51 @@ impl AuthorityOwnerLock {
             ));
         }
 
-        let path = root.join(OWNER_LOCK_FILE);
-        if let Ok(metadata) = std::fs::symlink_metadata(&path) {
-            if metadata.file_type().is_symlink() {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    format!("authority owner lock must not be a symlink: {}", path.display()),
-                ));
-            }
-            if !metadata.is_file() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("authority owner lock is not a regular file: {}", path.display()),
-                ));
-            }
-        }
-
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).create(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::OpenOptionsExt;
-            // O_NOFOLLOW closes the final-component symlink-following gap
-            // between the metadata check above and the actual open.
-            options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+            // Lock the directory inode itself. This is stronger than locking a
+            // child pathname: replacing or renaming a child cannot transfer
+            // ownership to another inode while the first daemon remains alive.
+            let file = File::open(root)?;
+            file.try_lock().map_err(|error| match error {
+                std::fs::TryLockError::WouldBlock => io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("authority storage root is already owned: {}", root.display()),
+                ),
+                std::fs::TryLockError::Error(error) => error,
+            })?;
+            return Ok(Self { file, path: root.to_path_buf() });
         }
-        let file = options.open(&path)?;
-        file.try_lock().map_err(|error| match error {
-            std::fs::TryLockError::WouldBlock => io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("authority storage root is already owned: {}", root.display()),
-            ),
-            std::fs::TryLockError::Error(error) => error,
-        })?;
 
-        Ok(Self { file, path })
+        #[cfg(not(unix))]
+        {
+            let path = root.join(OWNER_LOCK_FILE);
+            if let Ok(metadata) = std::fs::symlink_metadata(&path) {
+                if metadata.file_type().is_symlink() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!("authority owner lock must not be a symlink: {}", path.display()),
+                    ));
+                }
+                if !metadata.is_file() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("authority owner lock is not a regular file: {}", path.display()),
+                    ));
+                }
+            }
+            let mut options = OpenOptions::new();
+            options.read(true).write(true).create(true);
+            let file = options.open(&path)?;
+            file.try_lock().map_err(|error| match error {
+                std::fs::TryLockError::WouldBlock => io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("authority storage root is already owned: {}", root.display()),
+                ),
+                std::fs::TryLockError::Error(error) => error,
+            })?;
+            Ok(Self { file, path })
+        }
     }
 
     /// Acquire ownership using the parent directory of a generation ledger path.
@@ -130,22 +142,17 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn rejects_symlink_lock_path() {
-        let root = tempfile::tempdir().unwrap();
-        let target = root.path().join("outside.lock");
-        std::fs::write(&target, b"sentinel").unwrap();
-        let lock_path = root.path().join(OWNER_LOCK_FILE);
-        std::os::unix::fs::symlink(&target, &lock_path).unwrap();
-
-        let error = AuthorityOwnerLock::acquire(root.path()).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-        assert_eq!(std::fs::read(&target).unwrap(), b"sentinel");
-    }
-
-    #[test]
-    fn lock_path_is_stable_and_root_scoped() {
+    fn child_lock_path_is_not_the_ownership_boundary() {
         let root = tempfile::tempdir().unwrap();
         let owner = AuthorityOwnerLock::acquire(root.path()).unwrap();
-        assert_eq!(owner.path(), root.path().join(OWNER_LOCK_FILE));
+
+        let child = root.path().join("owner.lock");
+        let target = root.path().join("outside.lock");
+        std::fs::write(&target, b"sentinel").unwrap();
+        std::os::unix::fs::symlink(&target, &child).unwrap();
+
+        assert!(AuthorityOwnerLock::acquire(root.path()).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"sentinel");
+        drop(owner);
     }
-}
+
