@@ -83,6 +83,24 @@ If the journal cannot establish whether the terminal record reached durable stor
 the running process must fail closed; restart must parse the journal and resolve only
 what the durable bytes prove.
 
+## Idempotency binding
+
+The issuance nonce is not a bare idempotency key. Its durable binding digest
+covers the authenticated token's canonical bytes and the exact signed
+Symthaea authorization transcript. Consequently, reusing a durable nonce with
+a different receipt binding is rejected rather than treated as a replay.
+
+This matches the broader idempotency-security principle that a retry key should
+not be reusable for a different payload: an idempotency fingerprint lets the
+server distinguish an exact retry from a conflicting reuse. The Xenia design
+keeps that fingerprint inside the authenticated protocol transcript rather
+than trusting an HTTP header supplied separately from the signed operation.
+
+The regression suite now proves this at the integrated HTTP boundary: a
+successful request replays byte-for-byte, while the same nonce paired with a
+different receipt digest and freshly valid action signatures is rejected and
+cannot replace the retained receipt.
+
 ## Authority-generation relationship
 
 A receipt's signed generation and effective-policy commitment must come from one
