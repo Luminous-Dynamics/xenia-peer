@@ -100,8 +100,11 @@ injection seam exercises them.
 ## Filesystem assumptions and limits
 
 The trusted-root design relies on a daemon-owned directory that is not group/world
-writable, direct-child durable paths, no-follow opens for final path components, and
-stable identity checks on opened files. These checks reduce path substitution risk,
+writable, direct-child durable paths, no-follow opens for final path components,
+stable identity checks on opened files, and (on Unix) a kernel lock held on the
+trusted root directory inode itself. The root-directory lock avoids the
+replaceable-child-lock-file problem: replacing a child pathname cannot transfer
+ownership to another inode while the first owner remains alive. These checks reduce path substitution risk,
 but final-component no-follow flags do not constrain every intermediate component.
 A Linux-specific `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` implementation may
 strengthen path resolution, but should be introduced only with platform-specific tests
