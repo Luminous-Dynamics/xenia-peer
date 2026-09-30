@@ -1830,7 +1830,7 @@ mod tests {
             issuance.journal.reserve_status(&request_nonce).unwrap(),
             Some(ReserveOutcome::Aborted)
         );
-        assert!(!issuance_response.contains("\\"operator_id\\""));
+        assert!(!issuance_response.contains("\"operator_id\""));
     }
 
     /// If key replacement changes in-memory authority state but cannot persist
