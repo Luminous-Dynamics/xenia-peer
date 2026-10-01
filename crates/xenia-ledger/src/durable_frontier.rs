@@ -79,14 +79,20 @@ pub const DURABLE_AUTHORITY_EPOCH_CLAIM_SCHEMA_VERSION: u16 = 1;
 /// Exact authority epoch whose transition passed the authoritative durability boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DurableAuthorityEpochClaimV1 {
+    /// Version of the durable authority-epoch claim schema.
     pub schema_version: u16,
+    /// Successor authority epoch established by the transition.
     pub authority_epoch: u64,
+    /// Fingerprint of the exact signed ledger-key handover.
     pub key_transition_fingerprint: [u8; 32],
+    /// Public key authorized by the successor epoch.
     pub successor_ledger_public_key: [u8; 32],
+    /// Digest of the persistence policy used to establish durability.
     pub persistence_policy_digest: [u8; 32],
 }
 
 impl DurableAuthorityEpochClaimV1 {
+    /// Validate schema and reject incomplete authority claims.
     pub fn validate(self) -> Result<(), DurableLedgerFrontierError> {
         if self.schema_version != DURABLE_AUTHORITY_EPOCH_CLAIM_SCHEMA_VERSION
             || self.key_transition_fingerprint == ZERO32
@@ -98,8 +104,13 @@ impl DurableAuthorityEpochClaimV1 {
         Ok(())
     }
 
+    /// Compute the canonical BLAKE3 digest of this validated claim.
     pub fn digest(self) -> Result<[u8; 32], DurableLedgerFrontierError> {
         self.validate()?;
+        Ok(self.digest_validated())
+    }
+
+    fn digest_validated(self) -> [u8; 32] {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"xenia.durable-authority-epoch-claim.v1\0");
         hasher.update(&self.schema_version.to_be_bytes());
@@ -107,7 +118,7 @@ impl DurableAuthorityEpochClaimV1 {
         hasher.update(&self.key_transition_fingerprint);
         hasher.update(&self.successor_ledger_public_key);
         hasher.update(&self.persistence_policy_digest);
-        Ok(*hasher.finalize().as_bytes())
+        *hasher.finalize().as_bytes()
     }
 }
 
@@ -120,26 +131,32 @@ pub struct DurableAuthorityEpochV1 {
 }
 
 impl DurableAuthorityEpochV1 {
+    /// Return the canonical digest of the verified authority claim.
     pub fn digest(&self) -> [u8; 32] {
-        self.claim.digest().expect("validated durable authority claim")
+        self.claim.digest_validated()
     }
 
+    /// Return the successor authority epoch.
     pub fn authority_epoch(&self) -> u64 {
         self.claim.authority_epoch
     }
 
+    /// Return the fingerprint of the exact key transition.
     pub fn key_transition_fingerprint(&self) -> [u8; 32] {
         self.claim.key_transition_fingerprint
     }
 
+    /// Return the successor ledger public key.
     pub fn successor_ledger_public_key(&self) -> [u8; 32] {
         self.claim.successor_ledger_public_key
     }
 
+    /// Return the persistence policy digest bound to this token.
     pub fn persistence_policy_digest(&self) -> [u8; 32] {
         self.claim.persistence_policy_digest
     }
 
+    /// Verify that this token still matches the supplied successor chain and proofs.
     pub fn verify_against_chain(
         &self,
         chain: &Chain,
