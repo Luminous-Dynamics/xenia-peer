@@ -761,7 +761,7 @@ mod tests {
 
         let actual = claim.digest().unwrap();
         let mut canonical = blake3::Hasher::new();
-        canonical.update(b"xenia.durable-authority-epoch-claim.v1\\0");
+        canonical.update(b"xenia.durable-authority-epoch-claim.v1\0");
         canonical.update(&claim.schema_version.to_be_bytes());
         canonical.update(&claim.authority_epoch.to_be_bytes());
         canonical.update(&claim.key_transition_fingerprint);
