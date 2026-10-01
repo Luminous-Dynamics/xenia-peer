@@ -93,7 +93,6 @@ impl AuthorityRecoveryStateV1 {
             (RecoveryAfterUnknown, RecoverSuccessor) => TransitionCommitted,
             (RecoveryAfterUnknown, RecoverOld) => OldActive,
             (RecoveryFromOld, RecoverOutcomeUnknown) => OutcomeUnknown,
-            (RecoveryAfterCommit, RecoverOutcomeUnknown) => OutcomeUnknown,
             (RecoveryAfterUnknown, RecoverOutcomeUnknown) => OutcomeUnknown,
             (TransitionCommitted, ActivateSuccessor) => SuccessorActive,
             _ => {
