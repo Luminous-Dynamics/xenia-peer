@@ -40,6 +40,7 @@ pub(crate) enum M1RuntimeError {
     Session(M1SessionError),
     Ledger(LedgerError),
     Verify(VerifyError),
+    EmptyPersistedLedger,
     EvidenceBundle(EvidenceBundleVerifyError),
     MissingTranscriptBinding,
     FullPqcRuntimeUnavailable {
@@ -64,6 +65,10 @@ impl fmt::Display for M1RuntimeError {
             Self::Session(err) => write!(f, "M1 session error: {err}"),
             Self::Ledger(err) => write!(f, "M1 ledger error: {err}"),
             Self::Verify(err) => write!(f, "M1 ledger verification error: {err}"),
+            Self::EmptyPersistedLedger => write!(
+                f,
+                "M1 persisted ledger is empty; initialize a new runtime instead of restoring empty state"
+            ),
             Self::EvidenceBundle(err) => write!(f, "M1 transcript-bound evidence error: {err}"),
             Self::MissingTranscriptBinding => write!(
                 f,
@@ -797,6 +802,13 @@ impl M1RuntimeSession {
         request_id: Uuid,
         scope: impl Into<String>,
     ) -> Result<Self, M1RuntimeError> {
+        // An empty persisted artifact is not a recoverable M1 session. Use
+        // M1RuntimeSession::new for first-run initialization; restore requires
+        // at least one authenticated consent record to establish history.
+        if entries.is_empty() {
+            return Err(M1RuntimeError::EmptyPersistedLedger);
+        }
+
         // Chain::from_entries deliberately does not authenticate its input.
         // Restore must therefore verify the complete persisted sequence before
         // it can influence the live consent state machine. In particular, do
