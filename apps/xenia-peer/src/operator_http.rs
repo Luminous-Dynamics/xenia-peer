@@ -3535,4 +3535,309 @@ mod tests {
             get_json_with_header(&router, "/v1/audit/ledger", "X-Operator-Token", "not json").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
+
+    /// Produce a daemon-signed token for an arbitrary enrolled operator.
+    ///
+    /// The existing single-admin helper is intentionally narrow. The three-way
+    /// authority matrix needs a second independently authorized mutation author
+    /// so revoking/replacing Alice cannot accidentally become an authorization
+    /// failure instead of an ordering observation.
+    fn matrix_token_json_for(
+        daemon: &SigningKey,
+        operator_id: &str,
+        role: OperatorRole,
+        now: u64,
+        token_nonce: [u8; 16],
+    ) -> (serde_json::Value, [u8; 16]) {
+        let authed = crate::operator_auth::AuthenticatedOperator {
+            operator_id: operator_id.to_string(),
+            role,
+        };
+        let signed = issue_token(
+            daemon,
+            &test_daemon_ml_dsa(),
+            &authed,
+            now,
+            TOKEN_TTL_SECS,
+            token_nonce,
+        );
+        (
+            serde_json::to_value(TokenDto::from_signed(&signed)).unwrap(),
+            token_nonce,
+        )
+    }
+
+    /// Qualify the complete I/R/K permutation matrix against fresh durable
+    /// authority state.
+    ///
+    /// Mutation-first cases hold issuance after authentication. This proves
+    /// the request was genuinely authenticated before R/K changed its
+    /// authority, rather than merely observing a pre-existing stale key.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn integrated_issuance_three_way_ordering_matrix() {
+        let permutations = [
+            ["I", "R", "K"],
+            ["I", "K", "R"],
+            ["R", "I", "K"],
+            ["R", "K", "I"],
+            ["K", "I", "R"],
+            ["K", "R", "I"],
+        ];
+
+        for (case_index, order) in permutations.into_iter().enumerate() {
+            let alice_op = HandshakeManager::new();
+            let bob_op = HandshakeManager::new();
+            let daemon = SigningKey::generate(&mut rand::thread_rng());
+
+            let policy = OperatorPolicy::from_operators(vec![
+                EnrolledOperator {
+                    operator_id: "alice".to_string(),
+                    ed25519_pubkey: alice_op.identity_public_key_bytes(),
+                    ml_dsa_pubkey: alice_op.ml_dsa_public_key_bytes().to_vec(),
+                    ml_dsa_87_pubkey: None,
+                    role: OperatorRole::Admin,
+                },
+                EnrolledOperator {
+                    operator_id: "bob".to_string(),
+                    ed25519_pubkey: bob_op.identity_public_key_bytes(),
+                    ml_dsa_pubkey: bob_op.ml_dsa_public_key_bytes().to_vec(),
+                    ml_dsa_87_pubkey: None,
+                    role: OperatorRole::Admin,
+                },
+            ])
+            .unwrap();
+
+            let dir = tempfile::tempdir().unwrap();
+            let operators_file = dir.path().join("operators.json");
+            policy.persist_to(&operators_file).unwrap();
+
+            let trust =
+                xenia_symthaea_live_authority_guard::AuthorityStorageTrust::validate(dir.path())
+                    .unwrap();
+            let policy = OperatorPolicy::load_trusted(&operators_file, &trust).unwrap();
+
+            let revocation_path = dir.path().join("revoked-operators.txt");
+            std::fs::write(&revocation_path, b"").unwrap();
+            let revocations =
+                OperatorRevocations::from_trusted_file(&revocation_path, trust.clone()).unwrap();
+
+            let state = Arc::new(OperatorAuthState::new(
+                policy,
+                daemon.clone(),
+                test_daemon_ml_dsa(),
+                HandshakeManager::new(),
+                crate::operator_auth::AUTH_RATE_MAX,
+                crate::operator_auth::AUTH_RATE_WINDOW_SECS,
+            ));
+
+            let generation_path = dir.path().join("authority-generation.bin");
+            let journal_path = dir.path().join("issuance.journal");
+            let authority = SymthaeaAuthorityState::open_or_bootstrap(
+                state.policy.clone(),
+                revocations.clone(),
+                [case_index as u8 + 0x30; 32],
+                &generation_path,
+                true,
+            )
+            .unwrap();
+            let issuance = Arc::new(SymthaeaIssuanceState::new(
+                IssuanceJournal::bootstrap_new(&journal_path).unwrap(),
+                [case_index as u8 + 0x60; 32],
+            ));
+
+            state.symthaea_authority.set(authority.clone()).unwrap();
+            state.symthaea_issuance.set(issuance.clone()).unwrap();
+
+            let now = now_secs();
+            let (alice_token, alice_token_nonce) = matrix_token_json_for(
+                &daemon,
+                "alice",
+                OperatorRole::Admin,
+                now,
+                [case_index as u8 + 0x10; 16],
+            );
+            let request_nonce = [case_index as u8 + 0x20; 32];
+            let receipt_id = [case_index as u8 + 0x40; 16];
+            let receipt_digest = [case_index as u8 + 0x50; 32];
+            let issuance_transcript =
+                crate::operator_auth::symthaea_authorization_transcript(
+                    "alice",
+                    SymthaeaAuthorityScopeV1::VerificationReceiptAttestationV1.id(),
+                    &receipt_id,
+                    &receipt_digest,
+                    &request_nonce,
+                    &alice_token_nonce,
+                );
+            let issuance_body = serde_json::json!({
+                "token": alice_token,
+                "authority_scope":
+                    xenia_symthaea_attestation_authority::SYMTHAEA_RECEIPT_ATTESTATION_SCOPE_V1,
+                "symthaea_receipt_id": hex::encode(receipt_id),
+                "symthaea_receipt_digest_sha256": hex::encode(receipt_digest),
+                "request_nonce": hex::encode(request_nonce),
+                "action_signature":
+                    hex::encode(alice_op.sign(&issuance_transcript).to_bytes()),
+                "ml_dsa_action_signature":
+                    hex::encode(alice_op.sign_ml_dsa(&issuance_transcript)),
+            })
+            .to_string();
+
+            let (revoke_token, revoke_nonce) = matrix_token_json_for(
+                &daemon,
+                "bob",
+                OperatorRole::Admin,
+                now,
+                [case_index as u8 + 0x70; 16],
+            );
+            let revoke_body =
+                revoke_body(&bob_op, revoke_token, "alice", &revoke_nonce);
+
+            let replacement_ed = [case_index as u8 + 0x80; 32];
+            let replacement_ml = vec![case_index as u8 + 0x90; ML_DSA_65_PK_LEN];
+            let (replacement_token, replacement_nonce) = matrix_token_json_for(
+                &daemon,
+                "bob",
+                OperatorRole::Admin,
+                now,
+                [case_index as u8 + 0xA0; 16],
+            );
+            let replacement_body = replace_key_body(
+                &bob_op,
+                replacement_token,
+                "alice",
+                replacement_ed,
+                &replacement_ml,
+                None,
+                &replacement_nonce,
+            );
+
+            let router = router(
+                state.clone(),
+                revocations.clone(),
+                empty_ledger(),
+                Arc::new(Vec::new()),
+                Some(operators_file.clone()),
+            );
+
+            let mutation = |kind: &str| {
+                let router = router.clone();
+                let body = if kind == "R" {
+                    revoke_body.clone()
+                } else {
+                    replacement_body.clone()
+                };
+                async move {
+                    let path = if kind == "R" {
+                        "/operator/revoke"
+                    } else {
+                        "/operator/replace-key"
+                    };
+                    post_json(&router, path, body).await
+                }
+            };
+
+            let issue = || {
+                let router = router.clone();
+                let body = issuance_body.clone();
+                async move {
+                    post_json(
+                        &router,
+                        "/operator/symthaea/authorization-receipt",
+                        body,
+                    )
+                    .await
+                }
+            };
+
+            let label = order.join("->");
+
+            if order[0] == "I" {
+                let (status, body) = issue().await;
+                assert_eq!(status, StatusCode::OK, "{label}: issuance-first body: {body}");
+                let receipt:
+                    xenia_symthaea_authorization_receipt::XeniaSymthaeaAuthorizationReceiptV1 =
+                    serde_json::from_str(&body).unwrap();
+                assert_eq!(receipt.authority_state_epoch, 1, "{label}: issuance must be generation 1");
+
+                let (status, body) = mutation(order[1]).await;
+                assert_eq!(status, StatusCode::NO_CONTENT, "{label}: first mutation body: {body}");
+                assert_eq!(authority.guard.current_version().unwrap().generation, 2);
+
+                let (status, body) = mutation(order[2]).await;
+                assert_eq!(status, StatusCode::NO_CONTENT, "{label}: second mutation body: {body}");
+                assert_eq!(authority.guard.current_version().unwrap().generation, 3);
+
+                assert_eq!(
+                    issuance.journal.reserve_status(&request_nonce).unwrap(),
+                    Some(ReserveOutcome::AlreadyIssued {
+                        receipt: body_from_journal(&issuance, &request_nonce, &body)
+                    }),
+                    "{label}: placeholder"
+                );
+            } else {
+                let authentication_pause = Arc::new(IssuanceAuthenticationPause::new());
+                issuance.set_authentication_pause(Some(authentication_pause.clone()));
+
+                let issuance_task = tokio::spawn(issue());
+                authentication_pause.entered.wait();
+
+                let (status, body) = mutation(order[0]).await;
+                assert_eq!(status, StatusCode::NO_CONTENT, "{label}: first mutation body: {body}");
+                assert_eq!(authority.guard.current_version().unwrap().generation, 2);
+
+                if order[1] != "I" {
+                    let (status, body) = mutation(order[1]).await;
+                    assert_eq!(status, StatusCode::NO_CONTENT, "{label}: second mutation body: {body}");
+                    assert_eq!(authority.guard.current_version().unwrap().generation, 3);
+                }
+
+                authentication_pause.release.wait();
+                let (status, body) = issuance_task.await.unwrap();
+                assert_eq!(
+                    status,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "{label}: issuance must reject post-mutation authority: {body}"
+                );
+                assert!(!body.contains("\"operator_id\""));
+                assert_eq!(
+                    issuance.journal.reserve_status(&request_nonce).unwrap(),
+                    Some(ReserveOutcome::Aborted),
+                    "{label}: rejected issuance must abort its nonce"
+                );
+            }
+
+            let reloaded_policy =
+                OperatorPolicy::load_trusted(&operators_file, &trust).unwrap();
+            let reloaded_revocations =
+                OperatorRevocations::from_trusted_file(&revocation_path, trust.clone()).unwrap();
+
+            let alice_reloaded = reloaded_policy.lookup_by_id("alice").unwrap();
+            if order.contains(&"K") {
+                assert_ne!(
+                    alice_reloaded.ed25519_pubkey,
+                    alice_op.identity_public_key_bytes(),
+                    "{label}: durable policy must contain replacement lineage"
+                );
+            } else {
+                assert_eq!(
+                    alice_reloaded.ed25519_pubkey,
+                    alice_op.identity_public_key_bytes(),
+                    "{label}: durable policy must retain original lineage"
+                );
+            }
+
+            if order.contains(&"R") {
+                assert!(reloaded_revocations.is_revoked("alice"), "{label}: durable revocation missing");
+            } else {
+                assert!(!reloaded_revocations.is_revoked("alice"), "{label}: unexpected durable revocation");
+            }
+
+            assert_eq!(
+                authority.guard.current_version().unwrap().generation,
+                3,
+                "{label}: final generation must reflect two semantic mutations"
+            );
+        }
+    }
+
 }
