@@ -177,7 +177,10 @@ impl LedgerAuthorityEpochTransitionV1 {
 pub enum LedgerAuthorityEpochTransitionError {
     /// The schema is unknown.
     #[error("unsupported ledger authority epoch transition schema: {schema}")]
-    UnsupportedSchema { schema: String },
+    UnsupportedSchema {
+        /// Schema identifier that was not recognized.
+        schema: String,
+    },
     /// The underlying key transition was invalid.
     #[error("ledger key transition is invalid: {0}")]
     KeyTransition(#[from] LedgerKeyTransitionError),
