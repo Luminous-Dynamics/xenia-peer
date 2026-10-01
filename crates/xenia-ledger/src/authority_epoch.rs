@@ -69,7 +69,7 @@ pub fn ledger_key_transition_fingerprint(
     Verifier::verify_ledger_key_transition(transition)?;
     let checkpoint = checkpoint_fingerprint(&transition.previous_checkpoint)?;
     let mut hasher = Hasher::new();
-    hasher.update(b"xenia:ledger-key-transition-fingerprint:v1\\0");
+    hasher.update(b"xenia:ledger-key-transition-fingerprint:v1\0");
     hasher.update(transition.schema.as_bytes());
     hasher.update(&checkpoint);
     hasher.update(&transition.new_ledger_public_key);
