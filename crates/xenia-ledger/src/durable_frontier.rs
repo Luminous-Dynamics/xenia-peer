@@ -665,7 +665,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        AgentCheckpointAnchorV1, ConsentEventRecord, ConsentKind, SignatureSuite,
+        AgentCheckpointAnchorV1, ConsentEventRecord, ConsentKind, LedgerCheckpoint, SignatureSuite,
         TranscriptSignatureSuiteV1,
     };
 
