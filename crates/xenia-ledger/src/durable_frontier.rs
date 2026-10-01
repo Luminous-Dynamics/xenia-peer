@@ -915,9 +915,8 @@ mod tests {
         );
         assert!(matches!(
             rejected,
-            Err(DurableLedgerFrontierError::PersistenceVerificationRejected(
-                [0xE7; 32]
-            ))
+            Err(DurableLedgerFrontierError::PersistenceVerificationRejected(reason))
+                if reason == [0xE7; 32]
         ));
     }
 
