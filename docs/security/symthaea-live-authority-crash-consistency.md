@@ -270,11 +270,16 @@ ownership to another inode while the first owner remains alive. The retained roo
 identity also makes pathname-based operations fail closed if the configured root
 directory itself is replaced after startup. This does not eliminate every pathname
 race, because portable path-based writes still lack a stable directory-fd resolution
-primitive. These checks reduce path substitution risk,
-but final-component no-follow flags do not constrain every intermediate component.
-A Linux-specific `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` implementation may
-strengthen path resolution, but should be introduced only with platform-specific tests
-and a clearly documented portability/fallback policy.
+primitive. These checks reduce path substitution risk.
+On Linux, the trusted-source read path now additionally opens the trusted root directory
+itself, verifies its captured identity, and resolves the direct child with
+`openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV)`.
+This closes the whole-path resolution gap for the Linux read boundary: symlink traversal,
+magic-link traversal, mount crossing, and path escape are rejected by the kernel while
+the source bytes are read from the descriptor that was actually opened. The implementation
+is intentionally Linux-specific; non-Linux Unix retains the existing final-component
+`O_NOFOLLOW` boundary. This does not yet make every portable write path directory-fd
+anchored, so the read theorem and the durable-write theorem remain separate.
 
 Atomic rename, file synchronization, and directory synchronization are distinct
 properties. Durable replacement paths should preserve the ordering of writing and
