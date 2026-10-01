@@ -797,6 +797,13 @@ impl M1RuntimeSession {
         request_id: Uuid,
         scope: impl Into<String>,
     ) -> Result<Self, M1RuntimeError> {
+        // Chain::from_entries deliberately does not authenticate its input.
+        // Restore must therefore verify the complete persisted sequence before
+        // it can influence the live consent state machine. In particular, do
+        // not replay forged or torn entries merely because their shape parses.
+        let verifying_key = signing_key.verifying_key();
+        Verifier::verify_chain(&entries, &verifying_key)?;
+
         let mut runtime = Self::from_chain(
             Chain::from_entries(entries, signing_key),
             source_id,
