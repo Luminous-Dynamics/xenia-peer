@@ -2625,6 +2625,31 @@ mod tests {
     }
 
     #[test]
+    fn persisted_restore_rejects_tampered_entries_before_replay() {
+        let (mut runtime, verifying_key) = runtime(19);
+
+        runtime.offer().unwrap();
+        runtime.grant_consent().unwrap();
+
+        let mut entries = runtime.entries();
+        entries[1].signature[0] ^= 0x01;
+
+        let signing_key = SigningKey::from_bytes(&[19; 32]);
+        let err = M1RuntimeSession::from_persisted_entries(
+            signing_key,
+            entries,
+            [0xAB; 32],
+            Uuid::from_bytes([1; 16]),
+            Uuid::from_bytes([2; 16]),
+            "view screen",
+        )
+        .expect_err("tampered persisted entries must fail before replay");
+
+        assert!(matches!(err, M1RuntimeError::Verify(_)));
+        assert_eq!(verifying_key, SigningKey::from_bytes(&[19; 32]).verifying_key());
+    }
+
+    #[test]
     fn runtime_transcript_persists_and_reloads() {
         let (mut runtime, verifying_key) = runtime(17);
 
