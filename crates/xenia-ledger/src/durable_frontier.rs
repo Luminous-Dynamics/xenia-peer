@@ -620,6 +620,18 @@ pub enum DurableLedgerFrontierError {
     /// Claim contained zero/unsupported structure.
     #[error("malformed durable Xenia ledger frontier claim")]
     MalformedClaim,
+    /// Authority-epoch claim contained zero/unsupported structure.
+    #[error("malformed durable Xenia authority epoch claim")]
+    MalformedAuthorityEpochClaim,
+    /// Authority epoch proof failed cryptographic verification.
+    #[error("durable Xenia authority epoch transition is invalid: {0}")]
+    AuthorityEpoch(#[from] LedgerAuthorityEpochTransitionError),
+    /// The durable authority claim does not match the transition or current chain.
+    #[error("durable Xenia authority epoch does not match the current chain")]
+    AuthorityEpochMismatch,
+    /// The retained key-transition artifact is invalid.
+    #[error("durable Xenia key transition is invalid: {0}")]
+    KeyTransition(#[from] LedgerKeyTransitionError),
     /// Persistence-policy commitment cannot be zero.
     #[error("durable ledger persistence policy must be nonzero")]
     InvalidPersistencePolicy,
