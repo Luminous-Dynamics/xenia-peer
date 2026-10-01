@@ -2637,6 +2637,23 @@ mod tests {
     }
 
     #[test]
+    fn persisted_restore_rejects_empty_ledger() {
+        let signing_key = SigningKey::from_bytes(&[18; 32]);
+
+        let err = M1RuntimeSession::from_persisted_entries(
+            signing_key,
+            Vec::new(),
+            [0xAB; 32],
+            Uuid::from_bytes([1; 16]),
+            Uuid::from_bytes([2; 16]),
+            "view screen",
+        )
+        .expect_err("empty persisted state must not be treated as a restored session");
+
+        assert!(matches!(err, M1RuntimeError::EmptyPersistedLedger));
+    }
+
+    #[test]
     fn persisted_restore_rejects_tampered_entries_before_replay() {
         let (mut runtime, _) = runtime(19);
 
