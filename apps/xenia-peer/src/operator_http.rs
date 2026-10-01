@@ -3752,11 +3752,11 @@ mod tests {
             let label = order.join("->");
 
             if order[0] == "I" {
-                let (status, body) = issue().await;
-                assert_eq!(status, StatusCode::OK, "{label}: issuance-first body: {body}");
+                let (status, issuance_body_bytes) = issue().await;
+                assert_eq!(status, StatusCode::OK, "{label}: issuance-first body: {issuance_body_bytes}");
                 let receipt:
                     xenia_symthaea_authorization_receipt::XeniaSymthaeaAuthorizationReceiptV1 =
-                    serde_json::from_str(&body).unwrap();
+                    serde_json::from_str(&issuance_body_bytes).unwrap();
                 assert_eq!(receipt.authority_state_epoch, 1, "{label}: issuance must be generation 1");
 
                 let (status, body) = mutation(order[1]).await;
@@ -3770,9 +3770,9 @@ mod tests {
                 assert_eq!(
                     issuance.journal.reserve_status(&request_nonce).unwrap(),
                     Some(ReserveOutcome::AlreadyIssued {
-                        receipt: body_from_journal(&issuance, &request_nonce, &body)
+                        receipt: issuance_body_bytes.as_bytes().to_vec(),
                     }),
-                    "{label}: placeholder"
+                    "{label}: issued bytes must be retained exactly"
                 );
             } else {
                 let authentication_pause = Arc::new(IssuanceAuthenticationPause::new());
