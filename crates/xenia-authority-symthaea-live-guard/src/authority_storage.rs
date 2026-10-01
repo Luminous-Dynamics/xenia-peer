@@ -326,6 +326,7 @@ impl AuthorityStorageTrust {
     ) -> io::Result<(String, AuthoritySourceIdentity)> {
         self.validate_source_path(path)?;
         use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
 
         // Keep the trusted root directory itself open, then resolve the child
         // relative to that descriptor. On Linux, openat2() additionally
@@ -484,7 +485,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn read_source_rejects_intermediate_symlink_and_mount_escape() {
+    fn read_source_rejects_nested_escape_before_openat2() {
         let parent = tempfile::tempdir().unwrap();
         let root = parent.path().join("authority");
         std::fs::create_dir(&root).unwrap();
@@ -498,10 +499,9 @@ mod tests {
         std::os::unix::fs::symlink(&outside, &nested).unwrap();
         let escaped = nested.join("operators.json");
 
-        // The portable direct-child policy rejects this before open. The
-        // assertion is retained as a regression guard for future path-policy
-        // changes: whole-path Linux resolution must never make an escape
-        // possible if a nested path is ever permitted.
+        // The direct-child policy rejects the escape before any open. This
+        // keeps the portable policy stronger than necessary while the Linux
+        // openat2 path also remains ready for any future nested-source use.
         assert_eq!(
             trust.validate_source_path(&escaped).unwrap_err().kind(),
             io::ErrorKind::PermissionDenied
