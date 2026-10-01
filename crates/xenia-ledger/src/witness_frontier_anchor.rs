@@ -1200,6 +1200,78 @@ mod tests {
     }
 
     #[test]
+    fn old_source_epoch_observation_cannot_authorize_new_epoch() {
+        let chain = seeded_chain();
+        let (old_policy, source_id) = policy(&chain);
+        let mut store = MemoryStore::default();
+        let old_target = target(source_id, old_policy, 3, 0x33);
+        let old_anchor = match chain
+            .append_witness_frontier_anchor_v1(old_target, old_policy, 100, &mut store)
+            .unwrap()
+        {
+            WitnessFrontierAnchorAppendOutcomeV1::Persisted(anchor) => anchor,
+            _ => panic!("expected persisted old-epoch anchor"),
+        };
+
+        let old_observation = chain
+            .observe_witness_frontier_v1(
+                [0x51; 16],
+                [0xA5; 32],
+                old_policy,
+                120,
+                &mut store,
+            )
+            .unwrap();
+
+        let new_policy = XeniaWitnessFrontierSourcePolicyV1 {
+            source_epoch: old_policy.source_epoch + 1,
+            anchor_policy_digest: old_policy.anchor_policy_digest,
+        };
+
+        assert_eq!(
+            derive_xenia_witness_frontier_source_id(
+                chain.signing_key.verifying_key().to_bytes(),
+                old_policy.anchor_policy_digest,
+            )
+            .unwrap(),
+            source_id,
+            "source-id stability alone must not be treated as an authority epoch"
+        );
+
+        assert!(matches!(
+            old_observation.verify_fresh(
+                [0xA5; 32],
+                chain.signing_key.verifying_key().to_bytes(),
+                source_id,
+                new_policy.source_epoch,
+                new_policy.anchor_policy_digest,
+                [0x51; 16],
+                120,
+                5,
+                1,
+            ),
+            Err(WitnessFrontierAnchorError::ObservationBindingMismatch)
+        ));
+
+        assert!(old_observation.verify_current_anchor(&old_anchor).is_ok());
+
+        assert!(
+            chain
+                .observe_witness_frontier_v1(
+                    [0x51; 16],
+                    [0xA6; 32],
+                    new_policy,
+                    120,
+                    &mut store,
+                )
+                .unwrap()
+                .current
+                .is_none(),
+            "a fresh epoch must not inherit the old epoch's anchor namespace"
+        );
+    }
+
+    #[test]
     fn signed_anchor_cannot_be_relabelled_to_another_source() {
         let chain = seeded_chain();
         let (policy, source_id) = policy(&chain);
