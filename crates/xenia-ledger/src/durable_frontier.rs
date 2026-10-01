@@ -750,6 +750,67 @@ mod tests {
     }
 
     #[test]
+    fn authority_epoch_requires_authoritative_durable_commit() {
+        let old = SigningKey::from_bytes(&[41; 32]);
+        let successor = SigningKey::from_bytes(&[42; 32]);
+        let public = old.verifying_key().to_bytes();
+        let checkpoint_message = crate::checkpoint_message(0, &[0; 32], &public, 0);
+        let checkpoint = LedgerCheckpoint {
+            schema: crate::LEDGER_CHECKPOINT_SCHEMA.to_string(),
+            entry_count: 0,
+            head_hash: [0; 32],
+            ledger_public_key: public,
+            timestamp_unix_secs: 0,
+            signature: old.sign(&checkpoint_message).to_bytes(),
+        };
+        let key_transition =
+            LedgerKeyTransition::sign(checkpoint, &old, &successor, 100).unwrap();
+        let epoch_transition =
+            LedgerAuthorityEpochTransitionV1::sign(&key_transition, 7, 8, &old, &successor)
+                .unwrap();
+
+        let mut chain = Chain::new(successor.clone());
+        chain
+            .append_transactional_outcome(event(1), |_| PersistenceDisposition::Persisted)
+            .unwrap();
+
+        let token = chain
+            .verify_restored_authority_epoch_v1(
+                &key_transition,
+                &epoch_transition,
+                7,
+                8,
+                PERSISTENCE_POLICY,
+                |_, claim| {
+                    assert_eq!(claim.authority_epoch, 8);
+                    assert_eq!(claim.successor_ledger_public_key, successor.verifying_key().to_bytes());
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(token.authority_epoch(), 8);
+        assert_eq!(
+            token.successor_ledger_public_key(),
+            successor.verifying_key().to_bytes()
+        );
+
+        let rejected = chain.verify_restored_authority_epoch_v1(
+            &key_transition,
+            &epoch_transition,
+            7,
+            8,
+            PERSISTENCE_POLICY,
+            |_, _| Err([0xE7; 32]),
+        );
+        assert!(matches!(
+            rejected,
+            Err(DurableLedgerFrontierError::PersistenceVerificationRejected(
+                [0xE7; 32]
+            ))
+        ));
+    }
+
+    #[test]
     fn fresh_witness_observation_must_name_the_exact_durable_frontier() {
         let mut chain = Chain::new(SigningKey::from_bytes(&[3; 32]));
         let outcome = chain
