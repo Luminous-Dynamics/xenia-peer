@@ -2680,6 +2680,72 @@ mod tests {
     }
 
     #[test]
+    fn persisted_restore_requires_durable_frontier_binding() {
+        let (mut runtime, _) = runtime(27);
+        runtime.offer().unwrap();
+        runtime.grant_consent().unwrap();
+        let persisted = runtime.entries();
+        let durable_frontier = runtime
+            .chain
+            .verify_restored_durable_frontier_v1([0xD1; 32], |_, claim| {
+                assert_eq!(claim.entry_count, 2);
+                assert_eq!(claim.persistence_policy_digest, [0xD1; 32]);
+                Ok(())
+            })
+            .unwrap();
+
+        let signing_key = SigningKey::from_bytes(&[27; 32]);
+        let restored = M1RuntimeSession::from_persisted_entries_with_durable_frontier(
+            signing_key,
+            persisted,
+            [0xAB; 32],
+            Uuid::from_bytes([1; 16]),
+            Uuid::from_bytes([2; 16]),
+            "view screen",
+            &durable_frontier,
+            [0xD1; 32],
+        )
+        .unwrap();
+
+        assert_eq!(restored.entries().len(), 2);
+        assert_eq!(restored.state(), M1SessionState::Granted);
+    }
+
+    #[test]
+    fn persisted_restore_rejects_frontier_mismatch_even_when_entries_verify() {
+        let (mut runtime, _) = runtime(28);
+        runtime.offer().unwrap();
+        runtime.grant_consent().unwrap();
+        let durable_frontier = runtime
+            .chain
+            .verify_restored_durable_frontier_v1([0xD1; 32], |_, _| Ok(()))
+            .unwrap();
+
+        runtime.revoke().unwrap();
+        let persisted = runtime.entries();
+        let signing_key = SigningKey::from_bytes(&[28; 32]);
+
+        let err = M1RuntimeSession::from_persisted_entries_with_durable_frontier(
+            signing_key,
+            persisted,
+            [0xAB; 32],
+            Uuid::from_bytes([1; 16]),
+            Uuid::from_bytes([2; 16]),
+            "view screen",
+            &durable_frontier,
+            [0xD1; 32],
+        )
+        .expect_err("a valid but newer chain must not accept an older durable frontier");
+
+        assert!(matches!(
+            err,
+            M1RuntimeError::DurableFrontier(
+                DurableLedgerFrontierError::ChainFrontierMismatch
+            )
+        ));
+    }
+
+    #[test]
     fn persisted_restore_rejects_empty_ledger() {
         let signing_key = SigningKey::from_bytes(&[18; 32]);
 
