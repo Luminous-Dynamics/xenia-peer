@@ -1272,6 +1272,52 @@ mod tests {
     }
 
     #[test]
+    fn old_ledger_key_anchor_cannot_cross_key_epoch() {
+        let old_chain = seeded_chain();
+        let (policy, old_source_id) = policy(&old_chain);
+        let mut store = MemoryStore::default();
+        let old_target = target(old_source_id, policy, 3, 0x33);
+        let old_anchor = match old_chain
+            .append_witness_frontier_anchor_v1(old_target, policy, 100, &mut store)
+            .unwrap()
+        {
+            WitnessFrontierAnchorAppendOutcomeV1::Persisted(anchor) => anchor,
+            _ => panic!("expected persisted old-key anchor"),
+        };
+
+        let new_chain = Chain::new(SigningKey::from_bytes(&[4; 32]));
+        let new_source_id = derive_xenia_witness_frontier_source_id(
+            new_chain.signing_key.verifying_key().to_bytes(),
+            policy.anchor_policy_digest,
+        )
+        .unwrap();
+
+        assert_ne!(
+            old_source_id, new_source_id,
+            "ledger-key rotation must move the witness source namespace"
+        );
+        assert!(matches!(
+            old_anchor.verify_current_anchor(&SignedWitnessFrontierObservationV1 {
+                schema_version: WITNESS_FRONTIER_ANCHOR_SCHEMA_VERSION,
+                source_id: new_source_id,
+                source_epoch: policy.source_epoch,
+                anchor_policy_digest: policy.anchor_policy_digest,
+                witness_id: [0x51; 16],
+                challenge: [0xA5; 32],
+                observed_at_unix_s: 120,
+                current: None,
+                ledger_entry_count: old_anchor.ledger_entry_count,
+                ledger_head_hash: old_anchor.ledger_head_hash,
+                ledger_public_key: old_anchor.ledger_public_key,
+                signature: SignatureEnvelope::ed25519([0; 64]),
+            }),
+            Err(WitnessFrontierAnchorError::BadAnchorSignature)
+                | Err(WitnessFrontierAnchorError::SourceBindingMismatch)
+                | Err(WitnessFrontierAnchorError::ObservationCurrentAnchorMismatch)
+        ));
+    }
+
+    #[test]
     fn signed_anchor_cannot_be_relabelled_to_another_source() {
         let chain = seeded_chain();
         let (policy, source_id) = policy(&chain);
