@@ -3668,6 +3668,11 @@ mod tests {
                     &request_nonce,
                     &alice_token_nonce,
                 );
+            let pre_mutation_commitment = SymthaeaAuthorityState::current_commitment(
+                &state.policy,
+                &revocations,
+            )
+            .unwrap();
             let issuance_body = serde_json::json!({
                 "token": alice_token,
                 "authority_scope":
@@ -3758,14 +3763,31 @@ mod tests {
                     xenia_symthaea_authorization_receipt::XeniaSymthaeaAuthorizationReceiptV1 =
                     serde_json::from_str(&issuance_body_bytes).unwrap();
                 assert_eq!(receipt.authority_state_epoch, 1, "{label}: issuance must be generation 1");
+                assert_eq!(
+                    receipt.policy_commitment_sha256,
+                    pre_mutation_commitment,
+                    "{label}: receipt policy commitment must come from generation 1"
+                );
 
                 let (status, body) = mutation(order[1]).await;
                 assert_eq!(status, StatusCode::NO_CONTENT, "{label}: first mutation body: {body}");
                 assert_eq!(authority.guard.current_version().unwrap().generation, 2);
+                if order[1] == "R" {
+                    assert!(revocations.is_revoked("alice"), "{label}: live revocation missing");
+                } else {
+                    assert!(state.policy.lookup(&replacement_ed).is_some(), "{label}: live replacement missing");
+                    assert!(state.policy.lookup(&alice_op.identity_public_key_bytes()).is_none(), "{label}: old live lineage remains");
+                }
 
                 let (status, body) = mutation(order[2]).await;
                 assert_eq!(status, StatusCode::NO_CONTENT, "{label}: second mutation body: {body}");
                 assert_eq!(authority.guard.current_version().unwrap().generation, 3);
+                if order[2] == "R" {
+                    assert!(revocations.is_revoked("alice"), "{label}: live revocation missing");
+                } else {
+                    assert!(state.policy.lookup(&replacement_ed).is_some(), "{label}: live replacement missing");
+                    assert!(state.policy.lookup(&alice_op.identity_public_key_bytes()).is_none(), "{label}: old live lineage remains");
+                }
 
                 assert_eq!(
                     issuance.journal.reserve_status(&request_nonce).unwrap(),
@@ -3784,11 +3806,23 @@ mod tests {
                 let (status, body) = mutation(order[0]).await;
                 assert_eq!(status, StatusCode::NO_CONTENT, "{label}: first mutation body: {body}");
                 assert_eq!(authority.guard.current_version().unwrap().generation, 2);
+                if order[0] == "R" {
+                    assert!(revocations.is_revoked("alice"), "{label}: live revocation missing");
+                } else {
+                    assert!(state.policy.lookup(&replacement_ed).is_some(), "{label}: live replacement missing");
+                    assert!(state.policy.lookup(&alice_op.identity_public_key_bytes()).is_none(), "{label}: old live lineage remains");
+                }
 
                 if order[1] != "I" {
                     let (status, body) = mutation(order[1]).await;
                     assert_eq!(status, StatusCode::NO_CONTENT, "{label}: second mutation body: {body}");
                     assert_eq!(authority.guard.current_version().unwrap().generation, 3);
+                    if order[1] == "R" {
+                        assert!(revocations.is_revoked("alice"), "{label}: live revocation missing");
+                    } else {
+                        assert!(state.policy.lookup(&replacement_ed).is_some(), "{label}: live replacement missing");
+                        assert!(state.policy.lookup(&alice_op.identity_public_key_bytes()).is_none(), "{label}: old live lineage remains");
+                    }
                 }
 
                 authentication_pause.release.wait();
