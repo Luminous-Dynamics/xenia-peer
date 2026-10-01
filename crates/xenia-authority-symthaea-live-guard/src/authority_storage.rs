@@ -326,12 +326,60 @@ impl AuthorityStorageTrust {
     ) -> io::Result<(String, AuthoritySourceIdentity)> {
         self.validate_source_path(path)?;
         use std::io::Read;
-        use std::os::unix::fs::OpenOptionsExt;
 
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(path)?;
+        // Keep the trusted root directory itself open, then resolve the child
+        // relative to that descriptor. On Linux, openat2() additionally
+        // constrains *every* path component, rather than only the final
+        // component as O_NOFOLLOW does. This is the stronger whole-path
+        // theorem; non-Linux Unix retains the existing final-component
+        // no-follow boundary.
+        #[cfg(target_os = "linux")]
+        let file = {
+            use std::os::fd::AsFd;
+            use rustix::fs::{openat2, Mode, OFlags, ResolveFlags};
+
+            let root = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&self.root)?;
+            let root_identity = AuthorityStorageIdentity::capture(&self.root)?;
+            if root_identity != self.root_identity {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("authority storage root object identity changed: {}", self.root.display()),
+                ));
+            }
+
+            let name = path.file_name().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("authority source has no final component: {}", path.display()),
+                )
+            })?;
+
+            openat2(
+                root.as_fd(),
+                name,
+                OFlags::RDONLY | OFlags::CLOEXEC,
+                Mode::empty(),
+                ResolveFlags::BENEATH
+                    | ResolveFlags::NO_SYMLINKS
+                    | ResolveFlags::NO_MAGICLINKS
+                    | ResolveFlags::NO_XDEV,
+            )
+            .map_err(io::Error::from)?
+        };
+
+        #[cfg(not(target_os = "linux"))]
+        let file = {
+            use std::os::unix::fs::OpenOptionsExt;
+
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(path)?
+        };
+
         let actual = AuthoritySourceIdentity::capture_file(&file)?;
         if let Some(expected) = expected {
             if expected != actual {
@@ -432,6 +480,32 @@ mod tests {
 
         let error = trust.read_source(&source, Some(expected)).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn read_source_rejects_intermediate_symlink_and_mount_escape() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("authority");
+        std::fs::create_dir(&root).unwrap();
+        let trust = AuthorityStorageTrust::validate(&root).unwrap();
+
+        let outside = parent.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("operators.json"), b"outside").unwrap();
+
+        let nested = root.join("nested");
+        std::os::unix::fs::symlink(&outside, &nested).unwrap();
+        let escaped = nested.join("operators.json");
+
+        // The portable direct-child policy rejects this before open. The
+        // assertion is retained as a regression guard for future path-policy
+        // changes: whole-path Linux resolution must never make an escape
+        // possible if a nested path is ever permitted.
+        assert_eq!(
+            trust.validate_source_path(&escaped).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 
     #[cfg(unix)]
