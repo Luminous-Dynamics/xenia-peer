@@ -118,6 +118,51 @@ impl DurableLedgerFrontierV1 {
         }
         Ok(())
     }
+
+    /// Verify this durable frontier against a fresh, challenge-bound witness
+    /// observation of the external current-frontier store.
+    ///
+    /// The witness observation does not prove consent-ledger durability by
+    /// itself. The durable token must already have been minted by the reviewed
+    /// persistence verifier. The combined check establishes that the fresh
+    /// external observation names the same ledger frontier as that durable token.
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_against_fresh_witness_observation(
+        &self,
+        chain: &Chain,
+        observation: &SignedWitnessFrontierObservationV1,
+        expected_challenge: [u8; 32],
+        expected_source_id: [u8; 16],
+        expected_source_epoch: u64,
+        expected_anchor_policy_digest: [u8; 32],
+        expected_witness_id: [u8; 16],
+        now_unix_s: u64,
+        max_age_secs: u64,
+        max_future_skew_secs: u64,
+        expected_persistence_policy_digest: [u8; 32],
+    ) -> Result<(), DurableLedgerFrontierError> {
+        self.verify_against_chain(chain, expected_persistence_policy_digest)?;
+        observation
+            .verify_fresh(
+                expected_challenge,
+                self.claim.ledger_public_key,
+                expected_source_id,
+                expected_source_epoch,
+                expected_anchor_policy_digest,
+                expected_witness_id,
+                now_unix_s,
+                max_age_secs,
+                max_future_skew_secs,
+            )
+            .map_err(DurableLedgerFrontierError::WitnessAnchor)?;
+        if observation.ledger_entry_count != self.claim.entry_count
+            || observation.ledger_head_hash != self.claim.head_hash
+            || observation.ledger_public_key != self.claim.ledger_public_key
+        {
+            return Err(DurableLedgerFrontierError::ChainFrontierMismatch);
+        }
+        Ok(())
+    }
 }
 
 /// Outcome-aware append result that mints a durable frontier witness only when
