@@ -92,7 +92,13 @@ impl DurableLedgerFrontierV1 {
         self.claim.persistence_policy_digest
     }
 
-    fn verify_against_chain(
+    /// Verify this durable frontier against the exact current chain and expected policy.
+    ///
+    /// This does not establish current authority by itself; the token must first have
+    /// been minted by `verify_restored_durable_frontier_v1` using the authoritative
+    /// persistence adapter. It does establish that the token has not been detached
+    /// from the restored chain or silently crossed a persistence-policy boundary.
+    pub fn verify_against_chain(
         &self,
         chain: &Chain,
         expected_persistence_policy_digest: [u8; 32],
