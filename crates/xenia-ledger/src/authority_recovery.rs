@@ -58,7 +58,9 @@ pub enum AuthorityRecoveryError {
     /// The event is not valid from the current lifecycle state.
     #[error("invalid authority recovery transition from {state:?} via {event:?}")]
     InvalidTransition {
+        /// State from which the rejected event was attempted.
         state: AuthorityRecoveryStateV1,
+        /// Event that is invalid for the current state.
         event: AuthorityRecoveryEventV1,
     },
 }
