@@ -165,9 +165,6 @@ impl AuthorityStateCoordinator {
         initial_state_commitment_sha256: [u8; SHA256_LEN],
     ) -> Result<Self, AuthorityGenerationError> {
         let path = ledger_path.as_ref().to_path_buf();
-        if path.exists() {
-            return Err(AuthorityGenerationError::LedgerAlreadyExists);
-        }
         let version = AuthorityVersionV1 {
             daemon_host_fingerprint,
             generation: FIRST_AUTHORITY_GENERATION_V1,
@@ -197,9 +194,6 @@ impl AuthorityStateCoordinator {
         }
 
         let path = ledger_path.as_ref().to_path_buf();
-        if !path.exists() {
-            return Err(AuthorityGenerationError::LedgerMissing);
-        }
         let mut version = read_record(&path)?;
         if version.daemon_host_fingerprint != expected_daemon_host_fingerprint {
             return Err(AuthorityGenerationError::HostFingerprintMismatch);
@@ -383,7 +377,18 @@ fn decode_record(bytes: &[u8]) -> Result<AuthorityVersionV1, AuthorityGeneration
 }
 
 fn read_record(path: &Path) -> Result<AuthorityVersionV1, AuthorityGenerationError> {
-    let mut file = File::open(path).map_err(|error| match error.kind() {
+    // Do not let a durable authority ledger read follow a symlink. The live
+    // daemon normally validates this path through AuthorityStorageTrust, but
+    // this crate is also a standalone primitive and should retain its own
+    // final-component no-follow boundary.
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(path).map_err(|error| match error.kind() {
         std::io::ErrorKind::NotFound => AuthorityGenerationError::LedgerMissing,
         _ => AuthorityGenerationError::Io(error.to_string()),
     })?;
@@ -416,10 +421,6 @@ fn persist_replace(
 ) -> Result<(), AuthorityGenerationError> {
     let bytes = encode_record(version)?;
     let parent = parent_directory(path)?;
-    if !parent.exists() {
-        return Err(AuthorityGenerationError::LedgerStorageUnavailable);
-    }
-
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
@@ -715,6 +716,20 @@ mod tests {
             coordinator.current_version().unwrap_err(),
             AuthorityGenerationError::CoordinatorPoisoned
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ledger_read_rejects_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = ledger_path(&dir);
+        drop(AuthorityStateCoordinator::bootstrap_new(&path, HOST, STATE_A).unwrap());
+        let target = dir.path().join("target.bin");
+        std::fs::rename(&path, &target).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+
+        let error = AuthorityStateCoordinator::open_existing(&path, HOST, STATE_A).unwrap_err();
+        assert!(matches!(error, AuthorityGenerationError::Io(_)));
     }
 
     #[test]

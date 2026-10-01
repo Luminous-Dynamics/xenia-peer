@@ -21,6 +21,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+use xenia_symthaea_live_authority_guard::AuthoritySourceIdentity;
+
 /// Whether an operation changed the **effective** revoked-operator set.
 ///
 /// This is intentionally semantic rather than file/operation based: inserting
@@ -57,6 +59,10 @@ pub(crate) struct OperatorRevocations {
     /// The file the set is (re)loaded from, if any — kept so a SIGHUP handler
     /// can reload without re-plumbing the path.
     path: Option<PathBuf>,
+    /// Identity of the source object last trusted by the daemon.
+    source_identity: Arc<RwLock<Option<AuthoritySourceIdentity>>>,
+    /// Trusted authority storage boundary, present for live-authority deployments.
+    trust: Option<xenia_symthaea_live_authority_guard::AuthorityStorageTrust>,
 }
 
 impl OperatorRevocations {
@@ -71,10 +77,44 @@ impl OperatorRevocations {
     /// path for later [`OperatorRevocations::reload`].
     pub(crate) fn from_file(path: &Path) -> std::io::Result<Self> {
         let set = read_revocations(path)?;
+        let identity = if path.exists() {
+            Some(AuthoritySourceIdentity::capture(path)?)
+        } else {
+            None
+        };
         Ok(Self {
             revoked: Arc::new(RwLock::new(set)),
             path: Some(path.to_path_buf()),
+            source_identity: Arc::new(RwLock::new(identity)),
+            trust: None,
         })
+    }
+
+    /// Load a revocation list through the trusted authority-source boundary.
+    ///
+    /// A missing file retains the historical initial-load meaning of an empty
+    /// revocation set. If the file exists, its identity and parsed bytes come
+    /// from the same opened object.
+    pub(crate) fn from_trusted_file(
+        path: &Path,
+        trust: xenia_symthaea_live_authority_guard::AuthorityStorageTrust,
+    ) -> std::io::Result<Self> {
+        trust.validate_source_path(path)?;
+        match trust.read_source(path, None) {
+            Ok((text, identity)) => Ok(Self {
+                revoked: Arc::new(RwLock::new(parse_revocations(&text))),
+                path: Some(path.to_path_buf()),
+                source_identity: Arc::new(RwLock::new(Some(identity))),
+                trust: Some(trust),
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self {
+                revoked: Arc::new(RwLock::new(HashSet::new())),
+                path: Some(path.to_path_buf()),
+                source_identity: Arc::new(RwLock::new(None)),
+                trust: Some(trust),
+            }),
+            Err(error) => Err(error),
+        }
     }
 
     /// Whether `operator_id` is currently revoked. Cheap read-lock; the lock is
@@ -138,7 +178,45 @@ impl OperatorRevocations {
         // A configured file disappearing after successful startup is a real
         // error. Do not route through `read_revocations`, whose initial-load
         // semantics intentionally treat an absent file as an empty set.
-        let text = std::fs::read_to_string(path)?;
+        if let Some(identity) = self
+            .source_identity
+            .read()
+            .map_err(|_| std::io::Error::other("operator revocation source identity lock poisoned"))?
+            .as_ref()
+            .copied()
+        {
+            identity.verify(path)?;
+        } else if path.exists() {
+            let identity = AuthoritySourceIdentity::capture(path)?;
+            *self
+                .source_identity
+                .write()
+                .map_err(|_| std::io::Error::other("operator revocation source identity lock poisoned"))? = Some(identity);
+        }
+
+        let expected = self
+            .source_identity
+            .read()
+            .map_err(|_| std::io::Error::other("operator revocation source identity lock poisoned"))?
+            .as_ref()
+            .copied();
+        let text = if let Some(trust) = &self.trust {
+            match trust.read_source(path, expected) {
+                Ok((text, actual)) => {
+                    if expected.is_none() {
+                        *self
+                            .source_identity
+                            .write()
+                            .map_err(|_| std::io::Error::other("operator revocation source identity lock poisoned"))? =
+                            Some(actual);
+                    }
+                    text
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            read_trusted_source(path, self.source_identity.clone())?
+        };
         let fresh = parse_revocations(&text);
         let mut current = self
             .revoked
@@ -205,6 +283,25 @@ impl OperatorRevocations {
                 "no revocation backing file configured",
             ));
         };
+        if let Some(trust) = &self.trust {
+            trust.validate_source_path(path)?;
+            let expected = self
+                .source_identity
+                .read()
+                .map_err(|_| {
+                    std::io::Error::other(
+                        "operator revocation source identity lock poisoned",
+                    )
+                })?
+                .as_ref()
+                .copied();
+            if let Some(expected) = expected {
+                expected.verify(path)?;
+            } else {
+                let _ = AuthoritySourceIdentity::capture(path)?;
+            }
+        }
+
         let mut ids = self
             .revoked
             .read()
@@ -217,7 +314,13 @@ impl OperatorRevocations {
         if !bytes.is_empty() {
             bytes.push(b'\n');
         }
-        write_atomic_durable(path, &bytes)
+        write_atomic_durable(path, &bytes)?;
+        let identity = AuthoritySourceIdentity::capture(path)?;
+        *self
+            .source_identity
+            .write()
+            .map_err(|_| std::io::Error::other("operator revocation source identity lock poisoned"))? = Some(identity);
+        Ok(())
     }
 
     /// The number of currently-revoked operators.
@@ -263,6 +366,44 @@ fn write_atomic_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// load. Missing file -> empty set (there is nothing to have been revoked
 /// yet). [`OperatorRevocations::reload`] deliberately does not use this --
 /// see its doc comment for why "missing" means something different there.
+fn read_trusted_source(
+    path: &Path,
+    identity: Arc<RwLock<Option<AuthoritySourceIdentity>>>,
+) -> std::io::Result<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)?;
+        let actual = AuthoritySourceIdentity::capture_file(&file)?;
+        {
+            let expected = identity
+                .read()
+                .map_err(|_| std::io::Error::other("operator revocation source identity lock poisoned"))?;
+            if let Some(expected) = expected.as_ref() {
+                if *expected != actual {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        format!("authority source object identity changed: {}", path.display()),
+                    ));
+                }
+            }
+        }
+        let mut text = String::new();
+        use std::io::Read;
+        (&file).read_to_string(&mut text)?;
+        Ok(text)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = identity;
+        std::fs::read_to_string(path)
+    }
+}
+
 fn read_revocations(path: &Path) -> std::io::Result<HashSet<String>> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -324,6 +465,30 @@ mod tests {
         r.persist().unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "alice\nbob\n");
     }
+    #[cfg(unix)]
+    #[test]
+    fn trusted_persist_refuses_replaced_revocation_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("revoked.txt");
+        std::fs::write(&path, b"alice\n").unwrap();
+
+        let trust =
+            xenia_symthaea_live_authority_guard::AuthorityStorageTrust::validate(dir.path())
+                .unwrap();
+        let revocations =
+            OperatorRevocations::from_trusted_file(&path, trust).unwrap();
+
+        revocations.revoke("bob");
+        let replacement = dir.path().join("replacement.txt");
+        std::fs::write(&replacement, b"mallory\n").unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+
+        revocations
+            .persist()
+            .expect_err("stale revocation identity must refuse overwrite");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "mallory\\n");
+    }
+
     #[test]
     fn parses_file_ignoring_blanks_and_comments() {
         let mut f = tempfile::NamedTempFile::new().unwrap();

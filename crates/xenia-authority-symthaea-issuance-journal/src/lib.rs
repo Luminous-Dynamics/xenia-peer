@@ -713,7 +713,15 @@ fn ensure_path_identity(
     path: &Path,
     expected: &FileIdentity,
 ) -> Result<(), IssuanceJournalError> {
-    let file = File::open(path)
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
         .map_err(|error| IssuanceJournalError::StorageIdentityUnavailable(error.to_string()))?;
     let current = capture_identity(&file)?;
     if current == *expected {
@@ -747,6 +755,7 @@ fn secure_open_options() -> OpenOptions {
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
+        options.custom_flags(libc::O_NOFOLLOW);
     }
     options
 }
@@ -1031,6 +1040,22 @@ mod tests {
         );
     }
 
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_path_symlink_is_rejected_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_path = dir.path().join("real.bin");
+        IssuanceJournal::bootstrap_new(&real_path).unwrap();
+
+        let journal_path = dir.path().join("issuance-journal-v1.bin");
+        std::os::unix::fs::symlink(&real_path, &journal_path).unwrap();
+
+        assert!(matches!(
+            IssuanceJournal::open_existing(&journal_path).unwrap_err(),
+            IssuanceJournalError::Io(_)
+        ));
+    }
 
     #[test]
     fn concurrent_clones_serialize_reservations() {

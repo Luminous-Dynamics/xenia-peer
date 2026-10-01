@@ -1,0 +1,588 @@
+// Copyright (c) 2026 Tristan Stoltz / Luminous Dynamics
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+//! Trusted storage-root boundary for live Symthaea authority sources.
+//!
+//! The owner lock establishes exclusive process ownership. This module
+//! establishes the separate storage theorem: the authority root and configured
+//! policy/revocation source paths must resolve to objects the daemon can treat
+//! as trusted. It intentionally does not implement a second identity system.
+
+#![warn(missing_docs)]
+
+use std::io;
+use std::path::{Path, PathBuf};
+
+/// Identity of a filesystem object captured for a long-lived source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthoritySourceIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+impl AuthoritySourceIdentity {
+    /// Capture the identity of an existing, non-symlink source file.
+    pub fn capture(path: &Path) -> io::Result<Self> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("authority source must not be a symlink: {}", path.display()),
+            ));
+        }
+        if !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("authority source is not a regular file: {}", path.display()),
+            ));
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            return Ok(Self {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            });
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = metadata;
+            // Windows live-authority startup is rejected by validate() until
+            // ACL ownership verification is qualified. Keeping this value
+            // constructible preserves the legacy revocation API outside the
+            // live-authority feature boundary.
+            Ok(Self {})
+        }
+    }
+
+    /// Capture identity from an already-open file handle.
+    ///
+    /// This is the stronger read boundary: the caller can open with
+    /// platform-specific no-follow semantics and then inspect the object that
+    /// will actually be parsed, eliminating a pathname reopen between the
+    /// identity check and the read.
+    #[cfg(unix)]
+    pub fn capture_file(file: &std::fs::File) -> io::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "authority source is not a regular file",
+            ));
+        }
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    /// Re-check that the named source is still the same filesystem object.
+    pub fn verify(&self, path: &Path) -> io::Result<()> {
+        let current = Self::capture(path)?;
+        if current != *self {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("authority source object identity changed: {}", path.display()),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Validated trust boundary for one live Symthaea authority storage root.
+#[derive(Debug, Clone)]
+pub struct AuthorityStorageTrust {
+    root: PathBuf,
+    #[cfg(unix)]
+    root_identity: AuthorityStorageIdentity,
+    #[cfg(unix)]
+    owner_uid: u32,
+}
+
+/// Stable identity of the trusted storage directory itself.
+///
+/// The owner lock pins one opened directory inode, while this identity lets
+/// pathname-based operations fail closed if the configured root name is
+/// replaced or redirected after startup.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AuthorityStorageIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+impl AuthorityStorageIdentity {
+    fn capture(path: &Path) -> io::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("authority storage root is no longer a real directory: {}", path.display()),
+            ));
+        }
+        Ok(Self { device: metadata.dev(), inode: metadata.ino() })
+    }
+
+    fn verify(&self, path: &Path) -> io::Result<()> {
+        let current = Self::capture(path)?;
+        if current != *self {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("authority storage root object identity changed: {}", path.display()),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl AuthorityStorageTrust {
+    /// Validate and capture a trusted authority root.
+    ///
+    /// On Unix this requires a real directory owned by the current effective
+    /// uid with no group/world write permission. On Windows the ACL/owner
+    /// theorem is intentionally not guessed: until an explicit ACL ownership
+    /// implementation is added, live authority startup fails closed.
+    pub fn validate(root: impl AsRef<Path>) -> io::Result<Self> {
+        let root = root.as_ref();
+        let metadata = std::fs::symlink_metadata(root)?;
+        if metadata.file_type().is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("authority storage root must not be a symlink: {}", root.display()),
+            ));
+        }
+        if !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                format!("authority storage root is not a directory: {}", root.display()),
+            ));
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let mode = metadata.permissions().mode();
+            if mode & 0o022 != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "authority storage root is group/world writable: {}",
+                        root.display()
+                    ),
+                ));
+            }
+            // libc is used only for the process identity comparison. The
+            // filesystem metadata itself is obtained through safe std APIs.
+            let owner_uid = rustix::process::geteuid().as_raw();
+            if metadata.uid() != owner_uid {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "authority storage root owner uid {} does not match daemon uid {}",
+                        metadata.uid(),
+                        owner_uid
+                    ),
+                ));
+            }
+            return Ok(Self {
+                root: root.to_path_buf(),
+                root_identity: AuthorityStorageIdentity::capture(root)?,
+                owner_uid,
+            });
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = metadata;
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "live Symthaea authority storage trust is not qualified on Windows: explicit ACL ownership verification is required",
+            ))
+        }
+    }
+
+    /// Return the trusted root path.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Revalidate that the configured root still names the directory whose
+    /// inode was trusted at startup.
+    ///
+    /// This is intentionally separate from the owner lock: the lock pins the
+    /// original directory handle, while this check detects a pathname that was
+    /// replaced underneath a long-running daemon.
+    #[cfg(unix)]
+    pub fn verify_root(&self) -> io::Result<()> {
+        self.root_identity.verify(&self.root)
+    }
+
+    /// Validate that a configured source is a direct child of the trusted
+    /// root and is not a symlink. A missing source is allowed here so callers
+    /// can preserve their existing initial-load semantics; capture its
+    /// identity when the source must exist.
+    pub fn validate_source_path(&self, path: &Path) -> io::Result<()> {
+        #[cfg(unix)]
+        self.verify_root()?;
+
+        if path.parent() != Some(self.root.as_path()) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "authority source must be directly inside trusted root {}: {}",
+                    self.root.display(),
+                    path.display()
+                ),
+            ));
+        }
+
+        if let Ok(metadata) = std::fs::symlink_metadata(path) {
+            if metadata.file_type().is_symlink() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("authority source must not be a symlink: {}", path.display()),
+                ));
+            }
+            if !metadata.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("authority source is not a regular file: {}", path.display()),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate a generation ledger path against this root.
+    pub fn validate_generation_path(&self, path: &Path) -> io::Result<()> {
+        self.validate_child_path(path, "generation ledger")
+    }
+
+    /// Validate an issuance journal path against this root.
+    pub fn validate_issuance_path(&self, path: &Path) -> io::Result<()> {
+        self.validate_child_path(path, "issuance journal")
+    }
+
+    fn validate_child_path(&self, path: &Path, label: &str) -> io::Result<()> {
+        #[cfg(unix)]
+        self.verify_root()?;
+
+        if path.parent() != Some(self.root.as_path()) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "{label} must be directly inside trusted root {}: {}",
+                    self.root.display(),
+                    path.display()
+                ),
+            ));
+        }
+
+        // Generation and issuance paths are durable authority objects. If an
+        // object already exists at the configured child path, it must itself
+        // be a regular, non-symlink file. Otherwise a read/open operation
+        // could follow the link outside the trusted root before the durable
+        // authority boundary gets a chance to reject it.
+        if let Ok(metadata) = std::fs::symlink_metadata(path) {
+            if metadata.file_type().is_symlink() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("{label} must not be a symlink: {}", path.display()),
+                ));
+            }
+            if !metadata.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{label} is not a regular file: {}", path.display()),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Open a trusted source and return its exact bytes plus the filesystem
+    /// identity of the object that was actually opened.
+    ///
+    /// On Unix the final path component is opened with O_NOFOLLOW, then the
+    /// identity is captured from the open handle and the bytes are read from
+    /// that same handle. This removes the verify-then-reopen pathname race.
+    /// The optional expected identity must match the opened object when
+    /// present; callers can install the returned identity only after a
+    /// successful initial load.
+    #[cfg(unix)]
+    pub fn read_source(
+        &self,
+        path: &Path,
+        expected: Option<AuthoritySourceIdentity>,
+    ) -> io::Result<(String, AuthoritySourceIdentity)> {
+        self.validate_source_path(path)?;
+        use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // Keep the trusted root directory itself open, then resolve the child
+        // relative to that descriptor. On Linux, openat2() additionally
+        // constrains *every* path component, rather than only the final
+        // component as O_NOFOLLOW does. This is the stronger whole-path
+        // theorem; non-Linux Unix retains the existing final-component
+        // no-follow boundary.
+        #[cfg(target_os = "linux")]
+        let file = {
+            use std::os::fd::AsFd;
+            use rustix::fs::{openat2, Mode, OFlags, ResolveFlags};
+
+            let root = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&self.root)?;
+            let root_identity = AuthorityStorageIdentity::capture(&self.root)?;
+            if root_identity != self.root_identity {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("authority storage root object identity changed: {}", self.root.display()),
+                ));
+            }
+
+            let name = path.file_name().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("authority source has no final component: {}", path.display()),
+                )
+            })?;
+
+            openat2(
+                root.as_fd(),
+                name,
+                OFlags::RDONLY | OFlags::CLOEXEC,
+                Mode::empty(),
+                ResolveFlags::BENEATH
+                    | ResolveFlags::NO_SYMLINKS
+                    | ResolveFlags::NO_MAGICLINKS
+                    | ResolveFlags::NO_XDEV,
+            )
+            .map_err(io::Error::from)?
+        };
+
+        #[cfg(not(target_os = "linux"))]
+        let file = {
+            use std::os::unix::fs::OpenOptionsExt;
+
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(path)?
+        };
+
+        let actual = AuthoritySourceIdentity::capture_file(&file)?;
+        if let Some(expected) = expected {
+            if expected != actual {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("authority source object identity changed: {}", path.display()),
+                ));
+            }
+        }
+        let mut text = String::new();
+        (&file).read_to_string(&mut text)?;
+        Ok((text, actual))
+    }
+
+    /// Return the Unix owner uid captured at validation time.
+    #[cfg(unix)]
+    pub fn owner_uid(&self) -> u32 {
+        self.owner_uid
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_private_owned_root() {
+        let root = tempfile::tempdir().unwrap();
+        let trust = AuthorityStorageTrust::validate(root.path()).unwrap();
+        assert_eq!(trust.root(), root.path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_group_or_world_writable_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        let error = AuthorityStorageTrust::validate(root.path()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_root() {
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let link = parent.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let error = AuthorityStorageTrust::validate(&link).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn source_must_be_direct_child_and_not_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let trust = AuthorityStorageTrust::validate(root.path()).unwrap();
+        let nested = root.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let source = nested.join("operators.json");
+        assert_eq!(
+            trust.validate_source_path(&source).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+
+        let source = root.path().join("operators.json");
+        std::fs::write(&source, b"{}").unwrap();
+        let identity = AuthoritySourceIdentity::capture(&source).unwrap();
+        identity.verify(&source).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_source_parses_from_the_opened_object() {
+        let root = tempfile::tempdir().unwrap();
+        let trust = AuthorityStorageTrust::validate(root.path()).unwrap();
+        let source = root.path().join("operators.json");
+        std::fs::write(&source, b"{\"version\":1}").unwrap();
+
+        let (text, identity) = trust.read_source(&source, None).unwrap();
+        assert_eq!(text, "{\"version\":1}");
+        assert_eq!(identity, AuthoritySourceIdentity::capture(&source).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_source_rejects_replaced_object() {
+        let root = tempfile::tempdir().unwrap();
+        let trust = AuthorityStorageTrust::validate(root.path()).unwrap();
+        let source = root.path().join("operators.json");
+        std::fs::write(&source, b"old").unwrap();
+        let expected = AuthoritySourceIdentity::capture(&source).unwrap();
+
+        let replacement = root.path().join("replacement.json");
+        std::fs::write(&replacement, b"new").unwrap();
+        std::fs::rename(&replacement, &source).unwrap();
+
+        let error = trust.read_source(&source, Some(expected)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn read_source_rejects_nested_escape_before_openat2() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("authority");
+        std::fs::create_dir(&root).unwrap();
+        let trust = AuthorityStorageTrust::validate(&root).unwrap();
+
+        let outside = parent.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("operators.json"), b"outside").unwrap();
+
+        let nested = root.join("nested");
+        std::os::unix::fs::symlink(&outside, &nested).unwrap();
+        let escaped = nested.join("operators.json");
+
+        // The direct-child policy rejects the escape before any open. This
+        // keeps the portable policy stronger than necessary while the Linux
+        // openat2 path also remains ready for any future nested-source use.
+        assert_eq!(
+            trust.validate_source_path(&escaped).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_source_rejects_final_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let trust = AuthorityStorageTrust::validate(root.path()).unwrap();
+        let target = root.path().join("target");
+        std::fs::write(&target, b"target").unwrap();
+        let source = root.path().join("operators.json");
+        std::os::unix::fs::symlink(&target, &source).unwrap();
+
+        let error = trust.read_source(&source, None).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            io::ErrorKind::PermissionDenied | io::ErrorKind::Other
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_child_paths_reject_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let trust = AuthorityStorageTrust::validate(root.path()).unwrap();
+
+        let generation_target = root.path().join("generation-target.bin");
+        std::fs::write(&generation_target, b"generation").unwrap();
+        let generation = root.path().join("authority-generation.bin");
+        std::os::unix::fs::symlink(&generation_target, &generation).unwrap();
+        assert_eq!(
+            trust.validate_generation_path(&generation).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+
+        let issuance_target = root.path().join("issuance-target.bin");
+        std::fs::write(&issuance_target, b"issuance").unwrap();
+        let issuance = root.path().join("issuance-journal.bin");
+        std::os::unix::fs::symlink(&issuance_target, &issuance).unwrap();
+        assert_eq!(
+            trust.validate_issuance_path(&issuance).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_replaced_root_identity() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("authority");
+        std::fs::create_dir(&root).unwrap();
+        let trust = AuthorityStorageTrust::validate(&root).unwrap();
+
+        let replacement = parent.path().join("replacement");
+        std::fs::create_dir(&replacement).unwrap();
+        std::fs::rename(&replacement, &root).unwrap();
+
+        let error = trust.verify_root().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_replacement_is_detected() {
+        let root = tempfile::tempdir().unwrap();
+        let trust = AuthorityStorageTrust::validate(root.path()).unwrap();
+        let source = root.path().join("revoked.txt");
+        std::fs::write(&source, b"alice\\n").unwrap();
+        let identity = AuthoritySourceIdentity::capture(&source).unwrap();
+
+        let replacement = root.path().join("replacement.txt");
+        std::fs::write(&replacement, b"bob\\n").unwrap();
+        std::fs::rename(&replacement, &source).unwrap();
+
+        assert_eq!(
+            identity.verify(&source).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        drop(trust);
+    }
+}

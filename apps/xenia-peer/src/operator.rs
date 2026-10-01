@@ -121,6 +121,8 @@ pub(crate) struct EnrolledOperator {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct OperatorPolicy {
     by_ed25519: Arc<RwLock<HashMap<[u8; 32], EnrolledOperator>>>,
+    source_identity: Arc<RwLock<Option<AuthoritySourceIdentity>>>,
+    storage_trust: Arc<RwLock<Option<AuthorityStorageTrust>>>,
 }
 
 impl OperatorPolicy {
@@ -136,6 +138,8 @@ impl OperatorPolicy {
         }
         Ok(Self {
             by_ed25519: Arc::new(RwLock::new(by_ed25519)),
+            source_identity: Arc::new(RwLock::new(None)),
+            storage_trust: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -178,6 +182,36 @@ impl OperatorPolicy {
         let bytes = std::fs::read(path).map_err(|e| OperatorPolicyError::Io(e.to_string()))?;
         restrict_permissions(path);
         Self::from_json(&bytes)
+    }
+
+    /// Load a policy through the trusted authority-source boundary.
+    ///
+    /// The source is opened once with no-follow semantics, its filesystem
+    /// identity is captured from the opened handle, and the JSON is parsed
+    /// from those exact bytes. This is the live-authority path; the legacy
+    /// load method remains for non-live callers.
+    pub(crate) fn load_trusted(
+        path: &Path,
+        trust: &xenia_symthaea_live_authority_guard::AuthorityStorageTrust,
+    ) -> Result<Self, OperatorPolicyError> {
+        let expected = xenia_symthaea_live_authority_guard::AuthoritySourceIdentity::capture(path)
+            .map_err(|e| OperatorPolicyError::Io(e.to_string()))?;
+        let (text, actual) = trust
+            .read_source(path, Some(expected))
+            .map_err(|e| OperatorPolicyError::Io(e.to_string()))?;
+        debug_assert_eq!(expected, actual);
+        restrict_permissions(path);
+        let policy = Self::from_json(text.as_bytes())?;
+        *policy
+            .storage_trust
+            .write()
+            .map_err(|_| OperatorPolicyError::Io("operator policy storage trust lock poisoned".to_string()))? = Some(trust.clone());
+        *policy
+            .source_identity
+            .write()
+            .map_err(|_| OperatorPolicyError::Io("operator policy source identity lock poisoned".to_string()))? =
+            Some(actual);
+        Ok(policy)
     }
 
     /// Look up an enrolled operator by Ed25519 public key.
@@ -379,6 +413,41 @@ impl OperatorPolicy {
     /// doc comment flags and accepts for revocation: without this, a live
     /// [`Self::replace_operator_key`] would vanish on the next restart or
     /// reload from `path`.
+    /// Persist through the live trusted-source boundary.
+    ///
+    /// The source identity is checked before replacement, preventing a
+    /// stale authority process from overwriting an object that was replaced
+    /// underneath it. After the durable rename succeeds, the new object
+    /// identity is recorded for the next guarded mutation.
+    pub(crate) fn persist_to_trusted(&self, path: &Path) -> std::io::Result<()> {
+        let trust = self
+            .storage_trust
+            .read()
+            .map_err(|_| std::io::Error::other("operator policy storage trust lock poisoned"))?
+            .clone()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Unsupported, "operator policy has no trusted storage boundary"))?;
+        trust.validate_source_path(path)?;
+        let expected = self
+            .source_identity
+            .read()
+            .map_err(|_| std::io::Error::other("operator policy source identity lock poisoned"))?
+            .as_ref()
+            .copied();
+        if let Some(expected) = expected {
+            expected.verify(path)?;
+        } else {
+            let _ = AuthoritySourceIdentity::capture(path)?;
+        }
+        self.persist_to(path)?;
+        let actual = AuthoritySourceIdentity::capture(path)?;
+        *self
+            .source_identity
+            .write()
+            .map_err(|_| std::io::Error::other("operator policy source identity lock poisoned"))? =
+            Some(actual);
+        Ok(())
+    }
+
     pub(crate) fn persist_to(&self, path: &Path) -> std::io::Result<()> {
         let file = {
             let map = self
@@ -834,6 +903,33 @@ mod tests {
             .replace_operator_key("alice", ed, new_ml.clone(), None)
             .unwrap();
         assert_eq!(policy.lookup(&ed).unwrap().ml_dsa_pubkey, new_ml);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_persist_refuses_replaced_policy_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("operators.json");
+        let policy = OperatorPolicy::from_operators(vec![
+            record("alice", [8u8; 32], OperatorRole::Admin),
+        ])
+        .unwrap();
+        policy.persist_to(&path).unwrap();
+
+        let trust =
+            xenia_symthaea_live_authority_guard::AuthorityStorageTrust::validate(dir.path())
+                .unwrap();
+        let trusted = OperatorPolicy::load_trusted(&path, &trust).unwrap();
+
+        let replacement = dir.path().join("replacement.json");
+        std::fs::write(&replacement, b"{\"operators\":[]}").unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+
+        trusted
+            .persist_to_trusted(&path)
+            .expect_err("stale policy identity must refuse overwrite");
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes, b"{\"operators\":[]}");
     }
 
     #[test]

@@ -30,7 +30,7 @@ use xenia_symthaea_attestation_authority::{
     SymthaeaAuthorityScopeV1, symthaea_key_lineage_commitment_v1,
 };
 use xenia_symthaea_attestation_contract::{HybridSignatureBundleV1, XeniaHybridSuiteV1};
-use xenia_symthaea_authority_generation::{SHA256_LEN, StableAuthoritySnapshot};
+use xenia_symthaea_authority_generation::{AuthorityMutation, SHA256_LEN, StableAuthoritySnapshot};
 use xenia_symthaea_authorization_receipt::{
     MAX_AUTHORIZATION_TTL_SECS_V1, SignedXeniaSymthaeaAuthorizationReceiptV1,
     XeniaSymthaeaAuthorizationReceiptV1,
@@ -300,6 +300,43 @@ mod tests {
         assert!(MlDsaIdentity::verify(&ml.public_key_bytes(), &transcript, &ml_signature).is_ok());
     }
 
+    #[test]
+    fn generation_and_policy_provenance_cannot_be_transplanted_between_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = ledger_path(&dir);
+        let source_a = material();
+        let commitment_a = source_a.effective_policy_commitment_sha256().unwrap();
+        let guard = LiveAuthorityGuard::bootstrap_new(path.clone(), HOST, commitment_a).unwrap();
+        let snapshot_a = read_coherent_symthaea_authority_snapshot_v1(&guard, "alice", || {
+            Ok::<_, &'static str>(source_a.clone())
+        }).unwrap();
+
+        let (ed, ml) = daemon_keys();
+        let first = issue_symthaea_authorization_receipt_v1(
+            &request(), &snapshot_a, 1_000, 120, CERT, VERIFIER, &ed, &ml,
+        ).unwrap();
+
+        let mut source_b = source_a;
+        source_b.revoked_operator_ids.push("bob".into());
+        let commitment_b = source_b.effective_policy_commitment_sha256().unwrap();
+        guard.with_mutation(|| AuthorityMutation::changed((), commitment_b)).unwrap();
+        let snapshot_b = read_coherent_symthaea_authority_snapshot_v1(&guard, "alice", || {
+            Ok::<_, &'static str>(source_b)
+        }).unwrap();
+
+        let second = issue_symthaea_authorization_receipt_v1(
+            &request(), &snapshot_b, 1_000, 120, CERT, VERIFIER, &ed, &ml,
+        ).unwrap();
+
+        assert_eq!(first.receipt.authority_state_epoch, 1);
+        assert_eq!(second.receipt.authority_state_epoch, 2);
+        assert_eq!(first.receipt.policy_commitment_sha256, snapshot_a.version().state_commitment_sha256);
+        assert_eq!(second.receipt.policy_commitment_sha256, snapshot_b.version().state_commitment_sha256);
+        assert_ne!(
+            first.receipt.canonical_signing_transcript().unwrap(),
+            second.receipt.canonical_signing_transcript().unwrap()
+        );
+    }
     #[test]
     fn request_operator_must_match_coherent_snapshot() {
         let dir = tempfile::tempdir().unwrap();

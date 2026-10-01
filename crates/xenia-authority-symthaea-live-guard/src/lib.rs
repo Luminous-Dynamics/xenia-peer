@@ -20,6 +20,12 @@
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
+mod authority_owner;
+mod authority_storage;
+
+pub use authority_owner::AuthorityOwnerLock;
+pub use authority_storage::{AuthoritySourceIdentity, AuthorityStorageTrust};
+
 use xenia_symthaea_authority_generation::{
     AuthorityGenerationError, AuthorityMutation, AuthorityStateCoordinator, AuthorityVersionV1,
     SHA256_LEN, StableAuthoritySnapshot,
@@ -203,6 +209,15 @@ impl LiveAuthorityGuard {
         }
     }
 
+    /// Execute a snapshot-dependent operation while the live read barrier is held.
+    ///
+    /// This is the preferred provenance boundary for issuance and other
+    /// security-sensitive consumers. The callback receives the snapshot only
+    /// while the guard prevents concurrent authority mutation; callers must
+    /// not retain a snapshot and use it later as a substitute for this barrier.
+    /// A returned receipt/value is therefore the output of one coherent
+    /// authority interval rather than an independently live snapshot handle.
+    ///
     /// Run an operation while the outer live-authority read barrier remains
     /// held for the entire operation.
     ///
