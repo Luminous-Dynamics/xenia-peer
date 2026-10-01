@@ -140,8 +140,10 @@ pub use compaction::{
 
 pub use durable_frontier::{
     DURABLE_LEDGER_FRONTIER_DOMAIN, DURABLE_LEDGER_FRONTIER_SCHEMA_VERSION,
-    DurableLedgerAppendOutcomeV1, DurableLedgerFrontierClaimV1, DurableLedgerFrontierError,
-    DurableLedgerFrontierV1, DurableLedgerReconciliationOutcomeV1,
+    DurableAuthorityEpochClaimV1, DurableAuthorityEpochV1,
+    DURABLE_AUTHORITY_EPOCH_CLAIM_SCHEMA_VERSION, DurableLedgerAppendOutcomeV1,
+    DurableLedgerFrontierClaimV1, DurableLedgerFrontierError, DurableLedgerFrontierV1,
+    DurableLedgerReconciliationOutcomeV1,
 };
 
 pub use entry::{
