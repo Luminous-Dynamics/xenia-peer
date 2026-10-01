@@ -1296,24 +1296,32 @@ mod tests {
             old_source_id, new_source_id,
             "ledger-key rotation must move the witness source namespace"
         );
+
+        let observation = new_chain
+            .observe_witness_frontier_v1(
+                [0x51; 16],
+                [0xA5; 32],
+                policy,
+                120,
+                &mut store,
+            )
+            .unwrap();
+        observation
+            .verify_fresh(
+                [0xA5; 32],
+                new_chain.signing_key.verifying_key().to_bytes(),
+                new_source_id,
+                policy.source_epoch,
+                policy.anchor_policy_digest,
+                [0x51; 16],
+                120,
+                5,
+                1,
+            )
+            .unwrap();
         assert!(matches!(
-            old_anchor.verify_current_anchor(&SignedWitnessFrontierObservationV1 {
-                schema_version: WITNESS_FRONTIER_ANCHOR_SCHEMA_VERSION,
-                source_id: new_source_id,
-                source_epoch: policy.source_epoch,
-                anchor_policy_digest: policy.anchor_policy_digest,
-                witness_id: [0x51; 16],
-                challenge: [0xA5; 32],
-                observed_at_unix_s: 120,
-                current: None,
-                ledger_entry_count: old_anchor.ledger_entry_count,
-                ledger_head_hash: old_anchor.ledger_head_hash,
-                ledger_public_key: old_anchor.ledger_public_key,
-                signature: SignatureEnvelope::ed25519([0; 64]),
-            }),
-            Err(WitnessFrontierAnchorError::BadAnchorSignature)
-                | Err(WitnessFrontierAnchorError::SourceBindingMismatch)
-                | Err(WitnessFrontierAnchorError::ObservationCurrentAnchorMismatch)
+            observation.verify_current_anchor(&old_anchor),
+            Err(WitnessFrontierAnchorError::ObservationCurrentAnchorMismatch)
         ));
     }
 
