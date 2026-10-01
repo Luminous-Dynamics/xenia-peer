@@ -7,6 +7,11 @@
 //! makes the lifecycle invariant executable: authenticated state is not itself
 //! durable authority, an ambiguous persistence outcome cannot activate authority,
 //! and a stale predecessor cannot resurrect after a successor transition commits.
+//!
+//! This is a pure lifecycle reducer, not a persistence verifier. Callers must
+//! emit `DurableCommit` or a `Recover*` event only after the authoritative
+//! persistence adapter has verified the exact transition claim. The event value
+//! itself is not cryptographic evidence of persistence.
 
 use thiserror::Error;
 
@@ -198,6 +203,10 @@ mod tests {
         assert_eq!(state, AuthorityRecoveryStateV1::RecoveryAfterCommit);
         assert!(matches!(
             state.apply(AuthorityRecoveryEventV1::RecoverOld),
+            Err(AuthorityRecoveryError::InvalidTransition { .. })
+        ));
+        assert!(matches!(
+            state.apply(AuthorityRecoveryEventV1::RecoverOutcomeUnknown),
             Err(AuthorityRecoveryError::InvalidTransition { .. })
         ));
         assert_eq!(
