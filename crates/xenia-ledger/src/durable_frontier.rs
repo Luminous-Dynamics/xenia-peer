@@ -545,6 +545,124 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct ObservationStore {
+        current: Option<SignedWitnessFrontierAnchorV1>,
+    }
+
+    impl WitnessFrontierAnchorStore for ObservationStore {
+        fn lookup_operation(
+            &mut self,
+            _source_id: [u8; 16],
+            _source_epoch: u64,
+            operation_id: [u8; 32],
+        ) -> Result<Option<SignedWitnessFrontierAnchorV1>, [u8; 32]> {
+            Ok(self.current.as_ref().filter(|a| a.target.operation_id == operation_id).cloned())
+        }
+
+        fn current_for_witness(
+            &mut self,
+            _source_id: [u8; 16],
+            _source_epoch: u64,
+            _witness_id: [u8; 16],
+        ) -> Result<Option<SignedWitnessFrontierAnchorV1>, [u8; 32]> {
+            Ok(self.current.clone())
+        }
+
+        fn compare_and_swap(
+            &mut self,
+            expected_previous: Option<[u8; 32]>,
+            candidate: &SignedWitnessFrontierAnchorV1,
+        ) -> PersistenceDisposition<[u8; 32]> {
+            let actual = self.current.as_ref().and_then(|a| a.fingerprint().ok());
+            if actual != expected_previous {
+                return PersistenceDisposition::ProvenNotPersisted([0xE1; 32]);
+            }
+            self.current = Some(candidate.clone());
+            PersistenceDisposition::Persisted
+        }
+    }
+
+    #[test]
+    fn fresh_witness_observation_must_name_the_exact_durable_frontier() {
+        let mut chain = Chain::new(SigningKey::from_bytes(&[3; 32]));
+        let outcome = chain
+            .append_transactional_outcome_durable_v1(event(1), PERSISTENCE_POLICY, |_, _| {
+                PersistenceDisposition::Persisted
+            })
+            .unwrap();
+        let durable_frontier = match outcome {
+            DurableLedgerAppendOutcomeV1::Persisted { durable_frontier, .. } => durable_frontier,
+            _ => panic!("expected durable frontier"),
+        };
+
+        let policy = XeniaWitnessFrontierSourcePolicyV1 {
+            source_epoch: 7,
+            anchor_policy_digest: [0x62; 32],
+        };
+        let source_id = derive_xenia_witness_frontier_source_id(
+            chain.signing_key.verifying_key().to_bytes(),
+            policy.anchor_policy_digest,
+        )
+        .unwrap();
+        let witness_id = [0x51; 16];
+        let mut target = WitnessFrontierAnchorTargetV1 {
+            schema_version: WITNESS_FRONTIER_ANCHOR_SCHEMA_VERSION,
+            operation_id: [1; 32],
+            source_id,
+            source_epoch: policy.source_epoch,
+            anchor_policy_digest: policy.anchor_policy_digest,
+            witness_id,
+            high_watermark: 3,
+            reservation_head: [0x33; 32],
+            frontier_statement_digest: [1; 32],
+        };
+        target.frontier_statement_digest = target.recompute_frontier_statement_digest();
+        target.operation_id = target.recompute_operation_id();
+        let mut store = ObservationStore::default();
+        chain
+            .append_witness_frontier_anchor_v1(target, policy, 100, &mut store)
+            .unwrap();
+        let observation = chain
+            .observe_witness_frontier_v1(witness_id, [0xA5; 32], policy, 120, &mut store)
+            .unwrap();
+
+        durable_frontier
+            .verify_against_fresh_witness_observation(
+                &chain,
+                &observation,
+                [0xA5; 32],
+                source_id,
+                policy.source_epoch,
+                policy.anchor_policy_digest,
+                witness_id,
+                120,
+                5,
+                1,
+                PERSISTENCE_POLICY,
+            )
+            .unwrap();
+
+        let mut mismatched = observation.clone();
+        mismatched.ledger_head_hash[0] ^= 1;
+        assert!(matches!(
+            durable_frontier.verify_against_fresh_witness_observation(
+                &chain,
+                &mismatched,
+                [0xA5; 32],
+                source_id,
+                policy.source_epoch,
+                policy.anchor_policy_digest,
+                witness_id,
+                120,
+                5,
+                1,
+                PERSISTENCE_POLICY,
+            ),
+            Err(DurableLedgerFrontierError::WitnessAnchor(_))
+        ));
+    }
+
     #[test]
     fn persisted_append_mints_token_and_enables_durable_authority() {
         let mut chain = Chain::new(SigningKey::from_bytes(&[3; 32]));
