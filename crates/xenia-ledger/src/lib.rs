@@ -69,6 +69,7 @@
 mod agent_authority;
 mod agent_authority_proto;
 mod archive;
+mod authority_epoch;
 mod binding;
 mod chain;
 mod checkpoint;
@@ -96,6 +97,12 @@ pub use agent_authority_proto::{
     AGENT_CAPABILITY_AUTHORIZATION_DOMAIN, AGENT_CAPABILITY_AUTHORIZATION_SCHEMA_VERSION,
     AgentCapabilityAuthorizationError, AgentCapabilityAuthorizationV1, AgentCheckpointAnchorV1,
     TranscriptSignatureSuiteV1,
+};
+
+pub use authority_epoch::{
+    ledger_authority_epoch_transition_message, ledger_key_transition_fingerprint,
+    LedgerAuthorityEpochTransitionError, LedgerAuthorityEpochTransitionV1,
+    LEDGER_AUTHORITY_EPOCH_TRANSITION_SCHEMA,
 };
 
 pub use archive::{
