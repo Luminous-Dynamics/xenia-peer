@@ -101,7 +101,7 @@ impl DurableAuthorityEpochClaimV1 {
     pub fn digest(self) -> Result<[u8; 32], DurableLedgerFrontierError> {
         self.validate()?;
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"xenia.durable-authority-epoch-claim.v1\\0");
+        hasher.update(b"xenia.durable-authority-epoch-claim.v1\0");
         hasher.update(&self.schema_version.to_be_bytes());
         hasher.update(&self.authority_epoch.to_be_bytes());
         hasher.update(&self.key_transition_fingerprint);
