@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use xenia_ledger::{
     CURRENT_EVIDENCE_CRYPTO_MANIFEST, Chain, ConsentKind, CryptoPolicyProfile, DowngradePolicy,
+    DurableLedgerFrontierError, DurableLedgerFrontierV1,
     Ed25519EvidenceSignatureBackend, EvidenceBundleSeal, EvidenceBundleVerifyError,
     EvidenceCryptoManifest, EvidencePublicKeyBinding, EvidenceSignatureBackend, LedgerEntry,
     LedgerEntryExport, LedgerError, SessionTranscriptBinding, SessionTranscriptSignature,
@@ -40,6 +41,7 @@ pub(crate) enum M1RuntimeError {
     Session(M1SessionError),
     Ledger(LedgerError),
     Verify(VerifyError),
+    DurableFrontier(DurableLedgerFrontierError),
     EmptyPersistedLedger,
     EvidenceBundle(EvidenceBundleVerifyError),
     MissingTranscriptBinding,
@@ -65,6 +67,7 @@ impl fmt::Display for M1RuntimeError {
             Self::Session(err) => write!(f, "M1 session error: {err}"),
             Self::Ledger(err) => write!(f, "M1 ledger error: {err}"),
             Self::Verify(err) => write!(f, "M1 ledger verification error: {err}"),
+            Self::DurableFrontier(err) => write!(f, "M1 durable frontier restore error: {err}"),
             Self::EmptyPersistedLedger => write!(
                 f,
                 "M1 persisted ledger is empty; initialize a new runtime instead of restoring empty state"
@@ -119,6 +122,12 @@ impl From<LedgerError> for M1RuntimeError {
 impl From<VerifyError> for M1RuntimeError {
     fn from(err: VerifyError) -> Self {
         Self::Verify(err)
+    }
+}
+
+impl From<DurableLedgerFrontierError> for M1RuntimeError {
+    fn from(err: DurableLedgerFrontierError) -> Self {
+        Self::DurableFrontier(err)
     }
 }
 
@@ -824,6 +833,40 @@ impl M1RuntimeSession {
             scope,
         );
         runtime.replay_persisted_consent_state()?;
+        Ok(runtime)
+    }
+
+    /// Restore an M1 session only when its authenticated ledger is also bound to
+    /// an already-established durable frontier witness.
+    ///
+    /// Signature verification proves that the persisted history is internally
+    /// authentic. The durable frontier witness adds the stronger invariant that
+    /// this exact history was accepted by the reviewed persistence boundary.
+    /// Current-authority / anti-rollback policy remains the responsibility of the
+    /// authoritative adapter that minted the witness; this method never treats a
+    /// locally constructed token as authority.
+    pub(crate) fn from_persisted_entries_with_durable_frontier(
+        signing_key: SigningKey,
+        entries: Vec<LedgerEntry>,
+        source_id: [u8; 32],
+        session_id: Uuid,
+        request_id: Uuid,
+        scope: impl Into<String>,
+        durable_frontier: &DurableLedgerFrontierV1,
+        expected_persistence_policy_digest: [u8; 32],
+    ) -> Result<Self, M1RuntimeError> {
+        let mut runtime = Self::from_persisted_entries(
+            signing_key,
+            entries,
+            source_id,
+            session_id,
+            request_id,
+            scope,
+        )?;
+        durable_frontier.verify_against_chain(
+            &runtime.chain,
+            expected_persistence_policy_digest,
+        )?;
         Ok(runtime)
     }
 
