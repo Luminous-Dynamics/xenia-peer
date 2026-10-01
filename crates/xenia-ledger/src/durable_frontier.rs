@@ -660,7 +660,7 @@ pub enum DurableLedgerFrontierError {
 
 #[cfg(test)]
 mod tests {
-    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::{Signer, SigningKey};
     use uuid::Uuid;
 
     use super::*;
