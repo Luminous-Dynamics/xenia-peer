@@ -70,6 +70,7 @@ mod agent_authority;
 mod agent_authority_proto;
 mod archive;
 mod authority_epoch;
+mod authority_recovery;
 mod binding;
 mod chain;
 mod checkpoint;
@@ -97,6 +98,10 @@ pub use agent_authority_proto::{
     AGENT_CAPABILITY_AUTHORIZATION_DOMAIN, AGENT_CAPABILITY_AUTHORIZATION_SCHEMA_VERSION,
     AgentCapabilityAuthorizationError, AgentCapabilityAuthorizationV1, AgentCheckpointAnchorV1,
     TranscriptSignatureSuiteV1,
+};
+
+pub use authority_recovery::{
+    AuthorityRecoveryError, AuthorityRecoveryEventV1, AuthorityRecoveryStateV1,
 };
 
 pub use authority_epoch::{
