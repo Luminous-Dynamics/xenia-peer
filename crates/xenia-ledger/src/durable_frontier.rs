@@ -812,7 +812,7 @@ mod tests {
 
         let mut chain = Chain::new(successor.clone());
         chain
-            .append_transactional_outcome(event(1), |_| PersistenceDisposition::Persisted)
+            .append_transactional_outcome(event(1), |_| PersistenceDisposition::<[u8; 32]>::Persisted)
             .unwrap();
 
         // No durable acknowledgement: recovery must not invent successor authority.
@@ -882,7 +882,7 @@ mod tests {
 
         let mut chain = Chain::new(successor.clone());
         chain
-            .append_transactional_outcome(event(1), |_| PersistenceDisposition::Persisted)
+            .append_transactional_outcome(event(1), |_| PersistenceDisposition::<[u8; 32]>::Persisted)
             .unwrap();
 
         let token = chain
