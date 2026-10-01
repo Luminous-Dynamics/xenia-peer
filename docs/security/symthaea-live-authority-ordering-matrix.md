@@ -2,6 +2,8 @@
 
 Status: qualification contract for the live D3A1 issuance path.
 
+Implementation status: the integrated six-permutation matrix is now encoded in `apps/xenia-peer/src/operator_http.rs` as `integrated_issuance_three_way_ordering_matrix`. The test uses fresh durable fixtures per permutation, real HTTP mutation endpoints, post-authentication rendezvous for mutation-first cases, and a second authorized mutation principal. GitHub currently has no workflow/status result for the latest head, so this document does not treat the matrix as green until an actual test run is observed.
+
 This document freezes the next concurrency boundary after the paired revocation and key-replacement races. The three mutable authority operations are:
 - **I** — issuance of a Symthaea authorization receipt;
 - **R** — operator revocation;
