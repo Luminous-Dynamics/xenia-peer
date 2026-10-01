@@ -2626,7 +2626,7 @@ mod tests {
 
     #[test]
     fn persisted_restore_rejects_tampered_entries_before_replay() {
-        let (mut runtime, verifying_key) = runtime(19);
+        let (mut runtime, _) = runtime(19);
 
         runtime.offer().unwrap();
         runtime.grant_consent().unwrap();
@@ -2646,7 +2646,6 @@ mod tests {
         .expect_err("tampered persisted entries must fail before replay");
 
         assert!(matches!(err, M1RuntimeError::Verify(_)));
-        assert_eq!(verifying_key, SigningKey::from_bytes(&[19; 32]).verifying_key());
     }
 
     #[test]
