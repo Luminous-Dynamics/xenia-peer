@@ -12,7 +12,7 @@ use thiserror::Error;
 use crate::{
     AgentCapabilityAttestationError, AgentCapabilityAttestationV1, AgentCapabilityAuthorizationV1,
     ledger_key_transition_fingerprint, Chain, LedgerAuthorityEpochTransitionError,
-    LedgerAuthorityEpochTransitionV1, LedgerEntry, LedgerError, LedgerKeyTransition,
+    LedgerAuthorityEpochTransitionV1, LedgerEntry, LedgerError, LedgerKeyTransition, LedgerKeyTransitionError,
     PendingPersistenceFrontier, PersistenceDisposition,
     PersistenceReconciliationOutcome, SessionTranscriptBinding, SignedWitnessFrontierObservationV1,
     TransactionalAppendOutcome, WitnessFrontierAnchorAppendOutcomeV1, WitnessFrontierAnchorError,
