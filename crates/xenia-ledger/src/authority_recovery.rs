@@ -24,8 +24,12 @@ pub enum AuthorityRecoveryStateV1 {
     SuccessorActive,
     /// The persistence result is ambiguous; no authority may be activated.
     OutcomeUnknown,
-    /// Recovery is inspecting authoritative durable state after a crash.
-    Recovery,
+    /// Recovery from a predecessor state with no known committed transition.
+    RecoveryFromOld,
+    /// Recovery after a successor transition was already durably committed.
+    RecoveryAfterCommit,
+    /// Recovery while reconciling an ambiguous persistence result.
+    RecoveryAfterUnknown,
 }
 
 /// Events that move the authority recovery state machine.
@@ -79,13 +83,18 @@ impl AuthorityRecoveryStateV1 {
             (TransitionPending, DurableCommit) => TransitionCommitted,
             (TransitionPending, ProvenNotPersisted) => OldActive,
             (TransitionPending, CommitOutcomeUnknown) => OutcomeUnknown,
-            (TransitionCommitted, BeginRecovery) => Recovery,
-            (SuccessorActive, BeginRecovery) => Recovery,
-            (OldActive, BeginRecovery) => Recovery,
-            (OutcomeUnknown, BeginRecovery) => Recovery,
-            (Recovery, RecoverSuccessor) => TransitionCommitted,
-            (Recovery, RecoverOld) => OldActive,
-            (Recovery, RecoverOutcomeUnknown) => OutcomeUnknown,
+            (TransitionCommitted, BeginRecovery) => RecoveryAfterCommit,
+            (SuccessorActive, BeginRecovery) => RecoveryAfterCommit,
+            (OldActive, BeginRecovery) => RecoveryFromOld,
+            (OutcomeUnknown, BeginRecovery) => RecoveryAfterUnknown,
+            (RecoveryFromOld, RecoverSuccessor) => TransitionCommitted,
+            (RecoveryFromOld, RecoverOld) => OldActive,
+            (RecoveryAfterCommit, RecoverSuccessor) => TransitionCommitted,
+            (RecoveryAfterUnknown, RecoverSuccessor) => TransitionCommitted,
+            (RecoveryAfterUnknown, RecoverOld) => OldActive,
+            (RecoveryFromOld, RecoverOutcomeUnknown) => OutcomeUnknown,
+            (RecoveryAfterCommit, RecoverOutcomeUnknown) => OutcomeUnknown,
+            (RecoveryAfterUnknown, RecoverOutcomeUnknown) => OutcomeUnknown,
             (TransitionCommitted, ActivateSuccessor) => SuccessorActive,
             _ => {
                 return Err(AuthorityRecoveryError::InvalidTransition { state: self, event });
@@ -173,6 +182,29 @@ mod tests {
             ),
             Err(AuthorityRecoveryError::InvalidTransition { .. })
         ));
+    }
+
+    #[test]
+    fn committed_successor_cannot_recover_to_predecessor() {
+        let state = AuthorityRecoveryStateV1::OldActive
+            .apply(AuthorityRecoveryEventV1::PrepareTransition)
+            .unwrap()
+            .apply(AuthorityRecoveryEventV1::DurableCommit)
+            .unwrap()
+            .apply(AuthorityRecoveryEventV1::ActivateSuccessor)
+            .unwrap()
+            .apply(AuthorityRecoveryEventV1::BeginRecovery)
+            .unwrap();
+
+        assert_eq!(state, AuthorityRecoveryStateV1::RecoveryAfterCommit);
+        assert!(matches!(
+            state.apply(AuthorityRecoveryEventV1::RecoverOld),
+            Err(AuthorityRecoveryError::InvalidTransition { .. })
+        ));
+        assert_eq!(
+            state.apply(AuthorityRecoveryEventV1::RecoverSuccessor).unwrap(),
+            AuthorityRecoveryStateV1::TransitionCommitted
+        );
     }
 
     #[test]
