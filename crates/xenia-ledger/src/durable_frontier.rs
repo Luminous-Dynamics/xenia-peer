@@ -750,6 +750,100 @@ mod tests {
     }
 
     #[test]
+    fn authority_epoch_claim_digest_uses_canonical_nul_terminated_domain() {
+        let claim = DurableAuthorityEpochClaimV1 {
+            schema_version: DURABLE_AUTHORITY_EPOCH_CLAIM_SCHEMA_VERSION,
+            authority_epoch: 8,
+            key_transition_fingerprint: [0xA1; 32],
+            successor_ledger_public_key: [0xB2; 32],
+            persistence_policy_digest: PERSISTENCE_POLICY,
+        };
+
+        let actual = claim.digest().unwrap();
+        let mut canonical = blake3::Hasher::new();
+        canonical.update(b"xenia.durable-authority-epoch-claim.v1\\0");
+        canonical.update(&claim.schema_version.to_be_bytes());
+        canonical.update(&claim.authority_epoch.to_be_bytes());
+        canonical.update(&claim.key_transition_fingerprint);
+        canonical.update(&claim.successor_ledger_public_key);
+        canonical.update(&claim.persistence_policy_digest);
+
+        assert_eq!(actual, *canonical.finalize().as_bytes());
+    }
+
+    #[test]
+    fn authority_recovery_rejects_stale_snapshot_and_ambiguous_commit() {
+        let old = SigningKey::from_bytes(&[51; 32]);
+        let successor = SigningKey::from_bytes(&[52; 32]);
+        let old_public = old.verifying_key().to_bytes();
+        let successor_public = successor.verifying_key().to_bytes();
+        let checkpoint_message = crate::checkpoint_message(0, &[0; 32], &old_public, 0);
+        let checkpoint = LedgerCheckpoint {
+            schema: crate::LEDGER_CHECKPOINT_SCHEMA.to_string(),
+            entry_count: 0,
+            head_hash: [0; 32],
+            ledger_public_key: old_public,
+            timestamp_unix_secs: 0,
+            signature: old.sign(&checkpoint_message).to_bytes(),
+        };
+        let key_transition =
+            LedgerKeyTransition::sign(checkpoint, &old, &successor, 100).unwrap();
+        let epoch_transition =
+            LedgerAuthorityEpochTransitionV1::sign(&key_transition, 7, 8, &old, &successor)
+                .unwrap();
+        let fingerprint = ledger_key_transition_fingerprint(&key_transition).unwrap();
+
+        let mut chain = Chain::new(successor.clone());
+        chain
+            .append_transactional_outcome(event(1), |_| PersistenceDisposition::Persisted)
+            .unwrap();
+
+        // No durable acknowledgement: recovery must not invent successor authority.
+        let ambiguous = chain.verify_restored_authority_epoch_v1(
+            &key_transition,
+            &epoch_transition,
+            7,
+            8,
+            PERSISTENCE_POLICY,
+            |_, _| Err([0xE8; 32]),
+        );
+        assert!(matches!(
+            ambiguous,
+            Err(DurableLedgerFrontierError::PersistenceVerificationRejected(_))
+        ));
+
+        let token = chain
+            .verify_restored_authority_epoch_v1(
+                &key_transition,
+                &epoch_transition,
+                7,
+                8,
+                PERSISTENCE_POLICY,
+                |_, claim| {
+                    assert_eq!(claim.key_transition_fingerprint, fingerprint);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        // The durable token authenticates epoch 8, never the stale epoch-7 snapshot.
+        assert!(matches!(
+            token.verify_against_chain(
+                &Chain::new(old.clone()),
+                &key_transition,
+                &epoch_transition,
+                7,
+                8,
+                PERSISTENCE_POLICY,
+            ),
+            Err(DurableLedgerFrontierError::AuthorityEpochMismatch)
+        ));
+
+        assert_eq!(token.authority_epoch(), 8);
+        assert_eq!(token.successor_ledger_public_key(), successor_public);
+    }
+
+    #[test]
     fn authority_epoch_requires_authoritative_durable_commit() {
         let old = SigningKey::from_bytes(&[41; 32]);
         let successor = SigningKey::from_bytes(&[42; 32]);
