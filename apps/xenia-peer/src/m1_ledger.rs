@@ -188,7 +188,9 @@ mod tests {
 
         assert_eq!(appended.len(), 3);
 
-        let entries = chain.into_entries().expect("clean M1 ledger should be consumable");
+        let entries = chain
+            .into_entries()
+            .expect("clean M1 ledger should be consumable");
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].event.kind, ConsentKind::Request);
         assert_eq!(entries[1].event.kind, ConsentKind::Approval);
