@@ -926,12 +926,6 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(token.authority_epoch(), 8);
-        assert_eq!(
-            token.successor_ledger_public_key(),
-            successor.verifying_key().to_bytes()
-        );
-
         let rejected = chain.verify_restored_authority_epoch_v1(
             &durable_frontier,
             &key_transition,
@@ -945,6 +939,27 @@ mod tests {
             rejected,
             Err(DurableLedgerFrontierError::PersistenceVerificationRejected(reason))
                 if reason == [0xE7; 32]
+        ));
+
+        assert_eq!(token.authority_epoch(), 8);
+        assert_eq!(
+            token.successor_ledger_public_key(),
+            successor.verifying_key().to_bytes()
+        );
+
+        chain.append(event(2)).unwrap();
+        let stale_frontier = chain.verify_restored_authority_epoch_v1(
+            &durable_frontier,
+            &key_transition,
+            &epoch_transition,
+            7,
+            8,
+            PERSISTENCE_POLICY,
+            |_, _| Ok(()),
+        );
+        assert!(matches!(
+            stale_frontier,
+            Err(DurableLedgerFrontierError::ChainFrontierMismatch)
         ));
     }
 
