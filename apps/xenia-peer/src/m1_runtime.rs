@@ -497,8 +497,7 @@ pub(crate) fn sealed_evidence_policy_root_receipt_file_for_signature(
     let signature = read_sealed_evidence_trust_policy_signature_file(signature_path.as_ref())?;
     let roots = read_sealed_evidence_policy_roots_file(roots_path)?;
     let root_fingerprint_hex =
-        hex::encode(signature.root_public_key_binding.public_key_fingerprint);
-    let root = require_sealed_evidence_policy_root_at(
+        hex::encode(signature.root_public_key_binding.public_key_fingerprint);    let root = require_sealed_evidence_policy_root_at(
         &roots,
         expected_signature_suite,
         &root_fingerprint_hex,
@@ -855,7 +854,7 @@ impl M1RuntimeSession {
         durable_frontier: &DurableLedgerFrontierV1,
         expected_persistence_policy_digest: [u8; 32],
     ) -> Result<Self, M1RuntimeError> {
-        let mut runtime = Self::from_persisted_entries(
+        let runtime = Self::from_persisted_entries(
             signing_key,
             entries,
             source_id,
@@ -998,7 +997,6 @@ impl M1RuntimeSession {
         let bytes = std::fs::read(path)?;
         Ok(bincode::deserialize(&bytes)?)
     }
-
     pub(crate) fn verify_entries(
         entries: &[LedgerEntry],
         public_key: &VerifyingKey,
@@ -1497,8 +1495,7 @@ fn require_sealed_evidence_trust_policy_signature(
     signature
         .root_public_key_binding
         .validate_against_signature_suite_and_backend(signature_suite, backend)
-        .map_err(|err| {
-            M1RuntimeError::EvidenceManifest(format!(
+        .map_err(|err| {            M1RuntimeError::EvidenceManifest(format!(
                 "sealed evidence trust policy root public key binding rejected: {err}"
             ))
         })?;
@@ -1997,8 +1994,7 @@ mod tests {
         assert_eq!(binding.transcript_hash, [0x5A; 32]);
         assert_eq!(runtime.export_entries().len(), 3);
         runtime
-            .verify_transcript_bound_export(&verifying_key)
-            .expect("transcript-bound export should verify");
+            .verify_transcript_bound_export(&verifying_key)            .expect("transcript-bound export should verify");
     }
 
     #[test]
@@ -2497,7 +2493,6 @@ mod tests {
             valid_until: None,
             revoked_policy_ids: Vec::new(),
         };
-
         require_sealed_evidence_trust_policy_minimum_epoch(&policy, 7)
             .expect("matching minimum policy epoch should pass");
 
