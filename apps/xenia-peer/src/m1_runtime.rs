@@ -497,7 +497,10 @@ pub(crate) fn sealed_evidence_policy_root_receipt_file_for_signature(
     let signature = read_sealed_evidence_trust_policy_signature_file(signature_path.as_ref())?;
     let roots = read_sealed_evidence_policy_roots_file(roots_path)?;
     let root_fingerprint_hex =
-        hex::encode(signature.root_public_key_binding.public_key_fingerprint);    let root = require_sealed_evidence_policy_root_at(        &roots,        expected_signature_suite,
+        hex::encode(signature.root_public_key_binding.public_key_fingerprint);
+    let root = require_sealed_evidence_policy_root_at(
+        &roots,
+        expected_signature_suite,
         &root_fingerprint_hex,
         required_root_id,
         Utc::now(),
@@ -993,10 +996,12 @@ impl M1RuntimeSession {
         let bytes = std::fs::read(path)?;
         Ok(bincode::deserialize(&bytes)?)
     }
-    pub(crate) fn verify_entries(        entries: &[LedgerEntry],
+    pub(crate) fn verify_entries(
+        entries: &[LedgerEntry],
         public_key: &VerifyingKey,
     ) -> Result<(), M1RuntimeError> {
-        Verifier::verify_chain(entries, public_key)?;        Ok(())
+        Verifier::verify_chain(entries, public_key)?;
+        Ok(())
     }
 
     fn replay_persisted_consent_state(&mut self) -> Result<(), M1RuntimeError> {
@@ -1489,13 +1494,16 @@ fn require_sealed_evidence_trust_policy_signature(
     signature
         .root_public_key_binding
         .validate_against_signature_suite_and_backend(signature_suite, backend)
-        .map_err(|err| {            M1RuntimeError::EvidenceManifest(format!(
+        .map_err(|err| {
+            M1RuntimeError::EvidenceManifest(format!(
                 "sealed evidence trust policy root public key binding rejected: {err}"
-            ))        })?;
+            ))
+        })?;
 
     require_trusted_key_fingerprint(
         "trust-policy-root",
-        trusted_policy_root_fingerprint,        signature.root_public_key_binding.public_key_fingerprint,
+        trusted_policy_root_fingerprint,
+        signature.root_public_key_binding.public_key_fingerprint,
     )?;
 
     let envelope_suite = signature.signature.validate_shape().map_err(|err| {
@@ -1986,15 +1994,18 @@ mod tests {
         assert_eq!(binding.transcript_hash, [0x5A; 32]);
         assert_eq!(runtime.export_entries().len(), 3);
         runtime
-            .verify_transcript_bound_export(&verifying_key)            .expect("transcript-bound export should verify");
+            .verify_transcript_bound_export(&verifying_key)
+            .expect("transcript-bound export should verify");
     }
 
-    #[test]    fn runtime_writes_verifier_consumable_evidence_bundle() {
+    #[test]
+    fn runtime_writes_verifier_consumable_evidence_bundle() {
         let (mut runtime, verifying_key) = runtime(23);
         runtime.bind_session_transcript_hash([0x6B; 32]);
 
         runtime.offer().unwrap();
-        runtime.grant_consent().unwrap();        runtime.revoke().unwrap();
+        runtime.grant_consent().unwrap();
+        runtime.revoke().unwrap();
 
         let dir = std::env::temp_dir().join(format!(
             "xenia-m1-evidence-bundle-{}-{}",
@@ -2487,7 +2498,8 @@ mod tests {
             .expect("matching minimum policy epoch should pass");
 
         let err = require_sealed_evidence_trust_policy_minimum_epoch(&policy, 8)
-            .expect_err("stale policy epoch must fail closed");        assert!(err.to_string().contains("below required minimum"));
+            .expect_err("stale policy epoch must fail closed");
+        assert!(err.to_string().contains("below required minimum"));
 
         policy.policy_epoch = None;
         let err = require_sealed_evidence_trust_policy_minimum_epoch(&policy, 1)
