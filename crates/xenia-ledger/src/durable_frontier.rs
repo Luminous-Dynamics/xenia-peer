@@ -161,7 +161,6 @@ impl DurableAuthorityEpochV1 {
     pub fn verify_against_chain(
         &self,
         chain: &Chain,
-        durable_frontier: &DurableLedgerFrontierV1,
         key_transition: &LedgerKeyTransition,
         epoch_transition: &LedgerAuthorityEpochTransitionV1,
         expected_previous_epoch: u64,
@@ -379,7 +378,9 @@ impl Chain {
     /// success mints an opaque token; an ambiguous outcome must return an error.
     pub fn verify_restored_authority_epoch_v1(
         &self,
+        durable_frontier: &DurableLedgerFrontierV1,
         key_transition: &LedgerKeyTransition,
+        durable_frontier.verify_against_chain(self, persistence_policy_digest)?;
         epoch_transition: &LedgerAuthorityEpochTransitionV1,
         expected_previous_epoch: u64,
         expected_successor_epoch: u64,
@@ -390,7 +391,6 @@ impl Chain {
         if self.has_uncertain_persistence() || self.entry_count() == 0 {
             return Err(DurableLedgerFrontierError::PersistenceUncertain);
         }
-        durable_frontier.verify_against_chain(self, persistence_policy_digest)?;
         epoch_transition
             .verify(
                 key_transition,
