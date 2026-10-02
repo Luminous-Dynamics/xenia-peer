@@ -59,6 +59,10 @@ pub(crate) enum M1RuntimeError {
     PersistIo(std::io::Error),
     PersistCodec(bincode::Error),
     PersistJson(serde_json::Error),
+    PersistedContextMismatch {
+        entry_index: usize,
+        field: &'static str,
+    },
 }
 
 impl fmt::Display for M1RuntimeError {
@@ -101,6 +105,10 @@ impl fmt::Display for M1RuntimeError {
             Self::PersistIo(err) => write!(f, "M1 ledger persistence I/O error: {err}"),
             Self::PersistCodec(err) => write!(f, "M1 ledger persistence codec error: {err}"),
             Self::PersistJson(err) => write!(f, "M1 evidence JSON persistence error: {err}"),
+            Self::PersistedContextMismatch { entry_index, field } => write!(
+                f,
+                "M1 persisted ledger entry {entry_index} did not match restore context field {field}"
+            ),
         }
     }
 }
@@ -832,6 +840,7 @@ impl M1RuntimeSession {
             request_id,
             scope,
         );
+        runtime.validate_persisted_context()?;
         runtime.replay_persisted_consent_state()?;
         Ok(runtime)
     }
@@ -1006,6 +1015,37 @@ impl M1RuntimeSession {
         public_key: &VerifyingKey,
     ) -> Result<(), M1RuntimeError> {
         Verifier::verify_chain(entries, public_key)?;
+        Ok(())
+    }
+
+    fn validate_persisted_context(&self) -> Result<(), M1RuntimeError> {
+        for (entry_index, entry) in self.chain.iter().enumerate() {
+            if entry.event.source_id != self.source_id {
+                return Err(M1RuntimeError::PersistedContextMismatch {
+                    entry_index,
+                    field: "source_id",
+                });
+            }
+            if entry.event.session_id != self.session_id {
+                return Err(M1RuntimeError::PersistedContextMismatch {
+                    entry_index,
+                    field: "session_id",
+                });
+            }
+            if entry.event.request_id != self.request_id {
+                return Err(M1RuntimeError::PersistedContextMismatch {
+                    entry_index,
+                    field: "request_id",
+                });
+            }
+            if entry.event.scope != self.scope {
+                return Err(M1RuntimeError::PersistedContextMismatch {
+                    entry_index,
+                    field: "scope",
+                });
+            }
+        }
+
         Ok(())
     }
 
@@ -2741,6 +2781,71 @@ mod tests {
             Err(M1RuntimeError::DurableFrontier(
                 DurableLedgerFrontierError::ChainFrontierMismatch
             ))
+        ));
+    }
+
+    #[test]
+    fn persisted_restore_rejects_valid_ledger_from_wrong_session_context() {
+        let signing_key = SigningKey::from_bytes(&[29; 32]);
+        let source_session = Uuid::from_bytes([3; 16]);
+        let restore_session = Uuid::from_bytes([4; 16]);
+
+        let mut source = M1RuntimeSession::new(
+            signing_key.clone(),
+            [0xAB; 32],
+            source_session,
+            Uuid::from_bytes([2; 16]),
+            "view screen",
+        );
+        source.offer().unwrap();
+        source.grant_consent().unwrap();
+
+        let result = M1RuntimeSession::from_persisted_entries(
+            signing_key,
+            source.entries(),
+            [0xAB; 32],
+            restore_session,
+            Uuid::from_bytes([2; 16]),
+            "view screen",
+        );
+
+        assert!(matches!(
+            result,
+            Err(M1RuntimeError::PersistedContextMismatch {
+                entry_index: 0,
+                field: "session_id",
+            })
+        ));
+    }
+
+    #[test]
+    fn persisted_restore_rejects_valid_ledger_from_wrong_scope_context() {
+        let signing_key = SigningKey::from_bytes(&[30; 32]);
+        let mut source = M1RuntimeSession::new(
+            signing_key.clone(),
+            [0xAB; 32],
+            Uuid::from_bytes([5; 16]),
+            Uuid::from_bytes([6; 16]),
+            "view screen",
+        );
+        source.offer().unwrap();
+        source.grant_consent().unwrap();
+
+        let result = M1RuntimeSession::from_persisted_entries(
+            signing_key,
+            source.entries(),
+            [0xAB; 32],
+            Uuid::from_bytes([5; 16]),
+            Uuid::from_bytes([6; 16]),
+            "inject input",
+        );
+
+        assert!(matches!(
+            result,
+            Err(M1RuntimeError::PersistedContextMismatch {
+                entry_index: 0,
+                field: "scope",
+            })
         ));
     }
 
