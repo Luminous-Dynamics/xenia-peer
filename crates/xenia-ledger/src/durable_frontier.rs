@@ -14,7 +14,8 @@ use crate::{
     ledger_key_transition_fingerprint, Chain, LedgerAuthorityEpochTransitionError,
     LedgerAuthorityEpochTransitionV1, LedgerEntry, LedgerError, LedgerKeyTransition, LedgerKeyTransitionError,
     PendingPersistenceFrontier, PersistenceDisposition,
-    PersistenceReconciliationOutcome, SessionTranscriptBinding, SignedWitnessFrontierObservationV1,
+    PersistenceReconciliationOutcome, SessionTranscriptBinding, SignedWitnessFrontierAnchorV1,
+    SignedWitnessFrontierObservationV1,
     TransactionalAppendOutcome, WitnessFrontierAnchorAppendOutcomeV1, WitnessFrontierAnchorError,
     WitnessFrontierAnchorStore, WitnessFrontierAnchorTargetV1, XeniaWitnessFrontierSourcePolicyV1,
 };
@@ -497,8 +498,7 @@ impl Chain {
                 Ok(DurableLedgerReconciliationOutcomeV1::Persisted {
                     entry,
                     durable_frontier: DurableLedgerFrontierV1 { claim },
-                })
-            }
+                })            }
             PersistenceReconciliationOutcome::ProvenNotPersisted {
                 error,
                 reverted_entry,
@@ -997,8 +997,7 @@ mod tests {
                 PERSISTENCE_POLICY,
             ),
             Err(DurableLedgerFrontierError::WitnessAnchor(_))
-        ));
-    }
+        ));    }
 
     #[test]
     fn persisted_append_mints_token_and_enables_durable_authority() {
