@@ -105,9 +105,9 @@ pub use authority_recovery::{
 };
 
 pub use authority_epoch::{
-    ledger_authority_epoch_transition_message, ledger_key_transition_fingerprint,
-    LedgerAuthorityEpochTransitionError, LedgerAuthorityEpochTransitionV1,
-    LEDGER_AUTHORITY_EPOCH_TRANSITION_SCHEMA,
+    LEDGER_AUTHORITY_EPOCH_TRANSITION_SCHEMA, LedgerAuthorityEpochTransitionError,
+    LedgerAuthorityEpochTransitionV1, ledger_authority_epoch_transition_message,
+    ledger_key_transition_fingerprint,
 };
 
 pub use archive::{
@@ -144,11 +144,10 @@ pub use compaction::{
 };
 
 pub use durable_frontier::{
-    DURABLE_LEDGER_FRONTIER_DOMAIN, DURABLE_LEDGER_FRONTIER_SCHEMA_VERSION,
-    DurableAuthorityEpochClaimV1, DurableAuthorityEpochV1,
-    DURABLE_AUTHORITY_EPOCH_CLAIM_SCHEMA_VERSION, DurableLedgerAppendOutcomeV1,
-    DurableLedgerFrontierClaimV1, DurableLedgerFrontierError, DurableLedgerFrontierV1,
-    DurableLedgerReconciliationOutcomeV1,
+    DURABLE_AUTHORITY_EPOCH_CLAIM_SCHEMA_VERSION, DURABLE_LEDGER_FRONTIER_DOMAIN,
+    DURABLE_LEDGER_FRONTIER_SCHEMA_VERSION, DurableAuthorityEpochClaimV1, DurableAuthorityEpochV1,
+    DurableLedgerAppendOutcomeV1, DurableLedgerFrontierClaimV1, DurableLedgerFrontierError,
+    DurableLedgerFrontierV1, DurableLedgerReconciliationOutcomeV1,
 };
 
 pub use entry::{
