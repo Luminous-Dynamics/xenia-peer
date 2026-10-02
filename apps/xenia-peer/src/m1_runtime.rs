@@ -24,11 +24,11 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use xenia_ledger::{
     CURRENT_EVIDENCE_CRYPTO_MANIFEST, Chain, ConsentKind, CryptoPolicyProfile, DowngradePolicy,
-    DurableLedgerFrontierError, DurableLedgerFrontierV1,
-    Ed25519EvidenceSignatureBackend, EvidenceBundleSeal, EvidenceBundleVerifyError,
-    EvidenceCryptoManifest, EvidencePublicKeyBinding, EvidenceSignatureBackend, LedgerEntry,
-    LedgerEntryExport, LedgerError, SessionTranscriptBinding, SessionTranscriptSignature,
-    SignatureEnvelope, SignatureSuite, Verifier, VerifyError,
+    DurableLedgerFrontierError, DurableLedgerFrontierV1, Ed25519EvidenceSignatureBackend,
+    EvidenceBundleSeal, EvidenceBundleVerifyError, EvidenceCryptoManifest,
+    EvidencePublicKeyBinding, EvidenceSignatureBackend, LedgerEntry, LedgerEntryExport,
+    LedgerError, SessionTranscriptBinding, SessionTranscriptSignature, SignatureEnvelope,
+    SignatureSuite, Verifier, VerifyError,
 };
 use xenia_peer_core::{
     M1Permission, M1PermissionSet, M1SessionError, M1SessionMachine, M1SessionState,
@@ -497,8 +497,7 @@ pub(crate) fn sealed_evidence_policy_root_receipt_file_for_signature(
     let signature = read_sealed_evidence_trust_policy_signature_file(signature_path.as_ref())?;
     let roots = read_sealed_evidence_policy_roots_file(roots_path)?;
     let root_fingerprint_hex =
-        hex::encode(signature.root_public_key_binding.public_key_fingerprint);    let root = require_sealed_evidence_policy_root_at(        &roots,
-        expected_signature_suite,
+        hex::encode(signature.root_public_key_binding.public_key_fingerprint);    let root = require_sealed_evidence_policy_root_at(        &roots,        expected_signature_suite,
         &root_fingerprint_hex,
         required_root_id,
         Utc::now(),
@@ -997,8 +996,7 @@ impl M1RuntimeSession {
     pub(crate) fn verify_entries(        entries: &[LedgerEntry],
         public_key: &VerifyingKey,
     ) -> Result<(), M1RuntimeError> {
-        Verifier::verify_chain(entries, public_key)?;
-        Ok(())
+        Verifier::verify_chain(entries, public_key)?;        Ok(())
     }
 
     fn replay_persisted_consent_state(&mut self) -> Result<(), M1RuntimeError> {
@@ -1497,8 +1495,7 @@ fn require_sealed_evidence_trust_policy_signature(
 
     require_trusted_key_fingerprint(
         "trust-policy-root",
-        trusted_policy_root_fingerprint,
-        signature.root_public_key_binding.public_key_fingerprint,
+        trusted_policy_root_fingerprint,        signature.root_public_key_binding.public_key_fingerprint,
     )?;
 
     let envelope_suite = signature.signature.validate_shape().map_err(|err| {
@@ -1997,8 +1994,7 @@ mod tests {
         runtime.bind_session_transcript_hash([0x6B; 32]);
 
         runtime.offer().unwrap();
-        runtime.grant_consent().unwrap();
-        runtime.revoke().unwrap();
+        runtime.grant_consent().unwrap();        runtime.revoke().unwrap();
 
         let dir = std::env::temp_dir().join(format!(
             "xenia-m1-evidence-bundle-{}-{}",
@@ -2498,7 +2494,6 @@ mod tests {
             .expect_err("missing policy epoch must fail closed when a minimum is required");
         assert!(err.to_string().contains("does not declare policy_epoch"));
     }
-
     #[test]
     fn runtime_refuses_full_pqc_export_until_pq_signatures_land() {
         let (mut runtime, verifying_key) = runtime(25);
