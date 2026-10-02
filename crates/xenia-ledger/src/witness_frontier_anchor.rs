@@ -1133,8 +1133,10 @@ mod tests {
         let chain = seeded_chain();
         let (policy, source_id) = policy(&chain);
         let target = target(source_id, policy, 3, 0x33);
-        let mut store = MemoryStore::default();
-        store.next_disposition = Some(PersistenceDisposition::OutcomeUnknown([0xEE; 32]));
+        let mut store = MemoryStore {
+            next_disposition: Some(PersistenceDisposition::OutcomeUnknown([0xEE; 32])),
+            ..Default::default()
+        };
 
         let outcome = chain
             .append_witness_frontier_anchor_v1(target, policy, 100, &mut store)
