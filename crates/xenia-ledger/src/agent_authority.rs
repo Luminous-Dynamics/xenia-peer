@@ -436,16 +436,31 @@ mod tests {
         let mut guard = AgentCapabilityReplayGuardV1::new();
 
         verify_agent_capability_attestation_once(
-            &attestation, &session, &binding, &backend, 120,
-            authorization.capability_digest, authorization.executor_workload_digest,
-            authorization.authority_epoch, authorization.prior_checkpoint, &mut guard,
-        ).unwrap();
+            &attestation,
+            &session,
+            &binding,
+            &backend,
+            120,
+            authorization.capability_digest,
+            authorization.executor_workload_digest,
+            authorization.authority_epoch,
+            authorization.prior_checkpoint,
+            &mut guard,
+        )
+        .unwrap();
         assert_eq!(guard.len(), 1);
         assert!(matches!(
             verify_agent_capability_attestation_once(
-                &attestation, &session, &binding, &backend, 120,
-                authorization.capability_digest, authorization.executor_workload_digest,
-                authorization.authority_epoch, authorization.prior_checkpoint, &mut guard,
+                &attestation,
+                &session,
+                &binding,
+                &backend,
+                120,
+                authorization.capability_digest,
+                authorization.executor_workload_digest,
+                authorization.authority_epoch,
+                authorization.prior_checkpoint,
+                &mut guard,
             ),
             Err(AgentCapabilityAttestationError::ReplayDetected)
         ));
@@ -468,12 +483,21 @@ mod tests {
         let mut wrong_capability = authorization.capability_digest;
         wrong_capability[0] ^= 1;
         assert!(verify_agent_capability_attestation_once(
-            &attestation, &session, &binding, &backend, 120,
-            wrong_capability, authorization.executor_workload_digest,
-            authorization.authority_epoch, authorization.prior_checkpoint, &mut guard,
-        ).is_err());
+            &attestation,
+            &session,
+            &binding,
+            &backend,
+            120,
+            wrong_capability,
+            authorization.executor_workload_digest,
+            authorization.authority_epoch,
+            authorization.prior_checkpoint,
+            &mut guard,
+        )
+        .is_err());
         assert!(guard.is_empty());
     }
+
     #[test]
     fn stale_frontier_cannot_be_signed() {
         let chain = seeded_chain();
