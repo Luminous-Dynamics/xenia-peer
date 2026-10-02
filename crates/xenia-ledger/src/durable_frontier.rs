@@ -497,8 +497,7 @@ impl Chain {
         match outcome {
             PersistenceReconciliationOutcome::Persisted(entry) => {
                 let claim = durable_claim_for_chain(self, persistence_policy_digest)?;
-                Ok(DurableLedgerReconciliationOutcomeV1::Persisted {
-                    entry,
+                Ok(DurableLedgerReconciliationOutcomeV1::Persisted {                    entry,
                     durable_frontier: DurableLedgerFrontierV1 { claim },                })            }
             PersistenceReconciliationOutcome::ProvenNotPersisted {
                 error,
@@ -684,7 +683,8 @@ mod tests {
     use super::*;
     use crate::{
         AgentCheckpointAnchorV1, ConsentEventRecord, ConsentKind, LedgerCheckpoint, SignatureSuite,
-        TranscriptSignatureSuiteV1,
+        TranscriptSignatureSuiteV1, derive_xenia_witness_frontier_source_id,
+        WITNESS_FRONTIER_ANCHOR_SCHEMA_VERSION,
     };
 
     const PERSISTENCE_POLICY: [u8; 32] = [0xD1; 32];
@@ -762,7 +762,10 @@ mod tests {
             expected_previous: Option<[u8; 32]>,
             candidate: &SignedWitnessFrontierAnchorV1,
         ) -> PersistenceDisposition<[u8; 32]> {
-            let actual = self.current.as_ref().and_then(|a| a.fingerprint().ok());
+            let actual = self
+                .current
+                .as_ref()
+                .and_then(|a: &SignedWitnessFrontierAnchorV1| a.fingerprint().ok());
             if actual != expected_previous {
                 return PersistenceDisposition::ProvenNotPersisted([0xE1; 32]);
             }
@@ -997,8 +1000,7 @@ mod tests {
         mismatched.ledger_head_hash[0] ^= 1;
         assert!(matches!(
             durable_frontier.verify_against_fresh_witness_observation(
-                &chain,
-                &mismatched,
+                &chain,                &mismatched,
                 [0xA5; 32],
                 source_id,
                 policy.source_epoch,
