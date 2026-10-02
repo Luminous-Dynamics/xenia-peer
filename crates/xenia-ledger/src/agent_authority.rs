@@ -97,7 +97,7 @@ impl AgentCapabilityReplayGuardV1 {
     }
 
     /// Consume one already-verified authorization exactly once.
-    pub fn consume(
+    fn consume(
         &mut self,
         attestation: &AgentCapabilityAttestationV1,
     ) -> Result<(), AgentCapabilityReplayError> {
