@@ -132,6 +132,7 @@ pub enum AgentCapabilityReplayError {
 }
 
 /// Verify a capability attestation and consume it exactly once.
+#[allow(clippy::too_many_arguments)]
 ///
 /// The cryptographic/policy checks run before the replay registry is mutated.
 /// A rejected attestation therefore never poisons a valid authorization slot.
