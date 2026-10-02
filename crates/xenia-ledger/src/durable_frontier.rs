@@ -497,8 +497,7 @@ impl Chain {
         match outcome {
             PersistenceReconciliationOutcome::Persisted(entry) => {
                 let claim = durable_claim_for_chain(self, persistence_policy_digest)?;
-                Ok(DurableLedgerReconciliationOutcomeV1::Persisted {                    entry,
-                    durable_frontier: DurableLedgerFrontierV1 { claim },                })            }
+                Ok(DurableLedgerReconciliationOutcomeV1::Persisted {                    entry,                    durable_frontier: DurableLedgerFrontierV1 { claim },                })            }
             PersistenceReconciliationOutcome::ProvenNotPersisted {
                 error,
                 reverted_entry,
@@ -885,8 +884,7 @@ mod tests {
             timestamp_unix_secs: 0,
             signature: old.sign(&checkpoint_message).to_bytes(),
         };
-        let key_transition =
-            LedgerKeyTransition::sign(checkpoint, &old, &successor, 100).unwrap();
+        let key_transition = LedgerKeyTransition::sign(checkpoint, &old, &successor, 100).unwrap();
         let epoch_transition =
             LedgerAuthorityEpochTransitionV1::sign(&key_transition, 7, 8, &old, &successor)
                 .unwrap();
@@ -997,8 +995,7 @@ mod tests {
             .unwrap();
 
         let mut mismatched = observation.clone();
-        mismatched.ledger_head_hash[0] ^= 1;
-        assert!(matches!(
+        mismatched.ledger_head_hash[0] ^= 1;        assert!(matches!(
             durable_frontier.verify_against_fresh_witness_observation(
                 &chain,                &mismatched,
                 [0xA5; 32],
