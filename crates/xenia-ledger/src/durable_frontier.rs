@@ -14,8 +14,7 @@ use crate::{
     ledger_key_transition_fingerprint, Chain, LedgerAuthorityEpochTransitionError,
     LedgerAuthorityEpochTransitionV1, LedgerEntry, LedgerError, LedgerKeyTransition, LedgerKeyTransitionError,
     PendingPersistenceFrontier, PersistenceDisposition,
-    PersistenceReconciliationOutcome, SessionTranscriptBinding, SignedWitnessFrontierAnchorV1,
-    SignedWitnessFrontierObservationV1,
+    PersistenceReconciliationOutcome, SessionTranscriptBinding, SignedWitnessFrontierObservationV1,
     TransactionalAppendOutcome, WitnessFrontierAnchorAppendOutcomeV1, WitnessFrontierAnchorError,
     WitnessFrontierAnchorStore, WitnessFrontierAnchorTargetV1, XeniaWitnessFrontierSourcePolicyV1,
 };
@@ -684,6 +683,7 @@ mod tests {
     use super::*;
     use crate::{
         AgentCheckpointAnchorV1, ConsentEventRecord, ConsentKind, LedgerCheckpoint, SignatureSuite,
+        SignedWitnessFrontierAnchorV1,
         TranscriptSignatureSuiteV1, derive_xenia_witness_frontier_source_id,
         WITNESS_FRONTIER_ANCHOR_SCHEMA_VERSION,
     };
@@ -899,7 +899,9 @@ mod tests {
 
         let mut chain = Chain::new(successor.clone());
         chain
-            .append_transactional_outcome(event(1), |_| PersistenceDisposition::<[u8; 32]>::Persisted)
+            .append_transactional_outcome(event(1), |_| {
+                PersistenceDisposition::<[u8; 32]>::Persisted
+            })
             .unwrap();
 
         let durable_frontier = chain
@@ -1009,9 +1011,11 @@ mod tests {
             .unwrap();
 
         let mut mismatched = observation.clone();
-        mismatched.ledger_head_hash[0] ^= 1;        assert!(matches!(
+        mismatched.ledger_head_hash[0] ^= 1;
+        assert!(matches!(
             durable_frontier.verify_against_fresh_witness_observation(
-                &chain,                &mismatched,
+                &chain,
+                &mismatched,
                 [0xA5; 32],
                 source_id,
                 policy.source_epoch,
@@ -1023,7 +1027,8 @@ mod tests {
                 PERSISTENCE_POLICY,
             ),
             Err(DurableLedgerFrontierError::WitnessAnchor(_))
-        ));    }
+        ));
+    }
     #[test]
     fn persisted_append_mints_token_and_enables_durable_authority() {
         let mut chain = Chain::new(SigningKey::from_bytes(&[3; 32]));
