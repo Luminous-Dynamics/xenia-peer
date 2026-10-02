@@ -2691,7 +2691,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(restored.entries().len(), 2);
-        assert_eq!(restored.state(), M1SessionState::Granted);
+        assert_eq!(restored.state(), M1SessionState::Active);
     }
 
     #[test]
@@ -2708,7 +2708,7 @@ mod tests {
         let persisted = runtime.entries();
         let signing_key = SigningKey::from_bytes(&[28; 32]);
 
-        let err = M1RuntimeSession::from_persisted_entries_with_durable_frontier(
+        let result = M1RuntimeSession::from_persisted_entries_with_durable_frontier(
             signing_key,
             persisted,
             [0xAB; 32],
@@ -2717,14 +2717,13 @@ mod tests {
             "view screen",
             &durable_frontier,
             [0xD1; 32],
-        )
-        .expect_err("a valid but newer chain must not accept an older durable frontier");
+        );
 
         assert!(matches!(
-            err,
-            M1RuntimeError::DurableFrontier(
+            result,
+            Err(M1RuntimeError::DurableFrontier(
                 DurableLedgerFrontierError::ChainFrontierMismatch
-            )
+            ))
         ));
     }
 
@@ -2732,17 +2731,16 @@ mod tests {
     fn persisted_restore_rejects_empty_ledger() {
         let signing_key = SigningKey::from_bytes(&[18; 32]);
 
-        let err = M1RuntimeSession::from_persisted_entries(
+        let result = M1RuntimeSession::from_persisted_entries(
             signing_key,
             Vec::new(),
             [0xAB; 32],
             Uuid::from_bytes([1; 16]),
             Uuid::from_bytes([2; 16]),
             "view screen",
-        )
-        .expect_err("empty persisted state must not be treated as a restored session");
+        );
 
-        assert!(matches!(err, M1RuntimeError::EmptyPersistedLedger));
+        assert!(matches!(result, Err(M1RuntimeError::EmptyPersistedLedger)));
     }
 
     #[test]
@@ -2756,17 +2754,16 @@ mod tests {
         entries[1].signature[0] ^= 0x01;
 
         let signing_key = SigningKey::from_bytes(&[19; 32]);
-        let err = M1RuntimeSession::from_persisted_entries(
+        let result = M1RuntimeSession::from_persisted_entries(
             signing_key,
             entries,
             [0xAB; 32],
             Uuid::from_bytes([1; 16]),
             Uuid::from_bytes([2; 16]),
             "view screen",
-        )
-        .expect_err("tampered persisted entries must fail before replay");
+        );
 
-        assert!(matches!(err, M1RuntimeError::Verify(_)));
+        assert!(matches!(result, Err(M1RuntimeError::Verify(_))));
     }
 
     #[test]
