@@ -1144,7 +1144,7 @@ mod tests {
         original.append(event(1)).unwrap();
         let entries = original
             .into_entries()
-            .expect("clean restored ledger should be consumable");
+            .unwrap();
         let restored = Chain::from_entries(entries, SigningKey::from_bytes(&[3; 32]));
 
         assert!(matches!(
