@@ -49,7 +49,6 @@ fn into_entries_refuses_to_erase_uncertain_persistence() {
     ));
 }
 
-
 #[test]
 fn consent_kind_stable_names_are_contractual() {
     let cases = [
