@@ -372,6 +372,7 @@ impl Chain {
 
     /// Verify that an explicit authority transition and its successor epoch
     /// survived the authoritative persistence boundary.
+    #[allow(clippy::too_many_arguments)]
     ///
     /// The callback is the adapter trust boundary: it must consult the authoritative
     /// durable source and prove the exact transition/claim is committed. Returning
