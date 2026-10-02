@@ -92,7 +92,8 @@ mod tests;
 
 pub use agent_authority::{
     AGENT_CAPABILITY_ATTESTATION_SCHEMA, AgentCapabilityAttestationError,
-    AgentCapabilityAttestationV1, verify_agent_capability_attestation,
+    AgentCapabilityAttestationV1, AgentCapabilityReplayError, AgentCapabilityReplayGuardV1,
+    verify_agent_capability_attestation, verify_agent_capability_attestation_once,
 };
 pub use agent_authority_proto::{
     AGENT_CAPABILITY_AUTHORIZATION_DOMAIN, AGENT_CAPABILITY_AUTHORIZATION_SCHEMA_VERSION,
