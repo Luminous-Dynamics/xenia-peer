@@ -379,13 +379,13 @@ impl Chain {
         &self,
         durable_frontier: &DurableLedgerFrontierV1,
         key_transition: &LedgerKeyTransition,
-        durable_frontier.verify_against_chain(self, persistence_policy_digest)?;
         epoch_transition: &LedgerAuthorityEpochTransitionV1,
         expected_previous_epoch: u64,
         expected_successor_epoch: u64,
         persistence_policy_digest: [u8; 32],
         verify: impl FnOnce(&Self, &DurableAuthorityEpochClaimV1) -> Result<(), [u8; 32]>,
     ) -> Result<DurableAuthorityEpochV1, DurableLedgerFrontierError> {
+        durable_frontier.verify_against_chain(self, persistence_policy_digest)?;
         validate_policy_digest(persistence_policy_digest)?;
         if self.has_uncertain_persistence() || self.entry_count() == 0 {
             return Err(DurableLedgerFrontierError::PersistenceUncertain);
