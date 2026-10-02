@@ -845,6 +845,11 @@ impl M1RuntimeSession {
     /// Current-authority / anti-rollback policy remains the responsibility of the
     /// authoritative adapter that minted the witness; this method never treats a
     /// locally constructed token as authority.
+    // Keep the recovery boundary explicit: each argument is part of the
+    // authenticated-history / session / durable-frontier binding and collapsing
+    // these inputs into an untyped bundle would make the trust boundary easier
+    // to misuse. This is intentionally a narrow Clippy exception.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_persisted_entries_with_durable_frontier(
         signing_key: SigningKey,
         entries: Vec<LedgerEntry>,
