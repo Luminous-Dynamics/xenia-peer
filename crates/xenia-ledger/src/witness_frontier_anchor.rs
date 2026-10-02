@@ -1272,7 +1272,18 @@ mod tests {
             _ => panic!("expected persisted old-key anchor"),
         };
 
-        let new_chain = Chain::new(SigningKey::from_bytes(&[4; 32]));
+        let mut new_chain = Chain::new(SigningKey::from_bytes(&[4; 32]));
+        // A rotated ledger key starts a new authenticated chain namespace; seed
+        // the replacement chain before observing its frontier.
+        new_chain
+            .append(ConsentEventRecord {
+                source_id: [0x11; 32],
+                session_id: Uuid::from_bytes([0x22; 16]),
+                request_id: Uuid::from_bytes([0x33; 16]),
+                kind: ConsentKind::Approval,
+                scope: "witness anchor test".into(),
+            })
+            .unwrap();
         let new_source_id = derive_xenia_witness_frontier_source_id(
             new_chain.signing_key.verifying_key().to_bytes(),
             policy.anchor_policy_digest,
