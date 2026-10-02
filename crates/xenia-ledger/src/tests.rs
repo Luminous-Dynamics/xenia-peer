@@ -27,6 +27,30 @@ fn new_signing_key_from_seed(seed: u8) -> SigningKey {
 }
 
 #[test]
+fn into_entries_refuses_to_erase_uncertain_persistence() {
+    let mut chain = Chain::new(SigningKey::from_bytes(&[91; 32]));
+    let outcome = chain
+        .append_transactional_outcome(sample_event(ConsentKind::Approval), |_| {
+            PersistenceDisposition::<[u8; 32]>::OutcomeUnknown([0xAA; 32])
+        })
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        TransactionalAppendOutcome::OutcomeUnknown { .. }
+    ));
+
+    let err = chain
+        .into_entries()
+        .expect_err("uncertain persistence must block consuming the chain");
+    assert!(matches!(
+        err,
+        LedgerError::UncertainPersistencePending { seq: 0 }
+    ));
+}
+
+
+#[test]
 fn consent_kind_stable_names_are_contractual() {
     let cases = [
         (ConsentKind::Request, "consent.requested"),
