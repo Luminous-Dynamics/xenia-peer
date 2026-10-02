@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 use thiserror::Error;
 
-use crate::{checkpoint_fingerprint, LedgerKeyTransition, LedgerKeyTransitionError, Verifier};
+use crate::{LedgerKeyTransition, LedgerKeyTransitionError, Verifier, checkpoint_fingerprint};
 
 /// Stable schema label for an explicit witness-authority epoch transition.
 pub const LEDGER_AUTHORITY_EPOCH_TRANSITION_SCHEMA: &str =
@@ -150,10 +150,9 @@ impl LedgerAuthorityEpochTransitionV1 {
         {
             return Err(LedgerAuthorityEpochTransitionError::KeyTransitionMismatch);
         }
-        let previous_key = VerifyingKey::from_bytes(
-            &key_transition.previous_checkpoint.ledger_public_key,
-        )
-        .map_err(|_| LedgerAuthorityEpochTransitionError::PreviousKeyMismatch)?;
+        let previous_key =
+            VerifyingKey::from_bytes(&key_transition.previous_checkpoint.ledger_public_key)
+                .map_err(|_| LedgerAuthorityEpochTransitionError::PreviousKeyMismatch)?;
         let new_key = VerifyingKey::from_bytes(&self.new_ledger_public_key)
             .map_err(|_| LedgerAuthorityEpochTransitionError::SuccessorKeyMismatch)?;
         let message = ledger_authority_epoch_transition_message(
@@ -164,7 +163,10 @@ impl LedgerAuthorityEpochTransitionV1 {
             self.timestamp_unix_secs,
         );
         previous_key
-            .verify(&message, &Signature::from_bytes(&self.previous_key_signature))
+            .verify(
+                &message,
+                &Signature::from_bytes(&self.previous_key_signature),
+            )
             .map_err(|_| LedgerAuthorityEpochTransitionError::BadPreviousSignature)?;
         new_key
             .verify(&message, &Signature::from_bytes(&self.new_key_signature))
@@ -210,7 +212,7 @@ pub enum LedgerAuthorityEpochTransitionError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{checkpoint_message, LedgerCheckpoint, LEDGER_CHECKPOINT_SCHEMA};
+    use crate::{LEDGER_CHECKPOINT_SCHEMA, LedgerCheckpoint, checkpoint_message};
 
     fn checkpoint(key: &SigningKey) -> LedgerCheckpoint {
         let public = key.verifying_key().to_bytes();
@@ -229,11 +231,13 @@ mod tests {
     fn dual_signed_epoch_transition_requires_real_key_handover() {
         let old = SigningKey::from_bytes(&[31; 32]);
         let new = SigningKey::from_bytes(&[32; 32]);
-        let transition = LedgerKeyTransition::sign(checkpoint(&old), &old, &new, 100)
-            .expect("key transition");
+        let transition =
+            LedgerKeyTransition::sign(checkpoint(&old), &old, &new, 100).expect("key transition");
         let epoch = LedgerAuthorityEpochTransitionV1::sign(&transition, 7, 8, &old, &new)
             .expect("epoch transition");
-        epoch.verify(&transition, 7, 8).expect("valid epoch transition");
+        epoch
+            .verify(&transition, 7, 8)
+            .expect("valid epoch transition");
     }
 
     #[test]
