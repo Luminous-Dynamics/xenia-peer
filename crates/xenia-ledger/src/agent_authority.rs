@@ -78,6 +78,99 @@ impl Chain {
     }
 }
 
+/// Process-local one-use registry for Xenia agent-capability attestations.
+///
+/// A nonce carried inside a signed authorization is not, by itself, replay
+/// protection: a verifier must remember which valid authorizations it has
+/// already consumed. This registry uses the canonical authorization digest as
+/// the replay key and never evicts entries, so successful consumption cannot
+/// silently become replayable because of cache expiry.
+#[derive(Debug, Default)]
+pub struct AgentCapabilityReplayGuardV1 {
+    consumed: std::collections::BTreeSet<[u8; 32]>,
+}
+
+impl AgentCapabilityReplayGuardV1 {
+    /// Create an empty process-local replay registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Consume one already-verified authorization exactly once.
+    pub fn consume(
+        &mut self,
+        attestation: &AgentCapabilityAttestationV1,
+    ) -> Result<(), AgentCapabilityReplayError> {
+        let message = attestation.authorization.canonical_message()?;
+        let digest = *blake3::hash(&message).as_bytes();
+        if !self.consumed.insert(digest) {
+            return Err(AgentCapabilityReplayError::AlreadyConsumed(digest));
+        }
+        Ok(())
+    }
+
+    /// Return the number of authorization digests consumed by this guard.
+    pub fn len(&self) -> usize {
+        self.consumed.len()
+    }
+
+    /// True when no authorization has been consumed.
+    pub fn is_empty(&self) -> bool {
+        self.consumed.is_empty()
+    }
+}
+
+/// Replay failures from the process-local agent-capability consumption gate.
+#[derive(Debug, thiserror::Error)]
+pub enum AgentCapabilityReplayError {
+    /// The authorization was malformed before a replay key could be derived.
+    #[error("agent capability authorization is invalid: {0}")]
+    Authorization(#[from] crate::AgentCapabilityAuthorizationError),
+    /// The exact authorization was already consumed by this guard.
+    #[error("agent capability authorization has already been consumed")]
+    AlreadyConsumed([u8; 32]),
+}
+
+/// Verify a capability attestation and consume it exactly once.
+///
+/// The cryptographic/policy checks run before the replay registry is mutated.
+/// A rejected attestation therefore never poisons a valid authorization slot.
+pub fn verify_agent_capability_attestation_once(
+    attestation: &AgentCapabilityAttestationV1,
+    session_binding: &SessionTranscriptBinding,
+    public_key_binding: &EvidencePublicKeyBinding,
+    signature_backend: &impl EvidenceSignatureBackend,
+    now_unix_s: u64,
+    expected_capability_digest: [u8; 32],
+    expected_executor_workload_digest: [u8; 32],
+    expected_authority_epoch: u64,
+    expected_prior_checkpoint: Option<AgentCheckpointAnchorV1>,
+    replay_guard: &mut AgentCapabilityReplayGuardV1,
+) -> Result<(), AgentCapabilityAttestationError> {
+    verify_agent_capability_attestation(
+        attestation,
+        session_binding,
+        public_key_binding,
+        signature_backend,
+        now_unix_s,
+        expected_capability_digest,
+        expected_executor_workload_digest,
+        expected_authority_epoch,
+        expected_prior_checkpoint,
+    )?;
+
+    replay_guard
+        .consume(attestation)
+        .map_err(|error| match error {
+            AgentCapabilityReplayError::Authorization(error) => {
+                AgentCapabilityAttestationError::Authorization(error)
+            }
+            AgentCapabilityReplayError::AlreadyConsumed(_) => {
+                AgentCapabilityAttestationError::ReplayDetected
+            }
+        })?;
+    Ok(())
+}
 /// Verify a Xenia agent-capability attestation and all expected application
 /// bindings before the external agent treats it as authenticated authority.
 #[allow(clippy::too_many_arguments)]
@@ -231,6 +324,9 @@ pub enum AgentCapabilityAttestationError {
     /// Cryptographic verification failed.
     #[error("signature verification failed: {0}")]
     SignatureBackend(#[from] EvidenceSignatureBackendError),
+    /// This exact signed authorization was already consumed by the replay guard.
+    #[error("agent capability authorization has already been consumed")]
+    ReplayDetected,
 }
 
 #[cfg(test)]
@@ -326,6 +422,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn verified_authorization_is_consumed_only_once() {
+        let chain = seeded_chain();
+        let session = session();
+        let authorization = authorization(&chain);
+        let attestation = chain
+            .attest_agent_capability_authorization(authorization.clone(), &session)
+            .unwrap();
+        let public_key = chain.signing_key.verifying_key().to_bytes();
+        let binding = EvidencePublicKeyBinding::new(SignatureSuite::Ed25519Rfc8032, public_key);
+        let backend = Ed25519EvidenceSignatureBackend;
+        let mut guard = AgentCapabilityReplayGuardV1::new();
+
+        verify_agent_capability_attestation_once(
+            &attestation, &session, &binding, &backend, 120,
+            authorization.capability_digest, authorization.executor_workload_digest,
+            authorization.authority_epoch, authorization.prior_checkpoint, &mut guard,
+        ).unwrap();
+        assert_eq!(guard.len(), 1);
+        assert!(matches!(
+            verify_agent_capability_attestation_once(
+                &attestation, &session, &binding, &backend, 120,
+                authorization.capability_digest, authorization.executor_workload_digest,
+                authorization.authority_epoch, authorization.prior_checkpoint, &mut guard,
+            ),
+            Err(AgentCapabilityAttestationError::ReplayDetected)
+        ));
+        assert_eq!(guard.len(), 1);
+    }
+
+    #[test]
+    fn rejected_authorization_does_not_consume_replay_slot() {
+        let chain = seeded_chain();
+        let session = session();
+        let authorization = authorization(&chain);
+        let attestation = chain
+            .attest_agent_capability_authorization(authorization.clone(), &session)
+            .unwrap();
+        let public_key = chain.signing_key.verifying_key().to_bytes();
+        let binding = EvidencePublicKeyBinding::new(SignatureSuite::Ed25519Rfc8032, public_key);
+        let backend = Ed25519EvidenceSignatureBackend;
+        let mut guard = AgentCapabilityReplayGuardV1::new();
+
+        let mut wrong_capability = authorization.capability_digest;
+        wrong_capability[0] ^= 1;
+        assert!(verify_agent_capability_attestation_once(
+            &attestation, &session, &binding, &backend, 120,
+            wrong_capability, authorization.executor_workload_digest,
+            authorization.authority_epoch, authorization.prior_checkpoint, &mut guard,
+        ).is_err());
+        assert!(guard.is_empty());
+    }
     #[test]
     fn stale_frontier_cannot_be_signed() {
         let chain = seeded_chain();
