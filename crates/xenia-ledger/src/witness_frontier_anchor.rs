@@ -996,7 +996,8 @@ mod tests {
     fn policy(chain: &Chain) -> (XeniaWitnessFrontierSourcePolicyV1, [u8; 16]) {
         let policy = XeniaWitnessFrontierSourcePolicyV1 {
             source_epoch: 7,
-            anchor_policy_digest: [0x62; 32],        };
+            anchor_policy_digest: [0x62; 32],
+        };
         let source_id = derive_xenia_witness_frontier_source_id(
             chain.signing_key.verifying_key().to_bytes(),
             policy.anchor_policy_digest,
