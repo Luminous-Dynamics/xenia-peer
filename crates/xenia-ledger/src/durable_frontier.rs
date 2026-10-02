@@ -161,6 +161,7 @@ impl DurableAuthorityEpochV1 {
     pub fn verify_against_chain(
         &self,
         chain: &Chain,
+        durable_frontier: &DurableLedgerFrontierV1,
         key_transition: &LedgerKeyTransition,
         epoch_transition: &LedgerAuthorityEpochTransitionV1,
         expected_previous_epoch: u64,
@@ -389,6 +390,7 @@ impl Chain {
         if self.has_uncertain_persistence() || self.entry_count() == 0 {
             return Err(DurableLedgerFrontierError::PersistenceUncertain);
         }
+        durable_frontier.verify_against_chain(self, persistence_policy_digest)?;
         epoch_transition
             .verify(
                 key_transition,
@@ -823,8 +825,13 @@ mod tests {
             })
             .unwrap();
 
+        let durable_frontier = chain
+            .verify_restored_durable_frontier_v1(PERSISTENCE_POLICY, |_, _| Ok(()))
+            .unwrap();
+
         // No durable acknowledgement: recovery must not invent successor authority.
         let ambiguous = chain.verify_restored_authority_epoch_v1(
+            &durable_frontier,
             &key_transition,
             &epoch_transition,
             7,
@@ -841,6 +848,7 @@ mod tests {
 
         let token = chain
             .verify_restored_authority_epoch_v1(
+                &durable_frontier,
                 &key_transition,
                 &epoch_transition,
                 7,
@@ -894,8 +902,13 @@ mod tests {
             .append_transactional_outcome(event(1), |_| PersistenceDisposition::<[u8; 32]>::Persisted)
             .unwrap();
 
+        let durable_frontier = chain
+            .verify_restored_durable_frontier_v1(PERSISTENCE_POLICY, |_, _| Ok(()))
+            .unwrap();
+
         let token = chain
             .verify_restored_authority_epoch_v1(
+                &durable_frontier,
                 &key_transition,
                 &epoch_transition,
                 7,
@@ -918,6 +931,7 @@ mod tests {
         );
 
         let rejected = chain.verify_restored_authority_epoch_v1(
+            &durable_frontier,
             &key_transition,
             &epoch_transition,
             7,
