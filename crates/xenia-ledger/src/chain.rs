@@ -443,7 +443,9 @@ impl Chain {
             return Err(LedgerError::UncertainPersistencePending { seq: pending.seq });
         }
         Ok(self.entries)
-    }    /// Produce a signed [`LedgerCheckpoint`] committing to this chain's
+    }
+
+    /// Produce a signed [`LedgerCheckpoint`] committing to this chain's
     /// current length and head hash, without exposing any entry contents.
     /// Safe to publish without authentication -- see the checkpoint's own
     /// doc comment for why.
@@ -471,5 +473,4 @@ impl Chain {
             signature,
         }
     }
-
 }
