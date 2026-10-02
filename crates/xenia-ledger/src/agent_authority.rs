@@ -194,7 +194,7 @@ pub fn verify_agent_capability_attestation(
     if now_unix_s < attestation.authorization.issued_at_unix_s {
         return Err(AgentCapabilityAttestationError::NotYetValid);
     }
-    if now_unix_s > attestation.authorization.expires_at_unix_s {
+    if now_unix_s >= attestation.authorization.expires_at_unix_s {
         return Err(AgentCapabilityAttestationError::Expired);
     }
     if attestation.authorization.capability_digest != expected_capability_digest {
@@ -498,6 +498,33 @@ mod tests {
         assert!(guard.is_empty());
     }
 
+    #[test]
+    fn authorization_expires_at_exact_boundary() {
+        let chain = seeded_chain();
+        let session = session();
+        let authorization = authorization(&chain);
+        let attestation = chain
+            .attest_agent_capability_authorization(authorization.clone(), &session)
+            .unwrap();
+        let public_key = chain.signing_key.verifying_key().to_bytes();
+        let binding = EvidencePublicKeyBinding::new(SignatureSuite::Ed25519Rfc8032, public_key);
+        let backend = Ed25519EvidenceSignatureBackend;
+
+        assert!(matches!(
+            verify_agent_capability_attestation(
+                &attestation,
+                &session,
+                &binding,
+                &backend,
+                authorization.expires_at_unix_s,
+                authorization.capability_digest,
+                authorization.executor_workload_digest,
+                authorization.authority_epoch,
+                authorization.prior_checkpoint,
+            ),
+            Err(AgentCapabilityAttestationError::Expired)
+        ));
+    }
     #[test]
     fn stale_frontier_cannot_be_signed() {
         let chain = seeded_chain();
