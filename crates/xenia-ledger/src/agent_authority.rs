@@ -483,19 +483,21 @@ mod tests {
 
         let mut wrong_capability = authorization.capability_digest;
         wrong_capability[0] ^= 1;
-        assert!(verify_agent_capability_attestation_once(
-            &attestation,
-            &session,
-            &binding,
-            &backend,
-            120,
-            wrong_capability,
-            authorization.executor_workload_digest,
-            authorization.authority_epoch,
-            authorization.prior_checkpoint,
-            &mut guard,
-        )
-        .is_err());
+        assert!(
+            verify_agent_capability_attestation_once(
+                &attestation,
+                &session,
+                &binding,
+                &backend,
+                120,
+                wrong_capability,
+                authorization.executor_workload_digest,
+                authorization.authority_epoch,
+                authorization.prior_checkpoint,
+                &mut guard,
+            )
+            .is_err()
+        );
         assert!(guard.is_empty());
     }
 
