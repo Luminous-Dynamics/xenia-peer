@@ -443,5 +443,33 @@ impl Chain {
             return Err(LedgerError::UncertainPersistencePending { seq: pending.seq });
         }
         Ok(self.entries)
+    }    /// Produce a signed [`LedgerCheckpoint`] committing to this chain's
+    /// current length and head hash, without exposing any entry contents.
+    /// Safe to publish without authentication -- see the checkpoint's own
+    /// doc comment for why.
+    ///
+    /// If [`Chain::has_uncertain_persistence`] is true, this checkpoint commits
+    /// the candidate in-memory frontier but does **not** prove it was durably
+    /// persisted. Callers must not use such a checkpoint as persistence proof.
+    pub fn sign_checkpoint(&self, timestamp_unix_secs: u64) -> LedgerCheckpoint {
+        let entry_count = self.entry_count();
+        let head_hash = self.last_hash();
+        let ledger_public_key = self.signing_key.verifying_key().to_bytes();
+        let message = checkpoint_message(
+            entry_count,
+            &head_hash,
+            &ledger_public_key,
+            timestamp_unix_secs,
+        );
+        let signature = self.signing_key.sign(&message).to_bytes();
+        LedgerCheckpoint {
+            schema: LEDGER_CHECKPOINT_SCHEMA.to_string(),
+            entry_count,
+            head_hash,
+            ledger_public_key,
+            timestamp_unix_secs,
+            signature,
+        }
     }
+
 }
