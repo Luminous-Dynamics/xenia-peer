@@ -244,8 +244,8 @@ mod tests {
     fn selecting_a_higher_epoch_without_matching_transition_is_rejected() {
         let old = SigningKey::from_bytes(&[33; 32]);
         let new = SigningKey::from_bytes(&[34; 32]);
-        let transition = LedgerKeyTransition::sign(checkpoint(&old), &old, &new, 100)
-            .expect("key transition");
+        let transition =
+            LedgerKeyTransition::sign(checkpoint(&old), &old, &new, 100).expect("key transition");
         let epoch = LedgerAuthorityEpochTransitionV1::sign(&transition, 7, 8, &old, &new)
             .expect("epoch transition");
         assert!(epoch.verify(&transition, 7, 9).is_err());
