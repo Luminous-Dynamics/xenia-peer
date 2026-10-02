@@ -172,14 +172,17 @@ impl DurableAuthorityEpochV1 {
             return Err(DurableLedgerFrontierError::PersistencePolicyMismatch);
         }
         epoch_transition
-            .verify(key_transition, expected_previous_epoch, expected_successor_epoch)
+            .verify(
+                key_transition,
+                expected_previous_epoch,
+                expected_successor_epoch,
+            )
             .map_err(DurableLedgerFrontierError::AuthorityEpoch)?;
         let fingerprint = ledger_key_transition_fingerprint(key_transition)
             .map_err(DurableLedgerFrontierError::KeyTransition)?;
         if self.claim.key_transition_fingerprint != fingerprint
             || self.claim.authority_epoch != expected_successor_epoch
-            || self.claim.successor_ledger_public_key
-                != key_transition.new_ledger_public_key
+            || self.claim.successor_ledger_public_key != key_transition.new_ledger_public_key
             || chain.signing_key.verifying_key().to_bytes()
                 != self.claim.successor_ledger_public_key
         {
@@ -380,22 +383,22 @@ impl Chain {
         expected_previous_epoch: u64,
         expected_successor_epoch: u64,
         persistence_policy_digest: [u8; 32],
-        verify: impl FnOnce(
-            &Self,
-            &DurableAuthorityEpochClaimV1,
-        ) -> Result<(), [u8; 32]>,
+        verify: impl FnOnce(&Self, &DurableAuthorityEpochClaimV1) -> Result<(), [u8; 32]>,
     ) -> Result<DurableAuthorityEpochV1, DurableLedgerFrontierError> {
         validate_policy_digest(persistence_policy_digest)?;
         if self.has_uncertain_persistence() || self.entry_count() == 0 {
             return Err(DurableLedgerFrontierError::PersistenceUncertain);
         }
         epoch_transition
-            .verify(key_transition, expected_previous_epoch, expected_successor_epoch)
+            .verify(
+                key_transition,
+                expected_previous_epoch,
+                expected_successor_epoch,
+            )
             .map_err(DurableLedgerFrontierError::AuthorityEpoch)?;
         let fingerprint = ledger_key_transition_fingerprint(key_transition)
             .map_err(DurableLedgerFrontierError::KeyTransition)?;
-        if self.signing_key.verifying_key().to_bytes()
-            != key_transition.new_ledger_public_key
+        if self.signing_key.verifying_key().to_bytes() != key_transition.new_ledger_public_key
         {
             return Err(DurableLedgerFrontierError::AuthorityEpochMismatch);
         }
@@ -413,8 +416,7 @@ impl Chain {
             ));
         }
         if self.has_uncertain_persistence()
-            || self.signing_key.verifying_key().to_bytes()
-                != claim.successor_ledger_public_key
+            || self.signing_key.verifying_key().to_bytes() != claim.successor_ledger_public_key
         {
             return Err(DurableLedgerFrontierError::AuthorityEpochMismatch);
         }
@@ -431,16 +433,16 @@ impl Chain {
     ) -> Result<DurableLedgerAppendOutcomeV1, DurableLedgerFrontierError> {
         validate_policy_digest(persistence_policy_digest)?;
         let outcome = self.append_transactional_outcome(event, |chain| {
-            let claim = match durable_claim_for_chain_allow_pending(chain, persistence_policy_digest)
-            {
-                Ok(claim) => claim,
-                Err(_) => {
-                    return PersistenceDisposition::ProvenNotPersisted(nonzero_diagnostic(
-                        ZERO32,
-                        b"append-internal-claim-invalid",
-                    ));
-                }
-            };
+            let claim =
+                match durable_claim_for_chain_allow_pending(chain, persistence_policy_digest) {
+                    Ok(claim) => claim,
+                    Err(_) => {
+                        return PersistenceDisposition::ProvenNotPersisted(nonzero_diagnostic(
+                            ZERO32,
+                            b"append-internal-claim-invalid",
+                        ));
+                    }
+                };
             persist(chain, &claim)
         })?;
         match outcome {
@@ -480,16 +482,16 @@ impl Chain {
     ) -> Result<DurableLedgerReconciliationOutcomeV1, DurableLedgerFrontierError> {
         validate_policy_digest(persistence_policy_digest)?;
         let outcome = self.reconcile_pending_persistence(|chain, pending| {
-            let claim = match durable_claim_for_chain_allow_pending(chain, persistence_policy_digest)
-            {
-                Ok(claim) => claim,
-                Err(_) => {
-                    return PersistenceDisposition::OutcomeUnknown(nonzero_diagnostic(
-                        ZERO32,
-                        b"reconcile-internal-claim-invalid",
-                    ));
-                }
-            };
+            let claim =
+                match durable_claim_for_chain_allow_pending(chain, persistence_policy_digest) {
+                    Ok(claim) => claim,
+                    Err(_) => {
+                        return PersistenceDisposition::OutcomeUnknown(nonzero_diagnostic(
+                            ZERO32,
+                            b"reconcile-internal-claim-invalid",
+                        ));
+                    }
+                };
             reconcile(chain, pending, &claim)
         })?;
         match outcome {
@@ -497,8 +499,7 @@ impl Chain {
                 let claim = durable_claim_for_chain(self, persistence_policy_digest)?;
                 Ok(DurableLedgerReconciliationOutcomeV1::Persisted {
                     entry,
-                    durable_frontier: DurableLedgerFrontierV1 { claim },
-                })            }
+                    durable_frontier: DurableLedgerFrontierV1 { claim },                })            }
             PersistenceReconciliationOutcome::ProvenNotPersisted {
                 error,
                 reverted_entry,
@@ -740,7 +741,11 @@ mod tests {
             _source_epoch: u64,
             operation_id: [u8; 32],
         ) -> Result<Option<SignedWitnessFrontierAnchorV1>, [u8; 32]> {
-            Ok(self.current.as_ref().filter(|a| a.target.operation_id == operation_id).cloned())
+            Ok(self
+                .current
+                .as_ref()
+                .filter(|a| a.target.operation_id == operation_id)
+                .cloned())
         }
 
         fn current_for_witness(
@@ -803,8 +808,7 @@ mod tests {
             timestamp_unix_secs: 0,
             signature: old.sign(&checkpoint_message).to_bytes(),
         };
-        let key_transition =
-            LedgerKeyTransition::sign(checkpoint, &old, &successor, 100).unwrap();
+        let key_transition = LedgerKeyTransition::sign(checkpoint, &old, &successor, 100).unwrap();
         let epoch_transition =
             LedgerAuthorityEpochTransitionV1::sign(&key_transition, 7, 8, &old, &successor)
                 .unwrap();
@@ -812,7 +816,9 @@ mod tests {
 
         let mut chain = Chain::new(successor.clone());
         chain
-            .append_transactional_outcome(event(1), |_| PersistenceDisposition::<[u8; 32]>::Persisted)
+            .append_transactional_outcome(event(1), |_| {
+                PersistenceDisposition::<[u8; 32]>::Persisted
+            })
             .unwrap();
 
         // No durable acknowledgement: recovery must not invent successor authority.
@@ -826,7 +832,9 @@ mod tests {
         );
         assert!(matches!(
             ambiguous,
-            Err(DurableLedgerFrontierError::PersistenceVerificationRejected(_))
+            Err(DurableLedgerFrontierError::PersistenceVerificationRejected(
+                _
+            ))
         ));
 
         let token = chain
@@ -894,7 +902,10 @@ mod tests {
                 PERSISTENCE_POLICY,
                 |_, claim| {
                     assert_eq!(claim.authority_epoch, 8);
-                    assert_eq!(claim.successor_ledger_public_key, successor.verifying_key().to_bytes());
+                    assert_eq!(
+                        claim.successor_ledger_public_key,
+                        successor.verifying_key().to_bytes()
+                    );
                     Ok(())
                 },
             )
@@ -929,7 +940,9 @@ mod tests {
             })
             .unwrap();
         let durable_frontier = match outcome {
-            DurableLedgerAppendOutcomeV1::Persisted { durable_frontier, .. } => durable_frontier,
+            DurableLedgerAppendOutcomeV1::Persisted {
+                durable_frontier, ..
+            } => durable_frontier,
             _ => panic!("expected durable frontier"),
         };
 
@@ -998,7 +1011,6 @@ mod tests {
             ),
             Err(DurableLedgerFrontierError::WitnessAnchor(_))
         ));    }
-
     #[test]
     fn persisted_append_mints_token_and_enables_durable_authority() {
         let mut chain = Chain::new(SigningKey::from_bytes(&[3; 32]));
