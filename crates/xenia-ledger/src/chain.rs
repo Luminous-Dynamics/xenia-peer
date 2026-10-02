@@ -430,43 +430,18 @@ impl Chain {
         Ok(())
     }
 
-    /// Consume the chain and return its resident entries. An anchored prefix,
-    /// when present, is not included; persistence layers supporting compaction
-    /// must retain [`Chain::base_checkpoint`] separately.
+    /// Consume the chain and return its resident entries only when there is
+    /// no unresolved persistence outcome. An anchored prefix, when present,
+    /// is not included; persistence layers supporting compaction must retain
+    /// the base checkpoint separately.
     ///
-    /// The returned vector does not encode an in-process pending-persistence
-    /// latch. Callers should reconcile any ambiguous outcome before consuming a
-    /// live chain for ordinary persistence/export purposes.
-    pub fn into_entries(self) -> Vec<LedgerEntry> {
-        self.entries
-    }
-
-    /// Produce a signed [`LedgerCheckpoint`] committing to this chain's
-    /// current length and head hash, without exposing any entry contents.
-    /// Safe to publish without authentication -- see the checkpoint's own
-    /// doc comment for why.
-    ///
-    /// If [`Chain::has_uncertain_persistence`] is true, this checkpoint commits
-    /// the candidate in-memory frontier but does **not** prove it was durably
-    /// persisted. Callers must not use such a checkpoint as persistence proof.
-    pub fn sign_checkpoint(&self, timestamp_unix_secs: u64) -> LedgerCheckpoint {
-        let entry_count = self.entry_count();
-        let head_hash = self.last_hash();
-        let ledger_public_key = self.signing_key.verifying_key().to_bytes();
-        let message = checkpoint_message(
-            entry_count,
-            &head_hash,
-            &ledger_public_key,
-            timestamp_unix_secs,
-        );
-        let signature = self.signing_key.sign(&message).to_bytes();
-        LedgerCheckpoint {
-            schema: LEDGER_CHECKPOINT_SCHEMA.to_string(),
-            entry_count,
-            head_hash,
-            ledger_public_key,
-            timestamp_unix_secs,
-            signature,
+    /// Refusing consumption while a persistence outcome is ambiguous prevents
+    /// the in-process latch from being erased merely by moving the entries into
+    /// another persistence path. Reconciliation must happen first.
+    pub fn into_entries(self) -> Result<Vec<LedgerEntry>, LedgerError> {
+        if let Some(pending) = self.pending_persistence {
+            return Err(LedgerError::UncertainPersistencePending { seq: pending.seq });
         }
+        Ok(self.entries)
     }
 }
