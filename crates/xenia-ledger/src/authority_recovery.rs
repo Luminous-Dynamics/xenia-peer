@@ -76,10 +76,7 @@ pub enum AuthorityRecoveryError {
 
 impl AuthorityRecoveryStateV1 {
     /// Apply one lifecycle event and return the next state.
-    pub fn apply(
-        self,
-        event: AuthorityRecoveryEventV1,
-    ) -> Result<Self, AuthorityRecoveryError> {
+    pub fn apply(self, event: AuthorityRecoveryEventV1) -> Result<Self, AuthorityRecoveryError> {
         use AuthorityRecoveryEventV1::*;
         use AuthorityRecoveryStateV1::*;
 
@@ -181,9 +178,7 @@ mod tests {
             Ok(AuthorityRecoveryStateV1::SuccessorActive)
         ));
         assert!(matches!(
-            AuthorityRecoveryStateV1::OldActive.apply(
-                AuthorityRecoveryEventV1::ActivateSuccessor
-            ),
+            AuthorityRecoveryStateV1::OldActive.apply(AuthorityRecoveryEventV1::ActivateSuccessor),
             Err(AuthorityRecoveryError::InvalidTransition { .. })
         ));
     }
@@ -210,7 +205,9 @@ mod tests {
             Err(AuthorityRecoveryError::InvalidTransition { .. })
         ));
         assert_eq!(
-            state.apply(AuthorityRecoveryEventV1::RecoverSuccessor).unwrap(),
+            state
+                .apply(AuthorityRecoveryEventV1::RecoverSuccessor)
+                .unwrap(),
             AuthorityRecoveryStateV1::TransitionCommitted
         );
     }
