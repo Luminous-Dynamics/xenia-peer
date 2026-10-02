@@ -497,7 +497,6 @@ pub trait WitnessFrontierAnchorStore {
         source_epoch: u64,
         operation_id: [u8; 32],
     ) -> Result<Option<SignedWitnessFrontierAnchorV1>, [u8; 32]>;
-
     /// Read the latest anchor for one witness within one source epoch.
     fn current_for_witness(
         &mut self,
@@ -997,8 +996,7 @@ mod tests {
     fn policy(chain: &Chain) -> (XeniaWitnessFrontierSourcePolicyV1, [u8; 16]) {
         let policy = XeniaWitnessFrontierSourcePolicyV1 {
             source_epoch: 7,
-            anchor_policy_digest: [0x62; 32],
-        };
+            anchor_policy_digest: [0x62; 32],        };
         let source_id = derive_xenia_witness_frontier_source_id(
             chain.signing_key.verifying_key().to_bytes(),
             policy.anchor_policy_digest,
@@ -1214,13 +1212,7 @@ mod tests {
         };
 
         let old_observation = chain
-            .observe_witness_frontier_v1(
-                [0x51; 16],
-                [0xA5; 32],
-                old_policy,
-                120,
-                &mut store,
-            )
+            .observe_witness_frontier_v1([0x51; 16], [0xA5; 32], old_policy, 120, &mut store)
             .unwrap();
 
         let new_policy = XeniaWitnessFrontierSourcePolicyV1 {
@@ -1257,13 +1249,7 @@ mod tests {
 
         assert!(
             chain
-                .observe_witness_frontier_v1(
-                    [0x51; 16],
-                    [0xA6; 32],
-                    new_policy,
-                    120,
-                    &mut store,
-                )
+                .observe_witness_frontier_v1([0x51; 16], [0xA6; 32], new_policy, 120, &mut store,)
                 .unwrap()
                 .current
                 .is_none(),
@@ -1298,13 +1284,7 @@ mod tests {
         );
 
         let observation = new_chain
-            .observe_witness_frontier_v1(
-                [0x51; 16],
-                [0xA5; 32],
-                policy,
-                120,
-                &mut store,
-            )
+            .observe_witness_frontier_v1([0x51; 16], [0xA5; 32], policy, 120, &mut store)
             .unwrap();
         observation
             .verify_fresh(
