@@ -11,12 +11,13 @@ use thiserror::Error;
 
 use crate::{
     AgentCapabilityAttestationError, AgentCapabilityAttestationV1, AgentCapabilityAuthorizationV1,
-    ledger_key_transition_fingerprint, Chain, LedgerAuthorityEpochTransitionError,
-    LedgerAuthorityEpochTransitionV1, LedgerEntry, LedgerError, LedgerKeyTransition, LedgerKeyTransitionError,
-    PendingPersistenceFrontier, PersistenceDisposition,
-    PersistenceReconciliationOutcome, SessionTranscriptBinding, SignedWitnessFrontierObservationV1,
-    TransactionalAppendOutcome, WitnessFrontierAnchorAppendOutcomeV1, WitnessFrontierAnchorError,
-    WitnessFrontierAnchorStore, WitnessFrontierAnchorTargetV1, XeniaWitnessFrontierSourcePolicyV1,
+    Chain, LedgerAuthorityEpochTransitionError, LedgerAuthorityEpochTransitionV1, LedgerEntry,
+    LedgerError, LedgerKeyTransition, LedgerKeyTransitionError, PendingPersistenceFrontier,
+    PersistenceDisposition, PersistenceReconciliationOutcome, SessionTranscriptBinding,
+    SignedWitnessFrontierObservationV1, TransactionalAppendOutcome,
+    WitnessFrontierAnchorAppendOutcomeV1, WitnessFrontierAnchorError, WitnessFrontierAnchorStore,
+    WitnessFrontierAnchorTargetV1, XeniaWitnessFrontierSourcePolicyV1,
+    ledger_key_transition_fingerprint,
 };
 
 /// Schema version for [`DurableLedgerFrontierClaimV1`].
@@ -399,8 +400,7 @@ impl Chain {
             .map_err(DurableLedgerFrontierError::AuthorityEpoch)?;
         let fingerprint = ledger_key_transition_fingerprint(key_transition)
             .map_err(DurableLedgerFrontierError::KeyTransition)?;
-        if self.signing_key.verifying_key().to_bytes() != key_transition.new_ledger_public_key
-        {
+        if self.signing_key.verifying_key().to_bytes() != key_transition.new_ledger_public_key {
             return Err(DurableLedgerFrontierError::AuthorityEpochMismatch);
         }
         let claim = DurableAuthorityEpochClaimV1 {
@@ -498,7 +498,11 @@ impl Chain {
         match outcome {
             PersistenceReconciliationOutcome::Persisted(entry) => {
                 let claim = durable_claim_for_chain(self, persistence_policy_digest)?;
-                Ok(DurableLedgerReconciliationOutcomeV1::Persisted {                    entry,                    durable_frontier: DurableLedgerFrontierV1 { claim },                })            }
+                Ok(DurableLedgerReconciliationOutcomeV1::Persisted {
+                    entry,
+                    durable_frontier: DurableLedgerFrontierV1 { claim },
+                })
+            }
             PersistenceReconciliationOutcome::ProvenNotPersisted {
                 error,
                 reverted_entry,
@@ -683,9 +687,8 @@ mod tests {
     use super::*;
     use crate::{
         AgentCheckpointAnchorV1, ConsentEventRecord, ConsentKind, LedgerCheckpoint, SignatureSuite,
-        SignedWitnessFrontierAnchorV1,
-        TranscriptSignatureSuiteV1, derive_xenia_witness_frontier_source_id,
-        WITNESS_FRONTIER_ANCHOR_SCHEMA_VERSION,
+        SignedWitnessFrontierAnchorV1, TranscriptSignatureSuiteV1,
+        WITNESS_FRONTIER_ANCHOR_SCHEMA_VERSION, derive_xenia_witness_frontier_source_id,
     };
 
     const PERSISTENCE_POLICY: [u8; 32] = [0xD1; 32];
