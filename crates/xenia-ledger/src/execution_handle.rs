@@ -25,7 +25,7 @@ use crate::{
 };
 
 /// Stable domain separator for exact execution-handle identities.
-pub const EXECUTION_HANDLE_DOMAIN: &[u8] = b"xenia:exact-execution-handle:v1\0";
+pub const EXECUTION_HANDLE_DOMAIN: &[u8] = b"xenia:exact-execution-handle:v2\0";
 
 /// A process-local handle narrowed from one already-verified agent authorization.
 ///
