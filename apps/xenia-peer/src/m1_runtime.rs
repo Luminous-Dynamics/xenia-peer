@@ -35,6 +35,7 @@ use xenia_peer_core::{
 };
 
 use crate::m1_ledger::consent_record_for_m1_event;
+use xenia_inject::InputEffectOutcome;
 
 #[derive(Debug)]
 pub(crate) enum M1RuntimeError {
@@ -1234,10 +1235,28 @@ impl M1RuntimeSession {
         &mut self,
         effect: impl FnOnce() -> Result<(), M1RuntimeError>,
     ) -> Result<(), M1RuntimeError> {
+        self.execute_input_effect_outcome(|| effect().map(|()| InputEffectOutcome::Applied))?;
+        Ok(())
+    }
+
+    /// Execute one input operation while preserving the provider-boundary
+    /// outcome.
+    ///
+    /// Only a confirmed Applied result advances the M1 audit state. An explicit
+    /// pre-effect rejection leaves the state untouched, while Indeterminate
+    /// leaves the operation unaudited rather than manufacturing an InputInjected
+    /// event that the provider has not been proven to have effected.
+    pub(crate) fn execute_input_effect_outcome(
+        &mut self,
+        effect: impl FnOnce() -> Result<InputEffectOutcome, M1RuntimeError>,
+    ) -> Result<InputEffectOutcome, M1RuntimeError> {
         self.session.check_permission(M1Permission::InjectInput)?;
-        effect()?;
-        self.session.inject_input()?;
-        self.flush_new_audit_events()
+        let outcome = effect()?;
+        if outcome == InputEffectOutcome::Applied {
+            self.session.inject_input()?;
+            self.flush_new_audit_events()?;
+        }
+        Ok(outcome)
     }
 
     pub(crate) fn allow_input_flow(&mut self) -> Result<(), M1RuntimeError> {
