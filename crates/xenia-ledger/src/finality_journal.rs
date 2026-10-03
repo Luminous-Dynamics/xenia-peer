@@ -336,52 +336,6 @@ fn lock_path_for(path: &Path) -> PathBuf {
     PathBuf::from(lock_path)
 }
 
-fn occupied_action_index(
-    latest: &BTreeMap<[u8; 16], FinalityAttemptV1>,
-) -> Result<BTreeMap<[u8; 32], [u8; 16]>, FinalityJournalError> {
-    let mut occupied = BTreeMap::new();
-    for attempt in latest.values() {
-        let occupies = matches!(
-            attempt.state,
-            FinalityAttemptStateV1::EffectuationStarted
-                | FinalityAttemptStateV1::Committed
-                | FinalityAttemptStateV1::Indeterminate
-        );
-        if !occupies {
-            continue;
-        }
-        if let Some(existing) = occupied.insert(attempt.action_key_digest, attempt.attempt_id) {
-            if existing != attempt.attempt_id {
-                return Err(FinalityJournalError::ActionAlreadyFenced {
-                    action_key_digest: attempt.action_key_digest,
-                    existing_attempt_id: existing,
-                });
-            }
-        }
-    }
-    Ok(occupied)
-}
-
-fn consumed_handle_index(
-    latest: &BTreeMap<[u8; 16], FinalityAttemptV1>,
-) -> Result<BTreeMap<[u8; 32], [u8; 16]>, FinalityJournalError> {
-    let mut consumed = BTreeMap::new();
-    for attempt in latest.values() {
-        if matches!(attempt.state, FinalityAttemptStateV1::Prepared) {
-            continue;
-        }
-        if let Some(existing) = consumed.insert(attempt.handle_digest, attempt.attempt_id) {
-            if existing != attempt.attempt_id {
-                return Err(FinalityJournalError::HandleAlreadyConsumed {
-                    handle_digest: attempt.handle_digest,
-                    existing_attempt_id: existing,
-                });
-            }
-        }
-    }
-    Ok(consumed)
-}
-
 fn replay_journal_bytes(
     bytes: &[u8],
 ) -> Result<(
@@ -686,6 +640,38 @@ mod tests {
         ));
 
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn denied_outcome_releases_action_fence_but_not_native_handle() {
+        let path = temp_path("release");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(lock_path_for(&path));
+
+        let mut journal = FinalityJournalV1::open(&path).unwrap();
+        let mut first =
+            FinalityAttemptV1::prepare([31; 16], [32; 32], [33; 32], [34; 32], [35; 32]).unwrap();
+        journal.append_attempt(&first).unwrap();
+        first.mark_effectuation_started().unwrap();
+        journal.append_attempt(&first).unwrap();
+        first.deny().unwrap();
+        journal.append_attempt(&first).unwrap();
+
+        let mut second =
+            FinalityAttemptV1::prepare([36; 16], [37; 32], [33; 32], [34; 32], [35; 32]).unwrap();
+        journal.append_attempt(&second).unwrap();
+        second.mark_effectuation_started().unwrap();
+        journal.append_attempt(&second).unwrap();
+
+        let reused_original_handle =
+            FinalityAttemptV1::prepare([38; 16], [32; 32], [33; 32], [34; 32], [35; 32]).unwrap();
+        assert!(matches!(
+            journal.append_attempt(&reused_original_handle),
+            Err(FinalityJournalError::HandleAlreadyConsumed { .. })
+        ));
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(lock_path_for(&path));
     }
 
     #[test]
