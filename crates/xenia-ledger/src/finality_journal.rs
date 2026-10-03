@@ -27,10 +27,10 @@ use crate::{
 };
 
 /// Stable schema for the journal stream.
-pub const FINALITY_JOURNAL_SCHEMA: &str = "xenia-finality-journal-v1";
+pub const FINALITY_JOURNAL_SCHEMA: &str = "xenia-finality-journal-v2";
 
 const MAX_JOURNAL_RECORD_BYTES: u32 = 64 * 1024;
-const JOURNAL_MAGIC: &[u8; 8] = b"XNFJ0001";
+const JOURNAL_MAGIC: &[u8; 8] = b"XNFJ0002";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum FinalityJournalRecordV1 {
@@ -53,6 +53,7 @@ pub struct FinalityJournalV1 {
     latest: BTreeMap<[u8; 16], FinalityAttemptV1>,
     receipts: BTreeMap<[u8; 16], FinalityReceiptV1>,
     consumed_handles: BTreeMap<[u8; 32], [u8; 16]>,
+    occupied_actions: BTreeMap<[u8; 32], [u8; 16]>,
 }
 
 struct FinalityJournalLockV1 {
@@ -99,6 +100,14 @@ pub enum FinalityJournalError {
     /// Another live journal owner already holds the sibling lock.
     #[error("finality journal is already owned by another process")]
     JournalAlreadyOwned,
+    /// A different attempt already occupies the same semantic action key.
+    #[error("exact action is already durably in flight or closed")]
+    ActionAlreadyFenced {
+        /// Semantic action identity protected by the fence.
+        action_key_digest: [u8; 32],
+        /// Attempt currently occupying the action key.
+        existing_attempt_id: [u8; 16],
+    },
     /// An already-consumed exact handle was presented under a different attempt.
     #[error("exact execution handle was already durably consumed by another attempt")]
     HandleAlreadyConsumed {
@@ -148,6 +157,7 @@ impl FinalityJournalV1 {
         let (initialized, record_bytes) = split_journal_header(&bytes)?;
         let (latest, receipts) = replay_journal_bytes(record_bytes)?;
         let consumed_handles = consumed_handle_index(&latest)?;
+        let occupied_actions = occupied_action_index(&latest)?;
 
         Ok(Self {
             path,
@@ -157,6 +167,7 @@ impl FinalityJournalV1 {
             latest,
             receipts,
             consumed_handles,
+            occupied_actions,
         })
     }
 
@@ -186,8 +197,18 @@ impl FinalityJournalV1 {
             }
         }
 
+        if let Some(existing_attempt_id) = self.occupied_actions.get(&attempt.action_key_digest) {
+            if existing_attempt_id != &attempt.attempt_id {
+                return Err(FinalityJournalError::ActionAlreadyFenced {
+                    action_key_digest: attempt.action_key_digest,
+                    existing_attempt_id: *existing_attempt_id,
+                });
+            }
+        }
+
         if let Some(previous) = self.latest.get(&attempt.attempt_id) {
             if previous.handle_digest != attempt.handle_digest
+                || previous.action_key_digest != attempt.action_key_digest
                 || previous.act_digest != attempt.act_digest
                 || previous.sink_digest != attempt.sink_digest
             {
@@ -201,6 +222,17 @@ impl FinalityJournalV1 {
         self.append_record(&FinalityJournalRecordV1::Attempt(attempt.clone()))?;
         if !matches!(attempt.state, FinalityAttemptStateV1::Prepared) {
             self.consumed_handles.insert(attempt.handle_digest, attempt.attempt_id);
+        }
+        match attempt.state {
+            FinalityAttemptStateV1::EffectuationStarted
+            | FinalityAttemptStateV1::Committed
+            | FinalityAttemptStateV1::Indeterminate => {
+                self.occupied_actions.insert(attempt.action_key_digest, attempt.attempt_id);
+            }
+            FinalityAttemptStateV1::Prepared => {}
+            FinalityAttemptStateV1::Denied => {
+                self.occupied_actions.remove(&attempt.action_key_digest);
+            }
         }
         self.latest.insert(attempt.attempt_id, attempt.clone());
         Ok(())
@@ -217,6 +249,7 @@ impl FinalityJournalV1 {
         };
 
         if receipt.handle_digest != attempt.handle_digest
+            || receipt.action_key_digest != attempt.action_key_digest
             || receipt.act_digest != attempt.act_digest
             || receipt.sink_digest != attempt.sink_digest
             || receipt.attempt_digest != attempt.digest()
@@ -303,6 +336,32 @@ fn lock_path_for(path: &Path) -> PathBuf {
     PathBuf::from(lock_path)
 }
 
+fn occupied_action_index(
+    latest: &BTreeMap<[u8; 16], FinalityAttemptV1>,
+) -> Result<BTreeMap<[u8; 32], [u8; 16]>, FinalityJournalError> {
+    let mut occupied = BTreeMap::new();
+    for attempt in latest.values() {
+        let occupies = matches!(
+            attempt.state,
+            FinalityAttemptStateV1::EffectuationStarted
+                | FinalityAttemptStateV1::Committed
+                | FinalityAttemptStateV1::Indeterminate
+        );
+        if !occupies {
+            continue;
+        }
+        if let Some(existing) = occupied.insert(attempt.action_key_digest, attempt.attempt_id) {
+            if existing != attempt.attempt_id {
+                return Err(FinalityJournalError::ActionAlreadyFenced {
+                    action_key_digest: attempt.action_key_digest,
+                    existing_attempt_id: existing,
+                });
+            }
+        }
+    }
+    Ok(occupied)
+}
+
 fn consumed_handle_index(
     latest: &BTreeMap<[u8; 16], FinalityAttemptV1>,
 ) -> Result<BTreeMap<[u8; 32], [u8; 16]>, FinalityJournalError> {
@@ -365,6 +424,7 @@ fn replay_journal_bytes(
 
                 if let Some(previous) = latest.get(&attempt.attempt_id) {
                     if previous.handle_digest != attempt.handle_digest
+                        || previous.action_key_digest != attempt.action_key_digest
                         || previous.act_digest != attempt.act_digest
                         || previous.sink_digest != attempt.sink_digest
                     {
@@ -562,6 +622,29 @@ mod tests {
         assert!(matches!(
             journal.append_attempt(&substituted),
             Err(FinalityJournalError::AttemptIdentityMismatch)
+        ));
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn journal_rejects_fresh_authority_for_same_action_key() {
+        let path = temp_path("same-action");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(lock_path_for(&path));
+
+        let mut journal = FinalityJournalV1::open(&path).unwrap();
+        let mut first =
+            FinalityAttemptV1::prepare([21; 16], [22; 32], [23; 32], [24; 32], [25; 32]).unwrap();
+        journal.append_attempt(&first).unwrap();
+        first.mark_effectuation_started().unwrap();
+        journal.append_attempt(&first).unwrap();
+
+        let fresh_authority =
+            FinalityAttemptV1::prepare([26; 16], [27; 32], [23; 32], [24; 32], [25; 32]).unwrap();
+        assert!(matches!(
+            journal.append_attempt(&fresh_authority),
+            Err(FinalityJournalError::ActionAlreadyFenced { .. })
         ));
 
         let _ = fs::remove_file(&path);
