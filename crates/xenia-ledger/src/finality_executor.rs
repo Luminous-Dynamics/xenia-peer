@@ -145,6 +145,116 @@ mod tests {
         ))
     }
 
+    fn executable_handle() -> ExactExecutionHandleV1 {
+        use crate::{
+            AgentCapabilityAuthorizationV1, AgentCheckpointAnchorV1, Chain, ConsentEventRecord,
+            ConsentKind, Ed25519EvidenceSignatureBackend, EvidencePublicKeyBinding,
+            SessionTranscriptBinding, SignatureSuite, TranscriptSignatureSuiteV1,
+        };
+        use ed25519_dalek::SigningKey;
+        use uuid::Uuid;
+
+        let mut chain = Chain::new(SigningKey::from_bytes(&[3; 32]));
+        chain
+            .append(ConsentEventRecord {
+                source_id: [11; 32],
+                session_id: Uuid::from_bytes([9; 16]),
+                request_id: Uuid::from_bytes([4; 16]),
+                kind: ConsentKind::Approval,
+                scope: "bounded-agent authorization".into(),
+            })
+            .unwrap();
+
+        let session = SessionTranscriptBinding::from_hash(
+            Uuid::from_bytes([9; 16]),
+            [7; 32],
+            SignatureSuite::Ed25519Rfc8032,
+        );
+        let authorization = AgentCapabilityAuthorizationV1 {
+            schema_version: 1,
+            authorization_id: [1; 16],
+            session_id: [9; 16],
+            session_transcript_hash: [7; 32],
+            session_signature_suite: TranscriptSignatureSuiteV1::Ed25519Rfc8032,
+            capability_digest: [5; 32],
+            executor_workload_digest: [6; 32],
+            authority_epoch: 11,
+            issued_at_unix_s: 100,
+            expires_at_unix_s: 160,
+            nonce: [8; 16],
+            ledger_entry_count: chain.entry_count(),
+            ledger_head_hash: chain.last_hash(),
+            prior_checkpoint: Some(AgentCheckpointAnchorV1 {
+                sequence: 2,
+                digest: [10; 32],
+            }),
+        };
+        let attestation = chain
+            .attest_agent_capability_authorization(authorization.clone(), &session)
+            .unwrap();
+        let binding = EvidencePublicKeyBinding::new(
+            SignatureSuite::Ed25519Rfc8032,
+            chain.signing_key.verifying_key().to_bytes(),
+        );
+        ExactExecutionHandleV1::issue(
+            &attestation,
+            &session,
+            &binding,
+            &Ed25519EvidenceSignatureBackend,
+            120,
+            authorization.capability_digest,
+            authorization.executor_workload_digest,
+            authorization.authority_epoch,
+            authorization.prior_checkpoint,
+            [0x31; 32],
+            [0x41; 32],
+            [0x51; 32],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn executor_durably_reserves_then_closes_confirmed_effect() {
+        let path = std::env::temp_dir().join(format!(
+            "xenia-finality-executor-e2e-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let mut journal = FinalityJournalV1::open(&path).unwrap();
+        let handle = executable_handle();
+        let mut executor = FinalityExecutorV1::new(&mut journal);
+        let receipt = executor
+            .execute(
+                &handle,
+                120,
+                [0x31; 32],
+                [0x41; 32],
+                [0x51; 32],
+                [0x61; 16],
+                || FinalityOutcomeV1::Committed,
+            )
+            .unwrap();
+
+        assert_eq!(receipt.outcome, FinalityOutcomeV1::Committed);
+        assert!(!executor.requires_reconciliation([0x61; 16]));
+        assert_eq!(
+            executor
+                .latest_attempt([0x61; 16])
+                .unwrap()
+                .state(),
+            FinalityAttemptStateV1::Committed
+        );
+
+        let recovered = FinalityJournalV1::open(&path).unwrap();
+        assert_eq!(
+            recovered.latest_attempt([0x61; 16]).unwrap().state(),
+            FinalityAttemptStateV1::Committed
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn started_attempt_is_the_recovery_boundary() {
         let path = path();
