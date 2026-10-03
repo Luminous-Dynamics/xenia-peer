@@ -824,6 +824,7 @@ mod tests {
         AuthorityRecoveryStateV1::TransitionPending {
             transition_fingerprint: fingerprint,
             authority_epoch: 8,
+            durable_frontier_digest: [0xF1; 32],
             _seal: RecoveryStateSeal,
         }
     }
@@ -832,6 +833,7 @@ mod tests {
         AuthorityRecoveryStateV1::TransitionCommitted {
             transition_fingerprint: fingerprint,
             authority_epoch: 8,
+            durable_frontier_digest: [0xF1; 32],
             _seal: RecoveryStateSeal,
         }
     }
@@ -840,6 +842,7 @@ mod tests {
         AuthorityRecoveryStateV1::OutcomeUnknown {
             transition_fingerprint: fingerprint,
             authority_epoch: 8,
+            durable_frontier_digest: [0xF1; 32],
             _seal: RecoveryStateSeal,
         }
     }
@@ -848,6 +851,7 @@ mod tests {
         AuthorityRecoveryStateV1::RecoveryFromOld {
             transition_fingerprint: fingerprint,
             authority_epoch: 8,
+            durable_frontier_digest: [0xF1; 32],
             _seal: RecoveryStateSeal,
         }
     }
@@ -856,6 +860,7 @@ mod tests {
         AuthorityRecoveryStateV1::RecoveryAfterCommit {
             transition_fingerprint: fingerprint,
             authority_epoch: 8,
+            durable_frontier_digest: [0xF1; 32],
             _seal: RecoveryStateSeal,
         }
     }
@@ -864,6 +869,7 @@ mod tests {
         AuthorityRecoveryStateV1::RecoveryAfterUnknown {
             transition_fingerprint: fingerprint,
             authority_epoch: 8,
+            durable_frontier_digest: [0xF1; 32],
             _seal: RecoveryStateSeal,
         }
     }
@@ -872,6 +878,7 @@ mod tests {
         AuthorityRecoveryStateV1::SuccessorActive {
             transition_fingerprint: fingerprint,
             authority_epoch: 8,
+            durable_frontier_digest: [0xF1; 32],
             _seal: RecoveryStateSeal,
         }
     }
@@ -882,11 +889,13 @@ mod tests {
             .apply(AuthorityRecoveryEventV1::PrepareTransition {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
             })
             .unwrap()
             .apply(AuthorityRecoveryEventV1::DurableCommit {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
             })
             .unwrap()
             .apply(AuthorityRecoveryEventV1::ActivateSuccessor)
@@ -904,11 +913,13 @@ mod tests {
             .apply(AuthorityRecoveryEventV1::PrepareTransition {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
             })
             .unwrap()
             .apply(AuthorityRecoveryEventV1::CommitOutcomeUnknown {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
             })
             .unwrap();
 
@@ -933,11 +944,28 @@ mod tests {
     }
 
     #[test]
+    fn zero_frontier_digest_cannot_create_recovery_authority() {
+        let result = AuthorityRecoveryStateV1::OldActive.apply(
+            AuthorityRecoveryEventV1::PrepareTransition {
+                transition_fingerprint: TRANSITION_A,
+                authority_epoch: 8,
+                durable_frontier_digest: [0; 32],
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(AuthorityRecoveryError::InvalidDurableFrontierDigest)
+        );
+    }
+
+    #[test]
     fn mismatched_commit_proof_cannot_advance_transition() {
         let state = AuthorityRecoveryStateV1::OldActive
             .apply(AuthorityRecoveryEventV1::PrepareTransition {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
             })
             .unwrap();
 
@@ -945,6 +973,7 @@ mod tests {
             state.apply(AuthorityRecoveryEventV1::DurableCommit {
                 transition_fingerprint: TRANSITION_B,
                 authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
             }),
             Err(AuthorityRecoveryError::TransitionFingerprintMismatch)
         ));
@@ -966,6 +995,7 @@ mod tests {
             AuthorityRecoveryStateV1::OldActive.apply(AuthorityRecoveryEventV1::BeginRecovery {
                 transition_fingerprint: [0; 32],
                 authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
             }),
             Err(AuthorityRecoveryError::InvalidTransitionFingerprint)
         ));
@@ -986,11 +1016,13 @@ mod tests {
             .apply(AuthorityRecoveryEventV1::PrepareTransition {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
             })
             .unwrap()
             .apply(AuthorityRecoveryEventV1::DurableCommit {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
             })
             .unwrap()
             .apply(AuthorityRecoveryEventV1::ActivateSuccessor)
@@ -998,11 +1030,13 @@ mod tests {
             .apply(AuthorityRecoveryEventV1::BeginRecovery {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
             })
             .unwrap()
             .apply(AuthorityRecoveryEventV1::RecoverSuccessor {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
             })
             .unwrap()
             .apply(AuthorityRecoveryEventV1::ActivateSuccessor)
@@ -1014,11 +1048,13 @@ mod tests {
             .apply(AuthorityRecoveryEventV1::BeginRecovery {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
             })
             .unwrap()
             .apply(AuthorityRecoveryEventV1::RecoverOld {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
             })
             .unwrap();
 
@@ -1034,6 +1070,7 @@ mod tests {
             state.apply(AuthorityRecoveryEventV1::BeginRecovery {
                 transition_fingerprint: TRANSITION_B,
                 authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
             }),
             Err(AuthorityRecoveryError::TransitionFingerprintMismatch)
         ));
@@ -1061,6 +1098,7 @@ mod tests {
             .apply(AuthorityRecoveryEventV1::BeginRecovery {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
             })
             .unwrap();
 
@@ -1069,6 +1107,7 @@ mod tests {
             state.apply(AuthorityRecoveryEventV1::RecoverOld {
                 transition_fingerprint: TRANSITION_B,
                 authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
             }),
             Err(AuthorityRecoveryError::TransitionFingerprintMismatch)
         ));
@@ -1080,6 +1119,7 @@ mod tests {
             .apply(AuthorityRecoveryEventV1::BeginRecovery {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
             })
             .unwrap();
 
@@ -1088,6 +1128,7 @@ mod tests {
             state.apply(AuthorityRecoveryEventV1::RecoverOld {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
             }),
             Err(AuthorityRecoveryError::InvalidTransition { .. })
         ));
@@ -1095,6 +1136,7 @@ mod tests {
             state.apply(AuthorityRecoveryEventV1::RecoverOutcomeUnknown {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
             }),
             Err(AuthorityRecoveryError::InvalidTransition { .. })
         ));
@@ -1115,11 +1157,13 @@ mod tests {
             .apply(AuthorityRecoveryEventV1::BeginRecovery {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
             })
             .unwrap()
             .apply(AuthorityRecoveryEventV1::RecoverOutcomeUnknown {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
             })
             .unwrap();
 
@@ -1134,6 +1178,7 @@ mod tests {
             .apply(AuthorityRecoveryEventV1::BeginRecovery {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
             })
             .unwrap();
 
@@ -1142,6 +1187,7 @@ mod tests {
             state.apply(AuthorityRecoveryEventV1::RecoverSuccessor {
                 transition_fingerprint: TRANSITION_B,
                 authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
             }),
             Err(AuthorityRecoveryError::TransitionFingerprintMismatch)
         ));
