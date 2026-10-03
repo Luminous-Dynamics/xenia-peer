@@ -94,6 +94,9 @@ pub enum FinalityJournalError {
     /// A receipt outcome did not match the corresponding terminal state.
     #[error("finality receipt outcome does not match the attempt state")]
     ReceiptOutcomeMismatch,
+    /// Another live journal owner already holds the sibling lock.
+    #[error("finality journal is already owned by another process")]
+    JournalAlreadyOwned,
     /// An already-consumed exact handle was presented under a different attempt.
     #[error("exact execution handle was already durably consumed by another attempt")]
     HandleAlreadyConsumed {
@@ -115,12 +118,9 @@ impl FinalityJournalV1 {
             .open(&lock_path)
             .map_err(|error| {
                 if error.kind() == io::ErrorKind::AlreadyExists {
-                    io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        "finality journal is already owned by another process",
-                    )
+                    FinalityJournalError::JournalAlreadyOwned
                 } else {
-                    error
+                    FinalityJournalError::Io(error)
                 }
             })?;
 
@@ -441,6 +441,48 @@ mod tests {
 
     fn temp_path(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("xenia-finality-journal-{}-{}", tag, std::process::id()))
+    }
+
+    #[test]
+    fn second_owner_is_rejected_while_first_owner_is_live() {
+        let path = temp_path("ownership");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(lock_path_for(&path));
+
+        let journal = FinalityJournalV1::open(&path).unwrap();
+        assert!(matches!(
+            FinalityJournalV1::open(&path),
+            Err(FinalityJournalError::JournalAlreadyOwned)
+        ));
+
+        drop(journal);
+
+        let reopened = FinalityJournalV1::open(&path).unwrap();
+        drop(reopened);
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(lock_path_for(&path));
+    }
+
+    #[test]
+    fn failed_open_releases_lock_for_retry() {
+        let path = temp_path("failed-open-lock");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(lock_path_for(&path));
+
+        fs::write(&path, [0xAA, 0xBB, 0xCC]).unwrap();
+
+        assert!(matches!(
+            FinalityJournalV1::open(&path),
+            Err(FinalityJournalError::MalformedRecord)
+        ));
+        assert!(matches!(
+            FinalityJournalV1::open(&path),
+            Err(FinalityJournalError::MalformedRecord)
+        ));
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(lock_path_for(&path));
     }
 
     #[test]
