@@ -6656,7 +6656,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .as_ref()
                                 .expect("successful input effect must construct injector")
                                 .backend_name(),
-                            "input event injected"
+                            "input event effect confirmed"
+                        );
+                    }
+                    Ok(InputEffectOutcome::Accepted) => {
+                        info!(
+                            ?event,
+                            backend = injector
+                                .as_ref()
+                                .expect("accepted input operation must construct injector")
+                                .backend_name(),
+                            "input event accepted by provider; host effect not independently confirmed"
                         );
                     }
                     Ok(InputEffectOutcome::RejectionBeforeEffect) => {
