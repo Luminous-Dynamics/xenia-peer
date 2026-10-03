@@ -30,6 +30,7 @@ use crate::{
 pub const FINALITY_JOURNAL_SCHEMA: &str = "xenia-finality-journal-v1";
 
 const MAX_JOURNAL_RECORD_BYTES: u32 = 64 * 1024;
+const JOURNAL_MAGIC: &[u8; 8] = b"XNFJ0001";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum FinalityJournalRecordV1 {
@@ -48,6 +49,7 @@ pub struct FinalityJournalV1 {
     path: PathBuf,
     file: File,
     _lock: FinalityJournalLockV1,
+    initialized: bool,
     latest: BTreeMap<[u8; 16], FinalityAttemptV1>,
     receipts: BTreeMap<[u8; 16], FinalityReceiptV1>,
     consumed_handles: BTreeMap<[u8; 32], [u8; 16]>,
@@ -143,13 +145,15 @@ impl FinalityJournalV1 {
 
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes)?;
-        let (latest, receipts) = replay_journal_bytes(&bytes)?;
+        let (initialized, record_bytes) = split_journal_header(&bytes)?;
+        let (latest, receipts) = replay_journal_bytes(record_bytes)?;
         let consumed_handles = consumed_handle_index(&latest)?;
 
         Ok(Self {
             path,
             file: reader,
             _lock: lock,
+            initialized,
             latest,
             receipts,
             consumed_handles,
@@ -270,11 +274,27 @@ impl FinalityJournalV1 {
             return Err(FinalityJournalError::RecordTooLarge);
         }
 
+        if !self.initialized {
+            self.file.write_all(JOURNAL_MAGIC)?;
+            self.file.sync_data()?;
+            self.initialized = true;
+        }
+
         self.file.write_all(&(encoded.len() as u32).to_be_bytes())?;
         self.file.write_all(&encoded)?;
         self.file.sync_data()?;
         Ok(())
     }
+}
+
+fn split_journal_header(bytes: &[u8]) -> Result<(bool, &[u8]), FinalityJournalError> {
+    if bytes.is_empty() {
+        return Ok((false, bytes));
+    }
+    if bytes.len() < JOURNAL_MAGIC.len() || &bytes[..JOURNAL_MAGIC.len()] != JOURNAL_MAGIC {
+        return Err(FinalityJournalError::UnsupportedJournalSchema);
+    }
+    Ok((true, &bytes[JOURNAL_MAGIC.len()..]))
 }
 
 fn lock_path_for(path: &Path) -> PathBuf {
@@ -441,6 +461,27 @@ mod tests {
 
     fn temp_path(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("xenia-finality-journal-{}-{}", tag, std::process::id()))
+    }
+
+    #[test]
+    fn journal_requires_its_own_file_header() {
+        let path = temp_path("header");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(lock_path_for(&path));
+
+        fs::write(&path, b"not-xenia-journal").unwrap();
+        assert!(matches!(
+            FinalityJournalV1::open(&path),
+            Err(FinalityJournalError::UnsupportedJournalSchema)
+        ));
+
+        fs::write(&path, JOURNAL_MAGIC).unwrap();
+        let journal = FinalityJournalV1::open(&path).unwrap();
+        assert!(journal.is_empty());
+
+        drop(journal);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(lock_path_for(&path));
     }
 
     #[test]
