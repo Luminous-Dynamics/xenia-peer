@@ -129,6 +129,8 @@ impl DurableAuthorityEpochClaimV1 {
 #[derive(Debug)]
 pub struct DurableAuthorityEpochV1 {
     claim: DurableAuthorityEpochClaimV1,
+    /// Exact durable-ledger frontier verified before this authority token was issued.
+    durable_frontier_digest: [u8; 32],
 }
 
 impl DurableAuthorityEpochV1 {
@@ -157,9 +159,15 @@ impl DurableAuthorityEpochV1 {
         self.claim.persistence_policy_digest
     }
 
-    /// Verify that this token still matches the supplied successor chain and proofs.
+    /// Return the exact durable-ledger frontier digest bound to this token.
+    pub fn durable_frontier_digest(&self) -> [u8; 32] {
+        self.durable_frontier_digest
+    }
+
+    /// Verify that this token still matches the exact durable frontier, successor chain, and proofs.
     pub fn verify_against_chain(
         &self,
+        durable_frontier: &DurableLedgerFrontierV1,
         chain: &Chain,
         key_transition: &LedgerKeyTransition,
         epoch_transition: &LedgerAuthorityEpochTransitionV1,
@@ -168,6 +176,10 @@ impl DurableAuthorityEpochV1 {
         expected_persistence_policy_digest: [u8; 32],
     ) -> Result<(), DurableLedgerFrontierError> {
         self.claim.validate()?;
+        durable_frontier.verify_against_chain(chain, expected_persistence_policy_digest)?;
+        if self.durable_frontier_digest != durable_frontier.digest() {
+            return Err(DurableLedgerFrontierError::AuthorityEpochFrontierMismatch);
+        }
         if self.claim.persistence_policy_digest != expected_persistence_policy_digest {
             return Err(DurableLedgerFrontierError::PersistencePolicyMismatch);
         }
@@ -422,7 +434,10 @@ impl Chain {
         {
             return Err(DurableLedgerFrontierError::AuthorityEpochMismatch);
         }
-        Ok(DurableAuthorityEpochV1 { claim })
+        Ok(DurableAuthorityEpochV1 {
+            claim,
+            durable_frontier_digest: durable_frontier.digest(),
+        })
     }
 
     /// Outcome-aware append that returns an opaque durable token only after the
@@ -651,6 +666,9 @@ pub enum DurableLedgerFrontierError {
     /// The durable authority claim does not match the transition or current chain.
     #[error("durable Xenia authority epoch does not match the current chain")]
     AuthorityEpochMismatch,
+    /// The opaque authority token is bound to a different durable ledger frontier.
+    #[error("durable Xenia authority epoch is bound to a different durable ledger frontier")]
+    AuthorityEpochFrontierMismatch,
     /// The retained key-transition artifact is invalid.
     #[error("durable Xenia key transition is invalid: {0}")]
     KeyTransition(#[from] LedgerKeyTransitionError),
@@ -868,6 +886,7 @@ mod tests {
         // The durable token authenticates epoch 8, never the stale epoch-7 snapshot.
         assert!(matches!(
             token.verify_against_chain(
+                &durable_frontier,
                 &Chain::new(old.clone()),
                 &key_transition,
                 &epoch_transition,
@@ -950,6 +969,32 @@ mod tests {
             token.successor_ledger_public_key(),
             successor.verifying_key().to_bytes()
         );
+        assert_eq!(token.durable_frontier_digest(), durable_frontier.digest());
+
+        // The same successor key and transition proof are not enough: the authority
+        // token must remain bound to the exact durable ledger frontier that justified it.
+        let mut other_chain = Chain::new(successor.clone());
+        other_chain
+            .append_transactional_outcome(event(2), |_| {
+                PersistenceDisposition::Persisted
+            })
+            .unwrap();
+        let other_frontier = other_chain
+            .verify_restored_durable_frontier_v1(PERSISTENCE_POLICY, |_, _| Ok(()))
+            .unwrap();
+        assert_ne!(durable_frontier.digest(), other_frontier.digest());
+        assert!(matches!(
+            token.verify_against_chain(
+                &other_frontier,
+                &other_chain,
+                &key_transition,
+                &epoch_transition,
+                7,
+                8,
+                PERSISTENCE_POLICY,
+            ),
+            Err(DurableLedgerFrontierError::AuthorityEpochFrontierMismatch)
+        ));
 
         chain.append(event(2)).unwrap();
         let stale_frontier = chain.verify_restored_authority_epoch_v1(
@@ -1167,7 +1212,7 @@ mod tests {
             })
             .unwrap();
         token
-            .verify_against_chain(&restored, PERSISTENCE_POLICY)
+            .verify_against_chain(&durable_frontier, &restored, PERSISTENCE_POLICY)
             .unwrap();
     }
 }
