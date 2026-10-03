@@ -1721,65 +1721,33 @@ fn build_input_injector(
     choice: InputBackendChoice,
     screen_width: u32,
     screen_height: u32,
-) -> Box<dyn InputInjector> {
+) -> Result<Box<dyn InputInjector>, xenia_inject::InjectError> {
     match choice {
-        InputBackendChoice::Noop => Box::new(NoopInjector),
-        InputBackendChoice::Log => Box::new(LoggingInjector::new(screen_width, screen_height)),
+        InputBackendChoice::Noop => Ok(Box::new(NoopInjector)),
+        InputBackendChoice::Log => Ok(Box::new(LoggingInjector::new(screen_width, screen_height))),
         #[cfg(feature = "xdg-portal")]
         InputBackendChoice::XdgPortal => {
-            match xenia_inject::XdgPortalInjector::new(
+            xenia_inject::XdgPortalInjector::new(
                 screen_width,
                 screen_height,
                 Duration::from_secs(60),
-            ) {
-                Ok(injector) => Box::new(injector),
-                Err(err) => {
-                    warn!(
-                        error = %err,
-                        "XdgPortalInjector construction failed; input events will be discarded"
-                    );
-                    Box::new(NoopInjector)
-                }
-            }
+            )
+            .map(|injector| Box::new(injector) as Box<dyn InputInjector>)
         }
         #[cfg(feature = "uinput")]
         InputBackendChoice::Uinput => {
-            match xenia_inject::UinputInjector::new(screen_width, screen_height) {
-                Ok(injector) => Box::new(injector),
-                Err(err) => {
-                    warn!(
-                        error = %err,
-                        "UinputInjector construction failed; input events will be discarded"
-                    );
-                    Box::new(NoopInjector)
-                }
-            }
+            xenia_inject::UinputInjector::new(screen_width, screen_height)
+                .map(|injector| Box::new(injector) as Box<dyn InputInjector>)
         }
         #[cfg(all(feature = "windows-sendinput", target_os = "windows"))]
         InputBackendChoice::Windows => {
-            match xenia_inject::WindowsInjector::new(screen_width, screen_height) {
-                Ok(injector) => Box::new(injector),
-                Err(err) => {
-                    warn!(
-                        error = %err,
-                        "WindowsInjector construction failed; input events will be discarded"
-                    );
-                    Box::new(NoopInjector)
-                }
-            }
+            xenia_inject::WindowsInjector::new(screen_width, screen_height)
+                .map(|injector| Box::new(injector) as Box<dyn InputInjector>)
         }
         #[cfg(all(feature = "macos-cgevent", target_os = "macos"))]
         InputBackendChoice::Macos => {
-            match xenia_inject::MacosInjector::new(screen_width, screen_height) {
-                Ok(injector) => Box::new(injector),
-                Err(err) => {
-                    warn!(
-                        error = %err,
-                        "MacosInjector construction failed; input events will be discarded"
-                    );
-                    Box::new(NoopInjector)
-                }
-            }
+            xenia_inject::MacosInjector::new(screen_width, screen_height)
+                .map(|injector| Box::new(injector) as Box<dyn InputInjector>)
         }
     }
 }
@@ -6656,14 +6624,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let result = {
                     let mut m1_runtime = m1_runtime.lock().await;
                     m1_runtime.execute_input_effect_outcome(|| {
-                        let injector = injector.get_or_insert_with(|| {
-                            SessionInputInjector::new(build_input_injector(
-                                input_backend,
-                                width,
-                                height,
-                            ))
-                        });
+                        if injector.is_none() {
+                            match build_input_injector(input_backend, width, height) {
+                                Ok(inner) => {
+                                    injector = Some(SessionInputInjector::new(inner));
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        error = %err,
+                                        "input backend construction failed; no provider entry occurred"
+                                    );
+                                    return Ok(InputEffectOutcome::RejectionBeforeEffect);
+                                }
+                            }
+                        }
+
                         injector
+                            .as_mut()
+                            .expect("input injector must exist after successful construction")
                             .process_event_outcome(&event)
                             .map_err(|err| {
                                 crate::m1_runtime::M1RuntimeError::InputInjection(err.to_string())
@@ -7219,6 +7197,25 @@ mod audio_tests {
         assert_eq!(first.flags & audio_flags::SYNTHETIC, 0);
         assert!(first.validate());
         assert!(second.validate());
+    }
+}
+
+#[cfg(test)]
+mod input_backend_tests {
+    use super::*;
+
+    #[test]
+    fn noop_backend_build_is_explicitly_successful() {
+        let injector = build_input_injector(InputBackendChoice::Noop, 320, 200)
+            .expect("noop backend construction must succeed");
+        assert_eq!(injector.backend_name(), "noop");
+    }
+
+    #[test]
+    fn logging_backend_build_is_explicitly_successful() {
+        let injector = build_input_injector(InputBackendChoice::Log, 320, 200)
+            .expect("logging backend construction must succeed");
+        assert_eq!(injector.backend_name(), "log");
     }
 }
 
