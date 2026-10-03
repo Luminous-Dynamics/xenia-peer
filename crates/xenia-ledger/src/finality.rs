@@ -435,6 +435,19 @@ mod tests {
     }
 
     #[test]
+    fn indeterminate_attempt_round_trips_as_non_replayable_audit_state() {
+        let mut attempt = attempt();
+        attempt.mark_effectuation_started().unwrap();
+        attempt.mark_indeterminate().unwrap();
+
+        let encoded = serde_json::to_vec(&attempt).unwrap();
+        let restored: FinalityAttemptV1 = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(restored.state(), FinalityAttemptStateV1::Indeterminate);
+        assert!(restored.mark_effectuation_started().is_err());
+        assert!(restored.commit().is_err());
+    }
+
+    #[test]
     fn terminal_attempts_cannot_reopen() {
         let mut attempt = attempt();
         attempt.mark_effectuation_started().unwrap();
