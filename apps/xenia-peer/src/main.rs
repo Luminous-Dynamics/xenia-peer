@@ -6621,33 +6621,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                 };
-                {
-                    let mut m1_runtime = m1_runtime.lock().await;
-                    if let Err(err) = m1_runtime.allow_input_flow() {
-                        warn!(error = %err, "input event rejected by M1 consent gate");
-                        continue;
-                    }
-                }
-
                 let width = screen_dims.0.load(Ordering::Relaxed);
                 let height = screen_dims.1.load(Ordering::Relaxed);
-                let injector = injector.get_or_insert_with(|| {
-                    SessionInputInjector::new(build_input_injector(input_backend, width, height))
-                });
-                match injector.process_events(std::slice::from_ref(&event)) {
+                let result = {
+                    let mut m1_runtime = m1_runtime.lock().await;
+                    m1_runtime.execute_input_effect(|| {
+                        let injector = injector.get_or_insert_with(|| {
+                            SessionInputInjector::new(build_input_injector(
+                                input_backend,
+                                width,
+                                height,
+                            ))
+                        });
+                        injector
+                            .process_events(std::slice::from_ref(&event))
+                            .map_err(|err| {
+                                crate::m1_runtime::M1RuntimeError::InputInjection(err.to_string())
+                            })
+                    })
+                };
+                match result {
                     Ok(()) => {
                         info!(
                             ?event,
-                            backend = injector.backend_name(),
+                            backend = injector
+                                .as_ref()
+                                .expect("successful input effect must construct injector")
+                                .backend_name(),
                             "input event injected"
                         );
                     }
                     Err(err) => {
-                        warn!(
-                            error = %err,
-                            backend = injector.backend_name(),
-                            "input injection failed"
-                        );
+                        warn!(error = %err, "input event rejected or injection failed");
                     }
                 }
             }
