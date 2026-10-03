@@ -156,6 +156,11 @@ impl<'a> FinalityExecutorV1<'a> {
         Ok(receipt)
     }
 
+    /// Enumerate exact durable attempts that need reconciliation after restart.
+    pub fn attempts_requiring_reconciliation(&self) -> Vec<[u8; 16]> {
+        self.journal.attempts_requiring_reconciliation()
+    }
+
     /// Get the latest durable receipt for one attempt identifier.
     pub fn latest_receipt(&self, attempt_id: [u8; 16]) -> Option<&FinalityReceiptV1> {
         self.journal.latest_receipt(attempt_id)
