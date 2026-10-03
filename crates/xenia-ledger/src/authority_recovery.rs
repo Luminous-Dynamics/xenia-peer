@@ -29,6 +29,8 @@ pub enum AuthorityRecoveryStateV1 {
         transition_fingerprint: [u8; 32],
         /// Successor authority epoch bound to this exact transition.
         authority_epoch: u64,
+        /// Exact durable-ledger frontier expected for this transition.
+        durable_frontier_digest: [u8; 32],
         _seal: RecoveryStateSeal,
     },
     /// The successor transition is durably committed, but activation/recovery has not yet completed.
@@ -95,6 +97,8 @@ pub enum AuthorityRecoveryEventV1 {
         transition_fingerprint: [u8; 32],
         /// Successor authority epoch bound to this exact transition.
         authority_epoch: u64,
+        /// Exact durable-ledger frontier expected for this transition.
+        durable_frontier_digest: [u8; 32],
     },
     /// Persistence definitively committed the exact transition.
     DurableCommit {
@@ -170,6 +174,12 @@ pub enum AuthorityRecoveryError {
     /// A recovery event named a different successor authority epoch than the current state.
     #[error("authority recovery authority epoch does not match current state")]
     AuthorityEpochMismatch,
+    /// A recovery state or event used an empty durable-ledger frontier digest.
+    #[error("authority recovery durable frontier digest must be nonzero")]
+    InvalidDurableFrontierDigest,
+    /// A recovery event named a different durable-ledger frontier than the current state.
+    #[error("authority recovery durable frontier does not match current state")]
+    DurableFrontierMismatch,
 }
 impl AuthorityRecoveryStateV1 {
     /// Prepare one exact authority transition.
@@ -180,10 +190,12 @@ impl AuthorityRecoveryStateV1 {
         self,
         transition_fingerprint: [u8; 32],
         authority_epoch: u64,
+        durable_frontier_digest: [u8; 32],
     ) -> Result<Self, AuthorityRecoveryError> {
         self.apply(AuthorityRecoveryEventV1::PrepareTransition {
             transition_fingerprint,
             authority_epoch,
+            durable_frontier_digest,
         })
     }
 
@@ -192,10 +204,12 @@ impl AuthorityRecoveryStateV1 {
         self,
         transition_fingerprint: [u8; 32],
         authority_epoch: u64,
+        durable_frontier_digest: [u8; 32],
     ) -> Result<Self, AuthorityRecoveryError> {
         self.apply(AuthorityRecoveryEventV1::ProvenNotPersisted {
             transition_fingerprint,
             authority_epoch,
+            durable_frontier_digest,
         })
     }
 
@@ -204,10 +218,12 @@ impl AuthorityRecoveryStateV1 {
         self,
         transition_fingerprint: [u8; 32],
         authority_epoch: u64,
+        durable_frontier_digest: [u8; 32],
     ) -> Result<Self, AuthorityRecoveryError> {
         self.apply(AuthorityRecoveryEventV1::CommitOutcomeUnknown {
             transition_fingerprint,
             authority_epoch,
+            durable_frontier_digest,
         })
     }
 
@@ -216,10 +232,12 @@ impl AuthorityRecoveryStateV1 {
         self,
         transition_fingerprint: [u8; 32],
         authority_epoch: u64,
+        durable_frontier_digest: [u8; 32],
     ) -> Result<Self, AuthorityRecoveryError> {
         self.apply(AuthorityRecoveryEventV1::BeginRecovery {
             transition_fingerprint,
             authority_epoch,
+            durable_frontier_digest,
         })
     }
 
@@ -228,10 +246,12 @@ impl AuthorityRecoveryStateV1 {
         self,
         transition_fingerprint: [u8; 32],
         authority_epoch: u64,
+        durable_frontier_digest: [u8; 32],
     ) -> Result<Self, AuthorityRecoveryError> {
         self.apply(AuthorityRecoveryEventV1::RecoverOld {
             transition_fingerprint,
             authority_epoch,
+            durable_frontier_digest,
         })
     }
 
@@ -240,10 +260,12 @@ impl AuthorityRecoveryStateV1 {
         self,
         transition_fingerprint: [u8; 32],
         authority_epoch: u64,
+        durable_frontier_digest: [u8; 32],
     ) -> Result<Self, AuthorityRecoveryError> {
         self.apply(AuthorityRecoveryEventV1::RecoverOutcomeUnknown {
             transition_fingerprint,
             authority_epoch,
+            durable_frontier_digest,
         })
     }
 
@@ -259,6 +281,7 @@ impl AuthorityRecoveryStateV1 {
         self.apply(AuthorityRecoveryEventV1::DurableCommit {
             transition_fingerprint: durable_authority.key_transition_fingerprint(),
             authority_epoch: durable_authority.authority_epoch(),
+            durable_frontier_digest: durable_authority.durable_frontier_digest(),
         })
     }
 
@@ -270,6 +293,7 @@ impl AuthorityRecoveryStateV1 {
         self.apply(AuthorityRecoveryEventV1::RecoverSuccessor {
             transition_fingerprint: durable_authority.key_transition_fingerprint(),
             authority_epoch: durable_authority.authority_epoch(),
+            durable_frontier_digest: durable_authority.durable_frontier_digest(),
         })
     }
 
@@ -292,32 +316,39 @@ impl AuthorityRecoveryStateV1 {
                 PrepareTransition {
                     transition_fingerprint,
                     authority_epoch: event_authority_epoch,
+                    durable_frontier_digest: event_frontier_digest,
                 },
             ) => TransitionPending {
                 transition_fingerprint: require_fingerprint(transition_fingerprint)?,
                 authority_epoch: event_authority_epoch,
+                durable_frontier_digest: require_digest(event_frontier_digest)?,
                 _seal: RecoveryStateSeal,
             },
             (
                 TransitionPending {
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     ..
                 },
                 DurableCommit {
                     transition_fingerprint: event_fingerprint,
                     authority_epoch: event_authority_epoch,
+                    durable_frontier_digest: event_frontier_digest,
                 },
             ) => {
                 require_matching_identity(
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     event_fingerprint,
                     event_authority_epoch,
+                    event_frontier_digest,
                 )?;
                 TransitionCommitted {
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     _seal: RecoveryStateSeal,
                 }
             }
@@ -325,18 +356,22 @@ impl AuthorityRecoveryStateV1 {
                 TransitionPending {
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     ..
                 },
                 ProvenNotPersisted {
                     transition_fingerprint: event_fingerprint,
                     authority_epoch: event_authority_epoch,
+                    durable_frontier_digest: event_frontier_digest,
                 },
             ) => {
                 require_matching_identity(
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     event_fingerprint,
                     event_authority_epoch,
+                    event_frontier_digest,
                 )?;
                 OldActive
             }
@@ -344,22 +379,27 @@ impl AuthorityRecoveryStateV1 {
                 TransitionPending {
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     ..
                 },
                 CommitOutcomeUnknown {
                     transition_fingerprint: event_fingerprint,
                     authority_epoch: event_authority_epoch,
+                    durable_frontier_digest: event_frontier_digest,
                 },
             ) => {
                 require_matching_identity(
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     event_fingerprint,
                     event_authority_epoch,
+                    event_frontier_digest,
                 )?;
                 OutcomeUnknown {
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     _seal: RecoveryStateSeal,
                 }
             }
@@ -367,22 +407,27 @@ impl AuthorityRecoveryStateV1 {
                 TransitionCommitted {
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     ..
                 },
                 BeginRecovery {
                     transition_fingerprint: event_fingerprint,
                     authority_epoch: event_authority_epoch,
+                    durable_frontier_digest: event_frontier_digest,
                 },
             ) => {
                 require_matching_identity(
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     event_fingerprint,
                     event_authority_epoch,
+                    event_frontier_digest,
                 )?;
                 RecoveryAfterCommit {
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     _seal: RecoveryStateSeal,
                 }
             }
@@ -390,22 +435,27 @@ impl AuthorityRecoveryStateV1 {
                 SuccessorActive {
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     ..
                 },
                 BeginRecovery {
                     transition_fingerprint: event_fingerprint,
                     authority_epoch: event_authority_epoch,
+                    durable_frontier_digest: event_frontier_digest,
                 },
             ) => {
                 require_matching_identity(
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     event_fingerprint,
                     event_authority_epoch,
+                    event_frontier_digest,
                 )?;
                 RecoveryAfterCommit {
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     _seal: RecoveryStateSeal,
                 }
             }
@@ -414,32 +464,39 @@ impl AuthorityRecoveryStateV1 {
                 BeginRecovery {
                     transition_fingerprint,
                     authority_epoch: event_authority_epoch,
+                    durable_frontier_digest: event_frontier_digest,
                 },
             ) => RecoveryFromOld {
                 transition_fingerprint: require_fingerprint(transition_fingerprint)?,
                 authority_epoch: event_authority_epoch,
+                durable_frontier_digest: require_digest(event_frontier_digest)?,
                 _seal: RecoveryStateSeal,
             },
             (
                 OutcomeUnknown {
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     ..
                 },
                 BeginRecovery {
                     transition_fingerprint: event_fingerprint,
                     authority_epoch: event_authority_epoch,
+                    durable_frontier_digest: event_frontier_digest,
                 },
             ) => {
                 require_matching_identity(
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     event_fingerprint,
                     event_authority_epoch,
+                    event_frontier_digest,
                 )?;
                 RecoveryAfterUnknown {
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     _seal: RecoveryStateSeal,
                 }
             }
@@ -447,22 +504,27 @@ impl AuthorityRecoveryStateV1 {
                 RecoveryFromOld {
                     transition_fingerprint: state_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     ..
                 },
                 RecoverSuccessor {
                     transition_fingerprint: event_fingerprint,
                     authority_epoch: event_authority_epoch,
+                    durable_frontier_digest: event_frontier_digest,
                 },
             ) => {
                 require_matching_identity(
                     state_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     event_fingerprint,
                     event_authority_epoch,
+                    event_frontier_digest,
                 )?;
                 TransitionCommitted {
                     transition_fingerprint: state_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     _seal: RecoveryStateSeal,
                 }
             }
@@ -470,18 +532,22 @@ impl AuthorityRecoveryStateV1 {
                 RecoveryFromOld {
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     ..
                 },
                 RecoverOld {
                     transition_fingerprint: event_fingerprint,
                     authority_epoch: event_authority_epoch,
+                    durable_frontier_digest: event_frontier_digest,
                 },
             ) => {
                 require_matching_identity(
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     event_fingerprint,
                     event_authority_epoch,
+                    event_frontier_digest,
                 )?;
                 OldActive
             }
@@ -489,22 +555,27 @@ impl AuthorityRecoveryStateV1 {
                 RecoveryAfterCommit {
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     ..
                 },
                 RecoverSuccessor {
                     transition_fingerprint: event_fingerprint,
                     authority_epoch: event_authority_epoch,
+                    durable_frontier_digest: event_frontier_digest,
                 },
             ) => {
                 require_matching_identity(
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     event_fingerprint,
                     event_authority_epoch,
+                    event_frontier_digest,
                 )?;
                 TransitionCommitted {
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     _seal: RecoveryStateSeal,
                 }
             }
@@ -512,22 +583,27 @@ impl AuthorityRecoveryStateV1 {
                 RecoveryAfterUnknown {
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     ..
                 },
                 RecoverSuccessor {
                     transition_fingerprint: event_fingerprint,
                     authority_epoch: event_authority_epoch,
+                    durable_frontier_digest: event_frontier_digest,
                 },
             ) => {
                 require_matching_identity(
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     event_fingerprint,
                     event_authority_epoch,
+                    event_frontier_digest,
                 )?;
                 TransitionCommitted {
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     _seal: RecoveryStateSeal,
                 }
             }
@@ -535,18 +611,22 @@ impl AuthorityRecoveryStateV1 {
                 RecoveryAfterUnknown {
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     ..
                 },
                 RecoverOld {
                     transition_fingerprint: event_fingerprint,
                     authority_epoch: event_authority_epoch,
+                    durable_frontier_digest: event_frontier_digest,
                 },
             ) => {
                 require_matching_identity(
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     event_fingerprint,
                     event_authority_epoch,
+                    event_frontier_digest,
                 )?;
                 OldActive
             }
@@ -554,22 +634,27 @@ impl AuthorityRecoveryStateV1 {
                 RecoveryFromOld {
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     ..
                 },
                 RecoverOutcomeUnknown {
                     transition_fingerprint: event_fingerprint,
                     authority_epoch: event_authority_epoch,
+                    durable_frontier_digest: event_frontier_digest,
                 },
             ) => {
                 require_matching_identity(
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     event_fingerprint,
                     event_authority_epoch,
+                    event_frontier_digest,
                 )?;
                 OutcomeUnknown {
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     _seal: RecoveryStateSeal,
                 }
             }
@@ -577,22 +662,27 @@ impl AuthorityRecoveryStateV1 {
                 RecoveryAfterUnknown {
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     ..
                 },
                 RecoverOutcomeUnknown {
                     transition_fingerprint: event_fingerprint,
                     authority_epoch: event_authority_epoch,
+                    durable_frontier_digest: event_frontier_digest,
                 },
             ) => {
                 require_matching_identity(
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     event_fingerprint,
                     event_authority_epoch,
+                    event_frontier_digest,
                 )?;
                 OutcomeUnknown {
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     _seal: RecoveryStateSeal,
                 }
             }
@@ -600,6 +690,7 @@ impl AuthorityRecoveryStateV1 {
                 TransitionCommitted {
                     transition_fingerprint,
                     authority_epoch,
+                    durable_frontier_digest,
                     ..
                 },
                 ActivateSuccessor,
@@ -631,6 +722,20 @@ impl AuthorityRecoveryStateV1 {
             | Self::RecoveryAfterCommit { authority_epoch, .. }
             | Self::RecoveryAfterUnknown { authority_epoch, .. }
             | Self::SuccessorActive { authority_epoch, .. } => Some(authority_epoch),
+        }
+    }
+
+    /// Return the exact durable-ledger frontier digest attached to this state.
+    pub const fn durable_frontier_digest(self) -> Option<[u8; 32]> {
+        match self {
+            Self::OldActive => None,
+            Self::TransitionPending { durable_frontier_digest, .. }
+            | Self::TransitionCommitted { durable_frontier_digest, .. }
+            | Self::OutcomeUnknown { durable_frontier_digest, .. }
+            | Self::RecoveryFromOld { durable_frontier_digest, .. }
+            | Self::RecoveryAfterCommit { durable_frontier_digest, .. }
+            | Self::RecoveryAfterUnknown { durable_frontier_digest, .. }
+            | Self::SuccessorActive { durable_frontier_digest, .. } => Some(durable_frontier_digest),
         }
     }
 
@@ -677,19 +782,33 @@ fn require_fingerprint(fingerprint: [u8; 32]) -> Result<[u8; 32], AuthorityRecov
     Ok(fingerprint)
 }
 
+fn require_digest(digest: [u8; 32]) -> Result<[u8; 32], AuthorityRecoveryError> {
+    if digest == [0u8; 32] {
+        return Err(AuthorityRecoveryError::InvalidDurableFrontierDigest);
+    }
+    Ok(digest)
+}
+
 fn require_matching_identity(
     state_fingerprint: [u8; 32],
     state_authority_epoch: u64,
+    state_frontier_digest: [u8; 32],
     event_fingerprint: [u8; 32],
     event_authority_epoch: u64,
+    event_frontier_digest: [u8; 32],
 ) -> Result<(), AuthorityRecoveryError> {
     require_fingerprint(state_fingerprint)?;
     require_fingerprint(event_fingerprint)?;
+    require_digest(state_frontier_digest)?;
+    require_digest(event_frontier_digest)?;
     if state_fingerprint != event_fingerprint {
         return Err(AuthorityRecoveryError::TransitionFingerprintMismatch);
     }
     if state_authority_epoch != event_authority_epoch {
         return Err(AuthorityRecoveryError::AuthorityEpochMismatch);
+    }
+    if state_frontier_digest != event_frontier_digest {
+        return Err(AuthorityRecoveryError::DurableFrontierMismatch);
     }
     Ok(())
 }
