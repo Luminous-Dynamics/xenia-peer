@@ -350,6 +350,48 @@ mod tests {
     }
 
     #[test]
+    fn reopened_executor_reconciles_started_attempt_without_reinvocation() {
+        let path = std::env::temp_dir().join(format!(
+            "xenia-finality-executor-recovery-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+
+        {
+            let mut journal = FinalityJournalV1::open(&path).unwrap();
+            let mut attempt =
+                FinalityAttemptV1::prepare([11; 16], [12; 32], [13; 32], [14; 32]).unwrap();
+            journal.append_attempt(&attempt).unwrap();
+            attempt.mark_effectuation_started().unwrap();
+            journal.append_attempt(&attempt).unwrap();
+        }
+
+        {
+            let mut journal = FinalityJournalV1::open(&path).unwrap();
+            let mut executor = FinalityExecutorV1::new(&mut journal);
+            assert!(executor.requires_reconciliation([11; 16]));
+
+            let receipt = executor
+                .reconcile([11; 16], FinalityOutcomeV1::Committed)
+                .unwrap();
+            assert_eq!(receipt.outcome, FinalityOutcomeV1::Committed);
+            assert!(!executor.requires_reconciliation([11; 16]));
+        }
+
+        let journal = FinalityJournalV1::open(&path).unwrap();
+        assert_eq!(
+            journal.latest_attempt([11; 16]).unwrap().state(),
+            FinalityAttemptStateV1::Committed
+        );
+        assert_eq!(
+            journal.latest_receipt([11; 16]).unwrap().outcome,
+            FinalityOutcomeV1::Committed
+        );
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
     fn started_attempt_is_the_recovery_boundary() {
         let path = path();
         let _ = fs::remove_file(&path);
