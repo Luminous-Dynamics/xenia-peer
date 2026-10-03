@@ -112,14 +112,12 @@ impl FinalityJournalV1 {
     ) -> Result<(), FinalityJournalError> {
         attempt.validate()?;
 
-        if !matches!(attempt.state, FinalityAttemptStateV1::Prepared) {
-            if let Some(existing_attempt_id) = self.consumed_handles.get(&attempt.handle_digest) {
-                if existing_attempt_id != &attempt.attempt_id {
-                    return Err(FinalityJournalError::HandleAlreadyConsumed {
-                        handle_digest: attempt.handle_digest,
-                        existing_attempt_id: *existing_attempt_id,
-                    });
-                }
+        if let Some(existing_attempt_id) = self.consumed_handles.get(&attempt.handle_digest) {
+            if existing_attempt_id != &attempt.attempt_id {
+                return Err(FinalityJournalError::HandleAlreadyConsumed {
+                    handle_digest: attempt.handle_digest,
+                    existing_attempt_id: *existing_attempt_id,
+                });
             }
         }
 
@@ -388,6 +386,26 @@ mod tests {
         assert!(matches!(
             journal.append_attempt(&substituted),
             Err(FinalityJournalError::AttemptIdentityMismatch)
+        ));
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn journal_rejects_reused_handle_before_preparation_is_visible() {
+        let path = temp_path("early-handle-reuse");
+        let _ = fs::remove_file(&path);
+
+        let mut journal = FinalityJournalV1::open(&path).unwrap();
+        let mut first = attempt();
+        first.mark_effectuation_started().unwrap();
+        journal.append_attempt(&first).unwrap();
+
+        let second =
+            FinalityAttemptV1::prepare([9; 16], [2; 32], [3; 32], [4; 32]).unwrap();
+        assert!(matches!(
+            journal.append_attempt(&second),
+            Err(FinalityJournalError::HandleAlreadyConsumed { .. })
         ));
 
         let _ = fs::remove_file(&path);
