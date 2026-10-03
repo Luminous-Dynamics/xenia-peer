@@ -47,11 +47,22 @@ enum FinalityJournalRecordV1 {
 pub struct FinalityJournalV1 {
     path: PathBuf,
     file: File,
-    lock_path: PathBuf,
-    lock_file: File,
+    _lock: FinalityJournalLockV1,
     latest: BTreeMap<[u8; 16], FinalityAttemptV1>,
     receipts: BTreeMap<[u8; 16], FinalityReceiptV1>,
     consumed_handles: BTreeMap<[u8; 32], [u8; 16]>,
+}
+
+struct FinalityJournalLockV1 {
+    path: PathBuf,
+    file: File,
+}
+
+impl Drop for FinalityJournalLockV1 {
+    fn drop(&mut self) {
+        let _ = self.file.sync_all();
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 /// Errors raised while opening, validating, or appending the durable finality journal.
@@ -93,13 +104,6 @@ pub enum FinalityJournalError {
     },
 }
 
-impl Drop for FinalityJournalV1 {
-    fn drop(&mut self) {
-        let _ = self.lock_file.sync_all();
-        let _ = std::fs::remove_file(&self.lock_path);
-    }
-}
-
 impl FinalityJournalV1 {
     /// Open or create the journal and replay every existing record.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, FinalityJournalError> {
@@ -120,6 +124,17 @@ impl FinalityJournalV1 {
                 }
             })?;
 
+        let mut lock = FinalityJournalLockV1 {
+            path: lock_path,
+            file: lock_file,
+        };
+        let mut owner = format!("pid={}", std::process::id());
+        if let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) {
+            owner.push_str(&format!(" opened_at_unix_s={}", now.as_secs()));
+        }
+        lock.file.write_all(owner.as_bytes())?;
+        lock.file.sync_all()?;
+
         let mut reader = OpenOptions::new()
             .create(true)
             .read(true)
@@ -131,17 +146,10 @@ impl FinalityJournalV1 {
         let (latest, receipts) = replay_journal_bytes(&bytes)?;
         let consumed_handles = consumed_handle_index(&latest)?;
 
-        let mut owner = format!("pid={}", std::process::id());
-        if let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) {
-            owner.push_str(&format!(" opened_at_unix_s={}", now.as_secs()));
-        }
-        let _ = (&lock_file).write_all(owner.as_bytes());
-
         Ok(Self {
             path,
             file: reader,
-            lock_path,
-            lock_file,
+            _lock: lock,
             latest,
             receipts,
             consumed_handles,
