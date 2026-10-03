@@ -889,6 +889,59 @@ impl M1RuntimeSession {
         self.session.state()
     }
 
+    /// Canonical digest of the protected runtime state relevant to exact execution.
+    ///
+    /// The digest includes session identity, consent state, granted permission
+    /// bits, authenticated ledger frontier, scope, and transcript binding. It
+    /// is intentionally serializer-independent so execution handles can use it
+    /// as a stable current-state fence.
+    pub(crate) fn protected_execution_state_digest(&self) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"xenia:m1-protected-execution-state:v1\\0");
+        hasher.update(&self.source_id);
+        hasher.update(self.session_id.as_bytes());
+        hasher.update(self.request_id.as_bytes());
+        hasher.update(&(self.scope.len() as u64).to_be_bytes());
+        hasher.update(self.scope.as_bytes());
+        hasher.update(&(self.chain.entry_count() as u64).to_be_bytes());
+        hasher.update(&self.chain.last_hash());
+
+        let state_tag = match self.session.state() {
+            M1SessionState::Idle => 0,
+            M1SessionState::Offered => 1,
+            M1SessionState::Active => 2,
+            M1SessionState::Denied => 3,
+            M1SessionState::Revoked => 4,
+            M1SessionState::Ended => 5,
+            M1SessionState::Failed => 6,
+        };
+        hasher.update(&[state_tag]);
+
+        let permissions = self.session.granted_permissions();
+        let permission_bits = [
+            u8::from(permissions.stream_frame),
+            u8::from(permissions.stream_telemetry),
+            u8::from(permissions.stream_audio),
+            u8::from(permissions.inject_input),
+            u8::from(permissions.read_host_clipboard),
+            u8::from(permissions.write_host_clipboard),
+            u8::from(permissions.send_file_to_viewer),
+            u8::from(permissions.receive_file_from_viewer),
+        ];
+        hasher.update(&permission_bits);
+
+        match self.session_transcript_hash {
+            Some(hash) => {
+                hasher.update(&[1]);
+                hasher.update(&hash);
+            }
+            None => hasher.update(&[0]),
+        }
+
+        *hasher.finalize().as_bytes()
+    }
+
+
     pub(crate) fn entries(&self) -> Vec<LedgerEntry> {
         self.chain.iter().cloned().collect()
     }
@@ -2094,6 +2147,30 @@ mod tests {
             })
         ));
     }
+    #[test]
+    fn protected_execution_state_digest_fences_consent_and_frontier_changes() {
+        let (mut runtime, _) = runtime(33);
+        let idle = runtime.protected_execution_state_digest();
+
+        runtime.offer().unwrap();
+        let offered = runtime.protected_execution_state_digest();
+        assert_ne!(idle, offered);
+
+        runtime.grant_consent_scoped(M1PermissionSet {
+            inject_input: true,
+            ..M1PermissionSet::default()
+        }).unwrap();
+        let active = runtime.protected_execution_state_digest();
+        assert_ne!(offered, active);
+
+        runtime.revoke().unwrap();
+        let revoked = runtime.protected_execution_state_digest();
+        assert_ne!(active, revoked);
+
+        runtime.bind_session_transcript_hash([0x41; 32]);
+        assert_ne!(revoked, runtime.protected_execution_state_digest());
+    }
+
     #[test]
     fn runtime_lifecycle_appends_only_consent_boundaries() {
         let (mut runtime, verifying_key) = runtime(11);
