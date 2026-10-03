@@ -39,6 +39,8 @@ pub enum AuthorityRecoveryStateV1 {
         transition_fingerprint: [u8; 32],
         /// Successor authority epoch bound to this exact transition.
         authority_epoch: u64,
+        /// Exact durable-ledger frontier expected for this transition.
+        durable_frontier_digest: [u8; 32],
         _seal: RecoveryStateSeal,
     },
     /// The persistence result is ambiguous; no authority may be activated.
@@ -47,6 +49,8 @@ pub enum AuthorityRecoveryStateV1 {
         transition_fingerprint: [u8; 32],
         /// Successor authority epoch bound to this exact transition.
         authority_epoch: u64,
+        /// Exact durable-ledger frontier expected for this transition.
+        durable_frontier_digest: [u8; 32],
         _seal: RecoveryStateSeal,
     },
     /// Recovery from a predecessor state while reconciling one exact transition.
@@ -55,6 +59,8 @@ pub enum AuthorityRecoveryStateV1 {
         transition_fingerprint: [u8; 32],
         /// Successor authority epoch bound to this exact transition.
         authority_epoch: u64,
+        /// Exact durable-ledger frontier expected for this transition.
+        durable_frontier_digest: [u8; 32],
         _seal: RecoveryStateSeal,
     },
     /// Recovery after a successor transition was already durably committed.
@@ -63,6 +69,8 @@ pub enum AuthorityRecoveryStateV1 {
         transition_fingerprint: [u8; 32],
         /// Successor authority epoch bound to this exact transition.
         authority_epoch: u64,
+        /// Exact durable-ledger frontier expected for this transition.
+        durable_frontier_digest: [u8; 32],
         _seal: RecoveryStateSeal,
     },
     /// Recovery while reconciling an ambiguous persistence result.
@@ -71,6 +79,8 @@ pub enum AuthorityRecoveryStateV1 {
         transition_fingerprint: [u8; 32],
         /// Successor authority epoch bound to this exact transition.
         authority_epoch: u64,
+        /// Exact durable-ledger frontier expected for this transition.
+        durable_frontier_digest: [u8; 32],
         _seal: RecoveryStateSeal,
     },
     /// The successor authority has been recovered and activated.
@@ -79,6 +89,8 @@ pub enum AuthorityRecoveryStateV1 {
         transition_fingerprint: [u8; 32],
         /// Successor authority epoch bound to this exact transition.
         authority_epoch: u64,
+        /// Exact durable-ledger frontier expected for this transition.
+        durable_frontier_digest: [u8; 32],
         _seal: RecoveryStateSeal,
     },
 }
@@ -106,6 +118,8 @@ pub enum AuthorityRecoveryEventV1 {
         transition_fingerprint: [u8; 32],
         /// Successor authority epoch bound to this exact transition.
         authority_epoch: u64,
+        /// Exact durable-ledger frontier expected for this transition.
+        durable_frontier_digest: [u8; 32],
     },
     /// Persistence definitively did not commit the transition.
     ProvenNotPersisted {
@@ -113,6 +127,8 @@ pub enum AuthorityRecoveryEventV1 {
         transition_fingerprint: [u8; 32],
         /// Successor authority epoch bound to this exact transition.
         authority_epoch: u64,
+        /// Exact durable-ledger frontier expected for this transition.
+        durable_frontier_digest: [u8; 32],
     },
     /// Persistence returned an ambiguous result.
     CommitOutcomeUnknown {
@@ -120,6 +136,8 @@ pub enum AuthorityRecoveryEventV1 {
         transition_fingerprint: [u8; 32],
         /// Successor authority epoch bound to this exact transition.
         authority_epoch: u64,
+        /// Exact durable-ledger frontier expected for this transition.
+        durable_frontier_digest: [u8; 32],
     },
     /// A crash/restart enters recovery for one exact transition.
     BeginRecovery {
@@ -127,6 +145,8 @@ pub enum AuthorityRecoveryEventV1 {
         transition_fingerprint: [u8; 32],
         /// Successor authority epoch bound to this exact transition.
         authority_epoch: u64,
+        /// Exact durable-ledger frontier expected for this transition.
+        durable_frontier_digest: [u8; 32],
     },
     /// Recovery proves the successor transition is durably committed.
     RecoverSuccessor {
@@ -134,6 +154,8 @@ pub enum AuthorityRecoveryEventV1 {
         transition_fingerprint: [u8; 32],
         /// Successor authority epoch bound to this exact transition.
         authority_epoch: u64,
+        /// Exact durable-ledger frontier expected for this transition.
+        durable_frontier_digest: [u8; 32],
     },
     /// Recovery proves the exact transition is absent.
     RecoverOld {
@@ -141,6 +163,8 @@ pub enum AuthorityRecoveryEventV1 {
         transition_fingerprint: [u8; 32],
         /// Successor authority epoch bound to this exact transition.
         authority_epoch: u64,
+        /// Exact durable-ledger frontier expected for this transition.
+        durable_frontier_digest: [u8; 32],
     },
     /// Recovery cannot determine the durable outcome.
     RecoverOutcomeUnknown {
@@ -148,6 +172,8 @@ pub enum AuthorityRecoveryEventV1 {
         transition_fingerprint: [u8; 32],
         /// Successor authority epoch bound to this exact transition.
         authority_epoch: u64,
+        /// Exact durable-ledger frontier expected for this transition.
+        durable_frontier_digest: [u8; 32],
     },
     /// The already-recovered successor is activated.
     ActivateSuccessor,
