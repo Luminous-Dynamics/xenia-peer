@@ -11,7 +11,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use xenia_inject::{InputInjector, LoggingInjector, NoopInjector, SessionInputInjector};
+use xenia_inject::{InputEffectOutcome, InputInjector, LoggingInjector, NoopInjector, SessionInputInjector};
 
 use ed25519_dalek::SigningKey;
 #[cfg(any(feature = "audio-capture", test))]
@@ -6629,7 +6629,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let height = screen_dims.1.load(Ordering::Relaxed);
                 let result = {
                     let mut m1_runtime = m1_runtime.lock().await;
-                    m1_runtime.execute_input_effect(|| {
+                    m1_runtime.execute_input_effect_outcome(|| {
                         let injector = injector.get_or_insert_with(|| {
                             SessionInputInjector::new(build_input_injector(
                                 input_backend,
@@ -6638,14 +6638,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ))
                         });
                         injector
-                            .process_events(std::slice::from_ref(&event))
+                            .process_event_outcome(&event)
                             .map_err(|err| {
                                 crate::m1_runtime::M1RuntimeError::InputInjection(err.to_string())
                             })
                     })
                 };
                 match result {
-                    Ok(()) => {
+                    Ok(InputEffectOutcome::Applied) => {
                         info!(
                             ?event,
                             backend = injector
@@ -6655,8 +6655,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "input event injected"
                         );
                     }
+                    Ok(InputEffectOutcome::RejectionBeforeEffect) => {
+                        warn!(
+                            ?event,
+                            "input event rejected before provider entry"
+                        );
+                    }
+                    Ok(InputEffectOutcome::Indeterminate) => {
+                        warn!(
+                            ?event,
+                            backend = injector
+                                .as_ref()
+                                .expect("indeterminate input effect must construct injector")
+                                .backend_name(),
+                            "input event outcome indeterminate; effect was not recorded as confirmed"
+                        );
+                    }
                     Err(err) => {
-                        warn!(error = %err, "input event rejected or injection failed");
+                        warn!(error = %err, "input event could not be evaluated at the M1 gate");
                     }
                 }
             }
