@@ -12,8 +12,8 @@
 
 use crate::{
     ExactExecutionConsumptionError, ExactExecutionHandleV1, FinalityAttemptError,
-    FinalityJournalError, FinalityJournalV1, FinalityOutcomeV1, FinalityReceiptV1,
-    FinalityAttemptV1,
+    FinalityAttemptV1, FinalityAttemptError, FinalityJournalError, FinalityJournalV1,
+    FinalityOutcomeV1, FinalityReceiptV1,
 };
 
 /// Coordinates one exact execution handle with the durable finality journal.
@@ -99,7 +99,7 @@ impl<'a> FinalityExecutorV1<'a> {
         attempt_id: [u8; 16],
     ) -> bool {
         matches!(
-            self.journal.latest_attempt(attempt_id).map(FinalityAttemptV1State::state),
+            self.journal.latest_attempt(attempt_id).map(FinalityAttemptV1::state),
             Some(FinalityAttemptStateV1::EffectuationStarted)
                 | Some(FinalityAttemptStateV1::Indeterminate)
         )
@@ -111,7 +111,7 @@ impl<'a> FinalityExecutorV1<'a> {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+/// Errors raised while executing one exact finality attempt.\n#[derive(Debug, thiserror::Error)]
 pub enum FinalityExecutorError {
     /// The exact handle did not match the actual consequence request.
     #[error("execution handle validation failed: {0}")]
