@@ -11,7 +11,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use xenia_inject::{InputInjector, LoggingInjector, NoopInjector, SessionInputInjector};
+use xenia_inject::{InputEffectOutcome, InputInjector, LoggingInjector, NoopInjector, SessionInputInjector};
 
 use ed25519_dalek::SigningKey;
 #[cfg(any(feature = "audio-capture", test))]
@@ -1721,65 +1721,33 @@ fn build_input_injector(
     choice: InputBackendChoice,
     screen_width: u32,
     screen_height: u32,
-) -> Box<dyn InputInjector> {
+) -> Result<Box<dyn InputInjector>, xenia_inject::InjectError> {
     match choice {
-        InputBackendChoice::Noop => Box::new(NoopInjector),
-        InputBackendChoice::Log => Box::new(LoggingInjector::new(screen_width, screen_height)),
+        InputBackendChoice::Noop => Ok(Box::new(NoopInjector)),
+        InputBackendChoice::Log => Ok(Box::new(LoggingInjector::new(screen_width, screen_height))),
         #[cfg(feature = "xdg-portal")]
         InputBackendChoice::XdgPortal => {
-            match xenia_inject::XdgPortalInjector::new(
+            xenia_inject::XdgPortalInjector::new(
                 screen_width,
                 screen_height,
                 Duration::from_secs(60),
-            ) {
-                Ok(injector) => Box::new(injector),
-                Err(err) => {
-                    warn!(
-                        error = %err,
-                        "XdgPortalInjector construction failed; input events will be discarded"
-                    );
-                    Box::new(NoopInjector)
-                }
-            }
+            )
+            .map(|injector| Box::new(injector) as Box<dyn InputInjector>)
         }
         #[cfg(feature = "uinput")]
         InputBackendChoice::Uinput => {
-            match xenia_inject::UinputInjector::new(screen_width, screen_height) {
-                Ok(injector) => Box::new(injector),
-                Err(err) => {
-                    warn!(
-                        error = %err,
-                        "UinputInjector construction failed; input events will be discarded"
-                    );
-                    Box::new(NoopInjector)
-                }
-            }
+            xenia_inject::UinputInjector::new(screen_width, screen_height)
+                .map(|injector| Box::new(injector) as Box<dyn InputInjector>)
         }
         #[cfg(all(feature = "windows-sendinput", target_os = "windows"))]
         InputBackendChoice::Windows => {
-            match xenia_inject::WindowsInjector::new(screen_width, screen_height) {
-                Ok(injector) => Box::new(injector),
-                Err(err) => {
-                    warn!(
-                        error = %err,
-                        "WindowsInjector construction failed; input events will be discarded"
-                    );
-                    Box::new(NoopInjector)
-                }
-            }
+            xenia_inject::WindowsInjector::new(screen_width, screen_height)
+                .map(|injector| Box::new(injector) as Box<dyn InputInjector>)
         }
         #[cfg(all(feature = "macos-cgevent", target_os = "macos"))]
         InputBackendChoice::Macos => {
-            match xenia_inject::MacosInjector::new(screen_width, screen_height) {
-                Ok(injector) => Box::new(injector),
-                Err(err) => {
-                    warn!(
-                        error = %err,
-                        "MacosInjector construction failed; input events will be discarded"
-                    );
-                    Box::new(NoopInjector)
-                }
-            }
+            xenia_inject::MacosInjector::new(screen_width, screen_height)
+                .map(|injector| Box::new(injector) as Box<dyn InputInjector>)
         }
     }
 }
@@ -1819,6 +1787,20 @@ fn read_host_clipboard_text() -> Option<String> {
 /// host clipboard on every update. 1 MiB is well above any realistic text
 /// clipboard.
 const MAX_INBOUND_CLIPBOARD_BYTES: usize = 1024 * 1024;
+
+/// Accept one authenticated per-session input operation sequence.
+///
+/// The first sequence may be any value. Thereafter the receiver accepts only
+/// strictly larger values, rejecting duplicates and delayed/out-of-order inputs.
+/// This is a session-local replay/order fence; durable consequence finality
+/// remains the responsibility of the finality journal/executor boundary.
+fn accept_monotonic_input_sequence(last: &mut Option<u64>, sequence: u64) -> bool {
+    if last.is_some_and(|previous| sequence <= previous) {
+        return false;
+    }
+    *last = Some(sequence);
+    true
+}
 
 fn apply_clipboard_content(content: &ClipboardContent) {
     if let ClipboardContent::Text(text) = content
@@ -6533,6 +6515,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // noop`, the default) never triggers `XdgPortalInjector`'s
             // consent dialog because it's simply never built.
             let mut injector: Option<SessionInputInjector> = None;
+            // RawInput.sequence is the authenticated session's operation
+            // sequence. Keep the highest consumed value so delayed or duplicate
+            // envelopes cannot re-enter the host effect path.
+            let mut last_input_sequence: Option<u64> = None;
             loop {
                 let envelope = match recv_half.recv_envelope().await {
                     Ok(envelope) => envelope,
@@ -6621,33 +6607,86 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                 };
-                {
-                    let mut m1_runtime = m1_runtime.lock().await;
-                    if let Err(err) = m1_runtime.allow_input_flow() {
-                        warn!(error = %err, "input event rejected by M1 consent gate");
-                        continue;
-                    }
+                if let Err(err) = event.validate() {
+                    warn!(error = %err, "input event failed semantic validation");
+                    continue;
                 }
-
+                if !accept_monotonic_input_sequence(&mut last_input_sequence, input.sequence) {
+                    warn!(
+                        sequence = input.sequence,
+                        last_sequence = ?last_input_sequence,
+                        "stale or duplicate input sequence rejected"
+                    );
+                    continue;
+                }
                 let width = screen_dims.0.load(Ordering::Relaxed);
                 let height = screen_dims.1.load(Ordering::Relaxed);
-                let injector = injector.get_or_insert_with(|| {
-                    SessionInputInjector::new(build_input_injector(input_backend, width, height))
-                });
-                match injector.process_events(std::slice::from_ref(&event)) {
-                    Ok(()) => {
+                let result = {
+                    let mut m1_runtime = m1_runtime.lock().await;
+                    m1_runtime.execute_input_effect_outcome(|| {
+                        if injector.is_none() {
+                            match build_input_injector(input_backend, width, height) {
+                                Ok(inner) => {
+                                    injector = Some(SessionInputInjector::new(inner));
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        error = %err,
+                                        "input backend construction failed; no provider entry occurred"
+                                    );
+                                    return Ok(InputEffectOutcome::RejectionBeforeEffect);
+                                }
+                            }
+                        }
+
+                        injector
+                            .as_mut()
+                            .expect("input injector must exist after successful construction")
+                            .process_event_outcome(&event)
+                            .map_err(|err| {
+                                crate::m1_runtime::M1RuntimeError::InputInjection(err.to_string())
+                            })
+                    })
+                };
+                match result {
+                    Ok(InputEffectOutcome::Applied) => {
                         info!(
                             ?event,
-                            backend = injector.backend_name(),
-                            "input event injected"
+                            backend = injector
+                                .as_ref()
+                                .expect("successful input effect must construct injector")
+                                .backend_name(),
+                            "input event effect confirmed"
+                        );
+                    }
+                    Ok(InputEffectOutcome::Accepted) => {
+                        info!(
+                            ?event,
+                            backend = injector
+                                .as_ref()
+                                .expect("accepted input operation must construct injector")
+                                .backend_name(),
+                            "input event accepted by provider; host effect not independently confirmed"
+                        );
+                    }
+                    Ok(InputEffectOutcome::RejectionBeforeEffect) => {
+                        warn!(
+                            ?event,
+                            "input event rejected before provider entry"
+                        );
+                    }
+                    Ok(InputEffectOutcome::Indeterminate) => {
+                        warn!(
+                            ?event,
+                            backend = injector
+                                .as_ref()
+                                .expect("indeterminate input effect must construct injector")
+                                .backend_name(),
+                            "input event outcome indeterminate; effect was not recorded as confirmed"
                         );
                     }
                     Err(err) => {
-                        warn!(
-                            error = %err,
-                            backend = injector.backend_name(),
-                            "input injection failed"
-                        );
+                        warn!(error = %err, "input event could not be evaluated at the M1 gate");
                     }
                 }
             }
@@ -7172,6 +7211,25 @@ mod audio_tests {
 }
 
 #[cfg(test)]
+mod input_backend_tests {
+    use super::*;
+
+    #[test]
+    fn noop_backend_build_is_explicitly_successful() {
+        let injector = build_input_injector(InputBackendChoice::Noop, 320, 200)
+            .expect("noop backend construction must succeed");
+        assert_eq!(injector.backend_name(), "noop");
+    }
+
+    #[test]
+    fn logging_backend_build_is_explicitly_successful() {
+        let injector = build_input_injector(InputBackendChoice::Log, 320, 200)
+            .expect("logging backend construction must succeed");
+        assert_eq!(injector.backend_name(), "log");
+    }
+}
+
+#[cfg(test)]
 mod consent_scope_tests {
     use super::*;
 
@@ -7199,6 +7257,21 @@ mod consent_scope_tests {
         assert!(!granted.write_host_clipboard);
         assert!(!granted.send_file_to_viewer);
         assert!(!granted.receive_file_from_viewer);
+    }
+
+    #[test]
+    fn monotonic_input_sequence_fence_rejects_duplicates_and_reordering() {
+        let mut last = None;
+
+        assert!(accept_monotonic_input_sequence(&mut last, 7));
+        assert_eq!(last, Some(7));
+
+        assert!(!accept_monotonic_input_sequence(&mut last, 7));
+        assert!(!accept_monotonic_input_sequence(&mut last, 6));
+        assert_eq!(last, Some(7));
+
+        assert!(accept_monotonic_input_sequence(&mut last, 8));
+        assert_eq!(last, Some(8));
     }
 
     #[test]

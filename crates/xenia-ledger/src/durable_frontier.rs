@@ -11,10 +11,13 @@ use thiserror::Error;
 
 use crate::{
     AgentCapabilityAttestationError, AgentCapabilityAttestationV1, AgentCapabilityAuthorizationV1,
-    Chain, LedgerEntry, LedgerError, PendingPersistenceFrontier, PersistenceDisposition,
-    PersistenceReconciliationOutcome, SessionTranscriptBinding, SignedWitnessFrontierObservationV1,
-    TransactionalAppendOutcome, WitnessFrontierAnchorAppendOutcomeV1, WitnessFrontierAnchorError,
-    WitnessFrontierAnchorStore, WitnessFrontierAnchorTargetV1, XeniaWitnessFrontierSourcePolicyV1,
+    Chain, LedgerAuthorityEpochTransitionError, LedgerAuthorityEpochTransitionV1, LedgerEntry,
+    LedgerError, LedgerKeyTransition, LedgerKeyTransitionError, PendingPersistenceFrontier,
+    PersistenceDisposition, PersistenceReconciliationOutcome, SessionTranscriptBinding,
+    SignedWitnessFrontierObservationV1, TransactionalAppendOutcome,
+    WitnessFrontierAnchorAppendOutcomeV1, WitnessFrontierAnchorError, WitnessFrontierAnchorStore,
+    WitnessFrontierAnchorTargetV1, XeniaWitnessFrontierSourcePolicyV1,
+    ledger_key_transition_fingerprint,
 };
 
 /// Schema version for [`DurableLedgerFrontierClaimV1`].
@@ -71,6 +74,152 @@ pub struct DurableLedgerFrontierV1 {
     claim: DurableLedgerFrontierClaimV1,
 }
 
+/// Schema version for the durable authority-epoch claim.
+pub const DURABLE_AUTHORITY_EPOCH_CLAIM_SCHEMA_VERSION: u16 = 1;
+
+/// Exact authority epoch whose transition passed the authoritative durability boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DurableAuthorityEpochClaimV1 {
+    /// Version of the durable authority-epoch claim schema.
+    pub schema_version: u16,
+    /// Successor authority epoch established by the transition.
+    pub authority_epoch: u64,
+    /// Fingerprint of the exact signed ledger-key handover.
+    pub key_transition_fingerprint: [u8; 32],
+    /// Public key authorized by the successor epoch.
+    pub successor_ledger_public_key: [u8; 32],
+    /// Digest of the persistence policy used to establish durability.
+    pub persistence_policy_digest: [u8; 32],
+    /// Digest of the exact durable ledger frontier paired with this authority claim.
+    ///
+    /// This forces the authoritative persistence verifier to prove the authority
+    /// transition and the specific durable ledger state as one claim.
+    pub durable_frontier_digest: [u8; 32],
+}
+
+impl DurableAuthorityEpochClaimV1 {
+    /// Validate schema and reject incomplete authority claims.
+    pub fn validate(self) -> Result<(), DurableLedgerFrontierError> {
+        if self.schema_version != DURABLE_AUTHORITY_EPOCH_CLAIM_SCHEMA_VERSION
+            || self.key_transition_fingerprint == ZERO32
+            || self.successor_ledger_public_key == ZERO32
+            || self.persistence_policy_digest == ZERO32
+            || self.durable_frontier_digest == ZERO32
+        {
+            return Err(DurableLedgerFrontierError::MalformedAuthorityEpochClaim);
+        }
+        Ok(())
+    }
+
+    /// Compute the canonical BLAKE3 digest of this validated claim.
+    pub fn digest(self) -> Result<[u8; 32], DurableLedgerFrontierError> {
+        self.validate()?;
+        Ok(self.digest_validated())
+    }
+
+    fn digest_validated(self) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"xenia.durable-authority-epoch-claim.v1\0");
+        hasher.update(&self.schema_version.to_be_bytes());
+        hasher.update(&self.authority_epoch.to_be_bytes());
+        hasher.update(&self.key_transition_fingerprint);
+        hasher.update(&self.successor_ledger_public_key);
+        hasher.update(&self.persistence_policy_digest);
+        hasher.update(&self.durable_frontier_digest);
+        *hasher.finalize().as_bytes()
+    }
+}
+
+/// Process-local proof that an authority epoch transition was accepted by the
+/// authoritative persistence boundary. Possession alone is insufficient: the
+/// token is minted only by the reviewed restore verifier.
+#[derive(Debug)]
+pub struct DurableAuthorityEpochV1 {
+    claim: DurableAuthorityEpochClaimV1,
+    /// Exact durable-ledger frontier verified before this authority token was issued.
+    durable_frontier_digest: [u8; 32],
+}
+
+impl DurableAuthorityEpochV1 {
+    /// Return the canonical digest of the complete verified authority token.
+    ///
+    /// The token identity covers both the authority transition claim and the exact
+    /// durable-ledger frontier that justified issuing it.
+    pub fn digest(&self) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"xenia.durable-authority-epoch-token.v1\0");
+        hasher.update(&self.claim.digest_validated());
+        hasher.update(&self.durable_frontier_digest);
+        *hasher.finalize().as_bytes()
+    }
+
+    /// Return the successor authority epoch.
+    pub fn authority_epoch(&self) -> u64 {
+        self.claim.authority_epoch
+    }
+
+    /// Return the fingerprint of the exact key transition.
+    pub fn key_transition_fingerprint(&self) -> [u8; 32] {
+        self.claim.key_transition_fingerprint
+    }
+
+    /// Return the successor ledger public key.
+    pub fn successor_ledger_public_key(&self) -> [u8; 32] {
+        self.claim.successor_ledger_public_key
+    }
+
+    /// Return the persistence policy digest bound to this token.
+    pub fn persistence_policy_digest(&self) -> [u8; 32] {
+        self.claim.persistence_policy_digest
+    }
+
+    /// Return the exact durable-ledger frontier digest bound to this token.
+    pub fn durable_frontier_digest(&self) -> [u8; 32] {
+        self.durable_frontier_digest
+    }
+
+    /// Verify that this token still matches the exact durable frontier, successor chain, and proofs.
+    pub fn verify_against_chain(
+        &self,
+        durable_frontier: &DurableLedgerFrontierV1,
+        chain: &Chain,
+        key_transition: &LedgerKeyTransition,
+        epoch_transition: &LedgerAuthorityEpochTransitionV1,
+        expected_previous_epoch: u64,
+        expected_successor_epoch: u64,
+        expected_persistence_policy_digest: [u8; 32],
+    ) -> Result<(), DurableLedgerFrontierError> {
+        self.claim.validate()?;
+        durable_frontier.verify_against_chain(chain, expected_persistence_policy_digest)?;
+        if self.claim.durable_frontier_digest != self.durable_frontier_digest
+            || self.durable_frontier_digest != durable_frontier.digest()
+        {
+            return Err(DurableLedgerFrontierError::AuthorityEpochFrontierMismatch);
+        }
+        if self.claim.persistence_policy_digest != expected_persistence_policy_digest {
+            return Err(DurableLedgerFrontierError::PersistencePolicyMismatch);
+        }
+        epoch_transition
+            .verify(
+                key_transition,
+                expected_previous_epoch,
+                expected_successor_epoch,
+            )
+            .map_err(DurableLedgerFrontierError::AuthorityEpoch)?;
+        let fingerprint = ledger_key_transition_fingerprint(key_transition)
+            .map_err(DurableLedgerFrontierError::KeyTransition)?;
+        if self.claim.key_transition_fingerprint != fingerprint
+            || self.claim.authority_epoch != expected_successor_epoch
+            || self.claim.successor_ledger_public_key != key_transition.new_ledger_public_key
+            || chain.signing_key.verifying_key().to_bytes()
+                != self.claim.successor_ledger_public_key
+        {
+            return Err(DurableLedgerFrontierError::AuthorityEpochMismatch);
+        }
+        Ok(())
+    }
+}
+
 impl DurableLedgerFrontierV1 {
     /// Privacy-minimized commitment to the exact durable frontier and policy.
     pub fn digest(&self) -> [u8; 32] {
@@ -92,7 +241,13 @@ impl DurableLedgerFrontierV1 {
         self.claim.persistence_policy_digest
     }
 
-    fn verify_against_chain(
+    /// Verify this durable frontier against the exact current chain and expected policy.
+    ///
+    /// This does not establish current authority by itself; the token must first have
+    /// been minted by `verify_restored_durable_frontier_v1` using the authoritative
+    /// persistence adapter. It does establish that the token has not been detached
+    /// from the restored chain or silently crossed a persistence-policy boundary.
+    pub fn verify_against_chain(
         &self,
         chain: &Chain,
         expected_persistence_policy_digest: [u8; 32],
@@ -108,6 +263,51 @@ impl DurableLedgerFrontierV1 {
         }
         let current = durable_claim_for_chain(chain, self.claim.persistence_policy_digest)?;
         if current != self.claim {
+            return Err(DurableLedgerFrontierError::ChainFrontierMismatch);
+        }
+        Ok(())
+    }
+
+    /// Verify this durable frontier against a fresh, challenge-bound witness
+    /// observation of the external current-frontier store.
+    ///
+    /// The witness observation does not prove consent-ledger durability by
+    /// itself. The durable token must already have been minted by the reviewed
+    /// persistence verifier. The combined check establishes that the fresh
+    /// external observation names the same ledger frontier as that durable token.
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_against_fresh_witness_observation(
+        &self,
+        chain: &Chain,
+        observation: &SignedWitnessFrontierObservationV1,
+        expected_challenge: [u8; 32],
+        expected_source_id: [u8; 16],
+        expected_source_epoch: u64,
+        expected_anchor_policy_digest: [u8; 32],
+        expected_witness_id: [u8; 16],
+        now_unix_s: u64,
+        max_age_secs: u64,
+        max_future_skew_secs: u64,
+        expected_persistence_policy_digest: [u8; 32],
+    ) -> Result<(), DurableLedgerFrontierError> {
+        self.verify_against_chain(chain, expected_persistence_policy_digest)?;
+        observation
+            .verify_fresh(
+                expected_challenge,
+                self.claim.ledger_public_key,
+                expected_source_id,
+                expected_source_epoch,
+                expected_anchor_policy_digest,
+                expected_witness_id,
+                now_unix_s,
+                max_age_secs,
+                max_future_skew_secs,
+            )
+            .map_err(DurableLedgerFrontierError::WitnessAnchor)?;
+        if observation.ledger_entry_count != self.claim.entry_count
+            || observation.ledger_head_hash != self.claim.head_hash
+            || observation.ledger_public_key != self.claim.ledger_public_key
+        {
             return Err(DurableLedgerFrontierError::ChainFrontierMismatch);
         }
         Ok(())
@@ -198,6 +398,65 @@ impl Chain {
         Ok(DurableLedgerFrontierV1 { claim: after })
     }
 
+    /// Verify that an explicit authority transition and its successor epoch
+    /// survived the authoritative persistence boundary.
+    #[allow(clippy::too_many_arguments)]
+    ///
+    /// The callback is the adapter trust boundary: it must consult the authoritative
+    /// durable source and prove the exact transition/claim is committed. Returning
+    /// success mints an opaque token; an ambiguous outcome must return an error.
+    pub fn verify_restored_authority_epoch_v1(
+        &self,
+        durable_frontier: &DurableLedgerFrontierV1,
+        key_transition: &LedgerKeyTransition,
+        epoch_transition: &LedgerAuthorityEpochTransitionV1,
+        expected_previous_epoch: u64,
+        expected_successor_epoch: u64,
+        persistence_policy_digest: [u8; 32],
+        verify: impl FnOnce(&Self, &DurableAuthorityEpochClaimV1) -> Result<(), [u8; 32]>,
+    ) -> Result<DurableAuthorityEpochV1, DurableLedgerFrontierError> {
+        durable_frontier.verify_against_chain(self, persistence_policy_digest)?;
+        validate_policy_digest(persistence_policy_digest)?;
+        if self.has_uncertain_persistence() || self.entry_count() == 0 {
+            return Err(DurableLedgerFrontierError::PersistenceUncertain);
+        }
+        epoch_transition
+            .verify(
+                key_transition,
+                expected_previous_epoch,
+                expected_successor_epoch,
+            )
+            .map_err(DurableLedgerFrontierError::AuthorityEpoch)?;
+        let fingerprint = ledger_key_transition_fingerprint(key_transition)
+            .map_err(DurableLedgerFrontierError::KeyTransition)?;
+        if self.signing_key.verifying_key().to_bytes() != key_transition.new_ledger_public_key {
+            return Err(DurableLedgerFrontierError::AuthorityEpochMismatch);
+        }
+        let claim = DurableAuthorityEpochClaimV1 {
+            schema_version: DURABLE_AUTHORITY_EPOCH_CLAIM_SCHEMA_VERSION,
+            authority_epoch: expected_successor_epoch,
+            key_transition_fingerprint: fingerprint,
+            successor_ledger_public_key: key_transition.new_ledger_public_key,
+            persistence_policy_digest,
+            durable_frontier_digest: durable_frontier.digest(),
+        };
+        claim.validate()?;
+        if let Err(diagnostic_digest) = verify(self, &claim) {
+            return Err(DurableLedgerFrontierError::PersistenceVerificationRejected(
+                nonzero_diagnostic(diagnostic_digest, b"authority-epoch-verifier-rejected"),
+            ));
+        }
+        if self.has_uncertain_persistence()
+            || self.signing_key.verifying_key().to_bytes() != claim.successor_ledger_public_key
+        {
+            return Err(DurableLedgerFrontierError::AuthorityEpochMismatch);
+        }
+        Ok(DurableAuthorityEpochV1 {
+            claim,
+            durable_frontier_digest: durable_frontier.digest(),
+        })
+    }
+
     /// Outcome-aware append that returns an opaque durable token only after the
     /// exact candidate frontier is confirmed persisted.
     pub fn append_transactional_outcome_durable_v1(
@@ -208,16 +467,16 @@ impl Chain {
     ) -> Result<DurableLedgerAppendOutcomeV1, DurableLedgerFrontierError> {
         validate_policy_digest(persistence_policy_digest)?;
         let outcome = self.append_transactional_outcome(event, |chain| {
-            let claim = match durable_claim_for_chain_allow_pending(chain, persistence_policy_digest)
-            {
-                Ok(claim) => claim,
-                Err(_) => {
-                    return PersistenceDisposition::ProvenNotPersisted(nonzero_diagnostic(
-                        ZERO32,
-                        b"append-internal-claim-invalid",
-                    ));
-                }
-            };
+            let claim =
+                match durable_claim_for_chain_allow_pending(chain, persistence_policy_digest) {
+                    Ok(claim) => claim,
+                    Err(_) => {
+                        return PersistenceDisposition::ProvenNotPersisted(nonzero_diagnostic(
+                            ZERO32,
+                            b"append-internal-claim-invalid",
+                        ));
+                    }
+                };
             persist(chain, &claim)
         })?;
         match outcome {
@@ -257,16 +516,16 @@ impl Chain {
     ) -> Result<DurableLedgerReconciliationOutcomeV1, DurableLedgerFrontierError> {
         validate_policy_digest(persistence_policy_digest)?;
         let outcome = self.reconcile_pending_persistence(|chain, pending| {
-            let claim = match durable_claim_for_chain_allow_pending(chain, persistence_policy_digest)
-            {
-                Ok(claim) => claim,
-                Err(_) => {
-                    return PersistenceDisposition::OutcomeUnknown(nonzero_diagnostic(
-                        ZERO32,
-                        b"reconcile-internal-claim-invalid",
-                    ));
-                }
-            };
+            let claim =
+                match durable_claim_for_chain_allow_pending(chain, persistence_policy_digest) {
+                    Ok(claim) => claim,
+                    Err(_) => {
+                        return PersistenceDisposition::OutcomeUnknown(nonzero_diagnostic(
+                            ZERO32,
+                            b"reconcile-internal-claim-invalid",
+                        ));
+                    }
+                };
             reconcile(chain, pending, &claim)
         })?;
         match outcome {
@@ -415,6 +674,21 @@ pub enum DurableLedgerFrontierError {
     /// Claim contained zero/unsupported structure.
     #[error("malformed durable Xenia ledger frontier claim")]
     MalformedClaim,
+    /// Authority-epoch claim contained zero/unsupported structure.
+    #[error("malformed durable Xenia authority epoch claim")]
+    MalformedAuthorityEpochClaim,
+    /// Authority epoch proof failed cryptographic verification.
+    #[error("durable Xenia authority epoch transition is invalid: {0}")]
+    AuthorityEpoch(#[from] LedgerAuthorityEpochTransitionError),
+    /// The durable authority claim does not match the transition or current chain.
+    #[error("durable Xenia authority epoch does not match the current chain")]
+    AuthorityEpochMismatch,
+    /// The opaque authority token is bound to a different durable ledger frontier.
+    #[error("durable Xenia authority epoch is bound to a different durable ledger frontier")]
+    AuthorityEpochFrontierMismatch,
+    /// The retained key-transition artifact is invalid.
+    #[error("durable Xenia key transition is invalid: {0}")]
+    KeyTransition(#[from] LedgerKeyTransitionError),
     /// Persistence-policy commitment cannot be zero.
     #[error("durable ledger persistence policy must be nonzero")]
     InvalidPersistencePolicy,
@@ -443,13 +717,14 @@ pub enum DurableLedgerFrontierError {
 
 #[cfg(test)]
 mod tests {
-    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::{Signer, SigningKey};
     use uuid::Uuid;
 
     use super::*;
     use crate::{
-        AgentCheckpointAnchorV1, ConsentEventRecord, ConsentKind, SignatureSuite,
-        TranscriptSignatureSuiteV1,
+        AgentCheckpointAnchorV1, ConsentEventRecord, ConsentKind, LedgerCheckpoint, SignatureSuite,
+        SignedWitnessFrontierAnchorV1, TranscriptSignatureSuiteV1,
+        WITNESS_FRONTIER_ANCHOR_SCHEMA_VERSION, derive_xenia_witness_frontier_source_id,
     };
 
     const PERSISTENCE_POLICY: [u8; 32] = [0xD1; 32];
@@ -494,6 +769,381 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct ObservationStore {
+        current: Option<SignedWitnessFrontierAnchorV1>,
+    }
+
+    impl WitnessFrontierAnchorStore for ObservationStore {
+        fn lookup_operation(
+            &mut self,
+            _source_id: [u8; 16],
+            _source_epoch: u64,
+            operation_id: [u8; 32],
+        ) -> Result<Option<SignedWitnessFrontierAnchorV1>, [u8; 32]> {
+            Ok(self
+                .current
+                .as_ref()
+                .filter(|a| a.target.operation_id == operation_id)
+                .cloned())
+        }
+
+        fn current_for_witness(
+            &mut self,
+            _source_id: [u8; 16],
+            _source_epoch: u64,
+            _witness_id: [u8; 16],
+        ) -> Result<Option<SignedWitnessFrontierAnchorV1>, [u8; 32]> {
+            Ok(self.current.clone())
+        }
+
+        fn compare_and_swap(
+            &mut self,
+            expected_previous: Option<[u8; 32]>,
+            candidate: &SignedWitnessFrontierAnchorV1,
+        ) -> PersistenceDisposition<[u8; 32]> {
+            let actual = self
+                .current
+                .as_ref()
+                .and_then(|a: &SignedWitnessFrontierAnchorV1| a.fingerprint().ok());
+            if actual != expected_previous {
+                return PersistenceDisposition::ProvenNotPersisted([0xE1; 32]);
+            }
+            self.current = Some(candidate.clone());
+            PersistenceDisposition::Persisted
+        }
+    }
+
+    #[test]
+    #[test]
+    fn authority_epoch_claim_rejects_zero_durable_frontier_digest() {
+        let claim = DurableAuthorityEpochClaimV1 {
+            schema_version: DURABLE_AUTHORITY_EPOCH_CLAIM_SCHEMA_VERSION,
+            authority_epoch: 8,
+            key_transition_fingerprint: [0xA1; 32],
+            successor_ledger_public_key: [0xB2; 32],
+            persistence_policy_digest: PERSISTENCE_POLICY,
+            durable_frontier_digest: [0; 32],
+        };
+
+        assert!(matches!(
+            claim.validate(),
+            Err(DurableLedgerFrontierError::MalformedAuthorityEpochClaim)
+        ));
+    }
+
+    fn authority_epoch_claim_digest_uses_canonical_nul_terminated_domain() {
+        let claim = DurableAuthorityEpochClaimV1 {
+            schema_version: DURABLE_AUTHORITY_EPOCH_CLAIM_SCHEMA_VERSION,
+            authority_epoch: 8,
+            key_transition_fingerprint: [0xA1; 32],
+            successor_ledger_public_key: [0xB2; 32],
+            persistence_policy_digest: PERSISTENCE_POLICY,
+            durable_frontier_digest: [0xC3; 32],
+        };
+
+        let actual = claim.digest().unwrap();
+        let mut canonical = blake3::Hasher::new();
+        canonical.update(b"xenia.durable-authority-epoch-claim.v1\0");
+        canonical.update(&claim.schema_version.to_be_bytes());
+        canonical.update(&claim.authority_epoch.to_be_bytes());
+        canonical.update(&claim.key_transition_fingerprint);
+        canonical.update(&claim.successor_ledger_public_key);
+        canonical.update(&claim.persistence_policy_digest);
+        canonical.update(&claim.durable_frontier_digest);
+
+        assert_eq!(actual, *canonical.finalize().as_bytes());
+    }
+
+    #[test]
+    fn authority_recovery_rejects_stale_snapshot_and_ambiguous_commit() {
+        let old = SigningKey::from_bytes(&[51; 32]);
+        let successor = SigningKey::from_bytes(&[52; 32]);
+        let old_public = old.verifying_key().to_bytes();
+        let successor_public = successor.verifying_key().to_bytes();
+        let checkpoint_message = crate::checkpoint_message(0, &[0; 32], &old_public, 0);
+        let checkpoint = LedgerCheckpoint {
+            schema: crate::LEDGER_CHECKPOINT_SCHEMA.to_string(),
+            entry_count: 0,
+            head_hash: [0; 32],
+            ledger_public_key: old_public,
+            timestamp_unix_secs: 0,
+            signature: old.sign(&checkpoint_message).to_bytes(),
+        };
+        let key_transition = LedgerKeyTransition::sign(checkpoint, &old, &successor, 100).unwrap();
+        let epoch_transition =
+            LedgerAuthorityEpochTransitionV1::sign(&key_transition, 7, 8, &old, &successor)
+                .unwrap();
+        let fingerprint = ledger_key_transition_fingerprint(&key_transition).unwrap();
+
+        let mut chain = Chain::new(successor.clone());
+        chain
+            .append_transactional_outcome(event(1), |_| {
+                PersistenceDisposition::<[u8; 32]>::Persisted
+            })
+            .unwrap();
+
+        let durable_frontier = chain
+            .verify_restored_durable_frontier_v1(PERSISTENCE_POLICY, |_, _| Ok(()))
+            .unwrap();
+
+        // No durable acknowledgement: recovery must not invent successor authority.
+        let ambiguous = chain.verify_restored_authority_epoch_v1(
+            &durable_frontier,
+            &key_transition,
+            &epoch_transition,
+            7,
+            8,
+            PERSISTENCE_POLICY,
+            |_, _| Err([0xE8; 32]),
+        );
+        assert!(matches!(
+            ambiguous,
+            Err(DurableLedgerFrontierError::PersistenceVerificationRejected(
+                _
+            ))
+        ));
+
+        let token = chain
+            .verify_restored_authority_epoch_v1(
+                &durable_frontier,
+                &key_transition,
+                &epoch_transition,
+                7,
+                8,
+                PERSISTENCE_POLICY,
+                |_, claim| {
+                    assert_eq!(claim.key_transition_fingerprint, fingerprint);
+                    assert_eq!(claim.durable_frontier_digest, durable_frontier.digest());
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        // The durable token authenticates epoch 8, never the stale epoch-7 snapshot.
+        assert!(matches!(
+            token.verify_against_chain(
+                &durable_frontier,
+                &Chain::new(old.clone()),
+                &key_transition,
+                &epoch_transition,
+                7,
+                8,
+                PERSISTENCE_POLICY,
+            ),
+            Err(DurableLedgerFrontierError::AuthorityEpochMismatch)
+        ));
+
+        assert_eq!(token.authority_epoch(), 8);
+        assert_eq!(token.successor_ledger_public_key(), successor_public);
+    }
+
+    #[test]
+    fn authority_epoch_requires_authoritative_durable_commit() {
+        let old = SigningKey::from_bytes(&[41; 32]);
+        let successor = SigningKey::from_bytes(&[42; 32]);
+        let public = old.verifying_key().to_bytes();
+        let checkpoint_message = crate::checkpoint_message(0, &[0; 32], &public, 0);
+        let checkpoint = LedgerCheckpoint {
+            schema: crate::LEDGER_CHECKPOINT_SCHEMA.to_string(),
+            entry_count: 0,
+            head_hash: [0; 32],
+            ledger_public_key: public,
+            timestamp_unix_secs: 0,
+            signature: old.sign(&checkpoint_message).to_bytes(),
+        };
+        let key_transition = LedgerKeyTransition::sign(checkpoint, &old, &successor, 100).unwrap();
+        let epoch_transition =
+            LedgerAuthorityEpochTransitionV1::sign(&key_transition, 7, 8, &old, &successor)
+                .unwrap();
+
+        let mut chain = Chain::new(successor.clone());
+        chain
+            .append_transactional_outcome(event(1), |_| {
+                PersistenceDisposition::<[u8; 32]>::Persisted
+            })
+            .unwrap();
+
+        let durable_frontier = chain
+            .verify_restored_durable_frontier_v1(PERSISTENCE_POLICY, |_, _| Ok(()))
+            .unwrap();
+
+        let token = chain
+            .verify_restored_authority_epoch_v1(
+                &durable_frontier,
+                &key_transition,
+                &epoch_transition,
+                7,
+                8,
+                PERSISTENCE_POLICY,
+                |_, claim| {
+                    assert_eq!(claim.authority_epoch, 8);
+                    assert_eq!(
+                        claim.successor_ledger_public_key,
+                        successor.verifying_key().to_bytes()
+                    );
+                    assert_eq!(claim.durable_frontier_digest, durable_frontier.digest());
+                    Ok(())
+                },
+            )
+            .unwrap();
+        let rejected = chain.verify_restored_authority_epoch_v1(
+            &durable_frontier,
+            &key_transition,
+            &epoch_transition,
+            7,
+            8,
+            PERSISTENCE_POLICY,
+            |_, _| Err([0xE7; 32]),
+        );
+        assert!(matches!(
+            rejected,
+            Err(DurableLedgerFrontierError::PersistenceVerificationRejected(reason))
+                if reason == [0xE7; 32]
+        ));
+
+        assert_eq!(token.authority_epoch(), 8);
+        assert_eq!(
+            token.successor_ledger_public_key(),
+            successor.verifying_key().to_bytes()
+        );
+        assert_eq!(token.durable_frontier_digest(), durable_frontier.digest());
+
+        // Token identity must include the exact frontier, not only the authority claim.
+        // This prevents two otherwise-identical epoch claims from sharing one token digest
+        // after being issued against different durable ledger histories.
+        let token_digest = token.digest();
+
+        // The same successor key and transition proof are not enough: the authority
+        // token must remain bound to the exact durable ledger frontier that justified it.
+        let mut other_chain = Chain::new(successor.clone());
+        other_chain
+            .append_transactional_outcome::<_, ()>(event(2), |_| {
+                PersistenceDisposition::Persisted
+            })
+            .unwrap();
+        let other_frontier = other_chain
+            .verify_restored_durable_frontier_v1(PERSISTENCE_POLICY, |_, _| Ok(()))
+            .unwrap();
+        assert_ne!(durable_frontier.digest(), other_frontier.digest());
+
+        let mut other_claim_hasher = blake3::Hasher::new();
+        other_claim_hasher.update(b"xenia.durable-authority-epoch-token.v1\0");
+        other_claim_hasher.update(&token.claim.digest_validated());
+        other_claim_hasher.update(&other_frontier.digest());
+        let other_token_identity = *other_claim_hasher.finalize().as_bytes();
+        assert_ne!(token_digest, other_token_identity);
+
+        assert!(matches!(
+            token.verify_against_chain(
+                &other_frontier,
+                &other_chain,
+                &key_transition,
+                &epoch_transition,
+                7,
+                8,
+                PERSISTENCE_POLICY,
+            ),
+            Err(DurableLedgerFrontierError::AuthorityEpochFrontierMismatch)
+        ));
+
+        chain.append(event(2)).unwrap();
+        let stale_frontier = chain.verify_restored_authority_epoch_v1(
+            &durable_frontier,
+            &key_transition,
+            &epoch_transition,
+            7,
+            8,
+            PERSISTENCE_POLICY,
+            |_, _| Ok(()),
+        );
+        assert!(matches!(
+            stale_frontier,
+            Err(DurableLedgerFrontierError::ChainFrontierMismatch)
+        ));
+    }
+
+    #[test]
+    fn fresh_witness_observation_must_name_the_exact_durable_frontier() {
+        let mut chain = Chain::new(SigningKey::from_bytes(&[3; 32]));
+        let outcome = chain
+            .append_transactional_outcome_durable_v1(event(1), PERSISTENCE_POLICY, |_, _| {
+                PersistenceDisposition::Persisted
+            })
+            .unwrap();
+        let durable_frontier = match outcome {
+            DurableLedgerAppendOutcomeV1::Persisted {
+                durable_frontier, ..
+            } => durable_frontier,
+            _ => panic!("expected durable frontier"),
+        };
+
+        let policy = XeniaWitnessFrontierSourcePolicyV1 {
+            source_epoch: 7,
+            anchor_policy_digest: [0x62; 32],
+        };
+        let source_id = derive_xenia_witness_frontier_source_id(
+            chain.signing_key.verifying_key().to_bytes(),
+            policy.anchor_policy_digest,
+        )
+        .unwrap();
+        let witness_id = [0x51; 16];
+        let mut target = WitnessFrontierAnchorTargetV1 {
+            schema_version: WITNESS_FRONTIER_ANCHOR_SCHEMA_VERSION,
+            operation_id: [1; 32],
+            source_id,
+            source_epoch: policy.source_epoch,
+            anchor_policy_digest: policy.anchor_policy_digest,
+            witness_id,
+            high_watermark: 3,
+            reservation_head: [0x33; 32],
+            frontier_statement_digest: [1; 32],
+        };
+        target.frontier_statement_digest = target.recompute_frontier_statement_digest();
+        target.operation_id = target.recompute_operation_id();
+        let mut store = ObservationStore::default();
+        chain
+            .append_witness_frontier_anchor_v1(target, policy, 100, &mut store)
+            .unwrap();
+        let observation = chain
+            .observe_witness_frontier_v1(witness_id, [0xA5; 32], policy, 120, &mut store)
+            .unwrap();
+
+        durable_frontier
+            .verify_against_fresh_witness_observation(
+                &chain,
+                &observation,
+                [0xA5; 32],
+                source_id,
+                policy.source_epoch,
+                policy.anchor_policy_digest,
+                witness_id,
+                120,
+                5,
+                1,
+                PERSISTENCE_POLICY,
+            )
+            .unwrap();
+
+        let mut mismatched = observation.clone();
+        mismatched.ledger_head_hash[0] ^= 1;
+        assert!(matches!(
+            durable_frontier.verify_against_fresh_witness_observation(
+                &chain,
+                &mismatched,
+                [0xA5; 32],
+                source_id,
+                policy.source_epoch,
+                policy.anchor_policy_digest,
+                witness_id,
+                120,
+                5,
+                1,
+                PERSISTENCE_POLICY,
+            ),
+            Err(DurableLedgerFrontierError::WitnessAnchor(_))
+        ));
+    }
     #[test]
     fn persisted_append_mints_token_and_enables_durable_authority() {
         let mut chain = Chain::new(SigningKey::from_bytes(&[3; 32]));
@@ -588,7 +1238,7 @@ mod tests {
     fn restored_chain_requires_authoritative_exact_frontier_verification() {
         let mut original = Chain::new(SigningKey::from_bytes(&[3; 32]));
         original.append(event(1)).unwrap();
-        let entries = original.into_entries();
+        let entries = original.into_entries().unwrap();
         let restored = Chain::from_entries(entries, SigningKey::from_bytes(&[3; 32]));
 
         assert!(matches!(

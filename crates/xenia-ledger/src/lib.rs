@@ -69,11 +69,17 @@
 mod agent_authority;
 mod agent_authority_proto;
 mod archive;
+mod authority_epoch;
+mod authority_recovery;
 mod binding;
 mod chain;
 mod checkpoint;
 mod compaction;
 mod durable_frontier;
+mod execution_handle;
+mod finality;
+mod finality_journal;
+mod finality_executor;
 mod entry;
 mod errors;
 mod hash;
@@ -90,12 +96,23 @@ mod tests;
 
 pub use agent_authority::{
     AGENT_CAPABILITY_ATTESTATION_SCHEMA, AgentCapabilityAttestationError,
-    AgentCapabilityAttestationV1, verify_agent_capability_attestation,
+    AgentCapabilityAttestationV1, AgentCapabilityReplayError, AgentCapabilityReplayGuardV1,
+    verify_agent_capability_attestation, verify_agent_capability_attestation_once,
 };
 pub use agent_authority_proto::{
     AGENT_CAPABILITY_AUTHORIZATION_DOMAIN, AGENT_CAPABILITY_AUTHORIZATION_SCHEMA_VERSION,
     AgentCapabilityAuthorizationError, AgentCapabilityAuthorizationV1, AgentCheckpointAnchorV1,
     TranscriptSignatureSuiteV1,
+};
+
+pub use authority_recovery::{
+    AuthorityRecoveryError, AuthorityRecoveryEventV1, AuthorityRecoveryStateV1,
+};
+
+pub use authority_epoch::{
+    LEDGER_AUTHORITY_EPOCH_TRANSITION_SCHEMA, LedgerAuthorityEpochTransitionError,
+    LedgerAuthorityEpochTransitionV1, ledger_authority_epoch_transition_message,
+    ledger_key_transition_fingerprint,
 };
 
 pub use archive::{
@@ -131,8 +148,25 @@ pub use compaction::{
     ledger_compaction_manifest_message,
 };
 
+pub use finality_executor::{FinalityExecutorError, FinalityExecutorV1};
+
+pub use finality_journal::{
+    FinalityJournalError, FinalityJournalV1, FINALITY_JOURNAL_SCHEMA,
+};
+
+pub use finality::{
+    FINALITY_ATTEMPT_SCHEMA, FINALITY_RECEIPT_SCHEMA, FinalityAttemptError,
+    FinalityAttemptStateV1, FinalityAttemptV1, FinalityOutcomeV1, FinalityReceiptV1,
+};
+
+pub use execution_handle::{
+    ExactExecutionConsumptionError, ExactExecutionConsumptionGuardV1,
+    ExactExecutionHandleError, ExactExecutionHandleV1, EXECUTION_HANDLE_DOMAIN,
+};
+
 pub use durable_frontier::{
-    DURABLE_LEDGER_FRONTIER_DOMAIN, DURABLE_LEDGER_FRONTIER_SCHEMA_VERSION,
+    DURABLE_AUTHORITY_EPOCH_CLAIM_SCHEMA_VERSION, DURABLE_LEDGER_FRONTIER_DOMAIN,
+    DURABLE_LEDGER_FRONTIER_SCHEMA_VERSION, DurableAuthorityEpochClaimV1, DurableAuthorityEpochV1,
     DurableLedgerAppendOutcomeV1, DurableLedgerFrontierClaimV1, DurableLedgerFrontierError,
     DurableLedgerFrontierV1, DurableLedgerReconciliationOutcomeV1,
 };

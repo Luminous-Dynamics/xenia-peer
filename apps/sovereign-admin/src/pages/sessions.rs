@@ -659,7 +659,7 @@ fn LedgerDemo() -> impl IntoView {
                             title="Synthetic Ledger Demo".to_string()
                             description="This chain was generated in your browser for demonstration purposes.".to_string()
                             initial_pk_hex=pk_hex
-                            initial_entries=chain.into_entries()
+                            initial_entries=chain.into_entries().unwrap()
                         />
                     }
                 }

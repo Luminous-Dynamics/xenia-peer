@@ -24,22 +24,26 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use xenia_ledger::{
     CURRENT_EVIDENCE_CRYPTO_MANIFEST, Chain, ConsentKind, CryptoPolicyProfile, DowngradePolicy,
-    Ed25519EvidenceSignatureBackend, EvidenceBundleSeal, EvidenceBundleVerifyError,
-    EvidenceCryptoManifest, EvidencePublicKeyBinding, EvidenceSignatureBackend, LedgerEntry,
-    LedgerEntryExport, LedgerError, SessionTranscriptBinding, SessionTranscriptSignature,
-    SignatureEnvelope, SignatureSuite, Verifier, VerifyError,
+    DurableLedgerFrontierError, DurableLedgerFrontierV1, Ed25519EvidenceSignatureBackend,
+    EvidenceBundleSeal, EvidenceBundleVerifyError, EvidenceCryptoManifest,
+    EvidencePublicKeyBinding, EvidenceSignatureBackend, LedgerEntry, LedgerEntryExport,
+    LedgerError, SessionTranscriptBinding, SessionTranscriptSignature, SignatureEnvelope,
+    SignatureSuite, Verifier, VerifyError,
 };
 use xenia_peer_core::{
     M1Permission, M1PermissionSet, M1SessionError, M1SessionMachine, M1SessionState,
 };
 
 use crate::m1_ledger::consent_record_for_m1_event;
+use xenia_inject::InputEffectOutcome;
 
 #[derive(Debug)]
 pub(crate) enum M1RuntimeError {
     Session(M1SessionError),
     Ledger(LedgerError),
     Verify(VerifyError),
+    DurableFrontier(DurableLedgerFrontierError),
+    EmptyPersistedLedger,
     EvidenceBundle(EvidenceBundleVerifyError),
     MissingTranscriptBinding,
     FullPqcRuntimeUnavailable {
@@ -56,6 +60,12 @@ pub(crate) enum M1RuntimeError {
     PersistIo(std::io::Error),
     PersistCodec(bincode::Error),
     PersistJson(serde_json::Error),
+    PersistedContextMismatch {
+        entry_index: usize,
+        field: &'static str,
+    },
+    /// Backend rejected or failed to perform a requested input effect.
+    InputInjection(String),
 }
 
 impl fmt::Display for M1RuntimeError {
@@ -64,6 +74,11 @@ impl fmt::Display for M1RuntimeError {
             Self::Session(err) => write!(f, "M1 session error: {err}"),
             Self::Ledger(err) => write!(f, "M1 ledger error: {err}"),
             Self::Verify(err) => write!(f, "M1 ledger verification error: {err}"),
+            Self::DurableFrontier(err) => write!(f, "M1 durable frontier restore error: {err}"),
+            Self::EmptyPersistedLedger => write!(
+                f,
+                "M1 persisted ledger is empty; initialize a new runtime instead of restoring empty state"
+            ),
             Self::EvidenceBundle(err) => write!(f, "M1 transcript-bound evidence error: {err}"),
             Self::MissingTranscriptBinding => write!(
                 f,
@@ -93,6 +108,11 @@ impl fmt::Display for M1RuntimeError {
             Self::PersistIo(err) => write!(f, "M1 ledger persistence I/O error: {err}"),
             Self::PersistCodec(err) => write!(f, "M1 ledger persistence codec error: {err}"),
             Self::PersistJson(err) => write!(f, "M1 evidence JSON persistence error: {err}"),
+            Self::PersistedContextMismatch { entry_index, field } => write!(
+                f,
+                "M1 persisted ledger entry {entry_index} did not match restore context field {field}"
+            ),
+            Self::InputInjection(err) => write!(f, "M1 input injection failed: {err}"),
         }
     }
 }
@@ -114,6 +134,12 @@ impl From<LedgerError> for M1RuntimeError {
 impl From<VerifyError> for M1RuntimeError {
     fn from(err: VerifyError) -> Self {
         Self::Verify(err)
+    }
+}
+
+impl From<DurableLedgerFrontierError> for M1RuntimeError {
+    fn from(err: DurableLedgerFrontierError) -> Self {
+        Self::DurableFrontier(err)
     }
 }
 
@@ -751,6 +777,10 @@ pub(crate) struct M1RuntimeSession {
     scope: String,
     session_transcript_hash: Option<[u8; 32]>,
     next_audit_index: usize,
+    /// Once an input provider outcome becomes indeterminate, the session's
+    /// input lane remains closed until the session itself is replaced or an
+    /// explicit authoritative reconciliation path is introduced.
+    input_effect_uncertain: bool,
 }
 
 impl M1RuntimeSession {
@@ -786,6 +816,7 @@ impl M1RuntimeSession {
             scope: scope.into(),
             session_transcript_hash: None,
             next_audit_index: 0,
+            input_effect_uncertain: false,
         }
     }
 
@@ -797,6 +828,20 @@ impl M1RuntimeSession {
         request_id: Uuid,
         scope: impl Into<String>,
     ) -> Result<Self, M1RuntimeError> {
+        // An empty persisted artifact is not a recoverable M1 session. Use
+        // M1RuntimeSession::new for first-run initialization; restore requires
+        // at least one authenticated consent record to establish history.
+        if entries.is_empty() {
+            return Err(M1RuntimeError::EmptyPersistedLedger);
+        }
+
+        // Chain::from_entries deliberately does not authenticate its input.
+        // Restore must therefore verify the complete persisted sequence before
+        // it can influence the live consent state machine. In particular, do
+        // not replay forged or torn entries merely because their shape parses.
+        let verifying_key = signing_key.verifying_key();
+        Verifier::verify_chain(&entries, &verifying_key)?;
+
         let mut runtime = Self::from_chain(
             Chain::from_entries(entries, signing_key),
             source_id,
@@ -804,13 +849,109 @@ impl M1RuntimeSession {
             request_id,
             scope,
         );
+        runtime.validate_persisted_context()?;
         runtime.replay_persisted_consent_state()?;
+        Ok(runtime)
+    }
+
+    /// Restore an M1 session only when its authenticated ledger is also bound to
+    /// an already-established durable frontier witness.
+    ///
+    /// Signature verification proves that the persisted history is internally
+    /// authentic. The durable frontier witness adds the stronger invariant that
+    /// this exact history was accepted by the reviewed persistence boundary.
+    /// Current-authority / anti-rollback policy remains the responsibility of the
+    /// authoritative adapter that minted the witness; this method never treats a
+    /// locally constructed token as authority.
+    // Keep the recovery boundary explicit: each argument is part of the
+    // authenticated-history / session / durable-frontier binding and collapsing
+    // these inputs into an untyped bundle would make the trust boundary easier
+    // to misuse. This is intentionally a narrow Clippy exception.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_persisted_entries_with_durable_frontier(
+        signing_key: SigningKey,
+        entries: Vec<LedgerEntry>,
+        source_id: [u8; 32],
+        session_id: Uuid,
+        request_id: Uuid,
+        scope: impl Into<String>,
+        durable_frontier: &DurableLedgerFrontierV1,
+        expected_persistence_policy_digest: [u8; 32],
+    ) -> Result<Self, M1RuntimeError> {
+        let runtime = Self::from_persisted_entries(
+            signing_key,
+            entries,
+            source_id,
+            session_id,
+            request_id,
+            scope,
+        )?;
+        durable_frontier
+            .verify_against_chain(&runtime.chain, expected_persistence_policy_digest)?;
         Ok(runtime)
     }
 
     pub(crate) fn state(&self) -> M1SessionState {
         self.session.state()
     }
+
+    /// Canonical digest of the protected runtime state relevant to exact execution.
+    ///
+    /// The digest includes session identity, consent state, granted permission
+    /// bits, authenticated ledger frontier, scope, transcript binding, and the
+    /// fail-closed input-effect uncertainty latch. It is intentionally
+    /// serializer-independent so execution handles can use it as a stable
+    /// current-state fence.
+    pub(crate) fn protected_execution_state_digest(&self) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        // v2 makes the uncertainty latch load-bearing: an execution handle
+        // minted before an indeterminate effect must not remain valid afterward.
+        hasher.update(b"xenia:m1-protected-execution-state:v2\\0");
+        hasher.update(&self.source_id);
+        hasher.update(self.session_id.as_bytes());
+        hasher.update(self.request_id.as_bytes());
+        hasher.update(&(self.scope.len() as u64).to_be_bytes());
+        hasher.update(self.scope.as_bytes());
+        hasher.update(&(self.chain.entry_count() as u64).to_be_bytes());
+        hasher.update(&self.chain.last_hash());
+
+        let state_tag = match self.session.state() {
+            M1SessionState::Idle => 0,
+            M1SessionState::Offered => 1,
+            M1SessionState::Active => 2,
+            M1SessionState::Denied => 3,
+            M1SessionState::Revoked => 4,
+            M1SessionState::Ended => 5,
+            M1SessionState::Failed => 6,
+        };
+        hasher.update(&[state_tag]);
+
+        let permissions = self.session.granted_permissions();
+        let permission_bits = [
+            u8::from(permissions.stream_frame),
+            u8::from(permissions.stream_telemetry),
+            u8::from(permissions.stream_audio),
+            u8::from(permissions.inject_input),
+            u8::from(permissions.read_host_clipboard),
+            u8::from(permissions.write_host_clipboard),
+            u8::from(permissions.send_file_to_viewer),
+            u8::from(permissions.receive_file_from_viewer),
+        ];
+        hasher.update(&permission_bits);
+
+        match self.session_transcript_hash {
+            Some(hash) => {
+                hasher.update(&[1]);
+                hasher.update(&hash);
+            }
+            None => hasher.update(&[0]),
+        }
+
+        hasher.update(&[u8::from(self.input_effect_uncertain)]);
+
+        *hasher.finalize().as_bytes()
+    }
+
 
     pub(crate) fn entries(&self) -> Vec<LedgerEntry> {
         self.chain.iter().cloned().collect()
@@ -936,12 +1077,42 @@ impl M1RuntimeSession {
         let bytes = std::fs::read(path)?;
         Ok(bincode::deserialize(&bytes)?)
     }
-
     pub(crate) fn verify_entries(
         entries: &[LedgerEntry],
         public_key: &VerifyingKey,
     ) -> Result<(), M1RuntimeError> {
         Verifier::verify_chain(entries, public_key)?;
+        Ok(())
+    }
+
+    fn validate_persisted_context(&self) -> Result<(), M1RuntimeError> {
+        for (entry_index, entry) in self.chain.iter().enumerate() {
+            if entry.event.source_id != self.source_id {
+                return Err(M1RuntimeError::PersistedContextMismatch {
+                    entry_index,
+                    field: "source_id",
+                });
+            }
+            if entry.event.session_id != self.session_id {
+                return Err(M1RuntimeError::PersistedContextMismatch {
+                    entry_index,
+                    field: "session_id",
+                });
+            }
+            if entry.event.request_id != self.request_id {
+                return Err(M1RuntimeError::PersistedContextMismatch {
+                    entry_index,
+                    field: "request_id",
+                });
+            }
+            if entry.event.scope != self.scope {
+                return Err(M1RuntimeError::PersistedContextMismatch {
+                    entry_index,
+                    field: "scope",
+                });
+            }
+        }
+
         Ok(())
     }
 
@@ -1059,6 +1230,36 @@ impl M1RuntimeSession {
                 permission: M1Permission::StreamFrame,
             }))
         }
+    }
+
+    /// Execute one input operation while preserving the provider-boundary
+    /// outcome.
+    ///
+    /// Only an Applied result advances the M1 audit state. Provider acceptance,
+    /// explicit pre-effect rejection, and indeterminate outcomes remain unaudited
+    /// because none independently proves the requested host-side consequence completed.
+    pub(crate) fn execute_input_effect_outcome(
+        &mut self,
+        effect: impl FnOnce() -> Result<InputEffectOutcome, M1RuntimeError>,
+    ) -> Result<InputEffectOutcome, M1RuntimeError> {
+        self.session.check_permission(M1Permission::InjectInput)?;
+        if self.input_effect_uncertain {
+            return Err(M1RuntimeError::InputInjection(
+                "input effect lane is sealed after an indeterminate provider outcome; blind continuation is not permitted".into(),
+            ));
+        }
+
+        let outcome = effect()?;
+        if outcome == InputEffectOutcome::Indeterminate {
+            // Once provider entry is uncertain, the runtime cannot establish
+            // that a subsequent input operation is independent of the unresolved
+            // effect. Fail closed rather than allowing a blind continuation.
+            self.input_effect_uncertain = true;
+        } else if outcome == InputEffectOutcome::Applied {
+            self.session.inject_input()?;
+            self.flush_new_audit_events()?;
+        }
+        Ok(outcome)
     }
 
     pub(crate) fn allow_input_flow(&mut self) -> Result<(), M1RuntimeError> {
@@ -1901,6 +2102,224 @@ mod tests {
     }
 
     #[test]
+    fn input_effect_is_audited_only_after_successful_backend_effect() {
+        let (mut runtime, _verifying_key) = runtime(31);
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet {
+                inject_input: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        let mut called = false;
+        runtime
+            .execute_input_effect_outcome(|| {
+                called = true;
+                Ok(InputEffectOutcome::Applied)
+            })
+            .unwrap();
+        assert!(called);
+        assert_eq!(
+            runtime.session.audit().last(),
+            Some(&xenia_peer_core::M1AuditEvent::InputInjected)
+        );
+
+        let mut called = false;
+        let err = runtime
+            .execute_input_effect_outcome(|| {
+                called = true;
+                Err(M1RuntimeError::InputInjection("backend rejected".into()))
+            })
+            .unwrap_err();
+        assert!(called);
+        assert!(matches!(err, M1RuntimeError::InputInjection(_)));
+        assert_eq!(
+            runtime
+                .session
+                .audit()
+                .iter()
+                .filter(|event| **event == xenia_peer_core::M1AuditEvent::InputInjected)
+                .count(),
+            1,
+            "failed backend injection must not create a false success audit"
+        );
+    }
+
+    #[test]
+    fn typed_provider_outcomes_never_forge_input_injected_audit() {
+        let (mut runtime, _verifying_key) = runtime(34);
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet {
+                inject_input: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        let before = runtime
+            .session
+            .audit()
+            .iter()
+            .filter(|event| **event == xenia_peer_core::M1AuditEvent::InputInjected)
+            .count();
+
+        let outcome = runtime
+            .execute_input_effect_outcome(|| Ok(InputEffectOutcome::Accepted))
+            .unwrap();
+        assert_eq!(outcome, InputEffectOutcome::Accepted);
+        assert_eq!(
+            runtime
+                .session
+                .audit()
+                .iter()
+                .filter(|event| **event == xenia_peer_core::M1AuditEvent::InputInjected)
+                .count(),
+            before,
+            "provider acknowledgement must not be recorded as confirmed injection"
+        );
+
+        let outcome = runtime
+            .execute_input_effect_outcome(|| Ok(InputEffectOutcome::Indeterminate))
+            .unwrap();
+        assert_eq!(outcome, InputEffectOutcome::Indeterminate);
+        assert_eq!(
+            runtime
+                .session
+                .audit()
+                .iter()
+                .filter(|event| **event == xenia_peer_core::M1AuditEvent::InputInjected)
+                .count(),
+            before,
+            "indeterminate provider outcome must not be recorded as confirmed injection"
+        );
+
+        let outcome = runtime
+            .execute_input_effect_outcome(|| Ok(InputEffectOutcome::RejectionBeforeEffect))
+            .unwrap();
+        assert_eq!(outcome, InputEffectOutcome::RejectionBeforeEffect);
+        assert_eq!(
+            runtime
+                .session
+                .audit()
+                .iter()
+                .filter(|event| **event == xenia_peer_core::M1AuditEvent::InputInjected)
+                .count(),
+            before,
+            "pre-effect rejection must not create an input-injected audit event"
+        );
+    }
+
+    #[test]
+    fn input_effect_uncertainty_changes_protected_execution_state() {
+        let (mut runtime, _verifying_key) = runtime(36);
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet {
+                inject_input: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        let before = runtime.protected_execution_state_digest();
+        runtime
+            .execute_input_effect_outcome(|| Ok(InputEffectOutcome::Indeterminate))
+            .unwrap();
+        let after = runtime.protected_execution_state_digest();
+
+        assert_ne!(
+            before, after,
+            "the uncertainty latch must invalidate previously minted execution-state bindings"
+        );
+    }
+
+    #[test]
+    fn indeterminate_input_effect_seals_the_input_lane() {
+        let (mut runtime, _verifying_key) = runtime(35);
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet {
+                inject_input: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        let first = runtime
+            .execute_input_effect_outcome(|| Ok(InputEffectOutcome::Indeterminate))
+            .unwrap();
+        assert_eq!(first, InputEffectOutcome::Indeterminate);
+
+        let mut called = false;
+        let err = runtime
+            .execute_input_effect_outcome(|| {
+                called = true;
+                Ok(InputEffectOutcome::Applied)
+            })
+            .unwrap_err();
+
+        assert!(!called, "sealed input lane must not invoke a later provider call");
+        assert!(matches!(err, M1RuntimeError::InputInjection(message) if
+            message.contains("sealed after an indeterminate provider outcome")
+        ));
+        assert_eq!(
+            runtime
+                .session
+                .audit()
+                .iter()
+                .filter(|event| **event == xenia_peer_core::M1AuditEvent::InputInjected)
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn denied_input_effect_never_calls_backend() {
+        let (mut runtime, _verifying_key) = runtime(32);
+        runtime.offer().unwrap();
+        runtime.grant_consent_scoped(M1PermissionSet::default()).unwrap();
+
+        let mut called = false;
+        let err = runtime
+            .execute_input_effect_outcome(|| {
+                called = true;
+                Ok(InputEffectOutcome::Applied)
+            })
+            .unwrap_err();
+
+        assert!(!called);
+        assert!(matches!(
+            err,
+            M1RuntimeError::Session(M1SessionError::PermissionDenied {
+                permission: M1Permission::InjectInput,
+                ..
+            })
+        ));
+    }
+    #[test]
+    fn protected_execution_state_digest_fences_consent_and_frontier_changes() {
+        let (mut runtime, _) = runtime(33);
+        let idle = runtime.protected_execution_state_digest();
+
+        runtime.offer().unwrap();
+        let offered = runtime.protected_execution_state_digest();
+        assert_ne!(idle, offered);
+
+        runtime.grant_consent_scoped(M1PermissionSet {
+            inject_input: true,
+            ..M1PermissionSet::default()
+        }).unwrap();
+        let active = runtime.protected_execution_state_digest();
+        assert_ne!(offered, active);
+
+        runtime.revoke().unwrap();
+        let revoked = runtime.protected_execution_state_digest();
+        assert_ne!(active, revoked);
+
+        runtime.bind_session_transcript_hash([0x41; 32]);
+        assert_ne!(revoked, runtime.protected_execution_state_digest());
+    }
+
+    #[test]
     fn runtime_lifecycle_appends_only_consent_boundaries() {
         let (mut runtime, verifying_key) = runtime(11);
 
@@ -2435,7 +2854,6 @@ mod tests {
             valid_until: None,
             revoked_policy_ids: Vec::new(),
         };
-
         require_sealed_evidence_trust_policy_minimum_epoch(&policy, 7)
             .expect("matching minimum policy epoch should pass");
 
@@ -2448,7 +2866,6 @@ mod tests {
             .expect_err("missing policy epoch must fail closed when a minimum is required");
         assert!(err.to_string().contains("does not declare policy_epoch"));
     }
-
     #[test]
     fn runtime_refuses_full_pqc_export_until_pq_signatures_land() {
         let (mut runtime, verifying_key) = runtime(25);
@@ -2615,6 +3032,175 @@ mod tests {
         ));
 
         runtime.verify(&verifying_key).unwrap();
+    }
+
+    #[test]
+    fn persisted_restore_requires_durable_frontier_binding() {
+        let (mut runtime, _) = runtime(27);
+        runtime.offer().unwrap();
+        runtime.grant_consent().unwrap();
+        let persisted = runtime.entries();
+        let durable_frontier = runtime
+            .chain
+            .verify_restored_durable_frontier_v1([0xD1; 32], |_, claim| {
+                assert_eq!(claim.entry_count, 2);
+                assert_eq!(claim.persistence_policy_digest, [0xD1; 32]);
+                Ok(())
+            })
+            .unwrap();
+
+        let signing_key = SigningKey::from_bytes(&[27; 32]);
+        let restored = M1RuntimeSession::from_persisted_entries_with_durable_frontier(
+            signing_key,
+            persisted,
+            [0xAB; 32],
+            Uuid::from_bytes([1; 16]),
+            Uuid::from_bytes([2; 16]),
+            "view screen",
+            &durable_frontier,
+            [0xD1; 32],
+        )
+        .unwrap();
+
+        assert_eq!(restored.entries().len(), 2);
+        assert_eq!(restored.state(), M1SessionState::Active);
+    }
+
+    #[test]
+    fn persisted_restore_rejects_frontier_mismatch_even_when_entries_verify() {
+        let (mut runtime, _) = runtime(28);
+        runtime.offer().unwrap();
+        runtime.grant_consent().unwrap();
+        let durable_frontier = runtime
+            .chain
+            .verify_restored_durable_frontier_v1([0xD1; 32], |_, _| Ok(()))
+            .unwrap();
+
+        runtime.revoke().unwrap();
+        let persisted = runtime.entries();
+        let signing_key = SigningKey::from_bytes(&[28; 32]);
+
+        let result = M1RuntimeSession::from_persisted_entries_with_durable_frontier(
+            signing_key,
+            persisted,
+            [0xAB; 32],
+            Uuid::from_bytes([1; 16]),
+            Uuid::from_bytes([2; 16]),
+            "view screen",
+            &durable_frontier,
+            [0xD1; 32],
+        );
+
+        assert!(matches!(
+            result,
+            Err(M1RuntimeError::DurableFrontier(
+                DurableLedgerFrontierError::ChainFrontierMismatch
+            ))
+        ));
+    }
+
+    #[test]
+    fn persisted_restore_rejects_valid_ledger_from_wrong_session_context() {
+        let signing_key = SigningKey::from_bytes(&[29; 32]);
+        let source_session = Uuid::from_bytes([3; 16]);
+        let restore_session = Uuid::from_bytes([4; 16]);
+
+        let mut source = M1RuntimeSession::new(
+            signing_key.clone(),
+            [0xAB; 32],
+            source_session,
+            Uuid::from_bytes([2; 16]),
+            "view screen",
+        );
+        source.offer().unwrap();
+        source.grant_consent().unwrap();
+
+        let result = M1RuntimeSession::from_persisted_entries(
+            signing_key,
+            source.entries(),
+            [0xAB; 32],
+            restore_session,
+            Uuid::from_bytes([2; 16]),
+            "view screen",
+        );
+
+        assert!(matches!(
+            result,
+            Err(M1RuntimeError::PersistedContextMismatch {
+                entry_index: 0,
+                field: "session_id",
+            })
+        ));
+    }
+
+    #[test]
+    fn persisted_restore_rejects_valid_ledger_from_wrong_scope_context() {
+        let signing_key = SigningKey::from_bytes(&[30; 32]);
+        let mut source = M1RuntimeSession::new(
+            signing_key.clone(),
+            [0xAB; 32],
+            Uuid::from_bytes([5; 16]),
+            Uuid::from_bytes([6; 16]),
+            "view screen",
+        );
+        source.offer().unwrap();
+        source.grant_consent().unwrap();
+
+        let result = M1RuntimeSession::from_persisted_entries(
+            signing_key,
+            source.entries(),
+            [0xAB; 32],
+            Uuid::from_bytes([5; 16]),
+            Uuid::from_bytes([6; 16]),
+            "inject input",
+        );
+
+        assert!(matches!(
+            result,
+            Err(M1RuntimeError::PersistedContextMismatch {
+                entry_index: 0,
+                field: "scope",
+            })
+        ));
+    }
+
+    #[test]
+    fn persisted_restore_rejects_empty_ledger() {
+        let signing_key = SigningKey::from_bytes(&[18; 32]);
+
+        let result = M1RuntimeSession::from_persisted_entries(
+            signing_key,
+            Vec::new(),
+            [0xAB; 32],
+            Uuid::from_bytes([1; 16]),
+            Uuid::from_bytes([2; 16]),
+            "view screen",
+        );
+
+        assert!(matches!(result, Err(M1RuntimeError::EmptyPersistedLedger)));
+    }
+
+    #[test]
+    fn persisted_restore_rejects_tampered_entries_before_replay() {
+        let (mut runtime, _) = runtime(19);
+
+        runtime.offer().unwrap();
+        runtime.grant_consent().unwrap();
+
+        let mut entries = runtime.entries();
+        entries[1].signature[0] ^= 0x01;
+
+        let signing_key = SigningKey::from_bytes(&[19; 32]);
+        let result = M1RuntimeSession::from_persisted_entries(
+            signing_key,
+            entries,
+            [0xAB; 32],
+            Uuid::from_bytes([1; 16]),
+            Uuid::from_bytes([2; 16]),
+            "view screen",
+        );
+
+        assert!(matches!(result, Err(M1RuntimeError::Verify(_))));
     }
 
     #[test]

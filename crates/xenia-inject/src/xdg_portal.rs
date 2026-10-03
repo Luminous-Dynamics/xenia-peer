@@ -78,22 +78,26 @@ enum Command {
     PointerMove {
         x: f64,
         y: f64,
+        reply: mpsc::Sender<Result<(), InjectError>>,
     },
     PointerButton {
         x: f64,
         y: f64,
         button: u8,
         pressed: bool,
+        reply: mpsc::Sender<Result<(), InjectError>>,
     },
     Key {
         code: u32,
         pressed: bool,
+        reply: mpsc::Sender<Result<(), InjectError>>,
     },
     Touch {
         index: u8,
         x: f64,
         y: f64,
         phase: u8,
+        reply: mpsc::Sender<Result<(), InjectError>>,
     },
     Shutdown,
 }
@@ -154,10 +158,23 @@ impl XdgPortalInjector {
         denorm(y, self.screen_height)
     }
 
-    fn send(&self, cmd: Command) -> Result<(), InjectError> {
+    fn send(
+        &self,
+        command: impl FnOnce(mpsc::Sender<Result<(), InjectError>>) -> Command,
+    ) -> Result<(), InjectError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
         self.tx
-            .send(cmd)
-            .map_err(|_| InjectError::Backend("portal worker thread gone".into()))
+            .send(command(reply_tx))
+            .map_err(|_| InjectError::Backend("portal worker thread gone".into()))?;
+
+        // The provider operation runs asynchronously on the portal worker, so
+        // returning from `send()` immediately would falsely classify a queued
+        // event as Applied. Wait for the worker's actual portal result instead.
+        // A timeout is deliberately an ordinary Backend error: the provider may
+        // have entered the operation even though no response arrived.
+        reply_rx
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|err| InjectError::Backend(format!("portal worker result unavailable: {err}")))?
     }
 }
 
@@ -172,9 +189,10 @@ impl Drop for XdgPortalInjector {
 
 impl InputInjector for XdgPortalInjector {
     fn inject_pointer_move(&mut self, x: f32, y: f32) -> Result<(), InjectError> {
-        self.send(Command::PointerMove {
+        self.send(|reply| Command::PointerMove {
             x: self.denorm_x(x),
             y: self.denorm_y(y),
+            reply,
         })
     }
 
@@ -185,16 +203,17 @@ impl InputInjector for XdgPortalInjector {
         button: u8,
         pressed: bool,
     ) -> Result<(), InjectError> {
-        self.send(Command::PointerButton {
+        self.send(|reply| Command::PointerButton {
             x: self.denorm_x(x),
             y: self.denorm_y(y),
             button,
             pressed,
+            reply,
         })
     }
 
     fn inject_key(&mut self, code: u32, pressed: bool, _modifiers: u8) -> Result<(), InjectError> {
-        self.send(Command::Key { code, pressed })
+        self.send(|reply| Command::Key { code, pressed, reply })
     }
 
     fn inject_touch(
@@ -205,11 +224,12 @@ impl InputInjector for XdgPortalInjector {
         phase: u8,
         _pressure: f32,
     ) -> Result<(), InjectError> {
-        self.send(Command::Touch {
+        self.send(|reply| Command::Touch {
             index,
             x: self.denorm_x(x),
             y: self.denorm_y(y),
             phase,
+            reply,
         })
     }
 
@@ -247,44 +267,84 @@ fn portal_worker(rx: mpsc::Receiver<Command>, ready_tx: mpsc::Sender<Result<(), 
         while let Ok(cmd) = rx.recv() {
             match cmd {
                 Command::Shutdown => break,
-                Command::PointerMove { x, y } => {
+                Command::PointerMove { x, y, reply } => {
                     let (dx, dy) = match last_pointer {
                         Some((lx, ly)) => (x - lx, y - ly),
                         None => (0.0, 0.0),
                     };
-                    last_pointer = Some((x, y));
-                    if dx != 0.0 || dy != 0.0 {
-                        let _ = proxy.notify_pointer_motion(&session, dx, dy).await;
+                    let result = if dx != 0.0 || dy != 0.0 {
+                        proxy
+                            .notify_pointer_motion(&session, dx, dy)
+                            .await
+                            .map_err(|err| InjectError::Backend(format!(
+                                "portal pointer motion failed: {err}"
+                            )))
+                    } else {
+                        Ok(())
+                    };
+                    if result.is_ok() {
+                        last_pointer = Some((x, y));
                     }
+                    let _ = reply.send(result);
                 }
                 Command::PointerButton {
                     x,
                     y,
                     button,
                     pressed,
+                    reply,
                 } => {
                     let (dx, dy) = match last_pointer {
                         Some((lx, ly)) => (x - lx, y - ly),
                         None => (0.0, 0.0),
                     };
-                    last_pointer = Some((x, y));
-                    if dx != 0.0 || dy != 0.0 {
-                        let _ = proxy.notify_pointer_motion(&session, dx, dy).await;
-                    }
-                    let _ = proxy
-                        .notify_pointer_button(&session, evdev_button(button), key_state(pressed))
-                        .await;
+                    let result = if dx != 0.0 || dy != 0.0 {
+                        proxy
+                            .notify_pointer_motion(&session, dx, dy)
+                            .await
+                            .map_err(|err| InjectError::Backend(format!(
+                                "portal pointer motion failed: {err}"
+                            )))
+                    } else {
+                        Ok(())
+                    };
+                    let result = if result.is_ok() {
+                        last_pointer = Some((x, y));
+                        proxy
+                            .notify_pointer_button(
+                                &session,
+                                evdev_button(button),
+                                key_state(pressed),
+                            )
+                            .await
+                            .map_err(|err| InjectError::Backend(format!(
+                                "portal pointer button failed: {err}"
+                            )))
+                    } else {
+                        result
+                    };
+                    let _ = reply.send(result);
                 }
-                Command::Key { code, pressed } => {
-                    let _ = proxy
+                Command::Key { code, pressed, reply } => {
+                    let result = proxy
                         .notify_keyboard_keycode(
                             &session,
                             i32::try_from(code).unwrap_or(i32::MAX),
                             key_state(pressed),
                         )
-                        .await;
+                        .await
+                        .map_err(|err| InjectError::Backend(format!(
+                            "portal keyboard injection failed: {err}"
+                        )));
+                    let _ = reply.send(result);
                 }
-                Command::Touch { index, x, y, phase } => {
+                Command::Touch {
+                    index,
+                    x,
+                    y,
+                    phase,
+                    reply,
+                } => {
                     let slot = u32::from(index);
                     // Portal spec: down/motion carry (stream, slot, x, y);
                     // stream is a ScreenCast node id this injector doesn't
@@ -299,8 +359,11 @@ fn portal_worker(rx: mpsc::Receiver<Command>, ready_tx: mpsc::Sender<Result<(), 
                                 .await
                         }
                         _ => proxy.notify_touch_up(&session, slot).await,
-                    };
-                    let _ = result;
+                    }
+                    .map_err(|err| InjectError::Backend(format!(
+                        "portal touch injection failed: {err}"
+                    )));
+                    let _ = reply.send(result);
                 }
             }
         }
