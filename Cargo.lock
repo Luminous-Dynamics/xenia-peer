@@ -9565,6 +9565,7 @@ version = "0.0.0-m0"
 dependencies = [
  "ashpd",
  "bincode",
+ "blake3",
  "core-graphics 0.24.0",
  "input-linux",
  "nix 0.29.0",
