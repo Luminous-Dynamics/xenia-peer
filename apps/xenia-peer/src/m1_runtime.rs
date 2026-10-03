@@ -777,6 +777,10 @@ pub(crate) struct M1RuntimeSession {
     scope: String,
     session_transcript_hash: Option<[u8; 32]>,
     next_audit_index: usize,
+    /// Once an input provider outcome becomes indeterminate, the session's
+    /// input lane remains closed until the session itself is replaced or an
+    /// explicit authoritative reconciliation path is introduced.
+    input_effect_uncertain: bool,
 }
 
 impl M1RuntimeSession {
@@ -812,6 +816,7 @@ impl M1RuntimeSession {
             scope: scope.into(),
             session_transcript_hash: None,
             next_audit_index: 0,
+            input_effect_uncertain: false,
         }
     }
 
@@ -1233,8 +1238,19 @@ impl M1RuntimeSession {
         effect: impl FnOnce() -> Result<InputEffectOutcome, M1RuntimeError>,
     ) -> Result<InputEffectOutcome, M1RuntimeError> {
         self.session.check_permission(M1Permission::InjectInput)?;
+        if self.input_effect_uncertain {
+            return Err(M1RuntimeError::InputInjection(
+                "input effect lane is sealed after an indeterminate provider outcome;                  blind continuation is not permitted".into(),
+            ));
+        }
+
         let outcome = effect()?;
-        if outcome == InputEffectOutcome::Applied {
+        if outcome == InputEffectOutcome::Indeterminate {
+            // Once provider entry is uncertain, the runtime cannot establish
+            // that a subsequent input operation is independent of the unresolved
+            // effect. Fail closed rather than allowing a blind continuation.
+            self.input_effect_uncertain = true;
+        } else if outcome == InputEffectOutcome::Applied {
             self.session.inject_input()?;
             self.flush_new_audit_events()?;
         }
@@ -2186,6 +2202,45 @@ mod tests {
                 .count(),
             before,
             "pre-effect rejection must not create an input-injected audit event"
+        );
+    }
+
+    #[test]
+    fn indeterminate_input_effect_seals_the_input_lane() {
+        let (mut runtime, _verifying_key) = runtime(35);
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet {
+                inject_input: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        let first = runtime
+            .execute_input_effect_outcome(|| Ok(InputEffectOutcome::Indeterminate))
+            .unwrap();
+        assert_eq!(first, InputEffectOutcome::Indeterminate);
+
+        let mut called = false;
+        let err = runtime
+            .execute_input_effect_outcome(|| {
+                called = true;
+                Ok(InputEffectOutcome::Applied)
+            })
+            .unwrap_err();
+
+        assert!(!called, "sealed input lane must not invoke a later provider call");
+        assert!(matches!(err, M1RuntimeError::InputInjection(message) if
+            message.contains("sealed after an indeterminate provider outcome")
+        ));
+        assert_eq!(
+            runtime
+                .session
+                .audit()
+                .iter()
+                .filter(|event| **event == xenia_peer_core::M1AuditEvent::InputInjected)
+                .count(),
+            0
         );
     }
 
