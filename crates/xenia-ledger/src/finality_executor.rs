@@ -12,7 +12,7 @@
 
 use crate::{
     ExactExecutionConsumptionError, ExactExecutionHandleV1, FinalityAttemptError,
-    FinalityAttemptV1, FinalityAttemptError, FinalityJournalError, FinalityJournalV1,
+    FinalityAttemptStateV1, FinalityAttemptV1, FinalityJournalError, FinalityJournalV1,
     FinalityOutcomeV1, FinalityReceiptV1,
 };
 
@@ -111,7 +111,8 @@ impl<'a> FinalityExecutorV1<'a> {
     }
 }
 
-/// Errors raised while executing one exact finality attempt.\n#[derive(Debug, thiserror::Error)]
+/// Errors raised while executing one exact finality attempt.
+#[derive(Debug, thiserror::Error)]
 pub enum FinalityExecutorError {
     /// The exact handle did not match the actual consequence request.
     #[error("execution handle validation failed: {0}")]
