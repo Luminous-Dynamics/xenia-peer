@@ -608,9 +608,8 @@ impl SessionInputInjector {
     ) -> Result<InputEffectOutcome, InjectError> {
         let outcome = self.inner.process_event_outcome(event)?;
         match outcome {
-            InputEffectOutcome::Applied | InputEffectOutcome::Indeterminate => {
-                self.track_event_state(event);
-            }
+            InputEffectOutcome::Applied => self.track_event_state(event),
+            InputEffectOutcome::Indeterminate => self.track_indeterminate_state(event),
             InputEffectOutcome::RejectionBeforeEffect => {}
         }
         Ok(outcome)
@@ -652,6 +651,39 @@ impl SessionInputInjector {
                     _ => {
                         self.active_touches.remove(index);
                     }
+                }
+            }
+        }
+    }
+
+    /// Conservatively track an effect whose provider outcome is unknown.
+    ///
+    /// Possible press/down transitions are retained so teardown can release
+    /// them. Possible release/up/cancel transitions are deliberately *not*
+    /// removed from the tracked set, because the provider may not have seen
+    /// the release at all. A duplicate teardown release is safer than losing
+    /// knowledge of a possibly-held host state.
+    fn track_indeterminate_state(&mut self, event: &InputEvent) {
+        match event {
+            InputEvent::Pointer { x, y, button, pressed }
+            | InputEvent::PointerButton { x, y, button, pressed } => {
+                if *pressed {
+                    self.pressed_buttons.insert(*button, (*x, *y));
+                }
+            }
+            InputEvent::PointerMove { x, y } => {
+                for position in self.pressed_buttons.values_mut() {
+                    *position = (*x, *y);
+                }
+            }
+            InputEvent::Key { code, modifiers, pressed } => {
+                if *pressed {
+                    self.pressed_keys.insert(*code, *modifiers);
+                }
+            }
+            InputEvent::Touch { index, x, y, phase, pressure } => {
+                if matches!(*phase, 0 | 1) {
+                    self.active_touches.insert(*index, (*x, *y, *pressure));
                 }
             }
         }
@@ -1378,6 +1410,78 @@ mod tests {
         assert_eq!(
             injector.process_event_outcome(&event).unwrap(),
             InputEffectOutcome::RejectionBeforeEffect
+        );
+    }
+
+    #[test]
+    fn session_wrapper_retains_state_after_indeterminate_release() {
+        struct UncertainRelease;
+
+        impl InputInjector for UncertainRelease {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_pointer_button(
+                &mut self,
+                _x: f32,
+                _y: f32,
+                _button: u8,
+                pressed: bool,
+            ) -> Result<(), InjectError> {
+                if pressed {
+                    Ok(())
+                } else {
+                    Err(InjectError::Backend("release outcome unknown".into()))
+                }
+            }
+            fn inject_key(
+                &mut self,
+                _code: u32,
+                _pressed: bool,
+                _modifiers: u8,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_touch(
+                &mut self,
+                _index: u8,
+                _x: f32,
+                _y: f32,
+                _phase: u8,
+                _pressure: f32,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn backend_name(&self) -> &str { "uncertain-release" }
+        }
+
+        let mut injector = SessionInputInjector::new(Box::new(UncertainRelease));
+        let press = InputEvent::PointerButton {
+            x: 0.25,
+            y: 0.5,
+            button: 1,
+            pressed: true,
+        };
+        assert_eq!(
+            injector.process_event_outcome(&press).unwrap(),
+            InputEffectOutcome::Applied
+        );
+        assert_eq!(injector.active_state_count(), 1);
+
+        let release = InputEvent::PointerButton {
+            x: 0.25,
+            y: 0.5,
+            button: 1,
+            pressed: false,
+        };
+        assert_eq!(
+            injector.process_event_outcome(&release).unwrap(),
+            InputEffectOutcome::Indeterminate
+        );
+        assert_eq!(
+            injector.active_state_count(),
+            1,
+            "unknown release must remain tracked for teardown"
         );
     }
 
