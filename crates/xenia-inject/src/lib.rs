@@ -77,6 +77,10 @@ pub enum InjectError {
     /// Wrapped for logs; drop the event and carry on.
     #[error("inject backend: {0}")]
     Backend(String),
+
+    /// Decoded input event violated the current semantic protocol bounds.
+    #[error("invalid input event: {0}")]
+    InvalidEvent(#[from] InputEventValidationError),
 }
 
 /// Maximum serialized `InputEvent` payload accepted by the daemon before
@@ -1205,6 +1209,28 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn invalid_batch_event_prevents_any_backend_effect() {
+        let mut log = LoggingInjector::new(100, 100);
+        let events = [
+            InputEvent::PointerButton {
+                x: 0.5,
+                y: 0.5,
+                button: 0,
+                pressed: true,
+            },
+            InputEvent::PointerMove {
+                x: f32::NAN,
+                y: 0.5,
+            },
+        ];
+
+        let err = log
+            .process_events(&events)
+            .expect_err("semantic validation must run before the first backend call");
+        assert!(matches!(err, InjectError::InvalidEvent(_)));
+        assert!(log.events.is_empty());
+    }
     #[test]
     fn process_events_dispatches_all_variants() {
         let mut log = LoggingInjector::new(100, 100);
