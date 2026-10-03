@@ -495,6 +495,7 @@ mod tests {
     #[test]
     fn zero_bindings_are_rejected_before_handle_creation() {
         let (attestation, session, binding, authorization) = fixture();
+
         let result = ExactExecutionHandleV1::issue(
             &attestation,
             &session,
@@ -507,9 +508,13 @@ mod tests {
             authorization.prior_checkpoint,
             [0; 32],
             [0x71; 32],
-            [0x33; 32],
+            [0x72; 32],
+            [0x73; 32],
         );
-        assert!(matches!(result, Err(ExactExecutionHandleError::ZeroActDigest)));
+        assert!(matches!(
+            result,
+            Err(ExactExecutionHandleError::ZeroRelyingPartyDigest)
+        ));
 
         let result = ExactExecutionHandleV1::issue(
             &attestation,
@@ -523,9 +528,13 @@ mod tests {
             authorization.prior_checkpoint,
             [0x71; 32],
             [0; 32],
-            [0x33; 32],
+            [0x72; 32],
+            [0x73; 32],
         );
-        assert!(matches!(result, Err(ExactExecutionHandleError::ZeroSinkDigest)));
+        assert!(matches!(
+            result,
+            Err(ExactExecutionHandleError::ZeroActDigest)
+        ));
 
         let result = ExactExecutionHandleV1::issue(
             &attestation,
@@ -540,10 +549,30 @@ mod tests {
             [0x71; 32],
             [0x72; 32],
             [0; 32],
+            [0x73; 32],
+        );
+        assert!(matches!(
+            result,
+            Err(ExactExecutionHandleError::ZeroSinkDigest)
+        ));
+
+        let result = ExactExecutionHandleV1::issue(
+            &attestation,
+            &session,
+            &binding,
+            &Ed25519EvidenceSignatureBackend,
+            120,
+            authorization.capability_digest,
+            authorization.executor_workload_digest,
+            authorization.authority_epoch,
+            authorization.prior_checkpoint,
+            [0x71; 32],
+            [0x72; 32],
+            [0x73; 32],
+            [0; 32],
         );
         assert!(matches!(
             result,
             Err(ExactExecutionHandleError::ZeroProtectedStateDigest)
         ));
-    }
-}
+    }}
