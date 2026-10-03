@@ -354,8 +354,7 @@ impl AuthorityRecoveryStateV1 {
                 transition_fingerprint: require_fingerprint(transition_fingerprint)?,
                 authority_epoch: event_authority_epoch,
                 durable_frontier_digest: require_digest(event_frontier_digest)?,
-                /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
+                _seal: RecoveryStateSeal,
             },
             (
                 TransitionPending {
@@ -382,8 +381,7 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
+                    _seal: RecoveryStateSeal,
                 }
             }
             (
@@ -434,8 +432,7 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
+                    _seal: RecoveryStateSeal,
                 }
             }
             (
@@ -463,8 +460,7 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
+                    _seal: RecoveryStateSeal,
                 }
             }
             (
@@ -492,8 +488,7 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
+                    _seal: RecoveryStateSeal,
                 }
             }
             (
@@ -507,8 +502,7 @@ impl AuthorityRecoveryStateV1 {
                 transition_fingerprint: require_fingerprint(transition_fingerprint)?,
                 authority_epoch: event_authority_epoch,
                 durable_frontier_digest: require_digest(event_frontier_digest)?,
-                /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
+                _seal: RecoveryStateSeal,
             },
             (
                 OutcomeUnknown {
@@ -535,8 +529,7 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
+                    _seal: RecoveryStateSeal,
                 }
             }
             (
@@ -564,8 +557,7 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint: state_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
+                    _seal: RecoveryStateSeal,
                 }
             }
             (
@@ -616,8 +608,7 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
+                    _seal: RecoveryStateSeal,
                 }
             }
             (
@@ -645,8 +636,7 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
+                    _seal: RecoveryStateSeal,
                 }
             }
             (
@@ -697,8 +687,7 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
+                    _seal: RecoveryStateSeal,
                 }
             }
             (
@@ -726,8 +715,7 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
+                    _seal: RecoveryStateSeal,
                 }
             }
             (
@@ -742,8 +730,7 @@ impl AuthorityRecoveryStateV1 {
                 transition_fingerprint,
                 authority_epoch,
                 durable_frontier_digest,
-                /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
+                _seal: RecoveryStateSeal,
             },
             _ => {
                 return Err(AuthorityRecoveryError::InvalidTransition { state: self, event });
@@ -871,8 +858,7 @@ mod tests {
             transition_fingerprint: fingerprint,
             authority_epoch: 8,
             durable_frontier_digest: [0xF1; 32],
-            /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
+            _seal: RecoveryStateSeal,
         }
     }
 
@@ -881,8 +867,7 @@ mod tests {
             transition_fingerprint: fingerprint,
             authority_epoch: 8,
             durable_frontier_digest: [0xF1; 32],
-            /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
+            _seal: RecoveryStateSeal,
         }
     }
 
@@ -891,8 +876,7 @@ mod tests {
             transition_fingerprint: fingerprint,
             authority_epoch: 8,
             durable_frontier_digest: [0xF1; 32],
-            /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
+            _seal: RecoveryStateSeal,
         }
     }
 
@@ -901,8 +885,7 @@ mod tests {
             transition_fingerprint: fingerprint,
             authority_epoch: 8,
             durable_frontier_digest: [0xF1; 32],
-            /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
+            _seal: RecoveryStateSeal,
         }
     }
 
@@ -911,8 +894,7 @@ mod tests {
             transition_fingerprint: fingerprint,
             authority_epoch: 8,
             durable_frontier_digest: [0xF1; 32],
-            /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
+            _seal: RecoveryStateSeal,
         }
     }
 
@@ -921,8 +903,7 @@ mod tests {
             transition_fingerprint: fingerprint,
             authority_epoch: 8,
             durable_frontier_digest: [0xF1; 32],
-            /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
+            _seal: RecoveryStateSeal,
         }
     }
 
@@ -931,8 +912,7 @@ mod tests {
             transition_fingerprint: fingerprint,
             authority_epoch: 8,
             durable_frontier_digest: [0xF1; 32],
-            /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
+            _seal: RecoveryStateSeal,
         }
     }
 
