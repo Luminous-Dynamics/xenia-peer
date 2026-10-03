@@ -701,6 +701,69 @@ mod tests {
     }
 
     #[test]
+    fn committed_action_remains_fenced_against_fresh_authority() {
+        let path = temp_path("committed-action");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(lock_path_for(&path));
+
+        let mut journal = FinalityJournalV1::open(&path).unwrap();
+        let mut first =
+            FinalityAttemptV1::prepare([41; 16], [42; 32], [43; 32], [44; 32], [45; 32]).unwrap();
+        journal.append_attempt(&first).unwrap();
+        first.mark_effectuation_started().unwrap();
+        journal.append_attempt(&first).unwrap();
+        first.commit().unwrap();
+        journal.append_attempt(&first).unwrap();
+
+        let fresh =
+            FinalityAttemptV1::prepare([46; 16], [47; 32], [43; 32], [44; 32], [45; 32]).unwrap();
+        assert!(matches!(
+            journal.append_attempt(&fresh),
+            Err(FinalityJournalError::ActionAlreadyFenced { .. })
+        ));
+
+        drop(journal);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(lock_path_for(&path));
+    }
+
+    #[test]
+    fn replay_rejects_forged_overlapping_action_history() {
+        let path = temp_path("forged-overlap");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(lock_path_for(&path));
+
+        let mut first =
+            FinalityAttemptV1::prepare([51; 16], [52; 32], [53; 32], [54; 32], [55; 32]).unwrap();
+        first.mark_effectuation_started().unwrap();
+
+        let mut forged =
+            FinalityAttemptV1::prepare([56; 16], [57; 32], [53; 32], [54; 32], [55; 32]).unwrap();
+        forged.state = FinalityAttemptStateV1::EffectuationStarted;
+
+        let first_encoded = bincode::serialize(&FinalityJournalRecordV1::Attempt(first)).unwrap();
+        let second_encoded = bincode::serialize(&FinalityJournalRecordV1::Attempt(forged)).unwrap();
+
+        let mut bytes = Vec::with_capacity(
+            JOURNAL_MAGIC.len() + 4 + first_encoded.len() + 4 + second_encoded.len(),
+        );
+        bytes.extend_from_slice(JOURNAL_MAGIC);
+        bytes.extend_from_slice(&(first_encoded.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&first_encoded);
+        bytes.extend_from_slice(&(second_encoded.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&second_encoded);
+        fs::write(&path, bytes).unwrap();
+
+        assert!(matches!(
+            FinalityJournalV1::open(&path),
+            Err(FinalityJournalError::ActionAlreadyFenced { .. })
+        ));
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(lock_path_for(&path));
+    }
+
+    #[test]
     fn journal_fences_handle_reuse_across_distinct_attempt_ids() {
         let path = temp_path("handle-reuse");
         let _ = fs::remove_file(&path);
