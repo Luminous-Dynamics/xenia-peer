@@ -174,7 +174,7 @@ impl FinalityAttemptV1 {
     /// Stable digest of the complete attempt identity and lifecycle state.
     pub fn digest(&self) -> [u8; 32] {
         let mut hasher = Hasher::new();
-        hasher.update(b"xenia:finality-attempt-digest:v1\0");
+        hasher.update(b"xenia:finality-attempt-digest:v2\0");
         hasher.update(self.schema.as_bytes());
         hasher.update(&self.attempt_id);
         hasher.update(&self.handle_digest);
@@ -271,7 +271,7 @@ impl FinalityReceiptV1 {
     /// Stable digest for external archival and higher-level evidence binding.
     pub fn digest(&self) -> [u8; 32] {
         let mut hasher = Hasher::new();
-        hasher.update(b"xenia:finality-receipt-digest:v1\0");
+        hasher.update(b"xenia:finality-receipt-digest:v2\0");
         hasher.update(self.schema.as_bytes());
         hasher.update(&self.attempt_digest);
         hasher.update(&self.attempt_id);
@@ -279,7 +279,7 @@ impl FinalityReceiptV1 {
         hasher.update(&self.action_key_digest);
         hasher.update(&self.act_digest);
         hasher.update(&self.sink_digest);
-        hasher.update(&[self.outcome as u8]);
+        hasher.update(&[outcome_tag(self.outcome)]);
         *hasher.finalize().as_bytes()
     }
 
@@ -336,6 +336,14 @@ fn state_tag(state: FinalityAttemptStateV1) -> u8 {
         FinalityAttemptStateV1::Committed => 2,
         FinalityAttemptStateV1::Denied => 3,
         FinalityAttemptStateV1::Indeterminate => 4,
+    }
+}
+
+fn outcome_tag(outcome: FinalityOutcomeV1) -> u8 {
+    match outcome {
+        FinalityOutcomeV1::Committed => 0,
+        FinalityOutcomeV1::Denied => 1,
+        FinalityOutcomeV1::Indeterminate => 2,
     }
 }
 
