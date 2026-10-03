@@ -1242,10 +1242,9 @@ impl M1RuntimeSession {
     /// Execute one input operation while preserving the provider-boundary
     /// outcome.
     ///
-    /// Only a confirmed Applied result advances the M1 audit state. An explicit
-    /// pre-effect rejection leaves the state untouched, while Indeterminate
-    /// leaves the operation unaudited rather than manufacturing an InputInjected
-    /// event that the provider has not been proven to have effected.
+    /// Only an Applied result advances the M1 audit state. Provider acceptance,
+    /// explicit pre-effect rejection, and indeterminate outcomes remain unaudited
+    /// because none independently proves the requested host-side consequence completed.
     pub(crate) fn execute_input_effect_outcome(
         &mut self,
         effect: impl FnOnce() -> Result<InputEffectOutcome, M1RuntimeError>,
