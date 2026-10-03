@@ -2161,6 +2161,21 @@ mod tests {
             .count();
 
         let outcome = runtime
+            .execute_input_effect_outcome(|| Ok(InputEffectOutcome::Accepted))
+            .unwrap();
+        assert_eq!(outcome, InputEffectOutcome::Accepted);
+        assert_eq!(
+            runtime
+                .session
+                .audit()
+                .iter()
+                .filter(|event| **event == xenia_peer_core::M1AuditEvent::InputInjected)
+                .count(),
+            before,
+            "provider acknowledgement must not be recorded as confirmed injection"
+        );
+
+        let outcome = runtime
             .execute_input_effect_outcome(|| Ok(InputEffectOutcome::Indeterminate))
             .unwrap();
         assert_eq!(outcome, InputEffectOutcome::Indeterminate);
