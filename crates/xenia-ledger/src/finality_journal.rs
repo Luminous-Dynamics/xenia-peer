@@ -38,15 +38,14 @@ enum FinalityJournalRecordV1 {
 
 /// Single-owner append-only finality journal.
 ///
-/// Opening atomically claims a sibling `.lock` directory. A live process therefore
-/// refuses a second owner, including a second process that has independently
-/// reconstructed an empty in-memory fence. A stale lock is intentionally not
-/// guessed about: operators must reconcile/remove it after establishing that
-/// the prior owner is gone.
+/// Opening obtains an OS-level exclusive lock on the journal file itself. The
+/// lock is released automatically when the owning file handle closes, including
+/// normal process teardown and crash recovery by the operating system. A second
+/// process therefore cannot reconstruct an empty in-memory fence and append
+/// concurrently to the same journal.
 pub struct FinalityJournalV1 {
     path: PathBuf,
     file: File,
-    _lock: FinalityJournalLockV1,
     initialized: bool,
     latest: BTreeMap<[u8; 16], FinalityAttemptV1>,
     receipts: BTreeMap<[u8; 16], FinalityReceiptV1>,
