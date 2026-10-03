@@ -98,7 +98,7 @@ impl ExactExecutionHandleV1 {
         })
     }
 
-    /// Stable identity committing to authorization, exact act, and exact sink.
+    /// Stable identity committing to authorization, exact act, exact sink, and protected state.
     pub fn digest(&self) -> [u8; 32] {
         let mut hasher = Hasher::new();
         hasher.update(EXECUTION_HANDLE_DOMAIN);
@@ -309,6 +309,7 @@ mod tests {
             authorization.prior_checkpoint,
             act,
             sink,
+            [0x33; 32],
         )
         .unwrap()
     }
@@ -419,5 +420,24 @@ mod tests {
             [0x33; 32],
         );
         assert!(matches!(result, Err(ExactExecutionHandleError::ZeroSinkDigest)));
+
+        let result = ExactExecutionHandleV1::issue(
+            &attestation,
+            &session,
+            &binding,
+            &Ed25519EvidenceSignatureBackend,
+            120,
+            authorization.capability_digest,
+            authorization.executor_workload_digest,
+            authorization.authority_epoch,
+            authorization.prior_checkpoint,
+            [0x71; 32],
+            [0x72; 32],
+            [0; 32],
+        );
+        assert!(matches!(
+            result,
+            Err(ExactExecutionHandleError::ZeroProtectedStateDigest)
+        ));
     }
 }
