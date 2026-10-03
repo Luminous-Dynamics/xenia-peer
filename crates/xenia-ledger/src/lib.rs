@@ -77,6 +77,7 @@ mod checkpoint;
 mod compaction;
 mod durable_frontier;
 mod execution_handle;
+mod finality;
 mod entry;
 mod errors;
 mod hash;
@@ -143,6 +144,11 @@ pub use checkpoint::{
 pub use compaction::{
     LEDGER_COMPACTION_MANIFEST_SCHEMA, LedgerCompactionError, LedgerCompactionManifest,
     ledger_compaction_manifest_message,
+};
+
+pub use finality::{
+    FINALITY_ATTEMPT_SCHEMA, FINALITY_RECEIPT_SCHEMA, FinalityAttemptError,
+    FinalityAttemptStateV1, FinalityAttemptV1, FinalityOutcomeV1, FinalityReceiptV1,
 };
 
 pub use execution_handle::{
