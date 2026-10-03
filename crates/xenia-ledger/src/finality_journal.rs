@@ -153,9 +153,7 @@ impl FinalityJournalV1 {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes)?;
         let (initialized, record_bytes) = split_journal_header(&bytes)?;
-        let (latest, receipts) = replay_journal_bytes(record_bytes)?;
-        let consumed_handles = consumed_handle_index(&latest)?;
-        let occupied_actions = occupied_action_index(&latest)?;
+        let (latest, receipts, consumed_handles, occupied_actions) = replay_journal_bytes(record_bytes)?;
 
         Ok(Self {
             path,
