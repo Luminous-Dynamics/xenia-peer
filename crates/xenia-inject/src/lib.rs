@@ -250,6 +250,28 @@ fn canonical_f32_bits(value: f32) -> u32 {
 }
 
 impl InputEvent {
+    /// Compute the canonical digest of one exact input-operation instance.
+    ///
+    /// The raw event digest identifies the event itself; the session binding and
+    /// monotonic input sequence identify the operation instance. This prevents
+    /// two intentionally identical clicks in different operations from becoming
+    /// one permanent same-action fence key, while preserving retry identity for
+    /// the same (session, sequence, event) tuple.
+    pub fn canonical_action_digest(
+        &self,
+        session_id: [u8; 16],
+        sequence: u64,
+    ) -> Result<[u8; 32], InputEventValidationError> {
+        let event_digest = self.canonical_digest()?;
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"xenia:input-action-instance:v1\\0");
+        hasher.update(&session_id);
+        hasher.update(&sequence.to_be_bytes());
+        hasher.update(&event_digest);
+        Ok(*hasher.finalize().as_bytes())
+    }
+
     /// Compute the canonical digest of this exact validated input event.
     ///
     /// The encoding is explicit rather than serializer-dependent so the act
@@ -1138,6 +1160,23 @@ impl InputInjector for UinputInjector {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn action_instance_digest_binds_session_and_sequence() {
+        let event = InputEvent::PointerMove { x: 0.5, y: 0.5 };
+        let a = event.canonical_action_digest([1; 16], 7).unwrap();
+        let same = event.canonical_action_digest([1; 16], 7).unwrap();
+        let next = event.canonical_action_digest([1; 16], 8).unwrap();
+        let other_session = event.canonical_action_digest([2; 16], 7).unwrap();
+        let other_event = InputEvent::PointerMove { x: 0.5, y: 0.6 }
+            .canonical_action_digest([1; 16], 7)
+            .unwrap();
+
+        assert_eq!(a, same);
+        assert_ne!(a, next);
+        assert_ne!(a, other_session);
+        assert_ne!(a, other_event);
+    }
+
     #[test]
     fn canonical_digest_normalizes_signed_zero() {
         let positive = InputEvent::PointerMove { x: 0.0, y: 0.5 };
