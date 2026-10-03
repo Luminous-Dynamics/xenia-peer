@@ -119,12 +119,21 @@ impl AuthorityRecoveryStateV1 {
         use AuthorityRecoveryStateV1::*;
 
         let next = match (self, event) {
-            (OldActive, PrepareTransition { transition_fingerprint }) => TransitionPending {
+            (
+                OldActive,
+                PrepareTransition {
+                    transition_fingerprint,
+                },
+            ) => TransitionPending {
                 transition_fingerprint: require_fingerprint(transition_fingerprint)?,
             },
             (
-                TransitionPending { transition_fingerprint },
-                DurableCommit { transition_fingerprint: event_fingerprint },
+                TransitionPending {
+                    transition_fingerprint,
+                },
+                DurableCommit {
+                    transition_fingerprint: event_fingerprint,
+                },
             ) => {
                 require_matching_fingerprint(transition_fingerprint, event_fingerprint)?;
                 TransitionCommitted { transition_fingerprint }
@@ -146,49 +155,88 @@ impl AuthorityRecoveryStateV1 {
             (TransitionCommitted { transition_fingerprint }, BeginRecovery) => RecoveryAfterCommit {
                 transition_fingerprint,
             },
-            (SuccessorActive { transition_fingerprint }, BeginRecovery) => RecoveryAfterCommit {
+            (
+                SuccessorActive {
+                    transition_fingerprint,
+                },
+                BeginRecovery,
+            ) => RecoveryAfterCommit {
                 transition_fingerprint,
             },
             (OldActive, BeginRecovery) => RecoveryFromOld,
-            (OutcomeUnknown { transition_fingerprint }, BeginRecovery) => RecoveryAfterUnknown {
+            (
+                OutcomeUnknown {
+                    transition_fingerprint,
+                },
+                BeginRecovery,
+            ) => RecoveryAfterUnknown {
                 transition_fingerprint,
             },
-            (RecoveryFromOld, RecoverSuccessor { transition_fingerprint }) => TransitionCommitted {
+            (
+                RecoveryFromOld,
+                RecoverSuccessor {
+                    transition_fingerprint,
+                },
+            ) => TransitionCommitted {
                 transition_fingerprint: require_fingerprint(transition_fingerprint)?,
             },
             (RecoveryFromOld, RecoverOld) => OldActive,
             (
-                RecoveryAfterCommit { transition_fingerprint },
-                RecoverSuccessor { transition_fingerprint: event_fingerprint },
+                RecoveryAfterCommit {
+                    transition_fingerprint,
+                },
+                RecoverSuccessor {
+                    transition_fingerprint: event_fingerprint,
+                },
             ) => {
                 require_matching_fingerprint(transition_fingerprint, event_fingerprint)?;
                 TransitionCommitted { transition_fingerprint }
             }
             (
-                RecoveryAfterUnknown { transition_fingerprint },
-                RecoverSuccessor { transition_fingerprint: event_fingerprint },
+                RecoveryAfterUnknown {
+                    transition_fingerprint,
+                },
+                RecoverSuccessor {
+                    transition_fingerprint: event_fingerprint,
+                },
             ) => {
                 require_matching_fingerprint(transition_fingerprint, event_fingerprint)?;
                 TransitionCommitted { transition_fingerprint }
             }
-            (RecoveryAfterUnknown { transition_fingerprint }, RecoverOld) => {
+            (
+                RecoveryAfterUnknown {
+                    transition_fingerprint,
+                },
+                RecoverOld,
+            ) => {
                 require_fingerprint(transition_fingerprint)?;
                 OldActive
             }
             (
                 RecoveryFromOld,
-                RecoverOutcomeUnknown { transition_fingerprint },
+                RecoverOutcomeUnknown {
+                    transition_fingerprint,
+                },
             ) => OutcomeUnknown {
                 transition_fingerprint: require_fingerprint(transition_fingerprint)?,
             },
             (
-                RecoveryAfterUnknown { transition_fingerprint },
-                RecoverOutcomeUnknown { transition_fingerprint: event_fingerprint },
+                RecoveryAfterUnknown {
+                    transition_fingerprint,
+                },
+                RecoverOutcomeUnknown {
+                    transition_fingerprint: event_fingerprint,
+                },
             ) => {
                 require_matching_fingerprint(transition_fingerprint, event_fingerprint)?;
                 OutcomeUnknown { transition_fingerprint }
             }
-            (TransitionCommitted { transition_fingerprint }, ActivateSuccessor) => SuccessorActive {
+            (
+                TransitionCommitted {
+                    transition_fingerprint,
+                },
+                ActivateSuccessor,
+            ) => SuccessorActive {
                 transition_fingerprint,
             },
             _ => {
@@ -207,19 +255,29 @@ impl AuthorityRecoveryStateV1 {
     pub const fn transition_fingerprint(self) -> Option<[u8; 32]> {
         match self {
             Self::OldActive | Self::RecoveryFromOld => None,
-            Self::TransitionPending { transition_fingerprint }
-            | Self::TransitionCommitted { transition_fingerprint }
-            | Self::OutcomeUnknown { transition_fingerprint }
-            | Self::RecoveryAfterCommit { transition_fingerprint }
-            | Self::RecoveryAfterUnknown { transition_fingerprint }
-            | Self::SuccessorActive { transition_fingerprint } => Some(transition_fingerprint),
+            Self::TransitionPending {
+                transition_fingerprint,
+            }
+            | Self::TransitionCommitted {
+                transition_fingerprint,
+            }
+            | Self::OutcomeUnknown {
+                transition_fingerprint,
+            }
+            | Self::RecoveryAfterCommit {
+                transition_fingerprint,
+            }
+            | Self::RecoveryAfterUnknown {
+                transition_fingerprint,
+            }
+            | Self::SuccessorActive {
+                transition_fingerprint,
+            } => Some(transition_fingerprint),
         }
     }
 }
 
-fn require_fingerprint(
-    fingerprint: [u8; 32],
-) -> Result<[u8; 32], AuthorityRecoveryError> {
+fn require_fingerprint(fingerprint: [u8; 32]) -> Result<[u8; 32], AuthorityRecoveryError> {
     if fingerprint == [0u8; 32] {
         return Err(AuthorityRecoveryError::InvalidTransitionFingerprint);
     }
@@ -258,7 +316,12 @@ mod tests {
             .apply(AuthorityRecoveryEventV1::ActivateSuccessor)
             .unwrap();
 
-        assert_eq!(state, AuthorityRecoveryStateV1::SuccessorActive { transition_fingerprint: TRANSITION_A });
+        assert_eq!(
+            state,
+            AuthorityRecoveryStateV1::SuccessorActive {
+                transition_fingerprint: TRANSITION_A
+            }
+        );
         assert!(state.successor_authoritative());
         assert_eq!(state.transition_fingerprint(), Some(TRANSITION_A));
     }
@@ -266,36 +329,65 @@ mod tests {
     #[test]
     fn ambiguous_commit_cannot_activate_successor() {
         let state = AuthorityRecoveryStateV1::OldActive
-            .apply(AuthorityRecoveryEventV1::PrepareTransition { transition_fingerprint: TRANSITION_A })
+            .apply(AuthorityRecoveryEventV1::PrepareTransition {
+                transition_fingerprint: TRANSITION_A,
+            })
             .unwrap()
-            .apply(AuthorityRecoveryEventV1::CommitOutcomeUnknown { transition_fingerprint: TRANSITION_A })
+            .apply(AuthorityRecoveryEventV1::CommitOutcomeUnknown {
+                transition_fingerprint: TRANSITION_A,
+            })
             .unwrap();
 
-        assert_eq!(state, AuthorityRecoveryStateV1::OutcomeUnknown { transition_fingerprint: TRANSITION_A });
+        assert_eq!(
+            state,
+            AuthorityRecoveryStateV1::OutcomeUnknown {
+                transition_fingerprint: TRANSITION_A
+            }
+        );
         assert!(!state.successor_authoritative());
-        assert!(matches!(state.apply(AuthorityRecoveryEventV1::ActivateSuccessor), Err(AuthorityRecoveryError::InvalidTransition { .. })));
+        assert!(matches!(
+            state.apply(AuthorityRecoveryEventV1::ActivateSuccessor),
+            Err(AuthorityRecoveryError::InvalidTransition { .. })
+        ));
     }
 
     #[test]
     fn mismatched_commit_proof_cannot_advance_transition() {
         let pending = AuthorityRecoveryStateV1::OldActive
-            .apply(AuthorityRecoveryEventV1::PrepareTransition { transition_fingerprint: TRANSITION_A })
+            .apply(AuthorityRecoveryEventV1::PrepareTransition {
+                transition_fingerprint: TRANSITION_A,
+            })
             .unwrap();
         assert!(matches!(
-            pending.apply(AuthorityRecoveryEventV1::DurableCommit { transition_fingerprint: TRANSITION_B }),
+            pending.apply(AuthorityRecoveryEventV1::DurableCommit {
+                transition_fingerprint: TRANSITION_B
+            }),
             Err(AuthorityRecoveryError::TransitionFingerprintMismatch)
         ));
-        assert_eq!(pending, AuthorityRecoveryStateV1::TransitionPending { transition_fingerprint: TRANSITION_A });
+        assert_eq!(
+            pending,
+            AuthorityRecoveryStateV1::TransitionPending {
+                transition_fingerprint: TRANSITION_A
+            }
+        );
     }
 
     #[test]
     fn zero_fingerprint_can_never_create_transition_authority() {
         assert!(matches!(
-            AuthorityRecoveryStateV1::OldActive.apply(AuthorityRecoveryEventV1::PrepareTransition { transition_fingerprint: [0; 32] }),
+            AuthorityRecoveryStateV1::OldActive.apply(
+                AuthorityRecoveryEventV1::PrepareTransition {
+                    transition_fingerprint: [0; 32]
+                }
+            ),
             Err(AuthorityRecoveryError::InvalidTransitionFingerprint)
         ));
         assert!(matches!(
-            AuthorityRecoveryStateV1::RecoveryFromOld.apply(AuthorityRecoveryEventV1::RecoverSuccessor { transition_fingerprint: [0; 32] }),
+            AuthorityRecoveryStateV1::RecoveryFromOld.apply(
+                AuthorityRecoveryEventV1::RecoverSuccessor {
+                    transition_fingerprint: [0; 32]
+                }
+            ),
             Err(AuthorityRecoveryError::InvalidTransitionFingerprint)
         ));
     }
@@ -303,15 +395,32 @@ mod tests {
     #[test]
     fn crash_recovery_accepts_only_matching_durable_outcome() {
         let committed = AuthorityRecoveryStateV1::OldActive
-            .apply(AuthorityRecoveryEventV1::PrepareTransition { transition_fingerprint: TRANSITION_A }).unwrap()
-            .apply(AuthorityRecoveryEventV1::DurableCommit { transition_fingerprint: TRANSITION_A }).unwrap()
-            .apply(AuthorityRecoveryEventV1::ActivateSuccessor).unwrap()
-            .apply(AuthorityRecoveryEventV1::BeginRecovery).unwrap()
-            .apply(AuthorityRecoveryEventV1::RecoverSuccessor { transition_fingerprint: TRANSITION_A }).unwrap()
-            .apply(AuthorityRecoveryEventV1::ActivateSuccessor).unwrap();
-        assert_eq!(committed, AuthorityRecoveryStateV1::SuccessorActive { transition_fingerprint: TRANSITION_A });
+            .apply(AuthorityRecoveryEventV1::PrepareTransition {
+                transition_fingerprint: TRANSITION_A,
+            }).unwrap()
+            .apply(AuthorityRecoveryEventV1::DurableCommit {
+                transition_fingerprint: TRANSITION_A,
+            })
+            .unwrap()
+            .apply(AuthorityRecoveryEventV1::ActivateSuccessor)
+            .unwrap()
+            .apply(AuthorityRecoveryEventV1::BeginRecovery)
+            .unwrap()
+            .apply(AuthorityRecoveryEventV1::RecoverSuccessor {
+                transition_fingerprint: TRANSITION_A,
+            })
+            .unwrap()
+            .apply(AuthorityRecoveryEventV1::ActivateSuccessor)
+            .unwrap();
+        assert_eq!(
+            committed,
+            AuthorityRecoveryStateV1::SuccessorActive {
+                transition_fingerprint: TRANSITION_A
+            }
+        );
 
-        let stale = AuthorityRecoveryStateV1::OldActive.apply(AuthorityRecoveryEventV1::BeginRecovery).unwrap().apply(AuthorityRecoveryEventV1::RecoverOld).unwrap();
+        let stale = AuthorityRecoveryStateV1::OldActive.apply(AuthorityRecoveryEventV1::BeginRecovery)
+            .unwrap().apply(AuthorityRecoveryEventV1::RecoverOld).unwrap();
         assert_eq!(stale, AuthorityRecoveryStateV1::OldActive);
         assert!(!stale.successor_authoritative());
         assert_eq!(stale.transition_fingerprint(), None);
@@ -319,45 +428,101 @@ mod tests {
 
     #[test]
     fn stale_snapshot_cannot_skip_recovery_boundary() {
-        let state = AuthorityRecoveryStateV1::TransitionCommitted { transition_fingerprint: TRANSITION_A };
-        assert!(matches!(state.apply(AuthorityRecoveryEventV1::ActivateSuccessor), Ok(AuthorityRecoveryStateV1::SuccessorActive { transition_fingerprint: TRANSITION_A })));
-        assert!(matches!(AuthorityRecoveryStateV1::OldActive.apply(AuthorityRecoveryEventV1::ActivateSuccessor), Err(AuthorityRecoveryError::InvalidTransition { .. })));
+        let state = AuthorityRecoveryStateV1::TransitionCommitted {
+            transition_fingerprint: TRANSITION_A,
+        };
+        assert!(matches!(
+            state.apply(AuthorityRecoveryEventV1::ActivateSuccessor),
+            Ok(AuthorityRecoveryStateV1::SuccessorActive {
+                transition_fingerprint: TRANSITION_A
+            })
+        ));
+        assert!(matches!(
+            AuthorityRecoveryStateV1::OldActive.apply(AuthorityRecoveryEventV1::ActivateSuccessor),
+            Err(AuthorityRecoveryError::InvalidTransition { .. })
+        ));
     }
 
     #[test]
     fn committed_successor_cannot_recover_to_predecessor() {
         let state = AuthorityRecoveryStateV1::OldActive
-            .apply(AuthorityRecoveryEventV1::PrepareTransition { transition_fingerprint: TRANSITION_A }).unwrap()
-            .apply(AuthorityRecoveryEventV1::DurableCommit { transition_fingerprint: TRANSITION_A }).unwrap()
-            .apply(AuthorityRecoveryEventV1::ActivateSuccessor).unwrap()
-            .apply(AuthorityRecoveryEventV1::BeginRecovery).unwrap();
-        assert_eq!(state, AuthorityRecoveryStateV1::RecoveryAfterCommit { transition_fingerprint: TRANSITION_A });
-        assert!(matches!(state.apply(AuthorityRecoveryEventV1::RecoverOld), Err(AuthorityRecoveryError::InvalidTransition { .. })));
-        assert!(matches!(state.apply(AuthorityRecoveryEventV1::RecoverOutcomeUnknown { transition_fingerprint: TRANSITION_A }), Err(AuthorityRecoveryError::InvalidTransition { .. })));
-        assert_eq!(state.apply(AuthorityRecoveryEventV1::RecoverSuccessor { transition_fingerprint: TRANSITION_A }).unwrap(), AuthorityRecoveryStateV1::TransitionCommitted { transition_fingerprint: TRANSITION_A });
+            .apply(AuthorityRecoveryEventV1::PrepareTransition {
+                transition_fingerprint: TRANSITION_A,
+            }).unwrap()
+            .apply(AuthorityRecoveryEventV1::DurableCommit {
+                transition_fingerprint: TRANSITION_A,
+            })
+            .unwrap()
+            .apply(AuthorityRecoveryEventV1::ActivateSuccessor)
+            .unwrap()
+            .apply(AuthorityRecoveryEventV1::BeginRecovery)
+            .unwrap();
+        assert_eq!(
+            state,
+            AuthorityRecoveryStateV1::RecoveryAfterCommit {
+                transition_fingerprint: TRANSITION_A
+            }
+        );
+        assert!(matches!(
+            state.apply(AuthorityRecoveryEventV1::RecoverOld),
+            Err(AuthorityRecoveryError::InvalidTransition { .. })
+        ));
+        assert!(matches!(
+            state.apply(AuthorityRecoveryEventV1::RecoverOutcomeUnknown {
+                transition_fingerprint: TRANSITION_A
+            }),
+            Err(AuthorityRecoveryError::InvalidTransition { .. })
+        ));
+        assert_eq!(state.apply(AuthorityRecoveryEventV1::RecoverSuccessor {
+                transition_fingerprint: TRANSITION_A,
+            })
+            .unwrap(), AuthorityRecoveryStateV1::TransitionCommitted { transition_fingerprint: TRANSITION_A });
     }
 
     #[test]
     fn outcome_unknown_remains_non_authoritative_until_reconciled() {
         let state = AuthorityRecoveryStateV1::OldActive
-            .apply(AuthorityRecoveryEventV1::PrepareTransition { transition_fingerprint: TRANSITION_A }).unwrap()
-            .apply(AuthorityRecoveryEventV1::CommitOutcomeUnknown { transition_fingerprint: TRANSITION_A }).unwrap()
-            .apply(AuthorityRecoveryEventV1::BeginRecovery).unwrap()
-            .apply(AuthorityRecoveryEventV1::RecoverOutcomeUnknown { transition_fingerprint: TRANSITION_A }).unwrap();
-        assert_eq!(state, AuthorityRecoveryStateV1::OutcomeUnknown { transition_fingerprint: TRANSITION_A });
+            .apply(AuthorityRecoveryEventV1::PrepareTransition {
+                transition_fingerprint: TRANSITION_A,
+            }).unwrap()
+            .apply(AuthorityRecoveryEventV1::CommitOutcomeUnknown {
+                transition_fingerprint: TRANSITION_A,
+            }).unwrap()
+            .apply(AuthorityRecoveryEventV1::BeginRecovery)
+            .unwrap()
+            .apply(AuthorityRecoveryEventV1::RecoverOutcomeUnknown {
+                transition_fingerprint: TRANSITION_A,
+            })
+            .unwrap();
+        assert_eq!(
+            state,
+            AuthorityRecoveryStateV1::OutcomeUnknown {
+                transition_fingerprint: TRANSITION_A
+            }
+        );
         assert!(!state.successor_authoritative());
     }
 
     #[test]
     fn unknown_recovery_cannot_substitute_a_different_transition() {
         let state = AuthorityRecoveryStateV1::OldActive
-            .apply(AuthorityRecoveryEventV1::PrepareTransition { transition_fingerprint: TRANSITION_A }).unwrap()
-            .apply(AuthorityRecoveryEventV1::CommitOutcomeUnknown { transition_fingerprint: TRANSITION_A }).unwrap()
-            .apply(AuthorityRecoveryEventV1::BeginRecovery).unwrap();
+            .apply(AuthorityRecoveryEventV1::PrepareTransition {
+                transition_fingerprint: TRANSITION_A,
+            }).unwrap()
+            .apply(AuthorityRecoveryEventV1::CommitOutcomeUnknown {
+                transition_fingerprint: TRANSITION_A,
+            }).unwrap()
+            .apply(AuthorityRecoveryEventV1::BeginRecovery)
+            .unwrap();
         assert!(matches!(
             state.apply(AuthorityRecoveryEventV1::RecoverSuccessor { transition_fingerprint: TRANSITION_B }),
             Err(AuthorityRecoveryError::TransitionFingerprintMismatch)
         ));
-        assert_eq!(state, AuthorityRecoveryStateV1::RecoveryAfterUnknown { transition_fingerprint: TRANSITION_A });
+        assert_eq!(
+            state,
+            AuthorityRecoveryStateV1::RecoveryAfterUnknown {
+                transition_fingerprint: TRANSITION_A
+            }
+        );
     }
 }
