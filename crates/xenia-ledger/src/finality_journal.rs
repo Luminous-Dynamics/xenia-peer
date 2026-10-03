@@ -13,11 +13,9 @@
 //! deserialized into authority and it does not decide the external outcome.
 
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -56,20 +54,8 @@ pub struct FinalityJournalV1 {
     occupied_actions: BTreeMap<[u8; 32], [u8; 16]>,
     /// Once a persistence operation returns an I/O error, this owner is no longer
     /// safe to use: the file may contain an uncertain suffix and continuing to
-    /// append could turn an recoverable fail-closed state into a mixed journal.
+    /// append could turn a recoverable fail-closed state into a mixed journal.
     poisoned: bool,
-}
-
-struct FinalityJournalLockV1 {
-    dir: PathBuf,
-    owner: PathBuf,
-}
-
-impl Drop for FinalityJournalLockV1 {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.owner);
-        let _ = std::fs::remove_dir(&self.dir);
-    }
 }
 
 /// Errors raised while opening, validating, or appending the durable finality journal.
@@ -130,33 +116,21 @@ impl FinalityJournalV1 {
     /// Open or create the journal and replay every existing record.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, FinalityJournalError> {
         let path = path.as_ref().to_path_buf();
-        let lock_path = lock_path_for(&path);
-        std::fs::create_dir(&lock_path).map_err(|error| {
-            if error.kind() == io::ErrorKind::AlreadyExists {
-                FinalityJournalError::JournalAlreadyOwned
-            } else {
-                FinalityJournalError::Io(error)
-            }
-        })?;
-
-        let owner_path = lock_path.join("owner");
-        let mut lock = FinalityJournalLockV1 {
-            dir: lock_path,
-            owner: owner_path,
-        };
-        let mut owner_file = File::create(&lock.owner)?;
-        let mut owner = format!("pid={}", std::process::id());
-        if let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) {
-            owner.push_str(&format!(" opened_at_unix_s={}", now.as_secs()));
-        }
-        owner_file.write_all(owner.as_bytes())?;
-        owner_file.sync_all()?;
-
         let mut reader = OpenOptions::new()
             .create(true)
             .read(true)
             .append(true)
             .open(&path)?;
+
+        match reader.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => {
+                return Err(FinalityJournalError::JournalAlreadyOwned);
+            }
+            Err(TryLockError::Error(error)) => {
+                return Err(FinalityJournalError::Io(error));
+            }
+        }
 
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes)?;
@@ -166,7 +140,6 @@ impl FinalityJournalV1 {
         Ok(Self {
             path,
             file: reader,
-            _lock: lock,
             initialized,
             latest,
             receipts,
@@ -175,7 +148,6 @@ impl FinalityJournalV1 {
             poisoned: false,
         })
     }
-
     /// Return the filesystem path owned by this journal.
     pub fn path(&self) -> &Path {
         &self.path
@@ -360,12 +332,6 @@ fn split_journal_header(bytes: &[u8]) -> Result<(bool, &[u8]), FinalityJournalEr
         return Err(FinalityJournalError::UnsupportedJournalSchema);
     }
     Ok((true, &bytes[JOURNAL_MAGIC.len()..]))
-}
-
-fn lock_path_for(path: &Path) -> PathBuf {
-    let mut lock_path = path.as_os_str().to_owned();
-    lock_path.push(".lock");
-    PathBuf::from(lock_path)
 }
 
 fn replay_journal_bytes(
@@ -557,7 +523,6 @@ mod tests {
     fn poisoned_owner_refuses_future_appends() {
         let path = temp_path("poisoned-owner");
         let _ = fs::remove_file(&path);
-        let _ = fs::remove_dir_all(lock_path_for(&path));
 
         let mut journal = FinalityJournalV1::open(&path).unwrap();
         journal.poisoned = true;
@@ -568,14 +533,12 @@ mod tests {
         ));
 
         let _ = fs::remove_file(&path);
-        let _ = fs::remove_dir_all(lock_path_for(&path));
     }
 
     #[test]
     fn journal_requires_its_own_file_header() {
         let path = temp_path("header");
         let _ = fs::remove_file(&path);
-        let _ = fs::remove_file(lock_path_for(&path));
 
         fs::write(&path, b"not-xenia-journal").unwrap();
         assert!(matches!(
@@ -589,14 +552,12 @@ mod tests {
 
         drop(journal);
         let _ = fs::remove_file(&path);
-        let _ = fs::remove_file(lock_path_for(&path));
     }
 
     #[test]
     fn second_owner_is_rejected_while_first_owner_is_live() {
         let path = temp_path("ownership");
         let _ = fs::remove_file(&path);
-        let _ = fs::remove_file(lock_path_for(&path));
 
         let journal = FinalityJournalV1::open(&path).unwrap();
         assert!(matches!(
@@ -610,14 +571,12 @@ mod tests {
         drop(reopened);
 
         let _ = fs::remove_file(&path);
-        let _ = fs::remove_file(lock_path_for(&path));
     }
 
     #[test]
     fn failed_open_releases_lock_for_retry() {
         let path = temp_path("failed-open-lock");
         let _ = fs::remove_file(&path);
-        let _ = fs::remove_file(lock_path_for(&path));
 
         fs::write(&path, [0xAA, 0xBB, 0xCC]).unwrap();
 
@@ -631,7 +590,6 @@ mod tests {
         ));
 
         let _ = fs::remove_file(&path);
-        let _ = fs::remove_file(lock_path_for(&path));
     }
 
     #[test]
@@ -724,7 +682,6 @@ mod tests {
     fn journal_rejects_fresh_authority_for_same_action_key() {
         let path = temp_path("same-action");
         let _ = fs::remove_file(&path);
-        let _ = fs::remove_file(lock_path_for(&path));
 
         let mut journal = FinalityJournalV1::open(&path).unwrap();
         let mut first =
@@ -747,7 +704,6 @@ mod tests {
     fn denied_outcome_releases_action_fence_but_not_native_handle() {
         let path = temp_path("release");
         let _ = fs::remove_file(&path);
-        let _ = fs::remove_file(lock_path_for(&path));
 
         let mut journal = FinalityJournalV1::open(&path).unwrap();
         let mut first =
@@ -772,7 +728,6 @@ mod tests {
         ));
 
         let _ = fs::remove_file(&path);
-        let _ = fs::remove_file(lock_path_for(&path));
     }
 
     #[test]
@@ -799,7 +754,6 @@ mod tests {
     fn committed_action_remains_fenced_against_fresh_authority() {
         let path = temp_path("committed-action");
         let _ = fs::remove_file(&path);
-        let _ = fs::remove_dir_all(lock_path_for(&path));
 
         let mut journal = FinalityJournalV1::open(&path).unwrap();
         let mut first =
@@ -819,14 +773,12 @@ mod tests {
 
         drop(journal);
         let _ = fs::remove_file(&path);
-        let _ = fs::remove_dir_all(lock_path_for(&path));
     }
 
     #[test]
     fn replay_rejects_forged_overlapping_action_history() {
         let path = temp_path("forged-overlap");
         let _ = fs::remove_file(&path);
-        let _ = fs::remove_dir_all(lock_path_for(&path));
 
         let mut first =
             FinalityAttemptV1::prepare([51; 16], [52; 32], [53; 32], [54; 32], [55; 32]).unwrap();
@@ -855,7 +807,6 @@ mod tests {
         ));
 
         let _ = fs::remove_file(&path);
-        let _ = fs::remove_dir_all(lock_path_for(&path));
     }
 
     #[test]
