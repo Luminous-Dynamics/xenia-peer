@@ -90,6 +90,11 @@ pub struct DurableAuthorityEpochClaimV1 {
     pub successor_ledger_public_key: [u8; 32],
     /// Digest of the persistence policy used to establish durability.
     pub persistence_policy_digest: [u8; 32],
+    /// Digest of the exact durable ledger frontier paired with this authority claim.
+    ///
+    /// This forces the authoritative persistence verifier to prove the authority
+    /// transition and the specific durable ledger state as one claim.
+    pub durable_frontier_digest: [u8; 32],
 }
 
 impl DurableAuthorityEpochClaimV1 {
@@ -99,6 +104,7 @@ impl DurableAuthorityEpochClaimV1 {
             || self.key_transition_fingerprint == ZERO32
             || self.successor_ledger_public_key == ZERO32
             || self.persistence_policy_digest == ZERO32
+            || self.durable_frontier_digest == ZERO32
         {
             return Err(DurableLedgerFrontierError::MalformedAuthorityEpochClaim);
         }
@@ -119,6 +125,7 @@ impl DurableAuthorityEpochClaimV1 {
         hasher.update(&self.key_transition_fingerprint);
         hasher.update(&self.successor_ledger_public_key);
         hasher.update(&self.persistence_policy_digest);
+        hasher.update(&self.durable_frontier_digest);
         *hasher.finalize().as_bytes()
     }
 }
@@ -429,6 +436,7 @@ impl Chain {
             key_transition_fingerprint: fingerprint,
             successor_ledger_public_key: key_transition.new_ledger_public_key,
             persistence_policy_digest,
+            durable_frontier_digest: durable_frontier.digest(),
         };
         claim.validate()?;
         if let Err(diagnostic_digest) = verify(self, &claim) {
@@ -812,6 +820,7 @@ mod tests {
             key_transition_fingerprint: [0xA1; 32],
             successor_ledger_public_key: [0xB2; 32],
             persistence_policy_digest: PERSISTENCE_POLICY,
+            durable_frontier_digest: [0xC3; 32],
         };
 
         let actual = claim.digest().unwrap();
@@ -822,6 +831,7 @@ mod tests {
         canonical.update(&claim.key_transition_fingerprint);
         canonical.update(&claim.successor_ledger_public_key);
         canonical.update(&claim.persistence_policy_digest);
+        canonical.update(&claim.durable_frontier_digest);
 
         assert_eq!(actual, *canonical.finalize().as_bytes());
     }
