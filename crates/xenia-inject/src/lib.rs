@@ -322,20 +322,20 @@ impl InputEvent {
             Self::Touch { index, x, y, phase, pressure } => {
                 bytes.push(2);
                 bytes.push(*index);
-                bytes.extend_from_slice(&x.to_bits().to_be_bytes());
-                bytes.extend_from_slice(&y.to_bits().to_be_bytes());
+                bytes.extend_from_slice(&canonical_f32_bits(*x).to_be_bytes());
+                bytes.extend_from_slice(&canonical_f32_bits(*y).to_be_bytes());
                 bytes.push(*phase);
                 bytes.extend_from_slice(&canonical_f32_bits(*pressure).to_be_bytes());
             }
             Self::PointerMove { x, y } => {
                 bytes.push(3);
-                bytes.extend_from_slice(&x.to_bits().to_be_bytes());
-                bytes.extend_from_slice(&y.to_bits().to_be_bytes());
+                bytes.extend_from_slice(&canonical_f32_bits(*x).to_be_bytes());
+                bytes.extend_from_slice(&canonical_f32_bits(*y).to_be_bytes());
             }
             Self::PointerButton { x, y, button, pressed } => {
                 bytes.push(4);
-                bytes.extend_from_slice(&x.to_bits().to_be_bytes());
-                bytes.extend_from_slice(&y.to_bits().to_be_bytes());
+                bytes.extend_from_slice(&canonical_f32_bits(*x).to_be_bytes());
+                bytes.extend_from_slice(&canonical_f32_bits(*y).to_be_bytes());
                 bytes.push(*button);
                 bytes.push(u8::from(*pressed));
             }
@@ -1448,13 +1448,64 @@ mod tests {
     }
 
     #[test]
-    fn canonical_digest_normalizes_signed_zero() {
-        let positive = InputEvent::PointerMove { x: 0.0, y: 0.5 };
-        let negative = InputEvent::PointerMove { x: -0.0, y: 0.5 };
-        assert_eq!(
-            positive.canonical_digest().unwrap(),
-            negative.canonical_digest().unwrap()
-        );
+    fn canonical_digest_normalizes_signed_zero_for_all_coordinate_variants() {
+        let variants = [
+            (
+                InputEvent::Pointer {
+                    x: 0.0,
+                    y: 0.5,
+                    button: 0,
+                    pressed: false,
+                },
+                InputEvent::Pointer {
+                    x: -0.0,
+                    y: 0.5,
+                    button: 0,
+                    pressed: false,
+                },
+            ),
+            (
+                InputEvent::Touch {
+                    index: 0,
+                    x: 0.0,
+                    y: 0.5,
+                    phase: 1,
+                    pressure: 0.0,
+                },
+                InputEvent::Touch {
+                    index: 0,
+                    x: -0.0,
+                    y: 0.5,
+                    phase: 1,
+                    pressure: -0.0,
+                },
+            ),
+            (
+                InputEvent::PointerMove { x: 0.0, y: 0.5 },
+                InputEvent::PointerMove { x: -0.0, y: 0.5 },
+            ),
+            (
+                InputEvent::PointerButton {
+                    x: 0.0,
+                    y: 0.5,
+                    button: 1,
+                    pressed: true,
+                },
+                InputEvent::PointerButton {
+                    x: -0.0,
+                    y: 0.5,
+                    button: 1,
+                    pressed: true,
+                },
+            ),
+        ];
+
+        for (positive, negative) in variants {
+            assert_eq!(
+                positive.canonical_digest().unwrap(),
+                negative.canonical_digest().unwrap()
+            );
+        }
     }
 
     #[test]
