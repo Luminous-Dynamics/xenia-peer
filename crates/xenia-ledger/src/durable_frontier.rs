@@ -191,7 +191,9 @@ impl DurableAuthorityEpochV1 {
     ) -> Result<(), DurableLedgerFrontierError> {
         self.claim.validate()?;
         durable_frontier.verify_against_chain(chain, expected_persistence_policy_digest)?;
-        if self.durable_frontier_digest != durable_frontier.digest() {
+        if self.claim.durable_frontier_digest != self.durable_frontier_digest
+            || self.durable_frontier_digest != durable_frontier.digest()
+        {
             return Err(DurableLedgerFrontierError::AuthorityEpochFrontierMismatch);
         }
         if self.claim.persistence_policy_digest != expected_persistence_policy_digest {
@@ -813,6 +815,23 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn authority_epoch_claim_rejects_zero_durable_frontier_digest() {
+        let claim = DurableAuthorityEpochClaimV1 {
+            schema_version: DURABLE_AUTHORITY_EPOCH_CLAIM_SCHEMA_VERSION,
+            authority_epoch: 8,
+            key_transition_fingerprint: [0xA1; 32],
+            successor_ledger_public_key: [0xB2; 32],
+            persistence_policy_digest: PERSISTENCE_POLICY,
+            durable_frontier_digest: [0; 32],
+        };
+
+        assert!(matches!(
+            claim.validate(),
+            Err(DurableLedgerFrontierError::MalformedAuthorityEpochClaim)
+        ));
+    }
+
     fn authority_epoch_claim_digest_uses_canonical_nul_terminated_domain() {
         let claim = DurableAuthorityEpochClaimV1 {
             schema_version: DURABLE_AUTHORITY_EPOCH_CLAIM_SCHEMA_VERSION,
@@ -895,6 +914,7 @@ mod tests {
                 PERSISTENCE_POLICY,
                 |_, claim| {
                     assert_eq!(claim.key_transition_fingerprint, fingerprint);
+                    assert_eq!(claim.durable_frontier_digest, durable_frontier.digest());
                     Ok(())
                 },
             )
@@ -962,6 +982,7 @@ mod tests {
                         claim.successor_ledger_public_key,
                         successor.verifying_key().to_bytes()
                     );
+                    assert_eq!(claim.durable_frontier_digest, durable_frontier.digest());
                     Ok(())
                 },
             )
