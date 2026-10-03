@@ -54,6 +54,10 @@ pub struct FinalityJournalV1 {
     receipts: BTreeMap<[u8; 16], FinalityReceiptV1>,
     consumed_handles: BTreeMap<[u8; 32], [u8; 16]>,
     occupied_actions: BTreeMap<[u8; 32], [u8; 16]>,
+    /// Once a persistence operation returns an I/O error, this owner is no longer
+    /// safe to use: the file may contain an uncertain suffix and continuing to
+    /// append could turn an recoverable fail-closed state into a mixed journal.
+    poisoned: bool,
 }
 
 struct FinalityJournalLockV1 {
@@ -100,6 +104,10 @@ pub enum FinalityJournalError {
     /// Another live journal owner already holds the sibling lock.
     #[error("finality journal is already owned by another process")]
     JournalAlreadyOwned,
+    /// The current journal owner encountered a persistence error and must not
+    /// continue appending to a potentially uncertain tail.
+    #[error("finality journal owner is poisoned after a persistence error")]
+    JournalPoisoned,
     /// A different attempt already occupies the same semantic action key.
     #[error("exact action is already durably in flight or closed")]
     ActionAlreadyFenced {
@@ -164,6 +172,7 @@ impl FinalityJournalV1 {
             receipts,
             consumed_handles,
             occupied_actions,
+            poisoned: false,
         })
     }
 
@@ -182,6 +191,7 @@ impl FinalityJournalV1 {
         &mut self,
         attempt: &FinalityAttemptV1,
     ) -> Result<(), FinalityJournalError> {
+        self.ensure_healthy()?;
         attempt.validate()?;
 
         if let Some(existing_attempt_id) = self.consumed_handles.get(&attempt.handle_digest) {
@@ -239,6 +249,7 @@ impl FinalityJournalV1 {
         &mut self,
         receipt: &FinalityReceiptV1,
     ) -> Result<(), FinalityJournalError> {
+        self.ensure_healthy()?;
         receipt.validate()?;
         let Some(attempt) = self.latest.get(&receipt.attempt_id) else {
             return Err(FinalityJournalError::ReceiptMismatch);
@@ -306,15 +317,38 @@ impl FinalityJournalV1 {
         }
 
         if !self.initialized {
-            self.file.write_all(JOURNAL_MAGIC)?;
-            self.file.sync_data()?;
+            if let Err(error) = self.file.write_all(JOURNAL_MAGIC) {
+                self.poisoned = true;
+                return Err(FinalityJournalError::Io(error));
+            }
+            if let Err(error) = self.file.sync_data() {
+                self.poisoned = true;
+                return Err(FinalityJournalError::Io(error));
+            }
             self.initialized = true;
         }
 
-        self.file.write_all(&(encoded.len() as u32).to_be_bytes())?;
-        self.file.write_all(&encoded)?;
-        self.file.sync_data()?;
+        if let Err(error) = self.file.write_all(&(encoded.len() as u32).to_be_bytes()) {
+            self.poisoned = true;
+            return Err(FinalityJournalError::Io(error));
+        }
+        if let Err(error) = self.file.write_all(&encoded) {
+            self.poisoned = true;
+            return Err(FinalityJournalError::Io(error));
+        }
+        if let Err(error) = self.file.sync_data() {
+            self.poisoned = true;
+            return Err(FinalityJournalError::Io(error));
+        }
         Ok(())
+    }
+
+    fn ensure_healthy(&self) -> Result<(), FinalityJournalError> {
+        if self.poisoned {
+            Err(FinalityJournalError::JournalPoisoned)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -517,6 +551,24 @@ mod tests {
 
     fn temp_path(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("xenia-finality-journal-{}-{}", tag, std::process::id()))
+    }
+
+    #[test]
+    fn poisoned_owner_refuses_future_appends() {
+        let path = temp_path("poisoned-owner");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(lock_path_for(&path));
+
+        let mut journal = FinalityJournalV1::open(&path).unwrap();
+        journal.poisoned = true;
+
+        assert!(matches!(
+            journal.append_attempt(&attempt()),
+            Err(FinalityJournalError::JournalPoisoned)
+        ));
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(lock_path_for(&path));
     }
 
     #[test]
