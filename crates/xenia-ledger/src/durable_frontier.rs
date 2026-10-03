@@ -1142,9 +1142,7 @@ mod tests {
     fn restored_chain_requires_authoritative_exact_frontier_verification() {
         let mut original = Chain::new(SigningKey::from_bytes(&[3; 32]));
         original.append(event(1)).unwrap();
-        let entries = original
-            .into_entries()
-            .unwrap();
+        let entries = original.into_entries().unwrap();
         let restored = Chain::from_entries(entries, SigningKey::from_bytes(&[3; 32]));
 
         assert!(matches!(
