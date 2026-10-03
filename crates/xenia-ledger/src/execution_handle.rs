@@ -37,6 +37,7 @@ pub struct ExactExecutionHandleV1 {
     authorization_digest: [u8; 32],
     act_digest: [u8; 32],
     sink_digest: [u8; 32],
+    protected_state_digest: [u8; 32],
     expires_at_unix_s: u64,
     _seal: ExecutionHandleSeal,
 }
@@ -60,6 +61,7 @@ impl ExactExecutionHandleV1 {
         expected_prior_checkpoint: Option<AgentCheckpointAnchorV1>,
         act_digest: [u8; 32],
         sink_digest: [u8; 32],
+        protected_state_digest: [u8; 32],
     ) -> Result<Self, ExactExecutionHandleError> {
         verify_agent_capability_attestation(
             attestation,
@@ -79,6 +81,9 @@ impl ExactExecutionHandleV1 {
         if sink_digest == [0; 32] {
             return Err(ExactExecutionHandleError::ZeroSinkDigest);
         }
+        if protected_state_digest == [0; 32] {
+            return Err(ExactExecutionHandleError::ZeroProtectedStateDigest);
+        }
 
         let authorization_message = attestation.authorization.canonical_message()?;
         let authorization_digest = *blake3::hash(&authorization_message).as_bytes();
@@ -87,6 +92,7 @@ impl ExactExecutionHandleV1 {
             authorization_digest,
             act_digest,
             sink_digest,
+            protected_state_digest,
             expires_at_unix_s: attestation.authorization.expires_at_unix_s,
             _seal: ExecutionHandleSeal,
         })
@@ -99,6 +105,7 @@ impl ExactExecutionHandleV1 {
         hasher.update(&self.authorization_digest);
         hasher.update(&self.act_digest);
         hasher.update(&self.sink_digest);
+        hasher.update(&self.protected_state_digest);
         hasher.update(&self.expires_at_unix_s.to_be_bytes());
         *hasher.finalize().as_bytes()
     }
@@ -111,6 +118,11 @@ impl ExactExecutionHandleV1 {
     /// Digest of the exact sink/destination this handle authorizes.
     pub fn sink_digest(&self) -> [u8; 32] {
         self.sink_digest
+    }
+
+    /// Digest of the protected runtime state checked when this handle was issued.
+    pub fn protected_state_digest(&self) -> [u8; 32] {
+        self.protected_state_digest
     }
 
     /// Expiration inherited from the verified authorization.
@@ -136,9 +148,21 @@ impl ExactExecutionConsumptionGuardV1 {
         &self,
         handle: &ExactExecutionHandleV1,
         now_unix_s: u64,
+        actual_act_digest: [u8; 32],
+        actual_sink_digest: [u8; 32],
+        current_protected_state_digest: [u8; 32],
     ) -> Result<(), ExactExecutionConsumptionError> {
         if now_unix_s >= handle.expires_at_unix_s {
             return Err(ExactExecutionConsumptionError::Expired);
+        }
+        if actual_act_digest != handle.act_digest {
+            return Err(ExactExecutionConsumptionError::ActMismatch);
+        }
+        if actual_sink_digest != handle.sink_digest {
+            return Err(ExactExecutionConsumptionError::SinkMismatch);
+        }
+        if current_protected_state_digest != handle.protected_state_digest {
+            return Err(ExactExecutionConsumptionError::ProtectedStateMismatch);
         }
 
         let digest = handle.digest();
@@ -181,6 +205,9 @@ pub enum ExactExecutionHandleError {
     /// The exact sink digest was empty.
     #[error("exact execution sink digest must be nonzero")]
     ZeroSinkDigest,
+    /// The protected current-state digest was empty.
+    #[error("exact execution protected-state digest must be nonzero")]
+    ZeroProtectedStateDigest,
 }
 
 /// Errors consuming an exact execution handle.
@@ -192,6 +219,15 @@ pub enum ExactExecutionConsumptionError {
     /// This exact handle was already consumed.
     #[error("exact execution handle has already been consumed")]
     AlreadyConsumed,
+    /// The reconstructed act differs from the exact act bound into the handle.
+    #[error("exact execution act does not match the execution handle")]
+    ActMismatch,
+    /// The actual destination differs from the exact sink bound into the handle.
+    #[error("exact execution sink does not match the execution handle")]
+    SinkMismatch,
+    /// The protected current state differs from the state bound into the handle.
+    #[error("protected execution state does not match the execution handle")]
+    ProtectedStateMismatch,
     /// The process-local registry became unusable.
     #[error("exact execution consumption registry is poisoned")]
     Poisoned,
@@ -284,8 +320,10 @@ mod tests {
         assert_eq!(handle.digest(), same.digest());
         assert_eq!(handle.act_digest(), [0x11; 32]);
         assert_eq!(handle.sink_digest(), [0x22; 32]);
+        assert_eq!(handle.protected_state_digest(), [0x33; 32]);
         assert_ne!(handle.digest(), issue([0x12; 32], [0x22; 32]).digest());
         assert_ne!(handle.digest(), issue([0x11; 32], [0x23; 32]).digest());
+
     }
 
     #[test]
@@ -296,7 +334,7 @@ mod tests {
         for _ in 0..16 {
             let guard = std::sync::Arc::clone(&guard);
             let handle = handle.clone();
-            workers.push(std::thread::spawn(move || guard.consume(&handle, 120).is_ok()));
+            workers.push(std::thread::spawn(move || guard.consume(&handle, 120, [0x31; 32], [0x41; 32], [0x33; 32]).is_ok()));
         }
         let successes = workers
             .into_iter()
@@ -312,10 +350,39 @@ mod tests {
         let handle = issue([0x51; 32], [0x61; 32]);
         let guard = ExactExecutionConsumptionGuardV1::new();
         assert_eq!(
-            guard.consume(&handle, 160),
+            guard.consume(&handle, 160, [0x51; 32], [0x61; 32], [0x33; 32]),
             Err(ExactExecutionConsumptionError::Expired)
         );
         assert!(guard.is_empty().unwrap());
+    }
+
+    #[test]
+    fn final_sink_rejects_act_sink_or_state_substitution_before_consumption() {
+        let handle = issue([0x71; 32], [0x72; 32]);
+        let guard = ExactExecutionConsumptionGuardV1::new();
+
+        assert_eq!(
+            guard.consume(&handle, 120, [0x73; 32], [0x72; 32], [0x33; 32]),
+            Err(ExactExecutionConsumptionError::ActMismatch)
+        );
+        assert!(guard.is_empty().unwrap());
+
+        assert_eq!(
+            guard.consume(&handle, 120, [0x71; 32], [0x74; 32], [0x33; 32]),
+            Err(ExactExecutionConsumptionError::SinkMismatch)
+        );
+        assert!(guard.is_empty().unwrap());
+
+        assert_eq!(
+            guard.consume(&handle, 120, [0x71; 32], [0x72; 32], [0x34; 32]),
+            Err(ExactExecutionConsumptionError::ProtectedStateMismatch)
+        );
+        assert!(guard.is_empty().unwrap());
+
+        guard
+            .consume(&handle, 120, [0x71; 32], [0x72; 32], [0x33; 32])
+            .unwrap();
+        assert_eq!(guard.len().unwrap(), 1);
     }
 
     #[test]
@@ -333,6 +400,7 @@ mod tests {
             authorization.prior_checkpoint,
             [0; 32],
             [0x71; 32],
+            [0x33; 32],
         );
         assert!(matches!(result, Err(ExactExecutionHandleError::ZeroActDigest)));
 
@@ -348,6 +416,7 @@ mod tests {
             authorization.prior_checkpoint,
             [0x71; 32],
             [0; 32],
+            [0x33; 32],
         );
         assert!(matches!(result, Err(ExactExecutionHandleError::ZeroSinkDigest)));
     }
