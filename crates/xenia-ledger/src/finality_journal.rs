@@ -272,7 +272,9 @@ impl FinalityJournalV1 {
             if existing == receipt {
                 return Ok(());
             }
-            return Err(FinalityJournalError::ReceiptMismatch);
+            if existing.outcome != FinalityOutcomeV1::Indeterminate {
+                return Err(FinalityJournalError::ReceiptMismatch);
+            }
         }
 
         self.append_record(&FinalityJournalRecordV1::Receipt(receipt.clone()))?;
@@ -339,10 +341,14 @@ fn replay_journal_bytes(
 ) -> Result<(
     BTreeMap<[u8; 16], FinalityAttemptV1>,
     BTreeMap<[u8; 16], FinalityReceiptV1>,
+    BTreeMap<[u8; 32], [u8; 16]>,
+    BTreeMap<[u8; 32], [u8; 16]>,
 ), FinalityJournalError> {
     let mut cursor = 0usize;
     let mut latest = BTreeMap::new();
     let mut receipts = BTreeMap::new();
+    let mut consumed_handles = BTreeMap::new();
+    let mut occupied_actions = BTreeMap::new();
 
     while cursor < bytes.len() {
         if bytes.len() - cursor < 4 {
@@ -459,12 +465,14 @@ fn replay_journal_bytes(
                 }
 
                 if let Some(existing) = receipts.get(&receipt.attempt_id) {
-                    if existing != &receipt {
+                    if existing == &receipt {
+                        continue;
+                    }
+                    if existing.outcome != FinalityOutcomeV1::Indeterminate {
                         return Err(FinalityJournalError::ReceiptMismatch);
                     }
-                } else {
-                    receipts.insert(receipt.attempt_id, receipt);
                 }
+                receipts.insert(receipt.attempt_id, receipt);
             }
         }
     }
