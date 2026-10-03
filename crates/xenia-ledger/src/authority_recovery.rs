@@ -964,6 +964,7 @@ mod tests {
         let result = state.apply(AuthorityRecoveryEventV1::DurableCommit {
             transition_fingerprint: TRANSITION_A,
             authority_epoch: 9,
+            durable_frontier_digest: [0xF1; 32],
         });
 
         assert_eq!(result, Err(AuthorityRecoveryError::AuthorityEpochMismatch));
@@ -1031,7 +1032,7 @@ mod tests {
                     transition_fingerprint: [0; 32],
                     authority_epoch: 8,
                     durable_frontier_digest: [0xF1; 32],
-                    }
+                }
             ),
             Err(AuthorityRecoveryError::InvalidTransitionFingerprint)
         ));
