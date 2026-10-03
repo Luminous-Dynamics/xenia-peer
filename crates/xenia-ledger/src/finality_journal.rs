@@ -5,7 +5,7 @@
 //!
 //! The journal makes lifecycle intent durable, but it does not make an external
 //! OS/backend call transactional. Every state change is length-prefixed,
-//! validated, written, and followed by sync_data. Recovery fails closed on a
+//! validated, written, and followed by sync_all. Recovery fails closed on a
 //! truncated or malformed record instead of silently discarding an uncertain
 //! suffix.
 //!
