@@ -238,6 +238,61 @@ impl InputEvent {
     }
 }
 
+/// Stable domain separator for canonical input-act identities.
+pub const INPUT_EVENT_DIGEST_DOMAIN: &[u8] = b"xenia:input-event-digest:v1\\0";
+
+impl InputEvent {
+    /// Compute the canonical digest of this exact validated input event.
+    ///
+    /// The encoding is explicit rather than serializer-dependent so the act
+    /// identity cannot change merely because a bincode/serde version changes.
+    pub fn canonical_digest(&self) -> Result<[u8; 32], InputEventValidationError> {
+        self.validate()?;
+
+        let mut bytes = Vec::with_capacity(32);
+        match self {
+            Self::Pointer { x, y, button, pressed } => {
+                bytes.push(0);
+                bytes.extend_from_slice(&x.to_bits().to_be_bytes());
+                bytes.extend_from_slice(&y.to_bits().to_be_bytes());
+                bytes.push(*button);
+                bytes.push(u8::from(*pressed));
+            }
+            Self::Key { code, pressed, modifiers } => {
+                bytes.push(1);
+                bytes.extend_from_slice(&code.to_be_bytes());
+                bytes.push(u8::from(*pressed));
+                bytes.push(*modifiers);
+            }
+            Self::Touch { index, x, y, phase, pressure } => {
+                bytes.push(2);
+                bytes.push(*index);
+                bytes.extend_from_slice(&x.to_bits().to_be_bytes());
+                bytes.extend_from_slice(&y.to_bits().to_be_bytes());
+                bytes.push(*phase);
+                bytes.extend_from_slice(&pressure.to_bits().to_be_bytes());
+            }
+            Self::PointerMove { x, y } => {
+                bytes.push(3);
+                bytes.extend_from_slice(&x.to_bits().to_be_bytes());
+                bytes.extend_from_slice(&y.to_bits().to_be_bytes());
+            }
+            Self::PointerButton { x, y, button, pressed } => {
+                bytes.push(4);
+                bytes.extend_from_slice(&x.to_bits().to_be_bytes());
+                bytes.extend_from_slice(&y.to_bits().to_be_bytes());
+                bytes.push(*button);
+                bytes.push(u8::from(*pressed));
+            }
+        }
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(INPUT_EVENT_DIGEST_DOMAIN);
+        hasher.update(&bytes);
+        Ok(*hasher.finalize().as_bytes())
+    }
+}
+
 /// A recorded injection — useful for LoggingInjector + tests.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InjectedEvent {
@@ -1075,6 +1130,19 @@ impl InputInjector for UinputInjector {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn canonical_digest_is_exact_and_validation_bound() {
+        let event = InputEvent::PointerMove { x: 0.25, y: 0.75 };
+        let digest = event.canonical_digest().unwrap();
+        assert_eq!(digest, event.canonical_digest().unwrap());
+
+        let changed = InputEvent::PointerMove { x: 0.25001, y: 0.75 };
+        assert_ne!(digest, changed.canonical_digest().unwrap());
+
+        let invalid = InputEvent::PointerMove { x: f32::NAN, y: 0.75 };
+        assert!(invalid.canonical_digest().is_err());
+    }
+
     #[test]
     fn input_event_validation_rejects_non_finite_and_out_of_range_values() {
         let event = InputEvent::PointerMove { x: f32::NAN, y: 0.5 };
