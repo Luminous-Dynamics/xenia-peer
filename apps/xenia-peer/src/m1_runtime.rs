@@ -1222,23 +1222,6 @@ impl M1RuntimeSession {
         }
     }
 
-    /// Execute one already-decoded input event while holding the exclusive M1
-    /// runtime state borrow.
-    ///
-    /// The permission check happens before the backend effect runs. The borrow
-    /// remains exclusive through that synchronous call, so the daemon's
-    /// revocation path cannot transition this runtime to `Revoked` between
-    /// authorization and effectuation. `InputInjected` is appended only after
-    /// the backend reports success, keeping the audit trail truthful when
-    /// injection fails.
-    pub(crate) fn execute_input_effect(
-        &mut self,
-        effect: impl FnOnce() -> Result<(), M1RuntimeError>,
-    ) -> Result<(), M1RuntimeError> {
-        self.execute_input_effect_outcome(|| effect().map(|()| InputEffectOutcome::Applied))?;
-        Ok(())
-    }
-
     /// Execute one input operation while preserving the provider-boundary
     /// outcome.
     ///
@@ -2110,9 +2093,9 @@ mod tests {
 
         let mut called = false;
         runtime
-            .execute_input_effect(|| {
+            .execute_input_effect_outcome(|| {
                 called = true;
-                Ok(())
+                Ok(InputEffectOutcome::Applied)
             })
             .unwrap();
         assert!(called);
@@ -2123,7 +2106,7 @@ mod tests {
 
         let mut called = false;
         let err = runtime
-            .execute_input_effect(|| {
+            .execute_input_effect_outcome(|| {
                 called = true;
                 Err(M1RuntimeError::InputInjection("backend rejected".into()))
             })
@@ -2214,9 +2197,9 @@ mod tests {
 
         let mut called = false;
         let err = runtime
-            .execute_input_effect(|| {
+            .execute_input_effect_outcome(|| {
                 called = true;
-                Ok(())
+                Ok(InputEffectOutcome::Applied)
             })
             .unwrap_err();
 
