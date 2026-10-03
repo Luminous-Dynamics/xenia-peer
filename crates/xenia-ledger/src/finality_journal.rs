@@ -86,7 +86,7 @@ pub enum FinalityJournalError {
     /// A receipt outcome did not match the corresponding terminal state.
     #[error("finality receipt outcome does not match the attempt state")]
     ReceiptOutcomeMismatch,
-    /// Another live journal owner already holds the sibling lock.
+    /// Another live journal owner already holds the exclusive journal-file lock.
     #[error("finality journal is already owned by another process")]
     JournalAlreadyOwned,
     /// The current journal owner encountered a persistence error and must not
@@ -292,7 +292,7 @@ impl FinalityJournalV1 {
                 self.poisoned = true;
                 return Err(FinalityJournalError::Io(error));
             }
-            if let Err(error) = self.file.sync_data() {
+            if let Err(error) = self.file.sync_all() {
                 self.poisoned = true;
                 return Err(FinalityJournalError::Io(error));
             }
@@ -307,7 +307,7 @@ impl FinalityJournalV1 {
             self.poisoned = true;
             return Err(FinalityJournalError::Io(error));
         }
-        if let Err(error) = self.file.sync_data() {
+        if let Err(error) = self.file.sync_all() {
             self.poisoned = true;
             return Err(FinalityJournalError::Io(error));
         }
