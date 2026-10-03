@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -36,12 +37,20 @@ enum FinalityJournalRecordV1 {
     Receipt(FinalityReceiptV1),
 }
 
-/// Single-owner append-only finality journal. A deployment must ensure only one writer
-/// owns the journal path at a time; the journal itself does not provide cross-process locking.
+/// Single-owner append-only finality journal.
+///
+/// Opening atomically claims a sibling `.lock` file. A live process therefore
+/// refuses a second owner, including a second process that has independently
+/// reconstructed an empty in-memory fence. A stale lock is intentionally not
+/// guessed about: operators must reconcile/remove it after establishing that
+/// the prior owner is gone.
 pub struct FinalityJournalV1 {
     path: PathBuf,
     file: File,
+    lock_path: PathBuf,
+    lock_file: File,
     latest: BTreeMap<[u8; 16], FinalityAttemptV1>,
+    receipts: BTreeMap<[u8; 16], FinalityReceiptV1>,
     consumed_handles: BTreeMap<[u8; 32], [u8; 16]>,
 }
 
@@ -84,10 +93,33 @@ pub enum FinalityJournalError {
     },
 }
 
+impl Drop for FinalityJournalV1 {
+    fn drop(&mut self) {
+        let _ = self.lock_file.sync_all();
+        let _ = std::fs::remove_file(&self.lock_path);
+    }
+}
+
 impl FinalityJournalV1 {
     /// Open or create the journal and replay every existing record.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, FinalityJournalError> {
         let path = path.as_ref().to_path_buf();
+        let lock_path = lock_path_for(&path);
+        let lock_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "finality journal is already owned by another process",
+                    )
+                } else {
+                    error
+                }
+            })?;
+
         let mut reader = OpenOptions::new()
             .create(true)
             .read(true)
@@ -96,13 +128,22 @@ impl FinalityJournalV1 {
 
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes)?;
-        let latest = replay_journal_bytes(&bytes)?;
+        let (latest, receipts) = replay_journal_bytes(&bytes)?;
         let consumed_handles = consumed_handle_index(&latest)?;
+
+        let mut owner = format!("pid={}", std::process::id());
+        if let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) {
+            owner.push_str(&format!(" opened_at_unix_s={}", now.as_secs()));
+        }
+        let _ = (&lock_file).write_all(owner.as_bytes());
 
         Ok(Self {
             path,
             file: reader,
+            lock_path,
+            lock_file,
             latest,
+            receipts,
             consumed_handles,
         })
     }
@@ -184,7 +225,21 @@ impl FinalityJournalV1 {
             return Err(FinalityJournalError::ReceiptOutcomeMismatch);
         }
 
-        self.append_record(&FinalityJournalRecordV1::Receipt(receipt.clone()))
+        if let Some(existing) = self.receipts.get(&receipt.attempt_id) {
+            if existing == receipt {
+                return Ok(());
+            }
+            return Err(FinalityJournalError::ReceiptMismatch);
+        }
+
+        self.append_record(&FinalityJournalRecordV1::Receipt(receipt.clone()))?;
+        self.receipts.insert(receipt.attempt_id, receipt.clone());
+        Ok(())
+    }
+
+    /// Return the durable receipt for an exact attempt, when one has been recorded.
+    pub fn latest_receipt(&self, attempt_id: [u8; 16]) -> Option<&FinalityReceiptV1> {
+        self.receipts.get(&attempt_id)
     }
 
     /// Return the number of distinct attempts present in the journal index.
@@ -214,6 +269,12 @@ impl FinalityJournalV1 {
     }
 }
 
+fn lock_path_for(path: &Path) -> PathBuf {
+    let mut lock_path = path.as_os_str().to_owned();
+    lock_path.push(".lock");
+    PathBuf::from(lock_path)
+}
+
 fn consumed_handle_index(
     latest: &BTreeMap<[u8; 16], FinalityAttemptV1>,
 ) -> Result<BTreeMap<[u8; 32], [u8; 16]>, FinalityJournalError> {
@@ -236,9 +297,13 @@ fn consumed_handle_index(
 
 fn replay_journal_bytes(
     bytes: &[u8],
-) -> Result<BTreeMap<[u8; 16], FinalityAttemptV1>, FinalityJournalError> {
+) -> Result<(
+    BTreeMap<[u8; 16], FinalityAttemptV1>,
+    BTreeMap<[u8; 16], FinalityReceiptV1>,
+), FinalityJournalError> {
     let mut cursor = 0usize;
     let mut latest = BTreeMap::new();
+    let mut receipts = BTreeMap::new();
 
     while cursor < bytes.len() {
         if bytes.len() - cursor < 4 {
@@ -314,11 +379,19 @@ fn replay_journal_bytes(
                 if receipt.outcome != expected_outcome {
                     return Err(FinalityJournalError::ReceiptOutcomeMismatch);
                 }
+
+                if let Some(existing) = receipts.get(&receipt.attempt_id) {
+                    if existing != &receipt {
+                        return Err(FinalityJournalError::ReceiptMismatch);
+                    }
+                } else {
+                    receipts.insert(receipt.attempt_id, receipt);
+                }
             }
         }
     }
 
-    Ok(latest)
+    Ok((latest, receipts))
 }
 
 fn valid_lifecycle_transition(
