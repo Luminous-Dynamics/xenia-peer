@@ -267,6 +267,25 @@ impl FinalityJournalV1 {
         self.receipts.get(&attempt_id)
     }
 
+    /// Return exact attempt identifiers whose durable state requires reconciliation.
+    ///
+    /// This is intentionally derived from durable state rather than process-local
+    /// bookkeeping, so a reopened owner can discover every stranded attempt without
+    /// an external retry queue.
+    pub fn attempts_requiring_reconciliation(&self) -> Vec<[u8; 16]> {
+        self.latest
+            .iter()
+            .filter_map(|(attempt_id, attempt)| {
+                matches!(
+                    attempt.state,
+                    FinalityAttemptStateV1::EffectuationStarted
+                        | FinalityAttemptStateV1::Indeterminate
+                )
+                .then_some(*attempt_id)
+            })
+            .collect()
+    }
+
     /// Return the number of distinct attempts present in the journal index.
     pub fn len(&self) -> usize {
         self.latest.len()
@@ -745,6 +764,31 @@ mod tests {
             journal.append_attempt(&second),
             Err(FinalityJournalError::HandleAlreadyConsumed { .. })
         ));
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reopened_journal_discovers_every_reconciliation_attempt() {
+        let path = temp_path("reconciliation-index");
+        let _ = fs::remove_file(&path);
+
+        {
+            let mut journal = FinalityJournalV1::open(&path).unwrap();
+            let mut started =
+                FinalityAttemptV1::prepare([41; 16], [42; 32], [43; 32], [44; 32], [45; 32]).unwrap();
+            started.mark_effectuation_started().unwrap();
+            journal.append_attempt(&started).unwrap();
+
+            let mut closed =
+                FinalityAttemptV1::prepare([46; 16], [47; 32], [48; 32], [49; 32], [50; 32]).unwrap();
+            closed.mark_effectuation_started().unwrap();
+            closed.commit().unwrap();
+            journal.append_attempt(&closed).unwrap();
+        }
+
+        let journal = FinalityJournalV1::open(&path).unwrap();
+        assert_eq!(journal.attempts_requiring_reconciliation(), vec![[41; 16]]);
 
         let _ = fs::remove_file(&path);
     }
