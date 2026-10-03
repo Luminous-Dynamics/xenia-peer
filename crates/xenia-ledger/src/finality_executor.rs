@@ -126,9 +126,6 @@ pub enum FinalityExecutorError {
     /// Durable finality journaling failed.
     #[error("durable finality journal failed: {0}")]
     Journal(#[from] FinalityJournalError),
-    /// The durable attempt schema must remain the current execution schema.
-    #[error("unsupported finality attempt schema: {0}")]
-    UnsupportedSchema(String),
 }
 
 #[cfg(test)]
