@@ -272,7 +272,6 @@ fn portal_worker(rx: mpsc::Receiver<Command>, ready_tx: mpsc::Sender<Result<(), 
                         Some((lx, ly)) => (x - lx, y - ly),
                         None => (0.0, 0.0),
                     };
-                    last_pointer = Some((x, y));
                     let result = if dx != 0.0 || dy != 0.0 {
                         proxy
                             .notify_pointer_motion(&session, dx, dy)
@@ -283,6 +282,9 @@ fn portal_worker(rx: mpsc::Receiver<Command>, ready_tx: mpsc::Sender<Result<(), 
                     } else {
                         Ok(())
                     };
+                    if result.is_ok() {
+                        last_pointer = Some((x, y));
+                    }
                     let _ = reply.send(result);
                 }
                 Command::PointerButton {
@@ -296,7 +298,6 @@ fn portal_worker(rx: mpsc::Receiver<Command>, ready_tx: mpsc::Sender<Result<(), 
                         Some((lx, ly)) => (x - lx, y - ly),
                         None => (0.0, 0.0),
                     };
-                    last_pointer = Some((x, y));
                     let result = if dx != 0.0 || dy != 0.0 {
                         proxy
                             .notify_pointer_motion(&session, dx, dy)
@@ -307,7 +308,8 @@ fn portal_worker(rx: mpsc::Receiver<Command>, ready_tx: mpsc::Sender<Result<(), 
                     } else {
                         Ok(())
                     };
-                    let result = result.and_then(|()| async {
+                    let result = if result.is_ok() {
+                        last_pointer = Some((x, y));
                         proxy
                             .notify_pointer_button(
                                 &session,
@@ -318,7 +320,9 @@ fn portal_worker(rx: mpsc::Receiver<Command>, ready_tx: mpsc::Sender<Result<(), 
                             .map_err(|err| InjectError::Backend(format!(
                                 "portal pointer button failed: {err}"
                             )))
-                    }.await);
+                    } else {
+                        result
+                    };
                     let _ = reply.send(result);
                 }
                 Command::Key { code, pressed, reply } => {
