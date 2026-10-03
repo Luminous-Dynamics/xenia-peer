@@ -6621,6 +6621,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                 };
+                if let Err(err) = event.validate() {
+                    warn!(error = %err, "input event failed semantic validation");
+                    continue;
+                }
                 let width = screen_dims.0.load(Ordering::Relaxed);
                 let height = screen_dims.1.load(Ordering::Relaxed);
                 let result = {
