@@ -1820,6 +1820,20 @@ fn read_host_clipboard_text() -> Option<String> {
 /// clipboard.
 const MAX_INBOUND_CLIPBOARD_BYTES: usize = 1024 * 1024;
 
+/// Accept one authenticated per-session input operation sequence.
+///
+/// The first sequence may be any value. Thereafter the receiver accepts only
+/// strictly larger values, rejecting duplicates and delayed/out-of-order inputs.
+/// This is a session-local replay/order fence; durable consequence finality
+/// remains the responsibility of the finality journal/executor boundary.
+fn accept_monotonic_input_sequence(last: &mut Option<u64>, sequence: u64) -> bool {
+    if last.is_some_and(|previous| sequence <= previous) {
+        return false;
+    }
+    *last = Some(sequence);
+    true
+}
+
 fn apply_clipboard_content(content: &ClipboardContent) {
     if let ClipboardContent::Text(text) = content
         && text.len() > MAX_INBOUND_CLIPBOARD_BYTES
@@ -6533,6 +6547,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // noop`, the default) never triggers `XdgPortalInjector`'s
             // consent dialog because it's simply never built.
             let mut injector: Option<SessionInputInjector> = None;
+            // RawInput.sequence is the authenticated session's operation
+            // sequence. Keep the highest consumed value so delayed or duplicate
+            // envelopes cannot re-enter the host effect path.
+            let mut last_input_sequence: Option<u64> = None;
             loop {
                 let envelope = match recv_half.recv_envelope().await {
                     Ok(envelope) => envelope,
@@ -6623,6 +6641,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 if let Err(err) = event.validate() {
                     warn!(error = %err, "input event failed semantic validation");
+                    continue;
+                }
+                if !accept_monotonic_input_sequence(&mut last_input_sequence, input.sequence) {
+                    warn!(
+                        sequence = input.sequence,
+                        last_sequence = ?last_input_sequence,
+                        "stale or duplicate input sequence rejected"
+                    );
                     continue;
                 }
                 let width = screen_dims.0.load(Ordering::Relaxed);
@@ -7224,6 +7250,21 @@ mod consent_scope_tests {
         assert!(!granted.write_host_clipboard);
         assert!(!granted.send_file_to_viewer);
         assert!(!granted.receive_file_from_viewer);
+    }
+
+    #[test]
+    fn monotonic_input_sequence_fence_rejects_duplicates_and_reordering() {
+        let mut last = None;
+
+        assert!(accept_monotonic_input_sequence(&mut last, 7));
+        assert_eq!(last, Some(7));
+
+        assert!(!accept_monotonic_input_sequence(&mut last, 7));
+        assert!(!accept_monotonic_input_sequence(&mut last, 6));
+        assert_eq!(last, Some(7));
+
+        assert!(accept_monotonic_input_sequence(&mut last, 8));
+        assert_eq!(last, Some(8));
     }
 
     #[test]
