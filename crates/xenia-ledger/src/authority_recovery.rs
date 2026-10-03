@@ -35,8 +35,11 @@ pub enum AuthorityRecoveryStateV1 {
         /// Fingerprint of the exact transition whose persistence outcome is unknown.
         transition_fingerprint: [u8; 32],
     },
-    /// Recovery from a predecessor state with no known committed transition.
-    RecoveryFromOld,
+    /// Recovery from a predecessor state while reconciling one exact transition.
+    RecoveryFromOld {
+        /// Fingerprint of the exact signed transition being reconciled.
+        transition_fingerprint: [u8; 32],
+    },
     /// Recovery after a successor transition was already durably committed.
     RecoveryAfterCommit {
         /// Fingerprint of the exact committed transition being recovered.
@@ -77,15 +80,21 @@ pub enum AuthorityRecoveryEventV1 {
         /// Fingerprint of the exact transition whose persistence outcome is unknown.
         transition_fingerprint: [u8; 32],
     },
-    /// A crash/restart enters recovery.
-    BeginRecovery,
+    /// A crash/restart enters recovery for one exact transition.
+    BeginRecovery {
+        /// Fingerprint of the exact signed transition being recovered.
+        transition_fingerprint: [u8; 32],
+    },
     /// Recovery proves the successor transition is durably committed.
     RecoverSuccessor {
         /// Fingerprint of the exact transition proven durably committed.
         transition_fingerprint: [u8; 32],
     },
-    /// Recovery proves the successor transition is absent.
-    RecoverOld,
+    /// Recovery proves the exact transition is absent.
+    RecoverOld {
+        /// Fingerprint of the exact signed transition proven absent.
+        transition_fingerprint: [u8; 32],
+    },
     /// Recovery cannot determine the durable outcome.
     RecoverOutcomeUnknown {
         /// Fingerprint of the exact transition whose outcome remains unknown.
@@ -170,25 +179,44 @@ impl AuthorityRecoveryStateV1 {
                 TransitionCommitted {
                     transition_fingerprint,
                 },
-                BeginRecovery,
-            ) => RecoveryAfterCommit {
+                BeginRecovery {
+                    transition_fingerprint: event_fingerprint,
+                },
+            ) => {
+                require_matching_fingerprint(transition_fingerprint, event_fingerprint)?;
+                RecoveryAfterCommit {
                 transition_fingerprint,
             },
             (
                 SuccessorActive {
                     transition_fingerprint,
                 },
-                BeginRecovery,
-            ) => RecoveryAfterCommit {
+                BeginRecovery {
+                    transition_fingerprint: event_fingerprint,
+                },
+            ) => {
+                require_matching_fingerprint(transition_fingerprint, event_fingerprint)?;
+                RecoveryAfterCommit {
                 transition_fingerprint,
             },
-            (OldActive, BeginRecovery) => RecoveryFromOld,
+            (
+                OldActive,
+                BeginRecovery {
+                    transition_fingerprint,
+                },
+            ) => RecoveryFromOld {
+                transition_fingerprint: require_fingerprint(transition_fingerprint)?,
+            },
             (
                 OutcomeUnknown {
                     transition_fingerprint,
                 },
-                BeginRecovery,
-            ) => RecoveryAfterUnknown {
+                BeginRecovery {
+                    transition_fingerprint: event_fingerprint,
+                },
+            ) => {
+                require_matching_fingerprint(transition_fingerprint, event_fingerprint)?;
+                RecoveryAfterUnknown {
                 transition_fingerprint,
             },
             (
@@ -199,7 +227,17 @@ impl AuthorityRecoveryStateV1 {
             ) => TransitionCommitted {
                 transition_fingerprint: require_fingerprint(transition_fingerprint)?,
             },
-            (RecoveryFromOld, RecoverOld) => OldActive,
+            (
+                RecoveryFromOld {
+                    transition_fingerprint,
+                },
+                RecoverOld {
+                    transition_fingerprint: event_fingerprint,
+                },
+            ) => {
+                require_matching_fingerprint(transition_fingerprint, event_fingerprint)?;
+                OldActive
+            }
             (
                 RecoveryAfterCommit {
                     transition_fingerprint,
@@ -230,9 +268,11 @@ impl AuthorityRecoveryStateV1 {
                 RecoveryAfterUnknown {
                     transition_fingerprint,
                 },
-                RecoverOld,
+                RecoverOld {
+                    transition_fingerprint: event_fingerprint,
+                },
             ) => {
-                require_fingerprint(transition_fingerprint)?;
+                require_matching_fingerprint(transition_fingerprint, event_fingerprint)?;
                 OldActive
             }
             (
@@ -279,7 +319,7 @@ impl AuthorityRecoveryStateV1 {
     /// Return the exact key-transition fingerprint attached to this state.
     pub const fn transition_fingerprint(self) -> Option<[u8; 32]> {
         match self {
-            Self::OldActive | Self::RecoveryFromOld => None,
+            Self::OldActive => None,
             Self::TransitionPending {
                 transition_fingerprint,
             }
@@ -431,7 +471,9 @@ mod tests {
             .unwrap()
             .apply(AuthorityRecoveryEventV1::ActivateSuccessor)
             .unwrap()
-            .apply(AuthorityRecoveryEventV1::BeginRecovery)
+            .apply(AuthorityRecoveryEventV1::BeginRecovery {
+                transition_fingerprint: TRANSITION_A,
+            })
             .unwrap()
             .apply(AuthorityRecoveryEventV1::RecoverSuccessor {
                 transition_fingerprint: TRANSITION_A,
@@ -447,13 +489,30 @@ mod tests {
         );
 
         let stale = AuthorityRecoveryStateV1::OldActive
-            .apply(AuthorityRecoveryEventV1::BeginRecovery)
+            .apply(AuthorityRecoveryEventV1::BeginRecovery {
+                transition_fingerprint: TRANSITION_A,
+            })
             .unwrap()
-            .apply(AuthorityRecoveryEventV1::RecoverOld)
+            .apply(AuthorityRecoveryEventV1::RecoverOld {
+                transition_fingerprint: TRANSITION_A,
+            })
             .unwrap();
         assert_eq!(stale, AuthorityRecoveryStateV1::OldActive);
         assert!(!stale.successor_authoritative());
         assert_eq!(stale.transition_fingerprint(), None);
+    }
+
+    #[test]
+    fn mismatched_recovery_entry_cannot_cross_transition_boundary() {
+        let committed = AuthorityRecoveryStateV1::TransitionCommitted {
+            transition_fingerprint: TRANSITION_A,
+        };
+        assert!(matches!(
+            committed.apply(AuthorityRecoveryEventV1::BeginRecovery {
+                transition_fingerprint: TRANSITION_B
+            }),
+            Err(AuthorityRecoveryError::TransitionFingerprintMismatch)
+        ));
     }
 
     #[test]
@@ -474,6 +533,21 @@ mod tests {
     }
 
     #[test]
+    fn recover_old_cannot_substitute_a_different_transition() {
+        let state = AuthorityRecoveryStateV1::OldActive
+            .apply(AuthorityRecoveryEventV1::BeginRecovery {
+                transition_fingerprint: TRANSITION_A,
+            })
+            .unwrap();
+        assert!(matches!(
+            state.apply(AuthorityRecoveryEventV1::RecoverOld {
+                transition_fingerprint: TRANSITION_B
+            }),
+            Err(AuthorityRecoveryError::TransitionFingerprintMismatch)
+        ));
+    }
+
+    #[test]
     fn committed_successor_cannot_recover_to_predecessor() {
         let state = AuthorityRecoveryStateV1::OldActive
             .apply(AuthorityRecoveryEventV1::PrepareTransition {
@@ -485,7 +559,9 @@ mod tests {
             .unwrap()
             .apply(AuthorityRecoveryEventV1::ActivateSuccessor)
             .unwrap()
-            .apply(AuthorityRecoveryEventV1::BeginRecovery)
+            .apply(AuthorityRecoveryEventV1::BeginRecovery {
+                transition_fingerprint: TRANSITION_A,
+            })
             .unwrap();
         assert_eq!(
             state,
@@ -525,7 +601,9 @@ mod tests {
             .apply(AuthorityRecoveryEventV1::CommitOutcomeUnknown {
                 transition_fingerprint: TRANSITION_A,
             }).unwrap()
-            .apply(AuthorityRecoveryEventV1::BeginRecovery)
+            .apply(AuthorityRecoveryEventV1::BeginRecovery {
+                transition_fingerprint: TRANSITION_A,
+            })
             .unwrap()
             .apply(AuthorityRecoveryEventV1::RecoverOutcomeUnknown {
                 transition_fingerprint: TRANSITION_A,
@@ -549,7 +627,9 @@ mod tests {
             .apply(AuthorityRecoveryEventV1::CommitOutcomeUnknown {
                 transition_fingerprint: TRANSITION_A,
             }).unwrap()
-            .apply(AuthorityRecoveryEventV1::BeginRecovery)
+            .apply(AuthorityRecoveryEventV1::BeginRecovery {
+                transition_fingerprint: TRANSITION_A,
+            })
             .unwrap();
         assert!(matches!(
             state.apply(AuthorityRecoveryEventV1::RecoverSuccessor { transition_fingerprint: TRANSITION_B }),
