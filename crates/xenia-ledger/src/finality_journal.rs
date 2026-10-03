@@ -818,7 +818,7 @@ mod tests {
             journal.append_attempt(&first).unwrap();
 
             let mut second =
-                FinalityAttemptV1::prepare([9; 16], [2; 32], [3; 32], [4; 32]).unwrap();
+                FinalityAttemptV1::prepare([9; 16], [2; 32], [3; 32], [4; 32], [5; 32]).unwrap();
             second.mark_effectuation_started().unwrap();
 
             assert!(matches!(
