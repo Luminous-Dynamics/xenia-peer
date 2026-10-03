@@ -2144,6 +2144,55 @@ mod tests {
     }
 
     #[test]
+    fn typed_provider_outcomes_never_forge_input_injected_audit() {
+        let (mut runtime, _verifying_key) = runtime(34);
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet {
+                inject_input: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        let before = runtime
+            .session
+            .audit()
+            .iter()
+            .filter(|event| **event == xenia_peer_core::M1AuditEvent::InputInjected)
+            .count();
+
+        let outcome = runtime
+            .execute_input_effect_outcome(|| Ok(InputEffectOutcome::Indeterminate))
+            .unwrap();
+        assert_eq!(outcome, InputEffectOutcome::Indeterminate);
+        assert_eq!(
+            runtime
+                .session
+                .audit()
+                .iter()
+                .filter(|event| **event == xenia_peer_core::M1AuditEvent::InputInjected)
+                .count(),
+            before,
+            "indeterminate provider outcome must not be recorded as confirmed injection"
+        );
+
+        let outcome = runtime
+            .execute_input_effect_outcome(|| Ok(InputEffectOutcome::RejectionBeforeEffect))
+            .unwrap();
+        assert_eq!(outcome, InputEffectOutcome::RejectionBeforeEffect);
+        assert_eq!(
+            runtime
+                .session
+                .audit()
+                .iter()
+                .filter(|event| **event == xenia_peer_core::M1AuditEvent::InputInjected)
+                .count(),
+            before,
+            "pre-effect rejection must not create an input-injected audit event"
+        );
+    }
+
+    #[test]
     fn denied_input_effect_never_calls_backend() {
         let (mut runtime, _verifying_key) = runtime(32);
         runtime.offer().unwrap();
