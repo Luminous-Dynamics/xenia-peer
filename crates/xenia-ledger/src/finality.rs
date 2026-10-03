@@ -144,6 +144,21 @@ impl FinalityAttemptV1 {
         }
     }
 
+    /// Validate the structural identity of this audit record.
+    ///
+    /// Validation never grants authority; it only prevents malformed records
+    /// from being mistaken for a well-formed finality attempt.
+    pub fn validate(&self) -> Result<(), FinalityAttemptError> {
+        if self.schema != FINALITY_ATTEMPT_SCHEMA {
+            return Err(FinalityAttemptError::UnsupportedSchema);
+        }
+        require_nonzero_16(self.attempt_id, FinalityAttemptError::ZeroAttemptId)?;
+        require_nonzero(self.handle_digest, FinalityAttemptError::ZeroHandleDigest)?;
+        require_nonzero(self.act_digest, FinalityAttemptError::ZeroActDigest)?;
+        require_nonzero(self.sink_digest, FinalityAttemptError::ZeroSinkDigest)?;
+        Ok(())
+    }
+
     /// Return the current state.
     pub fn state(&self) -> FinalityAttemptStateV1 {
         self.state
@@ -158,7 +173,7 @@ impl FinalityAttemptV1 {
         hasher.update(&self.handle_digest);
         hasher.update(&self.act_digest);
         hasher.update(&self.sink_digest);
-        hasher.update(&[self.state as u8]);
+        hasher.update(&[state_tag(self.state)]);
         *hasher.finalize().as_bytes()
     }
 
@@ -228,6 +243,19 @@ pub struct FinalityReceiptV1 {
 }
 
 impl FinalityReceiptV1 {
+    /// Validate the structural identity of this audit receipt.
+    pub fn validate(&self) -> Result<(), FinalityAttemptError> {
+        if self.schema != FINALITY_RECEIPT_SCHEMA {
+            return Err(FinalityAttemptError::UnsupportedReceiptSchema);
+        }
+        require_nonzero_16(self.attempt_id, FinalityAttemptError::ZeroAttemptId)?;
+        require_nonzero(self.attempt_digest, FinalityAttemptError::ZeroAttemptDigest)?;
+        require_nonzero(self.handle_digest, FinalityAttemptError::ZeroHandleDigest)?;
+        require_nonzero(self.act_digest, FinalityAttemptError::ZeroActDigest)?;
+        require_nonzero(self.sink_digest, FinalityAttemptError::ZeroSinkDigest)?;
+        Ok(())
+    }
+
     /// Stable digest for external archival and higher-level evidence binding.
     pub fn digest(&self) -> [u8; 32] {
         let mut hasher = Hasher::new();
@@ -260,12 +288,21 @@ pub enum FinalityAttemptError {
     /// Execution-handle digest was all zeroes.
     #[error("finality handle digest must be nonzero")]
     ZeroHandleDigest,
+    /// Attempt digest in a receipt was all zeroes.
+    #[error("finality attempt digest must be nonzero")]
+    ZeroAttemptDigest,
     /// Act digest was all zeroes.
     #[error("finality act digest must be nonzero")]
     ZeroActDigest,
     /// Sink digest was all zeroes.
     #[error("finality sink digest must be nonzero")]
     ZeroSinkDigest,
+    /// The attempt schema is not recognized.
+    #[error("unsupported finality attempt schema")]
+    UnsupportedSchema,
+    /// The receipt schema is not recognized.
+    #[error("unsupported finality receipt schema")]
+    UnsupportedReceiptSchema,
     /// The requested lifecycle transition is impossible.
     #[error("invalid finality transition from {from:?} to {to:?}")]
     InvalidTransition {
@@ -274,6 +311,16 @@ pub enum FinalityAttemptError {
         /// Requested outcome represented by the destination.
         to: FinalityOutcomeV1,
     },
+}
+
+fn state_tag(state: FinalityAttemptStateV1) -> u8 {
+    match state {
+        FinalityAttemptStateV1::Prepared => 0,
+        FinalityAttemptStateV1::EffectuationStarted => 1,
+        FinalityAttemptStateV1::Committed => 2,
+        FinalityAttemptStateV1::Denied => 3,
+        FinalityAttemptStateV1::Indeterminate => 4,
+    }
 }
 
 fn require_nonzero(
@@ -323,6 +370,29 @@ mod tests {
         assert!(FinalityAttemptV1::prepare([1; 16], [0; 32], [3; 32], [4; 32]).is_err());
         assert!(FinalityAttemptV1::prepare([1; 16], [2; 32], [0; 32], [4; 32]).is_err());
         assert!(FinalityAttemptV1::prepare([1; 16], [2; 32], [3; 32], [0; 32]).is_err());
+    }
+
+    #[test]
+    fn generated_attempts_and_receipts_validate() {
+        let mut attempt = attempt();
+        attempt.validate().unwrap();
+        attempt.mark_effectuation_started().unwrap();
+        let receipt = attempt.commit().unwrap();
+        receipt.validate().unwrap();
+
+        let mut malformed = attempt.clone();
+        malformed.schema = "wrong".into();
+        assert!(matches!(
+            malformed.validate(),
+            Err(FinalityAttemptError::UnsupportedSchema)
+        ));
+
+        let mut malformed_receipt = receipt;
+        malformed_receipt.schema = "wrong".into();
+        assert!(matches!(
+            malformed_receipt.validate(),
+            Err(FinalityAttemptError::UnsupportedReceiptSchema)
+        ));
     }
 
     #[test]
