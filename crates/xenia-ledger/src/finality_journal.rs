@@ -40,7 +40,7 @@ enum FinalityJournalRecordV1 {
 
 /// Single-owner append-only finality journal.
 ///
-/// Opening atomically claims a sibling `.lock` file. A live process therefore
+/// Opening atomically claims a sibling `.lock` directory. A live process therefore
 /// refuses a second owner, including a second process that has independently
 /// reconstructed an empty in-memory fence. A stale lock is intentionally not
 /// guessed about: operators must reconcile/remove it after establishing that
@@ -57,14 +57,14 @@ pub struct FinalityJournalV1 {
 }
 
 struct FinalityJournalLockV1 {
-    path: PathBuf,
-    file: File,
+    dir: PathBuf,
+    owner: PathBuf,
 }
 
 impl Drop for FinalityJournalLockV1 {
     fn drop(&mut self) {
-        let _ = self.file.sync_all();
-        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_file(&self.owner);
+        let _ = std::fs::remove_dir(&self.dir);
     }
 }
 
@@ -123,28 +123,26 @@ impl FinalityJournalV1 {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, FinalityJournalError> {
         let path = path.as_ref().to_path_buf();
         let lock_path = lock_path_for(&path);
-        let lock_file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-            .map_err(|error| {
-                if error.kind() == io::ErrorKind::AlreadyExists {
-                    FinalityJournalError::JournalAlreadyOwned
-                } else {
-                    FinalityJournalError::Io(error)
-                }
-            })?;
+        std::fs::create_dir(&lock_path).map_err(|error| {
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                FinalityJournalError::JournalAlreadyOwned
+            } else {
+                FinalityJournalError::Io(error)
+            }
+        })?;
 
+        let owner_path = lock_path.join("owner");
         let mut lock = FinalityJournalLockV1 {
-            path: lock_path,
-            file: lock_file,
+            dir: lock_path,
+            owner: owner_path,
         };
+        let mut owner_file = File::create(&lock.owner)?;
         let mut owner = format!("pid={}", std::process::id());
         if let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) {
             owner.push_str(&format!(" opened_at_unix_s={}", now.as_secs()));
         }
-        lock.file.write_all(owner.as_bytes())?;
-        lock.file.sync_all()?;
+        owner_file.write_all(owner.as_bytes())?;
+        owner_file.sync_all()?;
 
         let mut reader = OpenOptions::new()
             .create(true)
