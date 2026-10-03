@@ -399,7 +399,7 @@ mod tests {
 
         let mut journal = FinalityJournalV1::open(&path).unwrap();
         let mut attempt =
-            FinalityAttemptV1::prepare([1; 16], [2; 32], [3; 32], [4; 32]).unwrap();
+            FinalityAttemptV1::prepare([1; 16], [2; 32], [3; 32], [4; 32], [5; 32]).unwrap();
         journal.append_attempt(&attempt).unwrap();
         attempt.mark_effectuation_started().unwrap();
         journal.append_attempt(&attempt).unwrap();
