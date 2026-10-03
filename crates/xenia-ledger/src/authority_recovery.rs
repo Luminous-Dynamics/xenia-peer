@@ -68,6 +68,7 @@ pub enum AuthorityRecoveryStateV1 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Private construction seal for transition-bearing recovery states.
 struct RecoveryStateSeal;
 
  
@@ -138,8 +139,103 @@ pub enum AuthorityRecoveryError {
     TransitionFingerprintMismatch,
 }
 impl AuthorityRecoveryStateV1 {
+    /// Prepare one exact authority transition.
+    ///
+    /// Preparation carries no successor authority and may safely be requested by
+    /// untrusted orchestration code.
+    pub fn prepare_transition(
+        self,
+        transition_fingerprint: [u8; 32],
+    ) -> Result<Self, AuthorityRecoveryError> {
+        self.apply(AuthorityRecoveryEventV1::PrepareTransition {
+            transition_fingerprint,
+        })
+    }
+
+    /// Record that one exact transition was proven absent from durable storage.
+    pub fn proven_not_persisted(
+        self,
+        transition_fingerprint: [u8; 32],
+    ) -> Result<Self, AuthorityRecoveryError> {
+        self.apply(AuthorityRecoveryEventV1::ProvenNotPersisted {
+            transition_fingerprint,
+        })
+    }
+
+    /// Record that persistence of one exact transition remains ambiguous.
+    pub fn commit_outcome_unknown(
+        self,
+        transition_fingerprint: [u8; 32],
+    ) -> Result<Self, AuthorityRecoveryError> {
+        self.apply(AuthorityRecoveryEventV1::CommitOutcomeUnknown {
+            transition_fingerprint,
+        })
+    }
+
+    /// Enter recovery for one exact transition.
+    pub fn begin_recovery(
+        self,
+        transition_fingerprint: [u8; 32],
+    ) -> Result<Self, AuthorityRecoveryError> {
+        self.apply(AuthorityRecoveryEventV1::BeginRecovery {
+            transition_fingerprint,
+        })
+    }
+
+    /// Record that recovery proved one exact transition absent.
+    pub fn recover_old(
+        self,
+        transition_fingerprint: [u8; 32],
+    ) -> Result<Self, AuthorityRecoveryError> {
+        self.apply(AuthorityRecoveryEventV1::RecoverOld {
+            transition_fingerprint,
+        })
+    }
+
+    /// Record that recovery still cannot determine the durable outcome.
+    pub fn recover_outcome_unknown(
+        self,
+        transition_fingerprint: [u8; 32],
+    ) -> Result<Self, AuthorityRecoveryError> {
+        self.apply(AuthorityRecoveryEventV1::RecoverOutcomeUnknown {
+            transition_fingerprint,
+        })
+    }
+
+    /// Commit one exact transition only with an opaque durable-authority proof.
+    ///
+    /// The proof is minted only after the authoritative persistence boundary accepts
+    /// the corresponding transition. External callers therefore cannot advance a
+    /// pending state by constructing a look-alike durable-commit event.
+    pub fn commit_durable(
+        self,
+        durable_authority: &crate::DurableAuthorityEpochV1,
+    ) -> Result<Self, AuthorityRecoveryError> {
+        self.apply(AuthorityRecoveryEventV1::DurableCommit {
+            transition_fingerprint: durable_authority.key_transition_fingerprint(),
+        })
+    }
+
+    /// Recover one exact successor only with an opaque durable-authority proof.
+    pub fn recover_successor(
+        self,
+        durable_authority: &crate::DurableAuthorityEpochV1,
+    ) -> Result<Self, AuthorityRecoveryError> {
+        self.apply(AuthorityRecoveryEventV1::RecoverSuccessor {
+            transition_fingerprint: durable_authority.key_transition_fingerprint(),
+        })
+    }
+
+    /// Activate a successor whose exact transition has already been durably committed.
+    pub fn activate_successor(self) -> Result<Self, AuthorityRecoveryError> {
+        self.apply(AuthorityRecoveryEventV1::ActivateSuccessor)
+    }
+
     /// Apply one lifecycle event and return the next state.
-    pub fn apply(self, event: AuthorityRecoveryEventV1) -> Result<Self, AuthorityRecoveryError> {
+    ///
+    /// This reducer is crate-private so authority-bearing transitions cannot be
+    /// advanced externally with an event that only claims durable persistence.
+    fn apply(self, event: AuthorityRecoveryEventV1) -> Result<Self, AuthorityRecoveryError> {
         use AuthorityRecoveryEventV1::*;
         use AuthorityRecoveryStateV1::*;
 
