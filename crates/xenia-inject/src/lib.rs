@@ -539,7 +539,8 @@ pub trait InputInjector: Send {
     ) -> Result<InputEffectOutcome, InjectError> {
         match self.process_events(events) {
             Ok(()) => Ok(InputEffectOutcome::Applied),
-            Err(InjectError::NotEntered(_reason)) => {
+            Err(InjectError::NotEntered(_reason))
+            | Err(InjectError::InvalidEvent(_)) => {
                 Ok(InputEffectOutcome::RejectionBeforeEffect)
             }
             Err(_err) => Ok(InputEffectOutcome::Indeterminate),
