@@ -36,6 +36,8 @@ enum FinalityJournalRecordV1 {
     Receipt(FinalityReceiptV1),
 }
 
+/// Single-owner append-only finality journal. A deployment must ensure only one writer
+/// owns the journal path at a time; the journal itself does not provide cross-process locking.
 pub struct FinalityJournalV1 {
     path: PathBuf,
     file: File,
@@ -71,6 +73,7 @@ pub enum FinalityJournalError {
 }
 
 impl FinalityJournalV1 {
+    /// Open or create the journal and replay every existing record.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, FinalityJournalError> {
         let path = path.as_ref().to_path_buf();
         let mut reader = OpenOptions::new()
@@ -92,14 +95,17 @@ impl FinalityJournalV1 {
         })
     }
 
+    /// Return the filesystem path owned by this journal.
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    /// Return the latest durable lifecycle state for an exact attempt identifier.
     pub fn latest_attempt(&self, attempt_id: [u8; 16]) -> Option<&FinalityAttemptV1> {
         self.latest.get(&attempt_id)
     }
 
+    /// Durably append a lifecycle state after enforcing exact identity and single-use handle fencing.
     pub fn append_attempt(
         &mut self,
         attempt: &FinalityAttemptV1,
@@ -137,6 +143,7 @@ impl FinalityJournalV1 {
         Ok(())
     }
 
+    /// Durably append a receipt that exactly matches the current terminal/indeterminate state.
     pub fn append_receipt(
         &mut self,
         receipt: &FinalityReceiptV1,
@@ -170,10 +177,12 @@ impl FinalityJournalV1 {
         self.append_record(&FinalityJournalRecordV1::Receipt(receipt.clone()))
     }
 
+    /// Return the number of distinct attempts present in the journal index.
     pub fn len(&self) -> usize {
         self.latest.len()
     }
 
+    /// Return true when the journal contains no attempts.
     pub fn is_empty(&self) -> bool {
         self.latest.is_empty()
     }
@@ -379,6 +388,35 @@ mod tests {
         assert!(matches!(
             journal.append_attempt(&substituted),
             Err(FinalityJournalError::AttemptIdentityMismatch)
+        ));
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn journal_fences_handle_reuse_across_distinct_attempt_ids() {
+        let path = temp_path("handle-reuse");
+        let _ = fs::remove_file(&path);
+
+        {
+            let mut journal = FinalityJournalV1::open(&path).unwrap();
+            let mut first = attempt();
+            first.mark_effectuation_started().unwrap();
+            journal.append_attempt(&first).unwrap();
+
+            let mut second =
+                FinalityAttemptV1::prepare([9; 16], [2; 32], [3; 32], [4; 32]).unwrap();
+            second.mark_effectuation_started().unwrap();
+
+            assert!(matches!(
+                journal.append_attempt(&second),
+                Err(FinalityJournalError::HandleAlreadyConsumed { .. })
+            ));
+        }
+
+        assert!(matches!(
+            FinalityJournalV1::open(&path).unwrap().latest_attempt([1; 16]).unwrap().state(),
+            FinalityAttemptStateV1::EffectuationStarted
         ));
 
         let _ = fs::remove_file(&path);
