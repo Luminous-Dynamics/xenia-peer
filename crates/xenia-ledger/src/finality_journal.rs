@@ -422,6 +422,23 @@ fn replay_journal_bytes(
                 }
                 attempt.validate()?;
 
+                if let Some(existing_attempt_id) = consumed_handles.get(&attempt.handle_digest) {
+                    if existing_attempt_id != &attempt.attempt_id {
+                        return Err(FinalityJournalError::HandleAlreadyConsumed {
+                            handle_digest: attempt.handle_digest,
+                            existing_attempt_id: *existing_attempt_id,
+                        });
+                    }
+                }
+                if let Some(existing_attempt_id) = occupied_actions.get(&attempt.action_key_digest) {
+                    if existing_attempt_id != &attempt.attempt_id {
+                        return Err(FinalityJournalError::ActionAlreadyFenced {
+                            action_key_digest: attempt.action_key_digest,
+                            existing_attempt_id: *existing_attempt_id,
+                        });
+                    }
+                }
+
                 if let Some(previous) = latest.get(&attempt.attempt_id) {
                     if previous.handle_digest != attempt.handle_digest
                         || previous.action_key_digest != attempt.action_key_digest
@@ -435,7 +452,27 @@ fn replay_journal_bytes(
                     }
                 }
 
-                latest.insert(attempt.attempt_id, attempt);
+                let attempt_id = attempt.attempt_id;
+                let handle_digest = attempt.handle_digest;
+                let action_key_digest = attempt.action_key_digest;
+
+                if !matches!(attempt.state, FinalityAttemptStateV1::Prepared) {
+                    consumed_handles.insert(handle_digest, attempt_id);
+                }
+
+                match attempt.state {
+                    FinalityAttemptStateV1::EffectuationStarted
+                    | FinalityAttemptStateV1::Committed
+                    | FinalityAttemptStateV1::Indeterminate => {
+                        occupied_actions.insert(action_key_digest, attempt_id);
+                    }
+                    FinalityAttemptStateV1::Prepared => {}
+                    FinalityAttemptStateV1::Denied => {
+                        occupied_actions.remove(&action_key_digest);
+                    }
+                }
+
+                latest.insert(attempt_id, attempt);
             }
             FinalityJournalRecordV1::Receipt(receipt) => {
                 if receipt.schema != FINALITY_RECEIPT_SCHEMA {
@@ -447,6 +484,7 @@ fn replay_journal_bytes(
                 };
 
                 if receipt.handle_digest != attempt.handle_digest
+                    || receipt.action_key_digest != attempt.action_key_digest
                     || receipt.act_digest != attempt.act_digest
                     || receipt.sink_digest != attempt.sink_digest
                     || receipt.attempt_digest != attempt.digest()
@@ -479,7 +517,7 @@ fn replay_journal_bytes(
         }
     }
 
-    Ok((latest, receipts))
+    Ok((latest, receipts, consumed_handles, occupied_actions))
 }
 
 fn valid_lifecycle_transition(
