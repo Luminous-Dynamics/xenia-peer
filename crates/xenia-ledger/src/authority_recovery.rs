@@ -697,6 +697,7 @@ impl AuthorityRecoveryStateV1 {
             ) => SuccessorActive {
                 transition_fingerprint,
                 authority_epoch,
+                durable_frontier_digest,
                 _seal: RecoveryStateSeal,
             },
             _ => {
@@ -960,6 +961,22 @@ mod tests {
     }
 
     #[test]
+    fn same_transition_and_epoch_with_different_frontier_is_rejected() {
+        let state = pending(TRANSITION_A);
+        let result = state.apply(AuthorityRecoveryEventV1::DurableCommit {
+            transition_fingerprint: TRANSITION_A,
+            authority_epoch: 8,
+            durable_frontier_digest: [0xF2; 32],
+        });
+
+        assert_eq!(
+            result,
+            Err(AuthorityRecoveryError::DurableFrontierMismatch)
+        );
+        assert_eq!(state, pending(TRANSITION_A));
+    }
+
+    #[test]
     fn mismatched_commit_proof_cannot_advance_transition() {
         let state = AuthorityRecoveryStateV1::OldActive
             .apply(AuthorityRecoveryEventV1::PrepareTransition {
@@ -987,7 +1004,8 @@ mod tests {
                 AuthorityRecoveryEventV1::PrepareTransition {
                     transition_fingerprint: [0; 32],
                     authority_epoch: 8,
-                }
+                    durable_frontier_digest: [0xF1; 32],
+                    }
             ),
             Err(AuthorityRecoveryError::InvalidTransitionFingerprint)
         ));
@@ -1004,7 +1022,8 @@ mod tests {
                 AuthorityRecoveryEventV1::RecoverSuccessor {
                     transition_fingerprint: [0; 32],
                     authority_epoch: 8,
-                }
+                    durable_frontier_digest: [0xF1; 32],
+                    }
             ),
             Err(AuthorityRecoveryError::InvalidTransitionFingerprint)
         ));
@@ -1145,7 +1164,8 @@ mod tests {
                 .apply(AuthorityRecoveryEventV1::RecoverSuccessor {
                     transition_fingerprint: TRANSITION_A,
                     authority_epoch: 8,
-                })
+                    durable_frontier_digest: [0xF1; 32],
+                    })
                 .unwrap(),
             committed(TRANSITION_A)
         );
