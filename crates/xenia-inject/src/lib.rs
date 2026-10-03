@@ -241,6 +241,14 @@ impl InputEvent {
 /// Stable domain separator for canonical input-act identities.
 pub const INPUT_EVENT_DIGEST_DOMAIN: &[u8] = b"xenia:input-event-digest:v1\\0";
 
+fn canonical_f32_bits(value: f32) -> u32 {
+    if value == 0.0 {
+        0
+    } else {
+        value.to_bits()
+    }
+}
+
 impl InputEvent {
     /// Compute the canonical digest of this exact validated input event.
     ///
@@ -253,8 +261,8 @@ impl InputEvent {
         match self {
             Self::Pointer { x, y, button, pressed } => {
                 bytes.push(0);
-                bytes.extend_from_slice(&x.to_bits().to_be_bytes());
-                bytes.extend_from_slice(&y.to_bits().to_be_bytes());
+                bytes.extend_from_slice(&canonical_f32_bits(*x).to_be_bytes());
+                bytes.extend_from_slice(&canonical_f32_bits(*y).to_be_bytes());
                 bytes.push(*button);
                 bytes.push(u8::from(*pressed));
             }
@@ -270,7 +278,7 @@ impl InputEvent {
                 bytes.extend_from_slice(&x.to_bits().to_be_bytes());
                 bytes.extend_from_slice(&y.to_bits().to_be_bytes());
                 bytes.push(*phase);
-                bytes.extend_from_slice(&pressure.to_bits().to_be_bytes());
+                bytes.extend_from_slice(&canonical_f32_bits(*pressure).to_be_bytes());
             }
             Self::PointerMove { x, y } => {
                 bytes.push(3);
@@ -1130,6 +1138,16 @@ impl InputInjector for UinputInjector {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn canonical_digest_normalizes_signed_zero() {
+        let positive = InputEvent::PointerMove { x: 0.0, y: 0.5 };
+        let negative = InputEvent::PointerMove { x: -0.0, y: 0.5 };
+        assert_eq!(
+            positive.canonical_digest().unwrap(),
+            negative.canonical_digest().unwrap()
+        );
+    }
+
     #[test]
     fn canonical_digest_is_exact_and_validation_bound() {
         let event = InputEvent::PointerMove { x: 0.25, y: 0.75 };
