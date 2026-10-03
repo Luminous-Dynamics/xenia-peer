@@ -185,8 +185,9 @@ impl AuthorityRecoveryStateV1 {
             ) => {
                 require_matching_fingerprint(transition_fingerprint, event_fingerprint)?;
                 RecoveryAfterCommit {
-                transition_fingerprint,
-            },
+                    transition_fingerprint,
+                }
+            }
             (
                 SuccessorActive {
                     transition_fingerprint,
@@ -197,8 +198,9 @@ impl AuthorityRecoveryStateV1 {
             ) => {
                 require_matching_fingerprint(transition_fingerprint, event_fingerprint)?;
                 RecoveryAfterCommit {
-                transition_fingerprint,
-            },
+                    transition_fingerprint,
+                }
+            }
             (
                 OldActive,
                 BeginRecovery {
@@ -217,16 +219,22 @@ impl AuthorityRecoveryStateV1 {
             ) => {
                 require_matching_fingerprint(transition_fingerprint, event_fingerprint)?;
                 RecoveryAfterUnknown {
-                transition_fingerprint,
-            },
-            (
-                RecoveryFromOld,
-                RecoverSuccessor {
                     transition_fingerprint,
+                }
+            }
+            (
+                RecoveryFromOld {
+                    transition_fingerprint: state_fingerprint,
                 },
-            ) => TransitionCommitted {
-                transition_fingerprint: require_fingerprint(transition_fingerprint)?,
-            },
+                RecoverSuccessor {
+                    transition_fingerprint: event_fingerprint,
+                },
+            ) => {
+                require_matching_fingerprint(state_fingerprint, event_fingerprint)?;
+                TransitionCommitted {
+                    transition_fingerprint: state_fingerprint,
+                }
+            }
             (
                 RecoveryFromOld {
                     transition_fingerprint,
@@ -327,6 +335,9 @@ impl AuthorityRecoveryStateV1 {
                 transition_fingerprint,
             }
             | Self::OutcomeUnknown {
+                transition_fingerprint,
+            }
+            | Self::RecoveryFromOld {
                 transition_fingerprint,
             }
             | Self::RecoveryAfterCommit {
@@ -570,7 +581,9 @@ mod tests {
             }
         );
         assert!(matches!(
-            state.apply(AuthorityRecoveryEventV1::RecoverOld),
+            state.apply(AuthorityRecoveryEventV1::RecoverOld {
+                transition_fingerprint: TRANSITION_A,
+            }),
             Err(AuthorityRecoveryError::InvalidTransition { .. })
         ));
         assert!(matches!(
