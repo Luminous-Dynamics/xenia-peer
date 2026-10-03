@@ -134,9 +134,16 @@ pub struct DurableAuthorityEpochV1 {
 }
 
 impl DurableAuthorityEpochV1 {
-    /// Return the canonical digest of the verified authority claim.
+    /// Return the canonical digest of the complete verified authority token.
+    ///
+    /// The token identity covers both the authority transition claim and the exact
+    /// durable-ledger frontier that justified issuing it.
     pub fn digest(&self) -> [u8; 32] {
-        self.claim.digest_validated()
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"xenia.durable-authority-epoch-token.v1\0");
+        hasher.update(&self.claim.digest_validated());
+        hasher.update(&self.durable_frontier_digest);
+        *hasher.finalize().as_bytes()
     }
 
     /// Return the successor authority epoch.
@@ -971,6 +978,11 @@ mod tests {
         );
         assert_eq!(token.durable_frontier_digest(), durable_frontier.digest());
 
+        // Token identity must include the exact frontier, not only the authority claim.
+        // This prevents two otherwise-identical epoch claims from sharing one token digest
+        // after being issued against different durable ledger histories.
+        let token_digest = token.digest();
+
         // The same successor key and transition proof are not enough: the authority
         // token must remain bound to the exact durable ledger frontier that justified it.
         let mut other_chain = Chain::new(successor.clone());
@@ -983,6 +995,14 @@ mod tests {
             .verify_restored_durable_frontier_v1(PERSISTENCE_POLICY, |_, _| Ok(()))
             .unwrap();
         assert_ne!(durable_frontier.digest(), other_frontier.digest());
+
+        let mut other_claim_hasher = blake3::Hasher::new();
+        other_claim_hasher.update(b"xenia.durable-authority-epoch-token.v1\0");
+        other_claim_hasher.update(&token.claim.digest_validated());
+        other_claim_hasher.update(&other_frontier.digest());
+        let other_token_identity = *other_claim_hasher.finalize().as_bytes();
+        assert_ne!(token_digest, other_token_identity);
+
         assert!(matches!(
             token.verify_against_chain(
                 &other_frontier,
