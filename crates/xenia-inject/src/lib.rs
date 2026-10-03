@@ -95,17 +95,21 @@ pub enum InjectError {
 
 /// Outcome classification for one host-input effect attempt.
 ///
-/// `RejectionBeforeEffect` is deliberately stronger than a generic backend
-/// error: it means the backend has established that provider entry never
-/// happened. `Indeterminate` is the conservative classification for an error
-/// whose relationship to provider entry is unknown.
+/// `Applied` is deliberately stronger than a successful provider/API return:
+/// it is reserved for an adapter that has evidence the requested host-side
+/// consequence completed. `Accepted` means the provider acknowledged the
+/// request, but does not independently prove host execution. `RejectionBeforeEffect`
+/// proves that provider entry did not occur. `Indeterminate` covers an error
+/// or timeout whose relationship to provider entry/effect is unknown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputEffectOutcome {
-    /// The backend accepted the event and reported successful completion.
+    /// The adapter has evidence that the requested host-side consequence completed.
     Applied,
-    /// The backend established that no provider entry/effect occurred.
+    /// The provider acknowledged/accepted the request, but host execution is not independently confirmed.
+    Accepted,
+    /// The adapter established that no provider entry/effect occurred.
     RejectionBeforeEffect,
-    /// The backend result does not establish whether the effect occurred.
+    /// The provider boundary does not establish whether the effect occurred.
     Indeterminate,
 }
 /// Maximum serialized `InputEvent` payload accepted by the daemon before
@@ -528,8 +532,9 @@ pub trait InputInjector: Send {
     /// Drive events and classify the provider-boundary outcome.
     ///
     /// The default mapping is intentionally conservative: successful backend
-    /// completion is Applied; an explicit NotEntered error is
-    /// RejectionBeforeEffect; every other error is Indeterminate.
+    /// completion is only Accepted because an API/RPC acknowledgement does not
+    /// by itself prove that the host-side consequence completed. Explicit
+    /// NotEntered is RejectionBeforeEffect; every other error is Indeterminate.
     /// Backends that have stronger provider-entry knowledge may override this
     /// method, but MUST NOT report RejectionBeforeEffect without proof that
     /// provider entry did not occur.
@@ -538,7 +543,7 @@ pub trait InputInjector: Send {
         events: &[InputEvent],
     ) -> Result<InputEffectOutcome, InjectError> {
         match self.process_events(events) {
-            Ok(()) => Ok(InputEffectOutcome::Applied),
+            Ok(()) => Ok(InputEffectOutcome::Accepted),
             Err(InjectError::NotEntered(_reason))
             | Err(InjectError::InvalidEvent(_)) => {
                 Ok(InputEffectOutcome::RejectionBeforeEffect)
@@ -599,16 +604,19 @@ impl SessionInputInjector {
     /// Process one event through the backend while preserving an explicit
     /// provider-boundary outcome for the caller.
     ///
-    /// Tracking is conservative around Indeterminate: a possible press/down
-    /// remains tracked so teardown can attempt the matching release rather than
-    /// assuming that an uncertain call had no effect.
+    /// Tracking is conservative around provider results that are not
+    /// independently execution-confirmed: possible press/down state remains
+    /// tracked so teardown can attempt the matching release rather than assuming
+    /// that provider acknowledgement means the host state definitely changed.
     pub fn process_event_outcome(
         &mut self,
         event: &InputEvent,
     ) -> Result<InputEffectOutcome, InjectError> {
         let outcome = self.inner.process_event_outcome(event)?;
         match outcome {
-            InputEffectOutcome::Applied => self.track_event_state(event),
+            InputEffectOutcome::Applied | InputEffectOutcome::Accepted => {
+                self.track_event_state(event)
+            }
             InputEffectOutcome::Indeterminate => self.track_indeterminate_state(event),
             InputEffectOutcome::RejectionBeforeEffect => {}
         }
@@ -1307,6 +1315,16 @@ impl InputInjector for UinputInjector {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn successful_backend_return_is_only_provider_acceptance() {
+        let mut injector = NoopInjector;
+        let event = InputEvent::PointerMove { x: 0.5, y: 0.5 };
+        assert_eq!(
+            injector.process_event_outcome(&event).unwrap(),
+            InputEffectOutcome::Accepted
+        );
+    }
+
     #[test]
     fn backend_error_is_indeterminate_by_default() {
         struct Failing;
