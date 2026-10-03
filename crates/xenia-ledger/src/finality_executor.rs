@@ -69,7 +69,7 @@ impl<'a> FinalityExecutorV1<'a> {
             handle.action_key_digest(),
             actual_act_digest,
             actual_sink_digest,
-        )?
+        )?;
 
         self.journal.append_attempt(&attempt)?;
         attempt.mark_effectuation_started()?;
