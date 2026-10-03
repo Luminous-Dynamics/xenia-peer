@@ -898,12 +898,15 @@ impl M1RuntimeSession {
     /// Canonical digest of the protected runtime state relevant to exact execution.
     ///
     /// The digest includes session identity, consent state, granted permission
-    /// bits, authenticated ledger frontier, scope, and transcript binding. It
-    /// is intentionally serializer-independent so execution handles can use it
-    /// as a stable current-state fence.
+    /// bits, authenticated ledger frontier, scope, transcript binding, and the
+    /// fail-closed input-effect uncertainty latch. It is intentionally
+    /// serializer-independent so execution handles can use it as a stable
+    /// current-state fence.
     pub(crate) fn protected_execution_state_digest(&self) -> [u8; 32] {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"xenia:m1-protected-execution-state:v1\\0");
+        // v2 makes the uncertainty latch load-bearing: an execution handle
+        // minted before an indeterminate effect must not remain valid afterward.
+        hasher.update(b"xenia:m1-protected-execution-state:v2\\0");
         hasher.update(&self.source_id);
         hasher.update(self.session_id.as_bytes());
         hasher.update(self.request_id.as_bytes());
@@ -943,6 +946,8 @@ impl M1RuntimeSession {
             }
             None => hasher.update(&[0]),
         }
+
+        hasher.update(&[u8::from(self.input_effect_uncertain)]);
 
         *hasher.finalize().as_bytes()
     }
@@ -2202,6 +2207,29 @@ mod tests {
                 .count(),
             before,
             "pre-effect rejection must not create an input-injected audit event"
+        );
+    }
+
+    #[test]
+    fn input_effect_uncertainty_changes_protected_execution_state() {
+        let (mut runtime, _verifying_key) = runtime(36);
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet {
+                inject_input: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        let before = runtime.protected_execution_state_digest();
+        runtime
+            .execute_input_effect_outcome(|| Ok(InputEffectOutcome::Indeterminate))
+            .unwrap();
+        let after = runtime.protected_execution_state_digest();
+
+        assert_ne!(
+            before, after,
+            "the uncertainty latch must invalidate previously minted execution-state bindings"
         );
     }
 
