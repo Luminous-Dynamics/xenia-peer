@@ -316,6 +316,69 @@ mod tests {
     }
 
     #[test]
+    fn indeterminate_execution_reopens_and_reconciles_without_reinvocation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let path = std::env::temp_dir().join(format!(
+            "xenia-finality-executor-indeterminate-e2e-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+
+        let handle = executable_handle();
+        let provider_calls = AtomicUsize::new(0);
+
+        {
+            let mut journal = FinalityJournalV1::open(&path).unwrap();
+            let mut executor = FinalityExecutorV1::new(&mut journal);
+
+            let receipt = executor
+                .execute(
+                    &handle,
+                    120,
+                    [0x41; 32],
+                    [0x51; 32],
+                    [0x61; 32],
+                    [0x71; 16],
+                    || {
+                        provider_calls.fetch_add(1, Ordering::SeqCst);
+                        FinalityOutcomeV1::Indeterminate
+                    },
+                )
+                .unwrap();
+
+            assert_eq!(receipt.outcome, FinalityOutcomeV1::Indeterminate);
+            assert!(executor.requires_reconciliation([0x71; 16]));
+        }
+
+        assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+
+        {
+            let mut journal = FinalityJournalV1::open(&path).unwrap();
+            let mut executor = FinalityExecutorV1::new(&mut journal);
+
+            let receipt = executor
+                .reconcile([0x71; 16], FinalityOutcomeV1::Committed)
+                .unwrap();
+
+            assert_eq!(receipt.outcome, FinalityOutcomeV1::Committed);
+            assert!(!executor.requires_reconciliation([0x71; 16]));
+        }
+
+        // Recovery closes the durable attempt without ever replaying the
+        // external effect. The provider invocation count must stay at one.
+        assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+
+        let journal = FinalityJournalV1::open(&path).unwrap();
+        assert_eq!(
+            journal.latest_attempt([0x71; 16]).unwrap().state(),
+            FinalityAttemptStateV1::Committed
+        );
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
     fn indeterminate_execution_reconciles_without_reinvocation() {
         let path = std::env::temp_dir().join(format!(
             "xenia-finality-reconcile-{}",
