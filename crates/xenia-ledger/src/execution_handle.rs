@@ -35,6 +35,7 @@ pub const EXECUTION_HANDLE_DOMAIN: &[u8] = b"xenia:exact-execution-handle:v1\0";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExactExecutionHandleV1 {
     authorization_digest: [u8; 32],
+    action_key_digest: [u8; 32],
     act_digest: [u8; 32],
     sink_digest: [u8; 32],
     protected_state_digest: [u8; 32],
@@ -59,6 +60,7 @@ impl ExactExecutionHandleV1 {
         expected_executor_workload_digest: [u8; 32],
         expected_authority_epoch: u64,
         expected_prior_checkpoint: Option<AgentCheckpointAnchorV1>,
+        relying_party_digest: [u8; 32],
         act_digest: [u8; 32],
         sink_digest: [u8; 32],
         protected_state_digest: [u8; 32],
@@ -75,6 +77,9 @@ impl ExactExecutionHandleV1 {
             expected_prior_checkpoint,
         )?;
 
+        if relying_party_digest == [0; 32] {
+            return Err(ExactExecutionHandleError::ZeroRelyingPartyDigest);
+        }
         if act_digest == [0; 32] {
             return Err(ExactExecutionHandleError::ZeroActDigest);
         }
@@ -87,9 +92,16 @@ impl ExactExecutionHandleV1 {
 
         let authorization_message = attestation.authorization.canonical_message()?;
         let authorization_digest = *blake3::hash(&authorization_message).as_bytes();
+        let mut action_hasher = Hasher::new();
+        action_hasher.update(b"xenia:same-action-key:v1\\0");
+        action_hasher.update(&relying_party_digest);
+        action_hasher.update(&sink_digest);
+        action_hasher.update(&act_digest);
+        let action_key_digest = *action_hasher.finalize().as_bytes();
 
         Ok(Self {
             authorization_digest,
+            action_key_digest,
             act_digest,
             sink_digest,
             protected_state_digest,
@@ -126,11 +138,17 @@ impl ExactExecutionHandleV1 {
         let mut hasher = Hasher::new();
         hasher.update(EXECUTION_HANDLE_DOMAIN);
         hasher.update(&self.authorization_digest);
+        hasher.update(&self.action_key_digest);
         hasher.update(&self.act_digest);
         hasher.update(&self.sink_digest);
         hasher.update(&self.protected_state_digest);
         hasher.update(&self.expires_at_unix_s.to_be_bytes());
         *hasher.finalize().as_bytes()
+    }
+
+    /// Digest of the durable same-action key for this relying party, sink, and action.
+    pub fn action_key_digest(&self) -> [u8; 32] {
+        self.action_key_digest
     }
 
     /// Digest of the exact act this handle authorizes.
@@ -216,6 +234,9 @@ pub enum ExactExecutionHandleError {
     /// The authorization canonical message was malformed.
     #[error("agent authorization canonicalization failed: {0}")]
     CanonicalAuthorization(#[from] crate::AgentCapabilityAuthorizationError),
+    /// The relying-party identity was empty.
+    #[error("exact execution relying-party digest must be nonzero")]
+    ZeroRelyingPartyDigest,
     /// The exact act digest was empty.
     #[error("exact execution act digest must be nonzero")]
     ZeroActDigest,
@@ -324,6 +345,7 @@ mod tests {
             authorization.executor_workload_digest,
             authorization.authority_epoch,
             authorization.prior_checkpoint,
+            [0x91; 32],
             act,
             sink,
             [0x33; 32],
@@ -401,6 +423,73 @@ mod tests {
             .consume(&handle, 120, [0x71; 32], [0x72; 32], [0x33; 32])
             .unwrap();
         assert_eq!(guard.len().unwrap(), 1);
+    }
+
+    #[test]
+    fn same_action_key_ignores_authorization_identity() {
+        let (_attestation_a, session_a, _binding_a, mut authorization_a) = fixture();
+        let (attestation_b, session_b, binding_b, authorization_b) = fixture();
+
+        authorization_a.authorization_id[0] ^= 1;
+        authorization_a.nonce[0] ^= 1;
+
+        // Re-sign the modified authorization through a fresh chain fixture.
+        let mut chain = Chain::new(SigningKey::from_bytes(&[3; 32]));
+        chain
+            .append(ConsentEventRecord {
+                source_id: [11; 32],
+                session_id: Uuid::from_bytes([9; 16]),
+                request_id: Uuid::from_bytes([4; 16]),
+                kind: ConsentKind::Approval,
+                scope: "bounded-agent authorization".into(),
+            })
+            .unwrap();
+        let attestation_a = chain
+            .attest_agent_capability_authorization(
+                authorization_a.clone(),
+                &session_a,
+            )
+            .unwrap();
+        let binding_a = EvidencePublicKeyBinding::new(
+            SignatureSuite::Ed25519Rfc8032,
+            chain.signing_key.verifying_key().to_bytes(),
+        );
+
+        let handle_a = ExactExecutionHandleV1::issue(
+            &attestation_a,
+            &session_a,
+            &binding_a,
+            &Ed25519EvidenceSignatureBackend,
+            120,
+            authorization_a.capability_digest,
+            authorization_a.executor_workload_digest,
+            authorization_a.authority_epoch,
+            authorization_a.prior_checkpoint,
+            [0x91; 32],
+            [0x31; 32],
+            [0x41; 32],
+            [0x51; 32],
+        )
+        .unwrap();
+        let handle_b = ExactExecutionHandleV1::issue(
+            &attestation_b,
+            &session_b,
+            &binding_b,
+            &Ed25519EvidenceSignatureBackend,
+            120,
+            authorization_b.capability_digest,
+            authorization_b.executor_workload_digest,
+            authorization_b.authority_epoch,
+            authorization_b.prior_checkpoint,
+            [0x91; 32],
+            [0x31; 32],
+            [0x41; 32],
+            [0x51; 32],
+        )
+        .unwrap();
+
+        assert_ne!(handle_a.digest(), handle_b.digest());
+        assert_eq!(handle_a.action_key_digest(), handle_b.action_key_digest());
     }
 
     #[test]
