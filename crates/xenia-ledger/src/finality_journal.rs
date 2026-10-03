@@ -40,6 +40,7 @@ pub struct FinalityJournalV1 {
     path: PathBuf,
     file: File,
     latest: BTreeMap<[u8; 16], FinalityAttemptV1>,
+    consumed_handles: BTreeMap<[u8; 32], [u8; 16]>,
 }
 
 #[derive(Debug, Error)]
@@ -62,6 +63,11 @@ pub enum FinalityJournalError {
     ReceiptMismatch,
     #[error("finality receipt outcome does not match the attempt state")]
     ReceiptOutcomeMismatch,
+    #[error("exact execution handle was already durably consumed by another attempt")]
+    HandleAlreadyConsumed {
+        handle_digest: [u8; 32],
+        existing_attempt_id: [u8; 16],
+    },
 }
 
 impl FinalityJournalV1 {
@@ -76,11 +82,13 @@ impl FinalityJournalV1 {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes)?;
         let latest = replay_journal_bytes(&bytes)?;
+        let consumed_handles = consumed_handle_index(&latest)?;
 
         Ok(Self {
             path,
             file: reader,
             latest,
+            consumed_handles,
         })
     }
 
@@ -98,6 +106,17 @@ impl FinalityJournalV1 {
     ) -> Result<(), FinalityJournalError> {
         attempt.validate()?;
 
+        if !matches!(attempt.state, FinalityAttemptStateV1::Prepared) {
+            if let Some(existing_attempt_id) = self.consumed_handles.get(&attempt.handle_digest) {
+                if existing_attempt_id != &attempt.attempt_id {
+                    return Err(FinalityJournalError::HandleAlreadyConsumed {
+                        handle_digest: attempt.handle_digest,
+                        existing_attempt_id: *existing_attempt_id,
+                    });
+                }
+            }
+        }
+
         if let Some(previous) = self.latest.get(&attempt.attempt_id) {
             if previous.handle_digest != attempt.handle_digest
                 || previous.act_digest != attempt.act_digest
@@ -111,6 +130,9 @@ impl FinalityJournalV1 {
         }
 
         self.append_record(&FinalityJournalRecordV1::Attempt(attempt.clone()))?;
+        if !matches!(attempt.state, FinalityAttemptStateV1::Prepared) {
+            self.consumed_handles.insert(attempt.handle_digest, attempt.attempt_id);
+        }
         self.latest.insert(attempt.attempt_id, attempt.clone());
         Ok(())
     }
@@ -171,6 +193,26 @@ impl FinalityJournalV1 {
         self.file.sync_data()?;
         Ok(())
     }
+}
+
+fn consumed_handle_index(
+    latest: &BTreeMap<[u8; 16], FinalityAttemptV1>,
+) -> Result<BTreeMap<[u8; 32], [u8; 16]>, FinalityJournalError> {
+    let mut consumed = BTreeMap::new();
+    for attempt in latest.values() {
+        if matches!(attempt.state, FinalityAttemptStateV1::Prepared) {
+            continue;
+        }
+        if let Some(existing) = consumed.insert(attempt.handle_digest, attempt.attempt_id) {
+            if existing != attempt.attempt_id {
+                return Err(FinalityJournalError::HandleAlreadyConsumed {
+                    handle_digest: attempt.handle_digest,
+                    existing_attempt_id: existing,
+                });
+            }
+        }
+    }
+    Ok(consumed)
 }
 
 fn replay_journal_bytes(
