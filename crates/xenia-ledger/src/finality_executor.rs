@@ -66,9 +66,10 @@ impl<'a> FinalityExecutorV1<'a> {
         let mut attempt = crate::FinalityAttemptV1::prepare(
             attempt_id,
             handle.digest(),
+            handle.action_key_digest(),
             actual_act_digest,
             actual_sink_digest,
-        )?;
+        )?
 
         self.journal.append_attempt(&attempt)?;
         attempt.mark_effectuation_started()?;
@@ -192,7 +193,7 @@ pub enum FinalityExecutorError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FinalityAttemptV1, FinalityAttemptStateV1};
+    use crate::FinalityAttemptStateV1;
     use std::fs;
     use std::path::PathBuf;
 
@@ -326,7 +327,7 @@ mod tests {
         // machine directly and verify the executor's non-provider reconciliation path.
         let mut journal = FinalityJournalV1::open(&path).unwrap();
         let mut attempt =
-            FinalityAttemptV1::prepare([1; 16], [2; 32], [3; 32], [4; 32]).unwrap();
+            FinalityAttemptV1::prepare([1; 16], [2; 32], [9; 32], [3; 32], [4; 32]).unwrap();
         journal.append_attempt(&attempt).unwrap();
         attempt.mark_effectuation_started().unwrap();
         journal.append_attempt(&attempt).unwrap();
@@ -360,7 +361,7 @@ mod tests {
         {
             let mut journal = FinalityJournalV1::open(&path).unwrap();
             let mut attempt =
-                FinalityAttemptV1::prepare([11; 16], [12; 32], [13; 32], [14; 32]).unwrap();
+                FinalityAttemptV1::prepare([11; 16], [12; 32], [15; 32], [13; 32], [14; 32]).unwrap();
             journal.append_attempt(&attempt).unwrap();
             attempt.mark_effectuation_started().unwrap();
             journal.append_attempt(&attempt).unwrap();
@@ -418,7 +419,7 @@ mod tests {
 
         let mut journal = FinalityJournalV1::open(&path).unwrap();
         let mut attempt =
-            FinalityAttemptV1::prepare([5; 16], [6; 32], [7; 32], [8; 32]).unwrap();
+            FinalityAttemptV1::prepare([5; 16], [6; 32], [9; 32], [7; 32], [8; 32]).unwrap();
         assert!(attempt.commit().is_err());
         journal.append_attempt(&attempt).unwrap();
         attempt.mark_effectuation_started().unwrap();
