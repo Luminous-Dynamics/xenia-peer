@@ -1322,6 +1322,20 @@ mod tests {
     }
 
     #[test]
+    fn validation_failure_is_always_pre_effect_rejection() {
+        let mut injector = NoopInjector;
+        let event = InputEvent::PointerMove {
+            x: f32::NAN,
+            y: 0.5,
+        };
+
+        assert_eq!(
+            injector.process_event_outcome(&event).unwrap(),
+            InputEffectOutcome::RejectionBeforeEffect
+        );
+    }
+
+    #[test]
     fn explicit_not_entered_error_is_pre_effect_rejection() {
         struct Rejected;
 
