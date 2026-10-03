@@ -516,7 +516,7 @@ mod tests {
     use std::fs;
 
     fn attempt() -> FinalityAttemptV1 {
-        FinalityAttemptV1::prepare([1; 16], [2; 32], [3; 32], [4; 32]).unwrap()
+        FinalityAttemptV1::prepare([1; 16], [2; 32], [9; 32], [3; 32], [4; 32]).unwrap()
     }
 
     fn temp_path(tag: &str) -> PathBuf {
@@ -661,7 +661,7 @@ mod tests {
         journal.append_attempt(&first).unwrap();
 
         let second =
-            FinalityAttemptV1::prepare([9; 16], [2; 32], [3; 32], [4; 32]).unwrap();
+            FinalityAttemptV1::prepare([9; 16], [2; 32], [9; 32], [3; 32], [4; 32]).unwrap();
         assert!(matches!(
             journal.append_attempt(&second),
             Err(FinalityJournalError::HandleAlreadyConsumed { .. })
