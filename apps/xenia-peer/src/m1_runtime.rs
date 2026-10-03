@@ -63,6 +63,8 @@ pub(crate) enum M1RuntimeError {
         entry_index: usize,
         field: &'static str,
     },
+    /// Backend rejected or failed to perform a requested input effect.
+    InputInjection(String),
 }
 
 impl fmt::Display for M1RuntimeError {
@@ -109,6 +111,7 @@ impl fmt::Display for M1RuntimeError {
                 f,
                 "M1 persisted ledger entry {entry_index} did not match restore context field {field}"
             ),
+            Self::InputInjection(err) => write!(f, "M1 input injection failed: {err}"),
         }
     }
 }
@@ -1165,6 +1168,25 @@ impl M1RuntimeSession {
         }
     }
 
+    /// Execute one already-decoded input event while holding the exclusive M1
+    /// runtime state borrow.
+    ///
+    /// The permission check happens before the backend effect runs. The borrow
+    /// remains exclusive through that synchronous call, so the daemon's
+    /// revocation path cannot transition this runtime to `Revoked` between
+    /// authorization and effectuation. `InputInjected` is appended only after
+    /// the backend reports success, keeping the audit trail truthful when
+    /// injection fails.
+    pub(crate) fn execute_input_effect(
+        &mut self,
+        effect: impl FnOnce() -> Result<(), M1RuntimeError>,
+    ) -> Result<(), M1RuntimeError> {
+        self.session.check_permission(M1Permission::InjectInput)?;
+        effect()?;
+        self.session.inject_input()?;
+        self.flush_new_audit_events()
+    }
+
     pub(crate) fn allow_input_flow(&mut self) -> Result<(), M1RuntimeError> {
         self.inject_input()
     }
@@ -2004,6 +2026,74 @@ mod tests {
         (runtime, verifying_key)
     }
 
+    #[test]
+    fn input_effect_is_audited_only_after_successful_backend_effect() {
+        let (mut runtime, _verifying_key) = runtime(31);
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet {
+                inject_input: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        let mut called = false;
+        runtime
+            .execute_input_effect(|| {
+                called = true;
+                Ok(())
+            })
+            .unwrap();
+        assert!(called);
+        assert_eq!(
+            runtime.session.audit().last(),
+            Some(&xenia_peer_core::M1AuditEvent::InputInjected)
+        );
+
+        let mut called = false;
+        let err = runtime
+            .execute_input_effect(|| {
+                called = true;
+                Err(M1RuntimeError::InputInjection("backend rejected".into()))
+            })
+            .unwrap_err();
+        assert!(called);
+        assert!(matches!(err, M1RuntimeError::InputInjection(_)));
+        assert_eq!(
+            runtime
+                .session
+                .audit()
+                .iter()
+                .filter(|event| **event == xenia_peer_core::M1AuditEvent::InputInjected)
+                .count(),
+            1,
+            "failed backend injection must not create a false success audit"
+        );
+    }
+
+    #[test]
+    fn denied_input_effect_never_calls_backend() {
+        let (mut runtime, _verifying_key) = runtime(32);
+        runtime.offer().unwrap();
+        runtime.grant_consent_scoped(M1PermissionSet::default()).unwrap();
+
+        let mut called = false;
+        let err = runtime
+            .execute_input_effect(|| {
+                called = true;
+                Ok(())
+            })
+            .unwrap_err();
+
+        assert!(!called);
+        assert!(matches!(
+            err,
+            M1RuntimeError::Session(M1SessionError::PermissionDenied {
+                permission: M1Permission::InjectInput,
+                ..
+            })
+        ));
+    }
     #[test]
     fn runtime_lifecycle_appends_only_consent_boundaries() {
         let (mut runtime, verifying_key) = runtime(11);
