@@ -354,6 +354,10 @@ mod tests {
 
             assert_eq!(receipt.outcome, FinalityOutcomeV1::Indeterminate);
             assert!(executor.requires_reconciliation([0x71; 16]));
+            assert_eq!(
+                executor.attempts_requiring_reconciliation(),
+                vec![[0x71; 16]]
+            );
         }
 
         assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
@@ -368,6 +372,7 @@ mod tests {
 
             assert_eq!(receipt.outcome, FinalityOutcomeV1::Committed);
             assert!(!executor.requires_reconciliation([0x71; 16]));
+            assert!(executor.attempts_requiring_reconciliation().is_empty());
         }
 
         // Recovery closes the durable attempt without ever replaying the
