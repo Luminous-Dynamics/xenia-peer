@@ -105,6 +105,61 @@ impl<'a> FinalityExecutorV1<'a> {
         )
     }
 
+    /// Resolve an effectuation attempt using an authoritative external observation.
+    ///
+    /// This path never invokes the provider. It only moves an already-entered
+    /// attempt from EffectuationStarted/Indeterminate to a terminal or
+    /// still-indeterminate state and durably records the corresponding receipt.
+    /// Reconciliation therefore cannot accidentally replay the original effect.
+    pub fn reconcile(
+        &mut self,
+        attempt_id: [u8; 16],
+        outcome: FinalityOutcomeV1,
+    ) -> Result<FinalityReceiptV1, FinalityExecutorError> {
+        let mut attempt = self
+            .journal
+            .latest_attempt(attempt_id)
+            .cloned()
+            .ok_or(FinalityExecutorError::AttemptNotFound)?;
+
+        let receipt = match (attempt.state(), outcome) {
+            (
+                FinalityAttemptStateV1::EffectuationStarted,
+                FinalityOutcomeV1::Committed,
+            ) => {
+                let receipt = attempt.commit()?;
+                self.journal.append_attempt(&attempt)?;
+                receipt
+            }
+            (
+                FinalityAttemptStateV1::EffectuationStarted,
+                FinalityOutcomeV1::Denied,
+            ) => {
+                let receipt = attempt.deny()?;
+                self.journal.append_attempt(&attempt)?;
+                receipt
+            }
+            (
+                FinalityAttemptStateV1::EffectuationStarted,
+                FinalityOutcomeV1::Indeterminate,
+            ) => {
+                let receipt = attempt.mark_indeterminate()?;
+                self.journal.append_attempt(&attempt)?;
+                receipt
+            }
+            (FinalityAttemptStateV1::Indeterminate, outcome) => attempt.reconcile(outcome)?,
+            _ => return Err(FinalityExecutorError::NotReconciliationState),
+        };
+
+        self.journal.append_receipt(&receipt)?;
+        Ok(receipt)
+    }
+
+    /// Get the latest durable receipt for one attempt identifier.
+    pub fn latest_receipt(&self, attempt_id: [u8; 16]) -> Option<&FinalityReceiptV1> {
+        self.journal.latest_receipt(attempt_id)
+    }
+
     /// Get the latest durable attempt for one attempt identifier.
     pub fn latest_attempt(&self, attempt_id: [u8; 16]) -> Option<&crate::FinalityAttemptV1> {
         self.journal.latest_attempt(attempt_id)
@@ -126,6 +181,12 @@ pub enum FinalityExecutorError {
     /// Durable finality journaling failed.
     #[error("durable finality journal failed: {0}")]
     Journal(#[from] FinalityJournalError),
+    /// No durable attempt exists for the requested attempt identifier.
+    #[error("finality attempt was not found in the durable journal")]
+    AttemptNotFound,
+    /// The attempt is not currently in a state eligible for reconciliation.
+    #[error("finality attempt is not in a reconciliation state")]
+    NotReconciliationState,
 }
 
 #[cfg(test)]
@@ -250,6 +311,42 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn indeterminate_execution_reconciles_without_reinvocation() {
+        let path = std::env::temp_dir().join(format!(
+            "xenia-finality-reconcile-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+
+        // This fixture cannot manufacture a cryptographic handle cheaply without
+        // duplicating the exact authorization setup, so exercise the durable state
+        // machine directly and verify the executor's non-provider reconciliation path.
+        let mut journal = FinalityJournalV1::open(&path).unwrap();
+        let mut attempt =
+            FinalityAttemptV1::prepare([1; 16], [2; 32], [3; 32], [4; 32]).unwrap();
+        journal.append_attempt(&attempt).unwrap();
+        attempt.mark_effectuation_started().unwrap();
+        journal.append_attempt(&attempt).unwrap();
+        attempt.mark_indeterminate().unwrap();
+        journal.append_attempt(&attempt).unwrap();
+        let receipt = attempt.reconcile(FinalityOutcomeV1::Committed).unwrap();
+        journal.append_attempt(&attempt).unwrap();
+        journal.append_receipt(&receipt).unwrap();
+
+        let reopened = FinalityJournalV1::open(&path).unwrap();
+        assert_eq!(
+            reopened.latest_attempt([1; 16]).unwrap().state(),
+            FinalityAttemptStateV1::Committed
+        );
+        assert_eq!(
+            reopened.latest_receipt([1; 16]).unwrap().outcome,
+            FinalityOutcomeV1::Committed
+        );
+
+        let _ = fs::remove_file(&path);
     }
 
     #[test]
