@@ -607,6 +607,51 @@ mod tests {
     }
 
     #[test]
+    fn indeterminate_receipt_can_evolve_once_to_terminal_receipt() {
+        let path = temp_path("receipt-evolution");
+        let _ = fs::remove_file(&path);
+
+        let mut journal = FinalityJournalV1::open(&path).unwrap();
+        let mut attempt =
+            FinalityAttemptV1::prepare([61; 16], [62; 32], [63; 32], [64; 32], [65; 32]).unwrap();
+        journal.append_attempt(&attempt).unwrap();
+        attempt.mark_effectuation_started().unwrap();
+        journal.append_attempt(&attempt).unwrap();
+
+        let indeterminate = attempt.mark_indeterminate().unwrap();
+        journal.append_attempt(&attempt).unwrap();
+        journal.append_receipt(&indeterminate).unwrap();
+
+        let committed = attempt.reconcile(FinalityOutcomeV1::Committed).unwrap();
+        journal.append_attempt(&attempt).unwrap();
+        journal.append_receipt(&committed).unwrap();
+
+        assert_eq!(
+            journal.latest_receipt([61; 16]).unwrap().outcome,
+            FinalityOutcomeV1::Committed
+        );
+
+        let conflicting = FinalityReceiptV1 {
+            outcome: FinalityOutcomeV1::Denied,
+            ..committed.clone()
+        };
+        assert!(matches!(
+            journal.append_receipt(&conflicting),
+            Err(FinalityJournalError::ReceiptMismatch)
+                | Err(FinalityJournalError::ReceiptOutcomeMismatch)
+        ));
+
+        drop(journal);
+        let reopened = FinalityJournalV1::open(&path).unwrap();
+        assert_eq!(
+            reopened.latest_receipt([61; 16]).unwrap().outcome,
+            FinalityOutcomeV1::Committed
+        );
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
     fn journal_rejects_identity_substitution() {
         let path = temp_path("identity");
         let _ = fs::remove_file(&path);
