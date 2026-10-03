@@ -18,10 +18,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Stable schema for a finality-attempt record.
-pub const FINALITY_ATTEMPT_SCHEMA: &str = "xenia-finality-attempt-v1";
+pub const FINALITY_ATTEMPT_SCHEMA: &str = "xenia-finality-attempt-v2";
 
 /// Stable schema for a finality receipt.
-pub const FINALITY_RECEIPT_SCHEMA: &str = "xenia-finality-receipt-v1";
+pub const FINALITY_RECEIPT_SCHEMA: &str = "xenia-finality-receipt-v2";
 
 /// Outcome of an exact external effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,8 +60,11 @@ pub struct FinalityAttemptV1 {
     pub schema: String,
     /// Application-chosen unique attempt identifier.
     pub attempt_id: [u8; 16],
-    /// Exact execution-handle identity consumed for this attempt.
+    /// Exact execution-handle/native replay identity consumed for this attempt.
     pub handle_digest: [u8; 32],
+    /// Durable same-action fence identity. This intentionally does not include
+    /// the native authorization identifier or operation identifier.
+    pub action_key_digest: [u8; 32],
     /// Exact Candidate Act digest.
     pub act_digest: [u8; 32],
     /// Exact finality-sink digest.
@@ -75,11 +78,13 @@ impl FinalityAttemptV1 {
     pub fn prepare(
         attempt_id: [u8; 16],
         handle_digest: [u8; 32],
+        action_key_digest: [u8; 32],
         act_digest: [u8; 32],
         sink_digest: [u8; 32],
     ) -> Result<Self, FinalityAttemptError> {
         require_nonzero_16(attempt_id, FinalityAttemptError::ZeroAttemptId)?;
         require_nonzero(handle_digest, FinalityAttemptError::ZeroHandleDigest)?;
+        require_nonzero(action_key_digest, FinalityAttemptError::ZeroActionKeyDigest)?;
         require_nonzero(act_digest, FinalityAttemptError::ZeroActDigest)?;
         require_nonzero(sink_digest, FinalityAttemptError::ZeroSinkDigest)?;
 
@@ -87,6 +92,7 @@ impl FinalityAttemptV1 {
             schema: FINALITY_ATTEMPT_SCHEMA.to_string(),
             attempt_id,
             handle_digest,
+            action_key_digest,
             act_digest,
             sink_digest,
             state: FinalityAttemptStateV1::Prepared,
@@ -154,6 +160,7 @@ impl FinalityAttemptV1 {
         }
         require_nonzero_16(self.attempt_id, FinalityAttemptError::ZeroAttemptId)?;
         require_nonzero(self.handle_digest, FinalityAttemptError::ZeroHandleDigest)?;
+        require_nonzero(self.action_key_digest, FinalityAttemptError::ZeroActionKeyDigest)?;
         require_nonzero(self.act_digest, FinalityAttemptError::ZeroActDigest)?;
         require_nonzero(self.sink_digest, FinalityAttemptError::ZeroSinkDigest)?;
         Ok(())
@@ -171,6 +178,7 @@ impl FinalityAttemptV1 {
         hasher.update(self.schema.as_bytes());
         hasher.update(&self.attempt_id);
         hasher.update(&self.handle_digest);
+        hasher.update(&self.action_key_digest);
         hasher.update(&self.act_digest);
         hasher.update(&self.sink_digest);
         hasher.update(&[state_tag(self.state)]);
@@ -213,6 +221,7 @@ impl FinalityAttemptV1 {
             attempt_digest: self.digest(),
             attempt_id: self.attempt_id,
             handle_digest: self.handle_digest,
+            action_key_digest: self.action_key_digest,
             act_digest: self.act_digest,
             sink_digest: self.sink_digest,
             outcome,
@@ -232,8 +241,10 @@ pub struct FinalityReceiptV1 {
     pub attempt_digest: [u8; 32],
     /// Exact attempt identifier.
     pub attempt_id: [u8; 16],
-    /// Exact execution-handle identity.
+    /// Exact execution-handle/native replay identity.
     pub handle_digest: [u8; 32],
+    /// Durable same-action fence identity.
+    pub action_key_digest: [u8; 32],
     /// Exact Candidate Act digest.
     pub act_digest: [u8; 32],
     /// Exact finality-sink digest.
@@ -251,6 +262,7 @@ impl FinalityReceiptV1 {
         require_nonzero_16(self.attempt_id, FinalityAttemptError::ZeroAttemptId)?;
         require_nonzero(self.attempt_digest, FinalityAttemptError::ZeroAttemptDigest)?;
         require_nonzero(self.handle_digest, FinalityAttemptError::ZeroHandleDigest)?;
+        require_nonzero(self.action_key_digest, FinalityAttemptError::ZeroActionKeyDigest)?;
         require_nonzero(self.act_digest, FinalityAttemptError::ZeroActDigest)?;
         require_nonzero(self.sink_digest, FinalityAttemptError::ZeroSinkDigest)?;
         Ok(())
@@ -264,6 +276,7 @@ impl FinalityReceiptV1 {
         hasher.update(&self.attempt_digest);
         hasher.update(&self.attempt_id);
         hasher.update(&self.handle_digest);
+        hasher.update(&self.action_key_digest);
         hasher.update(&self.act_digest);
         hasher.update(&self.sink_digest);
         hasher.update(&[self.outcome as u8]);
@@ -288,6 +301,9 @@ pub enum FinalityAttemptError {
     /// Execution-handle digest was all zeroes.
     #[error("finality handle digest must be nonzero")]
     ZeroHandleDigest,
+    /// Durable same-action fence identity was all zeroes.
+    #[error("finality action-key digest must be nonzero")]
+    ZeroActionKeyDigest,
     /// Attempt digest in a receipt was all zeroes.
     #[error("finality attempt digest must be nonzero")]
     ZeroAttemptDigest,
@@ -361,21 +377,29 @@ mod tests {
     use super::*;
 
     fn attempt() -> FinalityAttemptV1 {
-        FinalityAttemptV1::prepare([1; 16], [2; 32], [3; 32], [4; 32]).unwrap()
+        FinalityAttemptV1::prepare([1; 16], [2; 32], [9; 32], [3; 32], [4; 32]).unwrap()
     }
 
     #[test]
     fn prepared_attempt_requires_exact_nonzero_identity() {
-        assert!(FinalityAttemptV1::prepare([0; 16], [2; 32], [3; 32], [4; 32]).is_err());
-        assert!(FinalityAttemptV1::prepare([1; 16], [0; 32], [3; 32], [4; 32]).is_err());
-        assert!(FinalityAttemptV1::prepare([1; 16], [2; 32], [0; 32], [4; 32]).is_err());
-        assert!(FinalityAttemptV1::prepare([1; 16], [2; 32], [3; 32], [0; 32]).is_err());
+        assert!(FinalityAttemptV1::prepare([0; 16], [2; 32], [9; 32], [3; 32], [4; 32]).is_err());
+        assert!(FinalityAttemptV1::prepare([1; 16], [0; 32], [9; 32], [3; 32], [4; 32]).is_err());
+        assert!(FinalityAttemptV1::prepare([1; 16], [2; 32], [0; 32], [3; 32], [4; 32]).is_err());
+        assert!(FinalityAttemptV1::prepare([1; 16], [2; 32], [9; 32], [3; 32], [0; 32]).is_err());
     }
 
     #[test]
     fn generated_attempts_and_receipts_validate() {
         let mut attempt = attempt();
         attempt.validate().unwrap();
+        let mut malformed_action = attempt.clone();
+        malformed_action.action_key_digest = [0; 32];
+        assert!(matches!(
+            malformed_action.validate(),
+            Err(FinalityAttemptError::ZeroActionKeyDigest)
+        ));
+
+
         attempt.mark_effectuation_started().unwrap();
         let receipt = attempt.commit().unwrap();
         receipt.validate().unwrap();
