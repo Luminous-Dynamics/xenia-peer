@@ -1,0 +1,366 @@
+// Copyright (c) 2026 Tristan Stoltz / Luminous Dynamics
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+//! Crash-recovery journal for exact effectuation attempts.
+//!
+//! The journal makes lifecycle intent durable, but it does not make an external
+//! OS/backend call transactional. Every state change is length-prefixed,
+//! validated, written, and followed by sync_data. Recovery fails closed on a
+//! truncated or malformed record instead of silently discarding an uncertain
+//! suffix.
+//!
+//! The journal records only exact attempt/receipt material. It cannot be
+//! deserialized into authority and it does not decide the external outcome.
+
+use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use crate::{
+    FINALITY_ATTEMPT_SCHEMA, FINALITY_RECEIPT_SCHEMA, FinalityAttemptError,
+    FinalityAttemptStateV1, FinalityOutcomeV1, FinalityAttemptV1, FinalityReceiptV1,
+};
+
+/// Stable schema for the journal stream.
+pub const FINALITY_JOURNAL_SCHEMA: &str = "xenia-finality-journal-v1";
+
+const MAX_JOURNAL_RECORD_BYTES: u32 = 64 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum FinalityJournalRecordV1 {
+    Attempt(FinalityAttemptV1),
+    Receipt(FinalityReceiptV1),
+}
+
+pub struct FinalityJournalV1 {
+    path: PathBuf,
+    file: File,
+    latest: BTreeMap<[u8; 16], FinalityAttemptV1>,
+}
+
+#[derive(Debug, Error)]
+pub enum FinalityJournalError {
+    #[error("finality journal I/O failed: {0}")]
+    Io(#[from] io::Error),
+    #[error("finality journal record is malformed")]
+    MalformedRecord,
+    #[error("finality journal record exceeds parser ceiling")]
+    RecordTooLarge,
+    #[error("unsupported finality journal schema")]
+    UnsupportedJournalSchema,
+    #[error("finality attempt is invalid: {0}")]
+    Attempt(#[from] FinalityAttemptError),
+    #[error("finality attempt identity changed for an existing attempt")]
+    AttemptIdentityMismatch,
+    #[error("invalid finality journal lifecycle transition")]
+    InvalidLifecycleTransition,
+    #[error("finality receipt does not match the exact attempt")]
+    ReceiptMismatch,
+    #[error("finality receipt outcome does not match the attempt state")]
+    ReceiptOutcomeMismatch,
+}
+
+impl FinalityJournalV1 {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, FinalityJournalError> {
+        let path = path.as_ref().to_path_buf();
+        let mut reader = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(&path)?;
+
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes)?;
+        let latest = replay_journal_bytes(&bytes)?;
+
+        Ok(Self {
+            path,
+            file: reader,
+            latest,
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn latest_attempt(&self, attempt_id: [u8; 16]) -> Option<&FinalityAttemptV1> {
+        self.latest.get(&attempt_id)
+    }
+
+    pub fn append_attempt(
+        &mut self,
+        attempt: &FinalityAttemptV1,
+    ) -> Result<(), FinalityJournalError> {
+        attempt.validate()?;
+
+        if let Some(previous) = self.latest.get(&attempt.attempt_id) {
+            if previous.handle_digest != attempt.handle_digest
+                || previous.act_digest != attempt.act_digest
+                || previous.sink_digest != attempt.sink_digest
+            {
+                return Err(FinalityJournalError::AttemptIdentityMismatch);
+            }
+            if !valid_lifecycle_transition(previous.state, attempt.state) {
+                return Err(FinalityJournalError::InvalidLifecycleTransition);
+            }
+        }
+
+        self.append_record(&FinalityJournalRecordV1::Attempt(attempt.clone()))?;
+        self.latest.insert(attempt.attempt_id, attempt.clone());
+        Ok(())
+    }
+
+    pub fn append_receipt(
+        &mut self,
+        receipt: &FinalityReceiptV1,
+    ) -> Result<(), FinalityJournalError> {
+        receipt.validate()?;
+        let Some(attempt) = self.latest.get(&receipt.attempt_id) else {
+            return Err(FinalityJournalError::ReceiptMismatch);
+        };
+
+        if receipt.handle_digest != attempt.handle_digest
+            || receipt.act_digest != attempt.act_digest
+            || receipt.sink_digest != attempt.sink_digest
+            || receipt.attempt_digest != attempt.digest()
+        {
+            return Err(FinalityJournalError::ReceiptMismatch);
+        }
+
+        let expected_outcome = match attempt.state {
+            FinalityAttemptStateV1::Committed => FinalityOutcomeV1::Committed,
+            FinalityAttemptStateV1::Denied => FinalityOutcomeV1::Denied,
+            FinalityAttemptStateV1::Indeterminate => FinalityOutcomeV1::Indeterminate,
+            FinalityAttemptStateV1::Prepared | FinalityAttemptStateV1::EffectuationStarted => {
+                return Err(FinalityJournalError::ReceiptOutcomeMismatch)
+            }
+        };
+
+        if receipt.outcome != expected_outcome {
+            return Err(FinalityJournalError::ReceiptOutcomeMismatch);
+        }
+
+        self.append_record(&FinalityJournalRecordV1::Receipt(receipt.clone()))
+    }
+
+    pub fn len(&self) -> usize {
+        self.latest.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.latest.is_empty()
+    }
+
+    fn append_record(
+        &mut self,
+        record: &FinalityJournalRecordV1,
+    ) -> Result<(), FinalityJournalError> {
+        let encoded =
+            bincode::serialize(record).map_err(|_| FinalityJournalError::MalformedRecord)?;
+        if encoded.len() > MAX_JOURNAL_RECORD_BYTES as usize {
+            return Err(FinalityJournalError::RecordTooLarge);
+        }
+
+        self.file.write_all(&(encoded.len() as u32).to_be_bytes())?;
+        self.file.write_all(&encoded)?;
+        self.file.sync_data()?;
+        Ok(())
+    }
+}
+
+fn replay_journal_bytes(
+    bytes: &[u8],
+) -> Result<BTreeMap<[u8; 16], FinalityAttemptV1>, FinalityJournalError> {
+    let mut cursor = 0usize;
+    let mut latest = BTreeMap::new();
+
+    while cursor < bytes.len() {
+        if bytes.len() - cursor < 4 {
+            return Err(FinalityJournalError::MalformedRecord);
+        }
+
+        let len = u32::from_be_bytes(
+            bytes[cursor..cursor + 4]
+                .try_into()
+                .map_err(|_| FinalityJournalError::MalformedRecord)?,
+        ) as usize;
+        cursor += 4;
+
+        if len > MAX_JOURNAL_RECORD_BYTES as usize {
+            return Err(FinalityJournalError::RecordTooLarge);
+        }
+        if bytes.len() - cursor < len {
+            return Err(FinalityJournalError::MalformedRecord);
+        }
+
+        let record: FinalityJournalRecordV1 = bincode::deserialize(&bytes[cursor..cursor + len])
+            .map_err(|_| FinalityJournalError::MalformedRecord)?;
+        cursor += len;
+
+        match record {
+            FinalityJournalRecordV1::Attempt(attempt) => {
+                if attempt.schema != FINALITY_ATTEMPT_SCHEMA {
+                    return Err(FinalityJournalError::UnsupportedJournalSchema);
+                }
+                attempt.validate()?;
+
+                if let Some(previous) = latest.get(&attempt.attempt_id) {
+                    if previous.handle_digest != attempt.handle_digest
+                        || previous.act_digest != attempt.act_digest
+                        || previous.sink_digest != attempt.sink_digest
+                    {
+                        return Err(FinalityJournalError::AttemptIdentityMismatch);
+                    }
+                    if !valid_lifecycle_transition(previous.state, attempt.state) {
+                        return Err(FinalityJournalError::InvalidLifecycleTransition);
+                    }
+                }
+
+                latest.insert(attempt.attempt_id, attempt);
+            }
+            FinalityJournalRecordV1::Receipt(receipt) => {
+                if receipt.schema != FINALITY_RECEIPT_SCHEMA {
+                    return Err(FinalityJournalError::UnsupportedJournalSchema);
+                }
+                receipt.validate()?;
+                let Some(attempt) = latest.get(&receipt.attempt_id) else {
+                    return Err(FinalityJournalError::ReceiptMismatch);
+                };
+
+                if receipt.handle_digest != attempt.handle_digest
+                    || receipt.act_digest != attempt.act_digest
+                    || receipt.sink_digest != attempt.sink_digest
+                    || receipt.attempt_digest != attempt.digest()
+                {
+                    return Err(FinalityJournalError::ReceiptMismatch);
+                }
+
+                let expected_outcome = match attempt.state {
+                    FinalityAttemptStateV1::Committed => FinalityOutcomeV1::Committed,
+                    FinalityAttemptStateV1::Denied => FinalityOutcomeV1::Denied,
+                    FinalityAttemptStateV1::Indeterminate => FinalityOutcomeV1::Indeterminate,
+                    FinalityAttemptStateV1::Prepared
+                    | FinalityAttemptStateV1::EffectuationStarted => {
+                        return Err(FinalityJournalError::ReceiptOutcomeMismatch)
+                    }
+                };
+
+                if receipt.outcome != expected_outcome {
+                    return Err(FinalityJournalError::ReceiptOutcomeMismatch);
+                }
+            }
+        }
+    }
+
+    Ok(latest)
+}
+
+fn valid_lifecycle_transition(
+    from: FinalityAttemptStateV1,
+    to: FinalityAttemptStateV1,
+) -> bool {
+    matches!(
+        (from, to),
+        (
+            FinalityAttemptStateV1::Prepared,
+            FinalityAttemptStateV1::EffectuationStarted
+        ) | (
+            FinalityAttemptStateV1::EffectuationStarted,
+            FinalityAttemptStateV1::Committed
+        ) | (
+            FinalityAttemptStateV1::EffectuationStarted,
+            FinalityAttemptStateV1::Denied
+        ) | (
+            FinalityAttemptStateV1::EffectuationStarted,
+            FinalityAttemptStateV1::Indeterminate
+        ) | (
+            FinalityAttemptStateV1::Indeterminate,
+            FinalityAttemptStateV1::Committed
+        ) | (
+            FinalityAttemptStateV1::Indeterminate,
+            FinalityAttemptStateV1::Denied
+        )
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn attempt() -> FinalityAttemptV1 {
+        FinalityAttemptV1::prepare([1; 16], [2; 32], [3; 32], [4; 32]).unwrap()
+    }
+
+    fn temp_path(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("xenia-finality-journal-{}-{}", tag, std::process::id()))
+    }
+
+    #[test]
+    fn journal_round_trips_indeterminate_without_reopening_execution() {
+        let path = temp_path("round-trip");
+        let _ = fs::remove_file(&path);
+
+        {
+            let mut journal = FinalityJournalV1::open(&path).unwrap();
+            let mut current = attempt();
+            journal.append_attempt(&current).unwrap();
+            current.mark_effectuation_started().unwrap();
+            journal.append_attempt(&current).unwrap();
+            let receipt = current.mark_indeterminate().unwrap();
+            journal.append_attempt(&current).unwrap();
+            journal.append_receipt(&receipt).unwrap();
+        }
+
+        let journal = FinalityJournalV1::open(&path).unwrap();
+        let recovered = journal.latest_attempt([1; 16]).unwrap();
+        assert_eq!(recovered.state(), FinalityAttemptStateV1::Indeterminate);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn journal_rejects_identity_substitution() {
+        let path = temp_path("identity");
+        let _ = fs::remove_file(&path);
+
+        let mut journal = FinalityJournalV1::open(&path).unwrap();
+        let current = attempt();
+        journal.append_attempt(&current).unwrap();
+
+        let mut substituted = current.clone();
+        substituted.act_digest = [9; 32];
+        assert!(matches!(
+            journal.append_attempt(&substituted),
+            Err(FinalityJournalError::AttemptIdentityMismatch)
+        ));
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn truncated_tail_fails_closed() {
+        let path = temp_path("truncated");
+        let _ = fs::remove_file(&path);
+
+        {
+            let mut journal = FinalityJournalV1::open(&path).unwrap();
+            journal.append_attempt(&attempt()).unwrap();
+        }
+
+        let mut bytes = fs::read(&path).unwrap();
+        bytes.pop();
+        fs::write(&path, bytes).unwrap();
+
+        assert!(matches!(
+            FinalityJournalV1::open(&path),
+            Err(FinalityJournalError::MalformedRecord)
+        ));
+
+        let _ = fs::remove_file(&path);
+    }
+}
