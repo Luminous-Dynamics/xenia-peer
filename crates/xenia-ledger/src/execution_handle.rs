@@ -98,6 +98,29 @@ impl ExactExecutionHandleV1 {
         })
     }
 
+    /// Validate expiry and the exact consequence/current-state reconstruction without consuming the handle.
+    pub fn validate_current(
+        &self,
+        now_unix_s: u64,
+        actual_act_digest: [u8; 32],
+        actual_sink_digest: [u8; 32],
+        current_protected_state_digest: [u8; 32],
+    ) -> Result<(), ExactExecutionConsumptionError> {
+        if now_unix_s >= self.expires_at_unix_s {
+            return Err(ExactExecutionConsumptionError::Expired);
+        }
+        if actual_act_digest != self.act_digest {
+            return Err(ExactExecutionConsumptionError::ActMismatch);
+        }
+        if actual_sink_digest != self.sink_digest {
+            return Err(ExactExecutionConsumptionError::SinkMismatch);
+        }
+        if current_protected_state_digest != self.protected_state_digest {
+            return Err(ExactExecutionConsumptionError::ProtectedStateMismatch);
+        }
+        Ok(())
+    }
+
     /// Stable identity committing to authorization, exact act, exact sink, and protected state.
     pub fn digest(&self) -> [u8; 32] {
         let mut hasher = Hasher::new();
@@ -152,18 +175,12 @@ impl ExactExecutionConsumptionGuardV1 {
         actual_sink_digest: [u8; 32],
         current_protected_state_digest: [u8; 32],
     ) -> Result<(), ExactExecutionConsumptionError> {
-        if now_unix_s >= handle.expires_at_unix_s {
-            return Err(ExactExecutionConsumptionError::Expired);
-        }
-        if actual_act_digest != handle.act_digest {
-            return Err(ExactExecutionConsumptionError::ActMismatch);
-        }
-        if actual_sink_digest != handle.sink_digest {
-            return Err(ExactExecutionConsumptionError::SinkMismatch);
-        }
-        if current_protected_state_digest != handle.protected_state_digest {
-            return Err(ExactExecutionConsumptionError::ProtectedStateMismatch);
-        }
+        handle.validate_current(
+            now_unix_s,
+            actual_act_digest,
+            actual_sink_digest,
+            current_protected_state_digest,
+        )?;
 
         let digest = handle.digest();
         let mut consumed = self
