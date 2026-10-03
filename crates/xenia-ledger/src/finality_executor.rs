@@ -12,8 +12,8 @@
 
 use crate::{
     ExactExecutionConsumptionError, ExactExecutionHandleV1, FinalityAttemptError,
-    FinalityAttemptStateV1, FinalityJournalError, FinalityJournalV1, FinalityOutcomeV1,
-    FinalityReceiptV1, FINALITY_ATTEMPT_SCHEMA,
+    FinalityJournalError, FinalityJournalV1, FinalityOutcomeV1, FinalityReceiptV1,
+    FinalityAttemptV1,
 };
 
 /// Coordinates one exact execution handle with the durable finality journal.
@@ -111,8 +111,6 @@ impl<'a> FinalityExecutorV1<'a> {
     }
 }
 
-type FinalityAttemptV1State = crate::FinalityAttemptV1;
-
 #[derive(Debug, thiserror::Error)]
 pub enum FinalityExecutorError {
     /// The exact handle did not match the actual consequence request.
@@ -144,12 +142,6 @@ mod tests {
             "xenia-finality-executor-{}",
             std::process::id()
         ))
-    }
-
-    fn handle() -> ExactExecutionHandleV1 {
-        let mut journal = FinalityJournalV1::open(path()).unwrap();
-        let _ = &mut journal;
-        panic!("handle fixture is supplied by integration tests; this unit module focuses on orchestration state");
     }
 
     #[test]
