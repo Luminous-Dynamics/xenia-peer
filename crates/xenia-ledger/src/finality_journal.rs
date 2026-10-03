@@ -22,7 +22,7 @@ use thiserror::Error;
 
 use crate::{
     FINALITY_ATTEMPT_SCHEMA, FINALITY_RECEIPT_SCHEMA, FinalityAttemptError,
-    FinalityAttemptStateV1, FinalityOutcomeV1, FinalityAttemptV1, FinalityReceiptV1,
+    FinalityAttemptStateV1, FinalityAttemptV1, FinalityOutcomeV1, FinalityReceiptV1,
 };
 
 /// Stable schema for the journal stream.
@@ -45,29 +45,41 @@ pub struct FinalityJournalV1 {
     consumed_handles: BTreeMap<[u8; 32], [u8; 16]>,
 }
 
+/// Errors raised while opening, validating, or appending the durable finality journal.
 #[derive(Debug, Error)]
 pub enum FinalityJournalError {
+    /// Filesystem access failed.
     #[error("finality journal I/O failed: {0}")]
     Io(#[from] io::Error),
+    /// A length-delimited record could not be decoded completely.
     #[error("finality journal record is malformed")]
     MalformedRecord,
+    /// A record exceeded the parser's hard size ceiling.
     #[error("finality journal record exceeds parser ceiling")]
     RecordTooLarge,
+    /// A stored attempt or receipt used an unsupported schema.
     #[error("unsupported finality journal schema")]
     UnsupportedJournalSchema,
     #[error("finality attempt is invalid: {0}")]
     Attempt(#[from] FinalityAttemptError),
+    /// An attempt identifier was reused with different exact act/sink identity.
     #[error("finality attempt identity changed for an existing attempt")]
     AttemptIdentityMismatch,
+    /// A stored lifecycle state did not follow the previous durable state.
     #[error("invalid finality journal lifecycle transition")]
     InvalidLifecycleTransition,
+    /// A receipt did not match the exact latest attempt material.
     #[error("finality receipt does not match the exact attempt")]
     ReceiptMismatch,
+    /// A receipt outcome did not match the corresponding terminal state.
     #[error("finality receipt outcome does not match the attempt state")]
     ReceiptOutcomeMismatch,
+    /// An already-consumed exact handle was presented under a different attempt.
     #[error("exact execution handle was already durably consumed by another attempt")]
     HandleAlreadyConsumed {
+        /// Exact handle identity that was already consumed.
         handle_digest: [u8; 32],
+        /// Attempt that durably consumed the handle first.
         existing_attempt_id: [u8; 16],
     },
 }
