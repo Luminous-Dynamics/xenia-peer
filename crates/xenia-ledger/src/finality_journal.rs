@@ -567,11 +567,11 @@ mod tests {
 
         assert!(matches!(
             FinalityJournalV1::open(&path),
-            Err(FinalityJournalError::MalformedRecord)
+            Err(FinalityJournalError::UnsupportedJournalSchema)
         ));
         assert!(matches!(
             FinalityJournalV1::open(&path),
-            Err(FinalityJournalError::MalformedRecord)
+            Err(FinalityJournalError::UnsupportedJournalSchema)
         ));
 
         let _ = fs::remove_file(&path);
