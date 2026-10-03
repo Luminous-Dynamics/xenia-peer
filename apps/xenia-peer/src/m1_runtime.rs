@@ -1245,7 +1245,7 @@ impl M1RuntimeSession {
         self.session.check_permission(M1Permission::InjectInput)?;
         if self.input_effect_uncertain {
             return Err(M1RuntimeError::InputInjection(
-                "input effect lane is sealed after an indeterminate provider outcome;                  blind continuation is not permitted".into(),
+                "input effect lane is sealed after an indeterminate provider outcome; blind continuation is not permitted".into(),
             ));
         }
 
