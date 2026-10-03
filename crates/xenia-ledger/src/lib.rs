@@ -76,6 +76,7 @@ mod chain;
 mod checkpoint;
 mod compaction;
 mod durable_frontier;
+mod execution_handle;
 mod entry;
 mod errors;
 mod hash;
@@ -142,6 +143,11 @@ pub use checkpoint::{
 pub use compaction::{
     LEDGER_COMPACTION_MANIFEST_SCHEMA, LedgerCompactionError, LedgerCompactionManifest,
     ledger_compaction_manifest_message,
+};
+
+pub use execution_handle::{
+    ExactExecutionConsumptionError, ExactExecutionConsumptionGuardV1,
+    ExactExecutionHandleError, ExactExecutionHandleV1, EXECUTION_HANDLE_DOMAIN,
 };
 
 pub use durable_frontier::{
