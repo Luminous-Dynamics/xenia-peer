@@ -162,7 +162,79 @@ pub enum InputEvent {
     },
 }
 
-/// A recorded injection — useful for `LoggingInjector` + tests.
+/// Validation failures for a decoded remote input event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum InputEventValidationError {
+    /// Pointer/touch coordinates were NaN or infinite.
+    #[error("input coordinate must be finite")]
+    NonFiniteCoordinate,
+    /// A normalized pointer/touch coordinate was outside [0.0, 1.0].
+    #[error("input coordinate must be within 0.0..=1.0")]
+    CoordinateOutOfRange,
+    /// Touch pressure was NaN or infinite.
+    #[error("touch pressure must be finite")]
+    NonFinitePressure,
+    /// Touch pressure was outside [0.0, 1.0].
+    #[error("touch pressure must be within 0.0..=1.0")]
+    PressureOutOfRange,
+    /// A touch phase outside Down/Move/Up/Cancel was received.
+    #[error("touch phase must be 0 (down), 1 (move), 2 (up), or 3 (cancel)")]
+    InvalidTouchPhase,
+    /// Reserved keyboard modifier bits were set.
+    #[error("keyboard modifiers use reserved bits")]
+    ReservedModifierBits,
+}
+
+impl InputEvent {
+    /// Validate semantic bounds before any host input backend is touched.
+    ///
+    /// Wire authentication and payload-size checks do not make decoded values
+    /// safe: floating-point values can still carry NaN/infinity, and numeric
+    /// fields can still carry values outside the current protocol domain.
+    pub fn validate(&self) -> Result<(), InputEventValidationError> {
+        fn coordinate(x: f32) -> Result<(), InputEventValidationError> {
+            if !x.is_finite() {
+                return Err(InputEventValidationError::NonFiniteCoordinate);
+            }
+            if !(0.0..=1.0).contains(&x) {
+                return Err(InputEventValidationError::CoordinateOutOfRange);
+            }
+            Ok(())
+        }
+
+        match self {
+            Self::Pointer { x, y, .. } | Self::PointerButton { x, y, .. } => {
+                coordinate(*x)?;
+                coordinate(*y)?;
+            }
+            Self::PointerMove { x, y } => {
+                coordinate(*x)?;
+                coordinate(*y)?;
+            }
+            Self::Touch { x, y, phase, pressure, .. } => {
+                coordinate(*x)?;
+                coordinate(*y)?;
+                if !pressure.is_finite() {
+                    return Err(InputEventValidationError::NonFinitePressure);
+                }
+                if !(0.0..=1.0).contains(pressure) {
+                    return Err(InputEventValidationError::PressureOutOfRange);
+                }
+                if !matches!(*phase, 0..=3) {
+                    return Err(InputEventValidationError::InvalidTouchPhase);
+                }
+            }
+            Self::Key { modifiers, .. } => {
+                if modifiers & !0x0F != 0 {
+                    return Err(InputEventValidationError::ReservedModifierBits);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A recorded injection — useful for LoggingInjector + tests.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InjectedEvent {
     /// Legacy combined pointer event with denormalized coordinates.
@@ -302,6 +374,11 @@ pub trait InputInjector: Send {
     /// Drive a batch of [`InputEvent`]s. Default impl dispatches
     /// each one; backends needing batch semantics can override.
     fn process_events(&mut self, events: &[InputEvent]) -> Result<(), InjectError> {
+        // Validate the entire batch before the first backend call so a malformed
+        // later event cannot cause a valid earlier event to be partially applied.
+        for event in events {
+            event.validate()?;
+        }
         for event in events {
             match event {
                 InputEvent::Pointer {
@@ -994,6 +1071,88 @@ impl InputInjector for UinputInjector {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn input_event_validation_rejects_non_finite_and_out_of_range_values() {
+        let event = InputEvent::PointerMove { x: f32::NAN, y: 0.5 };
+        assert_eq!(
+            event.validate().unwrap_err(),
+            InputEventValidationError::NonFiniteCoordinate
+        );
+
+        let event = InputEvent::PointerMove { x: 1.1, y: 0.5 };
+        assert_eq!(
+            event.validate().unwrap_err(),
+            InputEventValidationError::CoordinateOutOfRange
+        );
+
+        let event = InputEvent::Touch {
+            index: 0,
+            x: 0.5,
+            y: 0.5,
+            phase: 1,
+            pressure: f32::INFINITY,
+        };
+        assert_eq!(
+            event.validate().unwrap_err(),
+            InputEventValidationError::NonFinitePressure
+        );
+    }
+
+    #[test]
+    fn input_event_validation_rejects_reserved_numeric_domains() {
+        let event = InputEvent::Touch {
+            index: 0,
+            x: 0.5,
+            y: 0.5,
+            phase: 4,
+            pressure: 0.0,
+        };
+        assert_eq!(
+            event.validate().unwrap_err(),
+            InputEventValidationError::InvalidTouchPhase
+        );
+
+        let event = InputEvent::Key {
+            code: 30,
+            pressed: true,
+            modifiers: 0x80,
+        };
+        assert_eq!(
+            event.validate().unwrap_err(),
+            InputEventValidationError::ReservedModifierBits
+        );
+    }
+
+    #[test]
+    fn input_event_validation_accepts_current_domains() {
+        assert!(InputEvent::PointerMove { x: 0.0, y: 1.0 }.validate().is_ok());
+        assert!(InputEvent::PointerButton {
+            x: 0.25,
+            y: 0.75,
+            button: 9,
+            pressed: true,
+        }
+        .validate()
+        .is_ok());
+        assert!(InputEvent::Touch {
+            index: 9,
+            x: 0.25,
+            y: 0.75,
+            phase: 3,
+            pressure: 1.0,
+        }
+        .validate()
+        .is_ok());
+        assert!(InputEvent::Key {
+            code: 30,
+            pressed: true,
+            modifiers: 0x0F,
+        }
+        .validate()
+        .is_ok());
+    }
+
+
     use super::*;
 
     #[test]
