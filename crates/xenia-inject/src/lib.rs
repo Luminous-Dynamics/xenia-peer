@@ -229,7 +229,7 @@ impl InputEvent {
                 }
             }
             Self::Key { modifiers, .. } => {
-                if modifiers & !0x0F != 0 {
+                if *modifiers & !0x0F != 0 {
                     return Err(InputEventValidationError::ReservedModifierBits);
                 }
             }
