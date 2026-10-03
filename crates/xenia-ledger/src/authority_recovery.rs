@@ -605,6 +605,7 @@ impl AuthorityRecoveryStateV1 {
                 ActivateSuccessor,
             ) => SuccessorActive {
                 transition_fingerprint,
+                authority_epoch,
                 _seal: RecoveryStateSeal,
             },
             _ => {
@@ -761,10 +762,12 @@ mod tests {
         let state = AuthorityRecoveryStateV1::OldActive
             .apply(AuthorityRecoveryEventV1::PrepareTransition {
                 transition_fingerprint: TRANSITION_A,
+            authority_epoch: 8,
             })
             .unwrap()
             .apply(AuthorityRecoveryEventV1::DurableCommit {
                 transition_fingerprint: TRANSITION_A,
+            authority_epoch: 8,
             })
             .unwrap()
             .apply(AuthorityRecoveryEventV1::ActivateSuccessor)
@@ -780,10 +783,12 @@ mod tests {
         let state = AuthorityRecoveryStateV1::OldActive
             .apply(AuthorityRecoveryEventV1::PrepareTransition {
                 transition_fingerprint: TRANSITION_A,
+            authority_epoch: 8,
             })
             .unwrap()
             .apply(AuthorityRecoveryEventV1::CommitOutcomeUnknown {
                 transition_fingerprint: TRANSITION_A,
+            authority_epoch: 8,
             })
             .unwrap();
 
@@ -812,12 +817,14 @@ mod tests {
         let state = AuthorityRecoveryStateV1::OldActive
             .apply(AuthorityRecoveryEventV1::PrepareTransition {
                 transition_fingerprint: TRANSITION_A,
+            authority_epoch: 8,
             })
             .unwrap();
 
         assert!(matches!(
             state.apply(AuthorityRecoveryEventV1::DurableCommit {
                 transition_fingerprint: TRANSITION_B,
+            authority_epoch: 8,
             }),
             Err(AuthorityRecoveryError::TransitionFingerprintMismatch)
         ));
@@ -830,6 +837,7 @@ mod tests {
             AuthorityRecoveryStateV1::OldActive.apply(
                 AuthorityRecoveryEventV1::PrepareTransition {
                     transition_fingerprint: [0; 32],
+                authority_epoch: 8,
                 }
             ),
             Err(AuthorityRecoveryError::InvalidTransitionFingerprint)
@@ -837,6 +845,7 @@ mod tests {
         assert!(matches!(
             AuthorityRecoveryStateV1::OldActive.apply(AuthorityRecoveryEventV1::BeginRecovery {
                 transition_fingerprint: [0; 32],
+            authority_epoch: 8,
             }),
             Err(AuthorityRecoveryError::InvalidTransitionFingerprint)
         ));
@@ -844,6 +853,7 @@ mod tests {
             recovery_from_old(TRANSITION_A).apply(
                 AuthorityRecoveryEventV1::RecoverSuccessor {
                     transition_fingerprint: [0; 32],
+                authority_epoch: 8,
                 }
             ),
             Err(AuthorityRecoveryError::InvalidTransitionFingerprint)
@@ -855,20 +865,24 @@ mod tests {
         let state = AuthorityRecoveryStateV1::OldActive
             .apply(AuthorityRecoveryEventV1::PrepareTransition {
                 transition_fingerprint: TRANSITION_A,
+            authority_epoch: 8,
             })
             .unwrap()
             .apply(AuthorityRecoveryEventV1::DurableCommit {
                 transition_fingerprint: TRANSITION_A,
+            authority_epoch: 8,
             })
             .unwrap()
             .apply(AuthorityRecoveryEventV1::ActivateSuccessor)
             .unwrap()
             .apply(AuthorityRecoveryEventV1::BeginRecovery {
                 transition_fingerprint: TRANSITION_A,
+            authority_epoch: 8,
             })
             .unwrap()
             .apply(AuthorityRecoveryEventV1::RecoverSuccessor {
                 transition_fingerprint: TRANSITION_A,
+            authority_epoch: 8,
             })
             .unwrap()
             .apply(AuthorityRecoveryEventV1::ActivateSuccessor)
@@ -879,10 +893,12 @@ mod tests {
         let stale = AuthorityRecoveryStateV1::OldActive
             .apply(AuthorityRecoveryEventV1::BeginRecovery {
                 transition_fingerprint: TRANSITION_A,
+            authority_epoch: 8,
             })
             .unwrap()
             .apply(AuthorityRecoveryEventV1::RecoverOld {
                 transition_fingerprint: TRANSITION_A,
+            authority_epoch: 8,
             })
             .unwrap();
 
@@ -897,6 +913,7 @@ mod tests {
         assert!(matches!(
             state.apply(AuthorityRecoveryEventV1::BeginRecovery {
                 transition_fingerprint: TRANSITION_B,
+            authority_epoch: 8,
             }),
             Err(AuthorityRecoveryError::TransitionFingerprintMismatch)
         ));
@@ -923,6 +940,7 @@ mod tests {
         let state = AuthorityRecoveryStateV1::OldActive
             .apply(AuthorityRecoveryEventV1::BeginRecovery {
                 transition_fingerprint: TRANSITION_A,
+            authority_epoch: 8,
             })
             .unwrap();
 
@@ -930,6 +948,7 @@ mod tests {
         assert!(matches!(
             state.apply(AuthorityRecoveryEventV1::RecoverOld {
                 transition_fingerprint: TRANSITION_B,
+            authority_epoch: 8,
             }),
             Err(AuthorityRecoveryError::TransitionFingerprintMismatch)
         ));
@@ -940,6 +959,7 @@ mod tests {
         let state = successor_active(TRANSITION_A)
             .apply(AuthorityRecoveryEventV1::BeginRecovery {
                 transition_fingerprint: TRANSITION_A,
+            authority_epoch: 8,
             })
             .unwrap();
 
@@ -947,12 +967,14 @@ mod tests {
         assert!(matches!(
             state.apply(AuthorityRecoveryEventV1::RecoverOld {
                 transition_fingerprint: TRANSITION_A,
+            authority_epoch: 8,
             }),
             Err(AuthorityRecoveryError::InvalidTransition { .. })
         ));
         assert!(matches!(
             state.apply(AuthorityRecoveryEventV1::RecoverOutcomeUnknown {
                 transition_fingerprint: TRANSITION_A,
+            authority_epoch: 8,
             }),
             Err(AuthorityRecoveryError::InvalidTransition { .. })
         ));
@@ -972,10 +994,12 @@ mod tests {
         let state = unknown(TRANSITION_A)
             .apply(AuthorityRecoveryEventV1::BeginRecovery {
                 transition_fingerprint: TRANSITION_A,
+            authority_epoch: 8,
             })
             .unwrap()
             .apply(AuthorityRecoveryEventV1::RecoverOutcomeUnknown {
                 transition_fingerprint: TRANSITION_A,
+            authority_epoch: 8,
             })
             .unwrap();
 
@@ -989,6 +1013,7 @@ mod tests {
         let state = unknown(TRANSITION_A)
             .apply(AuthorityRecoveryEventV1::BeginRecovery {
                 transition_fingerprint: TRANSITION_A,
+            authority_epoch: 8,
             })
             .unwrap();
 
@@ -996,6 +1021,7 @@ mod tests {
         assert!(matches!(
             state.apply(AuthorityRecoveryEventV1::RecoverSuccessor {
                 transition_fingerprint: TRANSITION_B,
+            authority_epoch: 8,
             }),
             Err(AuthorityRecoveryError::TransitionFingerprintMismatch)
         ));
