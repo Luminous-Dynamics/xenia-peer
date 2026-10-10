@@ -544,7 +544,7 @@ pub trait InputInjector: Send {
     ) -> Result<InputEffectOutcome, InjectError> {
         match self.process_events(events) {
             Ok(()) => Ok(InputEffectOutcome::Accepted),
-            Err(InjectError::NotEntered(_reason))
+            Err(InjectError::NotEntered(_))
             | Err(InjectError::InvalidEvent(_)) => {
                 Ok(InputEffectOutcome::RejectionBeforeEffect)
             }
