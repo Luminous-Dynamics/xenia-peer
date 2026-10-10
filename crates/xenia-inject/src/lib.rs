@@ -623,15 +623,65 @@ impl SessionInputInjector {
         &mut self,
         event: &InputEvent,
     ) -> Result<InputEffectOutcome, InjectError> {
-        let outcome = self.inner.process_event_outcome(event)?;
+        // Validate before calling an overridable backend boundary.
+        if event.validate().is_err() {
+            return Ok(InputEffectOutcome::RejectionBeforeEffect);
+        }
+
+        // Trait implementors should return an explicit outcome, but the Result
+        // channel still exists. Never let an unexpected backend error bypass
+        // conservative state tracking.
+        let outcome = match self.inner.process_event_outcome(event) {
+            Ok(outcome) => outcome,
+            Err(InjectError::NotEntered(_)) => InputEffectOutcome::RejectionBeforeEffect,
+            Err(_) => InputEffectOutcome::Indeterminate,
+        };
         match outcome {
-            InputEffectOutcome::Applied | InputEffectOutcome::Accepted => {
-                self.track_event_state(event)
+            InputEffectOutcome::Applied => self.track_event_state(event),
+            // Accepted is an acknowledgement, not proof the host executed the
+            // release. Preserve possible down-state just as for Indeterminate.
+            InputEffectOutcome::Accepted | InputEffectOutcome::Indeterminate => {
+                self.track_indeterminate_state(event)
             }
-            InputEffectOutcome::Indeterminate => self.track_indeterminate_state(event),
             InputEffectOutcome::RejectionBeforeEffect => {}
         }
         Ok(outcome)
+    }
+
+    /// Process a batch through the outcome-aware single-event path. If an event
+    /// fails after any earlier event was accepted/applied, the aggregate cannot
+    /// be described as a pre-effect rejection.
+    pub fn process_events_outcome(
+        &mut self,
+        events: &[InputEvent],
+    ) -> Result<InputEffectOutcome, InjectError> {
+        if events.iter().any(|event| event.validate().is_err()) {
+            return Ok(InputEffectOutcome::RejectionBeforeEffect);
+        }
+        if events.is_empty() {
+            return Ok(InputEffectOutcome::Accepted);
+        }
+
+        let mut any_accepted = false;
+        for (index, event) in events.iter().enumerate() {
+            match self.process_event_outcome(event)? {
+                InputEffectOutcome::Applied => {}
+                InputEffectOutcome::Accepted => any_accepted = true,
+                InputEffectOutcome::Indeterminate => return Ok(InputEffectOutcome::Indeterminate),
+                InputEffectOutcome::RejectionBeforeEffect if index == 0 => {
+                    return Ok(InputEffectOutcome::RejectionBeforeEffect);
+                }
+                InputEffectOutcome::RejectionBeforeEffect => {
+                    return Ok(InputEffectOutcome::Indeterminate);
+                }
+            }
+        }
+
+        if any_accepted {
+            Ok(InputEffectOutcome::Accepted)
+        } else {
+            Ok(InputEffectOutcome::Applied)
+        }
     }
 
     fn track_event_state(&mut self, event: &InputEvent) {
@@ -778,6 +828,35 @@ impl Drop for SessionInputInjector {
 }
 
 impl InputInjector for SessionInputInjector {
+    fn process_events(&mut self, events: &[InputEvent]) -> Result<(), InjectError> {
+        if let Some(error) = events.iter().find_map(|event| event.validate().err()) {
+            return Err(InjectError::InvalidEvent(error));
+        }
+        match SessionInputInjector::process_events_outcome(self, events)? {
+            InputEffectOutcome::Applied | InputEffectOutcome::Accepted => Ok(()),
+            InputEffectOutcome::RejectionBeforeEffect => Err(InjectError::NotEntered(
+                "session input batch rejected before provider entry".into(),
+            )),
+            InputEffectOutcome::Indeterminate => Err(InjectError::Backend(
+                "session input batch effect outcome is indeterminate".into(),
+            )),
+        }
+    }
+
+    fn process_events_outcome(
+        &mut self,
+        events: &[InputEvent],
+    ) -> Result<InputEffectOutcome, InjectError> {
+        SessionInputInjector::process_events_outcome(self, events)
+    }
+
+    fn process_event_outcome(
+        &mut self,
+        event: &InputEvent,
+    ) -> Result<InputEffectOutcome, InjectError> {
+        SessionInputInjector::process_event_outcome(self, event)
+    }
+
     fn inject_pointer_move(&mut self, x: f32, y: f32) -> Result<(), InjectError> {
         self.inner.inject_pointer_move(x, y)?;
         for position in self.pressed_buttons.values_mut() {
@@ -1552,6 +1631,69 @@ mod tests {
             injector.process_events_outcome(&events).unwrap(),
             InputEffectOutcome::Indeterminate,
             "the first event may have taken effect before the second was rejected"
+        );
+    }
+
+    #[test]
+    fn trait_object_outcome_error_tracks_possible_press() {
+        struct OutcomeError;
+
+        impl InputInjector for OutcomeError {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> { Ok(()) }
+            fn inject_pointer_button(&mut self, _x: f32, _y: f32, _button: u8, _pressed: bool) -> Result<(), InjectError> { Ok(()) }
+            fn inject_key(&mut self, _code: u32, _pressed: bool, _modifiers: u8) -> Result<(), InjectError> { Ok(()) }
+            fn inject_touch(&mut self, _index: u8, _x: f32, _y: f32, _phase: u8, _pressure: f32) -> Result<(), InjectError> { Ok(()) }
+            fn process_event_outcome(&mut self, _event: &InputEvent) -> Result<InputEffectOutcome, InjectError> {
+                Err(InjectError::Backend("outcome channel failed after provider entry".into()))
+            }
+            fn backend_name(&self) -> &str { "outcome-error" }
+        }
+
+        let mut wrapped = SessionInputInjector::new(Box::new(OutcomeError));
+        let event = InputEvent::PointerButton {
+            x: 0.25,
+            y: 0.5,
+            button: 1,
+            pressed: true,
+        };
+        let injector: &mut dyn InputInjector = &mut wrapped;
+        assert_eq!(
+            injector.process_event_outcome(&event).unwrap(),
+            InputEffectOutcome::Indeterminate
+        );
+        assert_eq!(wrapped.active_state_count(), 1);
+    }
+
+    #[test]
+    fn accepted_release_remains_tracked_until_applied() {
+        struct AcceptedRelease;
+
+        impl InputInjector for AcceptedRelease {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> { Ok(()) }
+            fn inject_pointer_button(&mut self, _x: f32, _y: f32, _button: u8, _pressed: bool) -> Result<(), InjectError> { Ok(()) }
+            fn inject_key(&mut self, _code: u32, _pressed: bool, _modifiers: u8) -> Result<(), InjectError> { Ok(()) }
+            fn inject_touch(&mut self, _index: u8, _x: f32, _y: f32, _phase: u8, _pressure: f32) -> Result<(), InjectError> { Ok(()) }
+            fn process_event_outcome(&mut self, event: &InputEvent) -> Result<InputEffectOutcome, InjectError> {
+                match event {
+                    InputEvent::PointerButton { pressed: true, .. } => Ok(InputEffectOutcome::Applied),
+                    InputEvent::PointerButton { pressed: false, .. } => Ok(InputEffectOutcome::Accepted),
+                    _ => Ok(InputEffectOutcome::Applied),
+                }
+            }
+            fn backend_name(&self) -> &str { "accepted-release" }
+        }
+
+        let mut wrapped = SessionInputInjector::new(Box::new(AcceptedRelease));
+        let press = InputEvent::PointerButton { x: 0.2, y: 0.3, button: 1, pressed: true };
+        let release = InputEvent::PointerButton { x: 0.2, y: 0.3, button: 1, pressed: false };
+        assert_eq!(wrapped.process_event_outcome(&press).unwrap(), InputEffectOutcome::Applied);
+        assert_eq!(wrapped.active_state_count(), 1);
+        let injector: &mut dyn InputInjector = &mut wrapped;
+        assert_eq!(injector.process_event_outcome(&release).unwrap(), InputEffectOutcome::Accepted);
+        assert_eq!(
+            wrapped.active_state_count(),
+            1,
+            "provider acceptance alone must not erase possible down-state"
         );
     }
 
