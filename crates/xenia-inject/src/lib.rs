@@ -768,14 +768,6 @@ impl SessionInputInjector {
         Self::legacy_outcome_result(outcome)
     }
 
-    fn legacy_events_result(&mut self, events: &[InputEvent]) -> Result<(), InjectError> {
-        if let Some(error) = events.iter().find_map(|event| event.validate().err()) {
-            return Err(InjectError::InvalidEvent(error));
-        }
-        let outcome = self.process_events_outcome(events)?;
-        Self::legacy_outcome_result(outcome)
-    }
-
     fn legacy_outcome_result(outcome: InputEffectOutcome) -> Result<(), InjectError> {
         match outcome {
             InputEffectOutcome::Applied | InputEffectOutcome::Accepted => Ok(()),
