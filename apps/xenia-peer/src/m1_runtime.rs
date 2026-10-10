@@ -44,6 +44,9 @@ pub(crate) enum M1RuntimeError {
     Verify(VerifyError),
     DurableFrontier(DurableLedgerFrontierError),
     EmptyPersistedLedger,
+    /// The ledger proves approval occurred but does not persist the exact scoped
+    /// permission set, so an active session cannot be safely reconstructed.
+    PersistedPermissionsUnrecoverable,
     EvidenceBundle(EvidenceBundleVerifyError),
     MissingTranscriptBinding,
     FullPqcRuntimeUnavailable {
@@ -78,6 +81,10 @@ impl fmt::Display for M1RuntimeError {
             Self::EmptyPersistedLedger => write!(
                 f,
                 "M1 persisted ledger is empty; initialize a new runtime instead of restoring empty state"
+            ),
+            Self::PersistedPermissionsUnrecoverable => write!(
+                f,
+                "M1 persisted ledger does not bind the exact scoped permission set; active consent cannot be restored safely"
             ),
             Self::EvidenceBundle(err) => write!(f, "M1 transcript-bound evidence error: {err}"),
             Self::MissingTranscriptBinding => write!(
@@ -851,6 +858,17 @@ impl M1RuntimeSession {
         );
         runtime.validate_persisted_context()?;
         runtime.replay_persisted_consent_state()?;
+
+        // ConsentEventRecord currently carries only Approval/Denial/Revocation,
+        // not the exact M1PermissionSet granted at approval. Replay's broad
+        // grant is suitable for deterministic legacy transcript tests, but
+        // returning an active restored runtime would silently widen a scoped
+        // grant. Until the ledger schema persists a signed permission receipt,
+        // refuse active restores rather than infer authority from scope text.
+        if runtime.state() == M1SessionState::Active {
+            return Err(M1RuntimeError::PersistedPermissionsUnrecoverable);
+        }
+
         Ok(runtime)
     }
 
@@ -3035,35 +3053,30 @@ mod tests {
     }
 
     #[test]
-    fn persisted_restore_requires_durable_frontier_binding() {
+    fn persisted_restore_fails_closed_when_scoped_permissions_are_not_persisted() {
         let (mut runtime, _) = runtime(27);
         runtime.offer().unwrap();
-        runtime.grant_consent().unwrap();
-        let persisted = runtime.entries();
-        let durable_frontier = runtime
-            .chain
-            .verify_restored_durable_frontier_v1([0xD1; 32], |_, claim| {
-                assert_eq!(claim.entry_count, 2);
-                assert_eq!(claim.persistence_policy_digest, [0xD1; 32]);
-                Ok(())
+        runtime
+            .grant_consent_scoped(M1PermissionSet {
+                stream_frame: true,
+                ..M1PermissionSet::default()
             })
             .unwrap();
+        let persisted = runtime.entries();
 
-        let signing_key = SigningKey::from_bytes(&[27; 32]);
-        let restored = M1RuntimeSession::from_persisted_entries_with_durable_frontier(
-            signing_key,
+        let result = M1RuntimeSession::from_persisted_entries(
+            SigningKey::from_bytes(&[27; 32]),
             persisted,
             [0xAB; 32],
             Uuid::from_bytes([1; 16]),
             Uuid::from_bytes([2; 16]),
             "view screen",
-            &durable_frontier,
-            [0xD1; 32],
-        )
-        .unwrap();
+        );
 
-        assert_eq!(restored.entries().len(), 2);
-        assert_eq!(restored.state(), M1SessionState::Active);
+        assert!(matches!(
+            result,
+            Err(M1RuntimeError::PersistedPermissionsUnrecoverable)
+        ));
     }
 
     #[test]
@@ -3241,7 +3254,6 @@ mod tests {
             "view screen",
         );
         runtime.offer().unwrap();
-        runtime.grant_consent().unwrap();
         let persisted = runtime.entries();
 
         let mut rehydrated = M1RuntimeSession::from_persisted_entries(
@@ -3253,11 +3265,11 @@ mod tests {
             "view screen",
         )
         .unwrap();
-        rehydrated.revoke().unwrap();
+        rehydrated.deny_consent().unwrap();
 
         let entries = rehydrated.entries();
-        assert_eq!(entries.len(), 3);
-        assert_eq!(entries[2].event.kind, ConsentKind::Revocation);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].event.kind, ConsentKind::Denial);
         M1RuntimeSession::verify_entries(&entries, &verifying_key).unwrap();
     }
 }
