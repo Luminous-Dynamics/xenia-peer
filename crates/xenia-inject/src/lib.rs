@@ -1648,12 +1648,47 @@ mod tests {
         struct OutcomeError;
 
         impl InputInjector for OutcomeError {
-            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> { Ok(()) }
-            fn inject_pointer_button(&mut self, _x: f32, _y: f32, _button: u8, _pressed: bool) -> Result<(), InjectError> { Ok(()) }
-            fn inject_key(&mut self, _code: u32, _pressed: bool, _modifiers: u8) -> Result<(), InjectError> { Ok(()) }
-            fn inject_touch(&mut self, _index: u8, _x: f32, _y: f32, _phase: u8, _pressure: f32) -> Result<(), InjectError> { Ok(()) }
-            fn process_event_outcome(&mut self, _event: &InputEvent) -> Result<InputEffectOutcome, InjectError> {
-                Err(InjectError::Backend("outcome channel failed after provider entry".into()))
+            fn inject_pointer_move(
+                &mut self,
+                _x: f32,
+                _y: f32,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_pointer_button(
+                &mut self,
+                _x: f32,
+                _y: f32,
+                _button: u8,
+                _pressed: bool,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_key(
+                &mut self,
+                _code: u32,
+                _pressed: bool,
+                _modifiers: u8,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_touch(
+                &mut self,
+                _index: u8,
+                _x: f32,
+                _y: f32,
+                _phase: u8,
+                _pressure: f32,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn process_event_outcome(
+                &mut self,
+                _event: &InputEvent,
+            ) -> Result<InputEffectOutcome, InjectError> {
+                Err(InjectError::Backend(
+                    "outcome channel failed after provider entry".into(),
+                ))
             }
             fn backend_name(&self) -> &str { "outcome-error" }
         }
@@ -1678,14 +1713,51 @@ mod tests {
         struct AcceptedRelease;
 
         impl InputInjector for AcceptedRelease {
-            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> { Ok(()) }
-            fn inject_pointer_button(&mut self, _x: f32, _y: f32, _button: u8, _pressed: bool) -> Result<(), InjectError> { Ok(()) }
-            fn inject_key(&mut self, _code: u32, _pressed: bool, _modifiers: u8) -> Result<(), InjectError> { Ok(()) }
-            fn inject_touch(&mut self, _index: u8, _x: f32, _y: f32, _phase: u8, _pressure: f32) -> Result<(), InjectError> { Ok(()) }
-            fn process_event_outcome(&mut self, event: &InputEvent) -> Result<InputEffectOutcome, InjectError> {
+            fn inject_pointer_move(
+                &mut self,
+                _x: f32,
+                _y: f32,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_pointer_button(
+                &mut self,
+                _x: f32,
+                _y: f32,
+                _button: u8,
+                _pressed: bool,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_key(
+                &mut self,
+                _code: u32,
+                _pressed: bool,
+                _modifiers: u8,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_touch(
+                &mut self,
+                _index: u8,
+                _x: f32,
+                _y: f32,
+                _phase: u8,
+                _pressure: f32,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn process_event_outcome(
+                &mut self,
+                event: &InputEvent,
+            ) -> Result<InputEffectOutcome, InjectError> {
                 match event {
-                    InputEvent::PointerButton { pressed: true, .. } => Ok(InputEffectOutcome::Applied),
-                    InputEvent::PointerButton { pressed: false, .. } => Ok(InputEffectOutcome::Accepted),
+                    InputEvent::PointerButton { pressed: true, .. } => {
+                        Ok(InputEffectOutcome::Applied)
+                    }
+                    InputEvent::PointerButton { pressed: false, .. } => {
+                        Ok(InputEffectOutcome::Accepted)
+                    }
                     _ => Ok(InputEffectOutcome::Applied),
                 }
             }
@@ -1783,7 +1855,13 @@ mod tests {
         struct Uncertain;
 
         impl InputInjector for Uncertain {
-            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> { Ok(()) }
+            fn inject_pointer_move(
+                &mut self,
+                _x: f32,
+                _y: f32,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
             fn inject_pointer_button(
                 &mut self,
                 _x: f32,
@@ -2147,10 +2225,40 @@ mod tests {
         struct ConfirmedApplied;
 
         impl InputInjector for ConfirmedApplied {
-            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> { Ok(()) }
-            fn inject_pointer_button(&mut self, _x: f32, _y: f32, _button: u8, _pressed: bool) -> Result<(), InjectError> { Ok(()) }
-            fn inject_key(&mut self, _code: u32, _pressed: bool, _modifiers: u8) -> Result<(), InjectError> { Ok(()) }
-            fn inject_touch(&mut self, _index: u8, _x: f32, _y: f32, _phase: u8, _pressure: f32) -> Result<(), InjectError> { Ok(()) }
+            fn inject_pointer_move(
+                &mut self,
+                _x: f32,
+                _y: f32,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_pointer_button(
+                &mut self,
+                _x: f32,
+                _y: f32,
+                _button: u8,
+                _pressed: bool,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_key(
+                &mut self,
+                _code: u32,
+                _pressed: bool,
+                _modifiers: u8,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_touch(
+                &mut self,
+                _index: u8,
+                _x: f32,
+                _y: f32,
+                _phase: u8,
+                _pressure: f32,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
             fn process_event_outcome(&mut self, _event: &InputEvent) -> Result<InputEffectOutcome, InjectError> {
                 Ok(InputEffectOutcome::Applied)
             }
