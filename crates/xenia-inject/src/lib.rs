@@ -1426,13 +1426,16 @@ mod tests {
         let mut injector = BatchOverride {
             process_events_calls: 0,
         };
-        let event = InputEvent::PointerMove {
-            x: f32::NAN,
-            y: 0.5,
-        };
+        let events = [
+            InputEvent::PointerMove { x: 0.2, y: 0.3 },
+            InputEvent::PointerMove {
+                x: f32::NAN,
+                y: 0.5,
+            },
+        ];
 
         assert_eq!(
-            injector.process_event_outcome(&event).unwrap(),
+            injector.process_events_outcome(&events).unwrap(),
             InputEffectOutcome::RejectionBeforeEffect
         );
         assert_eq!(
