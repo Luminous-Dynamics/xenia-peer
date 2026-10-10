@@ -542,12 +542,16 @@ pub trait InputInjector: Send {
         &mut self,
         events: &[InputEvent],
     ) -> Result<InputEffectOutcome, InjectError> {
+        // Validate at this boundary even if a backend overrides process_events:
+        // an override must not turn a later malformed event into a false claim
+        // that earlier events could not have taken effect.
+        if events.iter().any(|event| event.validate().is_err()) {
+            return Ok(InputEffectOutcome::RejectionBeforeEffect);
+        }
+
         match self.process_events(events) {
             Ok(()) => Ok(InputEffectOutcome::Accepted),
-            Err(InjectError::NotEntered(_))
-            | Err(InjectError::InvalidEvent(_)) => {
-                Ok(InputEffectOutcome::RejectionBeforeEffect)
-            }
+            Err(InjectError::NotEntered(_)) => Ok(InputEffectOutcome::RejectionBeforeEffect),
             Err(_err) => Ok(InputEffectOutcome::Indeterminate),
         }
     }
@@ -1373,7 +1377,55 @@ mod tests {
 
     #[test]
     fn validation_failure_is_always_pre_effect_rejection() {
-        let mut injector = NoopInjector;
+        struct BatchOverride {
+            process_events_calls: usize,
+        }
+
+        impl InputInjector for BatchOverride {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_pointer_button(
+                &mut self,
+                _x: f32,
+                _y: f32,
+                _button: u8,
+                _pressed: bool,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_key(
+                &mut self,
+                _code: u32,
+                _pressed: bool,
+                _modifiers: u8,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_touch(
+                &mut self,
+                _index: u8,
+                _x: f32,
+                _y: f32,
+                _phase: u8,
+                _pressure: f32,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn process_events(&mut self, _events: &[InputEvent]) -> Result<(), InjectError> {
+                self.process_events_calls += 1;
+                Err(InjectError::InvalidEvent(
+                    InputEventValidationError::NonFiniteCoordinate,
+                ))
+            }
+            fn backend_name(&self) -> &str {
+                "batch-override"
+            }
+        }
+
+        let mut injector = BatchOverride {
+            process_events_calls: 0,
+        };
         let event = InputEvent::PointerMove {
             x: f32::NAN,
             y: 0.5,
@@ -1382,6 +1434,10 @@ mod tests {
         assert_eq!(
             injector.process_event_outcome(&event).unwrap(),
             InputEffectOutcome::RejectionBeforeEffect
+        );
+        assert_eq!(
+            injector.process_events_calls, 0,
+            "invalid input must be rejected before a backend override is entered"
         );
     }
 
