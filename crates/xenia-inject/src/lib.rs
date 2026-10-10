@@ -787,8 +787,8 @@ impl SessionInputInjector {
 
     /// Best-effort release of every session-owned key/button/touch state.
     ///
-    /// Successful releases are removed immediately. Failed releases remain
-    /// tracked so a subsequent call (including the drop fallback) can retry.
+    /// Only releases explicitly confirmed as applied are removed immediately.
+    /// Unconfirmed or failed releases remain tracked so a later call can retry.
     pub fn release_all(&mut self) -> InputReleaseReport {
         let mut report = InputReleaseReport::default();
 
