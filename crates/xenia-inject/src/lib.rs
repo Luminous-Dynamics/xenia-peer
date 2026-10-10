@@ -580,9 +580,9 @@ pub trait InputInjector: Send {
 pub struct InputReleaseReport {
     /// Number of release/cancel operations attempted.
     pub attempted: usize,
-    /// Number successfully delivered to the backend.
+    /// Number of releases explicitly confirmed applied by the backend.
     pub released: usize,
-    /// Number that failed and remain tracked for a later retry/drop attempt.
+    /// Number not confirmed applied and therefore still tracked for retry/drop.
     pub failed: usize,
 }
 
@@ -776,12 +776,16 @@ impl SessionInputInjector {
             .collect();
         for (index, x, y, pressure) in touches {
             report.attempted += 1;
-            match self.inner.inject_touch(index, x, y, 3, pressure) {
-                Ok(()) => {
-                    self.active_touches.remove(&index);
-                    report.released += 1;
-                }
-                Err(_) => report.failed += 1,
+            let event = InputEvent::Touch {
+                index,
+                x,
+                y,
+                phase: 3,
+                pressure,
+            };
+            match self.process_event_outcome(&event) {
+                Ok(InputEffectOutcome::Applied) => report.released += 1,
+                Ok(_) | Err(_) => report.failed += 1,
             }
         }
 
@@ -792,12 +796,15 @@ impl SessionInputInjector {
             .collect();
         for (button, x, y) in buttons {
             report.attempted += 1;
-            match self.inner.inject_pointer_button(x, y, button, false) {
-                Ok(()) => {
-                    self.pressed_buttons.remove(&button);
-                    report.released += 1;
-                }
-                Err(_) => report.failed += 1,
+            let event = InputEvent::PointerButton {
+                x,
+                y,
+                button,
+                pressed: false,
+            };
+            match self.process_event_outcome(&event) {
+                Ok(InputEffectOutcome::Applied) => report.released += 1,
+                Ok(_) | Err(_) => report.failed += 1,
             }
         }
 
@@ -808,12 +815,14 @@ impl SessionInputInjector {
             .collect();
         for (code, modifiers) in keys {
             report.attempted += 1;
-            match self.inner.inject_key(code, false, modifiers) {
-                Ok(()) => {
-                    self.pressed_keys.remove(&code);
-                    report.released += 1;
-                }
-                Err(_) => report.failed += 1,
+            let event = InputEvent::Key {
+                code,
+                pressed: false,
+                modifiers,
+            };
+            match self.process_event_outcome(&event) {
+                Ok(InputEffectOutcome::Applied) => report.released += 1,
+                Ok(_) | Err(_) => report.failed += 1,
             }
         }
 
@@ -2135,7 +2144,20 @@ mod tests {
 
     #[test]
     fn session_injector_releases_pressed_state_on_teardown() {
-        let mut injector = SessionInputInjector::new(Box::new(NoopInjector));
+        struct ConfirmedApplied;
+
+        impl InputInjector for ConfirmedApplied {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> { Ok(()) }
+            fn inject_pointer_button(&mut self, _x: f32, _y: f32, _button: u8, _pressed: bool) -> Result<(), InjectError> { Ok(()) }
+            fn inject_key(&mut self, _code: u32, _pressed: bool, _modifiers: u8) -> Result<(), InjectError> { Ok(()) }
+            fn inject_touch(&mut self, _index: u8, _x: f32, _y: f32, _phase: u8, _pressure: f32) -> Result<(), InjectError> { Ok(()) }
+            fn process_event_outcome(&mut self, _event: &InputEvent) -> Result<InputEffectOutcome, InjectError> {
+                Ok(InputEffectOutcome::Applied)
+            }
+            fn backend_name(&self) -> &str { "confirmed-applied" }
+        }
+
+        let mut injector = SessionInputInjector::new(Box::new(ConfirmedApplied));
         injector
             .process_events(&[
                 InputEvent::PointerMove { x: 0.1, y: 0.2 },
@@ -2167,6 +2189,33 @@ mod tests {
         assert_eq!(report.released, 3);
         assert_eq!(report.failed, 0);
         assert_eq!(injector.active_state_count(), 0);
+    }
+
+    #[test]
+    fn release_all_retains_state_when_provider_only_accepts_release() {
+        let mut injector = SessionInputInjector::new(Box::new(NoopInjector));
+        let press = InputEvent::PointerButton {
+            x: 0.2,
+            y: 0.3,
+            button: 1,
+            pressed: true,
+        };
+        // NoopInjector's default outcome is Accepted, not Applied.
+        assert_eq!(
+            injector.process_event_outcome(&press).unwrap(),
+            InputEffectOutcome::Accepted
+        );
+        assert_eq!(injector.active_state_count(), 1);
+
+        let report = injector.release_all();
+        assert_eq!(report.attempted, 1);
+        assert_eq!(report.released, 0);
+        assert_eq!(report.failed, 1);
+        assert_eq!(
+            injector.active_state_count(),
+            1,
+            "acceptance alone must not erase a possibly-held host button"
+        );
     }
 
     #[test]
