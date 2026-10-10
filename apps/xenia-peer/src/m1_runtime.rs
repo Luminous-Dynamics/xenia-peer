@@ -3080,6 +3080,45 @@ mod tests {
     }
 
     #[test]
+    fn persisted_restore_with_matching_frontier_restores_revoked_state() {
+        let (mut runtime, _) = runtime(27);
+        runtime.offer().unwrap();
+        runtime.grant_consent().unwrap();
+        runtime.revoke().unwrap();
+        let persisted = runtime.entries();
+        let durable_frontier = runtime
+            .chain
+            .verify_restored_durable_frontier_v1([0xD1; 32], |_, claim| {
+                assert_eq!(claim.entry_count, 3);
+                assert_eq!(claim.persistence_policy_digest, [0xD1; 32]);
+                Ok(())
+            })
+            .unwrap();
+
+        let restored = M1RuntimeSession::from_persisted_entries_with_durable_frontier(
+            SigningKey::from_bytes(&[27; 32]),
+            persisted,
+            [0xAB; 32],
+            Uuid::from_bytes([1; 16]),
+            Uuid::from_bytes([2; 16]),
+            "view screen",
+            &durable_frontier,
+            [0xD1; 32],
+        )
+        .unwrap();
+
+        assert_eq!(restored.state(), M1SessionState::Revoked);
+        assert_eq!(restored.entries().len(), 3);
+        assert!(matches!(
+            restored.allow_input_flow(),
+            Err(M1RuntimeError::Session(M1SessionError::PermissionDenied {
+                state: M1SessionState::Revoked,
+                permission: M1Permission::InjectInput,
+            }))
+        ));
+    }
+
+    #[test]
     fn persisted_restore_rejects_frontier_mismatch_even_when_entries_verify() {
         let (mut runtime, _) = runtime(28);
         runtime.offer().unwrap();
