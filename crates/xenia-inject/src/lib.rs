@@ -533,8 +533,10 @@ pub trait InputInjector: Send {
     ///
     /// The default mapping is intentionally conservative: successful backend
     /// completion is only Accepted because an API/RPC acknowledgement does not
-    /// by itself prove that the host-side consequence completed. Explicit
-    /// NotEntered is RejectionBeforeEffect; every other error is Indeterminate.
+    /// by itself prove that the host-side consequence completed. NotEntered is
+    /// a pre-effect rejection only for a one-event operation; a multi-event
+    /// batch remains Indeterminate on any dispatch error because earlier events
+    /// may already have taken effect.
     /// Backends that have stronger provider-entry knowledge may override this
     /// method, but MUST NOT report RejectionBeforeEffect without proof that
     /// provider entry did not occur.
