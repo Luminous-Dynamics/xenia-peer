@@ -361,7 +361,7 @@ fn replay_journal_bytes(
     BTreeMap<[u8; 32], [u8; 16]>,
 ), FinalityJournalError> {
     let mut cursor = 0usize;
-    let mut latest = BTreeMap::new();
+    let mut latest: BTreeMap<[u8; 16], FinalityAttemptV1> = BTreeMap::new();
     let mut receipts = BTreeMap::new();
     let mut consumed_handles = BTreeMap::new();
     let mut occupied_actions = BTreeMap::new();
