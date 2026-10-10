@@ -1267,15 +1267,35 @@ impl M1RuntimeSession {
             ));
         }
 
-        let outcome = effect()?;
+        let outcome = match effect() {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // A generic error carries no proof that provider entry did not
+                // occur. Callers must use RejectionBeforeEffect for a proven
+                // pre-effect rejection; otherwise preserve uncertainty and seal
+                // this lane before returning the original diagnostic.
+                self.input_effect_uncertain = true;
+                return Err(error);
+            }
+        };
         if outcome == InputEffectOutcome::Indeterminate {
             // Once provider entry is uncertain, the runtime cannot establish
             // that a subsequent input operation is independent of the unresolved
             // effect. Fail closed rather than allowing a blind continuation.
             self.input_effect_uncertain = true;
         } else if outcome == InputEffectOutcome::Applied {
-            self.session.inject_input()?;
-            self.flush_new_audit_events()?;
+            // The external effect is confirmed, but if internal audit-state or
+            // ledger advancement fails, the action is not safely accounted for.
+            // Seal the lane rather than continue after an effect with incomplete
+            // audit evidence.
+            if let Err(error) = self.session.inject_input() {
+                self.input_effect_uncertain = true;
+                return Err(error);
+            }
+            if let Err(error) = self.flush_new_audit_events() {
+                self.input_effect_uncertain = true;
+                return Err(error);
+            }
         }
         Ok(outcome)
     }
@@ -2287,6 +2307,61 @@ mod tests {
                 .filter(|event| **event == xenia_peer_core::M1AuditEvent::InputInjected)
                 .count(),
             0
+        );
+    }
+
+    #[test]
+    fn unclassified_input_effect_error_seals_the_input_lane() {
+        let (mut runtime, _verifying_key) = runtime(37);
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet {
+                inject_input: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        let before = runtime.protected_execution_state_digest();
+        let err = runtime
+            .execute_input_effect_outcome(|| {
+                Err(M1RuntimeError::InputInjection(
+                    "provider result could not be classified".into(),
+                ))
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            M1RuntimeError::InputInjection(message)
+                if message.contains("provider result could not be classified")
+        ));
+        assert_ne!(
+            before,
+            runtime.protected_execution_state_digest(),
+            "an unclassified result must invalidate pre-effect execution-state bindings"
+        );
+
+        let mut called = false;
+        let retry = runtime
+            .execute_input_effect_outcome(|| {
+                called = true;
+                Ok(InputEffectOutcome::Applied)
+            })
+            .unwrap_err();
+        assert!(!called, "unknown effect outcome must seal later provider calls");
+        assert!(matches!(
+            retry,
+            M1RuntimeError::InputInjection(message)
+                if message.contains("sealed after an indeterminate provider outcome")
+        ));
+        assert_eq!(
+            runtime
+                .session
+                .audit()
+                .iter()
+                .filter(|event| **event == xenia_peer_core::M1AuditEvent::InputInjected)
+                .count(),
+            0,
+            "unclassified failures must never manufacture confirmed input evidence"
         );
     }
 
