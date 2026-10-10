@@ -757,6 +757,37 @@ impl SessionInputInjector {
             }
         }
     }
+    /// Preserve legacy Result-based trait calls without bypassing the
+    /// explicit effect-outcome tracker. A successful legacy backend call is
+    /// only an acknowledgement; it must not erase a possibly-held release.
+    fn legacy_event_result(&mut self, event: InputEvent) -> Result<(), InjectError> {
+        if let Err(error) = event.validate() {
+            return Err(InjectError::InvalidEvent(error));
+        }
+        let outcome = self.process_event_outcome(&event)?;
+        Self::legacy_outcome_result(outcome)
+    }
+
+    fn legacy_events_result(&mut self, events: &[InputEvent]) -> Result<(), InjectError> {
+        if let Some(error) = events.iter().find_map(|event| event.validate().err()) {
+            return Err(InjectError::InvalidEvent(error));
+        }
+        let outcome = self.process_events_outcome(events)?;
+        Self::legacy_outcome_result(outcome)
+    }
+
+    fn legacy_outcome_result(outcome: InputEffectOutcome) -> Result<(), InjectError> {
+        match outcome {
+            InputEffectOutcome::Applied | InputEffectOutcome::Accepted => Ok(()),
+            InputEffectOutcome::RejectionBeforeEffect => Err(InjectError::NotEntered(
+                "session input rejected before provider entry".into(),
+            )),
+            InputEffectOutcome::Indeterminate => Err(InjectError::Backend(
+                "session input effect outcome is indeterminate".into(),
+            )),
+        }
+    }
+
     /// Number of currently tracked press/down states.
     pub fn active_state_count(&self) -> usize {
         self.pressed_keys.len() + self.pressed_buttons.len() + self.active_touches.len()
@@ -867,11 +898,7 @@ impl InputInjector for SessionInputInjector {
     }
 
     fn inject_pointer_move(&mut self, x: f32, y: f32) -> Result<(), InjectError> {
-        self.inner.inject_pointer_move(x, y)?;
-        for position in self.pressed_buttons.values_mut() {
-            *position = (x, y);
-        }
-        Ok(())
+        self.legacy_event_result(InputEvent::PointerMove { x, y })
     }
 
     fn inject_pointer_button(
@@ -881,13 +908,7 @@ impl InputInjector for SessionInputInjector {
         button: u8,
         pressed: bool,
     ) -> Result<(), InjectError> {
-        self.inner.inject_pointer_button(x, y, button, pressed)?;
-        if pressed {
-            self.pressed_buttons.insert(button, (x, y));
-        } else {
-            self.pressed_buttons.remove(&button);
-        }
-        Ok(())
+        self.legacy_event_result(InputEvent::PointerButton { x, y, button, pressed })
     }
 
     fn inject_pointer(
@@ -897,23 +918,11 @@ impl InputInjector for SessionInputInjector {
         button: u8,
         pressed: bool,
     ) -> Result<(), InjectError> {
-        self.inner.inject_pointer(x, y, button, pressed)?;
-        if pressed {
-            self.pressed_buttons.insert(button, (x, y));
-        } else {
-            self.pressed_buttons.remove(&button);
-        }
-        Ok(())
+        self.legacy_event_result(InputEvent::Pointer { x, y, button, pressed })
     }
 
     fn inject_key(&mut self, code: u32, pressed: bool, modifiers: u8) -> Result<(), InjectError> {
-        self.inner.inject_key(code, pressed, modifiers)?;
-        if pressed {
-            self.pressed_keys.insert(code, modifiers);
-        } else {
-            self.pressed_keys.remove(&code);
-        }
-        Ok(())
+        self.legacy_event_result(InputEvent::Key { code, pressed, modifiers })
     }
 
     fn inject_touch(
@@ -924,16 +933,7 @@ impl InputInjector for SessionInputInjector {
         phase: u8,
         pressure: f32,
     ) -> Result<(), InjectError> {
-        self.inner.inject_touch(index, x, y, phase, pressure)?;
-        match phase {
-            0 | 1 => {
-                self.active_touches.insert(index, (x, y, pressure));
-            }
-            _ => {
-                self.active_touches.remove(&index);
-            }
-        }
-        Ok(())
+        self.legacy_event_result(InputEvent::Touch { index, x, y, phase, pressure })
     }
 
     fn backend_name(&self) -> &str {
@@ -1640,6 +1640,78 @@ mod tests {
             injector.process_events_outcome(&events).unwrap(),
             InputEffectOutcome::Indeterminate,
             "the first event may have taken effect before the second was rejected"
+        );
+    }
+
+    #[test]
+    fn legacy_trait_entry_point_tracks_uncertain_press_and_unconfirmed_release() {
+        struct LegacyOnly {
+            fail_key_press: bool,
+        }
+
+        impl InputInjector for LegacyOnly {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_pointer_button(
+                &mut self,
+                _x: f32,
+                _y: f32,
+                _button: u8,
+                _pressed: bool,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_key(
+                &mut self,
+                _code: u32,
+                pressed: bool,
+                _modifiers: u8,
+            ) -> Result<(), InjectError> {
+                if self.fail_key_press && pressed {
+                    Err(InjectError::Backend("provider outcome unknown".into()))
+                } else {
+                    Ok(())
+                }
+            }
+            fn inject_touch(
+                &mut self,
+                _index: u8,
+                _x: f32,
+                _y: f32,
+                _phase: u8,
+                _pressure: f32,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn backend_name(&self) -> &str {
+                "legacy-only"
+            }
+        }
+
+        let mut failed = SessionInputInjector::new(Box::new(LegacyOnly {
+            fail_key_press: true,
+        }));
+        assert!(matches!(
+            failed.inject_key(30, true, 0),
+            Err(InjectError::Backend(_))
+        ));
+        assert_eq!(
+            failed.active_state_count(),
+            1,
+            "legacy Result error must not bypass uncertain-press tracking"
+        );
+
+        let mut acknowledged = SessionInputInjector::new(Box::new(LegacyOnly {
+            fail_key_press: false,
+        }));
+        assert!(acknowledged.inject_key(30, true, 0).is_ok());
+        assert_eq!(acknowledged.active_state_count(), 1);
+        assert!(acknowledged.inject_key(30, false, 0).is_ok());
+        assert_eq!(
+            acknowledged.active_state_count(),
+            1,
+            "legacy Ok on release is only acceptance, not proof the host key is up"
         );
     }
 
