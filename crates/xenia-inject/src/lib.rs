@@ -551,7 +551,12 @@ pub trait InputInjector: Send {
 
         match self.process_events(events) {
             Ok(()) => Ok(InputEffectOutcome::Accepted),
-            Err(InjectError::NotEntered(_)) => Ok(InputEffectOutcome::RejectionBeforeEffect),
+            // NotEntered proves no provider entry for this operation. A failed
+            // multi-event batch may already have applied earlier events, so its
+            // aggregate outcome remains indeterminate.
+            Err(InjectError::NotEntered(_)) if events.len() == 1 => {
+                Ok(InputEffectOutcome::RejectionBeforeEffect)
+            }
             Err(_err) => Ok(InputEffectOutcome::Indeterminate),
         }
     }
@@ -1487,6 +1492,64 @@ mod tests {
         assert_eq!(
             injector.process_event_outcome(&event).unwrap(),
             InputEffectOutcome::RejectionBeforeEffect
+        );
+    }
+
+    #[test]
+    fn not_entered_on_later_batch_event_keeps_aggregate_indeterminate() {
+        struct PartialBatch;
+
+        impl InputInjector for PartialBatch {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_pointer_button(
+                &mut self,
+                _x: f32,
+                _y: f32,
+                _button: u8,
+                _pressed: bool,
+            ) -> Result<(), InjectError> {
+                Err(InjectError::NotEntered("second event never entered provider".into()))
+            }
+            fn inject_key(
+                &mut self,
+                _code: u32,
+                _pressed: bool,
+                _modifiers: u8,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_touch(
+                &mut self,
+                _index: u8,
+                _x: f32,
+                _y: f32,
+                _phase: u8,
+                _pressure: f32,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn backend_name(&self) -> &str {
+                "partial-batch"
+            }
+        }
+
+        let mut injector = PartialBatch;
+        let events = [
+            InputEvent::PointerMove { x: 0.2, y: 0.3 },
+            InputEvent::PointerButton {
+                x: 0.4,
+                y: 0.5,
+                button: 0,
+                pressed: true,
+            },
+        ];
+
+        assert_eq!(
+            injector.process_events_outcome(&events).unwrap(),
+            InputEffectOutcome::Indeterminate,
+            "the first event may have taken effect before the second was rejected"
         );
     }
 
