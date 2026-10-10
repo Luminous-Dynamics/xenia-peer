@@ -2350,10 +2350,16 @@ mod tests {
             ) -> Result<(), InjectError> {
                 Ok(())
             }
-            fn process_event_outcome(&mut self, _event: &InputEvent) -> Result<InputEffectOutcome, InjectError> {
+            fn process_event_outcome(
+                &mut self,
+                _event: &InputEvent,
+            ) -> Result<InputEffectOutcome, InjectError> {
                 Ok(InputEffectOutcome::Applied)
             }
-            fn backend_name(&self) -> &str { "confirmed-applied" }
+
+            fn backend_name(&self) -> &str {
+                "confirmed-applied"
+            }
         }
 
         let mut injector = SessionInputInjector::new(Box::new(ConfirmedApplied));
