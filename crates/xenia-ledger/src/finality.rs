@@ -215,6 +215,22 @@ impl FinalityAttemptV1 {
         Ok(())
     }
 
+    /// Reconstruct a receipt from the currently durable attempt state, if that state has an outcome.
+    ///
+    /// Journal recovery uses this only to repair a missing or stale receipt after a crash
+    /// between persisting a terminal attempt and persisting its matching receipt.
+    pub(crate) fn receipt_for_current_state(&self) -> Option<FinalityReceiptV1> {
+        let outcome = match self.state {
+            FinalityAttemptStateV1::Committed => FinalityOutcomeV1::Committed,
+            FinalityAttemptStateV1::Denied => FinalityOutcomeV1::Denied,
+            FinalityAttemptStateV1::Indeterminate => FinalityOutcomeV1::Indeterminate,
+            FinalityAttemptStateV1::Prepared | FinalityAttemptStateV1::EffectuationStarted => {
+                return None;
+            }
+        };
+        Some(self.receipt(outcome))
+    }
+
     fn receipt(&self, outcome: FinalityOutcomeV1) -> FinalityReceiptV1 {
         FinalityReceiptV1 {
             schema: FINALITY_RECEIPT_SCHEMA.to_string(),
