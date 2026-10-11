@@ -1017,9 +1017,7 @@ mod tests {
         // token must remain bound to the exact durable ledger frontier that justified it.
         let mut other_chain = Chain::new(successor.clone());
         other_chain
-            .append_transactional_outcome::<()>(event(2), |_| {
-                PersistenceDisposition::Persisted
-            })
+            .append_transactional_outcome::<()>(event(2), |_| PersistenceDisposition::Persisted)
             .unwrap();
         let other_frontier = other_chain
             .verify_restored_durable_frontier_v1(PERSISTENCE_POLICY, |_, _| Ok(()))
