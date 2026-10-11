@@ -76,12 +76,12 @@ mod chain;
 mod checkpoint;
 mod compaction;
 mod durable_frontier;
-mod execution_handle;
-mod finality;
-mod finality_journal;
-mod finality_executor;
 mod entry;
 mod errors;
+mod execution_handle;
+mod finality;
+mod finality_executor;
+mod finality_journal;
 mod hash;
 mod key_transition;
 mod policy;
@@ -150,18 +150,16 @@ pub use compaction::{
 
 pub use finality_executor::{FinalityExecutorError, FinalityExecutorV1};
 
-pub use finality_journal::{
-    FinalityJournalError, FinalityJournalV1, FINALITY_JOURNAL_SCHEMA,
-};
+pub use finality_journal::{FINALITY_JOURNAL_SCHEMA, FinalityJournalError, FinalityJournalV1};
 
 pub use finality::{
-    FINALITY_ATTEMPT_SCHEMA, FINALITY_RECEIPT_SCHEMA, FinalityAttemptError,
-    FinalityAttemptStateV1, FinalityAttemptV1, FinalityOutcomeV1, FinalityReceiptV1,
+    FINALITY_ATTEMPT_SCHEMA, FINALITY_RECEIPT_SCHEMA, FinalityAttemptError, FinalityAttemptStateV1,
+    FinalityAttemptV1, FinalityOutcomeV1, FinalityReceiptV1,
 };
 
 pub use execution_handle::{
-    ExactExecutionConsumptionError, ExactExecutionConsumptionGuardV1,
-    ExactExecutionHandleError, ExactExecutionHandleV1, EXECUTION_HANDLE_DOMAIN,
+    EXECUTION_HANDLE_DOMAIN, ExactExecutionConsumptionError, ExactExecutionConsumptionGuardV1,
+    ExactExecutionHandleError, ExactExecutionHandleV1,
 };
 
 pub use durable_frontier::{
