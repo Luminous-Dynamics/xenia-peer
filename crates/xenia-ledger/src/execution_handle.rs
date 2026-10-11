@@ -19,9 +19,9 @@ use blake3::Hasher;
 use thiserror::Error;
 
 use crate::{
-    AgentCapabilityAttestationError, AgentCapabilityAttestationV1,
-    AgentCheckpointAnchorV1, EvidencePublicKeyBinding, EvidenceSignatureBackend,
-    SessionTranscriptBinding, verify_agent_capability_attestation,
+    AgentCapabilityAttestationError, AgentCapabilityAttestationV1, AgentCheckpointAnchorV1,
+    EvidencePublicKeyBinding, EvidenceSignatureBackend, SessionTranscriptBinding,
+    verify_agent_capability_attestation,
 };
 
 /// Stable domain separator for exact execution-handle identities.
@@ -328,8 +328,10 @@ mod tests {
         let attestation = chain
             .attest_agent_capability_authorization(authorization.clone(), &session())
             .unwrap();
-        let public_key =
-            EvidencePublicKeyBinding::new(SignatureSuite::Ed25519Rfc8032, chain.signing_key.verifying_key().to_bytes());
+        let public_key = EvidencePublicKeyBinding::new(
+            SignatureSuite::Ed25519Rfc8032,
+            chain.signing_key.verifying_key().to_bytes(),
+        );
         (attestation, session(), public_key, authorization)
     }
 
@@ -363,7 +365,6 @@ mod tests {
         assert_eq!(handle.protected_state_digest(), [0x33; 32]);
         assert_ne!(handle.digest(), issue([0x12; 32], [0x22; 32]).digest());
         assert_ne!(handle.digest(), issue([0x11; 32], [0x23; 32]).digest());
-
     }
 
     #[test]
@@ -374,7 +375,11 @@ mod tests {
         for _ in 0..16 {
             let guard = std::sync::Arc::clone(&guard);
             let handle = handle.clone();
-            workers.push(std::thread::spawn(move || guard.consume(&handle, 120, [0x31; 32], [0x41; 32], [0x33; 32]).is_ok()));
+            workers.push(std::thread::spawn(move || {
+                guard
+                    .consume(&handle, 120, [0x31; 32], [0x41; 32], [0x33; 32])
+                    .is_ok()
+            }));
         }
         let successes = workers
             .into_iter()
@@ -445,10 +450,7 @@ mod tests {
             })
             .unwrap();
         let attestation_a = chain
-            .attest_agent_capability_authorization(
-                authorization_a.clone(),
-                &session_a,
-            )
+            .attest_agent_capability_authorization(authorization_a.clone(), &session_a)
             .unwrap();
         let binding_a = EvidencePublicKeyBinding::new(
             SignatureSuite::Ed25519Rfc8032,
@@ -575,4 +577,5 @@ mod tests {
             result,
             Err(ExactExecutionHandleError::ZeroProtectedStateDigest)
         ));
-    }}
+    }
+}
