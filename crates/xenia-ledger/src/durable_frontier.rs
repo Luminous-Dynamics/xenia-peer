@@ -930,7 +930,7 @@ mod tests {
                 8,
                 PERSISTENCE_POLICY,
             ),
-            Err(DurableLedgerFrontierError::AuthorityEpochMismatch)
+            Err(DurableLedgerFrontierError::ChainFrontierMismatch)
         ));
 
         assert_eq!(token.authority_epoch(), 8);
