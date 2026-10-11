@@ -160,7 +160,10 @@ impl FinalityAttemptV1 {
         }
         require_nonzero_16(self.attempt_id, FinalityAttemptError::ZeroAttemptId)?;
         require_nonzero(self.handle_digest, FinalityAttemptError::ZeroHandleDigest)?;
-        require_nonzero(self.action_key_digest, FinalityAttemptError::ZeroActionKeyDigest)?;
+        require_nonzero(
+            self.action_key_digest,
+            FinalityAttemptError::ZeroActionKeyDigest,
+        )?;
         require_nonzero(self.act_digest, FinalityAttemptError::ZeroActDigest)?;
         require_nonzero(self.sink_digest, FinalityAttemptError::ZeroSinkDigest)?;
         Ok(())
@@ -185,10 +188,7 @@ impl FinalityAttemptV1 {
         *hasher.finalize().as_bytes()
     }
 
-    fn transition(
-        &mut self,
-        next: FinalityAttemptStateV1,
-    ) -> Result<(), FinalityAttemptError> {
+    fn transition(&mut self, next: FinalityAttemptStateV1) -> Result<(), FinalityAttemptError> {
         let valid = matches!(
             (self.state, next),
             (
@@ -262,7 +262,10 @@ impl FinalityReceiptV1 {
         require_nonzero_16(self.attempt_id, FinalityAttemptError::ZeroAttemptId)?;
         require_nonzero(self.attempt_digest, FinalityAttemptError::ZeroAttemptDigest)?;
         require_nonzero(self.handle_digest, FinalityAttemptError::ZeroHandleDigest)?;
-        require_nonzero(self.action_key_digest, FinalityAttemptError::ZeroActionKeyDigest)?;
+        require_nonzero(
+            self.action_key_digest,
+            FinalityAttemptError::ZeroActionKeyDigest,
+        )?;
         require_nonzero(self.act_digest, FinalityAttemptError::ZeroActDigest)?;
         require_nonzero(self.sink_digest, FinalityAttemptError::ZeroSinkDigest)?;
         Ok(())
@@ -351,22 +354,14 @@ fn require_nonzero(
     value: [u8; 32],
     error: FinalityAttemptError,
 ) -> Result<(), FinalityAttemptError> {
-    if value == [0; 32] {
-        Err(error)
-    } else {
-        Ok(())
-    }
+    if value == [0; 32] { Err(error) } else { Ok(()) }
 }
 
 fn require_nonzero_16(
     value: [u8; 16],
     error: FinalityAttemptError,
 ) -> Result<(), FinalityAttemptError> {
-    if value == [0; 16] {
-        Err(error)
-    } else {
-        Ok(())
-    }
+    if value == [0; 16] { Err(error) } else { Ok(()) }
 }
 
 fn outcome_for_state(state: FinalityAttemptStateV1) -> FinalityOutcomeV1 {
@@ -406,7 +401,6 @@ mod tests {
             malformed_action.validate(),
             Err(FinalityAttemptError::ZeroActionKeyDigest)
         ));
-
 
         attempt.mark_effectuation_started().unwrap();
         let receipt = attempt.commit().unwrap();
