@@ -138,7 +138,7 @@ impl FinalityJournalV1 {
         let (latest, receipts, consumed_handles, occupied_actions) =
             replay_journal_bytes(record_bytes)?;
 
-        Ok(Self {
+        let mut journal = Self {
             path,
             file: reader,
             initialized,
@@ -147,7 +147,22 @@ impl FinalityJournalV1 {
             consumed_handles,
             occupied_actions,
             poisoned: false,
-        })
+        };
+
+        // A crash can persist a terminal attempt but stop before its receipt is
+        // appended. Rebuild that receipt from the exact durable attempt state;
+        // this never replays the external effect or changes the attempt outcome.
+        let receipt_repairs: Vec<_> = journal
+            .latest
+            .values()
+            .filter_map(FinalityAttemptV1::receipt_for_current_state)
+            .filter(|receipt| journal.receipts.get(&receipt.attempt_id) != Some(receipt))
+            .collect();
+        for receipt in receipt_repairs {
+            journal.append_receipt(&receipt)?;
+        }
+
+        Ok(journal)
     }
     /// Return the filesystem path owned by this journal.
     pub fn path(&self) -> &Path {
