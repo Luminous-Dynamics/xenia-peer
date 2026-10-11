@@ -78,15 +78,9 @@ impl<'a> FinalityExecutorV1<'a> {
         let outcome = effect();
 
         let receipt = match outcome {
-            FinalityOutcomeV1::Committed => {
-                attempt.commit()?
-            }
-            FinalityOutcomeV1::Denied => {
-                attempt.deny()?
-            }
-            FinalityOutcomeV1::Indeterminate => {
-                attempt.mark_indeterminate()?
-            }
+            FinalityOutcomeV1::Committed => attempt.commit()?,
+            FinalityOutcomeV1::Denied => attempt.deny()?,
+            FinalityOutcomeV1::Indeterminate => attempt.mark_indeterminate()?,
         };
 
         self.journal.append_attempt(&attempt)?;
@@ -95,12 +89,11 @@ impl<'a> FinalityExecutorV1<'a> {
     }
 
     /// True when the journal contains an attempt that requires authoritative reconciliation.
-    pub fn requires_reconciliation(
-        &self,
-        attempt_id: [u8; 16],
-    ) -> bool {
+    pub fn requires_reconciliation(&self, attempt_id: [u8; 16]) -> bool {
         matches!(
-            self.journal.latest_attempt(attempt_id).map(FinalityAttemptV1::state),
+            self.journal
+                .latest_attempt(attempt_id)
+                .map(FinalityAttemptV1::state),
             Some(FinalityAttemptStateV1::EffectuationStarted)
                 | Some(FinalityAttemptStateV1::Indeterminate)
         )
@@ -124,26 +117,17 @@ impl<'a> FinalityExecutorV1<'a> {
             .ok_or(FinalityExecutorError::AttemptNotFound)?;
 
         let receipt = match (attempt.state(), outcome) {
-            (
-                FinalityAttemptStateV1::EffectuationStarted,
-                FinalityOutcomeV1::Committed,
-            ) => {
+            (FinalityAttemptStateV1::EffectuationStarted, FinalityOutcomeV1::Committed) => {
                 let receipt = attempt.commit()?;
                 self.journal.append_attempt(&attempt)?;
                 receipt
             }
-            (
-                FinalityAttemptStateV1::EffectuationStarted,
-                FinalityOutcomeV1::Denied,
-            ) => {
+            (FinalityAttemptStateV1::EffectuationStarted, FinalityOutcomeV1::Denied) => {
                 let receipt = attempt.deny()?;
                 self.journal.append_attempt(&attempt)?;
                 receipt
             }
-            (
-                FinalityAttemptStateV1::EffectuationStarted,
-                FinalityOutcomeV1::Indeterminate,
-            ) => {
+            (FinalityAttemptStateV1::EffectuationStarted, FinalityOutcomeV1::Indeterminate) => {
                 let receipt = attempt.mark_indeterminate()?;
                 self.journal.append_attempt(&attempt)?;
                 receipt
@@ -203,10 +187,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn path() -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "xenia-finality-executor-{}",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("xenia-finality-executor-{}", std::process::id()))
     }
 
     fn executable_handle() -> ExactExecutionHandleV1 {
@@ -304,10 +285,7 @@ mod tests {
         assert_eq!(receipt.outcome, FinalityOutcomeV1::Committed);
         assert!(!executor.requires_reconciliation([0x61; 16]));
         assert_eq!(
-            executor
-                .latest_attempt([0x61; 16])
-                .unwrap()
-                .state(),
+            executor.latest_attempt([0x61; 16]).unwrap().state(),
             FinalityAttemptStateV1::Committed
         );
 
@@ -390,10 +368,8 @@ mod tests {
 
     #[test]
     fn indeterminate_execution_reconciles_without_reinvocation() {
-        let path = std::env::temp_dir().join(format!(
-            "xenia-finality-reconcile-{}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("xenia-finality-reconcile-{}", std::process::id()));
         let _ = fs::remove_file(&path);
 
         // This fixture cannot manufacture a cryptographic handle cheaply without
@@ -435,7 +411,8 @@ mod tests {
         {
             let mut journal = FinalityJournalV1::open(&path).unwrap();
             let mut attempt =
-                FinalityAttemptV1::prepare([11; 16], [12; 32], [15; 32], [13; 32], [14; 32]).unwrap();
+                FinalityAttemptV1::prepare([11; 16], [12; 32], [15; 32], [13; 32], [14; 32])
+                    .unwrap();
             journal.append_attempt(&attempt).unwrap();
             attempt.mark_effectuation_started().unwrap();
             journal.append_attempt(&attempt).unwrap();
