@@ -93,7 +93,7 @@ impl ExactExecutionHandleV1 {
         let authorization_message = attestation.authorization.canonical_message()?;
         let authorization_digest = *blake3::hash(&authorization_message).as_bytes();
         let mut action_hasher = Hasher::new();
-        action_hasher.update(b"xenia:same-action-key:v1\\0");
+        action_hasher.update(b"xenia:same-action-key:v1\0");
         action_hasher.update(&relying_party_digest);
         action_hasher.update(&sink_digest);
         action_hasher.update(&act_digest);
@@ -357,16 +357,34 @@ mod tests {
 
     #[test]
     fn handle_binds_exact_act_and_sink() {
-        let handle = issue([0x11; 32], [0x22; 32]);
-        let same = issue([0x11; 32], [0x22; 32]);
+        let (attestation, session, binding, authorization) = fixture();
+        let issue_with = |act_digest, sink_digest| {
+            ExactExecutionHandleV1::issue(
+                &attestation,
+                &session,
+                &binding,
+                &Ed25519EvidenceSignatureBackend,
+                120,
+                authorization.capability_digest,
+                authorization.executor_workload_digest,
+                authorization.authority_epoch,
+                authorization.prior_checkpoint,
+                [0x91; 32],
+                act_digest,
+                sink_digest,
+                [0x33; 32],
+            )
+            .unwrap()
+        };
+        let handle = issue_with([0x11; 32], [0x22; 32]);
+        let same = issue_with([0x11; 32], [0x22; 32]);
         assert_eq!(handle.digest(), same.digest());
         assert_eq!(handle.act_digest(), [0x11; 32]);
         assert_eq!(handle.sink_digest(), [0x22; 32]);
         assert_eq!(handle.protected_state_digest(), [0x33; 32]);
-        assert_ne!(handle.digest(), issue([0x12; 32], [0x22; 32]).digest());
-        assert_ne!(handle.digest(), issue([0x11; 32], [0x23; 32]).digest());
+        assert_ne!(handle.digest(), issue_with([0x12; 32], [0x22; 32]).digest());
+        assert_ne!(handle.digest(), issue_with([0x11; 32], [0x23; 32]).digest());
     }
-
     #[test]
     fn consumption_is_exactly_once_and_concurrency_safe() {
         let handle = issue([0x31; 32], [0x41; 32]);
@@ -449,6 +467,8 @@ mod tests {
                 scope: "bounded-agent authorization".into(),
             })
             .unwrap();
+        authorization_a.ledger_entry_count = chain.entry_count();
+        authorization_a.ledger_head_hash = chain.last_hash();
         let attestation_a = chain
             .attest_agent_capability_authorization(authorization_a.clone(), &session_a)
             .unwrap();
