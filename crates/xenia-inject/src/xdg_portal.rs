@@ -174,7 +174,9 @@ impl XdgPortalInjector {
         // have entered the operation even though no response arrived.
         reply_rx
             .recv_timeout(Duration::from_secs(5))
-            .map_err(|err| InjectError::Backend(format!("portal worker result unavailable: {err}")))?
+            .map_err(|err| {
+                InjectError::Backend(format!("portal worker result unavailable: {err}"))
+            })?
     }
 }
 
@@ -213,7 +215,11 @@ impl InputInjector for XdgPortalInjector {
     }
 
     fn inject_key(&mut self, code: u32, pressed: bool, _modifiers: u8) -> Result<(), InjectError> {
-        self.send(|reply| Command::Key { code, pressed, reply })
+        self.send(|reply| Command::Key {
+            code,
+            pressed,
+            reply,
+        })
     }
 
     fn inject_touch(
@@ -276,9 +282,9 @@ fn portal_worker(rx: mpsc::Receiver<Command>, ready_tx: mpsc::Sender<Result<(), 
                         proxy
                             .notify_pointer_motion(&session, dx, dy)
                             .await
-                            .map_err(|err| InjectError::Backend(format!(
-                                "portal pointer motion failed: {err}"
-                            )))
+                            .map_err(|err| {
+                                InjectError::Backend(format!("portal pointer motion failed: {err}"))
+                            })
                     } else {
                         Ok(())
                     };
@@ -302,9 +308,9 @@ fn portal_worker(rx: mpsc::Receiver<Command>, ready_tx: mpsc::Sender<Result<(), 
                         proxy
                             .notify_pointer_motion(&session, dx, dy)
                             .await
-                            .map_err(|err| InjectError::Backend(format!(
-                                "portal pointer motion failed: {err}"
-                            )))
+                            .map_err(|err| {
+                                InjectError::Backend(format!("portal pointer motion failed: {err}"))
+                            })
                     } else {
                         Ok(())
                     };
@@ -317,15 +323,19 @@ fn portal_worker(rx: mpsc::Receiver<Command>, ready_tx: mpsc::Sender<Result<(), 
                                 key_state(pressed),
                             )
                             .await
-                            .map_err(|err| InjectError::Backend(format!(
-                                "portal pointer button failed: {err}"
-                            )))
+                            .map_err(|err| {
+                                InjectError::Backend(format!("portal pointer button failed: {err}"))
+                            })
                     } else {
                         result
                     };
                     let _ = reply.send(result);
                 }
-                Command::Key { code, pressed, reply } => {
+                Command::Key {
+                    code,
+                    pressed,
+                    reply,
+                } => {
                     let result = proxy
                         .notify_keyboard_keycode(
                             &session,
@@ -333,9 +343,9 @@ fn portal_worker(rx: mpsc::Receiver<Command>, ready_tx: mpsc::Sender<Result<(), 
                             key_state(pressed),
                         )
                         .await
-                        .map_err(|err| InjectError::Backend(format!(
-                            "portal keyboard injection failed: {err}"
-                        )));
+                        .map_err(|err| {
+                            InjectError::Backend(format!("portal keyboard injection failed: {err}"))
+                        });
                     let _ = reply.send(result);
                 }
                 Command::Touch {
@@ -360,9 +370,9 @@ fn portal_worker(rx: mpsc::Receiver<Command>, ready_tx: mpsc::Sender<Result<(), 
                         }
                         _ => proxy.notify_touch_up(&session, slot).await,
                     }
-                    .map_err(|err| InjectError::Backend(format!(
-                        "portal touch injection failed: {err}"
-                    )));
+                    .map_err(|err| {
+                        InjectError::Backend(format!("portal touch injection failed: {err}"))
+                    });
                     let _ = reply.send(result);
                 }
             }
