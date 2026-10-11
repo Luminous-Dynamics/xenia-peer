@@ -473,7 +473,7 @@ mod tests {
         attempt.mark_indeterminate().unwrap();
 
         let encoded = serde_json::to_vec(&attempt).unwrap();
-        let restored: FinalityAttemptV1 = serde_json::from_slice(&encoded).unwrap();
+        let mut restored: FinalityAttemptV1 = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(restored.state(), FinalityAttemptStateV1::Indeterminate);
         assert!(restored.mark_effectuation_started().is_err());
         assert!(restored.commit().is_err());
