@@ -132,7 +132,11 @@ impl<'a> FinalityExecutorV1<'a> {
                 self.journal.append_attempt(&attempt)?;
                 receipt
             }
-            (FinalityAttemptStateV1::Indeterminate, outcome) => attempt.reconcile(outcome)?,
+            (FinalityAttemptStateV1::Indeterminate, outcome) => {
+                let receipt = attempt.reconcile(outcome)?;
+                self.journal.append_attempt(&attempt)?;
+                receipt
+            },
             _ => return Err(FinalityExecutorError::NotReconciliationState),
         };
 
@@ -265,6 +269,7 @@ mod tests {
             "xenia-finality-executor-e2e-{}",
             std::process::id()
         ));
+        drop(recovered);
         let _ = std::fs::remove_file(&path);
 
         let mut journal = FinalityJournalV1::open(&path).unwrap();
@@ -274,9 +279,9 @@ mod tests {
             .execute(
                 &handle,
                 120,
-                [0x31; 32],
                 [0x41; 32],
                 [0x51; 32],
+                [0x61; 32],
                 [0x61; 16],
                 || FinalityOutcomeV1::Committed,
             )
@@ -289,6 +294,8 @@ mod tests {
             FinalityAttemptStateV1::Committed
         );
 
+        drop(executor);
+        drop(journal);
         let recovered = FinalityJournalV1::open(&path).unwrap();
         assert_eq!(
             recovered.latest_attempt([0x61; 16]).unwrap().state(),
@@ -370,6 +377,7 @@ mod tests {
     fn indeterminate_execution_reconciles_without_reinvocation() {
         let path =
             std::env::temp_dir().join(format!("xenia-finality-reconcile-{}", std::process::id()));
+        drop(reopened);
         let _ = fs::remove_file(&path);
 
         // This fixture cannot manufacture a cryptographic handle cheaply without
@@ -387,6 +395,7 @@ mod tests {
         journal.append_attempt(&attempt).unwrap();
         journal.append_receipt(&receipt).unwrap();
 
+        drop(journal);
         let reopened = FinalityJournalV1::open(&path).unwrap();
         assert_eq!(
             reopened.latest_attempt([1; 16]).unwrap().state(),
