@@ -1802,6 +1802,102 @@ mod tests {
     }
 
     #[test]
+    fn legacy_pointer_and_touch_paths_retain_uncertain_held_state() {
+        struct LegacyOnly {
+            fail_button_press: bool,
+            fail_touch_down: bool,
+        }
+
+        impl InputInjector for LegacyOnly {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_pointer_button(
+                &mut self,
+                _x: f32,
+                _y: f32,
+                _button: u8,
+                pressed: bool,
+            ) -> Result<(), InjectError> {
+                if self.fail_button_press && pressed {
+                    Err(InjectError::Backend("provider outcome unknown".into()))
+                } else {
+                    Ok(())
+                }
+            }
+            fn inject_key(
+                &mut self,
+                _code: u32,
+                _pressed: bool,
+                _modifiers: u8,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_touch(
+                &mut self,
+                _index: u8,
+                _x: f32,
+                _y: f32,
+                phase: u8,
+                _pressure: f32,
+            ) -> Result<(), InjectError> {
+                if self.fail_touch_down && phase == 0 {
+                    Err(InjectError::Backend("provider outcome unknown".into()))
+                } else {
+                    Ok(())
+                }
+            }
+            fn backend_name(&self) -> &str {
+                "legacy-only"
+            }
+        }
+
+        let mut pointer = SessionInputInjector::new(Box::new(LegacyOnly {
+            fail_button_press: true,
+            fail_touch_down: false,
+        }));
+        assert!(matches!(
+            pointer.inject_pointer_button(0.25, 0.5, 1, true),
+            Err(InjectError::Backend(_))
+        ));
+        assert_eq!(
+            pointer.active_state_count(),
+            1,
+            "legacy pointer-button error must retain a possibly-held button"
+        );
+
+        assert!(pointer.inject_pointer_move(0.75, 0.8).is_ok());
+        assert_eq!(pointer.active_state_count(), 1);
+        assert!(pointer.inject_pointer_button(0.75, 0.8, 1, false).is_ok());
+        assert_eq!(
+            pointer.active_state_count(),
+            1,
+            "legacy acknowledgement must not clear an unconfirmed pointer release"
+        );
+
+        let mut touch = SessionInputInjector::new(Box::new(LegacyOnly {
+            fail_button_press: false,
+            fail_touch_down: true,
+        }));
+        assert!(matches!(
+            touch.inject_touch(2, 0.2, 0.3, 0, 1.0),
+            Err(InjectError::Backend(_))
+        ));
+        assert_eq!(
+            touch.active_state_count(),
+            1,
+            "legacy touch-down error must retain a possibly active touch"
+        );
+
+        assert!(touch.inject_touch(2, 0.2, 0.3, 2, 0.0).is_ok());
+        assert_eq!(
+            touch.active_state_count(),
+            1,
+            "legacy acknowledgement must not clear an unconfirmed touch-up"
+        );
+    }
+
+    #[test]
     fn trait_object_outcome_error_tracks_possible_press() {
         struct OutcomeError;
 
