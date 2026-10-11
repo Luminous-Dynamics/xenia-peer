@@ -20,7 +20,6 @@ use thiserror::Error;
 pub enum AuthorityRecoveryStateV1 {
     // All non-OldActive variants carry this private seal so callers cannot
     // fabricate a lifecycle state that claims an already-verified transition.
-
     /// The predecessor authority is the active authority.
     OldActive,
     /// A successor transition has been prepared but is not durable.
@@ -184,7 +183,7 @@ pub enum AuthorityRecoveryEventV1 {
     /// The already-recovered successor is activated.
     ActivateSuccessor,
 }
- 
+
 /// State-machine violations are fail-closed: an invalid event never produces
 /// an authority-bearing successor state.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
@@ -748,13 +747,27 @@ impl AuthorityRecoveryStateV1 {
     pub const fn authority_epoch(self) -> Option<u64> {
         match self {
             Self::OldActive => None,
-            Self::TransitionPending { authority_epoch, .. }
-            | Self::TransitionCommitted { authority_epoch, .. }
-            | Self::OutcomeUnknown { authority_epoch, .. }
-            | Self::RecoveryFromOld { authority_epoch, .. }
-            | Self::RecoveryAfterCommit { authority_epoch, .. }
-            | Self::RecoveryAfterUnknown { authority_epoch, .. }
-            | Self::SuccessorActive { authority_epoch, .. } => Some(authority_epoch),
+            Self::TransitionPending {
+                authority_epoch, ..
+            }
+            | Self::TransitionCommitted {
+                authority_epoch, ..
+            }
+            | Self::OutcomeUnknown {
+                authority_epoch, ..
+            }
+            | Self::RecoveryFromOld {
+                authority_epoch, ..
+            }
+            | Self::RecoveryAfterCommit {
+                authority_epoch, ..
+            }
+            | Self::RecoveryAfterUnknown {
+                authority_epoch, ..
+            }
+            | Self::SuccessorActive {
+                authority_epoch, ..
+            } => Some(authority_epoch),
         }
     }
 
@@ -762,13 +775,34 @@ impl AuthorityRecoveryStateV1 {
     pub const fn durable_frontier_digest(self) -> Option<[u8; 32]> {
         match self {
             Self::OldActive => None,
-            Self::TransitionPending { durable_frontier_digest, .. }
-            | Self::TransitionCommitted { durable_frontier_digest, .. }
-            | Self::OutcomeUnknown { durable_frontier_digest, .. }
-            | Self::RecoveryFromOld { durable_frontier_digest, .. }
-            | Self::RecoveryAfterCommit { durable_frontier_digest, .. }
-            | Self::RecoveryAfterUnknown { durable_frontier_digest, .. }
-            | Self::SuccessorActive { durable_frontier_digest, .. } => Some(durable_frontier_digest),
+            Self::TransitionPending {
+                durable_frontier_digest,
+                ..
+            }
+            | Self::TransitionCommitted {
+                durable_frontier_digest,
+                ..
+            }
+            | Self::OutcomeUnknown {
+                durable_frontier_digest,
+                ..
+            }
+            | Self::RecoveryFromOld {
+                durable_frontier_digest,
+                ..
+            }
+            | Self::RecoveryAfterCommit {
+                durable_frontier_digest,
+                ..
+            }
+            | Self::RecoveryAfterUnknown {
+                durable_frontier_digest,
+                ..
+            }
+            | Self::SuccessorActive {
+                durable_frontier_digest,
+                ..
+            } => Some(durable_frontier_digest),
         }
     }
 
@@ -845,7 +879,7 @@ fn require_matching_identity(
     }
     Ok(())
 }
- 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1002,10 +1036,7 @@ mod tests {
             durable_frontier_digest: [0xF2; 32],
         });
 
-        assert_eq!(
-            result,
-            Err(AuthorityRecoveryError::DurableFrontierMismatch)
-        );
+        assert_eq!(result, Err(AuthorityRecoveryError::DurableFrontierMismatch));
         assert_eq!(state, pending(TRANSITION_A));
     }
 
@@ -1051,13 +1082,11 @@ mod tests {
             Err(AuthorityRecoveryError::InvalidTransitionFingerprint)
         ));
         assert!(matches!(
-            recovery_from_old(TRANSITION_A).apply(
-                AuthorityRecoveryEventV1::RecoverSuccessor {
-                    transition_fingerprint: [0; 32],
-                    authority_epoch: 8,
-                    durable_frontier_digest: [0xF1; 32],
-                    }
-            ),
+            recovery_from_old(TRANSITION_A).apply(AuthorityRecoveryEventV1::RecoverSuccessor {
+                transition_fingerprint: [0; 32],
+                authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
+            }),
             Err(AuthorityRecoveryError::InvalidTransitionFingerprint)
         ));
     }
@@ -1138,8 +1167,7 @@ mod tests {
             successor_active(TRANSITION_A)
         );
         assert!(matches!(
-            AuthorityRecoveryStateV1::OldActive
-                .apply(AuthorityRecoveryEventV1::ActivateSuccessor),
+            AuthorityRecoveryStateV1::OldActive.apply(AuthorityRecoveryEventV1::ActivateSuccessor),
             Err(AuthorityRecoveryError::InvalidTransition { .. })
         ));
     }
@@ -1198,7 +1226,7 @@ mod tests {
                     transition_fingerprint: TRANSITION_A,
                     authority_epoch: 8,
                     durable_frontier_digest: [0xF1; 32],
-                    })
+                })
                 .unwrap(),
             committed(TRANSITION_A)
         );
