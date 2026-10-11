@@ -815,7 +815,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn authority_epoch_claim_rejects_zero_durable_frontier_digest() {
         let claim = DurableAuthorityEpochClaimV1 {
             schema_version: DURABLE_AUTHORITY_EPOCH_CLAIM_SCHEMA_VERSION,
@@ -1018,7 +1017,7 @@ mod tests {
         // token must remain bound to the exact durable ledger frontier that justified it.
         let mut other_chain = Chain::new(successor.clone());
         other_chain
-            .append_transactional_outcome::<_, ()>(event(2), |_| {
+            .append_transactional_outcome::<()>(event(2), |_| {
                 PersistenceDisposition::Persisted
             })
             .unwrap();
