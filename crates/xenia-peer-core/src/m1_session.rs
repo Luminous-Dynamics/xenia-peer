@@ -652,6 +652,41 @@ mod tests {
     }
 
     #[test]
+    fn permission_preflight_is_read_only() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+        session
+            .grant_consent_scoped(M1PermissionSet {
+                inject_input: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        let active_audit = session.audit().to_vec();
+        assert_eq!(session.check_permission(M1Permission::InjectInput), Ok(()));
+        assert_eq!(session.audit(), active_audit.as_slice());
+        assert_eq!(
+            session.check_permission(M1Permission::WriteHostClipboard),
+            Err(M1SessionError::PermissionDenied {
+                state: M1SessionState::Active,
+                permission: M1Permission::WriteHostClipboard,
+            })
+        );
+        assert_eq!(session.audit(), active_audit.as_slice());
+
+        session.revoke().unwrap();
+        let revoked_audit = session.audit().to_vec();
+        assert_eq!(
+            session.check_permission(M1Permission::InjectInput),
+            Err(M1SessionError::PermissionDenied {
+                state: M1SessionState::Revoked,
+                permission: M1Permission::InjectInput,
+            })
+        );
+        assert_eq!(session.audit(), revoked_audit.as_slice());
+    }
+
+    #[test]
     fn revocation_clears_granted_permissions() {
         let mut session = M1SessionMachine::new();
         session.offer().unwrap();
