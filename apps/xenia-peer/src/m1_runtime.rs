@@ -970,7 +970,6 @@ impl M1RuntimeSession {
         *hasher.finalize().as_bytes()
     }
 
-
     pub(crate) fn entries(&self) -> Vec<LedgerEntry> {
         self.chain.iter().cloned().collect()
     }
@@ -2295,7 +2294,10 @@ mod tests {
             })
             .unwrap_err();
 
-        assert!(!called, "sealed input lane must not invoke a later provider call");
+        assert!(
+            !called,
+            "sealed input lane must not invoke a later provider call"
+        );
         assert!(matches!(err, M1RuntimeError::InputInjection(message) if
             message.contains("sealed after an indeterminate provider outcome")
         ));
@@ -2347,7 +2349,10 @@ mod tests {
                 Ok(InputEffectOutcome::Applied)
             })
             .unwrap_err();
-        assert!(!called, "unknown effect outcome must seal later provider calls");
+        assert!(
+            !called,
+            "unknown effect outcome must seal later provider calls"
+        );
         assert!(matches!(
             retry,
             M1RuntimeError::InputInjection(message)
@@ -2369,7 +2374,9 @@ mod tests {
     fn denied_input_effect_never_calls_backend() {
         let (mut runtime, _verifying_key) = runtime(32);
         runtime.offer().unwrap();
-        runtime.grant_consent_scoped(M1PermissionSet::default()).unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet::default())
+            .unwrap();
 
         let mut called = false;
         let err = runtime
@@ -2397,10 +2404,12 @@ mod tests {
         let offered = runtime.protected_execution_state_digest();
         assert_ne!(idle, offered);
 
-        runtime.grant_consent_scoped(M1PermissionSet {
-            inject_input: true,
-            ..M1PermissionSet::default()
-        }).unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet {
+                inject_input: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
         let active = runtime.protected_execution_state_digest();
         assert_ne!(offered, active);
 
