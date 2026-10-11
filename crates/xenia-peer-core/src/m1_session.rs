@@ -431,6 +431,15 @@ impl M1SessionMachine {
         Ok(())
     }
 
+    /// Check active state and the exact granted permission without recording an operation.
+    ///
+    /// Callers use this before crossing an external-effect boundary. The
+    /// operation-specific method must still be called after a confirmed effect
+    /// to advance the session's audit state.
+    pub fn check_permission(&self, permission: M1Permission) -> Result<(), M1SessionError> {
+        self.require_active(permission)
+    }
+
     fn require_active(&self, permission: M1Permission) -> Result<(), M1SessionError> {
         if self.state == M1SessionState::Active && self.granted.contains(permission) {
             Ok(())
