@@ -72,6 +72,7 @@ pub enum FinalityJournalError {
     /// A stored attempt or receipt used an unsupported schema.
     #[error("unsupported finality journal schema")]
     UnsupportedJournalSchema,
+    /// A finality attempt did not satisfy its lifecycle invariants.
     #[error("finality attempt is invalid: {0}")]
     Attempt(#[from] FinalityAttemptError),
     /// An attempt identifier was reused with different exact act/sink identity.
@@ -166,22 +167,22 @@ impl FinalityJournalV1 {
         self.ensure_healthy()?;
         attempt.validate()?;
 
-        if let Some(existing_attempt_id) = self.consumed_handles.get(&attempt.handle_digest) {
-            if existing_attempt_id != &attempt.attempt_id {
-                return Err(FinalityJournalError::HandleAlreadyConsumed {
-                    handle_digest: attempt.handle_digest,
-                    existing_attempt_id: *existing_attempt_id,
-                });
-            }
+        if let Some(existing_attempt_id) = self.consumed_handles.get(&attempt.handle_digest)
+            && existing_attempt_id != &attempt.attempt_id
+        {
+            return Err(FinalityJournalError::HandleAlreadyConsumed {
+                handle_digest: attempt.handle_digest,
+                existing_attempt_id: *existing_attempt_id,
+            });
         }
 
-        if let Some(existing_attempt_id) = self.occupied_actions.get(&attempt.action_key_digest) {
-            if existing_attempt_id != &attempt.attempt_id {
-                return Err(FinalityJournalError::ActionAlreadyFenced {
-                    action_key_digest: attempt.action_key_digest,
-                    existing_attempt_id: *existing_attempt_id,
-                });
-            }
+        if let Some(existing_attempt_id) = self.occupied_actions.get(&attempt.action_key_digest)
+            && existing_attempt_id != &attempt.attempt_id
+        {
+            return Err(FinalityJournalError::ActionAlreadyFenced {
+                action_key_digest: attempt.action_key_digest,
+                existing_attempt_id: *existing_attempt_id,
+            });
         }
 
         if let Some(previous) = self.latest.get(&attempt.attempt_id) {
@@ -402,22 +403,21 @@ fn replay_journal_bytes(
                 }
                 attempt.validate()?;
 
-                if let Some(existing_attempt_id) = consumed_handles.get(&attempt.handle_digest) {
-                    if existing_attempt_id != &attempt.attempt_id {
-                        return Err(FinalityJournalError::HandleAlreadyConsumed {
-                            handle_digest: attempt.handle_digest,
-                            existing_attempt_id: *existing_attempt_id,
-                        });
-                    }
+                if let Some(existing_attempt_id) = consumed_handles.get(&attempt.handle_digest)
+                    && existing_attempt_id != &attempt.attempt_id
+                {
+                    return Err(FinalityJournalError::HandleAlreadyConsumed {
+                        handle_digest: attempt.handle_digest,
+                        existing_attempt_id: *existing_attempt_id,
+                    });
                 }
                 if let Some(existing_attempt_id) = occupied_actions.get(&attempt.action_key_digest)
+                    && existing_attempt_id != &attempt.attempt_id
                 {
-                    if existing_attempt_id != &attempt.attempt_id {
-                        return Err(FinalityJournalError::ActionAlreadyFenced {
-                            action_key_digest: attempt.action_key_digest,
-                            existing_attempt_id: *existing_attempt_id,
-                        });
-                    }
+                    return Err(FinalityJournalError::ActionAlreadyFenced {
+                        action_key_digest: attempt.action_key_digest,
+                        existing_attempt_id: *existing_attempt_id,
+                    });
                 }
 
                 if let Some(previous) = latest.get(&attempt.attempt_id) {
