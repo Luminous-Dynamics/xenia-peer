@@ -133,8 +133,11 @@ impl<'a> FinalityExecutorV1<'a> {
                 receipt
             }
             (FinalityAttemptStateV1::Indeterminate, outcome) => {
+                let previous_state = attempt.state();
                 let receipt = attempt.reconcile(outcome)?;
-                self.journal.append_attempt(&attempt)?;
+                if attempt.state() != previous_state {
+                    self.journal.append_attempt(&attempt)?;
+                }
                 receipt
             },
             _ => return Err(FinalityExecutorError::NotReconciliationState),
@@ -406,6 +409,52 @@ mod tests {
         );
         drop(reopened);
 
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn unresolved_reconciliation_remains_indeterminate_without_duplicate_transition() {
+        let path = std::env::temp_dir().join(format!(
+            "xenia-finality-still-indeterminate-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+
+        {
+            let mut journal = FinalityJournalV1::open(&path).unwrap();
+            let mut attempt =
+                FinalityAttemptV1::prepare([21; 16], [22; 32], [23; 32], [24; 32], [25; 32])
+                    .unwrap();
+            journal.append_attempt(&attempt).unwrap();
+            attempt.mark_effectuation_started().unwrap();
+            journal.append_attempt(&attempt).unwrap();
+            let receipt = attempt.mark_indeterminate().unwrap();
+            journal.append_attempt(&attempt).unwrap();
+            journal.append_receipt(&receipt).unwrap();
+        }
+
+        {
+            let mut journal = FinalityJournalV1::open(&path).unwrap();
+            let mut executor = FinalityExecutorV1::new(&mut journal);
+            let receipt = executor
+                .reconcile([21; 16], FinalityOutcomeV1::Indeterminate)
+                .unwrap();
+            assert_eq!(receipt.outcome, FinalityOutcomeV1::Indeterminate);
+            assert!(executor.requires_reconciliation([21; 16]));
+            drop(executor);
+            drop(journal);
+        }
+
+        let reopened = FinalityJournalV1::open(&path).unwrap();
+        assert_eq!(
+            reopened.latest_attempt([21; 16]).unwrap().state(),
+            FinalityAttemptStateV1::Indeterminate
+        );
+        assert_eq!(
+            reopened.latest_receipt([21; 16]).unwrap().outcome,
+            FinalityOutcomeV1::Indeterminate
+        );
+        drop(reopened);
         let _ = fs::remove_file(&path);
     }
 
