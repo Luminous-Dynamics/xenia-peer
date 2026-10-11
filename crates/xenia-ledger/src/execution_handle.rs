@@ -385,6 +385,7 @@ mod tests {
         assert_ne!(handle.digest(), issue_with([0x12; 32], [0x22; 32]).digest());
         assert_ne!(handle.digest(), issue_with([0x11; 32], [0x23; 32]).digest());
     }
+
     #[test]
     fn consumption_is_exactly_once_and_concurrency_safe() {
         let handle = issue([0x31; 32], [0x41; 32]);
