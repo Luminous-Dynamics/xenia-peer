@@ -12,16 +12,16 @@
 //! The journal records only exact attempt/receipt material. It cannot be
 //! deserialized into authority and it does not decide the external outcome.
 
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    FINALITY_ATTEMPT_SCHEMA, FINALITY_RECEIPT_SCHEMA, FinalityAttemptError,
-    FinalityAttemptStateV1, FinalityAttemptV1, FinalityOutcomeV1, FinalityReceiptV1,
+    FINALITY_ATTEMPT_SCHEMA, FINALITY_RECEIPT_SCHEMA, FinalityAttemptError, FinalityAttemptStateV1,
+    FinalityAttemptV1, FinalityOutcomeV1, FinalityReceiptV1,
 };
 
 /// Stable schema for the journal stream.
@@ -134,7 +134,8 @@ impl FinalityJournalV1 {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes)?;
         let (initialized, record_bytes) = split_journal_header(&bytes)?;
-        let (latest, receipts, consumed_handles, occupied_actions) = replay_journal_bytes(record_bytes)?;
+        let (latest, receipts, consumed_handles, occupied_actions) =
+            replay_journal_bytes(record_bytes)?;
 
         Ok(Self {
             path,
@@ -198,13 +199,15 @@ impl FinalityJournalV1 {
 
         self.append_record(&FinalityJournalRecordV1::Attempt(attempt.clone()))?;
         if !matches!(attempt.state, FinalityAttemptStateV1::Prepared) {
-            self.consumed_handles.insert(attempt.handle_digest, attempt.attempt_id);
+            self.consumed_handles
+                .insert(attempt.handle_digest, attempt.attempt_id);
         }
         match attempt.state {
             FinalityAttemptStateV1::EffectuationStarted
             | FinalityAttemptStateV1::Committed
             | FinalityAttemptStateV1::Indeterminate => {
-                self.occupied_actions.insert(attempt.action_key_digest, attempt.attempt_id);
+                self.occupied_actions
+                    .insert(attempt.action_key_digest, attempt.attempt_id);
             }
             FinalityAttemptStateV1::Prepared => {}
             FinalityAttemptStateV1::Denied => {
@@ -240,7 +243,7 @@ impl FinalityJournalV1 {
             FinalityAttemptStateV1::Denied => FinalityOutcomeV1::Denied,
             FinalityAttemptStateV1::Indeterminate => FinalityOutcomeV1::Indeterminate,
             FinalityAttemptStateV1::Prepared | FinalityAttemptStateV1::EffectuationStarted => {
-                return Err(FinalityJournalError::ReceiptOutcomeMismatch)
+                return Err(FinalityJournalError::ReceiptOutcomeMismatch);
             }
         };
 
@@ -354,12 +357,15 @@ fn split_journal_header(bytes: &[u8]) -> Result<(bool, &[u8]), FinalityJournalEr
 
 fn replay_journal_bytes(
     bytes: &[u8],
-) -> Result<(
-    BTreeMap<[u8; 16], FinalityAttemptV1>,
-    BTreeMap<[u8; 16], FinalityReceiptV1>,
-    BTreeMap<[u8; 32], [u8; 16]>,
-    BTreeMap<[u8; 32], [u8; 16]>,
-), FinalityJournalError> {
+) -> Result<
+    (
+        BTreeMap<[u8; 16], FinalityAttemptV1>,
+        BTreeMap<[u8; 16], FinalityReceiptV1>,
+        BTreeMap<[u8; 32], [u8; 16]>,
+        BTreeMap<[u8; 32], [u8; 16]>,
+    ),
+    FinalityJournalError,
+> {
     let mut cursor = 0usize;
     let mut latest: BTreeMap<[u8; 16], FinalityAttemptV1> = BTreeMap::new();
     let mut receipts: BTreeMap<[u8; 16], FinalityReceiptV1> = BTreeMap::new();
@@ -404,7 +410,8 @@ fn replay_journal_bytes(
                         });
                     }
                 }
-                if let Some(existing_attempt_id) = occupied_actions.get(&attempt.action_key_digest) {
+                if let Some(existing_attempt_id) = occupied_actions.get(&attempt.action_key_digest)
+                {
                     if existing_attempt_id != &attempt.attempt_id {
                         return Err(FinalityJournalError::ActionAlreadyFenced {
                             action_key_digest: attempt.action_key_digest,
@@ -472,7 +479,7 @@ fn replay_journal_bytes(
                     FinalityAttemptStateV1::Indeterminate => FinalityOutcomeV1::Indeterminate,
                     FinalityAttemptStateV1::Prepared
                     | FinalityAttemptStateV1::EffectuationStarted => {
-                        return Err(FinalityJournalError::ReceiptOutcomeMismatch)
+                        return Err(FinalityJournalError::ReceiptOutcomeMismatch);
                     }
                 };
 
@@ -496,10 +503,7 @@ fn replay_journal_bytes(
     Ok((latest, receipts, consumed_handles, occupied_actions))
 }
 
-fn valid_lifecycle_transition(
-    from: FinalityAttemptStateV1,
-    to: FinalityAttemptStateV1,
-) -> bool {
+fn valid_lifecycle_transition(from: FinalityAttemptStateV1, to: FinalityAttemptStateV1) -> bool {
     matches!(
         (from, to),
         (
@@ -534,7 +538,11 @@ mod tests {
     }
 
     fn temp_path(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("xenia-finality-journal-{}-{}", tag, std::process::id()))
+        std::env::temp_dir().join(format!(
+            "xenia-finality-journal-{}-{}",
+            tag,
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -776,12 +784,14 @@ mod tests {
         {
             let mut journal = FinalityJournalV1::open(&path).unwrap();
             let mut started =
-                FinalityAttemptV1::prepare([41; 16], [42; 32], [43; 32], [44; 32], [45; 32]).unwrap();
+                FinalityAttemptV1::prepare([41; 16], [42; 32], [43; 32], [44; 32], [45; 32])
+                    .unwrap();
             started.mark_effectuation_started().unwrap();
             journal.append_attempt(&started).unwrap();
 
             let mut closed =
-                FinalityAttemptV1::prepare([46; 16], [47; 32], [48; 32], [49; 32], [50; 32]).unwrap();
+                FinalityAttemptV1::prepare([46; 16], [47; 32], [48; 32], [49; 32], [50; 32])
+                    .unwrap();
             closed.mark_effectuation_started().unwrap();
             closed.commit().unwrap();
             journal.append_attempt(&closed).unwrap();
@@ -874,7 +884,11 @@ mod tests {
         }
 
         assert!(matches!(
-            FinalityJournalV1::open(&path).unwrap().latest_attempt([1; 16]).unwrap().state(),
+            FinalityJournalV1::open(&path)
+                .unwrap()
+                .latest_attempt([1; 16])
+                .unwrap()
+                .state(),
             FinalityAttemptStateV1::EffectuationStarted
         ));
 
