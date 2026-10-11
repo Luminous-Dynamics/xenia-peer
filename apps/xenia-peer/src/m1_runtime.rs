@@ -1195,6 +1195,11 @@ impl M1RuntimeSession {
     }
 
     pub(crate) fn inject_input(&mut self) -> Result<(), M1RuntimeError> {
+        if self.input_effect_uncertain {
+            return Err(M1RuntimeError::InputInjection(
+                "input effect lane is sealed after an indeterminate provider outcome; blind continuation is not permitted".into(),
+            ));
+        }
         self.session.inject_input()?;
         self.flush_new_audit_events()
     }
@@ -2287,6 +2292,11 @@ mod tests {
             .execute_input_effect_outcome(|| Ok(InputEffectOutcome::Indeterminate))
             .unwrap();
         assert_eq!(first, InputEffectOutcome::Indeterminate);
+
+        let legacy_error = runtime.inject_input().unwrap_err();
+        assert!(matches!(legacy_error, M1RuntimeError::InputInjection(message) if
+            message.contains("sealed after an indeterminate provider outcome")
+        ));
 
         let mut called = false;
         let err = runtime
