@@ -615,6 +615,64 @@ mod tests {
     }
 
     #[test]
+    fn recovery_repairs_missing_and_stale_terminal_receipts() {
+        let path = temp_path("receipt-repair");
+        let _ = fs::remove_file(&path);
+
+        let mut journal = FinalityJournalV1::open(&path).unwrap();
+
+        // Simulate a crash after the terminal attempt was durable but before
+        // the corresponding receipt record was appended.
+        let mut committed = attempt();
+        journal.append_attempt(&committed).unwrap();
+        committed.mark_effectuation_started().unwrap();
+        journal.append_attempt(&committed).unwrap();
+        let _missing_receipt = committed.commit().unwrap();
+        journal.append_attempt(&committed).unwrap();
+
+        // Simulate a second crash after reconciliation updated the attempt
+        // but before it replaced the earlier indeterminate receipt.
+        let mut reconciled = FinalityAttemptV1::prepare(
+            [5; 16], [6; 32], [7; 32], [8; 32], [9; 32],
+        )
+        .unwrap();
+        journal.append_attempt(&reconciled).unwrap();
+        reconciled.mark_effectuation_started().unwrap();
+        journal.append_attempt(&reconciled).unwrap();
+        let indeterminate_receipt = reconciled.mark_indeterminate().unwrap();
+        journal.append_attempt(&reconciled).unwrap();
+        journal.append_receipt(&indeterminate_receipt).unwrap();
+        let _committed_receipt = reconciled.reconcile(FinalityOutcomeV1::Committed).unwrap();
+        journal.append_attempt(&reconciled).unwrap();
+        assert_eq!(
+            journal.latest_receipt([5; 16]).unwrap().outcome,
+            FinalityOutcomeV1::Indeterminate
+        );
+        drop(journal);
+
+        let reopened = FinalityJournalV1::open(&path).unwrap();
+        assert_eq!(
+            reopened.latest_attempt([1; 16]).unwrap().state(),
+            FinalityAttemptStateV1::Committed
+        );
+        assert_eq!(
+            reopened.latest_receipt([1; 16]).unwrap().outcome,
+            FinalityOutcomeV1::Committed
+        );
+        assert_eq!(
+            reopened.latest_attempt([5; 16]).unwrap().state(),
+            FinalityAttemptStateV1::Committed
+        );
+        assert_eq!(
+            reopened.latest_receipt([5; 16]).unwrap().outcome,
+            FinalityOutcomeV1::Committed
+        );
+
+        drop(reopened);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
     fn failed_open_releases_lock_for_retry() {
         let path = temp_path("failed-open-lock");
         let _ = fs::remove_file(&path);
