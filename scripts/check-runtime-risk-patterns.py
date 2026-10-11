@@ -106,6 +106,9 @@ def main() -> int:
         print(f"{kind:16} runtime={runtime_count:4} tests/examples={test_count:4}")
 
     print("\n== Findings ==")
+    # Keep the findings that can fail --strict at the top of bounded output.
+    # A long test/example tail must not hide the actionable runtime findings.
+    findings.sort(key=lambda finding: not finding.runtime_source)
     printed = 0
     for finding in findings:
         if printed >= args.max_lines:
