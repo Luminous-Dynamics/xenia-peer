@@ -962,7 +962,9 @@ impl M1RuntimeSession {
                 hasher.update(&[1]);
                 hasher.update(&hash);
             }
-            None => hasher.update(&[0]),
+            None => {
+                hasher.update(&[0]);
+            }
         }
 
         hasher.update(&[u8::from(self.input_effect_uncertain)]);
@@ -1289,7 +1291,7 @@ impl M1RuntimeSession {
             // audit evidence.
             if let Err(error) = self.session.inject_input() {
                 self.input_effect_uncertain = true;
-                return Err(error);
+                return Err(M1RuntimeError::Session(error));
             }
             if let Err(error) = self.flush_new_audit_events() {
                 self.input_effect_uncertain = true;
@@ -3179,7 +3181,7 @@ mod tests {
             })
             .unwrap();
 
-        let restored = M1RuntimeSession::from_persisted_entries_with_durable_frontier(
+        let mut restored = M1RuntimeSession::from_persisted_entries_with_durable_frontier(
             SigningKey::from_bytes(&[27; 32]),
             persisted,
             [0xAB; 32],
