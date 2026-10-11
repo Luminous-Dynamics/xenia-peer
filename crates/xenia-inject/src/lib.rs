@@ -244,7 +244,13 @@ impl InputEvent {
                 coordinate(*x)?;
                 coordinate(*y)?;
             }
-            Self::Touch { x, y, phase, pressure, .. } => {
+            Self::Touch {
+                x,
+                y,
+                phase,
+                pressure,
+                ..
+            } => {
                 coordinate(*x)?;
                 coordinate(*y)?;
                 if !pressure.is_finite() {
@@ -271,11 +277,7 @@ impl InputEvent {
 pub const INPUT_EVENT_DIGEST_DOMAIN: &[u8] = b"xenia:input-event-digest:v1\\0";
 
 fn canonical_f32_bits(value: f32) -> u32 {
-    if value == 0.0 {
-        0
-    } else {
-        value.to_bits()
-    }
+    if value == 0.0 { 0 } else { value.to_bits() }
 }
 
 impl InputEvent {
@@ -310,20 +312,35 @@ impl InputEvent {
 
         let mut bytes = Vec::with_capacity(32);
         match self {
-            Self::Pointer { x, y, button, pressed } => {
+            Self::Pointer {
+                x,
+                y,
+                button,
+                pressed,
+            } => {
                 bytes.push(0);
                 bytes.extend_from_slice(&canonical_f32_bits(*x).to_be_bytes());
                 bytes.extend_from_slice(&canonical_f32_bits(*y).to_be_bytes());
                 bytes.push(*button);
                 bytes.push(u8::from(*pressed));
             }
-            Self::Key { code, pressed, modifiers } => {
+            Self::Key {
+                code,
+                pressed,
+                modifiers,
+            } => {
                 bytes.push(1);
                 bytes.extend_from_slice(&code.to_be_bytes());
                 bytes.push(u8::from(*pressed));
                 bytes.push(*modifiers);
             }
-            Self::Touch { index, x, y, phase, pressure } => {
+            Self::Touch {
+                index,
+                x,
+                y,
+                phase,
+                pressure,
+            } => {
                 bytes.push(2);
                 bytes.push(*index);
                 bytes.extend_from_slice(&canonical_f32_bits(*x).to_be_bytes());
@@ -336,7 +353,12 @@ impl InputEvent {
                 bytes.extend_from_slice(&canonical_f32_bits(*x).to_be_bytes());
                 bytes.extend_from_slice(&canonical_f32_bits(*y).to_be_bytes());
             }
-            Self::PointerButton { x, y, button, pressed } => {
+            Self::PointerButton {
+                x,
+                y,
+                button,
+                pressed,
+            } => {
                 bytes.push(4);
                 bytes.extend_from_slice(&canonical_f32_bits(*x).to_be_bytes());
                 bytes.extend_from_slice(&canonical_f32_bits(*y).to_be_bytes());
@@ -686,7 +708,12 @@ impl SessionInputInjector {
 
     fn track_event_state(&mut self, event: &InputEvent) {
         match event {
-            InputEvent::Pointer { x, y, button, pressed } => {
+            InputEvent::Pointer {
+                x,
+                y,
+                button,
+                pressed,
+            } => {
                 if *pressed {
                     self.pressed_buttons.insert(*button, (*x, *y));
                 } else {
@@ -698,30 +725,43 @@ impl SessionInputInjector {
                     *position = (*x, *y);
                 }
             }
-            InputEvent::PointerButton { x, y, button, pressed } => {
+            InputEvent::PointerButton {
+                x,
+                y,
+                button,
+                pressed,
+            } => {
                 if *pressed {
                     self.pressed_buttons.insert(*button, (*x, *y));
                 } else {
                     self.pressed_buttons.remove(button);
                 }
             }
-            InputEvent::Key { code, modifiers, pressed } => {
+            InputEvent::Key {
+                code,
+                modifiers,
+                pressed,
+            } => {
                 if *pressed {
                     self.pressed_keys.insert(*code, *modifiers);
                 } else {
                     self.pressed_keys.remove(code);
                 }
             }
-            InputEvent::Touch { index, x, y, phase, pressure } => {
-                match phase {
-                    0 | 1 => {
-                        self.active_touches.insert(*index, (*x, *y, *pressure));
-                    }
-                    _ => {
-                        self.active_touches.remove(index);
-                    }
+            InputEvent::Touch {
+                index,
+                x,
+                y,
+                phase,
+                pressure,
+            } => match phase {
+                0 | 1 => {
+                    self.active_touches.insert(*index, (*x, *y, *pressure));
                 }
-            }
+                _ => {
+                    self.active_touches.remove(index);
+                }
+            },
         }
     }
 
@@ -734,8 +774,18 @@ impl SessionInputInjector {
     /// knowledge of a possibly-held host state.
     fn track_indeterminate_state(&mut self, event: &InputEvent) {
         match event {
-            InputEvent::Pointer { x, y, button, pressed }
-            | InputEvent::PointerButton { x, y, button, pressed } => {
+            InputEvent::Pointer {
+                x,
+                y,
+                button,
+                pressed,
+            }
+            | InputEvent::PointerButton {
+                x,
+                y,
+                button,
+                pressed,
+            } => {
                 if *pressed {
                     self.pressed_buttons.insert(*button, (*x, *y));
                 }
@@ -745,12 +795,22 @@ impl SessionInputInjector {
                     *position = (*x, *y);
                 }
             }
-            InputEvent::Key { code, modifiers, pressed } => {
+            InputEvent::Key {
+                code,
+                modifiers,
+                pressed,
+            } => {
                 if *pressed {
                     self.pressed_keys.insert(*code, *modifiers);
                 }
             }
-            InputEvent::Touch { index, x, y, phase, pressure } => {
+            InputEvent::Touch {
+                index,
+                x,
+                y,
+                phase,
+                pressure,
+            } => {
                 if matches!(*phase, 0 | 1) {
                     self.active_touches.insert(*index, (*x, *y, *pressure));
                 }
@@ -900,7 +960,12 @@ impl InputInjector for SessionInputInjector {
         button: u8,
         pressed: bool,
     ) -> Result<(), InjectError> {
-        self.legacy_event_result(InputEvent::PointerButton { x, y, button, pressed })
+        self.legacy_event_result(InputEvent::PointerButton {
+            x,
+            y,
+            button,
+            pressed,
+        })
     }
 
     fn inject_pointer(
@@ -910,11 +975,20 @@ impl InputInjector for SessionInputInjector {
         button: u8,
         pressed: bool,
     ) -> Result<(), InjectError> {
-        self.legacy_event_result(InputEvent::Pointer { x, y, button, pressed })
+        self.legacy_event_result(InputEvent::Pointer {
+            x,
+            y,
+            button,
+            pressed,
+        })
     }
 
     fn inject_key(&mut self, code: u32, pressed: bool, modifiers: u8) -> Result<(), InjectError> {
-        self.legacy_event_result(InputEvent::Key { code, pressed, modifiers })
+        self.legacy_event_result(InputEvent::Key {
+            code,
+            pressed,
+            modifiers,
+        })
     }
 
     fn inject_touch(
@@ -925,7 +999,13 @@ impl InputInjector for SessionInputInjector {
         phase: u8,
         pressure: f32,
     ) -> Result<(), InjectError> {
-        self.legacy_event_result(InputEvent::Touch { index, x, y, phase, pressure })
+        self.legacy_event_result(InputEvent::Touch {
+            index,
+            x,
+            y,
+            phase,
+            pressure,
+        })
     }
 
     fn backend_name(&self) -> &str {
@@ -1451,7 +1531,9 @@ mod tests {
             ) -> Result<(), InjectError> {
                 Err(InjectError::Backend("unknown provider outcome".into()))
             }
-            fn backend_name(&self) -> &str { "failing" }
+            fn backend_name(&self) -> &str {
+                "failing"
+            }
         }
 
         let mut injector = Failing;
@@ -1537,7 +1619,9 @@ mod tests {
 
         impl InputInjector for Rejected {
             fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
-                Err(InjectError::NotEntered("portal refused before dispatch".into()))
+                Err(InjectError::NotEntered(
+                    "portal refused before dispatch".into(),
+                ))
             }
             fn inject_pointer_button(
                 &mut self,
@@ -1546,7 +1630,9 @@ mod tests {
                 _button: u8,
                 _pressed: bool,
             ) -> Result<(), InjectError> {
-                Err(InjectError::NotEntered("portal refused before dispatch".into()))
+                Err(InjectError::NotEntered(
+                    "portal refused before dispatch".into(),
+                ))
             }
             fn inject_key(
                 &mut self,
@@ -1554,7 +1640,9 @@ mod tests {
                 _pressed: bool,
                 _modifiers: u8,
             ) -> Result<(), InjectError> {
-                Err(InjectError::NotEntered("portal refused before dispatch".into()))
+                Err(InjectError::NotEntered(
+                    "portal refused before dispatch".into(),
+                ))
             }
             fn inject_touch(
                 &mut self,
@@ -1564,9 +1652,13 @@ mod tests {
                 _phase: u8,
                 _pressure: f32,
             ) -> Result<(), InjectError> {
-                Err(InjectError::NotEntered("portal refused before dispatch".into()))
+                Err(InjectError::NotEntered(
+                    "portal refused before dispatch".into(),
+                ))
             }
-            fn backend_name(&self) -> &str { "rejected" }
+            fn backend_name(&self) -> &str {
+                "rejected"
+            }
         }
 
         let mut injector = Rejected;
@@ -1592,7 +1684,9 @@ mod tests {
                 _button: u8,
                 _pressed: bool,
             ) -> Result<(), InjectError> {
-                Err(InjectError::NotEntered("second event never entered provider".into()))
+                Err(InjectError::NotEntered(
+                    "second event never entered provider".into(),
+                ))
             }
             fn inject_key(
                 &mut self,
@@ -1712,11 +1806,7 @@ mod tests {
         struct OutcomeError;
 
         impl InputInjector for OutcomeError {
-            fn inject_pointer_move(
-                &mut self,
-                _x: f32,
-                _y: f32,
-            ) -> Result<(), InjectError> {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
                 Ok(())
             }
             fn inject_pointer_button(
@@ -1754,7 +1844,9 @@ mod tests {
                     "outcome channel failed after provider entry".into(),
                 ))
             }
-            fn backend_name(&self) -> &str { "outcome-error" }
+            fn backend_name(&self) -> &str {
+                "outcome-error"
+            }
         }
 
         let mut wrapped = SessionInputInjector::new(Box::new(OutcomeError));
@@ -1777,11 +1869,7 @@ mod tests {
         struct PartialEffect;
 
         impl InputInjector for PartialEffect {
-            fn inject_pointer_move(
-                &mut self,
-                _x: f32,
-                _y: f32,
-            ) -> Result<(), InjectError> {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
                 Ok(())
             }
 
@@ -1823,11 +1911,9 @@ mod tests {
                     InputEvent::PointerButton { pressed: true, .. } => {
                         Ok(InputEffectOutcome::Applied)
                     }
-                    InputEvent::Key { pressed: true, .. } => {
-                        Err(InjectError::NotEntered(
-                            "second event never entered provider".into(),
-                        ))
-                    }
+                    InputEvent::Key { pressed: true, .. } => Err(InjectError::NotEntered(
+                        "second event never entered provider".into(),
+                    )),
                     _ => Ok(InputEffectOutcome::Applied),
                 }
             }
@@ -1868,11 +1954,7 @@ mod tests {
         struct AcceptedRelease;
 
         impl InputInjector for AcceptedRelease {
-            fn inject_pointer_move(
-                &mut self,
-                _x: f32,
-                _y: f32,
-            ) -> Result<(), InjectError> {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
                 Ok(())
             }
             fn inject_pointer_button(
@@ -1916,16 +1998,34 @@ mod tests {
                     _ => Ok(InputEffectOutcome::Applied),
                 }
             }
-            fn backend_name(&self) -> &str { "accepted-release" }
+            fn backend_name(&self) -> &str {
+                "accepted-release"
+            }
         }
 
         let mut wrapped = SessionInputInjector::new(Box::new(AcceptedRelease));
-        let press = InputEvent::PointerButton { x: 0.2, y: 0.3, button: 1, pressed: true };
-        let release = InputEvent::PointerButton { x: 0.2, y: 0.3, button: 1, pressed: false };
-        assert_eq!(wrapped.process_event_outcome(&press).unwrap(), InputEffectOutcome::Applied);
+        let press = InputEvent::PointerButton {
+            x: 0.2,
+            y: 0.3,
+            button: 1,
+            pressed: true,
+        };
+        let release = InputEvent::PointerButton {
+            x: 0.2,
+            y: 0.3,
+            button: 1,
+            pressed: false,
+        };
+        assert_eq!(
+            wrapped.process_event_outcome(&press).unwrap(),
+            InputEffectOutcome::Applied
+        );
         assert_eq!(wrapped.active_state_count(), 1);
         let injector: &mut dyn InputInjector = &mut wrapped;
-        assert_eq!(injector.process_event_outcome(&release).unwrap(), InputEffectOutcome::Accepted);
+        assert_eq!(
+            injector.process_event_outcome(&release).unwrap(),
+            InputEffectOutcome::Accepted
+        );
         assert_eq!(
             wrapped.active_state_count(),
             1,
@@ -1972,7 +2072,9 @@ mod tests {
             ) -> Result<(), InjectError> {
                 Ok(())
             }
-            fn backend_name(&self) -> &str { "uncertain-release" }
+            fn backend_name(&self) -> &str {
+                "uncertain-release"
+            }
         }
 
         let mut injector = SessionInputInjector::new(Box::new(UncertainRelease));
@@ -2010,11 +2112,7 @@ mod tests {
         struct Uncertain;
 
         impl InputInjector for Uncertain {
-            fn inject_pointer_move(
-                &mut self,
-                _x: f32,
-                _y: f32,
-            ) -> Result<(), InjectError> {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
                 Ok(())
             }
             fn inject_pointer_button(
@@ -2035,7 +2133,9 @@ mod tests {
                 _code: u32,
                 _pressed: bool,
                 _modifiers: u8,
-            ) -> Result<(), InjectError> { Ok(()) }
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
             fn inject_touch(
                 &mut self,
                 _index: u8,
@@ -2043,8 +2143,12 @@ mod tests {
                 _y: f32,
                 _phase: u8,
                 _pressure: f32,
-            ) -> Result<(), InjectError> { Ok(()) }
-            fn backend_name(&self) -> &str { "uncertain" }
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn backend_name(&self) -> &str {
+                "uncertain"
+            }
         }
 
         let mut injector = SessionInputInjector::new(Box::new(Uncertain));
@@ -2144,16 +2248,25 @@ mod tests {
         let digest = event.canonical_digest().unwrap();
         assert_eq!(digest, event.canonical_digest().unwrap());
 
-        let changed = InputEvent::PointerMove { x: 0.25001, y: 0.75 };
+        let changed = InputEvent::PointerMove {
+            x: 0.25001,
+            y: 0.75,
+        };
         assert_ne!(digest, changed.canonical_digest().unwrap());
 
-        let invalid = InputEvent::PointerMove { x: f32::NAN, y: 0.75 };
+        let invalid = InputEvent::PointerMove {
+            x: f32::NAN,
+            y: 0.75,
+        };
         assert!(invalid.canonical_digest().is_err());
     }
 
     #[test]
     fn input_event_validation_rejects_non_finite_and_out_of_range_values() {
-        let event = InputEvent::PointerMove { x: f32::NAN, y: 0.5 };
+        let event = InputEvent::PointerMove {
+            x: f32::NAN,
+            y: 0.5,
+        };
         assert_eq!(
             event.validate().unwrap_err(),
             InputEventValidationError::NonFiniteCoordinate
@@ -2205,33 +2318,42 @@ mod tests {
 
     #[test]
     fn input_event_validation_accepts_current_domains() {
-        assert!(InputEvent::PointerMove { x: 0.0, y: 1.0 }.validate().is_ok());
-        assert!(InputEvent::PointerButton {
-            x: 0.25,
-            y: 0.75,
-            button: 9,
-            pressed: true,
-        }
-        .validate()
-        .is_ok());
-        assert!(InputEvent::Touch {
-            index: 9,
-            x: 0.25,
-            y: 0.75,
-            phase: 3,
-            pressure: 1.0,
-        }
-        .validate()
-        .is_ok());
-        assert!(InputEvent::Key {
-            code: 30,
-            pressed: true,
-            modifiers: 0x0F,
-        }
-        .validate()
-        .is_ok());
+        assert!(
+            InputEvent::PointerMove { x: 0.0, y: 1.0 }
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            InputEvent::PointerButton {
+                x: 0.25,
+                y: 0.75,
+                button: 9,
+                pressed: true,
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            InputEvent::Touch {
+                index: 9,
+                x: 0.25,
+                y: 0.75,
+                phase: 3,
+                pressure: 1.0,
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            InputEvent::Key {
+                code: 30,
+                pressed: true,
+                modifiers: 0x0F,
+            }
+            .validate()
+            .is_ok()
+        );
     }
-
 
     use super::*;
 
@@ -2380,11 +2502,7 @@ mod tests {
         struct ConfirmedApplied;
 
         impl InputInjector for ConfirmedApplied {
-            fn inject_pointer_move(
-                &mut self,
-                _x: f32,
-                _y: f32,
-            ) -> Result<(), InjectError> {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
                 Ok(())
             }
             fn inject_pointer_button(
