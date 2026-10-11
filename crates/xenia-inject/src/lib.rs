@@ -2034,6 +2034,105 @@ mod tests {
     }
 
     #[test]
+    fn release_all_retries_unconfirmed_release_until_applied() {
+        struct RetryableRelease {
+            release_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        impl InputInjector for RetryableRelease {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_pointer_button(
+                &mut self,
+                _x: f32,
+                _y: f32,
+                _button: u8,
+                _pressed: bool,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_key(
+                &mut self,
+                _code: u32,
+                _pressed: bool,
+                _modifiers: u8,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_touch(
+                &mut self,
+                _index: u8,
+                _x: f32,
+                _y: f32,
+                _phase: u8,
+                _pressure: f32,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn process_event_outcome(
+                &mut self,
+                event: &InputEvent,
+            ) -> Result<InputEffectOutcome, InjectError> {
+                match event {
+                    InputEvent::PointerButton { pressed: false, .. } => {
+                        if self
+                            .release_calls
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                            == 0
+                        {
+                            Ok(InputEffectOutcome::Accepted)
+                        } else {
+                            Ok(InputEffectOutcome::Applied)
+                        }
+                    }
+                    _ => Ok(InputEffectOutcome::Applied),
+                }
+            }
+            fn backend_name(&self) -> &str {
+                "retryable-release"
+            }
+        }
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut injector = SessionInputInjector::new(Box::new(RetryableRelease {
+            release_calls: std::sync::Arc::clone(&calls),
+        }));
+        let press = InputEvent::PointerButton {
+            x: 0.2,
+            y: 0.3,
+            button: 1,
+            pressed: true,
+        };
+        assert_eq!(
+            injector.process_event_outcome(&press).unwrap(),
+            InputEffectOutcome::Applied
+        );
+        assert_eq!(injector.active_state_count(), 1);
+
+        let first = injector.release_all();
+        assert_eq!(first.attempted, 1);
+        assert_eq!(first.released, 0);
+        assert_eq!(first.failed, 1);
+        assert_eq!(
+            injector.active_state_count(),
+            1,
+            "unconfirmed release must remain available for retry"
+        );
+
+        let second = injector.release_all();
+        assert_eq!(second.attempted, 1);
+        assert_eq!(second.released, 1);
+        assert_eq!(second.failed, 0);
+        assert_eq!(injector.active_state_count(), 0);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "second teardown must retry and observe the confirmed release"
+        );
+    }
+
+    #[test]
     fn session_wrapper_retains_state_after_indeterminate_release() {
         struct UncertainRelease;
 
