@@ -269,7 +269,6 @@ mod tests {
             "xenia-finality-executor-e2e-{}",
             std::process::id()
         ));
-        drop(recovered);
         let _ = std::fs::remove_file(&path);
 
         let mut journal = FinalityJournalV1::open(&path).unwrap();
@@ -301,6 +300,7 @@ mod tests {
             recovered.latest_attempt([0x61; 16]).unwrap().state(),
             FinalityAttemptStateV1::Committed
         );
+        drop(recovered);
 
         let _ = std::fs::remove_file(&path);
     }
@@ -377,7 +377,6 @@ mod tests {
     fn indeterminate_execution_reconciles_without_reinvocation() {
         let path =
             std::env::temp_dir().join(format!("xenia-finality-reconcile-{}", std::process::id()));
-        drop(reopened);
         let _ = fs::remove_file(&path);
 
         // This fixture cannot manufacture a cryptographic handle cheaply without
@@ -405,6 +404,7 @@ mod tests {
             reopened.latest_receipt([1; 16]).unwrap().outcome,
             FinalityOutcomeV1::Committed
         );
+        drop(reopened);
 
         let _ = fs::remove_file(&path);
     }
