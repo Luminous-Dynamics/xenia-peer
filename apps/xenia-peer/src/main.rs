@@ -11,7 +11,9 @@ use tokio::sync::Mutex as AsyncMutex;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use xenia_inject::{InputEffectOutcome, InputInjector, LoggingInjector, NoopInjector, SessionInputInjector};
+use xenia_inject::{
+    InputEffectOutcome, InputInjector, LoggingInjector, NoopInjector, SessionInputInjector,
+};
 
 use ed25519_dalek::SigningKey;
 #[cfg(any(feature = "audio-capture", test))]
@@ -1726,14 +1728,12 @@ fn build_input_injector(
         InputBackendChoice::Noop => Ok(Box::new(NoopInjector)),
         InputBackendChoice::Log => Ok(Box::new(LoggingInjector::new(screen_width, screen_height))),
         #[cfg(feature = "xdg-portal")]
-        InputBackendChoice::XdgPortal => {
-            xenia_inject::XdgPortalInjector::new(
-                screen_width,
-                screen_height,
-                Duration::from_secs(60),
-            )
-            .map(|injector| Box::new(injector) as Box<dyn InputInjector>)
-        }
+        InputBackendChoice::XdgPortal => xenia_inject::XdgPortalInjector::new(
+            screen_width,
+            screen_height,
+            Duration::from_secs(60),
+        )
+        .map(|injector| Box::new(injector) as Box<dyn InputInjector>),
         #[cfg(feature = "uinput")]
         InputBackendChoice::Uinput => {
             xenia_inject::UinputInjector::new(screen_width, screen_height)
@@ -1745,10 +1745,8 @@ fn build_input_injector(
                 .map(|injector| Box::new(injector) as Box<dyn InputInjector>)
         }
         #[cfg(all(feature = "macos-cgevent", target_os = "macos"))]
-        InputBackendChoice::Macos => {
-            xenia_inject::MacosInjector::new(screen_width, screen_height)
-                .map(|injector| Box::new(injector) as Box<dyn InputInjector>)
-        }
+        InputBackendChoice::Macos => xenia_inject::MacosInjector::new(screen_width, screen_height)
+            .map(|injector| Box::new(injector) as Box<dyn InputInjector>),
     }
 }
 
@@ -6670,10 +6668,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
                     }
                     Ok(InputEffectOutcome::RejectionBeforeEffect) => {
-                        warn!(
-                            ?event,
-                            "input event rejected before provider entry"
-                        );
+                        warn!(?event, "input event rejected before provider entry");
                     }
                     Ok(InputEffectOutcome::Indeterminate) => {
                         warn!(
