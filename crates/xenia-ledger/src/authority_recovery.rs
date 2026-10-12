@@ -28,6 +28,15 @@ use thiserror::Error;
 ///
 /// let _forged = AuthorityRecoveryStateV1 { inner: todo!() };
 /// ```
+///
+/// The raw reducer is also inaccessible outside this crate:
+///
+/// ```compile_fail
+/// use xenia_ledger::{AuthorityRecoveryEventV1, AuthorityRecoveryStateV1};
+///
+/// let _forged = AuthorityRecoveryStateV1::old_active()
+///     .apply(AuthorityRecoveryEventV1::ActivateSuccessor);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthorityRecoveryStateV1 {
     inner: AuthorityRecoveryStateKindV1,
