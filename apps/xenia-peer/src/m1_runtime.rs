@@ -2294,9 +2294,11 @@ mod tests {
         assert_eq!(first, InputEffectOutcome::Indeterminate);
 
         let legacy_error = runtime.inject_input().unwrap_err();
-        assert!(matches!(legacy_error, M1RuntimeError::InputInjection(message) if
-            message.contains("sealed after an indeterminate provider outcome")
-        ));
+        assert!(
+            matches!(legacy_error, M1RuntimeError::InputInjection(message) if
+                message.contains("sealed after an indeterminate provider outcome")
+            )
+        );
 
         let mut called = false;
         let err = runtime

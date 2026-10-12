@@ -139,7 +139,7 @@ impl<'a> FinalityExecutorV1<'a> {
                     self.journal.append_attempt(&attempt)?;
                 }
                 receipt
-            },
+            }
             _ => return Err(FinalityExecutorError::NotReconciliationState),
         };
 

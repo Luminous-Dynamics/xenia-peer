@@ -632,10 +632,8 @@ mod tests {
 
         // Simulate a second crash after reconciliation updated the attempt
         // but before it replaced the earlier indeterminate receipt.
-        let mut reconciled = FinalityAttemptV1::prepare(
-            [5; 16], [6; 32], [7; 32], [8; 32], [9; 32],
-        )
-        .unwrap();
+        let mut reconciled =
+            FinalityAttemptV1::prepare([5; 16], [6; 32], [7; 32], [8; 32], [9; 32]).unwrap();
         journal.append_attempt(&reconciled).unwrap();
         reconciled.mark_effectuation_started().unwrap();
         journal.append_attempt(&reconciled).unwrap();
