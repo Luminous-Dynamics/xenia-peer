@@ -18,8 +18,16 @@ use thiserror::Error;
 /// Opaque lifecycle state of an authority transition across crashes and recovery.
 ///
 /// The internal state representation is private. Callers can inspect state identity
-/// through accessors and advance it only through proof-gated transition methods;
-/// they cannot construct an authority-bearing state by assembling enum fields.
+/// through accessors and advance into authority-bearing states only through proof-gated
+/// transition methods; they cannot construct such a state by assembling public enum fields.
+///
+/// The opaque representation is enforced by Rust visibility, not by a convention:
+///
+/// ```compile_fail
+/// use xenia_ledger::AuthorityRecoveryStateV1;
+///
+/// let _forged = AuthorityRecoveryStateV1 { inner: todo!() };
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthorityRecoveryStateV1 {
     inner: AuthorityRecoveryStateKindV1,
