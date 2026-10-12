@@ -371,17 +371,14 @@ fn split_journal_header(bytes: &[u8]) -> Result<(bool, &[u8]), FinalityJournalEr
     Ok((true, &bytes[JOURNAL_MAGIC.len()..]))
 }
 
-fn replay_journal_bytes(
-    bytes: &[u8],
-) -> Result<
-    (
-        BTreeMap<[u8; 16], FinalityAttemptV1>,
-        BTreeMap<[u8; 16], FinalityReceiptV1>,
-        BTreeMap<[u8; 32], [u8; 16]>,
-        BTreeMap<[u8; 32], [u8; 16]>,
-    ),
-    FinalityJournalError,
-> {
+type ReplayJournalState = (
+    BTreeMap<[u8; 16], FinalityAttemptV1>,
+    BTreeMap<[u8; 16], FinalityReceiptV1>,
+    BTreeMap<[u8; 32], [u8; 16]>,
+    BTreeMap<[u8; 32], [u8; 16]>,
+);
+
+fn replay_journal_bytes(bytes: &[u8]) -> Result<ReplayJournalState, FinalityJournalError> {
     let mut cursor = 0usize;
     let mut latest: BTreeMap<[u8; 16], FinalityAttemptV1> = BTreeMap::new();
     let mut receipts: BTreeMap<[u8; 16], FinalityReceiptV1> = BTreeMap::new();

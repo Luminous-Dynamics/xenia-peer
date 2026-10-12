@@ -103,7 +103,7 @@ pub enum AuthorityRecoveryStateV1 {
 
 /// Private construction seal for transition-bearing recovery states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RecoveryStateSeal;
+pub struct RecoveryStateSeal(());
 
 /// Events that move the authority recovery state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,15 +186,15 @@ pub enum AuthorityRecoveryEventV1 {
 
 /// State-machine violations are fail-closed: an invalid event never produces
 /// an authority-bearing successor state.
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum AuthorityRecoveryError {
     /// The event is not valid from the current lifecycle state.
     #[error("invalid authority recovery transition from {state:?} via {event:?}")]
     InvalidTransition {
         /// State from which the rejected event was attempted.
-        state: AuthorityRecoveryStateV1,
+        state: Box<AuthorityRecoveryStateV1>,
         /// Event that was rejected.
-        event: AuthorityRecoveryEventV1,
+        event: Box<AuthorityRecoveryEventV1>,
     },
     /// A transition-bearing state or event supplied an empty fingerprint.
     #[error("authority recovery transition fingerprint must be nonzero")]
@@ -353,7 +353,7 @@ impl AuthorityRecoveryStateV1 {
                 transition_fingerprint: require_fingerprint(transition_fingerprint)?,
                 authority_epoch: event_authority_epoch,
                 durable_frontier_digest: require_digest(event_frontier_digest)?,
-                _seal: RecoveryStateSeal,
+                _seal: RecoveryStateSeal(()),
             },
             (
                 TransitionPending {
@@ -380,7 +380,7 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    _seal: RecoveryStateSeal,
+                    _seal: RecoveryStateSeal(_),
                 }
             }
             (
@@ -431,7 +431,7 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    _seal: RecoveryStateSeal,
+                    _seal: RecoveryStateSeal(_),
                 }
             }
             (
@@ -459,7 +459,7 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    _seal: RecoveryStateSeal,
+                    _seal: RecoveryStateSeal(_),
                 }
             }
             (
@@ -487,7 +487,7 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    _seal: RecoveryStateSeal,
+                    _seal: RecoveryStateSeal(_),
                 }
             }
             (
@@ -501,7 +501,7 @@ impl AuthorityRecoveryStateV1 {
                 transition_fingerprint: require_fingerprint(transition_fingerprint)?,
                 authority_epoch: event_authority_epoch,
                 durable_frontier_digest: require_digest(event_frontier_digest)?,
-                _seal: RecoveryStateSeal,
+                _seal: RecoveryStateSeal(()),
             },
             (
                 OutcomeUnknown {
@@ -528,7 +528,7 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    _seal: RecoveryStateSeal,
+                    _seal: RecoveryStateSeal(_),
                 }
             }
             (
@@ -556,7 +556,7 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint: state_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    _seal: RecoveryStateSeal,
+                    _seal: RecoveryStateSeal(_),
                 }
             }
             (
@@ -607,7 +607,7 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    _seal: RecoveryStateSeal,
+                    _seal: RecoveryStateSeal(_),
                 }
             }
             (
@@ -635,7 +635,7 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    _seal: RecoveryStateSeal,
+                    _seal: RecoveryStateSeal(_),
                 }
             }
             (
@@ -686,7 +686,7 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    _seal: RecoveryStateSeal,
+                    _seal: RecoveryStateSeal(_),
                 }
             }
             (
@@ -714,7 +714,7 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    _seal: RecoveryStateSeal,
+                    _seal: RecoveryStateSeal(_),
                 }
             }
             (
@@ -729,10 +729,13 @@ impl AuthorityRecoveryStateV1 {
                 transition_fingerprint,
                 authority_epoch,
                 durable_frontier_digest,
-                _seal: RecoveryStateSeal,
+                _seal: RecoveryStateSeal(_),
             },
             _ => {
-                return Err(AuthorityRecoveryError::InvalidTransition { state: self, event });
+                return Err(AuthorityRecoveryError::InvalidTransition {
+                    state: Box::new(self),
+                    event: Box::new(event),
+                });
             }
         };
         Ok(next)
@@ -892,7 +895,7 @@ mod tests {
             transition_fingerprint: fingerprint,
             authority_epoch: 8,
             durable_frontier_digest: [0xF1; 32],
-            _seal: RecoveryStateSeal,
+            _seal: RecoveryStateSeal(()),
         }
     }
 
@@ -901,7 +904,7 @@ mod tests {
             transition_fingerprint: fingerprint,
             authority_epoch: 8,
             durable_frontier_digest: [0xF1; 32],
-            _seal: RecoveryStateSeal,
+            _seal: RecoveryStateSeal(()),
         }
     }
 
@@ -910,7 +913,7 @@ mod tests {
             transition_fingerprint: fingerprint,
             authority_epoch: 8,
             durable_frontier_digest: [0xF1; 32],
-            _seal: RecoveryStateSeal,
+            _seal: RecoveryStateSeal(()),
         }
     }
 
@@ -919,7 +922,7 @@ mod tests {
             transition_fingerprint: fingerprint,
             authority_epoch: 8,
             durable_frontier_digest: [0xF1; 32],
-            _seal: RecoveryStateSeal,
+            _seal: RecoveryStateSeal(()),
         }
     }
 
@@ -928,7 +931,7 @@ mod tests {
             transition_fingerprint: fingerprint,
             authority_epoch: 8,
             durable_frontier_digest: [0xF1; 32],
-            _seal: RecoveryStateSeal,
+            _seal: RecoveryStateSeal(()),
         }
     }
 
@@ -937,7 +940,7 @@ mod tests {
             transition_fingerprint: fingerprint,
             authority_epoch: 8,
             durable_frontier_digest: [0xF1; 32],
-            _seal: RecoveryStateSeal,
+            _seal: RecoveryStateSeal(()),
         }
     }
 
@@ -946,7 +949,7 @@ mod tests {
             transition_fingerprint: fingerprint,
             authority_epoch: 8,
             durable_frontier_digest: [0xF1; 32],
-            _seal: RecoveryStateSeal,
+            _seal: RecoveryStateSeal(()),
         }
     }
 
