@@ -759,7 +759,7 @@ impl AuthorityRecoveryStateV1 {
 
     /// Return the exact durable-ledger frontier digest attached to this state.
     pub const fn durable_frontier_digest(self) -> Option<[u8; 32]> {
-        match self {
+        match self.inner {
             AuthorityRecoveryStateKindV1::OldActive => None,
             AuthorityRecoveryStateKindV1::TransitionPending {
                 durable_frontier_digest,
@@ -794,7 +794,7 @@ impl AuthorityRecoveryStateV1 {
 
     /// Return the exact key-transition fingerprint attached to this state.
     pub const fn transition_fingerprint(self) -> Option<[u8; 32]> {
-        match self {
+        match self.inner {
             AuthorityRecoveryStateKindV1::OldActive => None,
             AuthorityRecoveryStateKindV1::TransitionPending {
                 transition_fingerprint,
@@ -969,7 +969,7 @@ mod tests {
 
     #[test]
     fn ambiguous_commit_cannot_activate_successor() {
-        let state = AuthorityRecoveryStateV1::OldActive
+        let state = AuthorityRecoveryStateV1::old_active()
             .apply(AuthorityRecoveryEventV1::PrepareTransition {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
@@ -1006,7 +1006,7 @@ mod tests {
 
     #[test]
     fn zero_frontier_digest_cannot_create_recovery_authority() {
-        let result = AuthorityRecoveryStateV1::OldActive.apply(
+        let result = AuthorityRecoveryStateV1::old_active().apply(
             AuthorityRecoveryEventV1::PrepareTransition {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
@@ -1035,7 +1035,7 @@ mod tests {
 
     #[test]
     fn mismatched_commit_proof_cannot_advance_transition() {
-        let state = AuthorityRecoveryStateV1::OldActive
+        let state = AuthorityRecoveryStateV1::old_active()
             .apply(AuthorityRecoveryEventV1::PrepareTransition {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
@@ -1057,7 +1057,7 @@ mod tests {
     #[test]
     fn zero_fingerprint_can_never_create_transition_authority() {
         assert!(matches!(
-            AuthorityRecoveryStateV1::OldActive.apply(
+            AuthorityRecoveryStateV1::old_active().apply(
                 AuthorityRecoveryEventV1::PrepareTransition {
                     transition_fingerprint: [0; 32],
                     authority_epoch: 8,
@@ -1067,7 +1067,7 @@ mod tests {
             Err(AuthorityRecoveryError::InvalidTransitionFingerprint)
         ));
         assert!(matches!(
-            AuthorityRecoveryStateV1::OldActive.apply(AuthorityRecoveryEventV1::BeginRecovery {
+            AuthorityRecoveryStateV1::old_active().apply(AuthorityRecoveryEventV1::BeginRecovery {
                 transition_fingerprint: [0; 32],
                 authority_epoch: 8,
                 durable_frontier_digest: [0xF1; 32],
@@ -1086,7 +1086,7 @@ mod tests {
 
     #[test]
     fn crash_recovery_accepts_only_matching_durable_outcome() {
-        let state = AuthorityRecoveryStateV1::OldActive
+        let state = AuthorityRecoveryStateV1::old_active()
             .apply(AuthorityRecoveryEventV1::PrepareTransition {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
@@ -1118,7 +1118,7 @@ mod tests {
 
         assert_eq!(state, successor_active(TRANSITION_A));
 
-        let stale = AuthorityRecoveryStateV1::OldActive
+        let stale = AuthorityRecoveryStateV1::old_active()
             .apply(AuthorityRecoveryEventV1::BeginRecovery {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
@@ -1132,7 +1132,7 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(stale, AuthorityRecoveryStateV1::OldActive);
+        assert_eq!(stale, AuthorityRecoveryStateV1::old_active());
         assert!(!stale.successor_authoritative());
         assert_eq!(stale.transition_fingerprint(), None);
     }
@@ -1160,14 +1160,14 @@ mod tests {
             successor_active(TRANSITION_A)
         );
         assert!(matches!(
-            AuthorityRecoveryStateV1::OldActive.apply(AuthorityRecoveryEventV1::ActivateSuccessor),
+            AuthorityRecoveryStateV1::old_active().apply(AuthorityRecoveryEventV1::ActivateSuccessor),
             Err(AuthorityRecoveryError::InvalidTransition { .. })
         ));
     }
 
     #[test]
     fn recover_old_cannot_substitute_a_different_transition() {
-        let state = AuthorityRecoveryStateV1::OldActive
+        let state = AuthorityRecoveryStateV1::old_active()
             .apply(AuthorityRecoveryEventV1::BeginRecovery {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
