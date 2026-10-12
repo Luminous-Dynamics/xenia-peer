@@ -148,7 +148,9 @@ pub use compaction::{
     ledger_compaction_manifest_message,
 };
 
-pub use finality_executor::{FinalityExecutorError, FinalityExecutorV1};
+pub use finality_executor::{
+    FinalityExecutionRequestV1, FinalityExecutorError, FinalityExecutorV1,
+};
 
 pub use finality_journal::{FINALITY_JOURNAL_SCHEMA, FinalityJournalError, FinalityJournalV1};
 
@@ -165,8 +167,9 @@ pub use execution_handle::{
 pub use durable_frontier::{
     DURABLE_AUTHORITY_EPOCH_CLAIM_SCHEMA_VERSION, DURABLE_LEDGER_FRONTIER_DOMAIN,
     DURABLE_LEDGER_FRONTIER_SCHEMA_VERSION, DurableAuthorityEpochClaimV1, DurableAuthorityEpochV1,
-    DurableLedgerAppendOutcomeV1, DurableLedgerFrontierClaimV1, DurableLedgerFrontierError,
-    DurableLedgerFrontierV1, DurableLedgerReconciliationOutcomeV1,
+    DurableFrontierVerificationContextV1, DurableLedgerAppendOutcomeV1,
+    DurableLedgerFrontierClaimV1, DurableLedgerFrontierError, DurableLedgerFrontierV1,
+    DurableLedgerReconciliationOutcomeV1,
 };
 
 pub use entry::{

@@ -140,6 +140,25 @@ pub struct DurableAuthorityEpochV1 {
     durable_frontier_digest: [u8; 32],
 }
 
+/// Exact inputs required to re-verify one durable authority-epoch token.
+#[derive(Debug, Clone, Copy)]
+pub struct DurableFrontierVerificationContextV1<'a> {
+    /// Opaque token for the exact durable ledger frontier.
+    pub durable_frontier: &'a DurableLedgerFrontierV1,
+    /// Restored chain which must match the durable frontier.
+    pub chain: &'a Chain,
+    /// Signed ledger key transition being authenticated.
+    pub key_transition: &'a LedgerKeyTransition,
+    /// Authority-epoch transition proof bound to that key transition.
+    pub epoch_transition: &'a LedgerAuthorityEpochTransitionV1,
+    /// Expected current predecessor epoch.
+    pub expected_previous_epoch: u64,
+    /// Expected successor epoch.
+    pub expected_successor_epoch: u64,
+    /// Expected digest of the reviewed persistence policy.
+    pub expected_persistence_policy_digest: [u8; 32],
+}
+
 impl DurableAuthorityEpochV1 {
     /// Return the canonical digest of the complete verified authority token.
     ///
@@ -181,14 +200,17 @@ impl DurableAuthorityEpochV1 {
     /// Verify that this token still matches the exact durable frontier, successor chain, and proofs.
     pub fn verify_against_chain(
         &self,
-        durable_frontier: &DurableLedgerFrontierV1,
-        chain: &Chain,
-        key_transition: &LedgerKeyTransition,
-        epoch_transition: &LedgerAuthorityEpochTransitionV1,
-        expected_previous_epoch: u64,
-        expected_successor_epoch: u64,
-        expected_persistence_policy_digest: [u8; 32],
+        context: DurableFrontierVerificationContextV1<'_>,
     ) -> Result<(), DurableLedgerFrontierError> {
+        let DurableFrontierVerificationContextV1 {
+            durable_frontier,
+            chain,
+            key_transition,
+            epoch_transition,
+            expected_previous_epoch,
+            expected_successor_epoch,
+            expected_persistence_policy_digest,
+        } = context;
         self.claim.validate()?;
         durable_frontier.verify_against_chain(chain, expected_persistence_policy_digest)?;
         if self.claim.durable_frontier_digest != self.durable_frontier_digest
@@ -200,11 +222,7 @@ impl DurableAuthorityEpochV1 {
             return Err(DurableLedgerFrontierError::PersistencePolicyMismatch);
         }
         epoch_transition
-            .verify(
-                key_transition,
-                expected_previous_epoch,
-                expected_successor_epoch,
-            )
+            .verify(key_transition, expected_previous_epoch, expected_successor_epoch)
             .map_err(DurableLedgerFrontierError::AuthorityEpoch)?;
         let fingerprint = ledger_key_transition_fingerprint(key_transition)
             .map_err(DurableLedgerFrontierError::KeyTransition)?;
@@ -921,15 +939,15 @@ mod tests {
 
         // The durable token authenticates epoch 8, never the stale epoch-7 snapshot.
         assert!(matches!(
-            token.verify_against_chain(
-                &durable_frontier,
-                &Chain::new(old.clone()),
-                &key_transition,
-                &epoch_transition,
-                7,
-                8,
-                PERSISTENCE_POLICY,
-            ),
+            token.verify_against_chain(DurableFrontierVerificationContextV1 {
+                durable_frontier: &durable_frontier,
+                chain: &Chain::new(old.clone()),
+                key_transition: &key_transition,
+                epoch_transition: &epoch_transition,
+                expected_previous_epoch: 7,
+                expected_successor_epoch: 8,
+                expected_persistence_policy_digest: PERSISTENCE_POLICY,
+            }),
             Err(DurableLedgerFrontierError::ChainFrontierMismatch)
         ));
 
@@ -1032,15 +1050,15 @@ mod tests {
         assert_ne!(token_digest, other_token_identity);
 
         assert!(matches!(
-            token.verify_against_chain(
-                &other_frontier,
-                &other_chain,
-                &key_transition,
-                &epoch_transition,
-                7,
-                8,
-                PERSISTENCE_POLICY,
-            ),
+            token.verify_against_chain(DurableFrontierVerificationContextV1 {
+                durable_frontier: &other_frontier,
+                chain: &other_chain,
+                key_transition: &key_transition,
+                epoch_transition: &epoch_transition,
+                expected_previous_epoch: 7,
+                expected_successor_epoch: 8,
+                expected_persistence_policy_digest: PERSISTENCE_POLICY,
+            }),
             Err(DurableLedgerFrontierError::AuthorityEpochFrontierMismatch)
         ));
 

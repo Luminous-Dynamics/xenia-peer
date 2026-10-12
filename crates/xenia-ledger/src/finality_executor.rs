@@ -16,6 +16,23 @@ use crate::{
     FinalityOutcomeV1, FinalityReceiptV1,
 };
 
+/// Exact request data validated before one durable effectuation attempt.
+#[derive(Debug, Clone, Copy)]
+pub struct FinalityExecutionRequestV1<'a> {
+    /// Exact capability authorizing the operation.
+    pub handle: &'a ExactExecutionHandleV1,
+    /// Current time used for capability validity checks.
+    pub now_unix_s: u64,
+    /// Digest of the act the provider will perform.
+    pub actual_act_digest: [u8; 32],
+    /// Digest of the exact effect sink.
+    pub actual_sink_digest: [u8; 32],
+    /// Digest of protected state before effectuation.
+    pub current_protected_state_digest: [u8; 32],
+    /// Unique nonzero identifier for this effectuation attempt.
+    pub attempt_id: [u8; 16],
+}
+
 /// Coordinates one exact execution handle with the durable finality journal.
 ///
 /// The journal must have one logical writer. This type provides the sequencing
@@ -44,14 +61,17 @@ impl<'a> FinalityExecutorV1<'a> {
     /// Otherwise the caller should return Indeterminate.
     pub fn execute(
         &mut self,
-        handle: &ExactExecutionHandleV1,
-        now_unix_s: u64,
-        actual_act_digest: [u8; 32],
-        actual_sink_digest: [u8; 32],
-        current_protected_state_digest: [u8; 32],
-        attempt_id: [u8; 16],
+        request: FinalityExecutionRequestV1<'_>,
         effect: impl FnOnce() -> FinalityOutcomeV1,
     ) -> Result<FinalityReceiptV1, FinalityExecutorError> {
+        let FinalityExecutionRequestV1 {
+            handle,
+            now_unix_s,
+            actual_act_digest,
+            actual_sink_digest,
+            current_protected_state_digest,
+            attempt_id,
+        } = request;
         handle.validate_current(
             now_unix_s,
             actual_act_digest,
@@ -279,12 +299,14 @@ mod tests {
         let mut executor = FinalityExecutorV1::new(&mut journal);
         let receipt = executor
             .execute(
-                &handle,
-                120,
-                [0x41; 32],
-                [0x51; 32],
-                [0x61; 32],
-                [0x61; 16],
+                FinalityExecutionRequestV1 {
+                    handle: &handle,
+                    now_unix_s: 120,
+                    actual_act_digest: [0x41; 32],
+                    actual_sink_digest: [0x51; 32],
+                    current_protected_state_digest: [0x61; 32],
+                    attempt_id: [0x61; 16],
+                },
                 || FinalityOutcomeV1::Committed,
             )
             .unwrap();
@@ -327,12 +349,14 @@ mod tests {
 
             let receipt = executor
                 .execute(
-                    &handle,
-                    120,
-                    [0x41; 32],
-                    [0x51; 32],
-                    [0x61; 32],
-                    [0x71; 16],
+                    FinalityExecutionRequestV1 {
+                        handle: &handle,
+                        now_unix_s: 120,
+                        actual_act_digest: [0x41; 32],
+                        actual_sink_digest: [0x51; 32],
+                        current_protected_state_digest: [0x61; 32],
+                        attempt_id: [0x71; 16],
+                    },
                     || {
                         provider_calls.fetch_add(1, Ordering::SeqCst);
                         FinalityOutcomeV1::Indeterminate
