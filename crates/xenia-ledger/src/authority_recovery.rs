@@ -15,11 +15,18 @@
 
 use thiserror::Error;
 
-/// Lifecycle state of an authority transition across crashes and recovery.
+/// Opaque lifecycle state of an authority transition across crashes and recovery.
+///
+/// The internal state representation is private. Callers can inspect state identity
+/// through accessors and advance it only through proof-gated transition methods;
+/// they cannot construct an authority-bearing state by assembling enum fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthorityRecoveryStateV1 {
-    // All non-OldActive variants carry this private seal so callers cannot
-    // fabricate a lifecycle state that claims an already-verified transition.
+pub struct AuthorityRecoveryStateV1 {
+    inner: AuthorityRecoveryStateKindV1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthorityRecoveryStateKindV1 {
     /// The predecessor authority is the active authority.
     OldActive,
     /// A successor transition has been prepared but is not durable.
@@ -30,8 +37,6 @@ pub enum AuthorityRecoveryStateV1 {
         authority_epoch: u64,
         /// Exact durable-ledger frontier expected for this transition.
         durable_frontier_digest: [u8; 32],
-        /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
     },
     /// The successor transition is durably committed, but activation/recovery has not yet completed.
     TransitionCommitted {
@@ -41,8 +46,6 @@ pub enum AuthorityRecoveryStateV1 {
         authority_epoch: u64,
         /// Exact durable-ledger frontier expected for this transition.
         durable_frontier_digest: [u8; 32],
-        /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
     },
     /// The persistence result is ambiguous; no authority may be activated.
     OutcomeUnknown {
@@ -52,8 +55,6 @@ pub enum AuthorityRecoveryStateV1 {
         authority_epoch: u64,
         /// Exact durable-ledger frontier expected for this transition.
         durable_frontier_digest: [u8; 32],
-        /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
     },
     /// Recovery from a predecessor state while reconciling one exact transition.
     RecoveryFromOld {
@@ -63,8 +64,6 @@ pub enum AuthorityRecoveryStateV1 {
         authority_epoch: u64,
         /// Exact durable-ledger frontier expected for this transition.
         durable_frontier_digest: [u8; 32],
-        /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
     },
     /// Recovery after a successor transition was already durably committed.
     RecoveryAfterCommit {
@@ -74,8 +73,6 @@ pub enum AuthorityRecoveryStateV1 {
         authority_epoch: u64,
         /// Exact durable-ledger frontier expected for this transition.
         durable_frontier_digest: [u8; 32],
-        /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
     },
     /// Recovery while reconciling an ambiguous persistence result.
     RecoveryAfterUnknown {
@@ -85,8 +82,6 @@ pub enum AuthorityRecoveryStateV1 {
         authority_epoch: u64,
         /// Exact durable-ledger frontier expected for this transition.
         durable_frontier_digest: [u8; 32],
-        /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
     },
     /// The successor authority has been recovered and activated.
     SuccessorActive {
@@ -96,16 +91,8 @@ pub enum AuthorityRecoveryStateV1 {
         authority_epoch: u64,
         /// Exact durable-ledger frontier expected for this transition.
         durable_frontier_digest: [u8; 32],
-        /// Private construction seal; transition-bearing states can only be minted by the reducer.
-        _seal: RecoveryStateSeal,
     },
 }
-
-/// Opaque construction seal for transition-bearing recovery states.
-///
-/// Its tuple field is private, so external callers cannot construct a seal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RecoveryStateSeal(());
 
 /// Events that move the authority recovery state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -341,9 +328,9 @@ impl AuthorityRecoveryStateV1 {
     /// advanced externally with an event that only claims durable persistence.
     fn apply(self, event: AuthorityRecoveryEventV1) -> Result<Self, AuthorityRecoveryError> {
         use AuthorityRecoveryEventV1::*;
-        use AuthorityRecoveryStateV1::*;
+        use AuthorityRecoveryStateKindV1::*;
 
-        let next = match (self, event) {
+        let next = match (self.inner, event) {
             (
                 OldActive,
                 PrepareTransition {
@@ -355,7 +342,6 @@ impl AuthorityRecoveryStateV1 {
                 transition_fingerprint: require_fingerprint(transition_fingerprint)?,
                 authority_epoch: event_authority_epoch,
                 durable_frontier_digest: require_digest(event_frontier_digest)?,
-                _seal: RecoveryStateSeal(()),
             },
             (
                 TransitionPending {
@@ -382,7 +368,6 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    _seal: RecoveryStateSeal(_),
                 }
             }
             (
@@ -433,7 +418,6 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    _seal: RecoveryStateSeal(_),
                 }
             }
             (
@@ -461,7 +445,6 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    _seal: RecoveryStateSeal(_),
                 }
             }
             (
@@ -489,7 +472,6 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    _seal: RecoveryStateSeal(_),
                 }
             }
             (
@@ -503,7 +485,6 @@ impl AuthorityRecoveryStateV1 {
                 transition_fingerprint: require_fingerprint(transition_fingerprint)?,
                 authority_epoch: event_authority_epoch,
                 durable_frontier_digest: require_digest(event_frontier_digest)?,
-                _seal: RecoveryStateSeal(()),
             },
             (
                 OutcomeUnknown {
@@ -530,7 +511,6 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    _seal: RecoveryStateSeal(_),
                 }
             }
             (
@@ -558,7 +538,6 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint: state_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    _seal: RecoveryStateSeal(_),
                 }
             }
             (
@@ -609,7 +588,6 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    _seal: RecoveryStateSeal(_),
                 }
             }
             (
@@ -637,7 +615,6 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    _seal: RecoveryStateSeal(_),
                 }
             }
             (
@@ -688,7 +665,6 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    _seal: RecoveryStateSeal(_),
                 }
             }
             (
@@ -716,7 +692,6 @@ impl AuthorityRecoveryStateV1 {
                     transition_fingerprint,
                     authority_epoch,
                     durable_frontier_digest,
-                    _seal: RecoveryStateSeal(_),
                 }
             }
             (
@@ -731,7 +706,6 @@ impl AuthorityRecoveryStateV1 {
                 transition_fingerprint,
                 authority_epoch,
                 durable_frontier_digest,
-                _seal: RecoveryStateSeal(_),
             },
             _ => {
                 return Err(AuthorityRecoveryError::InvalidTransition {
@@ -740,37 +714,44 @@ impl AuthorityRecoveryStateV1 {
                 });
             }
         };
-        Ok(next)
+        Ok(Self { inner: next })
+    }
+
+    /// Construct the initial state in which the predecessor authority remains active.
+    pub const fn old_active() -> Self {
+        Self {
+            inner: AuthorityRecoveryStateKindV1::OldActive,
+        }
     }
 
     /// True only for states where successor authority is active.
     pub const fn successor_authoritative(self) -> bool {
-        matches!(self, Self::SuccessorActive { .. })
+        matches!(self.inner, AuthorityRecoveryStateKindV1::SuccessorActive { .. })
     }
 
     /// Return the exact successor authority epoch attached to this state.
     pub const fn authority_epoch(self) -> Option<u64> {
-        match self {
-            Self::OldActive => None,
-            Self::TransitionPending {
+        match self.inner {
+            AuthorityRecoveryStateKindV1::OldActive => None,
+            AuthorityRecoveryStateKindV1::TransitionPending {
                 authority_epoch, ..
             }
-            | Self::TransitionCommitted {
+            | AuthorityRecoveryStateKindV1::TransitionCommitted {
                 authority_epoch, ..
             }
-            | Self::OutcomeUnknown {
+            | AuthorityRecoveryStateKindV1::OutcomeUnknown {
                 authority_epoch, ..
             }
-            | Self::RecoveryFromOld {
+            | AuthorityRecoveryStateKindV1::RecoveryFromOld {
                 authority_epoch, ..
             }
-            | Self::RecoveryAfterCommit {
+            | AuthorityRecoveryStateKindV1::RecoveryAfterCommit {
                 authority_epoch, ..
             }
-            | Self::RecoveryAfterUnknown {
+            | AuthorityRecoveryStateKindV1::RecoveryAfterUnknown {
                 authority_epoch, ..
             }
-            | Self::SuccessorActive {
+            | AuthorityRecoveryStateKindV1::SuccessorActive {
                 authority_epoch, ..
             } => Some(authority_epoch),
         }
@@ -779,32 +760,32 @@ impl AuthorityRecoveryStateV1 {
     /// Return the exact durable-ledger frontier digest attached to this state.
     pub const fn durable_frontier_digest(self) -> Option<[u8; 32]> {
         match self {
-            Self::OldActive => None,
-            Self::TransitionPending {
+            AuthorityRecoveryStateKindV1::OldActive => None,
+            AuthorityRecoveryStateKindV1::TransitionPending {
                 durable_frontier_digest,
                 ..
             }
-            | Self::TransitionCommitted {
+            | AuthorityRecoveryStateKindV1::TransitionCommitted {
                 durable_frontier_digest,
                 ..
             }
-            | Self::OutcomeUnknown {
+            | AuthorityRecoveryStateKindV1::OutcomeUnknown {
                 durable_frontier_digest,
                 ..
             }
-            | Self::RecoveryFromOld {
+            | AuthorityRecoveryStateKindV1::RecoveryFromOld {
                 durable_frontier_digest,
                 ..
             }
-            | Self::RecoveryAfterCommit {
+            | AuthorityRecoveryStateKindV1::RecoveryAfterCommit {
                 durable_frontier_digest,
                 ..
             }
-            | Self::RecoveryAfterUnknown {
+            | AuthorityRecoveryStateKindV1::RecoveryAfterUnknown {
                 durable_frontier_digest,
                 ..
             }
-            | Self::SuccessorActive {
+            | AuthorityRecoveryStateKindV1::SuccessorActive {
                 durable_frontier_digest,
                 ..
             } => Some(durable_frontier_digest),
@@ -814,32 +795,32 @@ impl AuthorityRecoveryStateV1 {
     /// Return the exact key-transition fingerprint attached to this state.
     pub const fn transition_fingerprint(self) -> Option<[u8; 32]> {
         match self {
-            Self::OldActive => None,
-            Self::TransitionPending {
+            AuthorityRecoveryStateKindV1::OldActive => None,
+            AuthorityRecoveryStateKindV1::TransitionPending {
                 transition_fingerprint,
                 ..
             }
-            | Self::TransitionCommitted {
+            | AuthorityRecoveryStateKindV1::TransitionCommitted {
                 transition_fingerprint,
                 ..
             }
-            | Self::OutcomeUnknown {
+            | AuthorityRecoveryStateKindV1::OutcomeUnknown {
                 transition_fingerprint,
                 ..
             }
-            | Self::RecoveryFromOld {
+            | AuthorityRecoveryStateKindV1::RecoveryFromOld {
                 transition_fingerprint,
                 ..
             }
-            | Self::RecoveryAfterCommit {
+            | AuthorityRecoveryStateKindV1::RecoveryAfterCommit {
                 transition_fingerprint,
                 ..
             }
-            | Self::RecoveryAfterUnknown {
+            | AuthorityRecoveryStateKindV1::RecoveryAfterUnknown {
                 transition_fingerprint,
                 ..
             }
-            | Self::SuccessorActive {
+            | AuthorityRecoveryStateKindV1::SuccessorActive {
                 transition_fingerprint,
                 ..
             } => Some(transition_fingerprint),
@@ -893,71 +874,78 @@ mod tests {
     const TRANSITION_B: [u8; 32] = [0xB2; 32];
 
     fn pending(fingerprint: [u8; 32]) -> AuthorityRecoveryStateV1 {
-        AuthorityRecoveryStateV1::TransitionPending {
-            transition_fingerprint: fingerprint,
-            authority_epoch: 8,
-            durable_frontier_digest: [0xF1; 32],
-            _seal: RecoveryStateSeal(()),
+        AuthorityRecoveryStateV1 {
+            inner: AuthorityRecoveryStateKindV1::TransitionPending {
+                transition_fingerprint: fingerprint,
+                authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
+            },
         }
     }
 
     fn committed(fingerprint: [u8; 32]) -> AuthorityRecoveryStateV1 {
-        AuthorityRecoveryStateV1::TransitionCommitted {
-            transition_fingerprint: fingerprint,
-            authority_epoch: 8,
-            durable_frontier_digest: [0xF1; 32],
-            _seal: RecoveryStateSeal(()),
+        AuthorityRecoveryStateV1 {
+            inner: AuthorityRecoveryStateKindV1::TransitionCommitted {
+                transition_fingerprint: fingerprint,
+                authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
+            },
         }
     }
 
     fn unknown(fingerprint: [u8; 32]) -> AuthorityRecoveryStateV1 {
-        AuthorityRecoveryStateV1::OutcomeUnknown {
-            transition_fingerprint: fingerprint,
-            authority_epoch: 8,
-            durable_frontier_digest: [0xF1; 32],
-            _seal: RecoveryStateSeal(()),
+        AuthorityRecoveryStateV1 {
+            inner: AuthorityRecoveryStateKindV1::OutcomeUnknown {
+                transition_fingerprint: fingerprint,
+                authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
+            },
         }
     }
 
     fn recovery_from_old(fingerprint: [u8; 32]) -> AuthorityRecoveryStateV1 {
-        AuthorityRecoveryStateV1::RecoveryFromOld {
-            transition_fingerprint: fingerprint,
-            authority_epoch: 8,
-            durable_frontier_digest: [0xF1; 32],
-            _seal: RecoveryStateSeal(()),
+        AuthorityRecoveryStateV1 {
+            inner: AuthorityRecoveryStateKindV1::RecoveryFromOld {
+                transition_fingerprint: fingerprint,
+                authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
+            },
         }
     }
 
     fn recovery_after_commit(fingerprint: [u8; 32]) -> AuthorityRecoveryStateV1 {
-        AuthorityRecoveryStateV1::RecoveryAfterCommit {
-            transition_fingerprint: fingerprint,
-            authority_epoch: 8,
-            durable_frontier_digest: [0xF1; 32],
-            _seal: RecoveryStateSeal(()),
+        AuthorityRecoveryStateV1 {
+            inner: AuthorityRecoveryStateKindV1::RecoveryAfterCommit {
+                transition_fingerprint: fingerprint,
+                authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
+            },
         }
     }
 
     fn recovery_after_unknown(fingerprint: [u8; 32]) -> AuthorityRecoveryStateV1 {
-        AuthorityRecoveryStateV1::RecoveryAfterUnknown {
-            transition_fingerprint: fingerprint,
-            authority_epoch: 8,
-            durable_frontier_digest: [0xF1; 32],
-            _seal: RecoveryStateSeal(()),
+        AuthorityRecoveryStateV1 {
+            inner: AuthorityRecoveryStateKindV1::RecoveryAfterUnknown {
+                transition_fingerprint: fingerprint,
+                authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
+            },
         }
     }
 
     fn successor_active(fingerprint: [u8; 32]) -> AuthorityRecoveryStateV1 {
-        AuthorityRecoveryStateV1::SuccessorActive {
-            transition_fingerprint: fingerprint,
-            authority_epoch: 8,
-            durable_frontier_digest: [0xF1; 32],
-            _seal: RecoveryStateSeal(()),
+        AuthorityRecoveryStateV1 {
+            inner: AuthorityRecoveryStateKindV1::SuccessorActive {
+                transition_fingerprint: fingerprint,
+                authority_epoch: 8,
+                durable_frontier_digest: [0xF1; 32],
+            },
         }
     }
 
     #[test]
     fn happy_path_requires_durable_commit_before_activation() {
-        let state = AuthorityRecoveryStateV1::OldActive
+        let state = AuthorityRecoveryStateV1::old_active()
             .apply(AuthorityRecoveryEventV1::PrepareTransition {
                 transition_fingerprint: TRANSITION_A,
                 authority_epoch: 8,
