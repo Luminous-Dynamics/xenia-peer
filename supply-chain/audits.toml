@@ -12,3 +12,9 @@ who = "tstoltz <tstoltz@luminous-dynamics.local>"
 criteria = "safe-to-deploy"
 delta = "1.2.1 -> 1.2.2"
 notes = "Reviewed webbrowser 1.2.1 -> 1.2.2 delta for safe-to-deploy. Unix BROWSER handling now tokenizes the command template before URL substitution, preventing URL-controlled whitespace from introducing additional browser arguments. Also reviewed the macOS CoreFoundation -> objc2/NSWorkspace migration and its unsafe launch call; no new shell interpolation, attacker-controlled raw pointers, or surprising ambient capability escalation identified."
+
+[[audits.event-listener]]
+who = "tstoltz <tstoltz@luminous-dynamics.local>"
+criteria = "safe-to-deploy"
+delta = "5.4.1 -> 5.4.2"
+notes = "Reviewed full upstream v5.4.1 -> v5.4.2 release delta and source. The primary soundness fix changes StackSlot unsafe Send/Sync impls from unconditional to T: Send (upstream PR #163 / RUSTSEC-2026-0221). Rechecked other Event, EventListener and InnerListener unsafe trait impl bounds. Reviewed the intrusive-list migration and new spinlock Acquire/Release protocol and RAII unlock: spinlock fallback is cfg-gated to builds with neither std nor critical-section, and upstream documents that configuration as unsuitable for production; this workspace uses the std-backed configuration. The std-backed mutex and critical-section paths retain their synchronization model. The release removes the slab/concurrent-queue fallback and includes associated regression/docs changes. Source-level delta audit only; workspace CI remains independently required."
