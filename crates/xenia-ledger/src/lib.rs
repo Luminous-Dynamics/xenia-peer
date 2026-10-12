@@ -106,7 +106,7 @@ pub use agent_authority_proto::{
 };
 
 pub use authority_recovery::{
-    AuthorityRecoveryError, AuthorityRecoveryEventV1, AuthorityRecoveryStateV1,
+    AuthorityRecoveryError, AuthorityRecoveryEventV1, AuthorityRecoveryStateV1, RecoveryStateSeal,
 };
 
 pub use authority_epoch::{

@@ -101,7 +101,9 @@ pub enum AuthorityRecoveryStateV1 {
     },
 }
 
-/// Private construction seal for transition-bearing recovery states.
+/// Opaque construction seal for transition-bearing recovery states.
+///
+/// Its tuple field is private, so external callers cannot construct a seal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecoveryStateSeal(());
 
