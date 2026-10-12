@@ -654,13 +654,20 @@ fn LedgerDemo() -> impl IntoView {
                         });
                     }
 
-                    view! {
-                        <VerifiableLedger
-                            title="Synthetic Ledger Demo".to_string()
-                            description="This chain was generated in your browser for demonstration purposes.".to_string()
-                            initial_pk_hex=pk_hex
-                            initial_entries=chain.into_entries().unwrap()
-                        />
+                    match chain.into_entries() {
+                        Ok(initial_entries) => view! {
+                            <VerifiableLedger
+                                title="Synthetic Ledger Demo".to_string()
+                                description="This chain was generated in your browser for demonstration purposes.".to_string()
+                                initial_pk_hex=pk_hex
+                                initial_entries=initial_entries
+                            />
+                        }.into_any(),
+                        Err(error) => view! {
+                            <p class="badge err">
+                                {format!("Synthetic ledger generation failed: {error}")}
+                            </p>
+                        }.into_any(),
                     }
                 }
             </Show>

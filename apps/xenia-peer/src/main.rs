@@ -6637,33 +6637,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
 
-                        injector
-                            .as_mut()
-                            .expect("input injector must exist after successful construction")
-                            .process_event_outcome(&event)
-                            .map_err(|err| {
-                                crate::m1_runtime::M1RuntimeError::InputInjection(err.to_string())
-                            })
+                        match injector.as_mut() {
+                            Some(injector) => injector
+                                .process_event_outcome(&event)
+                                .map_err(|err| {
+                                    crate::m1_runtime::M1RuntimeError::InputInjection(err.to_string())
+                                }),
+                            None => {
+                                warn!("input injector absent after construction; rejecting before provider entry");
+                                Ok(InputEffectOutcome::RejectionBeforeEffect)
+                            }
+                        }
                     })
                 };
+                let backend_name = injector
+                    .as_ref()
+                    .map(|injector| injector.backend_name().to_string())
+                    .unwrap_or_else(|| "unavailable".to_string());
                 match result {
                     Ok(InputEffectOutcome::Applied) => {
                         info!(
                             ?event,
-                            backend = injector
-                                .as_ref()
-                                .expect("successful input effect must construct injector")
-                                .backend_name(),
+                            backend = %backend_name,
                             "input event effect confirmed"
                         );
                     }
                     Ok(InputEffectOutcome::Accepted) => {
                         info!(
                             ?event,
-                            backend = injector
-                                .as_ref()
-                                .expect("accepted input operation must construct injector")
-                                .backend_name(),
+                            backend = %backend_name,
                             "input event accepted by provider; host effect not independently confirmed"
                         );
                     }
@@ -6673,10 +6675,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(InputEffectOutcome::Indeterminate) => {
                         warn!(
                             ?event,
-                            backend = injector
-                                .as_ref()
-                                .expect("indeterminate input effect must construct injector")
-                                .backend_name(),
+                            backend = %backend_name,
                             "input event outcome indeterminate; effect was not recorded as confirmed"
                         );
                     }

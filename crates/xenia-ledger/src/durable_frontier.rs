@@ -279,6 +279,9 @@ impl DurableLedgerFrontierV1 {
         if chain.has_uncertain_persistence() {
             return Err(DurableLedgerFrontierError::PersistenceUncertain);
         }
+        if chain.entry_count() != self.claim.entry_count {
+            return Err(DurableLedgerFrontierError::ChainFrontierMismatch);
+        }
         let current = durable_claim_for_chain(chain, self.claim.persistence_policy_digest)?;
         if current != self.claim {
             return Err(DurableLedgerFrontierError::ChainFrontierMismatch);
