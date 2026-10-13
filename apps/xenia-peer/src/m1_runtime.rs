@@ -1197,7 +1197,7 @@ impl M1RuntimeSession {
     pub(crate) fn inject_input(&mut self) -> Result<(), M1RuntimeError> {
         if self.input_effect_uncertain {
             return Err(M1RuntimeError::InputInjection(
-                "input effect lane is sealed after an indeterminate provider outcome; blind continuation is not permitted".into(),
+                "input effect lane is sealed after an accepted or indeterminate provider outcome; blind continuation is not permitted".into(),
             ));
         }
         self.session.inject_input()?;
@@ -1269,7 +1269,7 @@ impl M1RuntimeSession {
         self.session.check_permission(M1Permission::InjectInput)?;
         if self.input_effect_uncertain {
             return Err(M1RuntimeError::InputInjection(
-                "input effect lane is sealed after an indeterminate provider outcome; blind continuation is not permitted".into(),
+                "input effect lane is sealed after an accepted or indeterminate provider outcome; blind continuation is not permitted".into(),
             ));
         }
 
@@ -1284,23 +1284,30 @@ impl M1RuntimeSession {
                 return Err(error);
             }
         };
-        if outcome == InputEffectOutcome::Indeterminate {
-            // Once provider entry is uncertain, the runtime cannot establish
-            // that a subsequent input operation is independent of the unresolved
-            // effect. Fail closed rather than allowing a blind continuation.
-            self.input_effect_uncertain = true;
-        } else if outcome == InputEffectOutcome::Applied {
-            // The external effect is confirmed, but if internal audit-state or
-            // ledger advancement fails, the action is not safely accounted for.
-            // Seal the lane rather than continue after an effect with incomplete
-            // audit evidence.
-            if let Err(error) = self.session.inject_input() {
+        match outcome {
+            InputEffectOutcome::Accepted | InputEffectOutcome::Indeterminate => {
+                // Neither provider acknowledgement nor an indeterminate result
+                // proves whether the host-side action has completed. Seal the
+                // lane until authoritative reconciliation; a second action could
+                // otherwise overlap or duplicate an unresolved effect.
                 self.input_effect_uncertain = true;
-                return Err(M1RuntimeError::Session(error));
             }
-            if let Err(error) = self.flush_new_audit_events() {
-                self.input_effect_uncertain = true;
-                return Err(error);
+            InputEffectOutcome::Applied => {
+                // The external effect is confirmed, but if internal audit-state
+                // or ledger advancement fails, the action is not safely accounted
+                // for. Seal the lane rather than continue without audit evidence.
+                if let Err(error) = self.session.inject_input() {
+                    self.input_effect_uncertain = true;
+                    return Err(M1RuntimeError::Session(error));
+                }
+                if let Err(error) = self.flush_new_audit_events() {
+                    self.input_effect_uncertain = true;
+                    return Err(error);
+                }
+            }
+            InputEffectOutcome::RejectionBeforeEffect => {
+                // This is the sole non-success outcome that proves no provider
+                // entry/effect occurred, so it does not create uncertainty.
             }
         }
         Ok(outcome)
@@ -2177,70 +2184,83 @@ mod tests {
             })
             .unwrap_err();
         assert!(called);
-        assert!(matches!(err, M1RuntimeError::InputInjection(_)));
-        assert_eq!(
-            runtime
-                .session
-                .audit()
-                .iter()
-                .filter(|event| **event == xenia_peer_core::M1AuditEvent::InputInjected)
-                .count(),
-            1,
-            "failed backend injection must not create a false success audit"
-        );
-    }
-
-    #[test]
-    fn typed_provider_outcomes_never_forge_input_injected_audit() {
-        let (mut runtime, _verifying_key) = runtime(34);
-        runtime.offer().unwrap();
-        runtime
+        assert!(ma    fn typed_provider_outcomes_never_forge_input_injected_audit() {
+        // An accepted provider request is not proof of host execution. It must
+        // not create a success audit and must seal the lane until reconciliation.
+        let (mut accepted_runtime, _accepted_key) = runtime(34);
+        accepted_runtime.offer().unwrap();
+        accepted_runtime
             .grant_consent_scoped(M1PermissionSet {
                 inject_input: true,
                 ..M1PermissionSet::default()
             })
             .unwrap();
-
-        let before = runtime
+        let accepted_before = accepted_runtime
             .session
             .audit()
             .iter()
             .filter(|event| **event == xenia_peer_core::M1AuditEvent::InputInjected)
             .count();
 
-        let outcome = runtime
+        let outcome = accepted_runtime
             .execute_input_effect_outcome(|| Ok(InputEffectOutcome::Accepted))
             .unwrap();
         assert_eq!(outcome, InputEffectOutcome::Accepted);
         assert_eq!(
-            runtime
+            accepted_runtime
                 .session
                 .audit()
                 .iter()
                 .filter(|event| **event == xenia_peer_core::M1AuditEvent::InputInjected)
                 .count(),
-            before,
+            accepted_before,
             "provider acknowledgement must not be recorded as confirmed injection"
         );
+        let mut accepted_followup_called = false;
+        assert!(
+            accepted_runtime
+                .execute_input_effect_outcome(|| {
+                    accepted_followup_called = true;
+                    Ok(InputEffectOutcome::Applied)
+                })
+                .is_err(),
+            "accepted-but-unconfirmed effects must seal the lane"
+        );
+        assert!(!accepted_followup_called, "sealed lane must reject before provider entry");
 
-        let outcome = runtime
+        // An indeterminate result also seals the lane and must not forge an
+        // InputInjected audit event.
+        let (mut indeterminate_runtime, _indeterminate_key) = runtime(38);
+        indeterminate_runtime.offer().unwrap();
+        indeterminate_runtime
+            .grant_consent_scoped(M1PermissionSet {
+                inject_input: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+        let indeterminate_before = indeterminate_runtime
+            .session
+            .audit()
+            .iter()
+            .filter(|event| **event == xenia_peer_core::M1AuditEvent::InputInjected)
+            .count();
+        let outcome = indeterminate_runtime
             .execute_input_effect_outcome(|| Ok(InputEffectOutcome::Indeterminate))
             .unwrap();
         assert_eq!(outcome, InputEffectOutcome::Indeterminate);
         assert_eq!(
-            runtime
+            indeterminate_runtime
                 .session
                 .audit()
                 .iter()
                 .filter(|event| **event == xenia_peer_core::M1AuditEvent::InputInjected)
                 .count(),
-            before,
+            indeterminate_before,
             "indeterminate provider outcome must not be recorded as confirmed injection"
         );
 
-        // A pre-effect rejection is independently safe, but it must be
-        // exercised on a fresh session: the previous Indeterminate result
-        // deliberately seals the first runtime's input lane.
+        // A proven pre-effect rejection does not create uncertainty; it is safe
+        // to try again because the previous call cannot have reached the provider.
         let (mut rejected_runtime, _rejected_key) = runtime(37);
         rejected_runtime.offer().unwrap();
         rejected_runtime
@@ -2269,6 +2289,21 @@ mod tests {
                 .count(),
             rejection_before,
             "pre-effect rejection must not create an input-injected audit event"
+        );
+
+        let outcome = rejected_runtime
+            .execute_input_effect_outcome(|| Ok(InputEffectOutcome::Applied))
+            .unwrap();
+        assert_eq!(outcome, InputEffectOutcome::Applied);
+        assert_eq!(
+            rejected_runtime
+                .session
+                .audit()
+                .iter()
+                .filter(|event| **event == xenia_peer_core::M1AuditEvent::InputInjected)
+                .count(),
+            rejection_before + 1,
+            "a proven pre-effect rejection must leave the lane available for a later confirmed effect"
         );
     }
 
