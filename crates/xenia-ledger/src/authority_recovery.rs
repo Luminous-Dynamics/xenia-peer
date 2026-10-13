@@ -743,7 +743,10 @@ impl AuthorityRecoveryStateV1 {
 
     /// True only for states where successor authority is active.
     pub const fn successor_authoritative(self) -> bool {
-        matches!(self.inner, AuthorityRecoveryStateKindV1::SuccessorActive { .. })
+        matches!(
+            self.inner,
+            AuthorityRecoveryStateKindV1::SuccessorActive { .. }
+        )
     }
 
     /// Return the exact successor authority epoch attached to this state.
@@ -1177,7 +1180,8 @@ mod tests {
             successor_active(TRANSITION_A)
         );
         assert!(matches!(
-            AuthorityRecoveryStateV1::old_active().apply(AuthorityRecoveryEventV1::ActivateSuccessor),
+            AuthorityRecoveryStateV1::old_active()
+                .apply(AuthorityRecoveryEventV1::ActivateSuccessor),
             Err(AuthorityRecoveryError::InvalidTransition { .. })
         ));
     }
