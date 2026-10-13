@@ -431,6 +431,15 @@ impl M1SessionMachine {
         Ok(())
     }
 
+    /// Check active state and the exact granted permission without recording an operation.
+    ///
+    /// Callers use this before crossing an external-effect boundary. The
+    /// operation-specific method must still be called after a confirmed effect
+    /// to advance the session's audit state.
+    pub fn check_permission(&self, permission: M1Permission) -> Result<(), M1SessionError> {
+        self.require_active(permission)
+    }
+
     fn require_active(&self, permission: M1Permission) -> Result<(), M1SessionError> {
         if self.state == M1SessionState::Active && self.granted.contains(permission) {
             Ok(())
@@ -640,6 +649,41 @@ mod tests {
         session.send_file_to_viewer().unwrap();
         session.receive_file_from_viewer().unwrap();
         assert_eq!(session.granted_permissions(), M1PermissionSet::all());
+    }
+
+    #[test]
+    fn permission_preflight_is_read_only() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+        session
+            .grant_consent_scoped(M1PermissionSet {
+                inject_input: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        let active_audit = session.audit().to_vec();
+        assert_eq!(session.check_permission(M1Permission::InjectInput), Ok(()));
+        assert_eq!(session.audit(), active_audit.as_slice());
+        assert_eq!(
+            session.check_permission(M1Permission::WriteHostClipboard),
+            Err(M1SessionError::PermissionDenied {
+                state: M1SessionState::Active,
+                permission: M1Permission::WriteHostClipboard,
+            })
+        );
+        assert_eq!(session.audit(), active_audit.as_slice());
+
+        session.revoke().unwrap();
+        let revoked_audit = session.audit().to_vec();
+        assert_eq!(
+            session.check_permission(M1Permission::InjectInput),
+            Err(M1SessionError::PermissionDenied {
+                state: M1SessionState::Revoked,
+                permission: M1Permission::InjectInput,
+            })
+        );
+        assert_eq!(session.audit(), revoked_audit.as_slice());
     }
 
     #[test]

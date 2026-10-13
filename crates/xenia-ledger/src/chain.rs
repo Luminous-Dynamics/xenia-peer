@@ -430,15 +430,19 @@ impl Chain {
         Ok(())
     }
 
-    /// Consume the chain and return its resident entries. An anchored prefix,
-    /// when present, is not included; persistence layers supporting compaction
-    /// must retain [`Chain::base_checkpoint`] separately.
+    /// Consume the chain and return its resident entries only when there is
+    /// no unresolved persistence outcome. An anchored prefix, when present,
+    /// is not included; persistence layers supporting compaction must retain
+    /// the base checkpoint separately.
     ///
-    /// The returned vector does not encode an in-process pending-persistence
-    /// latch. Callers should reconcile any ambiguous outcome before consuming a
-    /// live chain for ordinary persistence/export purposes.
-    pub fn into_entries(self) -> Vec<LedgerEntry> {
-        self.entries
+    /// Refusing consumption while a persistence outcome is ambiguous prevents
+    /// the in-process latch from being erased merely by moving the entries into
+    /// another persistence path. Reconciliation must happen first.
+    pub fn into_entries(self) -> Result<Vec<LedgerEntry>, LedgerError> {
+        if let Some(pending) = self.pending_persistence {
+            return Err(LedgerError::UncertainPersistencePending { seq: pending.seq });
+        }
+        Ok(self.entries)
     }
 
     /// Produce a signed [`LedgerCheckpoint`] committing to this chain's

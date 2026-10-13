@@ -74,11 +74,44 @@ pub enum InjectError {
     Unavailable(String),
 
     /// Backend-level failure (e.g., compositor returned an error).
-    /// Wrapped for logs; drop the event and carry on.
+    /// The caller MUST treat this as potentially effecting unless the backend
+    /// explicitly proves that provider entry did not occur.
     #[error("inject backend: {0}")]
     Backend(String),
+
+    /// The backend explicitly proves that provider entry did not occur.
+    ///
+    /// This is the only injection error that the effectuation adapter may
+    /// classify as a closed pre-effect rejection. Ordinary backend errors stay
+    /// indeterminate because the error may have been emitted after provider
+    /// entry or after a partial host-side effect.
+    #[error("inject rejected before provider entry: {0}")]
+    NotEntered(String),
+
+    /// Decoded input event violated the current semantic protocol bounds.
+    #[error("invalid input event: {0}")]
+    InvalidEvent(#[from] InputEventValidationError),
 }
 
+/// Outcome classification for one host-input effect attempt.
+///
+/// `Applied` is deliberately stronger than a successful provider/API return:
+/// it is reserved for an adapter that has evidence the requested host-side
+/// consequence completed. `Accepted` means the provider acknowledged the
+/// request, but does not independently prove host execution. `RejectionBeforeEffect`
+/// proves that provider entry did not occur. `Indeterminate` covers an error
+/// or timeout whose relationship to provider entry/effect is unknown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputEffectOutcome {
+    /// The adapter has evidence that the requested host-side consequence completed.
+    Applied,
+    /// The provider acknowledged/accepted the request, but host execution is not independently confirmed.
+    Accepted,
+    /// The adapter established that no provider entry/effect occurred.
+    RejectionBeforeEffect,
+    /// The provider boundary does not establish whether the effect occurred.
+    Indeterminate,
+}
 /// Maximum serialized `InputEvent` payload accepted by the daemon before
 /// application-level bincode decoding. Every current event is fixed-size and
 /// far smaller than this; the ceiling prevents an authenticated peer from
@@ -162,7 +195,186 @@ pub enum InputEvent {
     },
 }
 
-/// A recorded injection — useful for `LoggingInjector` + tests.
+/// Validation failures for a decoded remote input event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum InputEventValidationError {
+    /// Pointer/touch coordinates were NaN or infinite.
+    #[error("input coordinate must be finite")]
+    NonFiniteCoordinate,
+    /// A normalized pointer/touch coordinate was outside [0.0, 1.0].
+    #[error("input coordinate must be within 0.0..=1.0")]
+    CoordinateOutOfRange,
+    /// Touch pressure was NaN or infinite.
+    #[error("touch pressure must be finite")]
+    NonFinitePressure,
+    /// Touch pressure was outside [0.0, 1.0].
+    #[error("touch pressure must be within 0.0..=1.0")]
+    PressureOutOfRange,
+    /// A touch phase outside Down/Move/Up/Cancel was received.
+    #[error("touch phase must be 0 (down), 1 (move), 2 (up), or 3 (cancel)")]
+    InvalidTouchPhase,
+    /// Reserved keyboard modifier bits were set.
+    #[error("keyboard modifiers use reserved bits")]
+    ReservedModifierBits,
+}
+
+impl InputEvent {
+    /// Validate semantic bounds before any host input backend is touched.
+    ///
+    /// Wire authentication and payload-size checks do not make decoded values
+    /// safe: floating-point values can still carry NaN/infinity, and numeric
+    /// fields can still carry values outside the current protocol domain.
+    pub fn validate(&self) -> Result<(), InputEventValidationError> {
+        fn coordinate(x: f32) -> Result<(), InputEventValidationError> {
+            if !x.is_finite() {
+                return Err(InputEventValidationError::NonFiniteCoordinate);
+            }
+            if !(0.0..=1.0).contains(&x) {
+                return Err(InputEventValidationError::CoordinateOutOfRange);
+            }
+            Ok(())
+        }
+
+        match self {
+            Self::Pointer { x, y, .. } | Self::PointerButton { x, y, .. } => {
+                coordinate(*x)?;
+                coordinate(*y)?;
+            }
+            Self::PointerMove { x, y } => {
+                coordinate(*x)?;
+                coordinate(*y)?;
+            }
+            Self::Touch {
+                x,
+                y,
+                phase,
+                pressure,
+                ..
+            } => {
+                coordinate(*x)?;
+                coordinate(*y)?;
+                if !pressure.is_finite() {
+                    return Err(InputEventValidationError::NonFinitePressure);
+                }
+                if !(0.0..=1.0).contains(pressure) {
+                    return Err(InputEventValidationError::PressureOutOfRange);
+                }
+                if !matches!(*phase, 0..=3) {
+                    return Err(InputEventValidationError::InvalidTouchPhase);
+                }
+            }
+            Self::Key { modifiers, .. } => {
+                if *modifiers & !0x0F != 0 {
+                    return Err(InputEventValidationError::ReservedModifierBits);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Stable domain separator for canonical input-act identities.
+pub const INPUT_EVENT_DIGEST_DOMAIN: &[u8] = b"xenia:input-event-digest:v1\\0";
+
+fn canonical_f32_bits(value: f32) -> u32 {
+    if value == 0.0 { 0 } else { value.to_bits() }
+}
+
+impl InputEvent {
+    /// Compute the canonical digest of one exact input-operation instance.
+    ///
+    /// The raw event digest identifies the event itself; the session binding and
+    /// monotonic input sequence identify the operation instance. This prevents
+    /// two intentionally identical clicks in different operations from becoming
+    /// one permanent same-action fence key, while preserving retry identity for
+    /// the same (session, sequence, event) tuple.
+    pub fn canonical_action_digest(
+        &self,
+        session_id: [u8; 16],
+        sequence: u64,
+    ) -> Result<[u8; 32], InputEventValidationError> {
+        let event_digest = self.canonical_digest()?;
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"xenia:input-action-instance:v1\\0");
+        hasher.update(&session_id);
+        hasher.update(&sequence.to_be_bytes());
+        hasher.update(&event_digest);
+        Ok(*hasher.finalize().as_bytes())
+    }
+
+    /// Compute the canonical digest of this exact validated input event.
+    ///
+    /// The encoding is explicit rather than serializer-dependent so the act
+    /// identity cannot change merely because a bincode/serde version changes.
+    pub fn canonical_digest(&self) -> Result<[u8; 32], InputEventValidationError> {
+        self.validate()?;
+
+        let mut bytes = Vec::with_capacity(32);
+        match self {
+            Self::Pointer {
+                x,
+                y,
+                button,
+                pressed,
+            } => {
+                bytes.push(0);
+                bytes.extend_from_slice(&canonical_f32_bits(*x).to_be_bytes());
+                bytes.extend_from_slice(&canonical_f32_bits(*y).to_be_bytes());
+                bytes.push(*button);
+                bytes.push(u8::from(*pressed));
+            }
+            Self::Key {
+                code,
+                pressed,
+                modifiers,
+            } => {
+                bytes.push(1);
+                bytes.extend_from_slice(&code.to_be_bytes());
+                bytes.push(u8::from(*pressed));
+                bytes.push(*modifiers);
+            }
+            Self::Touch {
+                index,
+                x,
+                y,
+                phase,
+                pressure,
+            } => {
+                bytes.push(2);
+                bytes.push(*index);
+                bytes.extend_from_slice(&canonical_f32_bits(*x).to_be_bytes());
+                bytes.extend_from_slice(&canonical_f32_bits(*y).to_be_bytes());
+                bytes.push(*phase);
+                bytes.extend_from_slice(&canonical_f32_bits(*pressure).to_be_bytes());
+            }
+            Self::PointerMove { x, y } => {
+                bytes.push(3);
+                bytes.extend_from_slice(&canonical_f32_bits(*x).to_be_bytes());
+                bytes.extend_from_slice(&canonical_f32_bits(*y).to_be_bytes());
+            }
+            Self::PointerButton {
+                x,
+                y,
+                button,
+                pressed,
+            } => {
+                bytes.push(4);
+                bytes.extend_from_slice(&canonical_f32_bits(*x).to_be_bytes());
+                bytes.extend_from_slice(&canonical_f32_bits(*y).to_be_bytes());
+                bytes.push(*button);
+                bytes.push(u8::from(*pressed));
+            }
+        }
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(INPUT_EVENT_DIGEST_DOMAIN);
+        hasher.update(&bytes);
+        Ok(*hasher.finalize().as_bytes())
+    }
+}
+
+/// A recorded injection — useful for LoggingInjector + tests.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InjectedEvent {
     /// Legacy combined pointer event with denormalized coordinates.
@@ -302,6 +514,11 @@ pub trait InputInjector: Send {
     /// Drive a batch of [`InputEvent`]s. Default impl dispatches
     /// each one; backends needing batch semantics can override.
     fn process_events(&mut self, events: &[InputEvent]) -> Result<(), InjectError> {
+        // Validate the entire batch before the first backend call so a malformed
+        // later event cannot cause a valid earlier event to be partially applied.
+        for event in events {
+            event.validate()?;
+        }
         for event in events {
             match event {
                 InputEvent::Pointer {
@@ -334,6 +551,48 @@ pub trait InputInjector: Send {
         Ok(())
     }
 
+    /// Drive events and classify the provider-boundary outcome.
+    ///
+    /// The default mapping is intentionally conservative: successful backend
+    /// completion is only Accepted because an API/RPC acknowledgement does not
+    /// by itself prove that the host-side consequence completed. NotEntered is
+    /// a pre-effect rejection only for a one-event operation; a multi-event
+    /// batch remains Indeterminate on any dispatch error because earlier events
+    /// may already have taken effect.
+    /// Backends that have stronger provider-entry knowledge may override this
+    /// method, but MUST NOT report RejectionBeforeEffect without proof that
+    /// provider entry did not occur.
+    fn process_events_outcome(
+        &mut self,
+        events: &[InputEvent],
+    ) -> Result<InputEffectOutcome, InjectError> {
+        // Validate at this boundary even if a backend overrides process_events:
+        // an override must not turn a later malformed event into a false claim
+        // that earlier events could not have taken effect.
+        if events.iter().any(|event| event.validate().is_err()) {
+            return Ok(InputEffectOutcome::RejectionBeforeEffect);
+        }
+
+        match self.process_events(events) {
+            Ok(()) => Ok(InputEffectOutcome::Accepted),
+            // NotEntered proves no provider entry for this operation. A failed
+            // multi-event batch may already have applied earlier events, so its
+            // aggregate outcome remains indeterminate.
+            Err(InjectError::NotEntered(_)) if events.len() == 1 => {
+                Ok(InputEffectOutcome::RejectionBeforeEffect)
+            }
+            Err(_err) => Ok(InputEffectOutcome::Indeterminate),
+        }
+    }
+
+    /// Drive one event with an explicit effect-boundary outcome.
+    fn process_event_outcome(
+        &mut self,
+        event: &InputEvent,
+    ) -> Result<InputEffectOutcome, InjectError> {
+        self.process_events_outcome(std::slice::from_ref(event))
+    }
+
     /// Backend identifier for observability.
     fn backend_name(&self) -> &str;
 }
@@ -343,9 +602,9 @@ pub trait InputInjector: Send {
 pub struct InputReleaseReport {
     /// Number of release/cancel operations attempted.
     pub attempted: usize,
-    /// Number successfully delivered to the backend.
+    /// Number of releases explicitly confirmed applied by the backend.
     pub released: usize,
-    /// Number that failed and remain tracked for a later retry/drop attempt.
+    /// Number not confirmed applied and therefore still tracked for retry/drop.
     pub failed: usize,
 }
 
@@ -375,6 +634,212 @@ impl SessionInputInjector {
         }
     }
 
+    /// Process one event through the backend while preserving an explicit
+    /// provider-boundary outcome for the caller.
+    ///
+    /// Tracking is conservative around provider results that are not
+    /// independently execution-confirmed: possible press/down state remains
+    /// tracked so teardown can attempt the matching release rather than assuming
+    /// that provider acknowledgement means the host state definitely changed.
+    pub fn process_event_outcome(
+        &mut self,
+        event: &InputEvent,
+    ) -> Result<InputEffectOutcome, InjectError> {
+        // Validate before calling an overridable backend boundary.
+        if event.validate().is_err() {
+            return Ok(InputEffectOutcome::RejectionBeforeEffect);
+        }
+
+        // Trait implementors should return an explicit outcome, but the Result
+        // channel still exists. Never let an unexpected backend error bypass
+        // conservative state tracking.
+        let outcome = match self.inner.process_event_outcome(event) {
+            Ok(outcome) => outcome,
+            Err(InjectError::NotEntered(_)) => InputEffectOutcome::RejectionBeforeEffect,
+            Err(_) => InputEffectOutcome::Indeterminate,
+        };
+        match outcome {
+            InputEffectOutcome::Applied => self.track_event_state(event),
+            // Accepted is an acknowledgement, not proof the host executed the
+            // release. Preserve possible down-state just as for Indeterminate.
+            InputEffectOutcome::Accepted | InputEffectOutcome::Indeterminate => {
+                self.track_indeterminate_state(event)
+            }
+            InputEffectOutcome::RejectionBeforeEffect => {}
+        }
+        Ok(outcome)
+    }
+
+    /// Process a batch through the outcome-aware single-event path. If an event
+    /// fails after any earlier event was accepted/applied, the aggregate cannot
+    /// be described as a pre-effect rejection.
+    pub fn process_events_outcome(
+        &mut self,
+        events: &[InputEvent],
+    ) -> Result<InputEffectOutcome, InjectError> {
+        if events.iter().any(|event| event.validate().is_err()) {
+            return Ok(InputEffectOutcome::RejectionBeforeEffect);
+        }
+        if events.is_empty() {
+            return Ok(InputEffectOutcome::Accepted);
+        }
+
+        let mut any_accepted = false;
+        for (index, event) in events.iter().enumerate() {
+            match self.process_event_outcome(event)? {
+                InputEffectOutcome::Applied => {}
+                InputEffectOutcome::Accepted => any_accepted = true,
+                InputEffectOutcome::Indeterminate => return Ok(InputEffectOutcome::Indeterminate),
+                InputEffectOutcome::RejectionBeforeEffect if index == 0 => {
+                    return Ok(InputEffectOutcome::RejectionBeforeEffect);
+                }
+                InputEffectOutcome::RejectionBeforeEffect => {
+                    return Ok(InputEffectOutcome::Indeterminate);
+                }
+            }
+        }
+
+        if any_accepted {
+            Ok(InputEffectOutcome::Accepted)
+        } else {
+            Ok(InputEffectOutcome::Applied)
+        }
+    }
+
+    fn track_event_state(&mut self, event: &InputEvent) {
+        match event {
+            InputEvent::Pointer {
+                x,
+                y,
+                button,
+                pressed,
+            } => {
+                if *pressed {
+                    self.pressed_buttons.insert(*button, (*x, *y));
+                } else {
+                    self.pressed_buttons.remove(button);
+                }
+            }
+            InputEvent::PointerMove { x, y } => {
+                for position in self.pressed_buttons.values_mut() {
+                    *position = (*x, *y);
+                }
+            }
+            InputEvent::PointerButton {
+                x,
+                y,
+                button,
+                pressed,
+            } => {
+                if *pressed {
+                    self.pressed_buttons.insert(*button, (*x, *y));
+                } else {
+                    self.pressed_buttons.remove(button);
+                }
+            }
+            InputEvent::Key {
+                code,
+                modifiers,
+                pressed,
+            } => {
+                if *pressed {
+                    self.pressed_keys.insert(*code, *modifiers);
+                } else {
+                    self.pressed_keys.remove(code);
+                }
+            }
+            InputEvent::Touch {
+                index,
+                x,
+                y,
+                phase,
+                pressure,
+            } => match phase {
+                0 | 1 => {
+                    self.active_touches.insert(*index, (*x, *y, *pressure));
+                }
+                _ => {
+                    self.active_touches.remove(index);
+                }
+            },
+        }
+    }
+
+    /// Conservatively track an effect whose provider outcome is unknown.
+    ///
+    /// Possible press/down transitions are retained so teardown can release
+    /// them. Possible release/up/cancel transitions are deliberately *not*
+    /// removed from the tracked set, because the provider may not have seen
+    /// the release at all. A duplicate teardown release is safer than losing
+    /// knowledge of a possibly-held host state.
+    fn track_indeterminate_state(&mut self, event: &InputEvent) {
+        match event {
+            InputEvent::Pointer {
+                x,
+                y,
+                button,
+                pressed,
+            }
+            | InputEvent::PointerButton {
+                x,
+                y,
+                button,
+                pressed,
+            } => {
+                if *pressed {
+                    self.pressed_buttons.insert(*button, (*x, *y));
+                }
+            }
+            InputEvent::PointerMove { x, y } => {
+                for position in self.pressed_buttons.values_mut() {
+                    *position = (*x, *y);
+                }
+            }
+            InputEvent::Key {
+                code,
+                modifiers,
+                pressed,
+            } => {
+                if *pressed {
+                    self.pressed_keys.insert(*code, *modifiers);
+                }
+            }
+            InputEvent::Touch {
+                index,
+                x,
+                y,
+                phase,
+                pressure,
+            } => {
+                if matches!(*phase, 0 | 1) {
+                    self.active_touches.insert(*index, (*x, *y, *pressure));
+                }
+            }
+        }
+    }
+    /// Preserve legacy Result-based trait calls without bypassing the
+    /// explicit effect-outcome tracker. A successful legacy backend call is
+    /// only an acknowledgement; it must not erase a possibly-held release.
+    fn legacy_event_result(&mut self, event: InputEvent) -> Result<(), InjectError> {
+        if let Err(error) = event.validate() {
+            return Err(InjectError::InvalidEvent(error));
+        }
+        let outcome = self.process_event_outcome(&event)?;
+        Self::legacy_outcome_result(outcome)
+    }
+
+    fn legacy_outcome_result(outcome: InputEffectOutcome) -> Result<(), InjectError> {
+        match outcome {
+            InputEffectOutcome::Applied | InputEffectOutcome::Accepted => Ok(()),
+            InputEffectOutcome::RejectionBeforeEffect => Err(InjectError::NotEntered(
+                "session input rejected before provider entry".into(),
+            )),
+            InputEffectOutcome::Indeterminate => Err(InjectError::Backend(
+                "session input effect outcome is indeterminate".into(),
+            )),
+        }
+    }
+
     /// Number of currently tracked press/down states.
     pub fn active_state_count(&self) -> usize {
         self.pressed_keys.len() + self.pressed_buttons.len() + self.active_touches.len()
@@ -382,8 +847,8 @@ impl SessionInputInjector {
 
     /// Best-effort release of every session-owned key/button/touch state.
     ///
-    /// Successful releases are removed immediately. Failed releases remain
-    /// tracked so a subsequent call (including the drop fallback) can retry.
+    /// Only releases explicitly confirmed as applied are removed immediately.
+    /// Unconfirmed or failed releases remain tracked so a later call can retry.
     pub fn release_all(&mut self) -> InputReleaseReport {
         let mut report = InputReleaseReport::default();
 
@@ -394,12 +859,16 @@ impl SessionInputInjector {
             .collect();
         for (index, x, y, pressure) in touches {
             report.attempted += 1;
-            match self.inner.inject_touch(index, x, y, 3, pressure) {
-                Ok(()) => {
-                    self.active_touches.remove(&index);
-                    report.released += 1;
-                }
-                Err(_) => report.failed += 1,
+            let event = InputEvent::Touch {
+                index,
+                x,
+                y,
+                phase: 3,
+                pressure,
+            };
+            match self.process_event_outcome(&event) {
+                Ok(InputEffectOutcome::Applied) => report.released += 1,
+                Ok(_) | Err(_) => report.failed += 1,
             }
         }
 
@@ -410,12 +879,15 @@ impl SessionInputInjector {
             .collect();
         for (button, x, y) in buttons {
             report.attempted += 1;
-            match self.inner.inject_pointer_button(x, y, button, false) {
-                Ok(()) => {
-                    self.pressed_buttons.remove(&button);
-                    report.released += 1;
-                }
-                Err(_) => report.failed += 1,
+            let event = InputEvent::PointerButton {
+                x,
+                y,
+                button,
+                pressed: false,
+            };
+            match self.process_event_outcome(&event) {
+                Ok(InputEffectOutcome::Applied) => report.released += 1,
+                Ok(_) | Err(_) => report.failed += 1,
             }
         }
 
@@ -426,12 +898,14 @@ impl SessionInputInjector {
             .collect();
         for (code, modifiers) in keys {
             report.attempted += 1;
-            match self.inner.inject_key(code, false, modifiers) {
-                Ok(()) => {
-                    self.pressed_keys.remove(&code);
-                    report.released += 1;
-                }
-                Err(_) => report.failed += 1,
+            let event = InputEvent::Key {
+                code,
+                pressed: false,
+                modifiers,
+            };
+            match self.process_event_outcome(&event) {
+                Ok(InputEffectOutcome::Applied) => report.released += 1,
+                Ok(_) | Err(_) => report.failed += 1,
             }
         }
 
@@ -446,12 +920,37 @@ impl Drop for SessionInputInjector {
 }
 
 impl InputInjector for SessionInputInjector {
-    fn inject_pointer_move(&mut self, x: f32, y: f32) -> Result<(), InjectError> {
-        self.inner.inject_pointer_move(x, y)?;
-        for position in self.pressed_buttons.values_mut() {
-            *position = (x, y);
+    fn process_events(&mut self, events: &[InputEvent]) -> Result<(), InjectError> {
+        if let Some(error) = events.iter().find_map(|event| event.validate().err()) {
+            return Err(InjectError::InvalidEvent(error));
         }
-        Ok(())
+        match SessionInputInjector::process_events_outcome(self, events)? {
+            InputEffectOutcome::Applied | InputEffectOutcome::Accepted => Ok(()),
+            InputEffectOutcome::RejectionBeforeEffect => Err(InjectError::NotEntered(
+                "session input batch rejected before provider entry".into(),
+            )),
+            InputEffectOutcome::Indeterminate => Err(InjectError::Backend(
+                "session input batch effect outcome is indeterminate".into(),
+            )),
+        }
+    }
+
+    fn process_events_outcome(
+        &mut self,
+        events: &[InputEvent],
+    ) -> Result<InputEffectOutcome, InjectError> {
+        SessionInputInjector::process_events_outcome(self, events)
+    }
+
+    fn process_event_outcome(
+        &mut self,
+        event: &InputEvent,
+    ) -> Result<InputEffectOutcome, InjectError> {
+        SessionInputInjector::process_event_outcome(self, event)
+    }
+
+    fn inject_pointer_move(&mut self, x: f32, y: f32) -> Result<(), InjectError> {
+        self.legacy_event_result(InputEvent::PointerMove { x, y })
     }
 
     fn inject_pointer_button(
@@ -461,13 +960,12 @@ impl InputInjector for SessionInputInjector {
         button: u8,
         pressed: bool,
     ) -> Result<(), InjectError> {
-        self.inner.inject_pointer_button(x, y, button, pressed)?;
-        if pressed {
-            self.pressed_buttons.insert(button, (x, y));
-        } else {
-            self.pressed_buttons.remove(&button);
-        }
-        Ok(())
+        self.legacy_event_result(InputEvent::PointerButton {
+            x,
+            y,
+            button,
+            pressed,
+        })
     }
 
     fn inject_pointer(
@@ -477,23 +975,20 @@ impl InputInjector for SessionInputInjector {
         button: u8,
         pressed: bool,
     ) -> Result<(), InjectError> {
-        self.inner.inject_pointer(x, y, button, pressed)?;
-        if pressed {
-            self.pressed_buttons.insert(button, (x, y));
-        } else {
-            self.pressed_buttons.remove(&button);
-        }
-        Ok(())
+        self.legacy_event_result(InputEvent::Pointer {
+            x,
+            y,
+            button,
+            pressed,
+        })
     }
 
     fn inject_key(&mut self, code: u32, pressed: bool, modifiers: u8) -> Result<(), InjectError> {
-        self.inner.inject_key(code, pressed, modifiers)?;
-        if pressed {
-            self.pressed_keys.insert(code, modifiers);
-        } else {
-            self.pressed_keys.remove(&code);
-        }
-        Ok(())
+        self.legacy_event_result(InputEvent::Key {
+            code,
+            pressed,
+            modifiers,
+        })
     }
 
     fn inject_touch(
@@ -504,16 +999,13 @@ impl InputInjector for SessionInputInjector {
         phase: u8,
         pressure: f32,
     ) -> Result<(), InjectError> {
-        self.inner.inject_touch(index, x, y, phase, pressure)?;
-        match phase {
-            0 | 1 => {
-                self.active_touches.insert(index, (x, y, pressure));
-            }
-            _ => {
-                self.active_touches.remove(&index);
-            }
-        }
-        Ok(())
+        self.legacy_event_result(InputEvent::Touch {
+            index,
+            x,
+            y,
+            phase,
+            pressure,
+        })
     }
 
     fn backend_name(&self) -> &str {
@@ -994,6 +1486,1070 @@ impl InputInjector for UinputInjector {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn successful_backend_return_is_only_provider_acceptance() {
+        let mut injector = NoopInjector;
+        let event = InputEvent::PointerMove { x: 0.5, y: 0.5 };
+        assert_eq!(
+            injector.process_event_outcome(&event).unwrap(),
+            InputEffectOutcome::Accepted
+        );
+    }
+
+    #[test]
+    fn backend_error_is_indeterminate_by_default() {
+        struct Failing;
+
+        impl InputInjector for Failing {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
+                Err(InjectError::Backend("unknown provider outcome".into()))
+            }
+            fn inject_pointer_button(
+                &mut self,
+                _x: f32,
+                _y: f32,
+                _button: u8,
+                _pressed: bool,
+            ) -> Result<(), InjectError> {
+                Err(InjectError::Backend("unknown provider outcome".into()))
+            }
+            fn inject_key(
+                &mut self,
+                _code: u32,
+                _pressed: bool,
+                _modifiers: u8,
+            ) -> Result<(), InjectError> {
+                Err(InjectError::Backend("unknown provider outcome".into()))
+            }
+            fn inject_touch(
+                &mut self,
+                _index: u8,
+                _x: f32,
+                _y: f32,
+                _phase: u8,
+                _pressure: f32,
+            ) -> Result<(), InjectError> {
+                Err(InjectError::Backend("unknown provider outcome".into()))
+            }
+            fn backend_name(&self) -> &str {
+                "failing"
+            }
+        }
+
+        let mut injector = Failing;
+        let event = InputEvent::PointerMove { x: 0.5, y: 0.5 };
+        assert_eq!(
+            injector.process_event_outcome(&event).unwrap(),
+            InputEffectOutcome::Indeterminate
+        );
+    }
+
+    #[test]
+    fn validation_failure_is_always_pre_effect_rejection() {
+        struct BatchOverride {
+            process_events_calls: usize,
+        }
+
+        impl InputInjector for BatchOverride {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_pointer_button(
+                &mut self,
+                _x: f32,
+                _y: f32,
+                _button: u8,
+                _pressed: bool,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_key(
+                &mut self,
+                _code: u32,
+                _pressed: bool,
+                _modifiers: u8,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_touch(
+                &mut self,
+                _index: u8,
+                _x: f32,
+                _y: f32,
+                _phase: u8,
+                _pressure: f32,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn process_events(&mut self, _events: &[InputEvent]) -> Result<(), InjectError> {
+                self.process_events_calls += 1;
+                Err(InjectError::InvalidEvent(
+                    InputEventValidationError::NonFiniteCoordinate,
+                ))
+            }
+            fn backend_name(&self) -> &str {
+                "batch-override"
+            }
+        }
+
+        let mut injector = BatchOverride {
+            process_events_calls: 0,
+        };
+        let events = [
+            InputEvent::PointerMove { x: 0.2, y: 0.3 },
+            InputEvent::PointerMove {
+                x: f32::NAN,
+                y: 0.5,
+            },
+        ];
+
+        assert_eq!(
+            injector.process_events_outcome(&events).unwrap(),
+            InputEffectOutcome::RejectionBeforeEffect
+        );
+        assert_eq!(
+            injector.process_events_calls, 0,
+            "invalid input must be rejected before a backend override is entered"
+        );
+    }
+
+    #[test]
+    fn explicit_not_entered_error_is_pre_effect_rejection() {
+        struct Rejected;
+
+        impl InputInjector for Rejected {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
+                Err(InjectError::NotEntered(
+                    "portal refused before dispatch".into(),
+                ))
+            }
+            fn inject_pointer_button(
+                &mut self,
+                _x: f32,
+                _y: f32,
+                _button: u8,
+                _pressed: bool,
+            ) -> Result<(), InjectError> {
+                Err(InjectError::NotEntered(
+                    "portal refused before dispatch".into(),
+                ))
+            }
+            fn inject_key(
+                &mut self,
+                _code: u32,
+                _pressed: bool,
+                _modifiers: u8,
+            ) -> Result<(), InjectError> {
+                Err(InjectError::NotEntered(
+                    "portal refused before dispatch".into(),
+                ))
+            }
+            fn inject_touch(
+                &mut self,
+                _index: u8,
+                _x: f32,
+                _y: f32,
+                _phase: u8,
+                _pressure: f32,
+            ) -> Result<(), InjectError> {
+                Err(InjectError::NotEntered(
+                    "portal refused before dispatch".into(),
+                ))
+            }
+            fn backend_name(&self) -> &str {
+                "rejected"
+            }
+        }
+
+        let mut injector = Rejected;
+        let event = InputEvent::PointerMove { x: 0.5, y: 0.5 };
+        assert_eq!(
+            injector.process_event_outcome(&event).unwrap(),
+            InputEffectOutcome::RejectionBeforeEffect
+        );
+    }
+
+    #[test]
+    fn not_entered_on_later_batch_event_keeps_aggregate_indeterminate() {
+        struct PartialBatch;
+
+        impl InputInjector for PartialBatch {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_pointer_button(
+                &mut self,
+                _x: f32,
+                _y: f32,
+                _button: u8,
+                _pressed: bool,
+            ) -> Result<(), InjectError> {
+                Err(InjectError::NotEntered(
+                    "second event never entered provider".into(),
+                ))
+            }
+            fn inject_key(
+                &mut self,
+                _code: u32,
+                _pressed: bool,
+                _modifiers: u8,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_touch(
+                &mut self,
+                _index: u8,
+                _x: f32,
+                _y: f32,
+                _phase: u8,
+                _pressure: f32,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn backend_name(&self) -> &str {
+                "partial-batch"
+            }
+        }
+
+        let mut injector = PartialBatch;
+        let events = [
+            InputEvent::PointerMove { x: 0.2, y: 0.3 },
+            InputEvent::PointerButton {
+                x: 0.4,
+                y: 0.5,
+                button: 0,
+                pressed: true,
+            },
+        ];
+
+        assert_eq!(
+            injector.process_events_outcome(&events).unwrap(),
+            InputEffectOutcome::Indeterminate,
+            "the first event may have taken effect before the second was rejected"
+        );
+    }
+
+    #[test]
+    fn legacy_trait_entry_point_tracks_uncertain_press_and_unconfirmed_release() {
+        struct LegacyOnly {
+            fail_key_press: bool,
+        }
+
+        impl InputInjector for LegacyOnly {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_pointer_button(
+                &mut self,
+                _x: f32,
+                _y: f32,
+                _button: u8,
+                _pressed: bool,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_key(
+                &mut self,
+                _code: u32,
+                pressed: bool,
+                _modifiers: u8,
+            ) -> Result<(), InjectError> {
+                if self.fail_key_press && pressed {
+                    Err(InjectError::Backend("provider outcome unknown".into()))
+                } else {
+                    Ok(())
+                }
+            }
+            fn inject_touch(
+                &mut self,
+                _index: u8,
+                _x: f32,
+                _y: f32,
+                _phase: u8,
+                _pressure: f32,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn backend_name(&self) -> &str {
+                "legacy-only"
+            }
+        }
+
+        let mut failed = SessionInputInjector::new(Box::new(LegacyOnly {
+            fail_key_press: true,
+        }));
+        assert!(matches!(
+            failed.inject_key(30, true, 0),
+            Err(InjectError::Backend(_))
+        ));
+        assert_eq!(
+            failed.active_state_count(),
+            1,
+            "legacy Result error must not bypass uncertain-press tracking"
+        );
+
+        let mut acknowledged = SessionInputInjector::new(Box::new(LegacyOnly {
+            fail_key_press: false,
+        }));
+        assert!(acknowledged.inject_key(30, true, 0).is_ok());
+        assert_eq!(acknowledged.active_state_count(), 1);
+        assert!(acknowledged.inject_key(30, false, 0).is_ok());
+        assert_eq!(
+            acknowledged.active_state_count(),
+            1,
+            "legacy Ok on release is only acceptance, not proof the host key is up"
+        );
+    }
+
+    #[test]
+    fn legacy_pointer_and_touch_paths_retain_uncertain_held_state() {
+        struct LegacyOnly {
+            fail_button_press: bool,
+            fail_touch_down: bool,
+        }
+
+        impl InputInjector for LegacyOnly {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_pointer_button(
+                &mut self,
+                _x: f32,
+                _y: f32,
+                _button: u8,
+                pressed: bool,
+            ) -> Result<(), InjectError> {
+                if self.fail_button_press && pressed {
+                    Err(InjectError::Backend("provider outcome unknown".into()))
+                } else {
+                    Ok(())
+                }
+            }
+            fn inject_key(
+                &mut self,
+                _code: u32,
+                _pressed: bool,
+                _modifiers: u8,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_touch(
+                &mut self,
+                _index: u8,
+                _x: f32,
+                _y: f32,
+                phase: u8,
+                _pressure: f32,
+            ) -> Result<(), InjectError> {
+                if self.fail_touch_down && phase == 0 {
+                    Err(InjectError::Backend("provider outcome unknown".into()))
+                } else {
+                    Ok(())
+                }
+            }
+            fn backend_name(&self) -> &str {
+                "legacy-only"
+            }
+        }
+
+        let mut pointer = SessionInputInjector::new(Box::new(LegacyOnly {
+            fail_button_press: true,
+            fail_touch_down: false,
+        }));
+        assert!(matches!(
+            pointer.inject_pointer_button(0.25, 0.5, 1, true),
+            Err(InjectError::Backend(_))
+        ));
+        assert_eq!(
+            pointer.active_state_count(),
+            1,
+            "legacy pointer-button error must retain a possibly-held button"
+        );
+
+        assert!(pointer.inject_pointer_move(0.75, 0.8).is_ok());
+        assert_eq!(pointer.active_state_count(), 1);
+        assert!(pointer.inject_pointer_button(0.75, 0.8, 1, false).is_ok());
+        assert_eq!(
+            pointer.active_state_count(),
+            1,
+            "legacy acknowledgement must not clear an unconfirmed pointer release"
+        );
+
+        let mut touch = SessionInputInjector::new(Box::new(LegacyOnly {
+            fail_button_press: false,
+            fail_touch_down: true,
+        }));
+        assert!(matches!(
+            touch.inject_touch(2, 0.2, 0.3, 0, 1.0),
+            Err(InjectError::Backend(_))
+        ));
+        assert_eq!(
+            touch.active_state_count(),
+            1,
+            "legacy touch-down error must retain a possibly active touch"
+        );
+
+        assert!(touch.inject_touch(2, 0.2, 0.3, 2, 0.0).is_ok());
+        assert_eq!(
+            touch.active_state_count(),
+            1,
+            "legacy acknowledgement must not clear an unconfirmed touch-up"
+        );
+    }
+
+    #[test]
+    fn trait_object_outcome_error_tracks_possible_press() {
+        struct OutcomeError;
+
+        impl InputInjector for OutcomeError {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_pointer_button(
+                &mut self,
+                _x: f32,
+                _y: f32,
+                _button: u8,
+                _pressed: bool,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_key(
+                &mut self,
+                _code: u32,
+                _pressed: bool,
+                _modifiers: u8,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_touch(
+                &mut self,
+                _index: u8,
+                _x: f32,
+                _y: f32,
+                _phase: u8,
+                _pressure: f32,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn process_event_outcome(
+                &mut self,
+                _event: &InputEvent,
+            ) -> Result<InputEffectOutcome, InjectError> {
+                Err(InjectError::Backend(
+                    "outcome channel failed after provider entry".into(),
+                ))
+            }
+            fn backend_name(&self) -> &str {
+                "outcome-error"
+            }
+        }
+
+        let mut wrapped = SessionInputInjector::new(Box::new(OutcomeError));
+        let event = InputEvent::PointerButton {
+            x: 0.25,
+            y: 0.5,
+            button: 1,
+            pressed: true,
+        };
+        let injector: &mut dyn InputInjector = &mut wrapped;
+        assert_eq!(
+            injector.process_event_outcome(&event).unwrap(),
+            InputEffectOutcome::Indeterminate
+        );
+        assert_eq!(wrapped.active_state_count(), 1);
+    }
+
+    #[test]
+    fn partial_batch_keeps_prior_press_tracked_after_later_not_entered() {
+        struct PartialEffect;
+
+        impl InputInjector for PartialEffect {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
+                Ok(())
+            }
+
+            fn inject_pointer_button(
+                &mut self,
+                _x: f32,
+                _y: f32,
+                _button: u8,
+                _pressed: bool,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+
+            fn inject_key(
+                &mut self,
+                _code: u32,
+                _pressed: bool,
+                _modifiers: u8,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+
+            fn inject_touch(
+                &mut self,
+                _index: u8,
+                _x: f32,
+                _y: f32,
+                _phase: u8,
+                _pressure: f32,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+
+            fn process_event_outcome(
+                &mut self,
+                event: &InputEvent,
+            ) -> Result<InputEffectOutcome, InjectError> {
+                match event {
+                    InputEvent::PointerButton { pressed: true, .. } => {
+                        Ok(InputEffectOutcome::Applied)
+                    }
+                    InputEvent::Key { pressed: true, .. } => Err(InjectError::NotEntered(
+                        "second event never entered provider".into(),
+                    )),
+                    _ => Ok(InputEffectOutcome::Applied),
+                }
+            }
+
+            fn backend_name(&self) -> &str {
+                "partial-effect"
+            }
+        }
+
+        let mut wrapped = SessionInputInjector::new(Box::new(PartialEffect));
+        let events = [
+            InputEvent::PointerButton {
+                x: 0.2,
+                y: 0.3,
+                button: 1,
+                pressed: true,
+            },
+            InputEvent::Key {
+                code: 30,
+                pressed: true,
+                modifiers: 0,
+            },
+        ];
+
+        assert_eq!(
+            wrapped.process_events_outcome(&events).unwrap(),
+            InputEffectOutcome::Indeterminate
+        );
+        assert_eq!(
+            wrapped.active_state_count(),
+            1,
+            "prior applied press must remain tracked after later batch rejection"
+        );
+    }
+
+    #[test]
+    fn accepted_release_remains_tracked_until_applied() {
+        struct AcceptedRelease;
+
+        impl InputInjector for AcceptedRelease {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_pointer_button(
+                &mut self,
+                _x: f32,
+                _y: f32,
+                _button: u8,
+                _pressed: bool,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_key(
+                &mut self,
+                _code: u32,
+                _pressed: bool,
+                _modifiers: u8,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_touch(
+                &mut self,
+                _index: u8,
+                _x: f32,
+                _y: f32,
+                _phase: u8,
+                _pressure: f32,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn process_event_outcome(
+                &mut self,
+                event: &InputEvent,
+            ) -> Result<InputEffectOutcome, InjectError> {
+                match event {
+                    InputEvent::PointerButton { pressed: true, .. } => {
+                        Ok(InputEffectOutcome::Applied)
+                    }
+                    InputEvent::PointerButton { pressed: false, .. } => {
+                        Ok(InputEffectOutcome::Accepted)
+                    }
+                    _ => Ok(InputEffectOutcome::Applied),
+                }
+            }
+            fn backend_name(&self) -> &str {
+                "accepted-release"
+            }
+        }
+
+        let mut wrapped = SessionInputInjector::new(Box::new(AcceptedRelease));
+        let press = InputEvent::PointerButton {
+            x: 0.2,
+            y: 0.3,
+            button: 1,
+            pressed: true,
+        };
+        let release = InputEvent::PointerButton {
+            x: 0.2,
+            y: 0.3,
+            button: 1,
+            pressed: false,
+        };
+        assert_eq!(
+            wrapped.process_event_outcome(&press).unwrap(),
+            InputEffectOutcome::Applied
+        );
+        assert_eq!(wrapped.active_state_count(), 1);
+        let injector: &mut dyn InputInjector = &mut wrapped;
+        assert_eq!(
+            injector.process_event_outcome(&release).unwrap(),
+            InputEffectOutcome::Accepted
+        );
+        assert_eq!(
+            wrapped.active_state_count(),
+            1,
+            "provider acceptance alone must not erase possible down-state"
+        );
+    }
+
+    #[test]
+    fn release_all_retries_unconfirmed_release_until_applied() {
+        struct RetryableRelease {
+            release_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        impl InputInjector for RetryableRelease {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_pointer_button(
+                &mut self,
+                _x: f32,
+                _y: f32,
+                _button: u8,
+                _pressed: bool,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_key(
+                &mut self,
+                _code: u32,
+                _pressed: bool,
+                _modifiers: u8,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_touch(
+                &mut self,
+                _index: u8,
+                _x: f32,
+                _y: f32,
+                _phase: u8,
+                _pressure: f32,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn process_event_outcome(
+                &mut self,
+                event: &InputEvent,
+            ) -> Result<InputEffectOutcome, InjectError> {
+                match event {
+                    InputEvent::PointerButton { pressed: false, .. } => {
+                        if self
+                            .release_calls
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                            == 0
+                        {
+                            Ok(InputEffectOutcome::Accepted)
+                        } else {
+                            Ok(InputEffectOutcome::Applied)
+                        }
+                    }
+                    _ => Ok(InputEffectOutcome::Applied),
+                }
+            }
+            fn backend_name(&self) -> &str {
+                "retryable-release"
+            }
+        }
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut injector = SessionInputInjector::new(Box::new(RetryableRelease {
+            release_calls: std::sync::Arc::clone(&calls),
+        }));
+        let press = InputEvent::PointerButton {
+            x: 0.2,
+            y: 0.3,
+            button: 1,
+            pressed: true,
+        };
+        assert_eq!(
+            injector.process_event_outcome(&press).unwrap(),
+            InputEffectOutcome::Applied
+        );
+        assert_eq!(injector.active_state_count(), 1);
+
+        let first = injector.release_all();
+        assert_eq!(first.attempted, 1);
+        assert_eq!(first.released, 0);
+        assert_eq!(first.failed, 1);
+        assert_eq!(
+            injector.active_state_count(),
+            1,
+            "unconfirmed release must remain available for retry"
+        );
+
+        let second = injector.release_all();
+        assert_eq!(second.attempted, 1);
+        assert_eq!(second.released, 1);
+        assert_eq!(second.failed, 0);
+        assert_eq!(injector.active_state_count(), 0);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "second teardown must retry and observe the confirmed release"
+        );
+    }
+
+    #[test]
+    fn session_wrapper_retains_state_after_indeterminate_release() {
+        struct UncertainRelease;
+
+        impl InputInjector for UncertainRelease {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_pointer_button(
+                &mut self,
+                _x: f32,
+                _y: f32,
+                _button: u8,
+                pressed: bool,
+            ) -> Result<(), InjectError> {
+                if pressed {
+                    Ok(())
+                } else {
+                    Err(InjectError::Backend("release outcome unknown".into()))
+                }
+            }
+            fn inject_key(
+                &mut self,
+                _code: u32,
+                _pressed: bool,
+                _modifiers: u8,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_touch(
+                &mut self,
+                _index: u8,
+                _x: f32,
+                _y: f32,
+                _phase: u8,
+                _pressure: f32,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn backend_name(&self) -> &str {
+                "uncertain-release"
+            }
+        }
+
+        let mut injector = SessionInputInjector::new(Box::new(UncertainRelease));
+        let press = InputEvent::PointerButton {
+            x: 0.25,
+            y: 0.5,
+            button: 1,
+            pressed: true,
+        };
+        assert_eq!(
+            injector.process_event_outcome(&press).unwrap(),
+            InputEffectOutcome::Applied
+        );
+        assert_eq!(injector.active_state_count(), 1);
+
+        let release = InputEvent::PointerButton {
+            x: 0.25,
+            y: 0.5,
+            button: 1,
+            pressed: false,
+        };
+        assert_eq!(
+            injector.process_event_outcome(&release).unwrap(),
+            InputEffectOutcome::Indeterminate
+        );
+        assert_eq!(
+            injector.active_state_count(),
+            1,
+            "unknown release must remain tracked for teardown"
+        );
+    }
+
+    #[test]
+    fn session_wrapper_tracks_uncertain_press_for_safe_teardown() {
+        struct Uncertain;
+
+        impl InputInjector for Uncertain {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_pointer_button(
+                &mut self,
+                _x: f32,
+                _y: f32,
+                _button: u8,
+                pressed: bool,
+            ) -> Result<(), InjectError> {
+                if pressed {
+                    Err(InjectError::Backend("provider outcome unknown".into()))
+                } else {
+                    Ok(())
+                }
+            }
+            fn inject_key(
+                &mut self,
+                _code: u32,
+                _pressed: bool,
+                _modifiers: u8,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_touch(
+                &mut self,
+                _index: u8,
+                _x: f32,
+                _y: f32,
+                _phase: u8,
+                _pressure: f32,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn backend_name(&self) -> &str {
+                "uncertain"
+            }
+        }
+
+        let mut injector = SessionInputInjector::new(Box::new(Uncertain));
+        let event = InputEvent::PointerButton {
+            x: 0.25,
+            y: 0.5,
+            button: 1,
+            pressed: true,
+        };
+        assert_eq!(
+            injector.process_event_outcome(&event).unwrap(),
+            InputEffectOutcome::Indeterminate
+        );
+        assert_eq!(injector.active_state_count(), 1);
+    }
+    #[test]
+    fn action_instance_digest_binds_session_and_sequence() {
+        let event = InputEvent::PointerMove { x: 0.5, y: 0.5 };
+        let a = event.canonical_action_digest([1; 16], 7).unwrap();
+        let same = event.canonical_action_digest([1; 16], 7).unwrap();
+        let next = event.canonical_action_digest([1; 16], 8).unwrap();
+        let other_session = event.canonical_action_digest([2; 16], 7).unwrap();
+        let other_event = InputEvent::PointerMove { x: 0.5, y: 0.6 }
+            .canonical_action_digest([1; 16], 7)
+            .unwrap();
+
+        assert_eq!(a, same);
+        assert_ne!(a, next);
+        assert_ne!(a, other_session);
+        assert_ne!(a, other_event);
+    }
+
+    #[test]
+    fn canonical_digest_normalizes_signed_zero_for_all_coordinate_variants() {
+        let variants = [
+            (
+                InputEvent::Pointer {
+                    x: 0.0,
+                    y: 0.5,
+                    button: 0,
+                    pressed: false,
+                },
+                InputEvent::Pointer {
+                    x: -0.0,
+                    y: 0.5,
+                    button: 0,
+                    pressed: false,
+                },
+            ),
+            (
+                InputEvent::Touch {
+                    index: 0,
+                    x: 0.0,
+                    y: 0.5,
+                    phase: 1,
+                    pressure: 0.0,
+                },
+                InputEvent::Touch {
+                    index: 0,
+                    x: -0.0,
+                    y: 0.5,
+                    phase: 1,
+                    pressure: -0.0,
+                },
+            ),
+            (
+                InputEvent::PointerMove { x: 0.0, y: 0.5 },
+                InputEvent::PointerMove { x: -0.0, y: 0.5 },
+            ),
+            (
+                InputEvent::PointerButton {
+                    x: 0.0,
+                    y: 0.5,
+                    button: 1,
+                    pressed: true,
+                },
+                InputEvent::PointerButton {
+                    x: -0.0,
+                    y: 0.5,
+                    button: 1,
+                    pressed: true,
+                },
+            ),
+        ];
+
+        for (positive, negative) in variants {
+            assert_eq!(
+                positive.canonical_digest().unwrap(),
+                negative.canonical_digest().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_digest_is_exact_and_validation_bound() {
+        let event = InputEvent::PointerMove { x: 0.25, y: 0.75 };
+        let digest = event.canonical_digest().unwrap();
+        assert_eq!(digest, event.canonical_digest().unwrap());
+
+        let changed = InputEvent::PointerMove {
+            x: 0.25001,
+            y: 0.75,
+        };
+        assert_ne!(digest, changed.canonical_digest().unwrap());
+
+        let invalid = InputEvent::PointerMove {
+            x: f32::NAN,
+            y: 0.75,
+        };
+        assert!(invalid.canonical_digest().is_err());
+    }
+
+    #[test]
+    fn input_event_validation_rejects_non_finite_and_out_of_range_values() {
+        let event = InputEvent::PointerMove {
+            x: f32::NAN,
+            y: 0.5,
+        };
+        assert_eq!(
+            event.validate().unwrap_err(),
+            InputEventValidationError::NonFiniteCoordinate
+        );
+
+        let event = InputEvent::PointerMove { x: 1.1, y: 0.5 };
+        assert_eq!(
+            event.validate().unwrap_err(),
+            InputEventValidationError::CoordinateOutOfRange
+        );
+
+        let event = InputEvent::Touch {
+            index: 0,
+            x: 0.5,
+            y: 0.5,
+            phase: 1,
+            pressure: f32::INFINITY,
+        };
+        assert_eq!(
+            event.validate().unwrap_err(),
+            InputEventValidationError::NonFinitePressure
+        );
+    }
+
+    #[test]
+    fn input_event_validation_rejects_reserved_numeric_domains() {
+        let event = InputEvent::Touch {
+            index: 0,
+            x: 0.5,
+            y: 0.5,
+            phase: 4,
+            pressure: 0.0,
+        };
+        assert_eq!(
+            event.validate().unwrap_err(),
+            InputEventValidationError::InvalidTouchPhase
+        );
+
+        let event = InputEvent::Key {
+            code: 30,
+            pressed: true,
+            modifiers: 0x80,
+        };
+        assert_eq!(
+            event.validate().unwrap_err(),
+            InputEventValidationError::ReservedModifierBits
+        );
+    }
+
+    #[test]
+    fn input_event_validation_accepts_current_domains() {
+        assert!(
+            InputEvent::PointerMove { x: 0.0, y: 1.0 }
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            InputEvent::PointerButton {
+                x: 0.25,
+                y: 0.75,
+                button: 9,
+                pressed: true,
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            InputEvent::Touch {
+                index: 9,
+                x: 0.25,
+                y: 0.75,
+                phase: 3,
+                pressure: 1.0,
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            InputEvent::Key {
+                code: 30,
+                pressed: true,
+                modifiers: 0x0F,
+            }
+            .validate()
+            .is_ok()
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -1046,6 +2602,28 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn invalid_batch_event_prevents_any_backend_effect() {
+        let mut log = LoggingInjector::new(100, 100);
+        let events = [
+            InputEvent::PointerButton {
+                x: 0.5,
+                y: 0.5,
+                button: 0,
+                pressed: true,
+            },
+            InputEvent::PointerMove {
+                x: f32::NAN,
+                y: 0.5,
+            },
+        ];
+
+        let err = log
+            .process_events(&events)
+            .expect_err("semantic validation must run before the first backend call");
+        assert!(matches!(err, InjectError::InvalidEvent(_)));
+        assert!(log.events.is_empty());
+    }
     #[test]
     fn process_events_dispatches_all_variants() {
         let mut log = LoggingInjector::new(100, 100);
@@ -1116,7 +2694,52 @@ mod tests {
 
     #[test]
     fn session_injector_releases_pressed_state_on_teardown() {
-        let mut injector = SessionInputInjector::new(Box::new(NoopInjector));
+        struct ConfirmedApplied;
+
+        impl InputInjector for ConfirmedApplied {
+            fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_pointer_button(
+                &mut self,
+                _x: f32,
+                _y: f32,
+                _button: u8,
+                _pressed: bool,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_key(
+                &mut self,
+                _code: u32,
+                _pressed: bool,
+                _modifiers: u8,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn inject_touch(
+                &mut self,
+                _index: u8,
+                _x: f32,
+                _y: f32,
+                _phase: u8,
+                _pressure: f32,
+            ) -> Result<(), InjectError> {
+                Ok(())
+            }
+            fn process_event_outcome(
+                &mut self,
+                _event: &InputEvent,
+            ) -> Result<InputEffectOutcome, InjectError> {
+                Ok(InputEffectOutcome::Applied)
+            }
+
+            fn backend_name(&self) -> &str {
+                "confirmed-applied"
+            }
+        }
+
+        let mut injector = SessionInputInjector::new(Box::new(ConfirmedApplied));
         injector
             .process_events(&[
                 InputEvent::PointerMove { x: 0.1, y: 0.2 },
@@ -1148,6 +2771,33 @@ mod tests {
         assert_eq!(report.released, 3);
         assert_eq!(report.failed, 0);
         assert_eq!(injector.active_state_count(), 0);
+    }
+
+    #[test]
+    fn release_all_retains_state_when_provider_only_accepts_release() {
+        let mut injector = SessionInputInjector::new(Box::new(NoopInjector));
+        let press = InputEvent::PointerButton {
+            x: 0.2,
+            y: 0.3,
+            button: 1,
+            pressed: true,
+        };
+        // NoopInjector's default outcome is Accepted, not Applied.
+        assert_eq!(
+            injector.process_event_outcome(&press).unwrap(),
+            InputEffectOutcome::Accepted
+        );
+        assert_eq!(injector.active_state_count(), 1);
+
+        let report = injector.release_all();
+        assert_eq!(report.attempted, 1);
+        assert_eq!(report.released, 0);
+        assert_eq!(report.failed, 1);
+        assert_eq!(
+            injector.active_state_count(),
+            1,
+            "acceptance alone must not erase a possibly-held host button"
+        );
     }
 
     #[test]

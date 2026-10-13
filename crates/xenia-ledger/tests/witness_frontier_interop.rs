@@ -115,15 +115,7 @@ fn frozen_xenia_symthaea_witness_frontier_vector_v1() {
     };
     observation
         .verify_fresh(
-            [0x66; 32],
-            PUBLIC_KEY,
-            SOURCE_ID,
-            3,
-            [0x33; 32],
-            [0x44; 16],
-            1_010,
-            30,
-            2,
+            [0x66; 32], PUBLIC_KEY, SOURCE_ID, 3, [0x33; 32], [0x44; 16], 1_010, 30, 2,
         )
         .unwrap();
     observation.verify_current_anchor(&anchor).unwrap();
