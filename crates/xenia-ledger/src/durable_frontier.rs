@@ -141,7 +141,7 @@ pub struct DurableAuthorityEpochV1 {
 }
 
 /// Exact inputs required to re-verify one durable authority-epoch token.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct DurableFrontierVerificationContextV1<'a> {
     /// Opaque token for the exact durable ledger frontier.
     pub durable_frontier: &'a DurableLedgerFrontierV1,
@@ -222,7 +222,11 @@ impl DurableAuthorityEpochV1 {
             return Err(DurableLedgerFrontierError::PersistencePolicyMismatch);
         }
         epoch_transition
-            .verify(key_transition, expected_previous_epoch, expected_successor_epoch)
+            .verify(
+                key_transition,
+                expected_previous_epoch,
+                expected_successor_epoch,
+            )
             .map_err(DurableLedgerFrontierError::AuthorityEpoch)?;
         let fingerprint = ledger_key_transition_fingerprint(key_transition)
             .map_err(DurableLedgerFrontierError::KeyTransition)?;
