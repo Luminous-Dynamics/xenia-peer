@@ -2238,18 +2238,36 @@ mod tests {
             "indeterminate provider outcome must not be recorded as confirmed injection"
         );
 
-        let outcome = runtime
+        // A pre-effect rejection is independently safe, but it must be
+        // exercised on a fresh session: the previous Indeterminate result
+        // deliberately seals the first runtime's input lane.
+        let (mut rejected_runtime, _rejected_key) = runtime(37);
+        rejected_runtime.offer().unwrap();
+        rejected_runtime
+            .grant_consent_scoped(M1PermissionSet {
+                inject_input: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+        let rejection_before = rejected_runtime
+            .session
+            .audit()
+            .iter()
+            .filter(|event| **event == xenia_peer_core::M1AuditEvent::InputInjected)
+            .count();
+
+        let outcome = rejected_runtime
             .execute_input_effect_outcome(|| Ok(InputEffectOutcome::RejectionBeforeEffect))
             .unwrap();
         assert_eq!(outcome, InputEffectOutcome::RejectionBeforeEffect);
         assert_eq!(
-            runtime
+            rejected_runtime
                 .session
                 .audit()
                 .iter()
                 .filter(|event| **event == xenia_peer_core::M1AuditEvent::InputInjected)
                 .count(),
-            before,
+            rejection_before,
             "pre-effect rejection must not create an input-injected audit event"
         );
     }
