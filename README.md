@@ -1,6 +1,6 @@
 # xenia-peer
 
-Application-layer crates for Xenia: a peer-to-peer, consciousness-first
+Application-layer crates for Xenia: a peer-to-peer, consent-first
 remote-session stack built on top of
 [`xenia-wire`](https://github.com/Luminous-Dynamics/xenia-wire)
 (the PQC-sealed protocol, separate repo).
