@@ -1936,10 +1936,10 @@ fn m1_consent_scope(args: &Args) -> String {
         granted.send_file_to_viewer,
         granted.receive_file_from_viewer,
     ) {
-        (false, false) => "file-transfer: off",
+        (false, false) => "file-transfer: off; read-only-workload: off",
         (true, false) => "file-transfer: host-to-viewer send",
         (false, true) => "file-transfer: viewer-to-host receive",
-        (true, true) => "file-transfer: bidirectional",
+        (true, true) => "file-transfer: bidirectional; read-only-workload: off",
     };
     format!("display: screen stream; {telemetry}; {audio}; {input}; {clipboard}; {file_transfer}")
 }
@@ -7055,7 +7055,7 @@ mod audio_tests {
         assert_eq!(
             m1_consent_scope(&args),
             "display: screen stream; telemetry: basic host performance; audio: off; \
-             input: off; clipboard: off; file-transfer: off"
+             input: off; clipboard: off; file-transfer: off; read-only-workload: off"
         );
     }
 
@@ -7067,7 +7067,7 @@ mod audio_tests {
         assert_eq!(
             m1_consent_scope(&args),
             "display: screen stream; telemetry: system identity and performance; \
-             audio: host device capture; input: off; clipboard: off; file-transfer: off"
+             audio: host device capture; input: off; clipboard: off; file-transfer: off; read-only-workload: off"
         );
     }
 
@@ -7083,7 +7083,7 @@ mod audio_tests {
             m1_consent_scope(&args),
             "display: screen stream; telemetry: off; audio: off; \
              input: viewer may inject; clipboard: bidirectional; \
-             file-transfer: bidirectional"
+             file-transfer: bidirectional; read-only-workload: off"
         );
     }
 
