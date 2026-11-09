@@ -1029,6 +1029,14 @@ impl M1RuntimeSession {
         self.flush_new_audit_events()
     }
 
+    /// Enforce the session's explicit read-only-workload consent tier.
+    /// This is a session gate only; downstream data policy, device posture,
+    /// runtime identity, task correctness and effect boundaries remain separate.
+    pub(crate) fn authorize_read_only_workload(&mut self) -> Result<(), M1RuntimeError> {
+        self.session.authorize_read_only_workload()?;
+        self.flush_new_audit_events()
+    }
+
     pub(crate) fn allow_frame_flow(&mut self) -> Result<(), M1RuntimeError> {
         self.stream_frame()
     }
@@ -2503,6 +2511,39 @@ mod tests {
         assert_eq!(after_ops, 2);
 
         runtime.verify(&verifying_key).unwrap();
+    }
+
+    #[test]
+    fn read_only_workload_authorization_is_separate_from_legacy_consent() {
+        let (mut legacy, _) = runtime(31);
+        legacy.offer().unwrap();
+        legacy.grant_consent().unwrap();
+        assert!(matches!(
+            legacy.authorize_read_only_workload(),
+            Err(M1RuntimeError::Session(M1SessionError::PermissionDenied {
+                state: M1SessionState::Active,
+                permission: M1Permission::ExecuteReadOnlyWorkload,
+            }))
+        ));
+
+        let (mut scoped, verifying_key) = runtime(32);
+        scoped.offer().unwrap();
+        scoped.grant_consent_scoped(M1PermissionSet {
+            execute_read_only_workload: true,
+            ..M1PermissionSet::default()
+        }).unwrap();
+        let before = scoped.ledger_len();
+        scoped.authorize_read_only_workload().unwrap();
+        assert_eq!(scoped.ledger_len(), before);
+        scoped.revoke().unwrap();
+        assert!(matches!(
+            scoped.authorize_read_only_workload(),
+            Err(M1RuntimeError::Session(M1SessionError::PermissionDenied {
+                state: M1SessionState::Revoked,
+                permission: M1Permission::ExecuteReadOnlyWorkload,
+            }))
+        ));
+        scoped.verify(&verifying_key).unwrap();
     }
 
     #[test]

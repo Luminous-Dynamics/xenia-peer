@@ -70,6 +70,12 @@ pub enum M1Permission {
     /// Permission to accept a viewer-offered file and write it to disk
     /// (reverse path, e.g. `--recv-file-dir`).
     ReceiveFileFromViewer,
+    /// Permission for this host to accept an explicitly scoped, pure
+    /// read-only workload from its authenticated peer. This grants only the
+    /// Xenia session-consent tier: it does not grant access to any data class,
+    /// device attestation, runtime trust, workload correctness, or effect
+    /// authority. Those remain separate policy/evidence decisions.
+    ExecuteReadOnlyWorkload,
 }
 
 /// The set of privileged operations a granted session actually authorizes.
@@ -101,12 +107,18 @@ pub struct M1PermissionSet {
     pub send_file_to_viewer: bool,
     /// Reverse-path file receive (viewer -> host).
     pub receive_file_from_viewer: bool,
+    /// Explicit peer-requested pure read-only workload permission.
+    /// Defaults to false and is deliberately excluded from the legacy broad
+    /// interactive grant in `all()`.
+    pub execute_read_only_workload: bool,
 }
 
 impl M1PermissionSet {
-    /// Grant every privileged operation. Retained for the transcript-replay
-    /// and test paths that reconstruct a session without a per-tier scope;
-    /// live daemons should grant exactly what the operator enabled.
+    /// Grant every legacy interactive operation. Retained for transcript
+    /// replay and tests that reconstruct a session without per-tier scope.
+    /// The read-only workload permission is deliberately excluded: an older
+    /// broad interactive approval must not silently authorize a new compute
+    /// surface. A caller must grant that tier explicitly.
     pub fn all() -> Self {
         Self {
             stream_frame: true,
@@ -117,6 +129,9 @@ impl M1PermissionSet {
             write_host_clipboard: true,
             send_file_to_viewer: true,
             receive_file_from_viewer: true,
+            // New peer-compute authority is never inherited from a legacy
+            // broad interactive consent grant.
+            execute_read_only_workload: false,
         }
     }
 
@@ -131,6 +146,7 @@ impl M1PermissionSet {
             M1Permission::WriteHostClipboard => self.write_host_clipboard,
             M1Permission::SendFileToViewer => self.send_file_to_viewer,
             M1Permission::ReceiveFileFromViewer => self.receive_file_from_viewer,
+            M1Permission::ExecuteReadOnlyWorkload => self.execute_read_only_workload,
         }
     }
 }
@@ -160,6 +176,9 @@ pub enum M1AuditEvent {
     FileSentToViewer,
     /// Viewer file bytes were accepted for host storage.
     FileReceivedFromViewer,
+    /// The session consent gate authorized a read-only workload request.
+    /// This records authorization only, not dispatch, execution, or correctness.
+    ReadOnlyWorkloadAuthorized,
     /// Consent was revoked.
     ConsentRevoked,
     /// The session ended normally.
@@ -409,6 +428,16 @@ impl M1SessionMachine {
     pub fn receive_file_from_viewer(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::ReceiveFileFromViewer)?;
         self.audit.push(M1AuditEvent::FileReceivedFromViewer);
+        Ok(())
+    }
+
+    /// Check the active session's explicit read-only-workload consent tier.
+    /// A successful return means only that this session permits a request to
+    /// proceed to separate data-policy, attestation, runtime and correctness
+    /// gates. It does not execute or authorize a workload by itself.
+    pub fn authorize_read_only_workload(&mut self) -> Result<(), M1SessionError> {
+        self.require_active(M1Permission::ExecuteReadOnlyWorkload)?;
+        self.audit.push(M1AuditEvent::ReadOnlyWorkloadAuthorized);
         Ok(())
     }
 
@@ -836,6 +865,70 @@ mod tests {
                 M1AuditEvent::FileSentToViewer,
                 M1AuditEvent::FileReceivedFromViewer
             ]
+        );
+    }
+
+    #[test]
+    fn legacy_broad_consent_does_not_authorize_read_only_compute() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+        session.grant_consent().unwrap();
+
+        assert!(!session.granted_permissions().execute_read_only_workload);
+        assert_eq!(
+            session.authorize_read_only_workload().unwrap_err(),
+            M1SessionError::PermissionDenied {
+                state: M1SessionState::Active,
+                permission: M1Permission::ExecuteReadOnlyWorkload,
+            }
+        );
+    }
+
+    #[test]
+    fn read_only_compute_requires_its_own_scoped_grant_and_revokes() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+        session
+            .grant_consent_scoped(M1PermissionSet {
+                execute_read_only_workload: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        session.authorize_read_only_workload().unwrap();
+        assert_eq!(
+            session.audit().last(),
+            Some(&M1AuditEvent::ReadOnlyWorkloadAuthorized)
+        );
+        assert_eq!(
+            session.stream_frame().unwrap_err(),
+            M1SessionError::PermissionDenied {
+                state: M1SessionState::Active,
+                permission: M1Permission::StreamFrame,
+            }
+        );
+
+        session.revoke().unwrap();
+        assert_eq!(
+            session.authorize_read_only_workload().unwrap_err(),
+            M1SessionError::PermissionDenied {
+                state: M1SessionState::Revoked,
+                permission: M1Permission::ExecuteReadOnlyWorkload,
+            }
+        );
+    }
+
+    #[test]
+    fn read_only_compute_is_denied_before_consent() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+
+        assert_eq!(
+            session.authorize_read_only_workload().unwrap_err(),
+            M1SessionError::PermissionDenied {
+                state: M1SessionState::Offered,
+                permission: M1Permission::ExecuteReadOnlyWorkload,
+            }
         );
     }
 

@@ -43,7 +43,8 @@ pub(crate) fn disposition_for_m1_event(event: M1AuditEvent) -> M1LedgerDispositi
         | M1AuditEvent::HostClipboardRead
         | M1AuditEvent::HostClipboardWritten
         | M1AuditEvent::FileSentToViewer
-        | M1AuditEvent::FileReceivedFromViewer => {
+        | M1AuditEvent::FileReceivedFromViewer
+        | M1AuditEvent::ReadOnlyWorkloadAuthorized => {
             M1LedgerDisposition::Skip(M1LedgerSkipReason::NotConsentBoundary)
         }
         M1AuditEvent::SessionEnded => {
