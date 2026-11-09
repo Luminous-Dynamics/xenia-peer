@@ -2547,6 +2547,36 @@ mod tests {
     }
 
     #[test]
+    fn rehydrated_approval_does_not_restore_read_only_workload_permission() {
+        let (mut original, _) = runtime(33);
+        original.offer().unwrap();
+        original.grant_consent_scoped(M1PermissionSet {
+            execute_read_only_workload: true,
+            ..M1PermissionSet::default()
+        }).unwrap();
+        let entries = original.entries();
+
+        let signing_key = SigningKey::from_bytes(&[33; 32]);
+        let mut restored = M1RuntimeSession::from_persisted_entries(
+            signing_key,
+            entries,
+            [0xAB; 32],
+            Uuid::from_bytes([1; 16]),
+            Uuid::from_bytes([2; 16]),
+            "read-only-workload: enabled",
+        ).expect("the signed consent ledger should rehydrate");
+
+        assert_eq!(restored.state(), M1SessionState::Active);
+        assert!(matches!(
+            restored.authorize_read_only_workload(),
+            Err(M1RuntimeError::Session(M1SessionError::PermissionDenied {
+                state: M1SessionState::Active,
+                permission: M1Permission::ExecuteReadOnlyWorkload,
+            }))
+        ));
+    }
+
+    #[test]
     fn denied_session_records_denial_and_blocks_privileged_flow() {
         let (mut runtime, verifying_key) = runtime(13);
 
