@@ -1936,10 +1936,10 @@ fn m1_consent_scope(args: &Args) -> String {
         granted.send_file_to_viewer,
         granted.receive_file_from_viewer,
     ) {
-        (false, false) => "file-transfer: off; read-only-workload: off",
+        (false, false) => "file-transfer: off",
         (true, false) => "file-transfer: host-to-viewer send",
         (false, true) => "file-transfer: viewer-to-host receive",
-        (true, true) => "file-transfer: bidirectional; read-only-workload: off",
+        (true, true) => "file-transfer: bidirectional",
     };
     let read_only_workload = if granted.execute_read_only_workload {
         "read-only-workload: enabled"

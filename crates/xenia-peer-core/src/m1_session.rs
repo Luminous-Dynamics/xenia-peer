@@ -88,7 +88,8 @@ pub enum M1Permission {
 /// each split by direction rather than a single combined flag: a grant
 /// scoped to "receive files" must not silently also permit sending host
 /// files, and "view the screen" must not silently also permit disclosing
-/// the host clipboard.
+/// the host clipboard. Read-only workload execution is a separate capability
+/// and is never implied by interactive desktop consent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct M1PermissionSet {
     /// Forward-path frame streaming.
@@ -274,12 +275,13 @@ impl M1SessionMachine {
         )
     }
 
-    /// Viewer grants consent for every tier; M1 becomes active.
+    /// Viewer grants consent for every legacy interactive tier; M1 becomes active.
+    /// The read-only workload tier remains denied by this method so an old
+    /// broad approval cannot silently authorize remote compute.
     ///
-    /// This is the broad grant used by the deterministic transcript-replay
-    /// and test paths. Live daemons should prefer [`grant_consent_scoped`]
-    /// so a single approval does not silently authorize input, clipboard,
-    /// and file transfer alongside screen viewing.
+    /// This is the broad grant used by deterministic transcript-replay and
+    /// test paths. Live daemons should prefer [`grant_consent_scoped`] so a
+    /// grant can name exactly the permissions the operator approved.
     ///
     /// [`grant_consent_scoped`]: Self::grant_consent_scoped
     pub fn grant_consent(&mut self) -> Result<(), M1SessionError> {

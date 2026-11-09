@@ -110,6 +110,10 @@ mod tests {
             disposition_for_m1_event(M1AuditEvent::InputInjected),
             M1LedgerDisposition::Skip(M1LedgerSkipReason::NotConsentBoundary)
         );
+        assert_eq!(
+            disposition_for_m1_event(M1AuditEvent::ReadOnlyWorkloadAuthorized),
+            M1LedgerDisposition::Skip(M1LedgerSkipReason::NotConsentBoundary)
+        );
     }
 
     #[test]
