@@ -2528,10 +2528,12 @@ mod tests {
 
         let (mut scoped, verifying_key) = runtime(32);
         scoped.offer().unwrap();
-        scoped.grant_consent_scoped(M1PermissionSet {
-            execute_read_only_workload: true,
-            ..M1PermissionSet::default()
-        }).unwrap();
+        scoped
+            .grant_consent_scoped(M1PermissionSet {
+                execute_read_only_workload: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
         let before = scoped.ledger_len();
         scoped.authorize_read_only_workload().unwrap();
         assert_eq!(scoped.ledger_len(), before);
@@ -2550,10 +2552,12 @@ mod tests {
     fn rehydrated_approval_does_not_restore_read_only_workload_permission() {
         let (mut original, _) = runtime(33);
         original.offer().unwrap();
-        original.grant_consent_scoped(M1PermissionSet {
-            execute_read_only_workload: true,
-            ..M1PermissionSet::default()
-        }).unwrap();
+        original
+            .grant_consent_scoped(M1PermissionSet {
+                execute_read_only_workload: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
         let entries = original.entries();
 
         let signing_key = SigningKey::from_bytes(&[33; 32]);
@@ -2564,7 +2568,8 @@ mod tests {
             Uuid::from_bytes([1; 16]),
             Uuid::from_bytes([2; 16]),
             "read-only-workload: enabled",
-        ).expect("the signed consent ledger should rehydrate");
+        )
+        .expect("the signed consent ledger should rehydrate");
 
         assert_eq!(restored.state(), M1SessionState::Active);
         assert!(matches!(

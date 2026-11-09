@@ -1946,7 +1946,9 @@ fn m1_consent_scope(args: &Args) -> String {
     } else {
         "read-only-workload: off"
     };
-    format!("display: screen stream; {telemetry}; {audio}; {input}; {clipboard}; {file_transfer}; {read_only_workload}")
+    format!(
+        "display: screen stream; {telemetry}; {audio}; {input}; {clipboard}; {file_transfer}; {read_only_workload}"
+    )
 }
 
 /// Load an Ed25519 signing key from `path`, or generate and persist a fresh
