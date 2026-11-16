@@ -397,7 +397,7 @@ pub fn ConsentModal() -> impl IntoView {
                         type="button"
                         class="consent-decision"
                         data-testid="consent-approve-button"
-                        prop:disabled=move || is_deciding.get() || prompt_conflict.get()
+                        prop:disabled=move || is_deciding.get() || prompt_conflict.get() || prompt_conflict.get()
                         on:click=move |_| decide(ConsentAction::Approve)
                     >
                         {move || if is_deciding.get() { "Submitting…" } else { "Approve" }}
@@ -409,7 +409,7 @@ pub fn ConsentModal() -> impl IntoView {
                         class="consent-decision"
                         data-testid="consent-deny-button"
                         autofocus
-                        prop:disabled=move || is_deciding.get()
+                        prop:disabled=move || is_deciding.get() || prompt_conflict.get()
                         on:click=move |_| decide(ConsentAction::Deny)
                     >
                         "Deny"
