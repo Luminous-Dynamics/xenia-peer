@@ -258,6 +258,33 @@ There is no aggregate score that allows high FPS, many tests, or good documentat
 
 The first public technical preview should be deliberately narrow: one supported host platform profile, explicit peer identity enrollment, consent required for each privileged capability, conservative defaults, and a documented manual recovery route. Expand the platform or autonomy scope only when its own evidence is complete.
 
+### 8.1 Competing on a Pareto frontier, not a single score
+
+A claim to outperform SOTA must identify the exact axis, product edition/version, host/client hardware, codec, visual-quality threshold, transport path and network profile. Report the vector of outcomes rather than an opaque weighted score:
+
+- physical input-to-photon p50/p95/p99;
+- visual quality at fixed bitrate and bitrate at fixed quality;
+- control p95/p99 while media and independent TCP cross-traffic compete;
+- energy/session and host/client CPU/GPU/RSS;
+- recovery time and failure rate across direct/relay/reconnect scenarios;
+- scope precision, revocation latency, unauthorized-effect count and independent evidence verifiability.
+
+Plot the Pareto frontier with confidence intervals. One product may be faster but less efficient; another may be more efficient but have lower quality. Xenia should claim a win only where it improves a measured dimension without concealing a material regression elsewhere. Security/authority violations are hard failures, not a dimension that can be traded for speed. Compare direct and relayed paths separately and disclose configuration differences.
+
+### 8.2 Post-quantum handshake performance and dependency qualification
+
+The current native/browser handshake uses a hybrid ML-KEM-768 + ML-DSA-65 + Ed25519 profile. Benchmark these separately and end-to-end on native and WASM:
+
+- ML-KEM-768 key generation, encapsulation and decapsulation latency;
+- ML-DSA-65 signing and verification latency;
+- transcript size, public-key/signature/ciphertext bytes and full handshake round-trip;
+- CPU, peak memory, allocation count, WASM download size and cold-start cost;
+- full rekey operation including exact current-key Ack verification.
+
+Capture the currently pinned implementation as the baseline, then evaluate current FIPS 203/204 crate releases in a separate candidate. Preserve byte-exact native/WASM interoperability and FIPS vectors; do not change only one consumer. The RustCrypto docs identify current ML-KEM and ML-DSA implementations but explicitly state they have not been independently audited, so version modernization is not a substitute for external cryptographic review. See [xenia-peer #459](https://github.com/Luminous-Dynamics/xenia-peer/issues/459).
+
+
+
 ## 8. External references
 
 - RustDesk self-host architecture and Pro feature boundary: https://rustdesk.com/docs/en/self-host/
