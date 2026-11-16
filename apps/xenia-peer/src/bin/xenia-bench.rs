@@ -307,6 +307,9 @@ fn required_measurements(profile_id: &str) -> AppResult<Vec<&'static str>> {
             "displayed_fps", "control_message_delivery_p95_ms", "avg_bitrate_mbps",
             "visual_quality_acceptable", "stale_video_dropped_count",
             "queue_high_water", "queue_capacity", "reconnect_recovery_ms",
+            "queue_age_p95_ms", "control_message_p95_under_media_saturation_ms",
+            "control_message_p95_under_tcp_cross_traffic_ms",
+            "adaptation_convergence_seconds", "tcp_goodput_vs_fq_reference_ratio",
             "cpu_percent", "rss_bytes",
         ],
         "constrained_link" => vec![
@@ -437,6 +440,11 @@ fn evaluate_thresholds(profile_id: &str, measurements: &Value) -> AppResult<Vec<
         "degraded_wan" => {
             numeric_check(&mut checks, measurements, "displayed_fps", ">=", 20.0)?;
             numeric_check(&mut checks, measurements, "control_message_delivery_p95_ms", "<=", 250.0)?;
+            numeric_check(&mut checks, measurements, "control_message_p95_under_media_saturation_ms", "<=", 250.0)?;
+            numeric_check(&mut checks, measurements, "control_message_p95_under_tcp_cross_traffic_ms", "<=", 250.0)?;
+            numeric_check(&mut checks, measurements, "adaptation_convergence_seconds", "<=", 2.0)?;
+            numeric_check(&mut checks, measurements, "queue_age_p95_ms", "<=", 100.0)?;
+            numeric_check(&mut checks, measurements, "tcp_goodput_vs_fq_reference_ratio", ">=", 0.8)?;
             bool_check(&mut checks, measurements, "visual_quality_acceptable", true)?;
             bounded_queue_check(&mut checks, measurements)?;
         }
@@ -696,7 +704,12 @@ mod tests {
                 "avg_bitrate_mbps": 8, "visual_quality_acceptable": true,
                 "stale_video_dropped_count": 100,
                 "queue_high_water": 2, "queue_capacity": 4,
-                "reconnect_recovery_ms": 800, "cpu_percent": 40, "rss_bytes": 600000000
+                "reconnect_recovery_ms": 800, "queue_age_p95_ms": 60,
+                "control_message_p95_under_media_saturation_ms": 200,
+                "control_message_p95_under_tcp_cross_traffic_ms": 220,
+                "adaptation_convergence_seconds": 1.5,
+                "tcp_goodput_vs_fq_reference_ratio": 0.9,
+                "cpu_percent": 40, "rss_bytes": 600000000
             }),
             "constrained_link" => json!({
                 "displayed_fps": 10, "control_message_delivery_p95_ms": 280,
