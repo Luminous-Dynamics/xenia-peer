@@ -37,7 +37,9 @@ fn run() -> AppResult<()> {
 
     match command.as_str() {
         "validate-profile" => {
-            let path = args.next().ok_or_else(|| app_error("missing profile path"))?;
+            let path = args
+                .next()
+                .ok_or_else(|| app_error("missing profile path"))?;
             reject_extra(args)?;
             let bytes = fs::read(&path)?;
             let profile: Value = serde_json::from_slice(&bytes)?;
@@ -75,10 +77,16 @@ fn run() -> AppResult<()> {
                 "No Xenia capture-to-display / input-to-photon measurement adapter is registered; this command prepares an evidence packet only.".to_string(),
             ];
             if source["commit_sha"].is_null() {
-                blockers.push("Could not identify an exact Git commit for the supplied repository path.".to_string());
+                blockers.push(
+                    "Could not identify an exact Git commit for the supplied repository path."
+                        .to_string(),
+                );
             }
             if source["dirty_tree"] != Value::Bool(false) {
-                blockers.push("The source checkout is dirty or its cleanliness could not be established.".to_string());
+                blockers.push(
+                    "The source checkout is dirty or its cleanliness could not be established."
+                        .to_string(),
+                );
             }
 
             let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
@@ -129,7 +137,9 @@ fn run() -> AppResult<()> {
             Ok(())
         }
         "check-run" => {
-            let path = args.next().ok_or_else(|| app_error("missing run packet path"))?;
+            let path = args
+                .next()
+                .ok_or_else(|| app_error("missing run packet path"))?;
             reject_extra(args)?;
             let bytes = fs::read(path)?;
             let packet: Value = serde_json::from_slice(&bytes)?;
@@ -176,7 +186,9 @@ fn reject_extra(mut args: impl Iterator<Item = String>) -> AppResult<()> {
     Ok(())
 }
 
-fn parse_options(args: impl Iterator<Item = String>) -> AppResult<std::collections::BTreeMap<String, String>> {
+fn parse_options(
+    args: impl Iterator<Item = String>,
+) -> AppResult<std::collections::BTreeMap<String, String>> {
     let values: Vec<String> = args.collect();
     if values.len() % 2 != 0 {
         return Err(app_error("options must be supplied as --name value pairs"));
@@ -187,13 +199,23 @@ fn parse_options(args: impl Iterator<Item = String>) -> AppResult<std::collectio
         if !key.starts_with("--") {
             return Err(app_error(format!("expected an option, got {key}")));
         }
-        let value = iter.next().ok_or_else(|| app_error(format!("missing value for {key}")))?;
+        let value = iter
+            .next()
+            .ok_or_else(|| app_error(format!("missing value for {key}")))?;
         if options.insert(key.clone(), value).is_some() {
             return Err(app_error(format!("duplicate option: {key}")));
         }
     }
     for key in options.keys() {
-        if !["--profile", "--profile-id", "--repo", "--out", "--host-label"].contains(&key.as_str()) {
+        if ![
+            "--profile",
+            "--profile-id",
+            "--repo",
+            "--out",
+            "--host-label",
+        ]
+        .contains(&key.as_str())
+        {
             return Err(app_error(format!("unknown option: {key}")));
         }
     }
@@ -212,10 +234,14 @@ fn required_option<'a>(
 
 fn validate_profile(profile: &Value) -> AppResult<()> {
     if profile["schema_version"].as_str() != Some(PROFILE_SCHEMA) {
-        return Err(app_error(format!("expected schema_version {PROFILE_SCHEMA}")));
+        return Err(app_error(format!(
+            "expected schema_version {PROFILE_SCHEMA}"
+        )));
     }
     if profile["status"].as_str() != Some("proposed_targets_not_measurements") {
-        return Err(app_error("profile status must explicitly identify proposed, unmeasured targets"));
+        return Err(app_error(
+            "profile status must explicitly identify proposed, unmeasured targets",
+        ));
     }
 
     let profiles = profile["network_profiles"]
@@ -249,7 +275,9 @@ fn validate_profile(profile: &Value) -> AppResult<()> {
             .as_f64()
             .ok_or_else(|| app_error(format!("profile {id} needs packet_loss_fraction")))?;
         if !(0.0..=1.0).contains(&loss) {
-            return Err(app_error(format!("profile {id} packet loss must be in [0, 1]")));
+            return Err(app_error(format!(
+                "profile {id} packet loss must be in [0, 1]"
+            )));
         }
         let _ = required_measurements(id)?;
     }
@@ -261,7 +289,9 @@ fn validate_profile(profile: &Value) -> AppResult<()> {
         .as_array()
         .is_none_or(Vec::is_empty)
     {
-        return Err(app_error("security_and_correctness_targets must be a non-empty array"));
+        return Err(app_error(
+            "security_and_correctness_targets must be a non-empty array",
+        ));
     }
 
     let states = profile["evidence_contract"]["allowed_result_states"]
@@ -269,14 +299,18 @@ fn validate_profile(profile: &Value) -> AppResult<()> {
         .ok_or_else(|| app_error("allowed_result_states must be an array"))?;
     for required in ["PASS", "FAIL", "BLOCKED", "ENVIRONMENT_FAILURE"] {
         if !states.iter().any(|v| v.as_str() == Some(required)) {
-            return Err(app_error(format!("evidence contract omits state {required}")));
+            return Err(app_error(format!(
+                "evidence contract omits state {required}"
+            )));
         }
     }
     if profile["evidence_contract"]["missing_measurements_are_not_zero"] != Value::Bool(true)
         || profile["evidence_contract"]["queued_skipped_cancelled_or_stale_ci_is_not_pass"]
             != Value::Bool(true)
     {
-        return Err(app_error("evidence contract must preserve fail-closed missing/CI semantics"));
+        return Err(app_error(
+            "evidence contract must preserve fail-closed missing/CI semantics",
+        ));
     }
     Ok(())
 }
@@ -291,39 +325,70 @@ fn find_profile<'a>(profile: &'a Value, id: &str) -> AppResult<&'a Value> {
 fn required_measurements(profile_id: &str) -> AppResult<Vec<&'static str>> {
     let names = match profile_id {
         "lan_interactive" => vec![
-            "displayed_fps", "frame_age_p95_ms", "input_to_photon_p95_ms",
-            "avg_bitrate_mbps", "visual_quality_acceptable",
+            "displayed_fps",
+            "frame_age_p95_ms",
+            "input_to_photon_p95_ms",
+            "avg_bitrate_mbps",
+            "visual_quality_acceptable",
             "direct_connect_to_first_authorized_frame_s",
             "post_approval_to_first_authorized_frame_s",
-            "queue_high_water", "queue_capacity", "cpu_percent", "rss_bytes",
+            "queue_high_water",
+            "queue_capacity",
+            "cpu_percent",
+            "rss_bytes",
         ],
         "regional_interactive" => vec![
-            "displayed_fps", "input_to_photon_p95_ms",
-            "control_message_delivery_p95_ms", "avg_bitrate_mbps",
-            "visual_quality_acceptable", "queue_high_water", "queue_capacity",
-            "cpu_percent", "rss_bytes",
+            "displayed_fps",
+            "input_to_photon_p95_ms",
+            "control_message_delivery_p95_ms",
+            "avg_bitrate_mbps",
+            "visual_quality_acceptable",
+            "queue_high_water",
+            "queue_capacity",
+            "cpu_percent",
+            "rss_bytes",
         ],
         "degraded_wan" => vec![
-            "displayed_fps", "control_message_delivery_p95_ms", "avg_bitrate_mbps",
-            "visual_quality_acceptable", "stale_video_dropped_count",
-            "queue_high_water", "queue_capacity", "reconnect_recovery_ms",
-            "queue_age_p95_ms", "control_message_p95_under_media_saturation_ms",
+            "displayed_fps",
+            "control_message_delivery_p95_ms",
+            "avg_bitrate_mbps",
+            "visual_quality_acceptable",
+            "stale_video_dropped_count",
+            "queue_high_water",
+            "queue_capacity",
+            "reconnect_recovery_ms",
+            "queue_age_p95_ms",
+            "control_message_p95_under_media_saturation_ms",
             "control_message_p95_under_tcp_cross_traffic_ms",
-            "adaptation_convergence_seconds", "tcp_goodput_vs_fq_reference_ratio",
-            "cpu_percent", "rss_bytes",
+            "adaptation_convergence_seconds",
+            "tcp_goodput_vs_fq_reference_ratio",
+            "cpu_percent",
+            "rss_bytes",
         ],
         "constrained_link" => vec![
-            "displayed_fps", "control_message_delivery_p95_ms",
-            "visual_quality_acceptable", "stale_video_dropped_count",
-            "queue_high_water", "queue_capacity", "reconnect_recovery_ms",
-            "cpu_percent", "rss_bytes",
+            "displayed_fps",
+            "control_message_delivery_p95_ms",
+            "visual_quality_acceptable",
+            "stale_video_dropped_count",
+            "queue_high_water",
+            "queue_capacity",
+            "reconnect_recovery_ms",
+            "cpu_percent",
+            "rss_bytes",
         ],
         "long_session_soak" => vec![
-            "duration_hours", "crash_count", "rss_growth_after_warmup_percent",
-            "unbounded_queue_count", "nonce_or_replay_invariant_violations",
+            "duration_hours",
+            "crash_count",
+            "rss_growth_after_warmup_percent",
+            "unbounded_queue_count",
+            "nonce_or_replay_invariant_violations",
             "authority_drift_count",
         ],
-        _ => return Err(app_error(format!("no measurement contract for profile {profile_id}"))),
+        _ => {
+            return Err(app_error(format!(
+                "no measurement contract for profile {profile_id}"
+            )));
+        }
     };
     Ok(names)
 }
@@ -333,7 +398,9 @@ fn validate_run_packet(packet: &Value) -> AppResult<()> {
         return Err(app_error(format!("expected schema_version {RUN_SCHEMA}")));
     }
     if packet["qualification_scope"].as_str() != Some("PERFORMANCE_PROFILE_ONLY") {
-        return Err(app_error("run packet must be scoped to one performance profile"));
+        return Err(app_error(
+            "run packet must be scoped to one performance profile",
+        ));
     }
     let state = packet["result_state"]
         .as_str()
@@ -352,7 +419,9 @@ fn validate_run_packet(packet: &Value) -> AppResult<()> {
         .filter_map(Value::as_str)
         .collect();
     if supplied != required {
-        return Err(app_error("required_measurements does not match the runner's canonical contract"));
+        return Err(app_error(
+            "required_measurements does not match the runner's canonical contract",
+        ));
     }
 
     if state != "PASS" {
@@ -365,15 +434,23 @@ fn validate_run_packet(packet: &Value) -> AppResult<()> {
     }
     let commit = packet["source"]["commit_sha"].as_str().unwrap_or_default();
     if !is_hex_digest(commit, 40) {
-        return Err(app_error("PASS requires an exact 40-character Git commit SHA"));
+        return Err(app_error(
+            "PASS requires an exact 40-character Git commit SHA",
+        ));
     }
     if packet["source"]["dirty_tree"] != Value::Bool(false) {
-        return Err(app_error("PASS requires a source snapshot with a clean working tree"));
+        return Err(app_error(
+            "PASS requires a source snapshot with a clean working tree",
+        ));
     }
     if packet["measurement_adapter"]["state"].as_str() != Some("EXECUTED")
-        || packet["measurement_adapter"]["id"].as_str().is_none_or(|s| s == "none")
+        || packet["measurement_adapter"]["id"]
+            .as_str()
+            .is_none_or(|s| s == "none")
     {
-        return Err(app_error("PASS requires an identified, executed measurement adapter"));
+        return Err(app_error(
+            "PASS requires an identified, executed measurement adapter",
+        ));
     }
     if packet["sample_count"].as_u64().unwrap_or(0) < 100 {
         return Err(app_error("PASS requires at least 100 measured samples"));
@@ -387,7 +464,9 @@ fn validate_run_packet(packet: &Value) -> AppResult<()> {
             .get(*name)
             .ok_or_else(|| app_error(format!("PASS is missing measurement {name}")))?;
         if !(value.is_number() || value.is_boolean()) {
-            return Err(app_error(format!("measurement {name} must be numeric or boolean")));
+            return Err(app_error(format!(
+                "measurement {name} must be numeric or boolean"
+            )));
         }
     }
 
@@ -398,12 +477,17 @@ fn validate_run_packet(packet: &Value) -> AppResult<()> {
     for artifact in artifacts {
         let hash = artifact["sha256"].as_str().unwrap_or_default();
         if !is_hex_digest(hash, 64) || artifact["path"].as_str().is_none() {
-            return Err(app_error("each PASS artifact requires a path and SHA-256 digest"));
+            return Err(app_error(
+                "each PASS artifact requires a path and SHA-256 digest",
+            ));
         }
     }
 
     let checks = evaluate_thresholds(profile_id, &Value::Object(measurements.clone()))?;
-    if checks.iter().any(|item| item["passed"] != Value::Bool(true)) {
+    if checks
+        .iter()
+        .any(|item| item["passed"] != Value::Bool(true))
+    {
         let failed: Vec<String> = checks
             .iter()
             .filter(|item| item["passed"] != Value::Bool(true))
@@ -423,46 +507,140 @@ fn evaluate_thresholds(profile_id: &str, measurements: &Value) -> AppResult<Vec<
         "lan_interactive" => {
             numeric_check(&mut checks, measurements, "displayed_fps", ">=", 57.0)?;
             numeric_check(&mut checks, measurements, "frame_age_p95_ms", "<=", 60.0)?;
-            numeric_check(&mut checks, measurements, "input_to_photon_p95_ms", "<=", 80.0)?;
+            numeric_check(
+                &mut checks,
+                measurements,
+                "input_to_photon_p95_ms",
+                "<=",
+                80.0,
+            )?;
             numeric_check(&mut checks, measurements, "avg_bitrate_mbps", "<=", 15.0)?;
-            numeric_check(&mut checks, measurements, "direct_connect_to_first_authorized_frame_s", "<=", 5.0)?;
-            numeric_check(&mut checks, measurements, "post_approval_to_first_authorized_frame_s", "<=", 1.0)?;
+            numeric_check(
+                &mut checks,
+                measurements,
+                "direct_connect_to_first_authorized_frame_s",
+                "<=",
+                5.0,
+            )?;
+            numeric_check(
+                &mut checks,
+                measurements,
+                "post_approval_to_first_authorized_frame_s",
+                "<=",
+                1.0,
+            )?;
             bool_check(&mut checks, measurements, "visual_quality_acceptable", true)?;
             bounded_queue_check(&mut checks, measurements)?;
         }
         "regional_interactive" => {
             numeric_check(&mut checks, measurements, "displayed_fps", ">=", 57.0)?;
-            numeric_check(&mut checks, measurements, "input_to_photon_p95_ms", "<=", 120.0)?;
-            numeric_check(&mut checks, measurements, "control_message_delivery_p95_ms", "<=", 150.0)?;
+            numeric_check(
+                &mut checks,
+                measurements,
+                "input_to_photon_p95_ms",
+                "<=",
+                120.0,
+            )?;
+            numeric_check(
+                &mut checks,
+                measurements,
+                "control_message_delivery_p95_ms",
+                "<=",
+                150.0,
+            )?;
             bool_check(&mut checks, measurements, "visual_quality_acceptable", true)?;
             bounded_queue_check(&mut checks, measurements)?;
         }
         "degraded_wan" => {
             numeric_check(&mut checks, measurements, "displayed_fps", ">=", 20.0)?;
-            numeric_check(&mut checks, measurements, "control_message_delivery_p95_ms", "<=", 250.0)?;
-            numeric_check(&mut checks, measurements, "control_message_p95_under_media_saturation_ms", "<=", 250.0)?;
-            numeric_check(&mut checks, measurements, "control_message_p95_under_tcp_cross_traffic_ms", "<=", 250.0)?;
-            numeric_check(&mut checks, measurements, "adaptation_convergence_seconds", "<=", 2.0)?;
+            numeric_check(
+                &mut checks,
+                measurements,
+                "control_message_delivery_p95_ms",
+                "<=",
+                250.0,
+            )?;
+            numeric_check(
+                &mut checks,
+                measurements,
+                "control_message_p95_under_media_saturation_ms",
+                "<=",
+                250.0,
+            )?;
+            numeric_check(
+                &mut checks,
+                measurements,
+                "control_message_p95_under_tcp_cross_traffic_ms",
+                "<=",
+                250.0,
+            )?;
+            numeric_check(
+                &mut checks,
+                measurements,
+                "adaptation_convergence_seconds",
+                "<=",
+                2.0,
+            )?;
             numeric_check(&mut checks, measurements, "queue_age_p95_ms", "<=", 100.0)?;
-            numeric_check(&mut checks, measurements, "tcp_goodput_vs_fq_reference_ratio", ">=", 0.8)?;
+            numeric_check(
+                &mut checks,
+                measurements,
+                "tcp_goodput_vs_fq_reference_ratio",
+                ">=",
+                0.8,
+            )?;
             bool_check(&mut checks, measurements, "visual_quality_acceptable", true)?;
             bounded_queue_check(&mut checks, measurements)?;
         }
         "constrained_link" => {
             numeric_check(&mut checks, measurements, "displayed_fps", ">=", 8.0)?;
-            numeric_check(&mut checks, measurements, "control_message_delivery_p95_ms", "<=", 300.0)?;
+            numeric_check(
+                &mut checks,
+                measurements,
+                "control_message_delivery_p95_ms",
+                "<=",
+                300.0,
+            )?;
             bool_check(&mut checks, measurements, "visual_quality_acceptable", true)?;
             bounded_queue_check(&mut checks, measurements)?;
         }
         "long_session_soak" => {
             numeric_check(&mut checks, measurements, "duration_hours", ">=", 24.0)?;
             numeric_check(&mut checks, measurements, "crash_count", "==", 0.0)?;
-            numeric_check(&mut checks, measurements, "rss_growth_after_warmup_percent", "<=", 5.0)?;
-            numeric_check(&mut checks, measurements, "unbounded_queue_count", "==", 0.0)?;
-            numeric_check(&mut checks, measurements, "nonce_or_replay_invariant_violations", "==", 0.0)?;
-            numeric_check(&mut checks, measurements, "authority_drift_count", "==", 0.0)?;
+            numeric_check(
+                &mut checks,
+                measurements,
+                "rss_growth_after_warmup_percent",
+                "<=",
+                5.0,
+            )?;
+            numeric_check(
+                &mut checks,
+                measurements,
+                "unbounded_queue_count",
+                "==",
+                0.0,
+            )?;
+            numeric_check(
+                &mut checks,
+                measurements,
+                "nonce_or_replay_invariant_violations",
+                "==",
+                0.0,
+            )?;
+            numeric_check(
+                &mut checks,
+                measurements,
+                "authority_drift_count",
+                "==",
+                0.0,
+            )?;
         }
-        _ => return Err(app_error(format!("no threshold contract for profile {profile_id}"))),
+        _ => {
+            return Err(app_error(format!(
+                "no threshold contract for profile {profile_id}"
+            )));
+        }
     }
     Ok(checks)
 }
@@ -534,16 +712,34 @@ fn is_hex_digest(value: &str, expected_len: usize) -> bool {
 }
 
 fn git_snapshot(repo: &Path) -> Value {
-    let commit = command_output("git", &[
-        OsStr::new("-C"), repo.as_os_str(), OsStr::new("rev-parse"), OsStr::new("HEAD"),
-    ]);
-    let status = command_output("git", &[
-        OsStr::new("-C"), repo.as_os_str(), OsStr::new("status"),
-        OsStr::new("--porcelain"), OsStr::new("--untracked-files=all"),
-    ]);
-    let branch = command_output("git", &[
-        OsStr::new("-C"), repo.as_os_str(), OsStr::new("branch"), OsStr::new("--show-current"),
-    ]);
+    let commit = command_output(
+        "git",
+        &[
+            OsStr::new("-C"),
+            repo.as_os_str(),
+            OsStr::new("rev-parse"),
+            OsStr::new("HEAD"),
+        ],
+    );
+    let status = command_output(
+        "git",
+        &[
+            OsStr::new("-C"),
+            repo.as_os_str(),
+            OsStr::new("status"),
+            OsStr::new("--porcelain"),
+            OsStr::new("--untracked-files=all"),
+        ],
+    );
+    let branch = command_output(
+        "git",
+        &[
+            OsStr::new("-C"),
+            repo.as_os_str(),
+            OsStr::new("branch"),
+            OsStr::new("--show-current"),
+        ],
+    );
     let dirty = status.as_ref().map(|s| !s.trim().is_empty());
     let changed_count = status
         .as_ref()
@@ -564,11 +760,22 @@ fn host_snapshot(label: Option<String>) -> Value {
     let cpu = command_text("lscpu", &[]);
     let gpu = command_text(
         "nvidia-smi",
-        &["--query-gpu=name,driver_version,memory.total", "--format=csv,noheader"],
+        &[
+            "--query-gpu=name,driver_version,memory.total",
+            "--format=csv,noheader",
+        ],
     );
     let rustc = command_text("rustc", &["--version"]);
     let cargo = command_text("cargo", &["--version"]);
-    let tools = ["xenia-peer", "xenia-viewer", "ffmpeg", "iperf3", "tc", "vainfo", "nvidia-smi"];
+    let tools = [
+        "xenia-peer",
+        "xenia-viewer",
+        "ffmpeg",
+        "iperf3",
+        "tc",
+        "vainfo",
+        "nvidia-smi",
+    ];
     let available_tools: Vec<&str> = tools
         .iter()
         .copied()
@@ -633,12 +840,19 @@ fn sha256_file(path: &Path) -> AppResult<String> {
     #[cfg(windows)]
     let candidates: Vec<(&str, Vec<&OsStr>)> = vec![(
         "certutil",
-        vec![OsStr::new("-hashfile"), path.as_os_str(), OsStr::new("SHA256")],
+        vec![
+            OsStr::new("-hashfile"),
+            path.as_os_str(),
+            OsStr::new("SHA256"),
+        ],
     )];
     #[cfg(not(windows))]
     let candidates: Vec<(&str, Vec<&OsStr>)> = vec![
         ("sha256sum", vec![path.as_os_str()]),
-        ("shasum", vec![OsStr::new("-a"), OsStr::new("256"), path.as_os_str()]),
+        (
+            "shasum",
+            vec![OsStr::new("-a"), OsStr::new("256"), path.as_os_str()],
+        ),
     ];
 
     for (program, args) in candidates {
@@ -654,7 +868,9 @@ fn sha256_file(path: &Path) -> AppResult<String> {
             }
         }
     }
-    Err(app_error("no working SHA-256 utility found (need sha256sum, shasum, or certutil)"))
+    Err(app_error(
+        "no working SHA-256 utility found (need sha256sum, shasum, or certutil)",
+    ))
 }
 
 fn write_new_file(path: &Path, bytes: &[u8]) -> AppResult<()> {
@@ -668,7 +884,10 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> AppResult<()> {
         .map_err(|error| {
             io::Error::new(
                 error.kind(),
-                format!("cannot create {} without overwriting: {error}", path.display()),
+                format!(
+                    "cannot create {} without overwriting: {error}",
+                    path.display()
+                ),
             )
         })?;
     file.write_all(bytes)?;
@@ -729,8 +948,11 @@ mod tests {
     #[test]
     fn required_measurement_contracts_exist_for_every_profile() {
         for id in [
-            "lan_interactive", "regional_interactive", "degraded_wan",
-            "constrained_link", "long_session_soak",
+            "lan_interactive",
+            "regional_interactive",
+            "degraded_wan",
+            "constrained_link",
+            "long_session_soak",
         ] {
             assert!(!required_measurements(id).unwrap().is_empty());
         }
@@ -739,13 +961,18 @@ mod tests {
     #[test]
     fn target_profiles_accept_threshold_compliant_synthetic_fixtures() {
         for id in [
-            "lan_interactive", "regional_interactive", "degraded_wan",
-            "constrained_link", "long_session_soak",
+            "lan_interactive",
+            "regional_interactive",
+            "degraded_wan",
+            "constrained_link",
+            "long_session_soak",
         ] {
             let measurements = minimal_measurements(id);
             let checks = evaluate_thresholds(id, &measurements).unwrap();
             assert!(
-                checks.iter().all(|check| check["passed"] == Value::Bool(true)),
+                checks
+                    .iter()
+                    .all(|check| check["passed"] == Value::Bool(true)),
                 "fixture for {id} should meet thresholds: {checks:?}"
             );
         }
@@ -757,8 +984,7 @@ mod tests {
         measurements["input_to_photon_p95_ms"] = json!(80.01);
         let checks = evaluate_thresholds("lan_interactive", &measurements).unwrap();
         assert!(checks.iter().any(|check| {
-            check["metric"] == "input_to_photon_p95_ms"
-                && check["passed"] == Value::Bool(false)
+            check["metric"] == "input_to_photon_p95_ms" && check["passed"] == Value::Bool(false)
         }));
     }
 
@@ -768,8 +994,7 @@ mod tests {
         measurements["authority_drift_count"] = json!(1);
         let checks = evaluate_thresholds("long_session_soak", &measurements).unwrap();
         assert!(checks.iter().any(|check| {
-            check["metric"] == "authority_drift_count"
-                && check["passed"] == Value::Bool(false)
+            check["metric"] == "authority_drift_count" && check["passed"] == Value::Bool(false)
         }));
     }
 
