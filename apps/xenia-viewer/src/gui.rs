@@ -313,6 +313,30 @@ pub struct ViewerConfig {
     pub peer_addr: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ImageDisplayMode {
+    #[default]
+    Fit,
+    ActualSize,
+}
+
+fn image_display_size(
+    source: egui::Vec2,
+    available: egui::Vec2,
+    mode: ImageDisplayMode,
+) -> egui::Vec2 {
+    match mode {
+        ImageDisplayMode::Fit => fit_image_size(source, available),
+        ImageDisplayMode::ActualSize => {
+            if source.x > 0.0 && source.y > 0.0 {
+                source
+            } else {
+                egui::Vec2::ZERO
+            }
+        }
+    }
+}
+
 /// eframe::App implementing the viewer window.
 pub struct ViewerApp {
     slot: Arc<FrameSlot>,
@@ -331,10 +355,12 @@ pub struct ViewerApp {
     // Input capture (mouse / keyboard -> daemon). `None` means input
     // is disabled client-side (no channel was wired up).
     input_tx: Option<tokio::sync::mpsc::Sender<InputEvent>>,
-    // On-screen rect of the last-rendered frame image, used to
-    // normalize pointer coordinates and to ignore pointer activity
-    // over the status bar / side panels.
+    // Full image rect preserves source-to-pointer coordinate mapping.
     image_rect: Option<egui::Rect>,
+    // Actual visible clip; prevents accepting pointer positions over
+    // portions of a 1:1 image hidden behind the viewport boundary.
+    image_clip_rect: Option<egui::Rect>,
+    image_display_mode: ImageDisplayMode,
     last_pointer_pos: Option<egui::Pos2>,
 }
 
@@ -364,6 +390,8 @@ impl ViewerApp {
             recent_frame_instants: std::collections::VecDeque::with_capacity(64),
             input_tx,
             image_rect: None,
+            image_clip_rect: None,
+            image_display_mode: ImageDisplayMode::Fit,
             last_pointer_pos: None,
         }
     }
@@ -373,7 +401,8 @@ impl ViewerApp {
     /// falls outside it (pointer over a side panel / status bar).
     fn normalize_in_image(&self, pos: egui::Pos2) -> Option<(f32, f32)> {
         let rect = self.image_rect?;
-        if !rect.contains(pos) {
+        let clip = self.image_clip_rect?;
+        if !rect.contains(pos) || !clip.contains(pos) {
             return None;
         }
         let size = rect.size();
@@ -696,17 +725,36 @@ impl eframe::App for ViewerApp {
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Display").strong());
+                ui.selectable_value(&mut self.image_display_mode, ImageDisplayMode::Fit, "Fit");
+                ui.selectable_value(
+                    &mut self.image_display_mode,
+                    ImageDisplayMode::ActualSize,
+                    "1:1",
+                );
+                if let Some(tex) = &self.texture {
+                    ui.separator();
+                    ui.label(format!("{} × {} px", tex.size()[0], tex.size()[1]));
+                }
+            });
+            ui.separator();
+
             if let Some(tex) = &self.texture {
-                let image_size = fit_image_size(tex.size_vec2(), ui.available_size());
+                let image_clip_rect = ui.clip_rect();
+                let image_size =
+                    image_display_size(tex.size_vec2(), ui.available_size(), self.image_display_mode);
                 ui.centered_and_justified(|ui| {
                     let response = ui.add(egui::Image::new(tex).fit_to_exact_size(image_size));
-                    // This exact painted rect remains the reference for
-                    // pointer normalization, including when the inspector
-                    // is resized or any section is expanded/collapsed.
+                    // Keep the full painted rect for source-coordinate
+                    // normalization, but reject pointer positions outside
+                    // the actually visible viewport clip.
                     self.image_rect = Some(response.rect);
+                    self.image_clip_rect = Some(image_clip_rect);
                 });
             } else {
                 self.image_rect = None;
+                self.image_clip_rect = None;
                 ui.centered_and_justified(|ui| {
                     ui.vertical_centered(|ui| {
                         ui.label(
@@ -791,6 +839,32 @@ mod tests {
     }
 
     #[test]
+    fn display_mode_fit_and_actual_size_have_distinct_scaling_contracts() {
+        let source = egui::vec2(1920.0, 1080.0);
+        let viewport = egui::vec2(1280.0, 720.0);
+        assert_eq!(
+            image_display_size(source, viewport, ImageDisplayMode::Fit),
+            egui::vec2(1280.0, 720.0)
+        );
+        assert_eq!(
+            image_display_size(source, viewport, ImageDisplayMode::ActualSize),
+            source
+        );
+    }
+
+    #[test]
+    fn actual_size_rejects_invalid_source_dimensions() {
+        assert_eq!(
+            image_display_size(
+                egui::vec2(0.0, 1080.0),
+                egui::vec2(1280.0, 720.0),
+                ImageDisplayMode::ActualSize
+            ),
+            egui::Vec2::ZERO
+        );
+    }
+
+    #[test]
     fn fit_image_size_preserves_aspect_and_fits_available_viewport() {
         assert_eq!(
             fit_image_size(egui::vec2(1920.0, 1080.0), egui::vec2(1280.0, 720.0)),
@@ -819,6 +893,35 @@ mod tests {
     }
 
     #[test]
+    fn normalize_in_image_rejects_the_clipped_offscreen_part_of_actual_size_frame() {
+        let mut app = ViewerApp::new(
+            FrameSlot::new(),
+            ViewerConfig {
+                codec: "test".into(),
+                transport: "test".into(),
+                peer_addr: "test".into(),
+            },
+            None,
+            Box::new(crate::NullAudioSink::default()),
+            None,
+        );
+        app.image_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(1920.0, 1080.0),
+        ));
+        app.image_clip_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(320.0, 180.0),
+            egui::vec2(1280.0, 720.0),
+        ));
+        assert_eq!(
+            app.normalize_in_image(egui::pos2(640.0, 360.0)),
+            Some((640.0 / 1920.0, 360.0 / 1080.0))
+        );
+        assert_eq!(app.normalize_in_image(egui::pos2(100.0, 100.0)), None);
+        assert_eq!(app.normalize_in_image(egui::pos2(1700.0, 900.0)), None);
+    }
+
+    #[test]
     fn normalize_in_image_clamps_and_rejects_outside_rect() {
         let mut app = ViewerApp::new(
             FrameSlot::new(),
@@ -834,6 +937,10 @@ mod tests {
         assert_eq!(app.normalize_in_image(egui::pos2(5.0, 5.0)), None);
 
         app.image_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(10.0, 10.0),
+            egui::vec2(100.0, 50.0),
+        ));
+        app.image_clip_rect = Some(egui::Rect::from_min_size(
             egui::pos2(10.0, 10.0),
             egui::vec2(100.0, 50.0),
         ));
