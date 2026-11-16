@@ -37,10 +37,54 @@ fn parse_session_id(prompt: &str) -> Option<[u8; 16]> {
 /// `{session_id, scope}`, so surface `scope`; fall back to the raw string for a
 /// legacy plaintext prompt.
 fn display_scope(prompt: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(prompt)
+    let scope = serde_json::from_str::<serde_json::Value>(prompt)
         .ok()
         .and_then(|v| v.get("scope").and_then(|s| s.as_str()).map(String::from))
-        .unwrap_or_else(|| prompt.to_string())
+        .unwrap_or_else(|| prompt.to_string());
+
+    if scope.trim().is_empty() {
+        "Scope was not supplied in the request.".to_string()
+    } else {
+        scope
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scope_display_uses_only_supplied_scope_and_preserves_legacy_text() {
+        assert_eq!(
+            display_scope(r#"{"session_id":"00112233445566778899aabbccddeeff","scope":"View-only session"}"#),
+            "View-only session"
+        );
+        assert_eq!(
+            display_scope("Legacy plaintext scope"),
+            "Legacy plaintext scope"
+        );
+    }
+
+    #[test]
+    fn scope_display_marks_an_empty_scope_as_unknown() {
+        assert_eq!(
+            display_scope(r#"{"session_id":"00112233445566778899aabbccddeeff","scope":"  "}"#),
+            "Scope was not supplied in the request."
+        );
+    }
+
+    #[test]
+    fn session_id_requires_exactly_sixteen_decoded_bytes() {
+        assert_eq!(
+            parse_session_id(r#"{"session_id":"00112233445566778899aabbccddeeff"}"#),
+            Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+                  0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
+        );
+        assert_eq!(
+            parse_session_id(r#"{"session_id":"001122"}"#),
+            None
+        );
+    }
 }
 
 #[component]
@@ -329,14 +373,12 @@ pub fn ConsentModal() -> impl IntoView {
                 "Escape does not submit a decision. A request remains pending until you choose Approve or Deny."
             </p>
 
-            <Show when=move || can(ConsentAction::Revoke)>
-                <section class="consent-revocation-note" aria-label="Revocation information">
-                    <h3>"Revoking an active session"</h3>
-                    <p>
-                        "Revoke stops future authorized effects. It cannot undo actions that have already completed."
-                    </p>
-                </section>
-            </Show>
+            <section class="consent-revocation-note" aria-label="Revocation information">
+                <h3>"Revocation is separate from approval"</h3>
+                <p>
+                    "Revocation applies only after a session is active. It stops future authorized effects; it cannot undo actions already completed."
+                </p>
+            </section>
 
             <Show when=move || decision_error.get().is_some()>
                 <p class="consent-decision-error" role="alert" aria-live="assertive">
@@ -366,17 +408,6 @@ pub fn ConsentModal() -> impl IntoView {
                         on:click=move |_| decide(ConsentAction::Deny)
                     >
                         "Deny"
-                    </button>
-                </Show>
-                <Show when=move || can(ConsentAction::Revoke)>
-                    <button
-                        type="button"
-                        class="consent-decision consent-revoke"
-                        data-testid="consent-revoke-button"
-                        prop:disabled=move || is_deciding.get()
-                        on:click=move |_| decide(ConsentAction::Revoke)
-                    >
-                        "Revoke active session"
                     </button>
                 </Show>
             </div>
