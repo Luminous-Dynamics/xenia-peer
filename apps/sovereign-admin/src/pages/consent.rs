@@ -14,8 +14,8 @@
 
 use futures_util::{SinkExt, StreamExt};
 use gloo_net::websocket::{Message, futures::WebSocket};
-use leptos::prelude::*;
 use leptos::html;
+use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use xenia_operator_proto::ConsentAction;
@@ -347,13 +347,17 @@ mod tests {
 
     #[test]
     fn display_scope_extracts_only_the_declared_scope_field() {
-        let prompt = r#"{"session_id":"00112233445566778899aabbccddeeff","scope":"View-only desktop"}"#;
+        let prompt =
+            r#"{"session_id":"00112233445566778899aabbccddeeff","scope":"View-only desktop"}"#;
         assert_eq!(display_scope(prompt), "View-only desktop");
     }
 
     #[test]
     fn display_scope_preserves_legacy_plaintext_prompt() {
-        assert_eq!(display_scope("Legacy view-only request"), "Legacy view-only request");
+        assert_eq!(
+            display_scope("Legacy view-only request"),
+            "Legacy view-only request"
+        );
     }
 
     #[test]
@@ -362,8 +366,8 @@ mod tests {
         assert_eq!(
             parse_session_id(valid),
             Some([
-                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-                0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff,
             ])
         );
         assert!(parse_session_id(r#"{"session_id":"abcd"}"#).is_none());
