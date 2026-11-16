@@ -750,13 +750,12 @@ impl eframe::App for ViewerApp {
 
             if let Some(tex) = &self.texture {
                 let image_clip_rect = ui.clip_rect();
-                let image_size =
-                    image_display_size(
-                        tex.size_vec2(),
-                        ui.available_size(),
-                        ui.ctx().pixels_per_point(),
-                        self.image_display_mode,
-                    );
+                let image_size = image_display_size(
+                    tex.size_vec2(),
+                    ui.available_size(),
+                    ui.ctx().pixels_per_point(),
+                    self.image_display_mode,
+                );
                 ui.centered_and_justified(|ui| {
                     let response = ui.add(egui::Image::new(tex).fit_to_exact_size(image_size));
                     // Keep the full painted rect for source-coordinate
