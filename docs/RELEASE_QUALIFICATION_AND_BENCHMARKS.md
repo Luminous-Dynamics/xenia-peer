@@ -8,7 +8,7 @@ This document turns Xenia's release goal into a reproducible qualification progr
 
 ## 1. Product thesis and release boundary
 
-Xenia should compete as **consent-first remote-session infrastructure**, not merely as another remote desktop. Its differentiator is an explicit authority model: a remote peer receives only the capabilities the host approved, for the approved purpose and duration, and important effects leave independently verifiable evidence.
+Xenia should compete as **consent-first, evidence-verifiable remote-session infrastructure**, not merely as another remote desktop. Granular permissions, live permission changes and audit logs already exist in mature products. Xenia's proposed differentiator must therefore be stronger: an independently verifiable cryptographic evidence chain binding requester identity, purpose, exact operation/lane, direction, scope, expiry, authorization generation, rekey and outcome—without making a central service the authority.
 
 The product proposition is:
 
@@ -90,10 +90,26 @@ All targets below are **proposed engineering goals**, not measured current resul
 | [TeamViewer security](https://www.teamviewer.com/en/trust-center/) | Enterprise remote support and fleet workflows | Enterprise administration, identity integration, policy lifecycle, audit and support operations |
 | [Parsec performance guidance](https://support.parsec.app/hc/en-us/articles/32381460716180-Parsec-Connectivity-Requirements) | High-frame-rate remote interaction; published 1080p60 guidance recommends roughly 30 Mbps and low same-city ping | Glass-to-glass latency, frame pacing, quality at constrained bandwidth, hardware encode/decode |
 | [MeshCentral](https://docs.meshcentral.com/) | Self-hosted agent/server remote management, desktop, terminal and file workflows | Fleet operations, browser usability, administrator workflows, offline behavior and self-hosting |
+| [Sunshine + Moonlight](https://docs.lizardbyte.dev/projects/sunshine/latest/) | Self-hosted low-latency streaming with hardware encoder selection and HEVC/AV1 support | Codec/encoder performance, capture path, frame pacing, HDR and bitrate-quality curves |
 
 No single competitor is a universal baseline. Parsec is a useful latency/streaming comparator; RustDesk and MeshCentral are useful open/self-hosted product comparators; AnyDesk and TeamViewer are useful enterprise-operational comparators. Run supported editions and disclose their configuration. Do not compare Xenia passthrough against a hardware H.265 competitor, or compare direct Xenia against a relayed competitor, without labeling the difference.
 
-### 3.2 Performance profiles
+Current vendor documentation makes the bar clearer: RustDesk Pro documents OIDC, LDAP, 2FA, device management, access control and multi-relay administration; RustDesk client configuration lists codec choices including AV1/H.264/H.265 but warns support depends on the machine. AnyDesk documents permission profiles and changing permissions during an active session. TeamViewer Tensor documents event logs covering session and management-console actions. Parsec's July 8, 2026 connectivity guidance recommends 30 Mbps host upload for 1080p60, and its September 29, 2026 playtesting guidance recommends 25+ Mbps. Sunshine documents hardware-dependent HEVC Main/Main10 and AV1 Main encoding. These are vendor-published claims and configuration guidance, not independent comparative test results.
+
+Consequently, the 15 Mbps Xenia LAN objective is a **stretch target**, not an established advantage. Every codec must be compared on the same corpus and host/client hardware at matched visual quality. Run bitrate sweeps at 5/10/15/20/25/30 Mbps and disclose whether encode/decode is hardware or software, color subsampling, bit depth, HDR state, direct/relay path and compositor/capture method.
+
+### 3.2 Codec and congestion-control comparisons
+
+For every codec/encoder path, sweep 5, 10, 15, 20, 25 and 30 Mbps at the same visual-quality threshold. Include H.264, HEVC, AV1, passthrough and HDC where supported. Record encoder/decoder vendor, hardware-vs-software path, chroma format, bit depth, HDR, CPU/GPU use, power and dropped frames. Use a reference capture corpus containing small text, terminal glyphs, scrolling, gradients and high-motion content; do not use a single perceptual score as the sole quality gate for text-heavy desktops.
+
+Add two explicit congestion experiments:
+
+1. **Media/control isolation:** saturate at least 90% of the shaped bottleneck with video, then measure control/input queue age and p95/p99 delivery latency. Repeat with an independent long-lived TCP bulk flow. Verify the TCP flow is not starved and compare its goodput with a fair-queue reference; do not assume equal bandwidth shares between real-time and bulk classes.
+2. **Fast network step-down:** begin at 30 Mbps, step to 5 Mbps with 80–100 ms RTT, jitter and packet loss, then measure time to stable bitrate/FPS, maximum queue age, stale-frame drops, control latency and recovery. Target adaptation convergence within 2 seconds without an unbounded queue or control starvation.
+
+These experiments operationalize RFC 8836's requirements for low-delay interactive traffic, fairness to TCP, minimizing self-induced latency and rapid adaptation. They are proposed qualification goals; no Xenia results exist yet.
+
+### 3.3 Performance profiles
 
 Use one published test corpus containing static text/UI, scrolling, rapid pointer motion, video playback, high-motion scenes, dark scenes and mixed desktop work. Include a fixed lossless reference capture so image quality can be evaluated rather than guessed.
 
@@ -114,7 +130,7 @@ Additional proposed budgets:
 - Resource use: publish CPU, GPU, encoder/decoder engine, RSS, allocation rate and energy where measurable. Define per-platform budgets after collecting baseline data rather than inventing a universal ceiling.
 - Recovery: measure connect success, time-to-recover, number of user actions, and behavior after NAT changes, sleep/resume, Wi-Fi roam, relay failure and peer restart.
 
-### 3.3 Security, correctness and resilience benchmarks
+### 3.4 Security, correctness and resilience benchmarks
 
 | Benchmark | Required measurement / target |
 |---|---|
@@ -130,7 +146,7 @@ Additional proposed budgets:
 
 The 10-million nonce and 100,000 rekey tests are stress targets, not mathematical proofs. They complement, rather than replace, code review, formal analysis and external cryptographic review.
 
-### 3.4 Consent and user-trust benchmarks
+### 3.5 Consent and user-trust benchmarks
 
 Measure consent as a human interface, not merely as a signature API:
 
@@ -172,7 +188,11 @@ The evidence bundle is not a packet capture and must not become a covert screen-
 
 Keep wire confidentiality/integrity, handshake identity, session authority, capture consent, OS input authorization, persistence integrity and workload correctness as separate proof obligations. Each emits a versioned receipt with its own verifier. A downstream application composes evidence; it does not inherit unearned trust from a neighboring component.
 
-### E. Adaptive streaming optimizes usefulness, not raw FPS
+### E. Deadline-aware congestion control protects interactivity
+
+Treat lanes according to their deadlines and reliability needs: consent, authorization, input and control are protected; video/audio are freshness-oriented; file transfer is bulk/reliable. Video saturation must not starve input or control, and Xenia must remain fair to competing TCP traffic. Measure control p95/p99 while media saturates the bottleneck, while a separate long-lived TCP flow competes, and immediately after a bandwidth step-down. Report queue age, time-to-adapt, dropped stale media, TCP goodput against a fair-queue reference and recovery time. RFC 8836 calls for low-delay interactive media while retaining useful bandwidth, minimizing self-induced latency, fairness to TCP and rapid adaptation to changing conditions.
+
+### E.1 Adaptive streaming optimizes usefulness, not raw FPS
 
 Use deadline-aware scheduling: preserve fresh control/input, drop stale video, prioritize text/edges when legibility matters, adapt resolution and bitrate based on measured conditions, and keep audio jitter within a declared budget. Explore HDC tile deltas as a selective/static-content path only after measured CPU cost and image-quality results demonstrate an advantage over hardware H.264/H.265/AV1. Do not promote HDC based on attractive synthetic keyframe/delta ratios alone.
 
