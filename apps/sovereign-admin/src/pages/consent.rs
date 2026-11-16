@@ -102,6 +102,7 @@ pub fn ConsentModal() -> impl IntoView {
     let (is_deciding, set_is_deciding) = signal(false);
     let (decision_error, set_decision_error) = signal(None::<String>);
     let (decision_notice, set_decision_notice) = signal(None::<String>);
+    let (prompt_conflict, set_prompt_conflict) = signal(false);
     let dialog_ref = NodeRef::<leptos::html::Dialog>::new();
 
     // Use the browser's native modal dialog implementation. show_modal()
@@ -153,6 +154,7 @@ pub fn ConsentModal() -> impl IntoView {
                         None => {
                             set_decision_error.set(None);
                             set_decision_notice.set(None);
+                            set_prompt_conflict.set(false);
                             set_consent_req.set(Some(text));
                             set_is_open.set(true);
                         }
@@ -163,10 +165,11 @@ pub fn ConsentModal() -> impl IntoView {
                         }
                         Some(_) => {
                             // Never replace a visible prompt with a later
-                            // session. Until the first request is reconciled,
-                            // decisions remain bound to the original payload.
+                            // session. Fail closed until the browser is
+                            // reconnected and the daemon state is reconciled.
+                            set_prompt_conflict.set(true);
                             set_decision_error.set(Some(
-                                "A different session request arrived while this request is still pending. The displayed request has been preserved; do not decide until the daemon state is reconciled."
+                                "A different session request arrived while this request is pending. The displayed request has been preserved and decisions are disabled. Reload/reconnect the console to reconcile the daemon state."
                                     .to_string(),
                             ));
                         }
@@ -197,7 +200,7 @@ pub fn ConsentModal() -> impl IntoView {
     // held here, so this component no longer needs the operator identity at
     // all.
     let decide = move |action: ConsentAction| {
-        if is_deciding.get_untracked() {
+        if is_deciding.get_untracked() || prompt_conflict.get_untracked() {
             return;
         }
         let Some(prompt) = consent_req.get_untracked() else {
@@ -325,13 +328,15 @@ pub fn ConsentModal() -> impl IntoView {
 
             match outcome {
                 Ok(()) => {
+                    let notice = if prompt_conflict.get_untracked() {
+                        "Decision transmitted for the displayed request, but another request arrived before reconciliation. Reload/reconnect the console to retrieve the remaining daemon state."
+                    } else {
+                        "Decision transmitted. The console has not received an independent host-side outcome confirmation."
+                    };
                     set_is_deciding.set(false);
                     set_is_open.set(false);
                     set_consent_req.set(None);
-                    set_decision_notice.set(Some(
-                        "Decision transmitted. The console has not received an independent host-side outcome confirmation."
-                            .to_string(),
-                    ));
+                    set_decision_notice.set(Some(notice.to_string()));
                 }
                 Err(error) => {
                     leptos::logging::error!("consent decision failed: {error}");
@@ -392,7 +397,7 @@ pub fn ConsentModal() -> impl IntoView {
                         type="button"
                         class="consent-decision"
                         data-testid="consent-approve-button"
-                        prop:disabled=move || is_deciding.get()
+                        prop:disabled=move || is_deciding.get() || prompt_conflict.get()
                         on:click=move |_| decide(ConsentAction::Approve)
                     >
                         {move || if is_deciding.get() { "Submitting…" } else { "Approve" }}
