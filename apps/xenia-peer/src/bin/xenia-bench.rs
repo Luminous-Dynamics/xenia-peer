@@ -543,6 +543,12 @@ fn validate_physical_latency_evidence(packet: &Value, artifacts: &[Value]) -> Ap
             if resolution > 1_000 {
                 return Err(app_error("photodiode timer resolution must be 1000 ns or better"));
             }
+            let bandwidth = evidence["sensor_bandwidth_hz"]
+                .as_u64()
+                .ok_or_else(|| app_error("photodiode evidence requires sensor_bandwidth_hz"))?;
+            if bandwidth < 10_000 {
+                return Err(app_error("photodiode sensor bandwidth must be at least 10 kHz"));
+            }
         }
         "high_speed_camera" => {
             let fps = evidence["frame_rate_fps"]
@@ -1089,6 +1095,7 @@ mod tests {
             "latency_measurement": {
                 "method": "photodiode",
                 "instrument_id": "lab-photodiode-01",
+                "sensor_bandwidth_hz": 100000,
                 "calibrated": true,
                 "event_id_join_verified": true,
                 "sample_count": 300,
@@ -1108,6 +1115,16 @@ mod tests {
         packet["latency_measurement"]["sample_count"] = json!(299);
         assert!(validate_run_packet(&packet).is_err());
         packet["latency_measurement"]["sample_count"] = json!(300);
+
+        packet["latency_measurement"]["method"] = json!("high_speed_camera");
+        packet["latency_measurement"]["frame_rate_fps"] = json!(240);
+        assert!(validate_run_packet(&packet).is_err());
+        packet["latency_measurement"]["method"] = json!("photodiode");
+        packet["latency_measurement"].as_object_mut().unwrap().remove("frame_rate_fps");
+
+        packet["latency_measurement"]["sensor_bandwidth_hz"] = json!(5000);
+        assert!(validate_run_packet(&packet).is_err());
+        packet["latency_measurement"]["sensor_bandwidth_hz"] = json!(100000);
 
         packet["artifacts"] = json!([]);
         assert!(validate_run_packet(&packet).is_err());
