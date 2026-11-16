@@ -26,7 +26,6 @@ members = [
     "apps/xenia-launcher-macos",
     "apps/sovereign-admin",
     "apps/xenia-operator-agent",
-    "benchmarks/runner",
 ]
 # sovereign-admin is a wasm32-unknown-unknown CSR bin; xenia-launcher-windows
 # is Windows-only (target-gated `windows` crate dependency, unconditional
