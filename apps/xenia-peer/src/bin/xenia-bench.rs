@@ -482,6 +482,7 @@ fn validate_run_packet(packet: &Value) -> AppResult<()> {
             ));
         }
     }
+    validate_physical_latency_evidence(packet, artifacts)?;
 
     let checks = evaluate_thresholds(profile_id, &Value::Object(measurements.clone()))?;
     if checks
@@ -497,6 +498,80 @@ fn validate_run_packet(packet: &Value) -> AppResult<()> {
             "result claims PASS but profile thresholds failed: {}",
             failed.join(", ")
         )));
+    }
+    Ok(())
+}
+
+fn validate_physical_latency_evidence(packet: &Value, artifacts: &[Value]) -> AppResult<()> {
+    let profile_id = packet["profile_id"].as_str().unwrap_or_default();
+    let required = required_measurements(profile_id)?;
+    if !required.contains(&"input_to_photon_p95_ms") {
+        return Ok(());
+    }
+
+    let evidence = &packet["latency_measurement"];
+    let method = evidence["method"]
+        .as_str()
+        .ok_or_else(|| app_error("input-to-photon PASS requires a physical latency instrument"))?;
+    if evidence["calibrated"] != Value::Bool(true) {
+        return Err(app_error("physical latency instrument must have a current calibration"));
+    }
+    if evidence["event_id_join_verified"] != Value::Bool(true) {
+        return Err(app_error("physical latency evidence must bind each sensor transition to its input event ID"));
+    }
+    let trials = evidence["sample_count"]
+        .as_u64()
+        .ok_or_else(|| app_error("physical latency evidence is missing sample_count"))?;
+    if trials < 300 {
+        return Err(app_error("physical input-to-photon PASS requires at least 300 valid trials"));
+    }
+    if evidence["instrument_id"].as_str().is_none_or(|s| s.trim().is_empty()) {
+        return Err(app_error("physical latency evidence requires an instrument identifier"));
+    }
+    if !matches!(
+        evidence["sensor_position"].as_str(),
+        Some("top" | "centre" | "bottom")
+    ) {
+        return Err(app_error("physical latency evidence requires sensor_position top, centre or bottom"));
+    }
+
+    match method {
+        "photodiode" => {
+            let resolution = evidence["clock_resolution_ns"]
+                .as_u64()
+                .ok_or_else(|| app_error("photodiode evidence requires clock_resolution_ns"))?;
+            if resolution > 1_000 {
+                return Err(app_error("photodiode timer resolution must be 1000 ns or better"));
+            }
+        }
+        "high_speed_camera" => {
+            let fps = evidence["frame_rate_fps"]
+                .as_u64()
+                .ok_or_else(|| app_error("high-speed camera evidence requires frame_rate_fps"))?;
+            if fps < 1_000 {
+                return Err(app_error("high-speed camera evidence requires at least 1000 fps"));
+            }
+        }
+        _ => return Err(app_error("physical latency method must be photodiode or high_speed_camera")),
+    }
+
+    for (role, digest_key) in [
+        ("physical_latency_trace", "raw_trace_sha256"),
+        ("instrument_calibration", "calibration_sha256"),
+    ] {
+        let expected = evidence[digest_key].as_str().unwrap_or_default();
+        if !is_hex_digest(expected, 64) {
+            return Err(app_error(format!("physical latency evidence requires {digest_key}")));
+        }
+        let bound = artifacts.iter().any(|artifact| {
+            artifact["role"].as_str() == Some(role)
+                && artifact["sha256"].as_str() == Some(expected)
+        });
+        if !bound {
+            return Err(app_error(format!(
+                "physical latency {role} digest must bind to a PASS evidence artifact"
+            )));
+        }
     }
     Ok(())
 }
@@ -999,7 +1074,7 @@ mod tests {
     }
 
     #[test]
-    fn pass_result_cannot_omit_raw_artifacts_or_commit_identity() {
+    fn pass_result_requires_physical_latency_evidence_and_raw_artifacts() {
         let mut packet = json!({
             "schema_version": RUN_SCHEMA,
             "qualification_scope": "PERFORMANCE_PROFILE_ONLY",
@@ -1011,12 +1086,36 @@ mod tests {
             "sample_count": 1000,
             "required_measurements": required_measurements("lan_interactive").unwrap(),
             "measurements": minimal_measurements("lan_interactive"),
-            "artifacts": [{ "path": "raw-samples.jsonl", "sha256": "c".repeat(64) }]
+            "latency_measurement": {
+                "method": "photodiode",
+                "instrument_id": "lab-photodiode-01",
+                "calibrated": true,
+                "event_id_join_verified": true,
+                "sample_count": 300,
+                "clock_resolution_ns": 1000,
+                "sensor_position": "centre",
+                "raw_trace_sha256": "d".repeat(64),
+                "calibration_sha256": "e".repeat(64)
+            },
+            "artifacts": [
+                { "role": "run_samples", "path": "raw-samples.jsonl", "sha256": "c".repeat(64) },
+                { "role": "physical_latency_trace", "path": "latency-trace.csv", "sha256": "d".repeat(64) },
+                { "role": "instrument_calibration", "path": "instrument-calibration.json", "sha256": "e".repeat(64) }
+            ]
         });
         validate_run_packet(&packet).unwrap();
+
+        packet["latency_measurement"]["sample_count"] = json!(299);
+        assert!(validate_run_packet(&packet).is_err());
+        packet["latency_measurement"]["sample_count"] = json!(300);
+
         packet["artifacts"] = json!([]);
         assert!(validate_run_packet(&packet).is_err());
-        packet["artifacts"] = json!([{ "path": "raw-samples.jsonl", "sha256": "c".repeat(64) }]);
+        packet["artifacts"] = json!([
+            { "role": "run_samples", "path": "raw-samples.jsonl", "sha256": "c".repeat(64) },
+            { "role": "physical_latency_trace", "path": "latency-trace.csv", "sha256": "d".repeat(64) },
+            { "role": "instrument_calibration", "path": "instrument-calibration.json", "sha256": "e".repeat(64) }
+        ]);
         packet["source"]["dirty_tree"] = json!(true);
         assert!(validate_run_packet(&packet).is_err());
     }
