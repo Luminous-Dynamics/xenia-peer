@@ -56,7 +56,9 @@ mod tests {
     #[test]
     fn scope_display_uses_only_supplied_scope_and_preserves_legacy_text() {
         assert_eq!(
-            display_scope(r#"{"session_id":"00112233445566778899aabbccddeeff","scope":"View-only session"}"#),
+            display_scope(
+                r#"{"session_id":"00112233445566778899aabbccddeeff","scope":"View-only session"}"#
+            ),
             "View-only session"
         );
         assert_eq!(
@@ -77,13 +79,12 @@ mod tests {
     fn session_id_requires_exactly_sixteen_decoded_bytes() {
         assert_eq!(
             parse_session_id(r#"{"session_id":"00112233445566778899aabbccddeeff"}"#),
-            Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-                  0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
+            Some([
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff
+            ])
         );
-        assert_eq!(
-            parse_session_id(r#"{"session_id":"001122"}"#),
-            None
-        );
+        assert_eq!(parse_session_id(r#"{"session_id":"001122"}"#), None);
     }
 }
 
