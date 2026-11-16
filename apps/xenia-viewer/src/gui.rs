@@ -530,13 +530,6 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or(std::time::Duration::ZERO)
-        .as_millis() as u64
-}
-
 /// Fit a remote frame inside an available viewport without cropping or upscaling.
 fn fit_image_size(source: egui::Vec2, available: egui::Vec2) -> egui::Vec2 {
     if source.x <= 0.0 || source.y <= 0.0 || available.x <= 0.0 || available.y <= 0.0 {
@@ -608,7 +601,7 @@ impl eframe::App for ViewerApp {
                             ui.label(format!("codec: {}", self.config.codec));
                             ui.label(format!("transport: {}", self.config.transport));
                             ui.label(format!("frames received: {}", self.frames_received));
-                            ui.label(format!("presented fps: {:.1}", self.fps()));
+                            ui.label(format!("frame update rate: {:.1}/s", self.fps()));
                             ui.label(format!("last wire frame: {}", format_bytes(self.last_wire_bytes as u64)));
                             ui.label(format!("last frame sequence: {}", self.last_frame_seq));
                             if self.last_video_timestamp_ms != 0 {
@@ -640,10 +633,6 @@ impl eframe::App for ViewerApp {
                                     ui.label(format!("os: {os}"));
                                 }
                                 ui.label(format!("samples: {}", telemetry.samples));
-                                ui.label(format!(
-                                    "telemetry age: {} ms",
-                                    now_ms().saturating_sub(telemetry.timestamp_ms)
-                                ));
                             } else {
                                 ui.label(
                                     egui::RichText::new("Waiting for host telemetry…")
@@ -667,10 +656,6 @@ impl eframe::App for ViewerApp {
                                 ui.label(format!(
                                     "format: {} Hz / {} ch / {} ms",
                                     audio.sample_rate_hz, audio.channels, audio.frame_duration_ms
-                                ));
-                                ui.label(format!(
-                                    "capture age: {} ms",
-                                    now_ms().saturating_sub(audio.capture_timestamp_ms)
                                 ));
                                 ui.label(format!("gaps: {}", audio.gaps));
                                 ui.label(format!("duplicates: {}", audio.duplicates));
