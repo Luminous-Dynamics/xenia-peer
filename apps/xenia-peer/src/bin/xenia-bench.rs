@@ -1902,7 +1902,8 @@ mod tests {
     #[test]
     fn i2p_import_rejects_duplicate_or_unmatched_event_ids() {
         let (mut trace, calibration, packet) = synthetic_i2p_fixture(300);
-        trace["triggers"][1]["event_id"] = trace["triggers"][0]["event_id"].clone();
+        let duplicate_event_id = trace["triggers"][0]["event_id"].clone();
+        trace["triggers"][1]["event_id"] = duplicate_event_id;
         assert!(validate_i2p_trace(
             &trace, &calibration, &"a".repeat(64), &"b".repeat(64), &packet
         ).is_err());
@@ -1917,7 +1918,8 @@ mod tests {
         ).is_err());
 
         let (mut trace, calibration, packet) = synthetic_i2p_fixture(300);
-        trace["transitions"][1]["observed_marker_id"] = trace["transitions"][0]["observed_marker_id"].clone();
+        let replayed_marker_id = trace["transitions"][0]["observed_marker_id"].clone();
+        trace["transitions"][1]["observed_marker_id"] = replayed_marker_id;
         assert!(validate_i2p_trace(
             &trace, &calibration, &"a".repeat(64), &"b".repeat(64), &packet
         ).is_err());
