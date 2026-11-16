@@ -492,5 +492,65 @@
     ],
     "reference": "NVIDIA LDAT and equivalent photodiode/high-speed-camera methods",
     "status": "proposed_measurement_contract_not_measurements"
+  },
+  "pqc_handshake_benchmark": {
+    "id": "hybrid_pqc_handshake_cost",
+    "current_reference_dependencies": {
+      "ml_kem": "0.3.0-rc.2",
+      "ml_dsa": "0.1.1",
+      "classical_signature": "ed25519-dalek 2.x",
+      "note": "These are the versions currently pinned in xenia-peer/xenia-wire; update the inventory when exact manifests/lockfile change."
+    },
+    "candidate_dependencies_to_evaluate": {
+      "ml_kem": "0.3.4",
+      "ml_dsa": "0.1.2",
+      "status": "candidate_not_adopted"
+    },
+    "algorithms": [
+      "ML-KEM-768",
+      "ML-DSA-65",
+      "Ed25519"
+    ],
+    "implementations": [
+      "native",
+      "wasm32-unknown-unknown"
+    ],
+    "operations": [
+      "ml_kem_768_keygen",
+      "ml_kem_768_encapsulate",
+      "ml_kem_768_decapsulate",
+      "ml_dsa_65_sign",
+      "ml_dsa_65_verify",
+      "hybrid_handshake_complete",
+      "hybrid_rekey_ack_roundtrip"
+    ],
+    "required_measurements": [
+      "p50_us",
+      "p95_us",
+      "p99_us",
+      "max_us",
+      "public_key_bytes",
+      "signature_bytes",
+      "ciphertext_bytes",
+      "transcript_bytes",
+      "peak_memory_bytes",
+      "allocation_count",
+      "wasm_binary_bytes",
+      "cold_start_ms"
+    ],
+    "comparison_policy": {
+      "matched_toolchain_and_hardware": true,
+      "preserve_exact_native_wasm_transcript_compatibility": true,
+      "require_fips_203_204_vectors": true,
+      "require_malformed_input_and_fuzz_results": true,
+      "no_perf_claim_without_reproducible_baseline": true,
+      "no_release_admission_without_independent_review": true
+    },
+    "security_note": "Current RustCrypto ML-KEM and ML-DSA crate documentation states the implementations have not been independently audited. Stable crate versions do not imply audited security.",
+    "references": {
+      "ml_kem": "https://docs.rs/crate/ml-kem/latest",
+      "ml_dsa": "https://docs.rs/ml-dsa/latest/ml_dsa/"
+    },
+    "status": "proposed_benchmark_not_measurement"
   }
 }
