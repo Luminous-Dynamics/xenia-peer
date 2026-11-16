@@ -867,26 +867,20 @@ fn git_snapshot(repo: &Path) -> Value {
             OsStr::new("--untracked-files=all"),
         ],
     );
-    let branch = command_output(
-        "git",
-        &[
-            OsStr::new("-C"),
-            repo.as_os_str(),
-            OsStr::new("branch"),
-            OsStr::new("--show-current"),
-        ],
-    );
+    let repository_label = repo
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "repository".to_string());
     let dirty = status.as_ref().map(|s| !s.trim().is_empty());
     let changed_count = status
         .as_ref()
         .map(|s| s.lines().filter(|line| !line.trim().is_empty()).count());
     json!({
-        "repository_path": repo.display().to_string(),
+        "repository_label": repository_label,
         "commit_sha": commit.map(|s| s.trim().to_string()),
-        "branch": branch.map(|s| s.trim().to_string()),
         "dirty_tree": dirty,
         "changed_path_count": changed_count,
-        "status_semantics": "Only a clean, exact commit can qualify a PASS result."
+        "status_semantics": "Only a clean, exact commit can qualify a PASS result. Absolute checkout paths and Git branch names are intentionally omitted."
     })
 }
 
