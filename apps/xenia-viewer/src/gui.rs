@@ -620,6 +620,10 @@ impl eframe::App for ViewerApp {
                         .show(ui, |ui| {
                             if let Some(telemetry) = &self.last_telemetry {
                                 ui.label(format!("telemetry backend: {}", telemetry.backend));
+                                ui.label(format!(
+                                    "host telemetry timestamp (host clock): {} ms",
+                                    telemetry.timestamp_ms
+                                ));
                                 if let Some(cpu) = telemetry.cpu_percent {
                                     ui.label(format!("cpu: {:.1}%", cpu));
                                 }
