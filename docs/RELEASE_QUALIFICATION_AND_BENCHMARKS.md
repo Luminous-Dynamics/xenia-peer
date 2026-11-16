@@ -186,6 +186,8 @@ Symthaea may diagnose, explain and propose actions. Xenia checks whether a human
 
 ## 5. Benchmark implementation and evidence format
 
+The machine-readable target profile is [`benchmarks/xenia-benchmark-profile-v0.1.json`](../benchmarks/xenia-benchmark-profile-v0.1.json). It records proposed scenarios and thresholds, not measured results. Keep this manifest and this document synchronized when changing the qualification contract.
+
 Create a reproducible benchmark runner that emits machine-readable JSON plus a concise Markdown report. Each run must record:
 
 - repository, exact commit, dirty-tree state and build profile;
