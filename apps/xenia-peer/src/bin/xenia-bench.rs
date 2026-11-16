@@ -6,7 +6,7 @@ use std::{
     ffi::OsStr,
     fs,
     io::{self, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -141,15 +141,20 @@ fn run() -> AppResult<()> {
                 .next()
                 .ok_or_else(|| app_error("missing run packet path"))?;
             reject_extra(args)?;
-            let bytes = fs::read(path)?;
+            let run_path = PathBuf::from(path);
+            let bytes = fs::read(&run_path)?;
             let packet: Value = serde_json::from_slice(&bytes)?;
             validate_run_packet(&packet)?;
             let state = packet["result_state"].as_str().unwrap_or("UNKNOWN");
+            if state == "PASS" {
+                let run_dir = run_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+                verify_artifacts_on_disk(&packet, run_dir)?;
+            }
             let result = json!({
                 "validation": "CONSISTENT",
                 "result_state": state,
                 "qualification_scope": packet["qualification_scope"],
-                "note": "Consistency check only; this tool does not independently attest measurements or artifact authorship."
+                "note": "Artifact bytes and path containment are checked locally. This does not independently attest measurement correctness, instrument authenticity or artifact authorship."
             });
             println!("{}", serde_json::to_string_pretty(&result)?);
             if state == "FAIL" {
@@ -476,9 +481,11 @@ fn validate_run_packet(packet: &Value) -> AppResult<()> {
         .ok_or_else(|| app_error("PASS requires at least one raw evidence artifact"))?;
     for artifact in artifacts {
         let hash = artifact["sha256"].as_str().unwrap_or_default();
-        if !is_hex_digest(hash, 64) || artifact["path"].as_str().is_none() {
+        if !is_hex_digest(hash, 64)
+            || artifact["path"].as_str().is_none_or(|path| path.trim().is_empty())
+        {
             return Err(app_error(
-                "each PASS artifact requires a path and SHA-256 digest",
+                "each PASS artifact requires a non-empty path and SHA-256 digest",
             ));
         }
     }
@@ -498,6 +505,54 @@ fn validate_run_packet(packet: &Value) -> AppResult<()> {
             "result claims PASS but profile thresholds failed: {}",
             failed.join(", ")
         )));
+    }
+    Ok(())
+}
+
+fn verify_artifacts_on_disk(packet: &Value, run_dir: &Path) -> AppResult<()> {
+    let base = fs::canonicalize(run_dir)?;
+    let artifacts = packet["artifacts"]
+        .as_array()
+        .ok_or_else(|| app_error("PASS artifact list is missing"))?;
+
+    for artifact in artifacts {
+        let relative = Path::new(
+            artifact["path"]
+                .as_str()
+                .ok_or_else(|| app_error("PASS artifact path is missing"))?,
+        );
+        if relative.is_absolute()
+            || relative.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
+            return Err(app_error("PASS artifact paths must be relative and remain inside the run directory"));
+        }
+
+        let resolved = fs::canonicalize(base.join(relative)).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("PASS artifact {} cannot be resolved: {error}", relative.display()),
+            )
+        })?;
+        if !resolved.starts_with(&base) {
+            return Err(app_error("PASS artifact resolves outside the run directory"));
+        }
+        if !resolved.is_file() {
+            return Err(app_error("PASS artifact path must resolve to a regular file"));
+        }
+
+        let expected = artifact["sha256"].as_str().unwrap_or_default();
+        let observed = sha256_file(&resolved)?;
+        if !observed.eq_ignore_ascii_case(expected) {
+            return Err(app_error(format!(
+                "PASS artifact digest mismatch for {}",
+                relative.display()
+            )));
+        }
     }
     Ok(())
 }
@@ -1077,6 +1132,37 @@ mod tests {
         assert!(checks.iter().any(|check| {
             check["metric"] == "authority_drift_count" && check["passed"] == Value::Bool(false)
         }));
+    }
+
+    #[test]
+    fn pass_artifact_check_verifies_bytes_and_rejects_path_escape() {
+        let run_dir = std::env::temp_dir().join(format!(
+            "xenia-bench-artifact-check-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(&run_dir).unwrap();
+        let raw_path = run_dir.join("samples.jsonl");
+        fs::write(&raw_path, b"{\\"sample\\":1}\\n").unwrap();
+        let digest = sha256_file(&raw_path).unwrap();
+
+        let mut packet = json!({
+            "result_state": "PASS",
+            "artifacts": [{
+                "path": "samples.jsonl",
+                "sha256": digest
+            }]
+        });
+        verify_artifacts_on_disk(&packet, &run_dir).unwrap();
+
+        packet["artifacts"][0]["sha256"] = json!("0".repeat(64));
+        assert!(verify_artifacts_on_disk(&packet, &run_dir).is_err());
+
+        packet["artifacts"][0]["path"] = json!("../samples.jsonl");
+        packet["artifacts"][0]["sha256"] = json!(digest);
+        assert!(verify_artifacts_on_disk(&packet, &run_dir).is_err());
+
+        fs::remove_dir_all(run_dir).unwrap();
     }
 
     #[test]
