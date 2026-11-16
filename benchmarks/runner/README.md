@@ -44,7 +44,7 @@ The checker validates consistency only. It does not independently attest the tru
 
 Profiles requiring input-to-photon measurement must include a calibrated photodiode record (timer resolution <=1 microsecond) or a high-speed-camera record (>=1,000 frames/s), >=300 valid trials, verified event-ID association, a physical trace digest and a calibration artifact digest. The method and sensor position must be recorded. A software presentation callback is not physical input-to-photon evidence.
 
-See [Measurement Methodology](../docs/benchmarks/MEASUREMENT_METHODOLOGY.md).
+See [Measurement Methodology](../../docs/benchmarks/MEASUREMENT_METHODOLOGY.md).
 
 ## Result vocabulary
 
