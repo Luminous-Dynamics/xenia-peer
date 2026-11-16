@@ -683,7 +683,9 @@ impl eframe::App for ViewerApp {
                                     ui.label(format!("a/v timestamp delta: {drift_ms:+} ms"));
                                 }
                             } else {
-                                ui.label(egui::RichText::new("Audio lane idle").size(14.0).italics());
+                                ui.label(
+                                    egui::RichText::new("Audio lane idle").size(14.0).italics(),
+                                );
                             }
                         });
                 });
