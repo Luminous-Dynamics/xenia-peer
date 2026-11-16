@@ -182,6 +182,7 @@ fn run() -> AppResult<()> {
             }
             verify_artifacts_on_disk(&packet, run_dir)?;
             verify_profile_binding(&packet, run_dir)?;
+            verify_physical_latency_binding(&packet, run_dir)?;
             let result = json!({
                 "validation": "CONSISTENT",
                 "result_state": state,
@@ -254,7 +255,6 @@ fn parse_options(
             "--run",
             "--trace",
             "--calibration",
-            "--out",
         ]
         .contains(&key.as_str())
         {
@@ -889,6 +889,12 @@ fn validate_i2p_trace(
         "tool_version": tool_version,
         "calibration_id": calibration_id,
         "calibration_sha256": calibration_digest,
+        "calibrated": true,
+        "event_id_join_verified": true,
+        "sample_count": latency_ns.len(),
+        "clock_resolution_ns": clock_resolution_ns,
+        "sensor_bandwidth_hz": sensor["bandwidth_hz"],
+        "frame_rate_fps": sensor["frame_rate_fps"],
         "raw_trace_sha256": trace_digest,
         "condition_id": trace["condition_id"],
         "measurement_unix_ms": measured_at,
@@ -1192,6 +1198,72 @@ fn verify_profile_binding(packet: &Value, run_dir: &Path) -> AppResult<()> {
     let selected = find_profile(&profile, profile_id)?;
     if &packet["profile_configuration"] != selected {
         return Err(app_error("run packet profile_configuration differs from its embedded profile"));
+    }
+    Ok(())
+}
+
+
+/// Re-open and re-validate imported physical evidence whenever a run packet is
+/// checked. Digest presence alone is not enough: the raw trace and calibration
+/// files must still produce the exact summary recorded in the packet.
+fn verify_physical_latency_binding(packet: &Value, run_dir: &Path) -> AppResult<()> {
+    if !packet["latency_measurement"].is_object() {
+        if packet["result_state"].as_str() == Some("PASS")
+            && required_measurements(packet["profile_id"].as_str().unwrap_or_default())?
+                .contains(&"input_to_photon_p95_ms")
+        {
+            return Err(app_error("PASS requires an imported physical latency summary"));
+        }
+        return Ok(());
+    }
+
+    let artifacts = packet["artifacts"]
+        .as_array()
+        .ok_or_else(|| app_error("physical I2P evidence requires an artifact list"))?;
+    let trace_matches = artifacts
+        .iter()
+        .filter(|item| item["role"].as_str() == Some("physical_latency_trace"))
+        .collect::<Vec<_>>();
+    let calibration_matches = artifacts
+        .iter()
+        .filter(|item| item["role"].as_str() == Some("instrument_calibration"))
+        .collect::<Vec<_>>();
+    if trace_matches.len() != 1 || calibration_matches.len() != 1 {
+        return Err(app_error("imported physical evidence requires exactly one trace and one calibration artifact"));
+    }
+
+    let base = fs::canonicalize(run_dir)?;
+    let trace_path = resolve_artifact_path(&base, trace_matches[0])?;
+    let calibration_path = resolve_artifact_path(&base, calibration_matches[0])?;
+    let trace_digest = sha256_file(&trace_path)?;
+    let calibration_digest = sha256_file(&calibration_path)?;
+    if trace_matches[0]["sha256"].as_str() != Some(trace_digest.as_str())
+        || calibration_matches[0]["sha256"].as_str() != Some(calibration_digest.as_str())
+    {
+        return Err(app_error("physical I2P artifact digest changed after import"));
+    }
+
+    let trace: Value = serde_json::from_slice(&fs::read(&trace_path)?)
+        .map_err(|error| app_error(format!("stored physical trace is invalid JSON: {error}")))?;
+    let calibration: Value = serde_json::from_slice(&fs::read(&calibration_path)?)
+        .map_err(|error| app_error(format!("stored calibration is invalid JSON: {error}")))?;
+    let recomputed = validate_i2p_trace(
+        &trace,
+        &calibration,
+        &trace_digest,
+        &calibration_digest,
+        packet,
+    )?;
+    if recomputed != packet["latency_measurement"] {
+        return Err(app_error("latency_measurement summary differs from the recomputed raw-trace result"));
+    }
+    if packet["physical_latency_import"]["trace_sha256"].as_str() != Some(trace_digest.as_str())
+        || packet["physical_latency_import"]["calibration_sha256"].as_str()
+            != Some(calibration_digest.as_str())
+        || packet["physical_latency_import"]["state"].as_str()
+            != Some("IMPORTED_PARTIAL_EVIDENCE")
+    {
+        return Err(app_error("physical_latency_import metadata does not bind the exact raw evidence"));
     }
     Ok(())
 }
