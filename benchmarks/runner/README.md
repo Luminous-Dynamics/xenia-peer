@@ -24,7 +24,7 @@ cargo run --locked -p xenia-peer --bin xenia-bench -- prepare-run \
   --out artifacts/xenia-bench/lan-interactive-run.json
 ```
 
-The tool records the profile SHA-256, exact Git commit and dirty state, OS/kernel, CPU, discoverable NVIDIA GPU metadata and Rust toolchain, selected network/media profile, and the required measurement keys.
+The tool records the profile SHA-256, exact Git commit and dirty state, a neutral repository-directory label, OS/kernel, CPU, discoverable NVIDIA GPU metadata and Rust toolchain, selected network/media profile, and the required measurement keys. It omits absolute checkout paths and Git branch names to avoid leaking usernames or personal branch labels.
 
 The resulting packet is deliberately `BLOCKED` with `measurement_adapter.state=NOT_CONFIGURED`. This first increment does not yet measure capture-to-display or input-to-photon. It never fabricates metrics.
 
