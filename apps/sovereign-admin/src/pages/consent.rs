@@ -15,6 +15,7 @@
 use futures_util::{SinkExt, StreamExt};
 use gloo_net::websocket::{Message, futures::WebSocket};
 use leptos::prelude::*;
+use leptos::html;
 use leptos::task::spawn_local;
 
 use xenia_operator_proto::ConsentAction;
@@ -55,6 +56,25 @@ pub fn ConsentModal() -> impl IntoView {
 
     let (consent_req, set_consent_req) = signal(None::<String>);
     let (is_open, set_is_open) = signal(false);
+    let (is_dismissed, set_is_dismissed) = signal(false);
+    let dialog_ref = NodeRef::<html::Dialog>::new();
+    let effect_dialog_ref = dialog_ref.clone();
+
+    // Native showModal() supplies top-layer rendering, modal focus handling,
+    // and inertness for the rest of the document. Keeping the dialog mounted
+    // lets the close event distinguish an Escape dismissal from a decision.
+    Effect::new(move |_| {
+        let should_open = is_open.get();
+        if let Some(dialog) = effect_dialog_ref.get() {
+            if should_open && !dialog.open() {
+                if let Err(err) = dialog.show_modal() {
+                    leptos::logging::error!("failed to open consent dialog: {err:?}");
+                }
+            } else if !should_open && dialog.open() {
+                dialog.close();
+            }
+        }
+    });
 
     // Listen for consent prompts the daemon broadcasts on its admin `/ws`
     // (derived from DaemonConfig, not hardcoded, so the console targets the
@@ -82,6 +102,7 @@ pub fn ConsentModal() -> impl IntoView {
             while let Some(msg) = reader.next().await {
                 if let Ok(Message::Text(text)) = msg {
                     set_consent_req.set(Some(text));
+                    set_is_dismissed.set(false);
                     set_is_open.set(true);
                 }
             }
@@ -234,35 +255,110 @@ pub fn ConsentModal() -> impl IntoView {
                 let _ = writer.send(Message::Text(payload)).await;
             }
         });
+        set_is_dismissed.set(false);
         set_is_open.set(false);
     };
 
+    let dismiss_dialog_ref = dialog_ref.clone();
+    let dismiss_dialog = move |_| {
+        if let Some(dialog) = dismiss_dialog_ref.get() {
+            dialog.close();
+        }
+    };
+
     view! {
-        <Show when=move || is_open.get()>
-            <div class="modal-overlay" data-testid="consent-modal">
-                <div class="modal">
-                    <h2>"New Session Request"</h2>
-                    <p>{move || consent_req.get().map(|p| display_scope(&p)).unwrap_or_default()}</p>
-                    <div class="button-row">
-                        <Show when=move || can(ConsentAction::Approve)>
-                            <button class="primary" data-testid="consent-approve-button" on:click=move |_| decide(ConsentAction::Approve)>
-                                "Approve"
-                            </button>
-                        </Show>
-                        <Show when=move || can(ConsentAction::Deny)>
-                            <button class="secondary" data-testid="consent-deny-button" on:click=move |_| decide(ConsentAction::Deny)>
-                                "Deny"
-                            </button>
-                        </Show>
-                        <Show when=move || can(ConsentAction::Revoke)>
-                            <button class="danger" data-testid="consent-revoke-button" on:click=move |_| decide(ConsentAction::Revoke)>
-                                "Revoke"
-                            </button>
-                        </Show>
-                    </div>
+        <dialog
+            node_ref=dialog_ref
+            class="consent-dialog"
+            data-testid="consent-modal"
+            aria-labelledby="consent-title"
+            aria-describedby="consent-scope"
+            on:close=move |_| {
+                if is_open.get_untracked() {
+                    // Escape / explicit dismiss closes the surface only. It
+                    // does not send an approval, denial, or revocation.
+                    set_is_open.set(false);
+                    set_is_dismissed.set(true);
+                }
+            }
+        >
+            <section class="consent-dialog-content">
+                <h2 id="consent-title">"New Session Request"</h2>
+                <p class="consent-scope-label">"Requested access"</p>
+                <p id="consent-scope" class="consent-scope">
+                    {move || consent_req.get().map(|p| display_scope(&p)).unwrap_or_default()}
+                </p>
+                <div class="button-row">
+                    <button
+                        class="secondary consent-dismiss"
+                        type="button"
+                        autofocus
+                        on:click=dismiss_dialog
+                    >
+                        "Dismiss"
+                    </button>
+                    <Show when=move || can(ConsentAction::Deny)>
+                        <button class="secondary" type="button" data-testid="consent-deny-button" on:click=move |_| decide(ConsentAction::Deny)>
+                            "Deny"
+                        </button>
+                    </Show>
+                    <Show when=move || can(ConsentAction::Approve)>
+                        <button class="primary" type="button" data-testid="consent-approve-button" on:click=move |_| decide(ConsentAction::Approve)>
+                            "Approve"
+                        </button>
+                    </Show>
+                    <Show when=move || can(ConsentAction::Revoke)>
+                        <button class="danger" type="button" data-testid="consent-revoke-button" on:click=move |_| decide(ConsentAction::Revoke)>
+                            "Revoke"
+                        </button>
+                    </Show>
                 </div>
-            </div>
+            </section>
+        </dialog>
+        <Show when=move || is_dismissed.get() && consent_req.get().is_some()>
+            <aside class="consent-dismissed" role="status" aria-live="polite">
+                <span>"Request hidden. No consent decision was sent."</span>
+                <button
+                    class="secondary"
+                    type="button"
+                    on:click=move |_| {
+                        set_is_dismissed.set(false);
+                        set_is_open.set(true);
+                    }
+                >
+                    "Review request"
+                </button>
+            </aside>
         </Show>
     }
     .into_any()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{display_scope, parse_session_id};
+
+    #[test]
+    fn display_scope_extracts_only_the_declared_scope_field() {
+        let prompt = r#"{"session_id":"00112233445566778899aabbccddeeff","scope":"View-only desktop"}"#;
+        assert_eq!(display_scope(prompt), "View-only desktop");
+    }
+
+    #[test]
+    fn display_scope_preserves_legacy_plaintext_prompt() {
+        assert_eq!(display_scope("Legacy view-only request"), "Legacy view-only request");
+    }
+
+    #[test]
+    fn session_id_requires_exactly_sixteen_decoded_bytes() {
+        let valid = r#"{"session_id":"00112233445566778899aabbccddeeff"}"#;
+        assert_eq!(
+            parse_session_id(valid),
+            Some([
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+                0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+            ])
+        );
+        assert!(parse_session_id(r#"{"session_id":"abcd"}"#).is_none());
+    }
 }
