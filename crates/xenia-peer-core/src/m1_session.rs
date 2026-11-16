@@ -245,15 +245,29 @@ impl M1SessionMachine {
         &self.audit
     }
 
+    /// Drain audit events into a caller-owned collection.
+    ///
+    /// This preserves the state machine's internal vector allocation so a
+    /// runtime can reuse its destination queue instead of allocating one
+    /// vector for every accepted input or frame event. The state machine
+    /// retains its full history for deterministic callers and tests unless
+    /// they explicitly drain it. Draining changes neither lifecycle state
+    /// nor granted permissions.
+    pub fn drain_audit_events_into(
+        &mut self,
+        destination: &mut impl Extend<M1AuditEvent>,
+    ) {
+        destination.extend(self.audit.drain(..));
+    }
+
     /// Drain the audit events emitted since the previous read or drain.
     ///
-    /// The state machine retains its full event history for deterministic
-    /// callers and tests unless they explicitly call this method. Runtime
-    /// adapters should drain after processing each operation so a long
-    /// session does not retain one vector entry per frame or input event.
-    /// Draining changes neither lifecycle state nor granted permissions.
+    /// This convenience form returns an owned vector. High-rate runtimes
+    /// should prefer [Self::drain_audit_events_into] to reuse their buffer.
     pub fn drain_audit_events(&mut self) -> Vec<M1AuditEvent> {
-        std::mem::take(&mut self.audit)
+        let mut events = Vec::new();
+        self.drain_audit_events_into(&mut events);
+        events
     }
 
     /// Host offers a session.
