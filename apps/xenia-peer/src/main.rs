@@ -1835,6 +1835,13 @@ fn read_host_clipboard_text() -> Option<String> {
 /// clipboard.
 const MAX_INBOUND_CLIPBOARD_BYTES: usize = 1024 * 1024;
 
+fn clipboard_content_class(content: &ClipboardContent) -> &'static str {
+    match content {
+        ClipboardContent::Text(_) => "text",
+        ClipboardContent::Cleared => "cleared",
+    }
+}
+
 fn apply_clipboard_content(content: &ClipboardContent) {
     if let ClipboardContent::Text(text) = content
         && text.len() > MAX_INBOUND_CLIPBOARD_BYTES
@@ -1868,7 +1875,7 @@ fn apply_clipboard_content(content: &ClipboardContent) {
         warn!(error = %err, "failed to apply viewer clipboard update to host clipboard");
     } else {
         info!(
-            ?content,
+            content_class = clipboard_content_class(content),
             "applied viewer clipboard update to host clipboard"
         );
     }
@@ -7113,12 +7120,21 @@ mod input_log_privacy_tests {
     }
 
     #[test]
+    fn clipboard_log_class_never_returns_clipboard_text() {
+        let text = ClipboardContent::Text("private clipboard payload".to_string());
+        assert_eq!(clipboard_content_class(&text), "text");
+        assert_eq!(clipboard_content_class(&ClipboardContent::Cleared), "cleared");
+    }
+
+    #[test]
     fn runtime_input_log_source_does_not_debug_format_raw_events() {
         // Keep this source-level negative control next to the classification
         // helper: a future diagnostic change must not reintroduce raw events.
         let source = include_str!("main.rs");
-        assert!(!source.contains("info!(\n                            ?event"));
+        assert!(!source.contains(concat!("                            ", "?", "event")));
+        assert!(!source.contains(concat!("            ", "?", "content")));
         assert!(source.contains("input_class = input_event_class(&event)"));
+        assert!(source.contains("content_class = clipboard_content_class(content)"));
     }
 }
 
