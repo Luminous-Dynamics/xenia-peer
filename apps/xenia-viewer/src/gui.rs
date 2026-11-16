@@ -323,13 +323,21 @@ enum ImageDisplayMode {
 fn image_display_size(
     source: egui::Vec2,
     available: egui::Vec2,
+    pixels_per_point: f32,
     mode: ImageDisplayMode,
 ) -> egui::Vec2 {
     match mode {
         ImageDisplayMode::Fit => fit_image_size(source, available),
         ImageDisplayMode::ActualSize => {
-            if source.x > 0.0 && source.y > 0.0 {
-                source
+            if source.x > 0.0
+                && source.y > 0.0
+                && pixels_per_point.is_finite()
+                && pixels_per_point > 0.0
+            {
+                // egui layout dimensions are points while decoded frames
+                // are physical pixels. Dividing by pixels_per_point gives
+                // one client framebuffer pixel per source image pixel.
+                source / pixels_per_point
             } else {
                 egui::Vec2::ZERO
             }
@@ -743,7 +751,12 @@ impl eframe::App for ViewerApp {
             if let Some(tex) = &self.texture {
                 let image_clip_rect = ui.clip_rect();
                 let image_size =
-                    image_display_size(tex.size_vec2(), ui.available_size(), self.image_display_mode);
+                    image_display_size(
+                        tex.size_vec2(),
+                        ui.available_size(),
+                        ui.ctx().pixels_per_point(),
+                        self.image_display_mode,
+                    );
                 ui.centered_and_justified(|ui| {
                     let response = ui.add(egui::Image::new(tex).fit_to_exact_size(image_size));
                     // Keep the full painted rect for source-coordinate
@@ -843,12 +856,40 @@ mod tests {
         let source = egui::vec2(1920.0, 1080.0);
         let viewport = egui::vec2(1280.0, 720.0);
         assert_eq!(
-            image_display_size(source, viewport, ImageDisplayMode::Fit),
+            image_display_size(source, viewport, 1.0, ImageDisplayMode::Fit),
             egui::vec2(1280.0, 720.0)
         );
         assert_eq!(
-            image_display_size(source, viewport, ImageDisplayMode::ActualSize),
+            image_display_size(source, viewport, 1.0, ImageDisplayMode::ActualSize),
             source
+        );
+    }
+
+    #[test]
+    fn actual_size_accounts_for_high_dpi_pixels_per_point() {
+        let source = egui::vec2(1920.0, 1080.0);
+        assert_eq!(
+            image_display_size(
+                source,
+                egui::vec2(960.0, 540.0),
+                2.0,
+                ImageDisplayMode::ActualSize
+            ),
+            egui::vec2(960.0, 540.0)
+        );
+    }
+
+    #[test]
+    fn actual_size_rejects_invalid_pixels_per_point() {
+        let source = egui::vec2(1920.0, 1080.0);
+        assert_eq!(
+            image_display_size(
+                source,
+                egui::vec2(1280.0, 720.0),
+                0.0,
+                ImageDisplayMode::ActualSize
+            ),
+            egui::Vec2::ZERO
         );
     }
 
@@ -858,6 +899,7 @@ mod tests {
             image_display_size(
                 egui::vec2(0.0, 1080.0),
                 egui::vec2(1280.0, 720.0),
+                1.0,
                 ImageDisplayMode::ActualSize
             ),
             egui::Vec2::ZERO
