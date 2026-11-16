@@ -206,6 +206,10 @@ Symthaea may diagnose, explain and propose actions. Xenia checks whether a human
 
 ## 5. Benchmark implementation and evidence format
 
+A first local-first Rust evidence tool lives in [`apps/xenia-peer/src/bin/xenia-bench.rs`](../../apps/xenia-peer/src/bin/xenia-bench.rs). It validates the profile, captures a privacy-minimized host/source snapshot, prepares a run packet that remains BLOCKED until a real adapter supplies measurements, and checks claimed profile results against explicit thresholds. It does not yet measure capture-to-display or input-to-photon; its consistency checker is not an independent attestation.
+
+Physical and clock-domain measurement rules are specified in [Measurement Methodology v0.1](benchmarks/MEASUREMENT_METHODOLOGY.md). In particular, the performance runner will not accept an input-to-photon PASS based solely on software timestamps.
+
 A first local-first Rust evidence tool now lives in [`benchmarks/runner`](../benchmarks/runner/README.md). It validates the profile, captures a privacy-minimized host/source snapshot, prepares a run packet that remains `BLOCKED` until a real adapter supplies measurements, and checks claimed profile results against explicit thresholds. It does not yet measure capture-to-display or input-to-photon, and its consistency checker is not an independent attestation.
 
 The machine-readable target profile is [`benchmarks/xenia-benchmark-profile-v0.1.json`](../benchmarks/xenia-benchmark-profile-v0.1.json). It records proposed scenarios and thresholds, not measured results. Keep this manifest and this document synchronized when changing the qualification contract.
