@@ -602,10 +602,16 @@ impl eframe::App for ViewerApp {
                             ui.label(format!("transport: {}", self.config.transport));
                             ui.label(format!("frames received: {}", self.frames_received));
                             ui.label(format!("frame update rate: {:.1}/s", self.fps()));
-                            ui.label(format!("last wire frame: {}", format_bytes(self.last_wire_bytes as u64)));
+                            ui.label(format!(
+                                "last wire frame: {}",
+                                format_bytes(self.last_wire_bytes as u64)
+                            ));
                             ui.label(format!("last frame sequence: {}", self.last_frame_seq));
                             if self.last_video_timestamp_ms != 0 {
-                                ui.label(format!("last capture timestamp: {} ms", self.last_video_timestamp_ms));
+                                ui.label(format!(
+                                    "last capture timestamp: {} ms",
+                                    self.last_video_timestamp_ms
+                                ));
                             }
                         });
 
@@ -687,10 +693,7 @@ impl eframe::App for ViewerApp {
             if let Some(tex) = &self.texture {
                 let image_size = fit_image_size(tex.size_vec2(), ui.available_size());
                 ui.centered_and_justified(|ui| {
-                    let response = ui.add(
-                        egui::Image::new(tex)
-                            .fit_to_exact_size(image_size),
-                    );
+                    let response = ui.add(egui::Image::new(tex).fit_to_exact_size(image_size));
                     // This exact painted rect remains the reference for
                     // pointer normalization, including when the inspector
                     // is resized or any section is expanded/collapsed.
@@ -706,9 +709,11 @@ impl eframe::App for ViewerApp {
                                 .strong(),
                         );
                         ui.label(
-                            egui::RichText::new("The remote workspace will appear here once video arrives.")
-                                .size(13.0)
-                                .weak(),
+                            egui::RichText::new(
+                                "The remote workspace will appear here once video arrives.",
+                            )
+                            .size(13.0)
+                            .weak(),
                         );
                     });
                 });
