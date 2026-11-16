@@ -473,8 +473,11 @@ fn import_i2p(options: &std::collections::BTreeMap<String, String>) -> AppResult
             "I2P import only accepts a BLOCKED run packet; it never mutates a PASS or FAIL result",
         ));
     }
-    let profile_id = packet["profile_id"].as_str().unwrap_or_default();
-    if !required_measurements(profile_id)?.contains(&"input_to_photon_p95_ms") {
+    let profile_id = packet["profile_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    if !required_measurements(&profile_id)?.contains(&"input_to_photon_p95_ms") {
         return Err(app_error(format!(
             "profile {profile_id} does not require physical input-to-photon measurement"
         )));
