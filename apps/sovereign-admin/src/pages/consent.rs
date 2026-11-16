@@ -318,16 +318,23 @@ pub fn ConsentModal() -> impl IntoView {
         <Show when=move || is_dismissed.get() && consent_req.get().is_some()>
             <aside class="consent-dismissed" role="status" aria-live="polite">
                 <span>"Request hidden. No consent decision was sent."</span>
-                <button
-                    class="secondary"
-                    type="button"
-                    on:click=move |_| {
-                        set_is_dismissed.set(false);
-                        set_is_open.set(true);
+                <Show
+                    when=move || consent_req.get().as_deref().and_then(parse_session_id).is_some()
+                    fallback=|| view! {
+                        <span>"This legacy prompt has no session identifier. Wait for a new request rather than reusing a potentially stale prompt."</span>
                     }
                 >
-                    "Review request"
-                </button>
+                    <button
+                        class="secondary"
+                        type="button"
+                        on:click=move |_| {
+                            set_is_dismissed.set(false);
+                            set_is_open.set(true);
+                        }
+                    >
+                        "Review request"
+                    </button>
+                </Show>
             </aside>
         </Show>
     }
