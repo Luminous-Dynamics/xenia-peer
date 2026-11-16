@@ -1987,6 +1987,53 @@ mod tests {
     }
 
     #[test]
+    fn i2p_physical_binding_recomputes_summary_from_raw_artifacts() {
+        let (trace, calibration, identity) = synthetic_i2p_fixture(300);
+        let run_dir = std::env::temp_dir().join(format!(
+            "xenia-i2p-binding-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(&run_dir).unwrap();
+        let trace_path = run_dir.join("physical-trace.json");
+        let calibration_path = run_dir.join("calibration.json");
+        write_new_file(&trace_path, &serde_json::to_vec_pretty(&trace).unwrap()).unwrap();
+        write_new_file(&calibration_path, &serde_json::to_vec_pretty(&calibration).unwrap()).unwrap();
+        let trace_digest = sha256_file(&trace_path).unwrap();
+        let calibration_digest = sha256_file(&calibration_path).unwrap();
+        let summary = validate_i2p_trace(
+            &trace,
+            &calibration,
+            &trace_digest,
+            &calibration_digest,
+            &identity,
+        )
+        .unwrap();
+        let packet = json!({
+            "run_id": identity["run_id"],
+            "profile_id": identity["profile_id"],
+            "result_state": "BLOCKED",
+            "latency_measurement": summary,
+            "physical_latency_import": {
+                "state": "IMPORTED_PARTIAL_EVIDENCE",
+                "trace_sha256": trace_digest,
+                "calibration_sha256": calibration_digest
+            },
+            "artifacts": [
+                { "role": "physical_latency_trace", "path": "physical-trace.json", "sha256": trace_digest },
+                { "role": "instrument_calibration", "path": "calibration.json", "sha256": calibration_digest }
+            ]
+        });
+        verify_physical_latency_binding(&packet, &run_dir).unwrap();
+
+        let mut tampered_summary = packet.clone();
+        tampered_summary["latency_measurement"]["p95_ms"] = json!(999.0);
+        assert!(verify_physical_latency_binding(&tampered_summary, &run_dir).is_err());
+
+        fs::remove_dir_all(run_dir).unwrap();
+    }
+
+    #[test]
     fn i2p_bootstrap_interval_is_deterministic_for_a_fixed_seed() {
         let samples = (0..300_u64).map(|value| 10_000 + value * 7).collect::<Vec<_>>();
         let first = bootstrap_percentile_ci(&samples, 95, 100, 500, 0x1234_5678);
