@@ -100,7 +100,8 @@
         "displayed_fps_min": 57,
         "codec": "H.264",
         "average_bitrate_mbps_max": 15,
-        "quality_gate": "Independent visual-quality score must remain acceptable; bitrate target cannot override legibility"
+        "quality_gate": "Independent visual-quality score must remain acceptable; bitrate target cannot override legibility",
+        "target_interpretation": "15 Mbps is a stretch target. Parsec vendor guidance recommends 30 Mbps host upload for 1080p60. Do not claim superiority until matched-quality runs on the same hardware, content and transport path."
       },
       "latency_targets": {
         "frame_age_p95_ms_max": 60,
@@ -156,6 +157,21 @@
       },
       "latency_targets": {
         "control_message_delivery_p95_ms_max": 250
+      },
+      "cross_traffic": {
+        "media_offered_load_fraction_min": 0.9,
+        "competing_flows": [
+          "Xenia video",
+          "independent long-lived TCP bulk flow"
+        ],
+        "fair_queue_reference_required": true,
+        "tcp_goodput_vs_fair_queue_reference_ratio_min": 0.8
+      },
+      "bandwidth_step_down": {
+        "initial_bandwidth_mbps": 30,
+        "target_bandwidth_mbps": 5,
+        "adaptation_convergence_seconds_max": 2,
+        "measure_queue_age_and_control_latency": true
       }
     },
     {
@@ -283,7 +299,7 @@
         "consent_transition",
         "rekey_transition"
       ],
-      "required_vector_pass_fraction": 1.0
+      "required_vector_pass_fraction": 1
     }
   ],
   "consent_usability_targets": {
@@ -344,5 +360,101 @@
     "meshcentral": "https://docs.meshcentral.com/",
     "kani": "https://model-checking.github.io/kani/",
     "criterion": "https://criterion-rs.github.io/book/"
+  },
+  "competitor_reference_points": [
+    {
+      "system": "Parsec",
+      "observed_reference": "30 Mbps host upload recommended by vendor for 1080p60",
+      "source": "https://support.parsec.app/hc/en-us/articles/32381460716180-Parsec-Connectivity-Requirements",
+      "published_or_updated": "2026-07-08",
+      "comparison_rule": "Reference only; run matched visual quality, codec, hardware, network and direct/relay configuration."
+    },
+    {
+      "system": "RustDesk",
+      "observed_reference": "Codec configuration lists auto, VP8, VP9, AV1, H.264 and H.265; vendor warns codec availability depends on host/client support.",
+      "source": "https://rustdesk.com/docs/en/self-host/client-configuration/advanced-settings/",
+      "comparison_rule": "Record actual negotiated codec and hardware path; configured preference is not proof of negotiated use."
+    },
+    {
+      "system": "AnyDesk",
+      "observed_reference": "Permission profiles and in-session permission changes are documented.",
+      "source": "https://anydesk.com/en/features/permission-management",
+      "comparison_rule": "Compare scope clarity, revocation/effect-boundary enforcement and verifiability, not merely presence of permission toggles."
+    },
+    {
+      "system": "TeamViewer Tensor",
+      "observed_reference": "Vendor documents session and management-console event logs with user/action/time scope.",
+      "source": "https://www.teamviewer.com/en/global/support/knowledge-base/teamviewer-tensor/security/auditability-event-log/",
+      "comparison_rule": "Compare administrator-accessible audit logs with participant-verifiable, cryptographically bound operation evidence."
+    },
+    {
+      "system": "Sunshine",
+      "observed_reference": "Vendor documents hardware-dependent HEVC Main/Main10 and AV1 Main encoding options.",
+      "source": "https://docs.lizardbyte.dev/projects/sunshine/latest/md_docs_2configuration.html",
+      "comparison_rule": "Record codec/profile, hardware encoder availability, capture backend, bit depth and HDR state."
+    },
+    {
+      "system": "MeshCentral",
+      "observed_reference": "Self-hosted web management with remote desktop, terminal and file management.",
+      "source": "https://docs.meshcentral.com/",
+      "comparison_rule": "Compare administration and fleet workflows, self-host operation, offline behavior and authority evidence."
+    }
+  ],
+  "codec_and_congestion_experiments": {
+    "bitrate_sweep_mbps": [
+      5,
+      10,
+      15,
+      20,
+      25,
+      30
+    ],
+    "codec_matrix": [
+      "H.264",
+      "HEVC",
+      "AV1",
+      "passthrough",
+      "HDC"
+    ],
+    "matched_quality_required": true,
+    "record_hardware_or_software_encode_decode": true,
+    "record_chroma_bit_depth_hdr_capture_backend": true,
+    "experiments": [
+      {
+        "id": "media_control_isolation",
+        "offered_media_load_fraction_min": 0.9,
+        "add_competing_long_lived_tcp_flow": true,
+        "measure": [
+          "control_message_p95_under_media_saturation_ms",
+          "control_message_p95_under_tcp_cross_traffic_ms",
+          "input_event_p95_ms",
+          "queue_age_p95_ms",
+          "stale_media_drops",
+          "tcp_goodput_vs_fq_reference_ratio"
+        ],
+        "acceptance": "No protected control/input starvation; bounded queues; long-lived TCP goodput at least 80% of the same-bottleneck fair-queue reference."
+      },
+      {
+        "id": "network_step_down",
+        "initial_bandwidth_mbps": 30,
+        "target_bandwidth_mbps": 5,
+        "rtt_ms": 80,
+        "jitter_ms": 20,
+        "packet_loss_fraction": 0.01,
+        "adaptation_convergence_seconds_max": 2,
+        "measure": [
+          "adaptation_convergence_seconds",
+          "time_to_stable_bitrate_s",
+          "time_to_stable_fps_s",
+          "queue_age_p95_ms",
+          "control_message_delivery_p95_ms",
+          "stale_media_drops",
+          "recovery_time_s"
+        ]
+      }
+    ],
+    "reference_standard": "RFC 8836",
+    "reference_url": "https://www.rfc-editor.org/rfc/rfc8836.html",
+    "status": "proposed_experiments_not_measurements"
   }
 }
