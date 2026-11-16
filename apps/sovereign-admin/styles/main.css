@@ -1148,6 +1148,109 @@ textarea:focus,
     margin-top: 1rem;
 }
 
+dialog.modal.consent-dialog {
+    position: fixed;
+    inset: 0;
+    width: min(600px, calc(100vw - 2rem));
+    max-width: min(600px, calc(100vw - 2rem));
+    max-height: min(84vh, 780px);
+    margin: auto;
+    color: var(--fg);
+}
+
+dialog.modal.consent-dialog::backdrop {
+    background: rgba(2, 8, 13, 0.82);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+}
+
+.consent-dialog .consent-dialog-hint {
+    margin-top: 0.9rem;
+    color: var(--fg-muted);
+    font-size: 0.82rem;
+}
+
+.consent-dialog .consent-revocation-note {
+    margin-top: 1rem;
+    padding: 0.9rem 1rem;
+    border: 1px solid rgba(255, 139, 145, 0.34);
+    border-radius: var(--radius-md);
+    background: rgba(255, 139, 145, 0.055);
+}
+
+.consent-dialog .consent-revocation-note h3 {
+    margin: 0 0 0.35rem;
+    color: var(--err);
+    font-size: 0.88rem;
+}
+
+.consent-dialog .consent-revocation-note p {
+    color: var(--fg-dim);
+    font-size: 0.82rem;
+}
+
+.consent-dialog .consent-decision-error {
+    margin-top: 1rem;
+    padding: 0.7rem 0.85rem;
+    border: 1px solid rgba(255, 139, 145, 0.35);
+    border-radius: var(--radius-sm);
+    background: rgba(255, 139, 145, 0.07);
+    color: #ffdadd;
+    font-size: 0.85rem;
+}
+
+.consent-dialog .consent-button-row {
+    justify-content: stretch;
+}
+
+.consent-dialog .consent-decision {
+    flex: 1 1 0;
+    min-width: 7rem;
+    min-height: 44px;
+    border: 1px solid var(--border-strong);
+    background: rgba(143, 164, 179, 0.08);
+    color: var(--fg);
+    font-weight: 700;
+}
+
+.consent-dialog .consent-decision:hover:not(:disabled) {
+    border-color: var(--accent);
+    background: rgba(120, 216, 203, 0.1);
+    color: var(--accent-strong);
+}
+
+.consent-dialog .consent-revoke {
+    flex-basis: 100%;
+    border-color: rgba(255, 139, 145, 0.45);
+    background: rgba(255, 139, 145, 0.08);
+    color: var(--err);
+}
+
+.consent-decision-notice {
+    position: fixed;
+    right: 1rem;
+    bottom: 1rem;
+    z-index: 20;
+    max-width: min(34rem, calc(100vw - 2rem));
+    padding: 0.8rem 1rem;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    background: var(--surface-raised);
+    color: var(--fg);
+    box-shadow: var(--shadow-soft);
+}
+
+@media (max-width: 420px) {
+    .consent-dialog .consent-button-row {
+        display: grid;
+        grid-template-columns: 1fr;
+    }
+
+    .consent-dialog .consent-decision {
+        width: 100%;
+    }
+}
+
 .modal-overlay {
     position: fixed;
     inset: 0;

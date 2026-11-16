@@ -37,10 +37,55 @@ fn parse_session_id(prompt: &str) -> Option<[u8; 16]> {
 /// `{session_id, scope}`, so surface `scope`; fall back to the raw string for a
 /// legacy plaintext prompt.
 fn display_scope(prompt: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(prompt)
+    let scope = serde_json::from_str::<serde_json::Value>(prompt)
         .ok()
         .and_then(|v| v.get("scope").and_then(|s| s.as_str()).map(String::from))
-        .unwrap_or_else(|| prompt.to_string())
+        .unwrap_or_else(|| prompt.to_string());
+
+    if scope.trim().is_empty() {
+        "Scope was not supplied in the request.".to_string()
+    } else {
+        scope
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scope_display_uses_only_supplied_scope_and_preserves_legacy_text() {
+        assert_eq!(
+            display_scope(
+                r#"{"session_id":"00112233445566778899aabbccddeeff","scope":"View-only session"}"#
+            ),
+            "View-only session"
+        );
+        assert_eq!(
+            display_scope("Legacy plaintext scope"),
+            "Legacy plaintext scope"
+        );
+    }
+
+    #[test]
+    fn scope_display_marks_an_empty_scope_as_unknown() {
+        assert_eq!(
+            display_scope(r#"{"session_id":"00112233445566778899aabbccddeeff","scope":"  "}"#),
+            "Scope was not supplied in the request."
+        );
+    }
+
+    #[test]
+    fn session_id_requires_exactly_sixteen_decoded_bytes() {
+        assert_eq!(
+            parse_session_id(r#"{"session_id":"00112233445566778899aabbccddeeff"}"#),
+            Some([
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff
+            ])
+        );
+        assert_eq!(parse_session_id(r#"{"session_id":"001122"}"#), None);
+    }
 }
 
 #[component]
@@ -55,6 +100,31 @@ pub fn ConsentModal() -> impl IntoView {
 
     let (consent_req, set_consent_req) = signal(None::<String>);
     let (is_open, set_is_open) = signal(false);
+    let (is_deciding, set_is_deciding) = signal(false);
+    let (decision_error, set_decision_error) = signal(None::<String>);
+    let (decision_notice, set_decision_notice) = signal(None::<String>);
+    let (prompt_conflict, set_prompt_conflict) = signal(false);
+    let dialog_ref = NodeRef::<leptos::html::Dialog>::new();
+
+    // Use the browser's native modal dialog implementation. show_modal()
+    // provides the top layer, focus placement/trapping, and document inertness;
+    // close() restores the element that was focused before the dialog opened.
+    Effect::new(move |_| {
+        let should_be_open = is_open.get();
+        if let Some(dialog) = dialog_ref.get() {
+            if should_be_open && !dialog.open() {
+                if let Err(error) = dialog.show_modal() {
+                    leptos::logging::error!("could not open native consent dialog: {error:?}");
+                    set_decision_error.set(Some(
+                        "The consent dialog could not be opened. Reload the console before making a decision."
+                            .to_string(),
+                    ));
+                }
+            } else if !should_be_open && dialog.open() {
+                dialog.close();
+            }
+        }
+    });
 
     // Listen for consent prompts the daemon broadcasts on its admin `/ws`
     // (derived from DaemonConfig, not hardcoded, so the console targets the
@@ -81,8 +151,30 @@ pub fn ConsentModal() -> impl IntoView {
         spawn_local(async move {
             while let Some(msg) = reader.next().await {
                 if let Ok(Message::Text(text)) = msg {
-                    set_consent_req.set(Some(text));
-                    set_is_open.set(true);
+                    match consent_req.get_untracked() {
+                        None => {
+                            set_decision_error.set(None);
+                            set_decision_notice.set(None);
+                            set_prompt_conflict.set(false);
+                            set_consent_req.set(Some(text));
+                            set_is_open.set(true);
+                        }
+                        Some(existing) if existing == text => {
+                            // The same prompt can be broadcast more than once.
+                            // Ignore an exact duplicate; it must not create a
+                            // second decision opportunity.
+                        }
+                        Some(_) => {
+                            // Never replace a visible prompt with a later
+                            // session. Fail closed until the browser is
+                            // reconnected and the daemon state is reconciled.
+                            set_prompt_conflict.set(true);
+                            set_decision_error.set(Some(
+                                "A different session request arrived while this request is pending. The displayed request has been preserved and decisions are disabled. Reload/reconnect the console to reconcile the daemon state."
+                                    .to_string(),
+                            ));
+                        }
+                    }
                 }
             }
         });
@@ -109,160 +201,224 @@ pub fn ConsentModal() -> impl IntoView {
     // held here, so this component no longer needs the operator identity at
     // all.
     let decide = move |action: ConsentAction| {
-        let prompt = consent_req.get_untracked();
-        let session_id = prompt.as_deref().and_then(parse_session_id);
-        let sealed = config.use_sealed_channel.get_untracked();
+        if is_deciding.get_untracked() || prompt_conflict.get_untracked() {
+            return;
+        }
+        let Some(prompt) = consent_req.get_untracked() else {
+            return;
+        };
 
+        let session_id = parse_session_id(&prompt);
+        let sealed = config.use_sealed_channel.get_untracked();
         let endpoint = config.endpoint.get_untracked();
         let agent_url = agent_config.agent_url.get_untracked();
         let sealed_url = config.sealed_ws_url();
         let high_security = config.high_security.get_untracked();
         let consent_url = config.consent_ws_url();
 
-        // Snapshot *before* the async refresh attempt below, to distinguish
-        // "never signed in as an operator" (the legitimate legacy-plaintext
-        // path, for a daemon run without --require-operator-auth) from "was
-        // signed in, but the session has now expired/failed to refresh" --
-        // the two used to be conflated (both produced `sess = None` from
-        // the refresh call below), which silently downgraded an
-        // authenticated operator's decision to an anonymous, unsigned one
-        // instead of erroring. Found in the 2026-07-18 audit of this PR's
-        // own rotation change.
+        // Preserve the boundary between legacy anonymous mode and a session
+        // that was authenticated but has since expired. An expired session
+        // must never downgrade into a plaintext decision.
         let had_session = session.is_some_and(|sig| sig.get_untracked().is_some());
 
-        // The payload now needs an `await` (asking the agent to sign) even
-        // in the non-sealed case, so both dispatch paths live inside one
-        // `spawn_local` after it resolves rather than each starting their
-        // own.
+        set_is_deciding.set(true);
+        set_decision_error.set(None);
+        set_decision_notice.set(None);
+
         spawn_local(async move {
-            // Proactively re-authenticate the operator session first if
-            // it's close to its (short, 15-minute) TTL -- mirrors the
-            // agent-session leg's `ensure_fresh_session` below, applied to
-            // the daemon-token leg. Otherwise a console left open past the
-            // TTL silently loses its privileged buttons (`can()` gates on
-            // `is_valid()`) with no way back short of a manual sign-in.
-            let sess = match session {
-                Some(sig) => crate::operator_session::ensure_fresh_operator_session(
-                    &endpoint,
-                    &agent_url,
-                    &agent_config,
-                    sig,
-                )
-                .await
-                .ok(),
-                None => None,
-            };
-            if had_session && sess.is_none() {
-                // Was authenticated a moment ago; the session has since
-                // expired and couldn't be renewed. Abort rather than
-                // falling through to the anonymous/unsigned legacy path
-                // below, which would silently strip this decision of its
-                // operator attribution and signature.
-                leptos::logging::error!(
-                    "operator session expired and could not be renewed -- sign in again to submit this decision"
-                );
-                return;
-            }
-
-            // Both a signed consent payload and the sealed channel's own
-            // handshake need a live agent session -- fetch (and
-            // transparently renew, if it's close to expiry) it once up
-            // front rather than separately for each.
-            let needs_agent = (sess.is_some() && session_id.is_some()) || sealed;
-            let agent_session = if needs_agent {
-                match crate::agent_client::ensure_fresh_session(&agent_url, &agent_config).await {
-                    Ok(s) => Some(s),
-                    Err(e) => {
-                        leptos::logging::error!("operator agent session unavailable: {e}");
-                        return;
+            let outcome: Result<(), String> = async {
+                let sess = match session {
+                    Some(sig) => {
+                        crate::operator_session::ensure_fresh_operator_session(
+                            &endpoint,
+                            &agent_url,
+                            &agent_config,
+                            sig,
+                        )
+                        .await
+                        .ok()
                     }
+                    None => None,
+                };
+                if had_session && sess.is_none() {
+                    return Err(
+                        "The operator session expired and could not be renewed. Sign in again; no decision was sent."
+                            .to_string(),
+                    );
                 }
-            } else {
-                None
-            };
 
-            let scope = prompt.as_deref().map(display_scope).unwrap_or_default();
-            let payload = match (&sess, session_id, &agent_session) {
-                (Some(s), Some(sid), Some(agent_session)) => {
-                    match build_consent_request(
-                        &endpoint,
-                        &agent_url,
-                        agent_session,
-                        s,
-                        action,
-                        &sid,
-                        &scope,
-                    )
-                    .await
-                    {
-                        Ok(p) => p,
-                        Err(e) => {
-                            leptos::logging::error!("failed to build signed consent request: {e}");
-                            return;
+                let needs_agent = (sess.is_some() && session_id.is_some()) || sealed;
+                let agent_session = if needs_agent {
+                    match crate::agent_client::ensure_fresh_session(&agent_url, &agent_config).await {
+                        Ok(session) => Some(session),
+                        Err(error) => {
+                            return Err(format!(
+                                "The operator agent session is unavailable. No decision was sent: {error}"
+                            ));
                         }
                     }
-                }
-                _ => action.as_str().to_string(),
-            };
-            if sealed {
-                let Some(agent_session) = agent_session else {
-                    leptos::logging::error!("sealed consent decision needs an agent session");
-                    return;
-                };
-                let result = if high_security {
-                    crate::sealed_consent::send_sealed_consent_highsec(
-                        &sealed_url,
-                        &agent_url,
-                        &agent_session,
-                        payload.as_bytes(),
-                    )
-                    .await
                 } else {
-                    crate::sealed_consent::send_sealed_consent(
-                        &sealed_url,
-                        &agent_url,
-                        &agent_session,
-                        payload.as_bytes(),
-                    )
-                    .await
+                    None
                 };
-                if let Err(err) = result {
-                    leptos::logging::error!("sealed consent decision failed: {err}");
+
+                let scope = display_scope(&prompt);
+                let payload = match (&sess, session_id, &agent_session) {
+                    (Some(operator), Some(session_id), Some(agent_session)) => {
+                        match build_consent_request(
+                            &endpoint,
+                            &agent_url,
+                            agent_session,
+                            operator,
+                            action,
+                            &session_id,
+                            &scope,
+                        )
+                        .await
+                        {
+                            Ok(payload) => payload,
+                            Err(error) => {
+                                return Err(format!(
+                                    "The signed decision could not be built. No decision was sent: {error}"
+                                ));
+                            }
+                        }
+                    }
+                    _ => action.as_str().to_string(),
+                };
+
+                if sealed {
+                    let Some(agent_session) = agent_session else {
+                        return Err(
+                            "The sealed consent channel requires a live operator-agent session. No decision was sent."
+                                .to_string(),
+                        );
+                    };
+                    let result = if high_security {
+                        crate::sealed_consent::send_sealed_consent_highsec(
+                            &sealed_url,
+                            &agent_url,
+                            &agent_session,
+                            payload.as_bytes(),
+                        )
+                        .await
+                    } else {
+                        crate::sealed_consent::send_sealed_consent(
+                            &sealed_url,
+                            &agent_url,
+                            &agent_session,
+                            payload.as_bytes(),
+                        )
+                        .await
+                    };
+                    result.map_err(|error| {
+                        format!("The sealed decision could not be transmitted: {error}")
+                    })?;
+                } else {
+                    let ws = WebSocket::open(&consent_url)
+                        .map_err(|error| format!("Could not open the consent channel: {error}"))?;
+                    let (mut writer, _) = ws.split();
+                    writer
+                        .send(Message::Text(payload))
+                        .await
+                        .map_err(|error| format!("Could not transmit the consent decision: {error}"))?;
                 }
-            } else if let Ok(ws) = WebSocket::open(&consent_url) {
-                let (mut writer, _) = ws.split();
-                let _ = writer.send(Message::Text(payload)).await;
+
+                Ok(())
+            }
+            .await;
+
+            match outcome {
+                Ok(()) => {
+                    let notice = if prompt_conflict.get_untracked() {
+                        "Decision transmitted for the displayed request, but another request arrived before reconciliation. Reload/reconnect the console to retrieve the remaining daemon state."
+                    } else {
+                        "Decision transmitted. The console has not received an independent host-side outcome confirmation."
+                    };
+                    set_is_deciding.set(false);
+                    set_is_open.set(false);
+                    set_consent_req.set(None);
+                    set_decision_notice.set(Some(notice.to_string()));
+                }
+                Err(error) => {
+                    leptos::logging::error!("consent decision failed: {error}");
+                    set_is_deciding.set(false);
+                    set_decision_error.set(Some(error));
+                }
             }
         });
-        set_is_open.set(false);
     };
 
     view! {
-        <Show when=move || is_open.get()>
-            <div class="modal-overlay" data-testid="consent-modal">
-                <div class="modal">
-                    <h2>"New Session Request"</h2>
-                    <p>{move || consent_req.get().map(|p| display_scope(&p)).unwrap_or_default()}</p>
-                    <div class="button-row">
-                        <Show when=move || can(ConsentAction::Approve)>
-                            <button class="primary" data-testid="consent-approve-button" on:click=move |_| decide(ConsentAction::Approve)>
-                                "Approve"
-                            </button>
-                        </Show>
-                        <Show when=move || can(ConsentAction::Deny)>
-                            <button class="secondary" data-testid="consent-deny-button" on:click=move |_| decide(ConsentAction::Deny)>
-                                "Deny"
-                            </button>
-                        </Show>
-                        <Show when=move || can(ConsentAction::Revoke)>
-                            <button class="danger" data-testid="consent-revoke-button" on:click=move |_| decide(ConsentAction::Revoke)>
-                                "Revoke"
-                            </button>
-                        </Show>
-                    </div>
-                </div>
-            </div>
+        <Show when=move || decision_notice.get().is_some()>
+            <p class="consent-decision-notice" role="status" aria-live="polite">
+                {move || decision_notice.get().unwrap_or_default()}
+            </p>
         </Show>
+
+        <dialog
+            node_ref=dialog_ref
+            class="modal consent-dialog"
+            data-testid="consent-modal"
+            aria-labelledby="consent-dialog-title"
+            aria-describedby="consent-dialog-description"
+            on:cancel=move |event: web_sys::Event| {
+                // A request remains live at the daemon until Approve or Deny
+                // is transmitted. Escape must not silently dismiss it.
+                event.prevent_default();
+                set_decision_error.set(Some(
+                    "This request is still pending. Use Deny to decline it, or Approve to grant it."
+                        .to_string(),
+                ));
+            }
+        >
+            <h2 id="consent-dialog-title">"New Session Request"</h2>
+            <p id="consent-dialog-description">
+                {move || consent_req.get().map(|prompt| display_scope(&prompt)).unwrap_or_default()}
+            </p>
+            <p class="consent-dialog-hint">
+                "Escape does not submit a decision. A request remains pending until you choose Approve or Deny."
+            </p>
+
+            <section class="consent-revocation-note" aria-label="Revocation information">
+                <h3>"Revocation is separate from approval"</h3>
+                <p>
+                    "Revocation applies only after a session is active. It stops future authorized effects; it cannot undo actions already completed."
+                </p>
+            </section>
+
+            <Show when=move || decision_error.get().is_some()>
+                <p class="consent-decision-error" role="alert" aria-live="assertive">
+                    {move || decision_error.get().unwrap_or_default()}
+                </p>
+            </Show>
+
+            <div class="button-row consent-button-row">
+                <Show when=move || can(ConsentAction::Approve)>
+                    <button
+                        type="button"
+                        class="consent-decision"
+                        data-testid="consent-approve-button"
+                        prop:disabled=move || is_deciding.get() || prompt_conflict.get() || prompt_conflict.get()
+                        on:click=move |_| decide(ConsentAction::Approve)
+                    >
+                        {move || if is_deciding.get() { "Submitting…" } else { "Approve" }}
+                    </button>
+                </Show>
+                <Show when=move || can(ConsentAction::Deny)>
+                    <button
+                        type="button"
+                        class="consent-decision"
+                        data-testid="consent-deny-button"
+                        autofocus
+                        prop:disabled=move || is_deciding.get() || prompt_conflict.get()
+                        on:click=move |_| decide(ConsentAction::Deny)
+                    >
+                        "Deny"
+                    </button>
+                </Show>
+            </div>
+        </dialog>
     }
+
     .into_any()
 }
