@@ -69,7 +69,6 @@ fn run() -> AppResult<()> {
             let profile: Value = serde_json::from_slice(&profile_bytes)?;
             validate_profile(&profile)?;
             let selected = find_profile(&profile, &profile_id)?;
-            let profile_digest = sha256_file(Path::new(&profile_path))?;
             let source = git_snapshot(&repo);
             let host = host_snapshot(host_label);
 
@@ -96,6 +95,23 @@ fn run() -> AppResult<()> {
                 .unwrap_or("unknown");
             let run_id = format!("{profile_id}-{now_ms}-{commit_short}");
             let required = required_measurements(&profile_id)?;
+            let output_dir = output
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            let profile_artifact_name = format!("{run_id}.profile.json");
+            let profile_artifact_path = output_dir.join(&profile_artifact_name);
+            if output == profile_artifact_path {
+                return Err(app_error("run packet path collides with its embedded profile artifact"));
+            }
+            write_new_file(&profile_artifact_path, &profile_bytes)?;
+            let profile_digest = match sha256_file(&profile_artifact_path) {
+                Ok(digest) => digest,
+                Err(error) => {
+                    let _ = fs::remove_file(&profile_artifact_path);
+                    return Err(error);
+                }
+            };
 
             let packet = json!({
                 "schema_version": RUN_SCHEMA,
@@ -117,12 +133,15 @@ fn run() -> AppResult<()> {
                 "sample_count": null,
                 "measurements": null,
                 "threshold_checks": [],
-                "artifacts": [],
+                "artifacts": [{ "role": "qualification_profile", "path": profile_artifact_name, "sha256": profile_digest }],
                 "blockers": blockers
             });
 
             let rendered = serde_json::to_vec_pretty(&packet)?;
-            write_new_file(&output, &rendered)?;
+            if let Err(error) = write_new_file(&output, &rendered) {
+                let _ = fs::remove_file(&profile_artifact_path);
+                return Err(error);
+            }
             println!(
                 "{}",
                 serde_json::to_string_pretty(&json!({
@@ -262,6 +281,12 @@ fn validate_profile(profile: &Value) -> AppResult<()> {
             .as_str()
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| app_error("each network profile needs a non-empty id"))?;
+        if !id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-'))
+        {
+            return Err(app_error(format!("profile id contains unsafe characters: {id}")));
+        }
         if !ids.insert(id.to_string()) {
             return Err(app_error(format!("duplicate network profile id: {id}")));
         }
