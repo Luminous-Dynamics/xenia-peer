@@ -14,6 +14,7 @@
 
 #![allow(dead_code)] // Skeleton lands before daemon CLI/runtime integration.
 
+use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -750,7 +751,7 @@ pub(crate) struct M1RuntimeSession {
     request_id: Uuid,
     scope: String,
     session_transcript_hash: Option<[u8; 32]>,
-    next_audit_index: usize,
+    pending_audit_events: VecDeque<xenia_peer_core::M1AuditEvent>,
 }
 
 impl M1RuntimeSession {
@@ -785,7 +786,7 @@ impl M1RuntimeSession {
             request_id,
             scope: scope.into(),
             session_transcript_hash: None,
-            next_audit_index: 0,
+            pending_audit_events: VecDeque::new(),
         }
     }
 
@@ -959,7 +960,11 @@ impl M1RuntimeSession {
             }
         }
 
-        self.next_audit_index = self.session.audit().len();
+        // Replay reconstructs state from the persisted consent ledger. Its
+        // generated lifecycle events are already represented by those entries,
+        // so discard the reconstruction-only audit events before live work.
+        let _ = self.session.drain_audit_events();
+        self.pending_audit_events.clear();
         Ok(())
     }
 
@@ -1103,9 +1108,17 @@ impl M1RuntimeSession {
     }
 
     fn flush_new_audit_events(&mut self) -> Result<(), M1RuntimeError> {
-        let events = self.session.audit()[self.next_audit_index..].to_vec();
+        // Move events out of the pure state machine immediately. Most
+        // operation events are deliberately not consent-ledger records; they
+        // are discarded here instead of remaining in an ever-growing Vec.
+        self.pending_audit_events
+            .extend(self.session.drain_audit_events());
 
-        for event in events {
+        // Keep a consent-boundary event queued until its ledger append
+        // succeeds. If append fails, a later retry sees this event first and
+        // cannot silently skip it or duplicate already committed earlier
+        // events from this batch.
+        while let Some(event) = self.pending_audit_events.front().copied() {
             if let Some(record) = consent_record_for_m1_event(
                 self.source_id,
                 self.session_id,
@@ -1115,9 +1128,9 @@ impl M1RuntimeSession {
             ) {
                 self.chain.append(record)?;
             }
+            self.pending_audit_events.pop_front();
         }
 
-        self.next_audit_index = self.session.audit().len();
         Ok(())
     }
 }
@@ -1918,6 +1931,42 @@ mod tests {
         assert_eq!(entries[1].event.kind, ConsentKind::Approval);
         assert_eq!(entries[2].event.kind, ConsentKind::Revocation);
 
+        runtime.verify(&verifying_key).unwrap();
+    }
+
+    #[test]
+    fn high_rate_input_does_not_retain_consumed_operation_audit_events() {
+        let (mut runtime, verifying_key) = runtime(12);
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet {
+                stream_frame: true,
+                inject_input: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        for _ in 0..50_000 {
+            runtime.allow_input_flow().unwrap();
+            assert!(
+                runtime.session.audit().is_empty(),
+                "runtime must drain each operation event after the M1 gate"
+            );
+            assert!(
+                runtime.pending_audit_events.is_empty(),
+                "non-consent operation events must not accumulate in the pending ledger queue"
+            );
+        }
+
+        // Operation volume must not expand the consent ledger or change its
+        // lifecycle transcript.
+        assert_eq!(runtime.entries().len(), 2);
+        runtime.revoke().unwrap();
+        assert_eq!(runtime.entries().len(), 3);
+        assert_eq!(
+            runtime.entries()[2].event.kind,
+            ConsentKind::Revocation
+        );
         runtime.verify(&verifying_key).unwrap();
     }
 
