@@ -1,0 +1,348 @@
+{
+  "schema_version": "xenia-benchmark-profile/v0.1",
+  "programme": "Xenia Release Qualification",
+  "prepared": "2026-11-16",
+  "status": "proposed_targets_not_measurements",
+  "scope": {
+    "repositories": [
+      "Luminous-Dynamics/xenia-peer",
+      "Luminous-Dynamics/xenia-wire"
+    ],
+    "product_boundary": "Consent-first remote-session infrastructure",
+    "release_stage": "Technical preview qualification"
+  },
+  "comparison_policy": {
+    "comparators": [
+      {
+        "name": "RustDesk OSS",
+        "focus": "Open-source self-hosting, direct-versus-relay behavior, deployment and supported platforms"
+      },
+      {
+        "name": "AnyDesk",
+        "focus": "Mature session permissions, authentication, encryption and on-premises operations"
+      },
+      {
+        "name": "TeamViewer",
+        "focus": "Enterprise identity, administration, policy and operational support"
+      },
+      {
+        "name": "Parsec",
+        "focus": "Interactive streaming latency, frame pacing, bitrate and visual quality"
+      },
+      {
+        "name": "MeshCentral",
+        "focus": "Self-hosted fleet administration, browser workflows, terminal and file access"
+      }
+    ],
+    "fair_comparison_required": true,
+    "controlled_variables": [
+      "host_and_client_hardware",
+      "display_resolution_and_refresh",
+      "codec_and_quality_target",
+      "content_corpus_digest",
+      "transport_and_direct_or_relay_mode",
+      "network_profile",
+      "test_duration",
+      "competitor_version_and_configuration"
+    ],
+    "report_percentiles": [
+      "p50",
+      "p95",
+      "p99",
+      "max"
+    ],
+    "do_not_claim_superiority_without_matched_runs": true
+  },
+  "corpus": [
+    {
+      "id": "static_ui_text",
+      "description": "Text editor, terminal and static high-contrast UI with small pointer movements",
+      "quality_priority": "Text legibility and edge fidelity"
+    },
+    {
+      "id": "scrolling_and_pointer",
+      "description": "Rapid scrolling, pointer motion, drag selection and window movement",
+      "quality_priority": "Freshness, frame pacing and input response"
+    },
+    {
+      "id": "high_motion",
+      "description": "Fixed high-motion video and animation sequence",
+      "quality_priority": "Temporal continuity and bounded latency"
+    },
+    {
+      "id": "mixed_desktop",
+      "description": "Alternating static UI, scrolling, video playback and window changes",
+      "quality_priority": "Balanced visual quality and responsiveness"
+    },
+    {
+      "id": "dark_scene",
+      "description": "Low-light gradients, dark UI and subtle color transitions",
+      "quality_priority": "Banding, color fidelity and compression artifacts"
+    }
+  ],
+  "network_profiles": [
+    {
+      "id": "lan_interactive",
+      "kind": "performance_target",
+      "network": {
+        "rtt_ms": {
+          "min": 1,
+          "max": 5
+        },
+        "jitter_ms": 2,
+        "packet_loss_fraction": 0,
+        "bandwidth_limit_mbps": null,
+        "reordering_fraction": 0
+      },
+      "media_target": {
+        "resolution": "1920x1080",
+        "fps_target": 60,
+        "displayed_fps_min": 57,
+        "codec": "H.264",
+        "average_bitrate_mbps_max": 15,
+        "quality_gate": "Independent visual-quality score must remain acceptable; bitrate target cannot override legibility"
+      },
+      "latency_targets": {
+        "frame_age_p95_ms_max": 60,
+        "input_to_photon_p95_ms_max": 80,
+        "direct_connect_to_first_authorized_frame_p95_ms_max": 5000,
+        "post_approval_to_first_authorized_frame_p95_ms_max": 1000
+      }
+    },
+    {
+      "id": "regional_interactive",
+      "kind": "performance_target",
+      "network": {
+        "rtt_ms": {
+          "min": 20,
+          "max": 30
+        },
+        "jitter_ms": 5,
+        "packet_loss_fraction": 0,
+        "bandwidth_limit_mbps": null,
+        "reordering_fraction": 0
+      },
+      "media_target": {
+        "resolution": "1920x1080",
+        "fps_target": 60,
+        "displayed_fps_min": 57,
+        "codec": "H.264",
+        "quality_gate": "Report frame pacing, bitrate and quality at matched visual settings"
+      },
+      "latency_targets": {
+        "input_to_photon_p95_ms_max": 120,
+        "control_message_delivery_p95_ms_max": 150
+      }
+    },
+    {
+      "id": "degraded_wan",
+      "kind": "resilience_target",
+      "network": {
+        "rtt_ms": {
+          "min": 80,
+          "max": 80
+        },
+        "jitter_ms": 20,
+        "packet_loss_fraction": 0.01,
+        "bandwidth_limit_mbps": 10,
+        "reordering_fraction": 0.002
+      },
+      "media_target": {
+        "resolution": "adaptive",
+        "fps_target": 30,
+        "displayed_fps_min": 20,
+        "codec": "H.264",
+        "quality_gate": "Graceful adaptation; stale video may be dropped, protected control may not be starved"
+      },
+      "latency_targets": {
+        "control_message_delivery_p95_ms_max": 250
+      }
+    },
+    {
+      "id": "constrained_link",
+      "kind": "resilience_target",
+      "network": {
+        "rtt_ms": {
+          "min": 100,
+          "max": 100
+        },
+        "jitter_ms": 30,
+        "packet_loss_fraction": 0.02,
+        "bandwidth_limit_mbps": 5,
+        "reordering_fraction": 0.005
+      },
+      "media_target": {
+        "resolution": "adaptive",
+        "fps_target": 15,
+        "displayed_fps_min": 8,
+        "codec": "H.264",
+        "quality_gate": "Reduced-rate viewing is acceptable; consent, revocation and control remain bounded and observable"
+      },
+      "latency_targets": {
+        "control_message_delivery_p95_ms_max": 300
+      }
+    },
+    {
+      "id": "long_session_soak",
+      "kind": "reliability_target",
+      "duration_hours_min": 24,
+      "network": {
+        "impairments": [
+          "short_disconnect",
+          "long_disconnect",
+          "packet_loss_burst",
+          "jitter_burst",
+          "bandwidth_throttle",
+          "peer_restart",
+          "transport_restart"
+        ]
+      },
+      "reliability_targets": {
+        "crash_count_max": 0,
+        "unbounded_queue_count_max": 0,
+        "nonce_or_replay_invariant_violations_max": 0,
+        "authority_drift_count_max": 0
+      },
+      "resource_targets": {
+        "rss_growth_after_warmup_percent_max": 5,
+        "note": "Measure after a documented warm-up and compare like-for-like; publish absolute RSS and allocation data too."
+      }
+    }
+  ],
+  "security_and_correctness_targets": [
+    {
+      "id": "aead_nonce_uniqueness",
+      "kind": "stress_test_plus_formal_obligation",
+      "minimum_distinct_key_nonce_pairs": 10000000,
+      "required_invariant": "No two distinct successful seals reuse the same AEAD key and 12-byte nonce.",
+      "note": "Stress count is not a proof; combine with model checking, source review and independent cryptographic review."
+    },
+    {
+      "id": "rekey_state_machine",
+      "kind": "fault_injection",
+      "minimum_scripted_rekeys": 100000,
+      "scenarios": [
+        "duplicate_ack",
+        "stale_key_ack",
+        "wrong_nonce_domain_ack",
+        "wrong_sequence_ack",
+        "delayed_message",
+        "reordered_message",
+        "disconnect_before_ack",
+        "disconnect_after_seal",
+        "restart_during_rekey",
+        "repeated_rekey"
+      ],
+      "false_acceptances_max": 0
+    },
+    {
+      "id": "consent_and_revocation",
+      "kind": "state_machine_and_race_test",
+      "scenarios": [
+        "deny",
+        "expiry",
+        "revocation_during_video",
+        "revocation_during_input",
+        "revocation_during_file_transfer",
+        "reconnect_after_revocation",
+        "restart_after_revocation",
+        "rekey_after_revocation",
+        "duplicate_or_reordered_authority_event"
+      ],
+      "protected_effects_after_denial_expiry_or_revocation_max": 0
+    },
+    {
+      "id": "randomized_fault_campaign",
+      "kind": "property_and_fault_injection",
+      "minimum_seeded_scenarios": 10000,
+      "scenarios": [
+        "partial_write",
+        "transport_timeout",
+        "process_termination",
+        "corrupt_persistence",
+        "truncated_ledger",
+        "slow_consumer",
+        "queue_saturation",
+        "peer_restart",
+        "stale_capability",
+        "replay"
+      ],
+      "silent_unauthorized_successes_max": 0
+    },
+    {
+      "id": "independent_conformance",
+      "kind": "cross_implementation",
+      "minimum_independent_implementations": 2,
+      "required_vector_classes": [
+        "positive",
+        "malformed",
+        "truncated",
+        "replay",
+        "wrong_domain",
+        "wrong_epoch",
+        "consent_transition",
+        "rekey_transition"
+      ],
+      "required_vector_pass_fraction": 1.0
+    }
+  ],
+  "consent_usability_targets": {
+    "minimum_formative_participants": 20,
+    "comprehension_fraction_min": 0.9,
+    "critical_comprehension_dimensions": [
+      "requester_and_recipient",
+      "purpose",
+      "data_and_operation_scope",
+      "duration_and_persistence",
+      "decline_consequences",
+      "revocation_and_limits"
+    ],
+    "deny_path_must_be_as_discoverable_as_approve": true,
+    "approval_rate_is_not_a_success_metric": true
+  },
+  "evidence_contract": {
+    "required_run_fields": [
+      "repository",
+      "commit_sha",
+      "dirty_tree",
+      "build_profile",
+      "rust_toolchain",
+      "os_kernel_compositor",
+      "cpu_gpu_driver",
+      "encoder_decoder",
+      "display_resolution_refresh",
+      "codec_profile",
+      "transport",
+      "direct_or_relay",
+      "network_profile",
+      "corpus_digest",
+      "warmup_duration",
+      "sample_count",
+      "measurement_clock",
+      "percentile_results",
+      "failure_counts",
+      "recovery_measurements",
+      "harness_version",
+      "random_seed",
+      "raw_artifact_digest"
+    ],
+    "allowed_result_states": [
+      "PASS",
+      "FAIL",
+      "BLOCKED",
+      "ENVIRONMENT_FAILURE"
+    ],
+    "missing_measurements_are_not_zero": true,
+    "queued_skipped_cancelled_or_stale_ci_is_not_pass": true,
+    "comparison_requires_matched_configuration": true
+  },
+  "references": {
+    "rustdesk": "https://rustdesk.com/docs/en/self-host/",
+    "anydesk": "https://anydesk.com/en/security",
+    "teamviewer": "https://www.teamviewer.com/en/trust-center/",
+    "parsec": "https://support.parsec.app/hc/en-us/articles/32381460716180-Parsec-Connectivity-Requirements",
+    "meshcentral": "https://docs.meshcentral.com/",
+    "kani": "https://model-checking.github.io/kani/",
+    "criterion": "https://criterion-rs.github.io/book/"
+  }
+}
