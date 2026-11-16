@@ -38,7 +38,13 @@ cargo run --locked -p xenia-peer --bin xenia-bench -- check-run artifacts/xenia-
 
 A claimed `PASS` is rejected unless all required measurements exist, the source was clean at capture time, an identified adapter is marked executed, raw evidence is bound, at least 100 samples exist, and the profile-specific thresholds pass. Thresholds are recomputed by the tool rather than accepted from the run packet.
 
-The checker validates consistency only. It does not independently attest the truth or authorship of measurements and artifacts.
+The checker validates consistency only. It does not independently attest the truth or authorship of measurements and artifacts. A claimed input-to-photon result also needs physical instrument evidence; see the measurement methodology. Without an attached photodiode or high-speed-camera trace and calibration record, the checker refuses PASS for profiles that require input-to-photon.
+
+## Physical input-to-photon evidence
+
+Profiles requiring input-to-photon measurement must include a calibrated photodiode record (timer resolution <=1 microsecond) or a high-speed-camera record (>=1,000 frames/s), >=300 valid trials, verified event-ID association, a physical trace digest and a calibration artifact digest. The method and sensor position must be recorded. A software presentation callback is not physical input-to-photon evidence.
+
+See [Measurement Methodology](../docs/benchmarks/MEASUREMENT_METHODOLOGY.md).
 
 ## Result vocabulary
 
