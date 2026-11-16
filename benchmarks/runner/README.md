@@ -36,9 +36,9 @@ After a real adapter has populated measurements, sample count, raw artifact path
 cargo run --locked -p xenia-peer --bin xenia-bench -- check-run artifacts/xenia-bench/lan-interactive-run.json
 ```
 
-A claimed `PASS` is rejected unless all required measurements exist, the source was clean at capture time, an identified adapter is marked executed, raw evidence is bound, at least 100 samples exist, and the profile-specific thresholds pass. Thresholds are recomputed by the tool rather than accepted from the run packet.
+A claimed `PASS` is rejected unless all required measurements exist, the source was clean at capture time, an identified adapter is marked executed, raw evidence is bound, at least 100 samples exist, and the profile-specific thresholds pass. Thresholds are recomputed by the tool rather than accepted from the run packet. For PASS, the tool also resolves each artifact relative to the run packet directory, rejects path escapes, reads the file and recomputes SHA-256. A digest-shaped string is not accepted in place of the actual bytes.
 
-The checker validates consistency only. It does not independently attest the truth or authorship of measurements and artifacts. A claimed input-to-photon result also needs physical instrument evidence; see the measurement methodology. Without an attached photodiode or high-speed-camera trace and calibration record, the checker refuses PASS for profiles that require input-to-photon.
+The checker validates packet consistency and on-disk artifact integrity only. It does not independently attest the truth or authorship of measurements, instrument calibration or artifacts. A claimed input-to-photon result also needs physical instrument evidence; see the measurement methodology. Without an attached photodiode or high-speed-camera trace and calibration record, the checker refuses PASS for profiles that require input-to-photon.
 
 ## Physical input-to-photon evidence
 
