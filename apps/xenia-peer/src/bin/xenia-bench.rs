@@ -1143,7 +1143,7 @@ mod tests {
         ));
         fs::create_dir_all(&run_dir).unwrap();
         let raw_path = run_dir.join("samples.jsonl");
-        fs::write(&raw_path, b"{\\"sample\\":1}\\n").unwrap();
+        fs::write(&raw_path, br#"{"sample":1}"#).unwrap();
         let digest = sha256_file(&raw_path).unwrap();
 
         let mut packet = json!({
