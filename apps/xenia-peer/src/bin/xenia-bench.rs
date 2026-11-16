@@ -169,12 +169,11 @@ fn run() -> AppResult<()> {
                 .parent()
                 .filter(|p| !p.as_os_str().is_empty())
                 .unwrap_or(Path::new("."));
-            if packet["artifacts"].as_array().is_some_and(|items| !items.is_empty()) {
-                verify_artifacts_on_disk(&packet, run_dir)?;
-                verify_profile_binding(&packet, run_dir)?;
-            } else if state == "PASS" {
-                return Err(app_error("PASS requires an embedded qualification profile artifact"));
+            if packet["artifacts"].as_array().is_none_or(Vec::is_empty) {
+                return Err(app_error("run packet requires an embedded qualification profile artifact"));
             }
+            verify_artifacts_on_disk(&packet, run_dir)?;
+            verify_profile_binding(&packet, run_dir)?;
             let result = json!({
                 "validation": "CONSISTENT",
                 "result_state": state,
@@ -1113,7 +1112,6 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> AppResult<()> {
             )
         })?;
     file.write_all(bytes)?;
-    file.write_all(b"\n")?;
     file.sync_all()?;
     Ok(())
 }
@@ -1336,6 +1334,7 @@ mod tests {
                 "calibration_sha256": "e".repeat(64)
             },
             "artifacts": [
+                { "role": "qualification_profile", "path": "qualification-profile.json", "sha256": "a".repeat(64) },
                 { "role": "run_samples", "path": "raw-samples.jsonl", "sha256": "c".repeat(64) },
                 { "role": "physical_latency_trace", "path": "latency-trace.csv", "sha256": "d".repeat(64) },
                 { "role": "instrument_calibration", "path": "instrument-calibration.json", "sha256": "e".repeat(64) }
@@ -1360,6 +1359,7 @@ mod tests {
         packet["artifacts"] = json!([]);
         assert!(validate_run_packet(&packet).is_err());
         packet["artifacts"] = json!([
+            { "role": "qualification_profile", "path": "qualification-profile.json", "sha256": "a".repeat(64) },
             { "role": "run_samples", "path": "raw-samples.jsonl", "sha256": "c".repeat(64) },
             { "role": "physical_latency_trace", "path": "latency-trace.csv", "sha256": "d".repeat(64) },
             { "role": "instrument_calibration", "path": "instrument-calibration.json", "sha256": "e".repeat(64) }
