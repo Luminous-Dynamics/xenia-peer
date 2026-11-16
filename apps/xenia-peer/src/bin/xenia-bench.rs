@@ -1948,6 +1948,27 @@ mod tests {
         }
     }
 
+    fn fixture_sha256(bytes: &[u8]) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "xenia-i2p-calibration-fixture-{}-{:?}-{}.json",
+            std::process::id(),
+            std::thread::current().id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&path, bytes).unwrap();
+        let digest = sha256_file(&path).unwrap();
+        fs::remove_file(path).unwrap();
+        digest
+    }
+
+    fn rebind_fixture_calibration_digest(trace: &mut Value, calibration: &Value) {
+        let bytes = serde_json::to_vec_pretty(calibration).unwrap();
+        trace["calibration_sha256"] = json!(fixture_sha256(&bytes));
+    }
+
     fn synthetic_i2p_fixture(valid_count: usize) -> (Value, Value, Value) {
         let run_id = "synthetic-i2p-run";
         let mut triggers = Vec::new();
@@ -1983,7 +2004,8 @@ mod tests {
             "valid_until_unix_ms": 2_000,
             "uncertainty_ns": 100
         });
-        let calibration_digest = "b".repeat(64);
+        let calibration_digest =
+            fixture_sha256(&serde_json::to_vec_pretty(&calibration).unwrap());
         let trace = json!({
             "schema_version": I2P_TRACE_SCHEMA,
             "run_id": run_id,
@@ -2063,7 +2085,7 @@ mod tests {
                 &trace,
                 &calibration,
                 &"a".repeat(64),
-                &"b".repeat(64),
+                trace["calibration_sha256"].as_str().unwrap(),
                 &packet
             )
             .is_err()
@@ -2079,7 +2101,7 @@ mod tests {
                 &trace,
                 &calibration,
                 &"a".repeat(64),
-                &"b".repeat(64),
+                trace["calibration_sha256"].as_str().unwrap(),
                 &packet
             )
             .is_err()
@@ -2093,7 +2115,7 @@ mod tests {
                 &trace,
                 &calibration,
                 &"a".repeat(64),
-                &"b".repeat(64),
+                trace["calibration_sha256"].as_str().unwrap(),
                 &packet
             )
             .is_err()
@@ -2109,7 +2131,7 @@ mod tests {
                 &trace,
                 &calibration,
                 &"a".repeat(64),
-                &"b".repeat(64),
+                trace["calibration_sha256"].as_str().unwrap(),
                 &packet
             )
             .is_err()
@@ -2122,7 +2144,7 @@ mod tests {
                 &trace,
                 &calibration,
                 &"a".repeat(64),
-                &"b".repeat(64),
+                trace["calibration_sha256"].as_str().unwrap(),
                 &packet
             )
             .is_err()
@@ -2137,7 +2159,7 @@ mod tests {
                 &trace,
                 &calibration,
                 &"a".repeat(64),
-                &"b".repeat(64),
+                trace["calibration_sha256"].as_str().unwrap(),
                 &packet
             )
             .is_err()
@@ -2148,12 +2170,13 @@ mod tests {
     fn i2p_import_rejects_expired_calibration_and_digest_mismatch() {
         let (trace, mut calibration, packet) = synthetic_i2p_fixture(300);
         calibration["valid_until_unix_ms"] = json!(1_499);
+        rebind_fixture_calibration_digest(&mut trace, &calibration);
         assert!(
             validate_i2p_trace(
                 &trace,
                 &calibration,
                 &"a".repeat(64),
-                &"b".repeat(64),
+                trace["calibration_sha256"].as_str().unwrap(),
                 &packet
             )
             .is_err()
@@ -2181,7 +2204,7 @@ mod tests {
                 &trace,
                 &calibration,
                 &"a".repeat(64),
-                &"b".repeat(64),
+                trace["calibration_sha256"].as_str().unwrap(),
                 &packet
             )
             .is_err()
@@ -2194,7 +2217,7 @@ mod tests {
                 &trace,
                 &calibration,
                 &"a".repeat(64),
-                &"b".repeat(64),
+                trace["calibration_sha256"].as_str().unwrap(),
                 &packet
             )
             .is_err()
@@ -2207,7 +2230,7 @@ mod tests {
                 &trace,
                 &calibration,
                 &"a".repeat(64),
-                &"b".repeat(64),
+                trace["calibration_sha256"].as_str().unwrap(),
                 &packet
             )
             .is_err()
@@ -2220,12 +2243,13 @@ mod tests {
         trace["instrument"]["method"] = json!("high_speed_camera");
         trace["sensor"]["frame_rate_fps"] = json!(999);
         calibration["method"] = json!("high_speed_camera");
+        rebind_fixture_calibration_digest(&mut trace, &calibration);
         assert!(
             validate_i2p_trace(
                 &trace,
                 &calibration,
                 &"a".repeat(64),
-                &"b".repeat(64),
+                trace["calibration_sha256"].as_str().unwrap(),
                 &packet
             )
             .is_err()
@@ -2237,7 +2261,7 @@ mod tests {
                 &trace,
                 &calibration,
                 &"a".repeat(64),
-                &"b".repeat(64),
+                trace["calibration_sha256"].as_str().unwrap(),
                 &packet
             )
             .is_ok()
