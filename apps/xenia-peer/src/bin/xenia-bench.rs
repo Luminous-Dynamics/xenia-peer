@@ -165,9 +165,15 @@ fn run() -> AppResult<()> {
             let packet: Value = serde_json::from_slice(&bytes)?;
             validate_run_packet(&packet)?;
             let state = packet["result_state"].as_str().unwrap_or("UNKNOWN");
-            if state == "PASS" {
-                let run_dir = run_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+            let run_dir = run_path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            if packet["artifacts"].as_array().is_some_and(|items| !items.is_empty()) {
                 verify_artifacts_on_disk(&packet, run_dir)?;
+                verify_profile_binding(&packet, run_dir)?;
+            } else if state == "PASS" {
+                return Err(app_error("PASS requires an embedded qualification profile artifact"));
             }
             let result = json!({
                 "validation": "CONSISTENT",
@@ -514,6 +520,13 @@ fn validate_run_packet(packet: &Value) -> AppResult<()> {
             ));
         }
     }
+    let profile_digest = packet["profile_sha256"].as_str().unwrap_or_default();
+    if !artifacts.iter().any(|artifact| {
+        artifact["role"].as_str() == Some("qualification_profile")
+            && artifact["sha256"].as_str() == Some(profile_digest)
+    }) {
+        return Err(app_error("PASS requires the exact qualification profile to be bound as an artifact"));
+    }
     validate_physical_latency_evidence(packet, artifacts)?;
 
     let checks = evaluate_thresholds(profile_id, &Value::Object(measurements.clone()))?;
@@ -534,50 +547,104 @@ fn validate_run_packet(packet: &Value) -> AppResult<()> {
     Ok(())
 }
 
+fn resolve_artifact_path(base: &Path, artifact: &Value) -> AppResult<PathBuf> {
+    let relative = Path::new(
+        artifact["path"]
+            .as_str()
+            .ok_or_else(|| app_error("artifact path is missing"))?,
+    );
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(app_error("artifact paths must be relative and remain inside the run directory"));
+    }
+
+    let resolved = fs::canonicalize(base.join(relative)).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("artifact {} cannot be resolved: {error}", relative.display()),
+        )
+    })?;
+    if !resolved.starts_with(base) {
+        return Err(app_error("artifact resolves outside the run directory"));
+    }
+    if !resolved.is_file() {
+        return Err(app_error("artifact path must resolve to a regular file"));
+    }
+    Ok(resolved)
+}
+
 fn verify_artifacts_on_disk(packet: &Value, run_dir: &Path) -> AppResult<()> {
     let base = fs::canonicalize(run_dir)?;
     let artifacts = packet["artifacts"]
         .as_array()
-        .ok_or_else(|| app_error("PASS artifact list is missing"))?;
+        .ok_or_else(|| app_error("artifact list is missing"))?;
 
     for artifact in artifacts {
         let relative = Path::new(
             artifact["path"]
                 .as_str()
-                .ok_or_else(|| app_error("PASS artifact path is missing"))?,
+                .ok_or_else(|| app_error("artifact path is missing"))?,
         );
-        if relative.is_absolute()
-            || relative.components().any(|component| {
-                matches!(
-                    component,
-                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
-                )
-            })
-        {
-            return Err(app_error("PASS artifact paths must be relative and remain inside the run directory"));
-        }
-
-        let resolved = fs::canonicalize(base.join(relative)).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("PASS artifact {} cannot be resolved: {error}", relative.display()),
-            )
-        })?;
-        if !resolved.starts_with(&base) {
-            return Err(app_error("PASS artifact resolves outside the run directory"));
-        }
-        if !resolved.is_file() {
-            return Err(app_error("PASS artifact path must resolve to a regular file"));
-        }
-
+        let resolved = resolve_artifact_path(&base, artifact)?;
         let expected = artifact["sha256"].as_str().unwrap_or_default();
+        if !is_hex_digest(expected, 64) {
+            return Err(app_error("artifact SHA-256 must be 64 hexadecimal characters"));
+        }
         let observed = sha256_file(&resolved)?;
         if !observed.eq_ignore_ascii_case(expected) {
             return Err(app_error(format!(
-                "PASS artifact digest mismatch for {}",
+                "artifact digest mismatch for {}",
                 relative.display()
             )));
         }
+    }
+    Ok(())
+}
+
+fn verify_profile_binding(packet: &Value, run_dir: &Path) -> AppResult<()> {
+    let artifacts = packet["artifacts"]
+        .as_array()
+        .ok_or_else(|| app_error("artifact list is missing"))?;
+    let matches: Vec<&Value> = artifacts
+        .iter()
+        .filter(|artifact| artifact["role"].as_str() == Some("qualification_profile"))
+        .collect();
+    if matches.len() != 1 {
+        return Err(app_error("run packet must contain exactly one qualification_profile artifact"));
+    }
+
+    let artifact = matches[0];
+    let expected_digest = packet["profile_sha256"]
+        .as_str()
+        .filter(|digest| is_hex_digest(digest, 64))
+        .ok_or_else(|| app_error("run packet profile_sha256 is missing or invalid"))?;
+    if artifact["sha256"].as_str() != Some(expected_digest) {
+        return Err(app_error("qualification profile artifact digest does not match profile_sha256"));
+    }
+
+    let base = fs::canonicalize(run_dir)?;
+    let resolved = resolve_artifact_path(&base, artifact)?;
+    let bytes = fs::read(&resolved)?;
+    let observed_digest = sha256_file(&resolved)?;
+    if !observed_digest.eq_ignore_ascii_case(expected_digest) {
+        return Err(app_error("embedded qualification profile digest mismatch"));
+    }
+
+    let profile: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| app_error(format!("embedded qualification profile is invalid JSON: {error}")))?;
+    validate_profile(&profile)?;
+    let profile_id = packet["profile_id"]
+        .as_str()
+        .ok_or_else(|| app_error("run packet profile_id is missing"))?;
+    let selected = find_profile(&profile, profile_id)?;
+    if &packet["profile_configuration"] != selected {
+        return Err(app_error("run packet profile_configuration differs from its embedded profile"));
     }
     Ok(())
 }
@@ -1180,6 +1247,65 @@ mod tests {
         packet["artifacts"][0]["path"] = json!("../samples.jsonl");
         packet["artifacts"][0]["sha256"] = json!(digest);
         assert!(verify_artifacts_on_disk(&packet, &run_dir).is_err());
+
+        fs::remove_dir_all(run_dir).unwrap();
+    }
+
+    #[test]
+    fn run_packet_profile_is_bound_to_exact_embedded_profile_bytes() {
+        let run_dir = std::env::temp_dir().join(format!(
+            "xenia-bench-profile-binding-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(&run_dir).unwrap();
+
+        let selected = json!({
+            "id": "lan_interactive",
+            "kind": "performance_target",
+            "network": {
+                "rtt_ms": { "min": 1, "max": 5 },
+                "packet_loss_fraction": 0.0
+            }
+        });
+        let profile = json!({
+            "schema_version": PROFILE_SCHEMA,
+            "status": "proposed_targets_not_measurements",
+            "network_profiles": [selected],
+            "corpus": [{ "id": "synthetic-test-corpus" }],
+            "security_and_correctness_targets": [{ "id": "synthetic-target" }],
+            "evidence_contract": {
+                "allowed_result_states": ["PASS", "FAIL", "BLOCKED", "ENVIRONMENT_FAILURE"],
+                "missing_measurements_are_not_zero": true,
+                "queued_skipped_cancelled_or_stale_ci_is_not_pass": true
+            }
+        });
+        validate_profile(&profile).unwrap();
+
+        let profile_path = run_dir.join("fixture.profile.json");
+        write_new_file(&profile_path, &serde_json::to_vec_pretty(&profile).unwrap()).unwrap();
+        let digest = sha256_file(&profile_path).unwrap();
+        let packet = json!({
+            "profile_id": "lan_interactive",
+            "profile_sha256": digest,
+            "profile_configuration": selected,
+            "artifacts": [{
+                "role": "qualification_profile",
+                "path": "fixture.profile.json",
+                "sha256": digest
+            }]
+        });
+
+        verify_artifacts_on_disk(&packet, &run_dir).unwrap();
+        verify_profile_binding(&packet, &run_dir).unwrap();
+
+        let mut altered = packet.clone();
+        altered["profile_configuration"]["network"]["rtt_ms"]["max"] = json!(999);
+        assert!(verify_profile_binding(&altered, &run_dir).is_err());
+
+        let mut missing_role = packet.clone();
+        missing_role["artifacts"][0]["role"] = json!("other");
+        assert!(verify_profile_binding(&missing_role, &run_dir).is_err());
 
         fs::remove_dir_all(run_dir).unwrap();
     }
