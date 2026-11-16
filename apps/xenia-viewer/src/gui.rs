@@ -26,7 +26,7 @@
 //! pointer-button presses are tracked so a focus/target transition emits
 //! matching releases instead of stranding a pressed state remotely.
 //! Coordinates are normalized against the last-rendered image rect,
- //! not the whole window.
+//! not the whole window.
 
 use std::sync::{Arc, Mutex};
 
@@ -374,10 +374,7 @@ impl RemoteInputState {
             self.pressed_pointer_buttons.clear();
             return Vec::new();
         };
-        let mut buttons = self
-            .pressed_pointer_buttons
-            .drain()
-            .collect::<Vec<_>>();
+        let mut buttons = self.pressed_pointer_buttons.drain().collect::<Vec<_>>();
         buttons.sort_unstable();
         buttons
             .into_iter()
@@ -568,8 +565,7 @@ impl ViewerApp {
             (pos, buttons, keys)
         });
 
-        let pointer_in_image =
-            pointer_pos.and_then(|pos| self.normalize_in_image(pos));
+        let pointer_in_image = pointer_pos.and_then(|pos| self.normalize_in_image(pos));
 
         if let Some(pos) = pointer_pos {
             if self.last_pointer_pos != Some(pos) {
@@ -603,8 +599,7 @@ impl ViewerApp {
         // Hovering the remote image is the explicit pointer target for
         // keyboard forwarding. Local egui text editing, menus, and other
         // keyboard-consuming controls always take precedence.
-        let allow_remote_keyboard =
-            pointer_in_image.is_some() && !ctx.wants_keyboard_input();
+        let allow_remote_keyboard = pointer_in_image.is_some() && !ctx.wants_keyboard_input();
         if !allow_remote_keyboard {
             for event in self.remote_input.release_keys() {
                 self.send_stateful_input(event);
@@ -971,11 +966,19 @@ mod tests {
         assert_eq!(releases.len(), 2);
         assert!(matches!(
             releases[0],
-            InputEvent::PointerButton { button: 0, pressed: false, .. }
+            InputEvent::PointerButton {
+                button: 0,
+                pressed: false,
+                ..
+            }
         ));
         assert!(matches!(
             releases[1],
-            InputEvent::PointerButton { button: 2, pressed: false, .. }
+            InputEvent::PointerButton {
+                button: 2,
+                pressed: false,
+                ..
+            }
         ));
         assert!(state.release_pointer_buttons().is_empty());
     }
