@@ -245,6 +245,17 @@ impl M1SessionMachine {
         &self.audit
     }
 
+    /// Drain the audit events emitted since the previous read or drain.
+    ///
+    /// The state machine retains its full event history for deterministic
+    /// callers and tests unless they explicitly call this method. Runtime
+    /// adapters should drain after processing each operation so a long
+    /// session does not retain one vector entry per frame or input event.
+    /// Draining changes neither lifecycle state nor granted permissions.
+    pub fn drain_audit_events(&mut self) -> Vec<M1AuditEvent> {
+        std::mem::take(&mut self.audit)
+    }
+
     /// Host offers a session.
     pub fn offer(&mut self) -> Result<(), M1SessionError> {
         self.transition(
@@ -924,6 +935,42 @@ mod tests {
                 action: "grant_consent"
             }
         );
+    }
+
+    #[test]
+    fn draining_audit_events_preserves_state_and_permissions() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+        session.grant_consent_scoped(M1PermissionSet {
+            stream_frame: true,
+            inject_input: true,
+            ..M1PermissionSet::default()
+        })
+        .unwrap();
+        session.inject_input().unwrap();
+
+        let state_before = session.state();
+        let permissions_before = session.granted_permissions();
+        let drained = session.drain_audit_events();
+
+        assert_eq!(
+            drained,
+            vec![
+                M1AuditEvent::SessionOffered,
+                M1AuditEvent::ConsentGranted,
+                M1AuditEvent::InputInjected
+            ]
+        );
+        assert!(session.audit().is_empty());
+        assert_eq!(session.state(), state_before);
+        assert_eq!(session.granted_permissions(), permissions_before);
+
+        session.inject_input().unwrap();
+        assert_eq!(
+            session.drain_audit_events(),
+            vec![M1AuditEvent::InputInjected]
+        );
+        assert!(session.audit().is_empty());
     }
 
     #[test]
