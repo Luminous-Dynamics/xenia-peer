@@ -537,6 +537,17 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Fit a remote frame inside an available viewport without cropping or upscaling.
+fn fit_image_size(source: egui::Vec2, available: egui::Vec2) -> egui::Vec2 {
+    if source.x <= 0.0 || source.y <= 0.0 || available.x <= 0.0 || available.y <= 0.0 {
+        return egui::Vec2::ZERO;
+    }
+    let scale = (available.x / source.x)
+        .min(available.y / source.y)
+        .min(1.0);
+    source * scale
+}
+
 impl eframe::App for ViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if let Some(frame) = self.slot.take() {
@@ -581,110 +592,142 @@ impl eframe::App for ViewerApp {
             });
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.horizontal_top(|ui| {
-                ui.vertical(|ui| {
-                    if let Some(tex) = &self.texture {
-                        let response = ui.add(
-                            egui::Image::new(tex)
-                                .fit_to_exact_size(tex.size_vec2())
-                                .maintain_aspect_ratio(true),
-                        );
-                        self.image_rect = Some(response.rect);
-                    } else {
-                        self.image_rect = None;
-                        ui.centered_and_justified(|ui| {
-                            ui.label(
-                                egui::RichText::new("Waiting for first frame...")
-                                    .size(18.0)
-                                    .italics(),
-                            );
+        egui::SidePanel::right("diagnostics-inspector")
+            .resizable(true)
+            .default_width(280.0)
+            .min_width(190.0)
+            .max_width(420.0)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.heading("Diagnostics");
+                    ui.separator();
+
+                    egui::CollapsingHeader::new("Stream")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ui.label(format!("codec: {}", self.config.codec));
+                            ui.label(format!("transport: {}", self.config.transport));
+                            ui.label(format!("frames received: {}", self.frames_received));
+                            ui.label(format!("presented fps: {:.1}", self.fps()));
+                            ui.label(format!("last wire frame: {}", format_bytes(self.last_wire_bytes as u64)));
+                            ui.label(format!("last frame sequence: {}", self.last_frame_seq));
+                            if self.last_video_timestamp_ms != 0 {
+                                ui.label(format!("last capture timestamp: {} ms", self.last_video_timestamp_ms));
+                            }
                         });
-                    }
-                });
 
-                ui.separator();
+                    egui::CollapsingHeader::new("Host")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            if let Some(telemetry) = &self.last_telemetry {
+                                ui.label(format!("telemetry backend: {}", telemetry.backend));
+                                if let Some(cpu) = telemetry.cpu_percent {
+                                    ui.label(format!("cpu: {:.1}%", cpu));
+                                }
+                                if let (Some(used), Some(total)) =
+                                    (telemetry.memory_used_bytes, telemetry.memory_total_bytes)
+                                {
+                                    ui.label(format!(
+                                        "memory: {} / {}",
+                                        format_bytes(used),
+                                        format_bytes(total)
+                                    ));
+                                }
+                                if let Some(host) = &telemetry.host_name {
+                                    ui.label(format!("host: {host}"));
+                                }
+                                if let Some(os) = &telemetry.os_version {
+                                    ui.label(format!("os: {os}"));
+                                }
+                                ui.label(format!("samples: {}", telemetry.samples));
+                                ui.label(format!(
+                                    "telemetry age: {} ms",
+                                    now_ms().saturating_sub(telemetry.timestamp_ms)
+                                ));
+                            } else {
+                                ui.label(
+                                    egui::RichText::new("Waiting for host telemetry…")
+                                        .size(14.0)
+                                        .italics(),
+                                );
+                            }
+                        });
 
-                ui.vertical(|ui| {
-                    ui.heading("Host");
-                    if let Some(telemetry) = &self.last_telemetry {
-                        ui.label(format!("telemetry: {}", telemetry.backend));
-                        if let Some(cpu) = telemetry.cpu_percent {
-                            ui.label(format!("cpu: {:.1}%", cpu));
-                        }
-                        if let (Some(used), Some(total)) =
-                            (telemetry.memory_used_bytes, telemetry.memory_total_bytes)
-                        {
-                            ui.label(format!(
-                                "memory: {} / {}",
-                                format_bytes(used),
-                                format_bytes(total)
-                            ));
-                        }
-                        if let Some(host) = &telemetry.host_name {
-                            ui.label(format!("host: {host}"));
-                        }
-                        if let Some(os) = &telemetry.os_version {
-                            ui.label(format!("os: {os}"));
-                        }
-                        ui.label(format!("samples: {}", telemetry.samples));
-                        ui.label(format!(
-                            "age: {} ms",
-                            now_ms().saturating_sub(telemetry.timestamp_ms)
-                        ));
-                    } else {
-                        ui.label(
-                            egui::RichText::new("Waiting for telemetry...")
-                                .size(14.0)
-                                .italics(),
-                        );
-                    }
-                });
-
-                ui.separator();
-
-                ui.vertical(|ui| {
-                    ui.heading("Audio");
-                    if let Some(audio) = &self.last_audio {
-                        ui.label(format!("stream: {}", audio.stream_id));
-                        ui.label(format!("decoded: {}", audio.frames_decoded));
-                        ui.label(format!("inserted: {}", audio.frames_inserted));
-                        ui.label(format!("emitted: {}", audio.frames_emitted));
-                        ui.label(format!("played: {}", audio.frames_played));
-                        ui.label(format!("played samples: {}", audio.samples_played));
-                        ui.label(format!("last seq: {}", audio.last_sequence));
-                        ui.label(format!(
-                            "format: {} Hz / {} ch / {} ms",
-                            audio.sample_rate_hz, audio.channels, audio.frame_duration_ms
-                        ));
-                        ui.label(format!(
-                            "age: {} ms",
-                            now_ms().saturating_sub(audio.capture_timestamp_ms)
-                        ));
-                        ui.label(format!("gaps: {}", audio.gaps));
-                        ui.label(format!("duplicates: {}", audio.duplicates));
-                        ui.label(format!("late: {}", audio.late));
-                        ui.label(format!("dropped: {}", audio.dropped));
-                        ui.label(format!("playback rejected: {}", audio.playback_rejected));
-                        ui.label(format!("underruns: {}", audio.underruns));
-                        if let Some(queue) = &self.audio_queue {
-                            let pressure = queue.pressure_snapshot();
-                            ui.label(format!(
-                                "ingress superseded: {}",
-                                pressure.dropped_superseded
-                            ));
-                            ui.label(format!("ingress rejected: {}", pressure.rejected));
-                        }
-                        if self.last_video_timestamp_ms != 0 {
-                            let drift_ms = audio.capture_timestamp_ms as i128
-                                - self.last_video_timestamp_ms as i128;
-                            ui.label(format!("a/v drift: {drift_ms:+} ms"));
-                        }
-                    } else {
-                        ui.label(egui::RichText::new("Audio lane idle").size(14.0).italics());
-                    }
+                    egui::CollapsingHeader::new("Audio")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            if let Some(audio) = &self.last_audio {
+                                ui.label(format!("stream: {}", audio.stream_id));
+                                ui.label(format!("decoded: {}", audio.frames_decoded));
+                                ui.label(format!("inserted: {}", audio.frames_inserted));
+                                ui.label(format!("emitted: {}", audio.frames_emitted));
+                                ui.label(format!("played: {}", audio.frames_played));
+                                ui.label(format!("played samples: {}", audio.samples_played));
+                                ui.label(format!("last sequence: {}", audio.last_sequence));
+                                ui.label(format!(
+                                    "format: {} Hz / {} ch / {} ms",
+                                    audio.sample_rate_hz, audio.channels, audio.frame_duration_ms
+                                ));
+                                ui.label(format!(
+                                    "capture age: {} ms",
+                                    now_ms().saturating_sub(audio.capture_timestamp_ms)
+                                ));
+                                ui.label(format!("gaps: {}", audio.gaps));
+                                ui.label(format!("duplicates: {}", audio.duplicates));
+                                ui.label(format!("late: {}", audio.late));
+                                ui.label(format!("dropped: {}", audio.dropped));
+                                ui.label(format!("playback rejected: {}", audio.playback_rejected));
+                                ui.label(format!("underruns: {}", audio.underruns));
+                                if let Some(queue) = &self.audio_queue {
+                                    let pressure = queue.pressure_snapshot();
+                                    ui.label(format!(
+                                        "ingress superseded: {}",
+                                        pressure.dropped_superseded
+                                    ));
+                                    ui.label(format!("ingress rejected: {}", pressure.rejected));
+                                }
+                                if self.last_video_timestamp_ms != 0 {
+                                    let drift_ms = audio.capture_timestamp_ms as i128
+                                        - self.last_video_timestamp_ms as i128;
+                                    ui.label(format!("a/v timestamp delta: {drift_ms:+} ms"));
+                                }
+                            } else {
+                                ui.label(egui::RichText::new("Audio lane idle").size(14.0).italics());
+                            }
+                        });
                 });
             });
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if let Some(tex) = &self.texture {
+                let image_size = fit_image_size(tex.size_vec2(), ui.available_size());
+                ui.centered_and_justified(|ui| {
+                    let response = ui.add(
+                        egui::Image::new(tex)
+                            .fit_to_exact_size(image_size),
+                    );
+                    // This exact painted rect remains the reference for
+                    // pointer normalization, including when the inspector
+                    // is resized or any section is expanded/collapsed.
+                    self.image_rect = Some(response.rect);
+                });
+            } else {
+                self.image_rect = None;
+                ui.centered_and_justified(|ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            egui::RichText::new("Waiting for first frame…")
+                                .size(20.0)
+                                .strong(),
+                        );
+                        ui.label(
+                            egui::RichText::new("The remote workspace will appear here once video arrives.")
+                                .size(13.0)
+                                .weak(),
+                        );
+                    });
+                });
+            }
         });
 
         // Capture after rendering so `self.image_rect` reflects
@@ -749,6 +792,34 @@ mod tests {
         assert_eq!(modifiers_bitmask(&m), 0b0111);
         m.command = true;
         assert_eq!(modifiers_bitmask(&m), 0b1111);
+    }
+
+    #[test]
+    fn fit_image_size_preserves_aspect_and_fits_available_viewport() {
+        assert_eq!(
+            fit_image_size(egui::vec2(1920.0, 1080.0), egui::vec2(1280.0, 720.0)),
+            egui::vec2(1280.0, 720.0)
+        );
+        assert_eq!(
+            fit_image_size(egui::vec2(1920.0, 1080.0), egui::vec2(800.0, 600.0)),
+            egui::vec2(800.0, 450.0)
+        );
+    }
+
+    #[test]
+    fn fit_image_size_never_upscales_and_rejects_empty_dimensions() {
+        assert_eq!(
+            fit_image_size(egui::vec2(640.0, 480.0), egui::vec2(1920.0, 1080.0)),
+            egui::vec2(640.0, 480.0)
+        );
+        assert_eq!(
+            fit_image_size(egui::vec2(0.0, 480.0), egui::vec2(800.0, 600.0)),
+            egui::Vec2::ZERO
+        );
+        assert_eq!(
+            fit_image_size(egui::vec2(640.0, 480.0), egui::vec2(0.0, 600.0)),
+            egui::Vec2::ZERO
+        );
     }
 
     #[test]
