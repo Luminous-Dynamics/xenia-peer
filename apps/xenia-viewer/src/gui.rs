@@ -18,13 +18,12 @@
 //! queued stale one.
 //!
 //! Input capture (mouse / keyboard → `RawInput` back to the
-//! daemon): pointer motion/buttons and a common-subset keymap are
-//! wired below via `egui::Context::input`. Captured [`InputEvent`]s
-//! go out over an unbounded channel to the network task, which seals
-//! and sends them concurrently with the frame-receive loop (see
-//! `gui_receive_loop` in `main.rs`). Coordinates are normalized
-//! against the last-rendered image rect, not the whole window, so
-//! pointer activity over the status bar / side panels is ignored.
+//! daemon) uses a bounded channel and an explicit remote-input state
+//! machine. Input is admitted only while the pointer targets the visible
+//! remote image and local egui controls are not consuming keyboard input.
+//! Focus/target loss emits matching key/button releases to avoid stranded
+//! remote input state. Frame telemetry describes viewer-consume cadence,
+//! not physical display presentation or network packet loss.
 
 use std::sync::{Arc, Mutex};
 
@@ -345,6 +344,114 @@ fn image_display_size(
     }
 }
 
+struct RemoteInputState {
+    last_pointer: Option<(f32, f32)>,
+    pressed_pointer_buttons: std::collections::HashSet<u8>,
+    // Store key-down modifiers so the matching release describes the same
+    // key chord even if local focus changes before key-up arrives.
+    pressed_keys: std::collections::HashMap<u32, u8>,
+}
+
+impl RemoteInputState {
+    fn pointer_move(&mut self, position: Option<(f32, f32)>) -> Option<InputEvent> {
+        let (x, y) = position?;
+        self.last_pointer = Some((x, y));
+        Some(InputEvent::PointerMove { x, y })
+    }
+
+    fn pointer_button(
+        &mut self,
+        button: u8,
+        pressed: bool,
+        position: Option<(f32, f32)>,
+    ) -> Option<InputEvent> {
+        if pressed {
+            let (x, y) = position?;
+            self.last_pointer = Some((x, y));
+            if !self.pressed_pointer_buttons.insert(button) {
+                return None;
+            }
+            Some(InputEvent::PointerButton {
+                x,
+                y,
+                button,
+                pressed: true,
+            })
+        } else if self.pressed_pointer_buttons.remove(&button) {
+            let (x, y) = position.or(self.last_pointer)?;
+            self.last_pointer = Some((x, y));
+            Some(InputEvent::PointerButton {
+                x,
+                y,
+                button,
+                pressed: false,
+            })
+        } else {
+            // A release without a forwarded press is never injected.
+            None
+        }
+    }
+
+    fn release_pointer_buttons(&mut self) -> Vec<InputEvent> {
+        let Some((x, y)) = self.last_pointer else {
+            self.pressed_pointer_buttons.clear();
+            return Vec::new();
+        };
+        let mut buttons = self.pressed_pointer_buttons.drain().collect::<Vec<_>>();
+        buttons.sort_unstable();
+        buttons
+            .into_iter()
+            .map(|button| InputEvent::PointerButton {
+                x,
+                y,
+                button,
+                pressed: false,
+            })
+            .collect()
+    }
+
+    fn key_event(
+        &mut self,
+        code: u32,
+        pressed: bool,
+        modifiers: u8,
+        allow_new_press: bool,
+    ) -> Option<InputEvent> {
+        if pressed {
+            if !allow_new_press || self.pressed_keys.contains_key(&code) {
+                return None;
+            }
+            self.pressed_keys.insert(code, modifiers);
+            Some(InputEvent::Key {
+                code,
+                pressed: true,
+                modifiers,
+            })
+        } else {
+            // A matching key-up is allowed even after focus is lost. Its
+            // modifiers come from the original admitted key-down.
+            let modifiers = self.pressed_keys.remove(&code)?;
+            Some(InputEvent::Key {
+                code,
+                pressed: false,
+                modifiers,
+            })
+        }
+    }
+
+    fn release_keys(&mut self) -> Vec<InputEvent> {
+        let mut keys = self.pressed_keys.drain().collect::<Vec<_>>();
+        keys.sort_unstable_by_key(|(code, _)| *code);
+        keys.into_iter()
+            .map(|(code, modifiers)| InputEvent::Key {
+                code,
+                pressed: false,
+                modifiers,
+            })
+            .collect()
+    }
+}
+
 /// eframe::App implementing the viewer window.
 pub struct ViewerApp {
     slot: Arc<FrameSlot>,
@@ -356,6 +463,9 @@ pub struct ViewerApp {
     last_wire_bytes: usize,
     last_frame_seq: u64,
     last_video_timestamp_ms: u64,
+    last_frame_consume_instant: Option<std::time::Instant>,
+    recent_frame_intervals_ms: std::collections::VecDeque<f64>,
+    sequence_gap_count: u64,
     last_telemetry: Option<TelemetryData>,
     last_audio: Option<AudioData>,
     // Simple rolling fps: timestamp of last ~30 frames.
@@ -363,6 +473,7 @@ pub struct ViewerApp {
     // Input capture (mouse / keyboard -> daemon). `None` means input
     // is disabled client-side (no channel was wired up).
     input_tx: Option<tokio::sync::mpsc::Sender<InputEvent>>,
+    remote_input: RemoteInputState,
     // Full image rect preserves source-to-pointer coordinate mapping.
     image_rect: Option<egui::Rect>,
     // Actual visible clip; prevents accepting pointer positions over
@@ -393,10 +504,14 @@ impl ViewerApp {
             last_wire_bytes: 0,
             last_frame_seq: 0,
             last_video_timestamp_ms: 0,
+            last_frame_consume_instant: None,
+            recent_frame_intervals_ms: std::collections::VecDeque::with_capacity(512),
+            sequence_gap_count: 0,
             last_telemetry: None,
             last_audio: None,
             recent_frame_instants: std::collections::VecDeque::with_capacity(64),
             input_tx,
+            remote_input: RemoteInputState::default(),
             image_rect: None,
             image_clip_rect: None,
             image_display_mode: ImageDisplayMode::Fit,
@@ -484,37 +599,59 @@ impl ViewerApp {
             (pos, buttons, keys)
         });
 
-        if let Some(pos) = pointer_pos
-            && self.last_pointer_pos != Some(pos)
-        {
-            self.last_pointer_pos = Some(pos);
-            if let Some((x, y)) = self.normalize_in_image(pos) {
-                self.send_lossy_input(InputEvent::PointerMove { x, y });
+        let pointer_in_image = pointer_pos.and_then(|pos| self.normalize_in_image(pos));
+
+        if let Some(pos) = pointer_pos {
+            if self.last_pointer_pos != Some(pos) {
+                self.last_pointer_pos = Some(pos);
+                if let Some(event) = self.remote_input.pointer_move(pointer_in_image) {
+                    self.send_lossy_input(event);
+                }
             }
+        } else {
+            self.last_pointer_pos = None;
         }
 
         for (button, pressed) in button_events {
-            let Some(pos) = pointer_pos else { continue };
-            let Some((x, y)) = self.normalize_in_image(pos) else {
-                continue;
-            };
-            self.send_stateful_input(InputEvent::PointerButton {
-                x,
-                y,
-                button: pointer_button_id(button),
+            if let Some(event) = self.remote_input.pointer_button(
+                pointer_button_id(button),
                 pressed,
-            });
+                pointer_in_image,
+            ) {
+                self.send_stateful_input(event);
+            }
+        }
+
+        // A remote drag must not remain held after the pointer leaves the
+        // image, enters local chrome, or leaves the viewer window.
+        if pointer_in_image.is_none() {
+            for event in self.remote_input.release_pointer_buttons() {
+                self.send_stateful_input(event);
+            }
+        }
+
+        // Hovering the remote image is the explicit pointer target for
+        // keyboard forwarding. Local egui text editing, menus, and other
+        // keyboard-consuming controls always take precedence.
+        let allow_remote_keyboard = pointer_in_image.is_some() && !ctx.wants_keyboard_input();
+        if !allow_remote_keyboard {
+            for event in self.remote_input.release_keys() {
+                self.send_stateful_input(event);
+            }
         }
 
         for (key, pressed, modifiers) in key_events {
             let Some(code) = egui_key_to_evdev(key) else {
                 continue;
             };
-            self.send_stateful_input(InputEvent::Key {
+            if let Some(event) = self.remote_input.key_event(
                 code,
                 pressed,
-                modifiers: modifiers_bitmask(&modifiers),
-            });
+                modifiers_bitmask(&modifiers),
+                allow_remote_keyboard,
+            ) {
+                self.send_stateful_input(event);
+            }
         }
     }
 
@@ -567,6 +704,35 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// Count missing sequence values between two monotonically increasing frames.
+/// The count is deliberately unattributed: it can include coalescing, transport,
+/// decoder, or UI scheduling effects and must not be labelled packet loss.
+fn sequence_gap_count(previous: u64, current: u64) -> u64 {
+    if previous == 0 || current <= previous {
+        0
+    } else {
+        current.saturating_sub(previous).saturating_sub(1)
+    }
+}
+
+/// Nearest-rank percentile over finite, non-negative viewer-consume intervals.
+fn frame_interval_percentile_ms(samples: &[f64], percentile: u8) -> Option<f64> {
+    if !(1..=100).contains(&percentile) {
+        return None;
+    }
+    let mut values: Vec<f64> = samples
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .collect();
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(f64::total_cmp);
+    let rank = (values.len() * usize::from(percentile)).div_ceil(100);
+    values.get(rank.saturating_sub(1)).copied()
+}
+
 /// Fit a remote frame inside an available viewport without cropping or upscaling.
 fn fit_image_size(source: egui::Vec2, available: egui::Vec2) -> egui::Vec2 {
     if source.x <= 0.0 || source.y <= 0.0 || available.x <= 0.0 || available.y <= 0.0 {
@@ -581,6 +747,22 @@ fn fit_image_size(source: egui::Vec2, available: egui::Vec2) -> egui::Vec2 {
 impl eframe::App for ViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if let Some(frame) = self.slot.take() {
+            let consume_instant = std::time::Instant::now();
+            if let Some(previous) = self.last_frame_consume_instant {
+                let interval_ms = consume_instant
+                    .duration_since(previous)
+                    .as_secs_f64()
+                    * 1_000.0;
+                self.recent_frame_intervals_ms.push_back(interval_ms);
+                while self.recent_frame_intervals_ms.len() > 512 {
+                    self.recent_frame_intervals_ms.pop_front();
+                }
+            }
+            self.sequence_gap_count = self
+                .sequence_gap_count
+                .saturating_add(sequence_gap_count(self.last_frame_seq, frame.seq));
+            self.last_frame_consume_instant = Some(consume_instant);
+
             let image = egui::ColorImage::from_rgba_unmultiplied(
                 [frame.width as usize, frame.height as usize],
                 &frame.rgba,
@@ -644,6 +826,32 @@ impl eframe::App for ViewerApp {
                                 format_bytes(self.last_wire_bytes as u64)
                             ));
                             ui.label(format!("last frame sequence: {}", self.last_frame_seq));
+                            ui.label(format!(
+                                "unattributed sequence gaps: {}",
+                                self.sequence_gap_count
+                            ));
+                            let intervals = self
+                                .recent_frame_intervals_ms
+                                .iter()
+                                .copied()
+                                .collect::<Vec<_>>();
+                            if !intervals.is_empty() {
+                                for percentile in [50, 95, 99] {
+                                    if let Some(value) =
+                                        frame_interval_percentile_ms(&intervals, percentile)
+                                    {
+                                        ui.label(format!(
+                                            "viewer-consume interval p{percentile}: {value:.2} ms"
+                                        ));
+                                    }
+                                }
+                                if let Some(max) = frame_interval_percentile_ms(&intervals, 100) {
+                                    ui.label(format!("viewer-consume interval max: {max:.2} ms"));
+                                }
+                                ui.label(format!("interval samples: {}", intervals.len()));
+                            } else {
+                                ui.label("viewer-consume interval: collecting samples…");
+                            }
                             if self.last_video_timestamp_ms != 0 {
                                 ui.label(format!(
                                     "last capture timestamp: {} ms",
@@ -834,6 +1042,139 @@ mod tests {
         assert_eq!(pointer_button_id(egui::PointerButton::Primary), 0);
         assert_eq!(pointer_button_id(egui::PointerButton::Middle), 1);
         assert_eq!(pointer_button_id(egui::PointerButton::Secondary), 2);
+    }
+
+    #[test]
+    fn remote_keys_are_gated_and_only_matching_releases_are_forwarded() {
+        let mut state = RemoteInputState::default();
+
+        assert!(state.key_event(30, true, 0b0011, false).is_none());
+        assert!(state.key_event(30, false, 0, false).is_none());
+
+        assert!(matches!(
+            state.key_event(30, true, 0b0011, true),
+            Some(InputEvent::Key {
+                code: 30,
+                pressed: true,
+                modifiers: 0b0011,
+            })
+        ));
+        assert!(state.key_event(30, true, 0b0011, true).is_none());
+        assert!(matches!(
+            state.key_event(30, false, 0, false),
+            Some(InputEvent::Key {
+                code: 30,
+                pressed: false,
+                modifiers: 0b0011,
+            })
+        ));
+        assert!(state.key_event(30, false, 0, false).is_none());
+    }
+
+    #[test]
+    fn remote_key_focus_loss_releases_each_forwarded_key_once() {
+        let mut state = RemoteInputState::default();
+        assert!(state.key_event(48, true, 0b0001, true).is_some());
+        assert!(state.key_event(30, true, 0b0010, true).is_some());
+
+        let releases = state.release_keys();
+        assert_eq!(releases.len(), 2);
+        assert!(matches!(
+            releases[0],
+            InputEvent::Key {
+                code: 30,
+                pressed: false,
+                modifiers: 0b0010,
+            }
+        ));
+        assert!(matches!(
+            releases[1],
+            InputEvent::Key {
+                code: 48,
+                pressed: false,
+                modifiers: 0b0001,
+            }
+        ));
+        assert!(state.release_keys().is_empty());
+    }
+
+    #[test]
+    fn pointer_release_after_leaving_image_uses_last_valid_coordinates() {
+        let mut state = RemoteInputState::default();
+        assert!(state.pointer_move(Some((0.2, 0.3))).is_some());
+        assert!(matches!(
+            state.pointer_button(0, true, Some((0.4, 0.6))),
+            Some(InputEvent::PointerButton {
+                x,
+                y,
+                button: 0,
+                pressed: true,
+            }) if (x - 0.4).abs() < f32::EPSILON && (y - 0.6).abs() < f32::EPSILON
+        ));
+        assert!(matches!(
+            state.pointer_button(0, false, None),
+            Some(InputEvent::PointerButton {
+                x,
+                y,
+                button: 0,
+                pressed: false,
+            }) if (x - 0.4).abs() < f32::EPSILON && (y - 0.6).abs() < f32::EPSILON
+        ));
+        assert!(state.pointer_button(0, false, None).is_none());
+    }
+
+    #[test]
+    fn leaving_image_releases_all_pointer_buttons_once() {
+        let mut state = RemoteInputState::default();
+        assert!(state.pointer_button(2, true, Some((0.7, 0.8))).is_some());
+        assert!(state.pointer_button(0, true, Some((0.7, 0.8))).is_some());
+
+        let releases = state.release_pointer_buttons();
+        assert_eq!(releases.len(), 2);
+        assert!(matches!(
+            releases[0],
+            InputEvent::PointerButton {
+                button: 0,
+                pressed: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            releases[1],
+            InputEvent::PointerButton {
+                button: 2,
+                pressed: false,
+                ..
+            }
+        ));
+        assert!(state.release_pointer_buttons().is_empty());
+    }
+
+
+    #[test]
+    fn viewer_consume_interval_percentiles_use_nearest_rank() {
+        let samples = [5.0, 1.0, 4.0, 2.0, 3.0];
+        assert_eq!(frame_interval_percentile_ms(&samples, 50), Some(3.0));
+        assert_eq!(frame_interval_percentile_ms(&samples, 95), Some(5.0));
+        assert_eq!(frame_interval_percentile_ms(&samples, 100), Some(5.0));
+    }
+
+    #[test]
+    fn viewer_consume_interval_percentiles_ignore_non_finite_values() {
+        let samples = [1.0, f64::NAN, f64::INFINITY, -1.0, 3.0];
+        assert_eq!(frame_interval_percentile_ms(&samples, 50), Some(1.0));
+        assert_eq!(frame_interval_percentile_ms(&samples, 100), Some(3.0));
+        assert_eq!(frame_interval_percentile_ms(&[], 95), None);
+        assert_eq!(frame_interval_percentile_ms(&samples, 0), None);
+    }
+
+    #[test]
+    fn sequence_gap_count_is_unattributed_and_never_underflows() {
+        assert_eq!(sequence_gap_count(0, 10), 0);
+        assert_eq!(sequence_gap_count(10, 11), 0);
+        assert_eq!(sequence_gap_count(10, 15), 4);
+        assert_eq!(sequence_gap_count(15, 10), 0);
+        assert_eq!(sequence_gap_count(u64::MAX - 1, u64::MAX), 0);
     }
 
     #[test]
