@@ -1114,25 +1114,39 @@ impl M1RuntimeSession {
         self.session
             .drain_audit_events_into(&mut self.pending_audit_events);
 
-        // Keep a consent-boundary event queued until its ledger append
-        // succeeds. If append fails, a later retry sees this event first and
-        // cannot silently skip it or duplicate already committed earlier
-        // events from this batch.
-        while let Some(event) = self.pending_audit_events.front().copied() {
+        let source_id = self.source_id;
+        let session_id = self.session_id;
+        let request_id = self.request_id;
+        let scope = self.scope.clone();
+        let chain = &mut self.chain;
+
+        flush_pending_audit_events(&mut self.pending_audit_events, |event| {
             if let Some(record) = consent_record_for_m1_event(
-                self.source_id,
-                self.session_id,
-                self.request_id,
-                self.scope.clone(),
+                source_id,
+                session_id,
+                request_id,
+                scope.clone(),
                 event,
             ) {
-                self.chain.append(record)?;
+                chain.append(record)?;
             }
-            self.pending_audit_events.pop_front();
-        }
-
-        Ok(())
+            Ok(())
+        })
     }
+}
+
+/// Consume pending M1 audit events in order. The front item is removed
+/// only after its optional consent-ledger append succeeds; an append failure
+/// leaves the failed event and all later events queued for retry.
+fn flush_pending_audit_events(
+    pending: &mut VecDeque<xenia_peer_core::M1AuditEvent>,
+    mut append: impl FnMut(xenia_peer_core::M1AuditEvent) -> Result<(), M1RuntimeError>,
+) -> Result<(), M1RuntimeError> {
+    while let Some(event) = pending.front().copied() {
+        append(event)?;
+        pending.pop_front();
+    }
+    Ok(())
 }
 
 fn evidence_bundle_paths(dir: &Path) -> M1EvidenceBundlePaths {
@@ -1932,6 +1946,40 @@ mod tests {
         assert_eq!(entries[2].event.kind, ConsentKind::Revocation);
 
         runtime.verify(&verifying_key).unwrap();
+    }
+
+    #[test]
+    fn failed_consent_append_keeps_current_and_later_events_pending() {
+        let mut pending = VecDeque::from([
+            xenia_peer_core::M1AuditEvent::SessionOffered,
+            xenia_peer_core::M1AuditEvent::ConsentGranted,
+            xenia_peer_core::M1AuditEvent::InputInjected,
+        ]);
+        let mut appended = Vec::new();
+
+        let result = flush_pending_audit_events(&mut pending, |event| {
+            if event == xenia_peer_core::M1AuditEvent::ConsentGranted {
+                return Err(M1RuntimeError::MissingTranscriptBinding);
+            }
+            appended.push(event);
+            Ok(())
+        });
+
+        assert!(matches!(
+            result,
+            Err(M1RuntimeError::MissingTranscriptBinding)
+        ));
+        assert_eq!(
+            appended,
+            vec![xenia_peer_core::M1AuditEvent::SessionOffered]
+        );
+        assert_eq!(
+            pending.iter().copied().collect::<Vec<_>>(),
+            vec![
+                xenia_peer_core::M1AuditEvent::ConsentGranted,
+                xenia_peer_core::M1AuditEvent::InputInjected
+            ]
+        );
     }
 
     #[test]
