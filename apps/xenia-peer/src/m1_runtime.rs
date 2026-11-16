@@ -1111,8 +1111,8 @@ impl M1RuntimeSession {
         // Move events out of the pure state machine immediately. Most
         // operation events are deliberately not consent-ledger records; they
         // are discarded here instead of remaining in an ever-growing Vec.
-        self.pending_audit_events
-            .extend(self.session.drain_audit_events());
+        self.session
+            .drain_audit_events_into(&mut self.pending_audit_events);
 
         // Keep a consent-boundary event queued until its ledger append
         // succeeds. If append fails, a later retry sees this event first and
