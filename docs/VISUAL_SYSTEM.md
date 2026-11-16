@@ -42,7 +42,7 @@ The current implementation lives in `apps/sovereign-admin/styles/main.css`.
 | `--border`, `--border-strong` | Surface and control boundaries |
 | `--radius-sm/md/lg` | Consistent component geometry |
 
-The CSS refresh preserves existing Leptos component classes and route behavior. It is a styling foundation, not proof of WCAG conformance.
+The CSS refresh preserves existing Leptos component classes and route behavior. It is a styling foundation, not proof of WCAG conformance. Calculated contrast for the directly paired declared tokens is 16.71:1 for primary text/background, 8.16:1 for secondary text/background, 4.59:1 for muted text/surface, and 10.90:1 for accent-on-primary-button text. These calculations do not replace sampling every rendered/translucent component state in a browser.
 
 ## Security-state presentation rules
 
