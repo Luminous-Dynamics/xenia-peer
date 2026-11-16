@@ -350,7 +350,11 @@
     ],
     "missing_measurements_are_not_zero": true,
     "queued_skipped_cancelled_or_stale_ci_is_not_pass": true,
-    "comparison_requires_matched_configuration": true
+    "comparison_requires_matched_configuration": true,
+    "required_physical_latency_trace_roles": [
+      "physical_latency_trace",
+      "instrument_calibration"
+    ]
   },
   "references": {
     "rustdesk": "https://rustdesk.com/docs/en/self-host/",
@@ -456,5 +460,37 @@
     "reference_standard": "RFC 8836",
     "reference_url": "https://www.rfc-editor.org/rfc/rfc8836.html",
     "status": "proposed_experiments_not_measurements"
+  },
+  "input_to_photon_evidence_contract": {
+    "required_for_profiles": [
+      "lan_interactive",
+      "regional_interactive"
+    ],
+    "valid_methods": [
+      "photodiode",
+      "high_speed_camera"
+    ],
+    "minimum_valid_trials": 300,
+    "preferred_trials": 1000,
+    "require_calibration": true,
+    "require_event_id_join": true,
+    "require_bound_raw_trace_artifact": true,
+    "require_bound_calibration_artifact": true,
+    "photodiode": {
+      "maximum_timer_resolution_ns": 1000,
+      "minimum_sensor_bandwidth_hz": 10000
+    },
+    "high_speed_camera": {
+      "minimum_frame_rate_fps": 1000
+    },
+    "invalid_substitutes": [
+      "host ACK",
+      "decoder completion callback",
+      "browser requestAnimationFrame callback",
+      "compositor present submission",
+      "unsynchronized cross-host wall-clock subtraction"
+    ],
+    "reference": "NVIDIA LDAT and equivalent photodiode/high-speed-camera methods",
+    "status": "proposed_measurement_contract_not_measurements"
   }
 }
