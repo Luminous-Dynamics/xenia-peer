@@ -1713,6 +1713,21 @@ async fn perform_rekey_split(
     }
 }
 
+/// Coarse privacy-safe classification for operator runtime logs.
+///
+/// Never return the event's payload, scancode, modifiers, coordinates,
+/// button identifier, touch index, phase, or pressure. The structured event
+/// is used only by the injector and is intentionally not debug-logged.
+fn input_event_class(event: &xenia_inject::InputEvent) -> &'static str {
+    match event {
+        xenia_inject::InputEvent::Pointer { .. }
+        | xenia_inject::InputEvent::PointerMove { .. }
+        | xenia_inject::InputEvent::PointerButton { .. } => "pointer",
+        xenia_inject::InputEvent::Key { .. } => "keyboard",
+        xenia_inject::InputEvent::Touch { .. } => "touch",
+    }
+}
+
 /// Construct the input-injection backend selected by `--input-backend`.
 /// Called lazily on the first real inbound `InputEvent` (see the recv
 /// task in `main`), not eagerly at startup, so a view-only session
@@ -6637,13 +6652,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match injector.process_events(std::slice::from_ref(&event)) {
                     Ok(()) => {
                         info!(
-                            ?event,
+                            input_class = input_event_class(&event),
                             backend = injector.backend_name(),
                             "input event injected"
                         );
                     }
                     Err(err) => {
                         warn!(
+                            input_class = input_event_class(&event),
                             error = %err,
                             backend = injector.backend_name(),
                             "input injection failed"
@@ -7040,6 +7056,70 @@ fn run_m1_runtime_smoke(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod input_log_privacy_tests {
+    use super::*;
+
+    #[test]
+    fn input_event_log_class_is_coarse_and_exhaustive() {
+        let cases = [
+            (
+                xenia_inject::InputEvent::Pointer {
+                    x: 0.123,
+                    y: 0.987,
+                    button: 2,
+                    pressed: true,
+                },
+                "pointer",
+            ),
+            (
+                xenia_inject::InputEvent::PointerMove { x: 0.123, y: 0.987 },
+                "pointer",
+            ),
+            (
+                xenia_inject::InputEvent::PointerButton {
+                    x: 0.123,
+                    y: 0.987,
+                    button: 2,
+                    pressed: false,
+                },
+                "pointer",
+            ),
+            (
+                xenia_inject::InputEvent::Key {
+                    code: 42,
+                    pressed: true,
+                    modifiers: 0b1111,
+                },
+                "keyboard",
+            ),
+            (
+                xenia_inject::InputEvent::Touch {
+                    index: 7,
+                    x: 0.123,
+                    y: 0.987,
+                    phase: 3,
+                    pressure: 0.75,
+                },
+                "touch",
+            ),
+        ];
+
+        for (event, expected_class) in cases {
+            assert_eq!(input_event_class(&event), expected_class);
+        }
+    }
+
+    #[test]
+    fn runtime_input_log_source_does_not_debug_format_raw_events() {
+        // Keep this source-level negative control next to the classification
+        // helper: a future diagnostic change must not reintroduce raw events.
+        let source = include_str!("main.rs");
+        assert!(!source.contains("info!(\n                            ?event"));
+        assert!(source.contains("input_class = input_event_class(&event)"));
+    }
 }
 
 #[cfg(test)]
