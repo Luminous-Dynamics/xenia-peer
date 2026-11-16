@@ -981,7 +981,9 @@ fn validate_i2p_trace(
     let p50 = nearest_rank_percentile(&latency_ns, 50, 100);
     let p95 = nearest_rank_percentile(&latency_ns, 95, 100);
     let p99 = nearest_rank_percentile(&latency_ns, 99, 100);
-    let max = *latency_ns.last().expect("valid-trial count checked");
+    let max = *latency_ns
+        .last()
+        .ok_or_else(|| app_error("at least one valid trial is required for percentile calculation"))?;
     let seed = u64::from_str_radix(&trace_digest[..16], 16)
         .map_err(|_| app_error("cannot derive deterministic bootstrap seed from trace digest"))?;
     let (ci_lower, ci_upper) =
