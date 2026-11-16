@@ -18,7 +18,7 @@ const RUN_SCHEMA: &str = "xenia-benchmark-run/v1";
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
 fn app_error(message: impl Into<String>) -> Box<dyn Error> {
-    Box::new(io::Error::new(io::ErrorKind::InvalidData, message.into()))
+    Box::new(io::Error::other(message.into()))
 }
 
 fn main() {
@@ -120,7 +120,7 @@ fn run() -> AppResult<()> {
                 serde_json::to_string_pretty(&json!({
                     "result_state": "BLOCKED",
                     "run_id": run_id,
-                    "output": output,
+                    "output": output.display().to_string(),
                     "profile_sha256": profile_digest,
                     "required_measurements": required,
                     "blockers": blockers
@@ -541,7 +541,7 @@ fn git_snapshot(repo: &Path) -> Value {
         .as_ref()
         .map(|s| s.lines().filter(|line| !line.trim().is_empty()).count());
     json!({
-        "repository_path": repo,
+        "repository_path": repo.display().to_string(),
         "commit_sha": commit.map(|s| s.trim().to_string()),
         "branch": branch.map(|s| s.trim().to_string()),
         "dirty_tree": dirty,
