@@ -116,6 +116,17 @@ Reference: [W3C WCAG 2.2](https://www.w3.org/TR/WCAG22/).
 
 These are **engineering targets for planning**. They are not current Xenia measurements, competitor scores, or acceptance claims. Before promoting any target into a release gate, run a baseline against the exact supported hardware and codec matrix.
 
+### Important: separate the release gate from the aspirational frontier
+
+The existing `xenia-benchmark-profile-v0.1.json` in the release-qualification branch is the current proposed baseline contract. It specifies, among other targets:
+
+- LAN 1080p60: input-to-photon p95 ≤ 80 ms, frame-age p95 ≤ 60 ms, direct connect-to-first-authorized-frame p95 ≤ 5 s, and post-approval-to-first-authorized-frame p95 ≤ 1 s.
+- Regional interactive (20–30 ms RTT): input-to-photon p95 ≤ 120 ms and control-message delivery p95 ≤ 150 ms.
+- Degraded WAN: control-message delivery p95 ≤ 250 ms, with the separate bandwidth-step-down and fairness conditions.
+
+The tighter Tier A and Tier B values below are **aspirational product-frontier goals**, not replacements for those existing v0.1 release-qualification thresholds. For example, Tier A's proposed p95 ≤ 45 ms is a stretch goal relative to the existing LAN p95 ≤ 80 ms target. The first-usable-frame ≤ 2 s goal is also an additional product target; it must not be confused with the existing approval-to-first-authorized-frame measurement. Keep the schemas and result reports explicit about which profile is being tested. Do not silently tighten or loosen a release gate after seeing results.
+
+
 ### Tier A — controlled LAN, interactive desktop
 
 | Metric | Proposed target | Measurement rule |
