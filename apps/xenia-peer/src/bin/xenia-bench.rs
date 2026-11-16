@@ -570,10 +570,17 @@ fn import_i2p(options: &std::collections::BTreeMap<String, String>) -> AppResult
     if !packet["blockers"].is_array() {
         packet["blockers"] = json!([]);
     }
-    packet["blockers"]
+    let blockers = packet["blockers"]
         .as_array_mut()
-        .expect("blockers initialized as an array")
-        .push(json!("Physical I2P evidence imported. Overall qualification remains BLOCKED until every other required metric and adapter evidence is supplied."));
+        .ok_or_else(|| app_error("blockers must be an array"))?;
+    for blocker in blockers.iter_mut() {
+        if blocker.as_str()
+            == Some("No Xenia capture-to-display / input-to-photon measurement adapter is registered; this command prepares an evidence packet only.")
+        {
+            *blocker = json!("No full Xenia performance measurement adapter is registered. A physical I2P trace may be imported separately, but the complete profile remains unmeasured.");
+        }
+    }
+    blockers.push(json!("Physical I2P evidence imported. Overall qualification remains BLOCKED until every other required metric and adapter evidence is supplied."));
 
     let rendered = serde_json::to_vec_pretty(&packet)?;
     write_new_file(&output_path, &rendered)?;
@@ -599,6 +606,10 @@ fn import_i2p(options: &std::collections::BTreeMap<String, String>) -> AppResult
 
 fn write_or_verify_artifact_copy(path: &Path, bytes: &[u8], expected_digest: &str) -> AppResult<()> {
     if path.exists() {
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            return Err(app_error("digest-named evidence artifact must be a regular file, not a symlink or special file"));
+        }
         let observed = sha256_file(path)?;
         if !observed.eq_ignore_ascii_case(expected_digest) {
             return Err(app_error(format!(
