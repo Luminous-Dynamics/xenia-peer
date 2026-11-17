@@ -36,7 +36,7 @@ The differentiator is not a cryptographic badge beside a conventional remote des
 
 ### Publicly stated reference points
 
-- Parsec's September 2026 guidance recommends 1080p60, a 25+ Mbps bandwidth limit, 30 Mbps host upload and 30 Mbps client download, with a same-city ping below 15 ms in its recommended setup. These are vendor configuration recommendations, **not an independent latency result or universal requirement**.
+- Parsec's September 29, 2026 gaming/playtesting guidance uses 1080p60+, HEVC, hardware decoding and a 25+ Mbps bandwidth limit; it recommends leaving 4:4:4 preference off for motion-heavy gaming where latency is prioritized. Its July 7, 2026 programmers/writers guidance instead recommends 4:4:4 on at 25+ Mbps for crisp IDE/document text. Its connectivity guidance recommends 30 Mbps host upload and client download for 1080p60, with same-city ping below 15 ms. These are vendor configuration recommendations, **not independent latency results or universal requirements**.
 - Moonlight explicitly cautions that its internal connection statistics cannot be used to compare directly with other clients because instrumentation and available measurements differ. It recommends external hardware for accurate end-to-end measurements.
 - Microsoft documents adaptive RDP graphics, separate dynamic virtual channels, UDP Shortpath, and RDP Multipath. The current RDP Multipath documentation describes multiple monitored UDP routes discovered with ICE/STUN/TURN plus redundant TCP standby paths; when the active path degrades or fails, the product can switch to a backup path. This is an established industry capability, not an Xenia differentiator.
 - The RDP architecture already separates data across virtual channels, including presentation and input-related data. Xenia's existing cryptographic lane keys are a good security foundation, but the current QUIC transport still exposes one ordered logical stream; key separation alone does not provide stream-level head-of-line isolation.
@@ -158,11 +158,11 @@ The existing `xenia-benchmark-profile-v0.1.json` in the release-qualification br
 The tighter Tier A and Tier B values below are **aspirational product-frontier goals**, not replacements for those existing v0.1 release-qualification thresholds. For example, Tier A's proposed p95 ≤ 45 ms is a stretch goal relative to the existing LAN p95 ≤ 80 ms target. The first-usable-frame ≤ 2 s goal is also an additional product target; it must not be confused with the existing approval-to-first-authorized-frame measurement. Keep the schemas and result reports explicit about which profile is being tested. Do not silently tighten or loosen a release gate after seeing results.
 
 
-### Tier A — controlled LAN, interactive desktop
+### Tier A-M — controlled LAN, motion-first / low-bandwidth desktop
 
 | Metric | Proposed target | Measurement rule |
 |---|---:|---|
-| Profile | 1920×1080, 60 Hz, 15 Mbps cap | Same codec, encoder mode, color format and display refresh across products |
+| Profile | 1920×1080, 60 Hz, 15 Mbps cap | Matched H.264/HEVC/AV1 configuration, 4:2:0 where supported, same display refresh and decoder class |
 | Input-to-photon p50 | ≤ 25 ms | External photodiode or ≥1,000 fps camera; at least 300 randomized trials |
 | Input-to-photon p95 | ≤ 45 ms | Report p50/p95/p99 and confidence intervals, not average only |
 | Input-to-photon p99 | ≤ 70 ms | Record instrument uncertainty and reject uncalibrated runs |
@@ -170,7 +170,22 @@ The tighter Tier A and Tier B values below are **aspirational product-frontier g
 | First usable frame | ≤ 2.0 s after authenticated session acceptance | Record both acceptance-to-first-frame and connect-to-first-frame |
 | Control under video load | p99 control response ≤ 75 ms | Saturate media traffic and verify no priority inversion |
 
-The 15 Mbps profile is a stretch efficiency target against Parsec's 25+ Mbps / 30 Mbps recommendations for its stated 1080p60 setup. Xenia only beats that reference if visual fidelity is matched and the measurement rig is equivalent.
+The 15 Mbps profile is a **motion-first efficiency stretch target** against Parsec's 25+ Mbps gaming/playtesting guidance and 30 Mbps 1080p60 connectivity recommendation. It is not a proposed 15 Mbps target for text-accurate 4:4:4 desktop work. Xenia only beats the motion reference if motion quality is matched and the external measurement rig is equivalent.
+
+### Tier A-T — controlled LAN, text/color-accurate productivity
+
+| Metric | Proposed target | Measurement rule |
+|---|---:|---|
+| Profile | 1920×1080, 60 Hz, 4:4:4, 25 Mbps baseline | Start at Parsec's documented 25+ Mbps programmers/writers profile; compare higher/lower rates separately |
+| Text fidelity | OCR word error rate ≤ 0.5% | Fixed IDE/document corpus, pinned fonts, scale factor and rasterization; score only text regions |
+| Glyph fidelity | Edge F1 ≥ 0.99 | Compare reference and decoded glyph-edge masks after geometrically aligned capture |
+| Color accuracy | Median ΔE2000 ≤ 3; p95 ≤ 5 | Calibrated display, colorimeter, pinned color profile and patch suite |
+| Input-to-photon p95 | ≤ 60 ms | External photodiode/camera; report motion and text profiles separately |
+| Frame pacing | p95 presented-frame interval ≤ 20 ms | Include static, scrolling, caret blink, window drag and text reflow workloads |
+
+These are proposed product targets, not current measurements or industry scores. OCR and edge metrics are evaluated alongside blinded human readability tests; color results require a calibrated display/sensor path. Do not substitute VMAF or a generic full-frame SSIM score for text legibility or color correctness.
+
+**Rule:** compare each product at matched workload quality before comparing bitrate. If one client is using 4:2:0 and the other 4:4:4, or one is using software decode and the other hardware decode, label the comparison accordingly instead of treating the raw bitrate/latency pair as equivalent.
 
 ### Tier B — WAN and constrained links
 
@@ -219,7 +234,7 @@ A fair comparison requires a fixed lab, not screenshots or vendor marketing clai
 3. **Network:** publish RTT, jitter, loss, bandwidth cap, queue discipline, competing flows, route, MTU and impairment seed. Run LAN, WAN and constrained profiles separately.
 4. **Workloads:** include static text/IDE, scrolling, window movement, video, rapid pointer movement, drag-and-drop, high-motion scenes, dual-monitor and mixed-resolution displays.
 5. **Latency:** use an external input trigger and photodiode/high-speed-camera observation. Collect at least 300 valid trials per profile; publish raw timestamps, instrument calibration and dropped/invalid trial reasons.
-6. **Quality:** pair objective video metrics with screen-specific text/UI legibility and blinded human assessment. Do not use VMAF, PSNR or SSIM alone to rank text-heavy desktop content.
+6. **Quality:** pair objective video metrics with screen-specific text/UI legibility and blinded human assessment. For motion-first content, report VMAF/SSIM or a suitable perceptual metric plus motion artifacts. For productivity, score OCR word error rate, glyph-edge F1, cursor/caret visibility and calibrated color-patch ΔE2000 at 4:4:4. Do not use VMAF, PSNR or SSIM alone to rank text-heavy desktop content.
 7. **Statistics:** publish sample count, median, p95, p99, bootstrap confidence interval, run-to-run spread and outlier policy. Do not discard inconvenient tails without a pre-registered rule.
 8. **Evidence:** include source SHA, binary digest, run packet digest, raw trace digest, environment manifest, network fixture, calibration record, and analysis tool version.
 9. **Competitors:** where supported, test Parsec, RustDesk, Sunshine/Moonlight and RDP on the same endpoints. When a product cannot support an identical codec, path or feature, mark the cell **not comparable** rather than inventing an equivalent.
@@ -276,7 +291,18 @@ Every result should be represented as a versioned run packet with:
 
 A `PASS` must require actual measurement evidence. A planned run, skipped check, missing artifact, internal-only timestamp, or historical result cannot qualify.
 
-## 8. Release / research decision rules
+## 8. Current Xenia instrumentation versus external evidence
+
+The codebase is beginning to expose useful *local diagnostics*:
+
+- Client-local decoded-frame age uses a monotonic `Instant` captured after decode; it is not network or host-to-display latency.
+- The latest-frame slot counts unconsumed frames superseded locally; it is not packet loss or decoder loss.
+- The native viewer reports local pointer-motion queue drops, last/max key/button enqueue wait and input-channel closure; these are not network RTT or host-application acknowledgments.
+- The physical I2P importer accepts calibrated external traces and recomputes summaries from raw evidence, but a schema/parser pass is not a physical measurement.
+
+These local signals help explain *where* delay/backpressure occurs. Only the calibrated external trigger-to-photon path qualifies full input-to-photon claims. No current Xenia number should be called better than SOTA until matched, physical runs exist for both Xenia and the comparator.
+
+## 9. Release / research decision rules
 
 - Keep proposed targets separate from measured achievements.
 - Keep benchmark profile changes versioned; do not quietly retune thresholds after seeing results.
