@@ -51,4 +51,4 @@ jobs:
           rm .github/workflows/lockfile-refresh.yml
           git add Cargo.lock .github/workflows/lockfile-refresh.yml
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "chore(deps): regenerate Cargo lockfile with fixed crates"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git push origin "HEAD:${TARGET_BRANCH}"
