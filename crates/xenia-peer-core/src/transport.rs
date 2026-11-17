@@ -343,6 +343,26 @@ impl NetworkPathProfileV1 {
         }
     }
 
+    /// Construct a profile from the canonical ordered custom relay URL set.
+    ///
+    /// The hash uses length-prefixed UTF-8 URL bytes and a domain-separation
+    /// tag. Relay order is retained because it may encode operator preference.
+    /// The raw URLs are not copied into the negotiated session context.
+    pub fn custom_relay_urls(urls: &[String]) -> Result<Self, &'static str> {
+        if urls.is_empty() {
+            return Err("custom relay set must contain at least one URL");
+        }
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"xenia-network-path-custom-relays-v1");
+        for url in urls {
+            let length = u64::try_from(url.len())
+                .map_err(|_| "custom relay URL length exceeds supported range")?;
+            hasher.update(&length.to_be_bytes());
+            hasher.update(url.as_bytes());
+        }
+        Ok(Self::custom_relay(*hasher.finalize().as_bytes()))
+    }
+
     /// Construct a profile for an operator-managed custom relay set.
     pub fn custom_relay(custom_relay_set_digest: [u8; 32]) -> Self {
         Self {
@@ -620,6 +640,58 @@ impl RecvEnvelope for TcpRecvHalf {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn network_path_profile_defaults_match_carrier() {
+        let quic = NetworkPathProfileV1::current(TransportKind::Quic);
+        assert_eq!(quic.relay_mode, NetworkRelayModeV1::DirectOnly);
+        assert!(quic.is_supported_for(&TransportProfileV1::current(TransportKind::Quic)));
+
+        let tcp = NetworkPathProfileV1::current(TransportKind::Tcp);
+        assert_eq!(tcp.relay_mode, NetworkRelayModeV1::NotApplicable);
+        assert!(tcp.is_supported_for(&TransportProfileV1::current(TransportKind::Tcp)));
+    }
+
+    #[test]
+    fn custom_relay_profile_binds_ordered_url_set_without_storing_urls() {
+        let first = NetworkPathProfileV1::custom_relay_urls(&[
+            "https://relay-a.example.test".to_string(),
+            "https://relay-b.example.test".to_string(),
+        ])
+        .unwrap();
+        let same = NetworkPathProfileV1::custom_relay_urls(&[
+            "https://relay-a.example.test".to_string(),
+            "https://relay-b.example.test".to_string(),
+        ])
+        .unwrap();
+        let reversed = NetworkPathProfileV1::custom_relay_urls(&[
+            "https://relay-b.example.test".to_string(),
+            "https://relay-a.example.test".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(first, same);
+        assert_ne!(first, reversed);
+        assert_eq!(first.relay_mode, NetworkRelayModeV1::Custom);
+        assert!(first.custom_relay_set_digest.is_some());
+        assert!(!format!("{first:?}").contains("relay-a.example.test"));
+    }
+
+    #[test]
+    fn custom_relay_profile_rejects_empty_set_and_invalid_carrier_shape() {
+        assert!(NetworkPathProfileV1::custom_relay_urls(&[]).is_err());
+
+        let custom = NetworkPathProfileV1::custom_relay([0x5a; 32]);
+        assert!(!custom.is_supported_for(&TransportProfileV1::current(TransportKind::Tcp)));
+        assert!(custom.is_supported_for(&TransportProfileV1::current(TransportKind::Quic)));
+
+        let invalid = NetworkPathProfileV1 {
+            schema: "wrong-schema".to_string(),
+            ..NetworkPathProfileV1::current(TransportKind::Quic)
+        };
+        assert!(!invalid.is_supported_for(&TransportProfileV1::current(TransportKind::Quic)));
+    }
     use super::*;
 
     #[test]
