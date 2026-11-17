@@ -10,18 +10,18 @@
 //! uses Iroh for endpoint identity, multiplexing, and QUIC stream semantics;
 //! the application payload remains transport-independent.
 //!
-//! **NAT traversal is not currently enabled.** [`bind_xenia_endpoint`] binds
-//! with Iroh's `presets::Minimal`, which sets up only the TLS crypto
-//! provider -- no relay, no DNS/pkarr address lookup, no STUN. Connections
-//! only succeed between endpoints with a direct, already-reachable address
-//! (same LAN, or one side publicly routable); this matches
-//! `docs/roadmap/M1_VERTICAL_SLICE_PLAN.md`'s explicit M1 non-goals ("public
-//! internet NAT traversal", "production-grade relay infrastructure"), not
-//! an oversight. Real NAT traversal would need Iroh's `presets::N0` (or a
-//! self-hosted relay) instead, plus the operational cost of depending on
-//! that relay infrastructure -- a real scope decision, not a quick fix.
+//! **NAT traversal is opt-in.** [`bind_xenia_endpoint`] defaults to direct-only
+//! mode and requires already-reachable addresses. Operators may select
+//! `public-relay` or `custom-relay` through `XENIA_IROH_RELAY_MODE`; custom
+//! mode additionally requires `XENIA_IROH_RELAY_URLS`. See
+//! `docs/transport/RELAY_PATH_POLICY.md`.
 //!
-//! The transport wraps one long-lived bidirectional QUIC stream. Inside that
+//! Relay use improves reachability but creates a metadata-observation point:
+//! the selected relay can observe endpoint IDs, timing, packet sizes and
+//! traffic volume. It forwards encrypted Iroh packets and cannot decode
+//! Xenia's end-to-end sealed application envelopes.
+//!
+//! //! The transport wraps one long-lived bidirectional QUIC stream. Inside that
 //! stream it uses the same 4-byte big-endian envelope length prefix as the TCP
 //! transport, so callers get identical envelope boundary behavior across TCP,
 //! WebSocket, and QUIC.
