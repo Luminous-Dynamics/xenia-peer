@@ -1,7 +1,7 @@
 # Xenia Interaction Quality Benchmark v0.1
 
 Status: research and evaluation specification; no product conformance or usability result claimed  
-Related: #496, #497, #455, #460, #461, #463, PR #462, #469, #471
+Related: #496, #497, #455, #392, #460, #461, #463, PR #462, #469, #471
 
 ## 1. Purpose
 
@@ -95,7 +95,7 @@ Use a persistent session rail and a dominant workspace. The rail should answer, 
 
 The inspector should be collapsible and grouped into Stream, Host and Audio. Show only useful high-level signals by default; expose advanced counters on demand. Label host-reported and locally measured values separately.
 
-The person at the remote host also needs a persistent, locally accessible indication when their screen is being viewed or controlled, with a clearly named way to stop the relevant access. The exact UI surface is platform-dependent and should be implemented only where its semantics are reliable. A controller-side toolbar is not a substitute for recipient-side visibility.
+The person at the remote host also needs a persistent, locally accessible indication when their screen is being viewed or controlled, with a clearly named way to stop the relevant access. This is the human-facing realization of the existing security requirement in [#392](https://github.com/Luminous-Dynamics/xenia-peer/issues/392), which already calls for a visible session indicator and mid-session revoke; this benchmark does not create a duplicate authority feature. The exact UI surface is platform-dependent and should be implemented only where its semantics are reliable. A controller-side toolbar is not a substitute for recipient-side visibility.
 
 Fit and 1:1 modes are explicit. Any future zoom, pan, scaling, multi-monitor or inspector resize work must preserve the source-image coordinate contract.
 
