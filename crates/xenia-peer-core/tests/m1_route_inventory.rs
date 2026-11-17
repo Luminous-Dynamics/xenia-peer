@@ -255,7 +255,7 @@ fn sensitive_source_routes_keep_preflight_and_final_lane_gates_in_order() {
         "clipboard disclosure",
         &[
             "preflight_host_clipboard_read_flow()",
-            "if let Some(text) = read_host_clipboard_text()",
+            "&& let Some(text) = read_host_clipboard_text()",
             "seal_frame(&clipboard_frame)",
             "allow_host_clipboard_read_flow()",
             "send_half.send_envelope(&envelope)",
