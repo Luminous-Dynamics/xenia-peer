@@ -302,7 +302,7 @@ Introduce an authenticated, monotonic AuthorityFrontier per sovereignty/authorit
 - issue time and bounded validity/lease;
 - optional predecessor/frontier commitment for audit continuity.
 
-Every session admission and effect request carries a minimum acceptable frontier. The effect owner must establish that its observed frontier is at least as new as the requested minimum and belongs to the exact resource authority namespace. A mismatched namespace or stale frontier is INDETERMINATE, never a permit. The standalone Rust model now includes a small freshness-frontier predicate; it does not authenticate frontiers or establish distributed convergence.
+Every session admission and effect request carries a minimum acceptable frontier. The effect owner must establish that its observed frontier is at least as new as the requested minimum and belongs to the exact resource authority namespace. A mismatched namespace or stale frontier is INDETERMINATE, never a permit. The standalone Rust model now includes a small freshness-frontier predicate; it does not authenticate frontiers, prove that a frontier commits to the exact in-memory authority snapshot being evaluated, or establish distributed convergence. An integrating caller must verify all three bindings before using the predicate.
 
 Define explicit consistency profiles:
 
