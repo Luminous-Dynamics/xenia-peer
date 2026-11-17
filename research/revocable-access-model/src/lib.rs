@@ -507,16 +507,17 @@ mod tests {
 
     #[test]
     fn bounded_exhaustive_request_and_authority_matrix_never_false_allows() {
-        // Exhaustively enumerate 576 small states: completeness (2), revoke
+        // Exhaustively enumerate 1,152 small states: completeness (2), revoke
         // masks (4), epoch state (3), right (3), resource (2), purpose (2),
-        // and execution requirement (2).
+        // direction (2), and execution requirement (2).
         for complete in [false, true] {
             for revoke_mask in 0_u8..4 {
                 for epoch_state in 0_u8..3 {
                     for right in [Right::View, Right::Input, Right::Administer] {
                         for wrong_resource in [false, true] {
                             for wrong_purpose in [false, true] {
-                                for requires_execution in [false, true] {
+                                for wrong_direction in [false, true] {
+                                    for requires_execution in [false, true] {
                                     let mut s = state();
                                     s.complete = complete;
                                     if revoke_mask & 1 != 0 { s.revoked.insert("root".into()); }
@@ -532,6 +533,14 @@ mod tests {
                                             id: if wrong_resource { "other-host".into() } else { "host-1".into() },
                                         },
                                         right,
+                                        direction: if wrong_direction {
+                                            match right.direction() {
+                                                Direction::HostToDelegate => Direction::DelegateToHost,
+                                                Direction::DelegateToHost | Direction::HostLocal => Direction::HostToDelegate,
+                                            }
+                                        } else {
+                                            right.direction()
+                                        },
                                         purpose: if wrong_purpose { "different-purpose".into() } else { "support-session".into() },
                                         requires_execution,
                                     };
@@ -541,12 +550,14 @@ mod tests {
                                         && epoch_state == 0
                                         && right == Right::View
                                         && !wrong_resource
-                                        && !wrong_purpose;
+                                        && !wrong_purpose
+                                        && !wrong_direction;
                                     assert_eq!(
                                         got.decision == Decision::Allowed,
                                         expected_allow,
-                                        "complete={complete} revoke={revoke_mask} epoch={epoch_state} right={right:?} wrong_resource={wrong_resource} wrong_purpose={wrong_purpose} execution={requires_execution} result={got:?}"
+                                        "complete={complete} revoke={revoke_mask} epoch={epoch_state} right={right:?} wrong_resource={wrong_resource} wrong_purpose={wrong_purpose} wrong_direction={wrong_direction} execution={requires_execution} result={got:?}"
                                     );
+                                    }
                                 }
                             }
                         }
@@ -658,13 +669,12 @@ mod tests {
         );
     }
 
-}
     #[test]
     fn freshness_frontier_blocks_stale_snapshots() {
         let s = state();
         let request = AccessRequest {
             resource: Resource { domain: "home-a".into(), id: "host-1".into() },
-            right: Right::View, purpose: "support-session".into(), requires_execution: true,
+            right: Right::View, direction: Direction::HostToDelegate, purpose: "support-session".into(), requires_execution: true,
         };
         let minimum = AuthorityFrontier { namespace: "home-a".into(), revision: 12 };
         let stale = AuthorityFrontier { namespace: "home-a".into(), revision: 11 };
@@ -693,4 +703,4 @@ mod tests {
             Decision::Indeterminate
         );
     }
-
+}
