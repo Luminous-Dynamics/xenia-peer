@@ -79,11 +79,12 @@ commit boundary: a transfer that was admitted earlier must not publish after a
 later revocation has been observed.
 
 The outbound runtime now performs exact-lane preflight before screen capture,
-telemetry polling, audio reads, host clipboard reads and outbound file-chunk
-reads. The inbound input path checks the input lane before decoding the event.
-The outbound file-transfer path then checks again after sealing each chunk and
-immediately before network send; it also rechecks before sending the terminal
-completion signal. The final lane checks remain at the send/apply boundary. A denial skips that lane rather than aborting the
+telemetry polling, audio reads, host clipboard reads, the initial outbound file
+open/hash, and every outbound file-chunk read. The inbound input path checks
+the input lane before decoding the event. The outbound file-transfer path then
+checks again after sealing each chunk and immediately before network send; it
+also rechecks before sending the terminal completion signal. The final lane
+checks remain at the send/apply boundary. A denial skips that lane rather than aborting the
 whole daemon session. Clipboard disclosure is checked against
 `ReadHostClipboard` at its final send boundary; it must not accidentally
 require `StreamFrame` as well.
@@ -107,8 +108,9 @@ and the effect-commit work in #504 must define races after the final check.
 - Lane-specific denial skips sensitive source work while final effect gates
   remain intact.
 - Clipboard send is gated by clipboard-read authority, not screen-frame access.
-- Outbound file chunks are checked before source consumption and again at the
-  sealed-envelope send boundary; completion is rechecked after revocation.
+- Initial outbound file open/hash is preceded by a side-effect-free
+  `SendFileToViewer` preflight; chunks are checked before source consumption
+  and again at the sealed-envelope send boundary; completion is rechecked.
 
 ## Explicit claim ceiling
 
