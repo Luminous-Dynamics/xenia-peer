@@ -29,8 +29,8 @@
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
 
-use std::{collections::BTreeSet, env, io};
 use std::time::Duration;
+use std::{collections::BTreeSet, env, io};
 
 use iroh::{
     Endpoint, EndpointAddr, RelayMode, RelayUrl,
