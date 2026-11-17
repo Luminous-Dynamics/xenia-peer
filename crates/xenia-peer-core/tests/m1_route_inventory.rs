@@ -7,8 +7,7 @@ const ROUTE_INVENTORY: &str = include_str!("../../../docs/security/M1_ROUTE_INVE
 const DAEMON_SOURCE: &str = include_str!("../../../apps/xenia-peer/src/main.rs");
 const FILE_TRANSFER_SOURCE: &str = include_str!("../../../apps/xenia-peer/src/file_transfer.rs");
 const RUNTIME_SOURCE: &str = include_str!("../../../apps/xenia-peer/src/m1_runtime.rs");
-const PERMISSION_MODEL_SOURCE: &str =
-    include_str!("../src/m1_session.rs");
+const PERMISSION_MODEL_SOURCE: &str = include_str!("../src/m1_session.rs");
 
 fn source_section<'a>(source: &'a str, route: &str, start: &str, end: &str) -> &'a str {
     let start_index = source
@@ -350,7 +349,11 @@ fn sensitive_source_routes_keep_preflight_and_final_lane_gates_in_order() {
     assert_source_order(
         screen_send,
         "screen frame send",
-        &["seal_frame(&raw)", "allow_frame_flow()", "send_half.send_envelope(&envelope)"],
+        &[
+            "seal_frame(&raw)",
+            "allow_frame_flow()",
+            "send_half.send_envelope(&envelope)",
+        ],
     );
 
     let input = source_section(
@@ -427,7 +430,10 @@ fn sensitive_source_routes_keep_preflight_and_final_lane_gates_in_order() {
     assert_source_order(
         incoming_chunks,
         "incoming file chunks",
-        &["allow_file_receive_flow()", "transfer.stager.append(offset, &data)"],
+        &[
+            "allow_file_receive_flow()",
+            "transfer.stager.append(offset, &data)",
+        ],
     );
 
     let incoming_publication = source_section(
