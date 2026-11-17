@@ -1788,6 +1788,109 @@ mod tests {
         assert_ne!(first, second);
     }
 
+    #[test]
+    fn negotiated_session_context_v5_binds_relay_mode() {
+        let transport = TransportProfileV1::current(TransportKind::Quic);
+        let pre_session = TransportPreSessionProfileV1::current(TransportKind::Quic);
+        let availability = TransportAvailabilityProfileV1::current(TransportKind::Quic);
+        let capabilities = test_capabilities();
+
+        let direct = negotiated_session_context_hash_with_network_path_profile(
+            &transport,
+            &pre_session,
+            &availability,
+            &NetworkPathProfileV1::current(TransportKind::Quic),
+            capabilities.clone(),
+        )
+        .unwrap();
+        let public = negotiated_session_context_hash_with_network_path_profile(
+            &transport,
+            &pre_session,
+            &availability,
+            &NetworkPathProfileV1::public_relay(),
+            capabilities.clone(),
+        )
+        .unwrap();
+        assert_ne!(direct, public);
+    }
+
+    #[test]
+    fn negotiated_session_context_v5_binds_exact_custom_relay_set_digest() {
+        let transport = TransportProfileV1::current(TransportKind::Quic);
+        let pre_session = TransportPreSessionProfileV1::current(TransportKind::Quic);
+        let availability = TransportAvailabilityProfileV1::current(TransportKind::Quic);
+        let capabilities = test_capabilities();
+        let first = NetworkPathProfileV1::custom_relay([0x11; 32]);
+        let second = NetworkPathProfileV1::custom_relay([0x22; 32]);
+
+        let first_hash = negotiated_session_context_hash_with_network_path_profile(
+            &transport,
+            &pre_session,
+            &availability,
+            &first,
+            capabilities.clone(),
+        )
+        .unwrap();
+        let second_hash = negotiated_session_context_hash_with_network_path_profile(
+            &transport,
+            &pre_session,
+            &availability,
+            &second,
+            capabilities,
+        )
+        .unwrap();
+        assert_ne!(first_hash, second_hash);
+    }
+
+    #[test]
+    fn pending_surface_rejects_relay_policy_mismatch_before_application_surface() {
+        let transport = TransportProfileV1::current(TransportKind::Quic);
+        let pre_session = TransportPreSessionProfileV1::current(TransportKind::Quic);
+        let availability = TransportAvailabilityProfileV1::current(TransportKind::Quic);
+        let capabilities = test_capabilities();
+        let host_hash = negotiated_session_context_hash_with_network_path_profile(
+            &transport,
+            &pre_session,
+            &availability,
+            &NetworkPathProfileV1::current(TransportKind::Quic),
+            capabilities.clone(),
+        )
+        .unwrap();
+
+        let pending = PendingSessionSurface::new_with_profiles_and_network_path(
+            Some(host_hash),
+            transport,
+            pre_session,
+            availability,
+            NetworkPathProfileV1::public_relay(),
+        )
+        .unwrap();
+        assert!(matches!(
+            pending.authenticate_capabilities(capabilities),
+            Err(CapabilityAcceptanceError::ContextHashMismatch)
+        ));
+    }
+
+    #[test]
+    fn negotiated_session_context_v5_rejects_invalid_path_profile_shape() {
+        let transport = TransportProfileV1::current(TransportKind::Quic);
+        let pre_session = TransportPreSessionProfileV1::current(TransportKind::Quic);
+        let availability = TransportAvailabilityProfileV1::current(TransportKind::Quic);
+        let invalid = NetworkPathProfileV1::current(TransportKind::Tcp);
+        assert!(matches!(
+            negotiated_session_context_hash_with_network_path_profile(
+                &transport,
+                &pre_session,
+                &availability,
+                &invalid,
+                test_capabilities(),
+            ),
+            Err(NegotiatedSessionContextError::UnsupportedNetworkPathProfile(
+                TransportKind::Tcp
+            ))
+        ));
+    }
+
     fn test_capabilities() -> RawCapabilities {
         RawCapabilities {
             frame_id: 1,
