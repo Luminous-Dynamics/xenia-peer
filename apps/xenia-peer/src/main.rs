@@ -6614,6 +6614,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     continue;
                 }
+                m1_runtime.lock().await.preflight_input_flow()?;
                 let event: xenia_inject::InputEvent = match bincode::deserialize(&input.payload) {
                     Ok(event) => event,
                     Err(err) => {
@@ -6739,7 +6740,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if args.telemetry_level != TelemetryLevel::Off
             && last_telemetry_sent.elapsed() >= telemetry_interval
         {
-            m1_runtime.lock().await.preflight_frame_flow()?;
+            m1_runtime.lock().await.preflight_telemetry_flow()?;
             match telemetry.poll_samples() {
                 Ok(samples) if !samples.is_empty() => {
                     let samples: Vec<_> = samples
@@ -6778,7 +6779,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(audio) = &mut audio
             && last_audio_sent.elapsed() >= audio_interval
         {
-            m1_runtime.lock().await.preflight_frame_flow()?;
+            m1_runtime.lock().await.preflight_audio_flow()?;
             if let Some(raw_audio) = audio.next_raw_audio(now_ms())? {
                 let raw_audio = audio_codec.encode(raw_audio)?;
                 let frame_id = session.lock().await.next_frame_id();
@@ -6799,10 +6800,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             && last_clipboard_check.elapsed() >= clipboard_interval
         {
             last_clipboard_check = std::time::Instant::now();
+            m1_runtime.lock().await.preflight_host_clipboard_read_flow()?;
             if let Some(text) = read_host_clipboard_text()
                 && Some(&text) != last_sent_clipboard_text.as_ref()
             {
-                m1_runtime.lock().await.preflight_frame_flow()?;
                 m1_runtime.lock().await.allow_host_clipboard_read_flow()?;
                 let frame_id = session.lock().await.next_frame_id();
                 let seq = clipboard_seq;
