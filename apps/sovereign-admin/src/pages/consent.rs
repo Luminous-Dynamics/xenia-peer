@@ -49,9 +49,152 @@ fn display_scope(prompt: &str) -> String {
     }
 }
 
+/// Human-readable rendering of one canonical daemon-generated capability
+/// scope field. This type is display-only: it must never be serialized into
+/// the consent signature transcript.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ConsentScopeItem {
+    label: &'static str,
+    detail: String,
+}
+
+/// Render a single semicolon-delimited field from the daemon's canonical scope.
+/// Known fields get explicit direction/sensitivity wording. Unknown fields are
+/// retained verbatim so a new daemon capability is never hidden by an older UI.
+fn describe_scope_fragment(fragment: &str) -> ConsentScopeItem {
+    let raw = fragment.trim();
+    let Some((key, value)) = raw.split_once(':') else {
+        return ConsentScopeItem {
+            label: "Additional scope detail",
+            detail: raw.to_string(),
+        };
+    };
+    let key = key.trim();
+    let value = value.trim();
+
+    let known = match (key, value) {
+        ("display", "screen stream") => Some(("Display", "View the remote screen")),
+        ("telemetry", "off") => Some(("Telemetry", "No host telemetry")),
+        ("telemetry", "basic host performance") => {
+            Some(("Telemetry", "Basic host performance metrics"))
+        }
+        ("telemetry", "system identity and performance") => {
+            Some(("Telemetry", "System identity and performance telemetry"))
+        }
+        ("audio", "off") => Some(("Audio", "Off")),
+        ("audio", "synthetic test signal") => Some(("Audio", "Synthetic test signal only")),
+        ("audio", "host device capture") => Some(("Audio", "Host audio capture")),
+        ("input", "off") => Some(("Input", "No remote keyboard or pointer input")),
+        ("input", "viewer may inject") => Some(("Input", "Keyboard and pointer injection")),
+        ("clipboard", "off") => Some(("Clipboard", "Disabled")),
+        ("clipboard", "host-to-viewer disclosure") => {
+            Some(("Clipboard", "Host → viewer disclosure"))
+        }
+        ("clipboard", "viewer-to-host apply") => {
+            Some(("Clipboard", "Viewer → host apply"))
+        }
+        ("clipboard", "bidirectional") => Some(("Clipboard", "Both directions")),
+        ("file-transfer", "off") => Some(("File transfer", "Disabled")),
+        ("file-transfer", "host-to-viewer send") => {
+            Some(("File transfer", "Host → viewer send"))
+        }
+        ("file-transfer", "viewer-to-host receive") => {
+            Some(("File transfer", "Viewer → host receive"))
+        }
+        ("file-transfer", "bidirectional") => Some(("File transfer", "Both directions")),
+        _ => None,
+    };
+
+    match known {
+        Some((label, detail)) => ConsentScopeItem {
+            label,
+            detail: detail.to_string(),
+        },
+        None => ConsentScopeItem {
+            label: "Additional capability",
+            detail: raw.to_string(),
+        },
+    }
+}
+
+/// Parse scope only for display. `display_scope` remains the exact string
+/// passed to `build_consent_request`; this projection must never be used for
+/// scope_digest or any signed/authorized decision.
+fn consent_scope_items(prompt: &str) -> Vec<ConsentScopeItem> {
+    let scope = display_scope(prompt);
+    let items = scope
+        .split(';')
+        .map(describe_scope_fragment)
+        .filter(|item| !item.detail.is_empty())
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        vec![ConsentScopeItem {
+            label: "Scope",
+            detail: "Scope was not supplied in the request.".to_string(),
+        }]
+    } else {
+        items
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capability_scope_projection_maps_all_daemon_fields_for_humans() {
+        let scope = concat!(
+            "display: screen stream; ",
+            "telemetry: system identity and performance; ",
+            "audio: host device capture; ",
+            "input: viewer may inject; ",
+            "clipboard: host-to-viewer disclosure; ",
+            "file-transfer: viewer-to-host receive"
+        );
+        let prompt = format!(
+            r#"{{"session_id":"00112233445566778899aabbccddeeff","scope":"{scope}"}}"#
+        );
+        let items = consent_scope_items(&prompt);
+
+        assert_eq!(items.len(), 6);
+        assert_eq!(items[0].label, "Display");
+        assert_eq!(items[0].detail, "View the remote screen");
+        assert_eq!(items[1].label, "Telemetry");
+        assert_eq!(
+            items[1].detail,
+            "System identity and performance telemetry"
+        );
+        assert_eq!(items[2].label, "Audio");
+        assert_eq!(items[2].detail, "Host audio capture");
+        assert_eq!(items[3].label, "Input");
+        assert_eq!(items[3].detail, "Keyboard and pointer injection");
+        assert_eq!(items[4].detail, "Host → viewer disclosure");
+        assert_eq!(items[5].detail, "Viewer → host receive");
+    }
+
+    #[test]
+    fn capability_scope_projection_preserves_unknown_fields_verbatim() {
+        let prompt = r#"{"scope":"display: screen stream; future-lane: confidential operation set v2"}"#;
+        let items = consent_scope_items(prompt);
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].detail, "View the remote screen");
+        assert_eq!(items[1].label, "Additional capability");
+        assert_eq!(
+            items[1].detail,
+            "future-lane: confidential operation set v2"
+        );
+    }
+
+    #[test]
+    fn capability_scope_projection_never_changes_the_signed_scope_string() {
+        let scope = "display: screen stream; input: viewer may inject";
+        let prompt = format!(r#"{{"scope":"{scope}"}}"#);
+
+        assert_eq!(display_scope(&prompt), scope);
+        let _presentation_only = consent_scope_items(&prompt);
+        assert_eq!(display_scope(&prompt), scope);
+    }
 
     #[test]
     fn scope_display_uses_only_supplied_scope_and_preserves_legacy_text() {
@@ -372,9 +515,26 @@ pub fn ConsentModal() -> impl IntoView {
             }
         >
             <h2 id="consent-dialog-title">"New Session Request"</h2>
-            <p id="consent-dialog-description">
-                {move || consent_req.get().map(|prompt| display_scope(&prompt)).unwrap_or_default()}
-            </p>
+            <section
+                id="consent-dialog-description"
+                class="consent-scope"
+                aria-label="Requested capabilities"
+            >
+                <h3>"Requested capabilities"</h3>
+                <ul class="consent-scope-list">
+                    {move || consent_req.get().map(|prompt| {
+                        consent_scope_items(&prompt)
+                            .into_iter()
+                            .map(|item| view! {
+                                <li class="consent-scope-item">
+                                    <span class="consent-scope-label">{item.label}</span>
+                                    <span class="consent-scope-detail">{item.detail}</span>
+                                </li>
+                            })
+                            .collect_view()
+                    }).unwrap_or_default()}
+                </ul>
+            </section>
             <p class="consent-dialog-hint">
                 "Escape does not submit a decision. A request remains pending until you choose Approve or Deny."
             </p>
@@ -398,7 +558,7 @@ pub fn ConsentModal() -> impl IntoView {
                         type="button"
                         class="consent-decision"
                         data-testid="consent-approve-button"
-                        prop:disabled=move || is_deciding.get() || prompt_conflict.get() || prompt_conflict.get()
+                        prop:disabled=move || is_deciding.get() || prompt_conflict.get()
                         on:click=move |_| decide(ConsentAction::Approve)
                     >
                         {move || if is_deciding.get() { "Submitting…" } else { "Approve" }}
