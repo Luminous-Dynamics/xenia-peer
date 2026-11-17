@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex as AsyncMutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use xenia_inject::{InputInjector, LoggingInjector, NoopInjector, SessionInputInjector};
@@ -6753,36 +6753,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             if telemetry_permitted {
                 match telemetry.poll_samples() {
-                Ok(samples) if !samples.is_empty() => {
-                    let samples: Vec<_> = samples
-                        .into_iter()
-                        .filter(|sample| telemetry_sample_allowed(args.telemetry_level, sample))
-                        .collect();
-                    if samples.is_empty() {
+                    Ok(samples) if !samples.is_empty() => {
+                        let samples: Vec<_> = samples
+                            .into_iter()
+                            .filter(|sample| {
+                                telemetry_sample_allowed(args.telemetry_level, sample)
+                            })
+                            .collect();
+                        if samples.is_empty() {
+                            last_telemetry_sent = std::time::Instant::now();
+                            continue;
+                        }
+                        let frame_id = session.lock().await.next_frame_id();
+                        let telemetry_frame = RawTelemetry {
+                            frame_id,
+                            timestamp_ms: now_ms(),
+                            backend: telemetry.backend_name().to_string(),
+                            samples: samples.into_iter().map(telemetry_sample_to_wire).collect(),
+                        }
+                        .into_frame()?;
+                        let envelope = session.lock().await.seal_frame(&telemetry_frame)?;
+                        m1_runtime.lock().await.allow_telemetry_flow()?;
+                        send_half.send_envelope(&envelope).await?;
+                        sent_telemetry += 1;
                         last_telemetry_sent = std::time::Instant::now();
-                        continue;
+                        if sent_telemetry <= 3 || sent_telemetry.is_multiple_of(10) {
+                            info!(
+                                sent = sent_telemetry,
+                                frame_id, "telemetry batch sealed and sent"
+                            );
+                        }
                     }
-                    let frame_id = session.lock().await.next_frame_id();
-                    let telemetry_frame = RawTelemetry {
-                        frame_id,
-                        timestamp_ms: now_ms(),
-                        backend: telemetry.backend_name().to_string(),
-                        samples: samples.into_iter().map(telemetry_sample_to_wire).collect(),
-                    }
-                    .into_frame()?;
-                    let envelope = session.lock().await.seal_frame(&telemetry_frame)?;
-                    m1_runtime.lock().await.allow_telemetry_flow()?;
-                    send_half.send_envelope(&envelope).await?;
-                    sent_telemetry += 1;
-                    last_telemetry_sent = std::time::Instant::now();
-                    if sent_telemetry <= 3 || sent_telemetry.is_multiple_of(10) {
-                        info!(
-                            sent = sent_telemetry,
-                            frame_id, "telemetry batch sealed and sent"
-                        );
-                    }
-                }
-                Ok(_) => {}
+                    Ok(_) => {}
                     Err(err) => warn!(error = %err, "telemetry poll failed"),
                 }
             }
@@ -6794,7 +6796,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let audio_permitted = match m1_runtime.lock().await.preflight_audio_flow() {
                 Ok(()) => true,
                 Err(err) => {
-                    warn!(error = %err, "audio lane denied; skipping host audio read");
+                    debug!(error = %err, "audio lane denied; skipping host audio read");
                     false
                 }
             };
