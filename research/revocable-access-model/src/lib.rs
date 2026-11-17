@@ -163,11 +163,11 @@ impl AuthorityState {
         self.evaluate_inner(id, now_ms, &mut Vec::with_capacity(16))
     }
 
-    fn evaluate_inner(
-        &self,
-        id: &str,
+    fn evaluate_inner<'a>(
+        &'a self,
+        id: &'a str,
         now_ms: u64,
-        visited: &mut Vec<&str>,
+        visited: &mut Vec<&'a str>,
     ) -> Evaluation {
         if visited.contains(&id) { return Evaluation::denied(Failure::Cycle); }
         visited.push(id);
