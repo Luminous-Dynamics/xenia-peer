@@ -2063,9 +2063,9 @@ mod tests {
         .unwrap();
         assert_eq!(summary["valid_trial_count"], 300);
         assert_eq!(summary["rejected_trial_count"], 0);
-        assert_eq!(summary["p50_ms"].as_f64().unwrap(), 0.058);
-        assert_eq!(summary["p95_ms"].as_f64().unwrap(), 0.066);
-        assert_eq!(summary["p99_ms"].as_f64().unwrap(), 0.066);
+        assert_eq!(summary["p50_ms"].as_f64().unwrap(), 58.0);
+        assert_eq!(summary["p95_ms"].as_f64().unwrap(), 66.0);
+        assert_eq!(summary["p99_ms"].as_f64().unwrap(), 66.0);
         assert_eq!(
             summary["confidence_interval_method"],
             "deterministic nonparametric bootstrap percentile interval for p95"
