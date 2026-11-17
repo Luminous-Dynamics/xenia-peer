@@ -4,12 +4,16 @@ on:
   push:
     branches:
       - chore/refresh-security-advisory-locks-v0.1
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: write
 
 concurrency:
-  group: cargo-lock-refresh-{{ github.ref }}
+  group: cargo-lock-refresh-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
