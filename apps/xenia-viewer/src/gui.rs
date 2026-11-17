@@ -969,7 +969,8 @@ mod tests {
     #[test]
     fn lossy_pointer_motion_counts_full_queue_without_blocking() {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        tx.try_send(InputEvent::PointerMove { x: 0.1, y: 0.2 }).unwrap();
+        tx.try_send(InputEvent::PointerMove { x: 0.1, y: 0.2 })
+            .unwrap();
         let mut app = ViewerApp::new(
             FrameSlot::new(),
             ViewerConfig {
