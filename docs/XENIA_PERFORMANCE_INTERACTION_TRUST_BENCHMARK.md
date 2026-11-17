@@ -30,7 +30,7 @@ The differentiator is not a cryptographic badge beside a conventional remote des
 | Parsec | Gaming/workstation streaming; hardware decode; color-accuracy options; Teams/Enterprise identity and audit capabilities; on-premises relay and API options | Treat low-latency media and enterprise administration as the baseline. Bind a cryptographically inspectable capability to each session and preserve event-level outcome evidence |
 | RustDesk | Open-source client, self-hosted rendezvous/relay, P2P encrypted connections; Pro adds OIDC/LDAP/2FA, device management, access control, log management and multiple relays | Keep deployment sovereignty, self-hosting and cross-platform simplicity; make policy decisions and evidence independently verifiable in both direct and relayed paths |
 | Sunshine + Moonlight | High-performance streaming, hardware encode/decode, low-buffering modes and user-visible performance statistics | Benchmark full input-to-photon and frame pacing; expose measurement definitions because application counters are not directly comparable |
-| Microsoft RDP / Windows 365 | Adaptive graphics, multiple virtual channels, TCP compatibility path, UDP Shortpath and relay/direct path selection | Match the reliability and adaptive-network discipline; ensure control traffic does not starve behind media and preserve a clear session-authority model |
+| Microsoft RDP / Windows 365 | Adaptive graphics, multiple virtual channels, UDP Shortpath, and RDP Multipath with multiple monitored UDP paths plus redundant TCP standby paths | Match the mature channel and path-resilience baseline. Differentiate with independently verifiable, capability-bound authority and measurable per-lane isolation rather than claiming multipath is unique |
 | TeamViewer Tensor | Central conditional access, expiring rules, account/group/device-level scope, permissions for sessions and file transfer | Make grants short-lived, scope-specific and tied to the exact requested action—not just a general user/device relationship |
 | AnyDesk | Permission management, device whitelisting, 2FA, privacy mode and session recording | Treat privacy as an explicit bilateral session state; make recording/redaction visible and verifiable |
 
@@ -38,7 +38,8 @@ The differentiator is not a cryptographic badge beside a conventional remote des
 
 - Parsec's September 2026 guidance recommends 1080p60, a 25+ Mbps bandwidth limit, 30 Mbps host upload and 30 Mbps client download, with a same-city ping below 15 ms in its recommended setup. These are vendor configuration recommendations, **not an independent latency result or universal requirement**.
 - Moonlight explicitly cautions that its internal connection statistics cannot be used to compare directly with other clients because instrumentation and available measurements differ. It recommends external hardware for accurate end-to-end measurements.
-- Microsoft documents adaptive RDP graphics, separate dynamic virtual channels, and UDP Shortpath paths that can improve responsiveness while TCP remains a compatibility fallback.
+- Microsoft documents adaptive RDP graphics, separate dynamic virtual channels, UDP Shortpath, and RDP Multipath. The current RDP Multipath documentation describes multiple monitored UDP routes discovered with ICE/STUN/TURN plus redundant TCP standby paths; when the active path degrades or fails, the product can switch to a backup path. This is an established industry capability, not an Xenia differentiator.
+- The RDP architecture already separates data across virtual channels, including presentation and input-related data. Xenia's existing cryptographic lane keys are a good security foundation, but the current QUIC transport still exposes one ordered logical stream; key separation alone does not provide stream-level head-of-line isolation.
 - RustDesk documents an OSS self-hosted rendezvous/relay model and a commercial layer with centralized identity, policy and device-management features.
 - AnyDesk and TeamViewer demonstrate that permission controls, privacy features, recording, expiry, and centralized conditional access are already established product expectations.
 
@@ -52,6 +53,11 @@ Sources:
 - [RustDesk Server Pro capabilities](https://rustdesk.com/docs/en/self-host/rustdesk-server-pro/)
 - [Microsoft RDP bandwidth requirements](https://learn.microsoft.com/en-us/azure/virtual-desktop/rdp-bandwidth)
 - [Microsoft RDP Shortpath](https://learn.microsoft.com/en-us/azure/virtual-desktop/rdp-shortpath)
+- [Microsoft RDP Multipath (Azure Virtual Desktop)](https://learn.microsoft.com/en-us/azure/virtual-desktop/rdp-multipath)
+- [Microsoft RDP Multipath (Windows 365)](https://learn.microsoft.com/en-us/windows-365/enterprise/rdp-multipath)
+- [Microsoft RDP architecture and virtual channels](https://learn.microsoft.com/en-us/windows/win32/termserv/remote-desktop-protocol)
+- [IETF RFC 10069: Managing Multiple Paths for a QUIC Connection (November 2026)](https://www.rfc-editor.org/rfc/rfc10069.html)
+- [Iroh 1.0.2 relay security maintenance release](https://www.iroh.computer/blog/iroh-1-0-2)
 - [TeamViewer Tensor conditional access](https://www.teamviewer.com/en-us/products/tensor/features/conditional-access/)
 - [AnyDesk feature overview](https://anydesk.com/en/features)
 
@@ -106,11 +112,36 @@ Preserve independent, bounded control and media paths. Video can drop stale fram
 
 Make sharing, recording, host telemetry, identity display, clipboard, and file transfer explicit capabilities. Default exported diagnostics and screenshots to redacted identity/host details. Make privacy state visible and ensure the operator can distinguish connected, viewing-only, input-authorized, degraded, revoked, and unknown states.
 
+
 ### 3.7 Design for accessible, safe operation
 
 The console should target WCAG 2.2 AA: text contrast, reflow, visible and unobscured focus, keyboard operation, programmatic names/states, and status communication that does not depend on color alone. A screenshot is not an accessibility audit; perform keyboard, screen-reader and zoom tests.
 
 Reference: [W3C WCAG 2.2](https://www.w3.org/TR/WCAG22/).
+
+### 3.8 Multiplexed session lanes and path-resilient authority
+
+A subtle but important distinction in Xenia's current implementation: LaneSession already derives separate Control, Video, Audio and Telemetry keys, but TransportProfileV1 still declares logical_streams = 1, and the native QUIC transport opens one bidirectional stream. This separates cryptographic keys but does not isolate ordered-stream delivery. A large video or file-transfer envelope can still delay input/control envelopes behind it.
+
+The next transport architecture should use independently flow-controlled logical streams inside one authenticated QUIC connection:
+
+- **Control:** input/key/button transitions, consent/rekey coordination, and security-critical state. Reliable, ordered, bounded, never silently discarded.
+- **Video:** freshness-first presentation; discard/coalesce stale frames rather than build latency debt.
+- **Audio:** bounded jitter and a separately measurable playout deadline.
+- **Telemetry:** coalesce to current state; no backlog.
+- **Bulk transfer:** independently backpressured so file chunks do not stall keyboard and revocation/control traffic.
+
+Do not call this independent congestion control: multiple QUIC streams on the same connection still share its congestion controller. The immediate objective is removal of per-stream ordered-delivery head-of-line blocking and independent stream flow control. Xenia's current LaneSession keys are a foundation, but a fifth bulk lane requires an explicit key/replay/rekey design; simply reusing one mutable control replay window across concurrent streams is not acceptable.
+
+This also needs a backward-compatible transport profile: one-stream TCP/WebSocket and older QUIC peers remain on the current profile; the multi-stream profile is explicitly negotiated and bound into the authenticated session context. Rekey is a session-wide barrier across all streams. File-transfer commits whose acknowledgements are lost must remain UNKNOWN until host reconciliation by transfer ID, chunk digest and committed offset—never blindly replay a mutation after reconnect.
+
+**Path resilience is a second, different layer.** RFC 10069 specifies simultaneous QUIC paths and path identifiers, but deliberately leaves address discovery/management and application traffic scheduling out of scope. Xenia must own those policies. Microsoft's RDP Multipath shows that the industry already combines path probing, STUN/TURN and redundant TCP standby paths; Xenia should benchmark direct-only, public/custom relay, multiple relay candidates, TCP fallback and recovery rather than treating relay enablement as multipath.
+
+Work in progress:
+- [#480 — sovereign NAT traversal, relay policy and path resilience](https://github.com/Luminous-Dynamics/xenia-peer/issues/480)
+- [#482 — isolate control, media, telemetry and bulk-transfer streams](https://github.com/Luminous-Dynamics/xenia-peer/issues/482)
+
+These are roadmap targets, not implemented or measured capabilities.
 
 ## 4. Proposed qualification tiers and target thresholds
 
@@ -202,6 +233,10 @@ A fair comparison requires a fixed lab, not screenshots or vendor marketing clai
 | Bitrate | 5, 10, 15, 20, 25, 30 Mbps |
 | Codec | H.264, HEVC, AV1, passthrough where supported; record 4:2:0 / 4:4:4 |
 | Transport | Direct, relay, TCP fallback / UDP path where supported |
+| Transport policy | Direct-only, public relay, one custom relay, multiple custom relays, relay unavailable |
+| Route resilience | Direct→relay, relay→direct, active path degraded, active path lost, backup path failover, all paths lost/reconnect |
+| Logical streams | Current one-stream profile vs negotiated multi-stream profile; control/video/audio/telemetry/bulk saturation independently and concurrently |
+| Lane pressure | 90% media saturation, large file transfer, audio jitter, burst control transitions, rekey overlap, queue-bound stress |
 | RTT | 1, 15, 30, 60, 100 ms |
 | Jitter | 0, 5, 15, 30 ms |
 | Loss | 0, 0.1%, 1%, 3%, 5%, including burst loss |
@@ -217,7 +252,8 @@ Do not claim to beat the whole industry with one number. Establish independent w
 
 - **Efficiency:** match Parsec-level 1080p60 legibility at a materially lower bitrate (15 Mbps target vs vendor guidance of 25–30 Mbps) without worse tail latency or frame pacing.
 - **Responsiveness:** demonstrate lower externally measured p95/p99 input-to-photon latency under the same endpoint and network conditions, not just lower codec or receive time.
-- **Congestion behavior:** maintain control responsiveness and bounded queues while media is saturated; prove this against both product defaults and a fair-queue network reference.
+- **Congestion behavior:** maintain control responsiveness and bounded queues while media and bulk transfer are saturated; compare a single ordered stream with a negotiated multi-stream profile. Prove this against both product defaults and a fair-queue network reference.
+- **Path resilience:** keep the authenticated session usable through direct-path degradation, relay failover and redundant-path changes; compare connection success, failover time, interruption duration, reconnect probability and metadata exposure against current RDP Multipath capabilities.
 - **Authority correctness:** show zero out-of-scope or post-revocation accepted actions in the published negative-control suite, with host-side observation.
 - **Evidence quality:** let a third party verify the complete chain from request and grant through action and outcome using raw artifacts and public verification code.
 - **Deployment sovereignty:** make self-hosted, auditable operation practical without forcing customers into a proprietary control plane.
