@@ -7214,6 +7214,11 @@ mod consent_scope_tests {
         send_file: Option<std::path::PathBuf>,
     ) -> Args {
         let mut args = Args::parse_from(["xenia-peer"]);
+        // Keep each test fixture opt-in: the CLI's production default is
+        // Basic telemetry, but the helper must model a view-only baseline
+        // before a test explicitly enables an additional capability.
+        args.telemetry_level = TelemetryLevel::Off;
+        args.audio = AudioMode::Off;
         args.input_backend = input_backend;
         args.clipboard = clipboard;
         args.recv_file_dir = recv_file_dir;
