@@ -6614,7 +6614,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     continue;
                 }
-                m1_runtime.lock().await.preflight_input_flow()?;
+                if let Err(err) = m1_runtime.lock().await.preflight_input_flow() {
+                    warn!(error = %err, "input event rejected by M1 preflight gate");
+                    continue;
+                }
                 let event: xenia_inject::InputEvent = match bincode::deserialize(&input.payload) {
                     Ok(event) => event,
                     Err(err) => {
@@ -6740,8 +6743,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if args.telemetry_level != TelemetryLevel::Off
             && last_telemetry_sent.elapsed() >= telemetry_interval
         {
-            m1_runtime.lock().await.preflight_telemetry_flow()?;
-            match telemetry.poll_samples() {
+            let telemetry_permitted = match m1_runtime.lock().await.preflight_telemetry_flow() {
+                Ok(()) => true,
+                Err(err) => {
+                    warn!(error = %err, "telemetry lane denied; skipping host telemetry poll");
+                    last_telemetry_sent = std::time::Instant::now();
+                    false
+                }
+            };
+            if telemetry_permitted {
+                match telemetry.poll_samples() {
                 Ok(samples) if !samples.is_empty() => {
                     let samples: Vec<_> = samples
                         .into_iter()
@@ -6772,15 +6783,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 Ok(_) => {}
-                Err(err) => warn!(error = %err, "telemetry poll failed"),
+                    Err(err) => warn!(error = %err, "telemetry poll failed"),
+                }
             }
         }
 
         if let Some(audio) = &mut audio
             && last_audio_sent.elapsed() >= audio_interval
         {
-            m1_runtime.lock().await.preflight_audio_flow()?;
-            if let Some(raw_audio) = audio.next_raw_audio(now_ms())? {
+            let audio_permitted = match m1_runtime.lock().await.preflight_audio_flow() {
+                Ok(()) => true,
+                Err(err) => {
+                    warn!(error = %err, "audio lane denied; skipping host audio read");
+                    false
+                }
+            };
+            if audio_permitted
+                && let Some(raw_audio) = audio.next_raw_audio(now_ms())?
+            {
                 let raw_audio = audio_codec.encode(raw_audio)?;
                 let frame_id = session.lock().await.next_frame_id();
                 let audio_frame = raw_audio.into_frame(frame_id)?;
@@ -6800,11 +6820,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             && last_clipboard_check.elapsed() >= clipboard_interval
         {
             last_clipboard_check = std::time::Instant::now();
-            m1_runtime.lock().await.preflight_host_clipboard_read_flow()?;
-            if let Some(text) = read_host_clipboard_text()
+            let clipboard_read_permitted =
+                match m1_runtime.lock().await.preflight_host_clipboard_read_flow() {
+                    Ok(()) => true,
+                    Err(err) => {
+                        warn!(error = %err, "host clipboard read lane denied; skipping clipboard read");
+                        false
+                    }
+                };
+            if clipboard_read_permitted
+                && let Some(text) = read_host_clipboard_text()
                 && Some(&text) != last_sent_clipboard_text.as_ref()
             {
-                m1_runtime.lock().await.allow_host_clipboard_read_flow()?;
                 let frame_id = session.lock().await.next_frame_id();
                 let seq = clipboard_seq;
                 clipboard_seq += 1;
@@ -6815,7 +6842,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 .into_frame(frame_id)?;
                 let envelope = session.lock().await.seal_frame(&clipboard_frame)?;
-                m1_runtime.lock().await.allow_frame_flow()?;
+                m1_runtime.lock().await.allow_host_clipboard_read_flow()?;
                 send_half.send_envelope(&envelope).await?;
                 last_sent_clipboard_text = Some(text);
                 sent_clipboard += 1;
@@ -6828,7 +6855,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        m1_runtime.lock().await.preflight_frame_flow()?;
+        if let Err(err) = m1_runtime.lock().await.preflight_frame_flow() {
+            warn!(error = %err, "screen-view lane denied; skipping host screen capture");
+            continue;
+        }
         let video_capture_started = std::time::Instant::now();
         let Some(frame) = capture.capture()? else {
             continue;
