@@ -35,3 +35,5 @@ jobs:
         run: cargo fmt --manifest-path research/revocable-access-model/Cargo.toml -- --check
       - name: Run deterministic model tests
         run: cargo test --manifest-path research/revocable-access-model/Cargo.toml --locked
+      - name: Compile lineage benchmark
+        run: cargo bench --manifest-path research/revocable-access-model/Cargo.toml --bench lineage --no-run --locked
