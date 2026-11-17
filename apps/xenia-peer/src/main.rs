@@ -6756,9 +6756,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(samples) if !samples.is_empty() => {
                         let samples: Vec<_> = samples
                             .into_iter()
-                            .filter(|sample| {
-                                telemetry_sample_allowed(args.telemetry_level, sample)
-                            })
+                            .filter(|sample| telemetry_sample_allowed(args.telemetry_level, sample))
                             .collect();
                         if samples.is_empty() {
                             last_telemetry_sent = std::time::Instant::now();
@@ -6800,9 +6798,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     false
                 }
             };
-            if audio_permitted
-                && let Some(raw_audio) = audio.next_raw_audio(now_ms())?
-            {
+            if audio_permitted && let Some(raw_audio) = audio.next_raw_audio(now_ms())? {
                 let raw_audio = audio_codec.encode(raw_audio)?;
                 let frame_id = session.lock().await.next_frame_id();
                 let audio_frame = raw_audio.into_frame(frame_id)?;
@@ -6822,14 +6818,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             && last_clipboard_check.elapsed() >= clipboard_interval
         {
             last_clipboard_check = std::time::Instant::now();
-            let clipboard_read_permitted =
-                match m1_runtime.lock().await.preflight_host_clipboard_read_flow() {
-                    Ok(()) => true,
-                    Err(err) => {
-                        warn!(error = %err, "host clipboard read lane denied; skipping clipboard read");
-                        false
-                    }
-                };
+            let clipboard_read_permitted = match m1_runtime
+                .lock()
+                .await
+                .preflight_host_clipboard_read_flow()
+            {
+                Ok(()) => true,
+                Err(err) => {
+                    warn!(error = %err, "host clipboard read lane denied; skipping clipboard read");
+                    false
+                }
+            };
             if clipboard_read_permitted
                 && let Some(text) = read_host_clipboard_text()
                 && Some(&text) != last_sent_clipboard_text.as_ref()
