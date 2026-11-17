@@ -9,6 +9,8 @@ A deterministic Rust reference model for composable, revocable delegated authori
 - Parent lineage and strict attenuation of rights, purpose, mode, validity, epoch, and delegation depth.
 - Local revocation and authority-epoch invalidation.
 - Three-valued results: `Allowed`, `Denied`, and `Indeterminate`.
+- A hard 64-node lineage bound and consistent subdelegation-depth metadata.
+- A bounded exhaustive 576-state authority/request matrix test.
 - Distinct composition operators: independent grants (OR) and required bundles (AND).
 
 ## Does not establish
