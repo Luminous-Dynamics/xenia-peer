@@ -21,9 +21,9 @@
 //! traffic volume. It forwards encrypted Iroh packets and cannot decode
 //! Xenia's end-to-end sealed application envelopes.
 //!
-//! //! The transport wraps one long-lived bidirectional QUIC stream. Inside that
-//! stream it uses the same 4-byte big-endian envelope length prefix as the TCP
-//! transport, so callers get identical envelope boundary behavior across TCP,
+//! The transport currently wraps one long-lived bidirectional QUIC stream.
+//! Inside that stream it uses the same 4-byte big-endian envelope length prefix
+//! as TCP, so callers get identical envelope boundary behavior across TCP,
 //! WebSocket, and QUIC.
 
 #![warn(missing_docs)]
@@ -199,9 +199,10 @@ fn relay_config_error(message: String) -> TransportError {
 
 /// Bind an Iroh endpoint configured for the Xenia QUIC ALPN.
 ///
-/// This uses Iroh's minimal preset: no public relay or DNS dependency is
-/// required. The resulting [`Endpoint::addr`] contains direct addresses that
-/// work for loopback and reachable LAN interfaces.
+/// This uses Iroh's minimal preset. Relay behavior is selected explicitly
+/// through `XENIA_IROH_RELAY_MODE`; the default remains direct-only. The
+/// resulting [`Endpoint::addr`] contains direct and, when opted in, relay
+/// addresses appropriate to the configured policy.
 pub async fn bind_xenia_endpoint() -> Result<Endpoint, TransportError> {
     let policy = RelayPolicy::from_env()?;
     bind_xenia_endpoint_with_policy(policy).await
