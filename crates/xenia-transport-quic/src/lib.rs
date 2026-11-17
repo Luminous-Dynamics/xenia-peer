@@ -39,10 +39,9 @@ use iroh::{
 use thiserror::Error;
 use tracing::debug;
 use xenia_peer_core::transport::{
-    NetworkPathProfileV1,
-    MAX_ENVELOPE_BYTES, QUIC_CONNECT_TIMEOUT_MS, QUIC_PROTOCOL_ID, QUIC_STREAM_OPEN_TIMEOUT_MS,
-    RECEIVE_ENVELOPE_TIMEOUT_MS, RecvEnvelope, SEND_STALL_TIMEOUT_MS, SendEnvelope, Transport,
-    TransportError, TransportKind, TransportProfileV1,
+    MAX_ENVELOPE_BYTES, NetworkPathProfileV1, QUIC_CONNECT_TIMEOUT_MS, QUIC_PROTOCOL_ID,
+    QUIC_STREAM_OPEN_TIMEOUT_MS, RECEIVE_ENVELOPE_TIMEOUT_MS, RecvEnvelope, SEND_STALL_TIMEOUT_MS,
+    SendEnvelope, Transport, TransportError, TransportKind, TransportProfileV1,
 };
 
 /// Re-export of the Iroh crate for endpoint ownership in callers.
@@ -192,9 +191,8 @@ impl RelayPolicy {
             Self::PublicRelay => Ok(NetworkPathProfileV1::public_relay()),
             Self::Custom(relays) => {
                 let canonical_urls = relays.iter().map(ToString::to_string).collect::<Vec<_>>();
-                NetworkPathProfileV1::custom_relay_urls(&canonical_urls).map_err(|error| {
-                    relay_config_error(error.to_string())
-                })
+                NetworkPathProfileV1::custom_relay_urls(&canonical_urls)
+                    .map_err(|error| relay_config_error(error.to_string()))
             }
         }
     }
@@ -596,7 +594,10 @@ mod tests {
         .network_path_profile()
         .unwrap();
         assert_ne!(first, reversed);
-        assert_eq!(first.relay_mode, xenia_peer_core::transport::NetworkRelayModeV1::Custom);
+        assert_eq!(
+            first.relay_mode,
+            xenia_peer_core::transport::NetworkRelayModeV1::Custom
+        );
         assert!(!format!("{first:?}").contains("relay-a.example.test"));
     }
 
