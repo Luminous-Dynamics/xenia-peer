@@ -1,0 +1,37 @@
+name: Delegated Access Model
+
+on:
+  pull_request:
+    paths:
+      - "research/revocable-access-model/**"
+      - ".github/workflows/delegated-access-model.yml"
+  push:
+    branches:
+      - "research/mycelix-xenia-delegated-access-v0.1"
+    paths:
+      - "research/revocable-access-model/**"
+      - ".github/workflows/delegated-access-model.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: delegated-access-model-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  reference-model:
+    name: Reference model (format + tests)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact revision
+        uses: actions/checkout@v4
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --manifest-path research/revocable-access-model/Cargo.toml -- --check
+      - name: Run deterministic model tests
+        run: cargo test --manifest-path research/revocable-access-model/Cargo.toml --locked
