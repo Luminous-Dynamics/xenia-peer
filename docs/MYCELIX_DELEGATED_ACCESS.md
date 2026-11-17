@@ -355,3 +355,18 @@ Least privilege should bound not only *which* operation is allowed, but *how muc
 Each child grant must have budgets less than or equal to its parent for every dimension. A reconnect, rekey, process restart or duplicated request must not reset consumption. Consumption uses stable operation IDs and monotonic authority epochs. Reserve/commit/reconcile semantics must treat a timeout after dispatch as UNKNOWN; do not refund or reuse quota until the effect outcome is reconciled. Parallel workers must share a serialized or otherwise overspend-safe budget ledger.
 
 Independent grants retain independent budgets. Required bundles apply the strictest compatible constraints. If budget state or consumption is unknown, high-risk effects are HOLD/INDETERMINATE. Budget accounting must be independently auditable and must not depend on reputation scores.
+
+
+## 23. Performance architecture without weakening authorization
+
+The target is not to send every mouse event or video frame to a remote PDP. That would add avoidable latency and make availability depend on a network round trip. Instead:
+
+1. Verify canonicalization, signatures and immutable parent-chain commitments once per content-addressed delegation version; cache the *verification result* by exact content digest.
+2. Compile an immutable session/lane capability matrix from the verified delegation and consent, with exact resource, direction, purpose, epoch, expiry and budget constraints.
+3. Cache lineage/attenuation proofs separately from current authorization. A cached proof that a child is narrower does not prove the parent remains current.
+4. Keep a small local effect gate at each effect owner. It checks current local revocation watermark, session epoch, lane, expiry, operation sequence and budget reservation at the commit boundary.
+5. Use short-lived lane leases and monotonic sequence numbers for high-frequency input paths. A lease may reduce repeated remote decision calls; it must never outlive the authority freshness bound or bypass the local effect gate.
+6. Batch only operations whose semantics permit batching. Each protected operation still has a stable identity, ordered commit semantics and replay protection.
+7. If the local frontier is below the required minimum, the session is partitioned beyond its lease, or the revocation state is unknown, stop high-risk effects rather than falling back to a stale cached allow.
+
+This is the intended performance advantage: move expensive immutable proof work out of the hot path, while keeping freshness and effect authorization local and current. Benchmark the complete path, not just the compiled policy decision.
