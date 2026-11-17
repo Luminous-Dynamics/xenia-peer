@@ -26,7 +26,11 @@
 //! against the last-rendered image rect, not the whole window, so
 //! pointer activity over the status bar / side panels is ignored.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::Instant;
 
 use crate::{AudioPlaybackSink, FreshAudioQueue};
 use eframe::egui;
@@ -161,6 +165,9 @@ pub struct FrameSlot {
     pub telemetry: Mutex<Option<TelemetryData>>,
     /// Latest audio timing/jitter state.
     pub audio: Mutex<Option<AudioData>>,
+    /// Number of decoded frames replaced before the GUI consumed them.
+    /// This measures local slot coalescing, not network or decoder loss.
+    superseded_frames: AtomicU64,
 }
 
 /// Decoded RGBA frame shared between the receive task and the
@@ -178,8 +185,11 @@ pub struct FrameData {
     /// decode). Displayed in the status bar so the user can eyeball
     /// codec efficiency.
     pub wire_bytes: usize,
-    /// Video presentation/capture timestamp in milliseconds.
+    /// Video presentation/capture timestamp in milliseconds (host clock).
     pub timestamp_ms: u64,
+    /// Monotonic viewer-local instant recorded immediately after decode.
+    /// Used only for client-local frame freshness; never compared to host time.
+    pub decoded_at: Instant,
 }
 
 /// Latest host telemetry values shared between receive task and GUI.
@@ -249,6 +259,7 @@ impl FrameSlot {
             latest: Mutex::new(None),
             telemetry: Mutex::new(None),
             audio: Mutex::new(None),
+            superseded_frames: AtomicU64::new(0),
         })
     }
 
@@ -257,8 +268,16 @@ impl FrameSlot {
     /// user wants the latest screen, not a stale one.
     pub fn put(&self, frame: FrameData) {
         if let Ok(mut g) = self.latest.lock() {
+            if g.is_some() {
+                self.superseded_frames.fetch_add(1, Ordering::Relaxed);
+            }
             *g = Some(frame);
         }
+    }
+
+    /// Cumulative count of frames coalesced before presentation in this slot.
+    pub fn superseded_frames(&self) -> u64 {
+        self.superseded_frames.load(Ordering::Relaxed)
     }
 
     /// Take the current frame out of the slot (if any). The egui
@@ -299,6 +318,7 @@ impl Default for FrameSlot {
             latest: Mutex::new(None),
             telemetry: Mutex::new(None),
             audio: Mutex::new(None),
+            superseded_frames: AtomicU64::new(0),
         }
     }
 }
@@ -353,6 +373,7 @@ pub struct ViewerApp {
     audio_queue: Option<Arc<FreshAudioQueue>>,
     audio_sink: Box<dyn AudioPlaybackSink>,
     frames_received: u64,
+    last_frame_decoded_at: Option<Instant>,
     last_wire_bytes: usize,
     last_frame_seq: u64,
     last_video_timestamp_ms: u64,
@@ -390,6 +411,7 @@ impl ViewerApp {
             audio_queue,
             audio_sink,
             frames_received: 0,
+            last_frame_decoded_at: None,
             last_wire_bytes: 0,
             last_frame_seq: 0,
             last_video_timestamp_ms: 0,
@@ -581,6 +603,7 @@ fn fit_image_size(source: egui::Vec2, available: egui::Vec2) -> egui::Vec2 {
 impl eframe::App for ViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if let Some(frame) = self.slot.take() {
+            self.last_frame_decoded_at = Some(frame.decoded_at);
             let image = egui::ColorImage::from_rgba_unmultiplied(
                 [frame.width as usize, frame.height as usize],
                 &frame.rgba,
@@ -639,6 +662,16 @@ impl eframe::App for ViewerApp {
                             ui.label(format!("transport: {}", self.config.transport));
                             ui.label(format!("frames received: {}", self.frames_received));
                             ui.label(format!("frame update rate: {:.1}/s", self.fps()));
+                            if let Some(decoded_at) = self.last_frame_decoded_at {
+                                let age_ms = Instant::now()
+                                    .saturating_duration_since(decoded_at)
+                                    .as_millis();
+                                ui.label(format!("client-local displayed frame age: {age_ms} ms"));
+                            }
+                            ui.label(format!(
+                                "local slot superseded frames: {}",
+                                self.slot.superseded_frames()
+                            ));
                             ui.label(format!(
                                 "last wire frame: {}",
                                 format_bytes(self.last_wire_bytes as u64)
@@ -800,6 +833,41 @@ impl eframe::App for ViewerApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn synthetic_frame(seq: u64) -> FrameData {
+        FrameData {
+            width: 1,
+            height: 1,
+            rgba: vec![0, 0, 0, 255],
+            seq,
+            wire_bytes: 4,
+            timestamp_ms: seq,
+            decoded_at: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn frame_slot_counts_only_unconsumed_frames_that_are_superseded() {
+        let slot = FrameSlot::default();
+        assert_eq!(slot.superseded_frames(), 0);
+
+        slot.put(synthetic_frame(1));
+        assert_eq!(slot.superseded_frames(), 0);
+
+        slot.put(synthetic_frame(2));
+        assert_eq!(slot.superseded_frames(), 1);
+        assert_eq!(slot.take().map(|frame| frame.seq), Some(2));
+
+        // An empty slot means the previous frame was consumed, not dropped.
+        slot.put(synthetic_frame(3));
+        assert_eq!(slot.superseded_frames(), 1);
+        assert_eq!(slot.take().map(|frame| frame.seq), Some(3));
+
+        slot.put(synthetic_frame(4));
+        slot.put(synthetic_frame(5));
+        assert_eq!(slot.superseded_frames(), 2);
+        assert_eq!(slot.take().map(|frame| frame.seq), Some(5));
+    }
 
     #[test]
     fn key_map_has_no_duplicate_evdev_codes() {

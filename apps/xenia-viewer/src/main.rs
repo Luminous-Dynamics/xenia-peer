@@ -2445,6 +2445,7 @@ async fn gui_receive_loop(
                 seq: received,
                 wire_bytes,
                 timestamp_ms: decoded.pts_ms,
+                decoded_at: std::time::Instant::now(),
             });
         }
     }
