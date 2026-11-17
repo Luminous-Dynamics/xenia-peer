@@ -294,9 +294,11 @@ impl AuthorityState {
     /// Evaluate only if the observed authority frontier satisfies the
     /// caller's minimum freshness requirement for this resource domain.
     ///
-    /// The caller must authenticate both frontiers and bind them to the
-    /// authoritative namespace. This method checks namespace equality and
-    /// monotonic revision ordering; it does not verify signatures or DHT
+    /// The caller must authenticate both frontiers and prove that the
+    /// observed frontier commits to the exact AuthorityState snapshot being
+    /// evaluated. Otherwise an old snapshot could be relabeled with a newer
+    /// revision. This method checks namespace equality and monotonic revision
+    /// ordering; it does not verify signatures, snapshot commitments or DHT
     /// convergence.
     pub fn evaluate_request_at_frontier(
         &self,
