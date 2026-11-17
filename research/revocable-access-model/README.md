@@ -11,6 +11,7 @@ A deterministic Rust reference model for composable, revocable delegated authori
 - Three-valued results: `Allowed`, `Denied`, and `Indeterminate`.
 - A hard 64-node lineage bound and consistent subdelegation-depth metadata.
 - A bounded exhaustive 576-state authority/request matrix test.
+- An authority-frontier predicate that rejects stale or cross-namespace snapshots before authorization.
 - Distinct composition operators: independent grants (OR) and required bundles (AND).
 
 ## Does not establish
