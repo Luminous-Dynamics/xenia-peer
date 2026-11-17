@@ -1944,15 +1944,11 @@ mod tests {
             .unwrap();
         runtime.revoke().unwrap();
 
-        for preflight in [
-            M1RuntimeSession::preflight_frame_flow as fn(&M1RuntimeSession) -> _,
-            M1RuntimeSession::preflight_telemetry_flow,
-            M1RuntimeSession::preflight_audio_flow,
-            M1RuntimeSession::preflight_host_clipboard_read_flow,
-            M1RuntimeSession::preflight_input_flow,
-        ] {
-            assert!(preflight(&runtime).is_err());
-        }
+        assert!(runtime.preflight_frame_flow().is_err());
+        assert!(runtime.preflight_telemetry_flow().is_err());
+        assert!(runtime.preflight_audio_flow().is_err());
+        assert!(runtime.preflight_host_clipboard_read_flow().is_err());
+        assert!(runtime.preflight_input_flow().is_err());
     }
 
     #[test]
