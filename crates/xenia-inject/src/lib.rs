@@ -995,6 +995,91 @@ impl InputInjector for UinputInjector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Debug, Default)]
+    struct ReleaseAttempts {
+        keys: usize,
+        buttons: usize,
+        touches: usize,
+    }
+
+    struct FailFirstReleaseInjector {
+        attempts: Arc<Mutex<ReleaseAttempts>>,
+    }
+
+    impl FailFirstReleaseInjector {
+        fn fail_once(counter: &mut usize) -> Result<(), InjectError> {
+            *counter += 1;
+            if *counter == 1 {
+                Err(InjectError::Unavailable(
+                    "synthetic one-shot release failure".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl InputInjector for FailFirstReleaseInjector {
+        fn inject_pointer_move(&mut self, _x: f32, _y: f32) -> Result<(), InjectError> {
+            Ok(())
+        }
+
+        fn inject_pointer_button(
+            &mut self,
+            _x: f32,
+            _y: f32,
+            _button: u8,
+            pressed: bool,
+        ) -> Result<(), InjectError> {
+            if pressed {
+                return Ok(());
+            }
+            let mut attempts = self.attempts.lock().unwrap();
+            Self::fail_once(&mut attempts.buttons)
+        }
+
+        fn inject_key(
+            &mut self,
+            _code: u32,
+            pressed: bool,
+            _modifiers: u8,
+        ) -> Result<(), InjectError> {
+            if pressed {
+                return Ok(());
+            }
+            let mut attempts = self.attempts.lock().unwrap();
+            Self::fail_once(&mut attempts.keys)
+        }
+
+        fn inject_touch(
+            &mut self,
+            _index: u8,
+            _x: f32,
+            _y: f32,
+            phase: u8,
+            _pressure: f32,
+        ) -> Result<(), InjectError> {
+            if phase != 3 {
+                return Ok(());
+            }
+            let mut attempts = self.attempts.lock().unwrap();
+            Self::fail_once(&mut attempts.touches)
+        }
+
+        fn backend_name(&self) -> &str {
+            "fail-first-release-test"
+        }
+    }
+
+    fn failure_injecting_session() -> (SessionInputInjector, Arc<Mutex<ReleaseAttempts>>) {
+        let attempts = Arc::new(Mutex::new(ReleaseAttempts::default()));
+        let backend = FailFirstReleaseInjector {
+            attempts: Arc::clone(&attempts),
+        };
+        (SessionInputInjector::new(Box::new(backend)), attempts)
+    }
 
     #[test]
     fn noop_accepts_everything() {
@@ -1148,6 +1233,83 @@ mod tests {
         assert_eq!(report.released, 3);
         assert_eq!(report.failed, 0);
         assert_eq!(injector.active_state_count(), 0);
+    }
+
+    #[test]
+    fn session_injector_retains_failed_releases_and_retries_only_active_state() {
+        let (mut injector, attempts) = failure_injecting_session();
+        injector
+            .process_events(&[
+                InputEvent::PointerButton {
+                    x: 0.2,
+                    y: 0.3,
+                    button: 0,
+                    pressed: true,
+                },
+                InputEvent::Key {
+                    code: 30,
+                    pressed: true,
+                    modifiers: 0,
+                },
+                InputEvent::Touch {
+                    index: 1,
+                    x: 0.4,
+                    y: 0.5,
+                    phase: 0,
+                    pressure: 1.0,
+                },
+            ])
+            .unwrap();
+
+        assert_eq!(injector.active_state_count(), 3);
+
+        let first = injector.release_all();
+        assert_eq!(first.attempted, 3);
+        assert_eq!(first.released, 0);
+        assert_eq!(first.failed, 3);
+        assert_eq!(injector.active_state_count(), 3);
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            ReleaseAttempts {
+                keys: 1,
+                buttons: 1,
+                touches: 1,
+            }
+        );
+
+        let retry = injector.release_all();
+        assert_eq!(retry.attempted, 3);
+        assert_eq!(retry.released, 3);
+        assert_eq!(retry.failed, 0);
+        assert_eq!(injector.active_state_count(), 0);
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            ReleaseAttempts {
+                keys: 2,
+                buttons: 2,
+                touches: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn drop_retries_state_that_remained_after_failed_explicit_release() {
+        let (mut injector, attempts) = failure_injecting_session();
+        injector
+            .inject_key(42, true, 0b0001)
+            .expect("synthetic backend accepts key-down");
+        let report = injector.release_all();
+        assert_eq!(report.failed, 1);
+        assert_eq!(injector.active_state_count(), 1);
+        assert_eq!(attempts.lock().unwrap().keys, 1);
+
+        drop(injector);
+
+        assert_eq!(
+            attempts.lock().unwrap().keys,
+            2,
+            "Drop must make one best-effort retry for the still-tracked key"
+        );
     }
 
     #[test]
