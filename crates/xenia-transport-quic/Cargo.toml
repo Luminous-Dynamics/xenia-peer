@@ -18,3 +18,4 @@ tracing.workspace = true
 bs58.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+futures-util = "0.3"
