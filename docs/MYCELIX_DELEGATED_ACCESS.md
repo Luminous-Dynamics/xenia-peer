@@ -162,3 +162,54 @@ Report denominators, confidence intervals, per-surface latency and worst-case st
 ## 13. Claim ceiling
 
 This document is an architecture/qualification specification. It does not establish that Mycelix 0.7.1 is qualified, that Xenia currently consumes Mycelix delegations, that revocation is globally instantaneous, that previously disclosed data is erased, or that a UI consent record proves comprehension or voluntariness.
+
+## 14. Standards interoperability and industry positioning
+
+Do not replace established authorization interfaces. Map this profile to the industry ecosystem while retaining stronger local enforcement semantics:
+
+| Ecosystem | Reuse | Mycelix/Xenia extension |
+|---|---|---|
+| OpenID AuthZEN Authorization API 1.0 | PDP↔PEP evaluation contract and SARC (subject/action/resource/context) request model | Carry delegation commitment, parent lineage, authority epoch, consent reference and effect-boundary identity as versioned context/obligations; local PEP remains responsible for enforcement |
+| AuthZEN Obligations / access-request-and-approval work | Machine-readable obligations and request/approval/re-evaluation flow | Consent and approvals are inputs to a fresh evaluation, never a bypass or cached grant; obligations must be acknowledged by the enforcing PEP |
+| Zanzibar-style relationship authorization / OpenFGA | Relationship graph and consistency-aware authorization patterns | Add explicit principal-issued delegation contracts, attenuating child grants, expiry/epoch and revocation receipts; benchmark on equivalent tuple/relationship workloads |
+| OPA / Cedar | Policy evaluation and policy-as-code; use as optional PDP adapters | Keep policy decision separate from session capability issuance and OS/effect enforcement; never treat a PDP response as proof that the effect occurred |
+| SPIFFE/SPIRE | Workload identity and short-lived workload credentials | Authentication is not authorization; bind workload identity to the semantic delegation and the exact Xenia session/effect scope |
+| Holochain 0.7.1 CapGrant/CapClaim | Host-enforced reachability to specifically granted zome functions | Keep native call capability below the semantic delegation and Xenia lane/effect capability; revocation must be tested at the owning conductor |
+
+The differentiator is not another policy language or another central PDP. It is an interoperable, sovereignty-aware authority lineage whose narrowing rules and revocation consequences are checked at the place where each effect is committed. External PDPs may contribute a decision; they do not mint host authority, override local revocation, or attest that an operation succeeded.
+
+## 15. Benchmark protocol and aspirational targets
+
+All targets below are proposed engineering goals, not measured results or industry-leading claims. Publish the harness, frozen fixtures, environment, raw samples, denominators, and exact tested commit for every run.
+
+### Correctness and safety
+
+- 100% expected outcomes across positive, negative and indeterminate fixtures; zero false permits in the frozen corpus.
+- Zero privilege amplification across root/child/grandchild depth 0–16, including purpose, resource, action, direction, expiry, mode and epoch mutations.
+- Zero protected effect commits after the local effect owner has observed effective revocation.
+- Zero alternate-lane bypasses; zero stale queued input accepted after local revocation observation.
+- 100% of incomplete authority states return non-permit outcomes; never render them as globally revoked or globally current.
+- Independent grants preserve unrelated scope; required bundles fail when any required parent is invalid.
+
+### Performance and scale
+
+Measure local evaluation separately from network propagation. Initial targets for an optimized local evaluator on a declared reference host: p50 ≤ 2 ms, p95 ≤ 10 ms, p99 ≤ 25 ms for a warm cache and lineage depth ≤ 8; report cold-cache and depth-16 results separately. These are targets to test, not assumptions.
+
+Run 1, 10, 100 and 1,000 concurrent sessions; 1, 8 and 32 lanes/session; 1, 10, 100 and 1,000 grants/principal; lineage depths 0, 1, 4, 8 and 16. Measure CPU, memory, allocation count, throughput, and p50/p95/p99/max latency. Test bursty grant/revoke churn and concurrent authorization/effect commits.
+
+### Revocation behavior
+
+- Local linearization: once the effect owner has observed a revocation, no later protected commit may succeed. Test revoke-vs-commit races with deterministic barriers and record the winner/linearization point.
+- Connected propagation goal: p95 ≤ 1 s and p99 ≤ 5 s from authoritative revoke to acknowledgement by every enumerated connected enforcement point. This is a target, not a global guarantee.
+- Disconnected enforcement points must be visibly unconfirmed and must fail closed for high-risk effects when their bounded authority lease expires. Measure worst stale-capability exposure, not only average propagation latency.
+- Report route inventory completeness. Missing acknowledgements or unknown routes make the global status Indeterminate.
+
+### Comparative baseline
+
+Compare equivalent policy semantics against at least one Zanzibar-style relationship engine (e.g. OpenFGA), OPA, Cedar, and an AuthZEN-compatible PDP/PEP pair. Keep identity, policy graph, resource count, cache state, consistency mode, hardware, concurrency, and query mix matched. Report raw latency distributions and correctness separately. Do not claim “better than SOTA” from unlike workloads or from a single median.
+
+The likely advantage to pursue is not raw PDP latency alone: it is a stronger end-to-end safety envelope—strict delegation attenuation, no confused OR/AND composition, per-lane enforcement, explicit in-flight commit semantics, and independently verifiable revocation receipts—with acceptable measured overhead.
+
+## 16. Deterministic reference model
+
+A standalone, dependency-light Rust policy oracle and adversarial unit tests live in `research/revocable-access-model/` and are tracked by Xenia #501. It models exact resource equality, parent attenuation, local revocation, epochs, three-valued decisions and OR/AND composition. It is deliberately not a production authorization service and does not qualify cryptography, Holochain, DHT convergence, or OS enforcement. CI/test results must be attached to the exact tested commit before any qualification claim.
