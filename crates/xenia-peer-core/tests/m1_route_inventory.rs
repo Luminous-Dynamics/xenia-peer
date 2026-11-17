@@ -1,11 +1,14 @@
 use std::collections::HashSet;
 
+use sha1::{Digest, Sha1};
 use xenia_peer_core::{M1DataDirection, M1Permission};
 
 const ROUTE_INVENTORY: &str = include_str!("../../../docs/security/M1_ROUTE_INVENTORY_V0_1.toml");
 const DAEMON_SOURCE: &str = include_str!("../../../apps/xenia-peer/src/main.rs");
 const FILE_TRANSFER_SOURCE: &str = include_str!("../../../apps/xenia-peer/src/file_transfer.rs");
 const RUNTIME_SOURCE: &str = include_str!("../../../apps/xenia-peer/src/m1_runtime.rs");
+const PERMISSION_MODEL_SOURCE: &str =
+    include_str!("../src/m1_session.rs");
 
 fn source_section<'a>(source: &'a str, route: &str, start: &str, end: &str) -> &'a str {
     let start_index = source
@@ -60,6 +63,43 @@ fn route_inventory_is_complete_for_the_declared_eight_lane_census() {
         .and_then(toml::Value::as_table)
         .expect("source_files table is required");
     assert!(!source_files.is_empty());
+
+    let reviewed_sources = [
+        ("daemon", "apps/xenia-peer/src/main.rs", DAEMON_SOURCE),
+        (
+            "file_transfer",
+            "apps/xenia-peer/src/file_transfer.rs",
+            FILE_TRANSFER_SOURCE,
+        ),
+        (
+            "runtime",
+            "apps/xenia-peer/src/m1_runtime.rs",
+            RUNTIME_SOURCE,
+        ),
+        (
+            "permission_model",
+            "crates/xenia-peer-core/src/m1_session.rs",
+            PERMISSION_MODEL_SOURCE,
+        ),
+    ];
+    for (name, expected_path, contents) in reviewed_sources {
+        let source_ref = source_files
+            .get(name)
+            .and_then(toml::Value::as_str)
+            .unwrap_or_else(|| panic!("source_files.{name} is required"));
+        let (path, declared_sha) = source_ref
+            .rsplit_once('@')
+            .unwrap_or_else(|| panic!("source_files.{name} must be path@sha"));
+        assert_eq!(
+            path, expected_path,
+            "source_files.{name} path does not match its include_str binding"
+        );
+        assert_eq!(
+            git_blob_sha1(contents.as_bytes()),
+            declared_sha,
+            "source_files.{name} Git blob SHA does not match the compiled source"
+        );
+    }
     for (name, value) in source_files {
         let source_ref = value
             .as_str()
@@ -202,6 +242,13 @@ fn route_inventory_is_complete_for_the_declared_eight_lane_census() {
             "incomplete route evidence must remain INDETERMINATE"
         );
     }
+}
+
+fn git_blob_sha1(contents: &[u8]) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(format!("blob {}\0", contents.len()).as_bytes());
+    hasher.update(contents);
+    format!("{:x}", hasher.finalize())
 }
 
 fn is_git_sha(value: &str) -> bool {
