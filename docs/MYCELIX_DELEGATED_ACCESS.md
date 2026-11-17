@@ -457,10 +457,26 @@ sequence:
 - [#3679 — addressable parent chain and content binding](https://github.com/Luminous-Dynamics/mycelix/pull/3679),
   branch `feat/ros-005-parent-chain-hardening`, stacked on #3660.
 
-The current #3679 branch head used for this source review is
-`c4cf22922be4917d6aad2ba568bbfe9138ba85cf`. These PRs are open and unmerged.
-No GitHub Actions runs were returned for the latest #3679 head, so the newly
-added tests are pending hosted verification; no CI pass is claimed.
+The current #3679 source branch head reviewed on 17 November is
+`ce5ad5b903d4ecf2a3c89e7b85273e7bf195875f`. Both implementation PRs remain
+open and unmerged. On that exact head, pinned formatting and the 470-test
+all-target suite passed. The original full-package Clippy gate failed because
+the wider core-types package contains existing `wisdom_engine` diagnostics
+(including `inherent_to_string_shadow_display`, `absurd_extreme_comparisons`
+and an `overly_complex_bool_expr` in legacy tests). The two newly introduced
+warnings in `delegation.rs` were corrected in this head.
+
+The current qualification PR is [#6307](https://github.com/Luminous-Dynamics/mycelix/pull/6307).
+Its earlier run found the Clippy path filter was matching repository-root
+paths although rustc emits crate-relative `src/delegation.rs` paths. The
+workflow now binds diagnostics to the `mycelix-core-types` package ID and
+crate-relative source suffixes, while retaining the complete package JSON
+artifact. Exact head `cc623a37a19a4e0bca85c01c449ec0a3333fceef` passed the
+format gate, 470 tests, and the strict ROS-005 touched-file Clippy gate.
+Full-package Clippy still returned 101 due to diagnostics outside the touched
+ROS-005 files; the workflow explicitly records that as a non-pass rather than
+suppressing it. Artifact:
+https://github.com/Luminous-Dynamics/mycelix/actions/runs/44143989265/artifacts/14355083222.
 
 ### Existing Rust contract to consume
 
@@ -531,3 +547,100 @@ treat it as authoritative. The future bridge must:
 A pure `AuthorizedExecution` result is a semantic decision only. It does not
 prove that the Zome call, Xenia lane, host OS effect or remote observation
 occurred.
+
+## 26. Exact Xenia M1 mapping onto ROS-004 and ROS-005
+
+Xenia's current M1 crosswalk assigns eight stable action identifiers and
+explicit data/control directions. The identifiers are intentionally exact
+strings because the current ROS-005 `ActionScope::Named` containment rule is
+equality-only. They are not wildcard families or hierarchical scopes.
+
+| M1 lane | ROS-005 `ActionScope::Named` | Direction | Protected operation mode |
+|---|---|---|---|
+| `StreamFrame` | `xenia.screen.view` | Host → viewer | Execute/disclose |
+| `StreamTelemetry` | `xenia.host.telemetry` | Host → viewer | Execute/disclose |
+| `StreamAudio` | `xenia.audio.capture` | Host → viewer | Execute/disclose |
+| `InjectInput` | `xenia.input.inject` | Viewer → host | Execute |
+| `ReadHostClipboard` | `xenia.clipboard.read` | Host → viewer | Execute/disclose |
+| `WriteHostClipboard` | `xenia.clipboard.write` | Viewer → host | Execute |
+| `SendFileToViewer` | `xenia.file.send` | Host → viewer | Execute/disclose |
+| `ReceiveFileFromViewer` | `xenia.file.receive` | Viewer → host | Execute |
+
+The direction is a separate Xenia crosswalk invariant; it is not currently a
+field in ROS-005's `ExecutionRequest`. The action IDs must remain direction-
+specific so a send action cannot be reinterpreted as receive, and vice versa.
+A proposal to request a session or change configuration may use proposal
+semantics in a separate action profile, but `DelegationMode::Propose` does not
+authorize any of the eight protected M1 effects.
+
+For each M1 lane, an adapter constructs one exact ROS-005 request:
+
+- authenticated principal and delegate references from the owner-validated
+  source records;
+- the exact stable M1 action ID above;
+- one exact, canonical host/resource identity in `ResourceScope::Named`;
+- `DelegationMode::Execute` for a protected lane effect;
+- the source-defined request timestamp and current authority epoch.
+
+Do not encode direction, purpose, audience, data class, session ID or operation
+digest by appending ad-hoc strings to `ActionScope` or `ResourceScope`. The
+current ROS-005 API has no explicit fields for those dimensions. Xenia must
+bind direction, session fingerprint/rekey epoch, lane, consent reference,
+resource identity and operation identity in its own local session/effect
+capability, and combine the resulting decision with ROS-004 consent where
+there is disclosure.
+
+### ROS-004 composition
+
+For host-to-viewer media, telemetry, clipboard and file disclosure, recipient
+consent remains a separate required gate. Compose the source-owned ROS-004
+`Consent::authorize(&ConsentRequest)` result with ROS-005 semantic action
+authority and the existing M1 local lane gate. ROS-004 already carries the
+requester/audience, named purpose, read-vs-disclose mode, data classes, exact
+fields, explicit request time and authority epoch. Do not treat a valid
+consent as execution authority. For viewer-to-host operations, the exact M1
+operator/recipient gate remains required; do not invent an ROS-004 disclosure
+record as a substitute for action authority.
+
+### Important unresolved API semantics
+
+- `ExecutionRequest::requested_at`, `Delegation::granted_at` and expiry are
+  represented as `i64`; the reviewed API does not specify the epoch or unit.
+  Xenia's runtime uses millisecond timestamps in other paths. Do not convert
+  or compare these values until Mycelix standardizes the wire unit/epoch.
+- `ResourceScope::Named` is also exact equality. Do not use string prefixes,
+  wildcards or path ancestry to express host/resource containment.
+- `DelegationContext::from_slice` checks duplicate identifiers and provides
+  addressable parent records to the pure validator; it does not authenticate
+  Holochain records, prove complete DHT visibility, or establish currentness.
+- The type crate is not yet a released/pinned dependency for Xenia. Do not add
+  an unpinned Git dependency or fork these Rust types into Xenia. Pin a reviewed
+  source revision or published artifact only after the owner API and
+  compatibility contract are stable.
+- Current strict child attenuation is limited to proposal-mode narrowing,
+  later start time or earlier/finite expiry. A child cannot yet select a proper
+  subset of multi-action sets or nested resource sets. Mycelix #6302 owns the
+  separately versioned typed-scope and quantitative-budget extension. Until
+  it is implemented and qualified, Xenia should issue separate exact grants
+  per lane/resource rather than infer set semantics.
+- Mycelix #4903 owns Holochain/DHT capability currentness under delayed
+  visibility; #6236 owns trajectory-wide revocation propagation. Xenia #506
+  must consume their authenticated currentness evidence rather than treat a
+  local revision or a complete-looking caller slice as proof of global
+  currency. Holochain 0.7.1 qualification remains incomplete under Mycelix
+  #5719.
+
+### Adapter non-permit rules
+
+A verified ROS-005 `AuthorizedExecution` is a semantic permit input only.
+Missing parent records, an invalid content-bound ID, revoked/expired parent,
+stale epoch, unknown action/resource semantics, unresolved timestamp profile,
+incomplete authority frontier, or unavailable currentness evidence must not
+be converted into a permit. Valid semantic denial maps to DENIED; unavailable
+or unverifiable authority/currentness maps to HOLD/INDETERMINATE. The M1
+source preflight remains a resource-minimization check, and the final effect
+owner must revalidate before send/apply/publish. Neither stage alone closes
+the asynchronous race tracked by Xenia #504.
+
+This mapping is a contract only. Xenia PR #509 still consumes local M1 consent
+and does not yet call ROS-005 or ROS-004 at runtime.
