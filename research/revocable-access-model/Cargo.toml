@@ -10,3 +10,8 @@ description = "Deterministic reference model for revocable, attenuating delegate
 
 [lints.rust]
 unsafe_code = "deny"
+
+[[bench]]
+name = "lineage"
+path = "benches/lineage.rs"
+harness = false
