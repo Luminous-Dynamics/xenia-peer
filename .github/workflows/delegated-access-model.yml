@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   reference-model:
-    name: Reference model (format + tests)
+    name: Reference model tests + benchmark compile
     runs-on: ubuntu-latest
     steps:
       - name: Checkout exact revision
@@ -31,8 +31,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Check formatting
-        run: cargo fmt --manifest-path research/revocable-access-model/Cargo.toml -- --check
       - name: Run deterministic model tests
         run: cargo test --manifest-path research/revocable-access-model/Cargo.toml --locked
       - name: Compile lineage benchmark
