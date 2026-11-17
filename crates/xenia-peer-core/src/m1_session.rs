@@ -538,10 +538,7 @@ impl M1SessionMachine {
     /// This is a side-effect-free preflight. It does not record an operation
     /// or replace the final check that must still run at the protected effect
     /// boundary.
-    pub fn require_permission(
-        &self,
-        permission: M1Permission,
-    ) -> Result<(), M1SessionError> {
+    pub fn require_permission(&self, permission: M1Permission) -> Result<(), M1SessionError> {
         if self.state == M1SessionState::Active && self.granted.contains(permission) {
             Ok(())
         } else {
@@ -1071,7 +1068,11 @@ mod tests {
             .unwrap();
         let audit_before = session.audit().to_vec();
 
-        assert!(session.require_permission(M1Permission::StreamFrame).is_ok());
+        assert!(
+            session
+                .require_permission(M1Permission::StreamFrame)
+                .is_ok()
+        );
         assert_eq!(
             session.require_permission(M1Permission::StreamTelemetry),
             Err(M1SessionError::PermissionDenied {
@@ -1090,14 +1091,46 @@ mod tests {
     #[test]
     fn delegated_action_crosswalk_is_stable_unique_and_directional() {
         let expected = [
-            (M1Permission::StreamFrame, "xenia.screen.view", M1DataDirection::HostToViewer),
-            (M1Permission::StreamTelemetry, "xenia.host.telemetry", M1DataDirection::HostToViewer),
-            (M1Permission::StreamAudio, "xenia.audio.capture", M1DataDirection::HostToViewer),
-            (M1Permission::InjectInput, "xenia.input.inject", M1DataDirection::ViewerToHost),
-            (M1Permission::ReadHostClipboard, "xenia.clipboard.read", M1DataDirection::HostToViewer),
-            (M1Permission::WriteHostClipboard, "xenia.clipboard.write", M1DataDirection::ViewerToHost),
-            (M1Permission::SendFileToViewer, "xenia.file.send", M1DataDirection::HostToViewer),
-            (M1Permission::ReceiveFileFromViewer, "xenia.file.receive", M1DataDirection::ViewerToHost),
+            (
+                M1Permission::StreamFrame,
+                "xenia.screen.view",
+                M1DataDirection::HostToViewer,
+            ),
+            (
+                M1Permission::StreamTelemetry,
+                "xenia.host.telemetry",
+                M1DataDirection::HostToViewer,
+            ),
+            (
+                M1Permission::StreamAudio,
+                "xenia.audio.capture",
+                M1DataDirection::HostToViewer,
+            ),
+            (
+                M1Permission::InjectInput,
+                "xenia.input.inject",
+                M1DataDirection::ViewerToHost,
+            ),
+            (
+                M1Permission::ReadHostClipboard,
+                "xenia.clipboard.read",
+                M1DataDirection::HostToViewer,
+            ),
+            (
+                M1Permission::WriteHostClipboard,
+                "xenia.clipboard.write",
+                M1DataDirection::ViewerToHost,
+            ),
+            (
+                M1Permission::SendFileToViewer,
+                "xenia.file.send",
+                M1DataDirection::HostToViewer,
+            ),
+            (
+                M1Permission::ReceiveFileFromViewer,
+                "xenia.file.receive",
+                M1DataDirection::ViewerToHost,
+            ),
         ];
 
         assert_eq!(M1Permission::ALL.len(), expected.len());
@@ -1106,7 +1139,9 @@ mod tests {
             assert_eq!(permission.action_id(), *action_id);
             assert_eq!(permission.direction(), *direction);
             assert!(
-                expected[..index].iter().all(|(_, prior, _)| prior != action_id),
+                expected[..index]
+                    .iter()
+                    .all(|(_, prior, _)| prior != action_id),
                 "delegated action identifiers must be unique"
             );
         }
