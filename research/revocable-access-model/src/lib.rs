@@ -73,6 +73,7 @@ pub enum Decision {
 pub enum Failure {
     MissingRecord,
     IncompleteAuthority,
+    FreshnessNotMet,
     Revoked,
     StaleEpoch,
     NotYetValid,
@@ -153,6 +154,13 @@ impl Delegation {
             && self.remaining_depth < parent.remaining_depth;
         if contained { Ok(()) } else { Err(Failure::ScopeAmplification) }
     }
+}
+
+/// Monotonic revision watermark for one authority namespace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorityFrontier {
+    pub namespace: String,
+    pub revision: u64,
 }
 
 /// Authority facts visible to one enforcement point. Revocation here means
@@ -260,6 +268,31 @@ impl AuthorityState {
             }
         }
         if unknown { Evaluation::unknown(Failure::MissingRecord) } else { Evaluation::allowed() }
+    }
+
+    /// Evaluate only if the observed authority frontier satisfies the
+    /// caller's minimum freshness requirement for this resource domain.
+    ///
+    /// The caller must authenticate both frontiers and bind them to the
+    /// authoritative namespace. This method checks namespace equality and
+    /// monotonic revision ordering; it does not verify signatures or DHT
+    /// convergence.
+    pub fn evaluate_request_at_frontier(
+        &self,
+        id: &str,
+        request: &AccessRequest,
+        now_ms: u64,
+        observed: &AuthorityFrontier,
+        minimum: &AuthorityFrontier,
+    ) -> Evaluation {
+        if observed.namespace != request.resource.domain
+            || minimum.namespace != request.resource.domain
+            || observed.namespace != minimum.namespace
+            || observed.revision < minimum.revision
+        {
+            return Evaluation::unknown(Failure::FreshnessNotMet);
+        }
+        self.evaluate_request(id, request, now_ms)
     }
 
     /// Alternative grants: any independently valid grant suffices (OR).
@@ -528,3 +561,38 @@ mod tests {
         );
     }
 }
+    #[test]
+    fn freshness_frontier_blocks_stale_snapshots() {
+        let s = state();
+        let request = AccessRequest {
+            resource: Resource { domain: "home-a".into(), id: "host-1".into() },
+            right: Right::View, purpose: "support-session".into(), requires_execution: true,
+        };
+        let minimum = AuthorityFrontier { namespace: "home-a".into(), revision: 12 };
+        let stale = AuthorityFrontier { namespace: "home-a".into(), revision: 11 };
+        let current = AuthorityFrontier { namespace: "home-a".into(), revision: 12 };
+        assert_eq!(
+            s.evaluate_request_at_frontier("child", &request, 500, &stale, &minimum).failure,
+            Some(Failure::FreshnessNotMet)
+        );
+        assert_eq!(
+            s.evaluate_request_at_frontier("child", &request, 500, &current, &minimum).decision,
+            Decision::Allowed
+        );
+    }
+
+    #[test]
+    fn freshness_frontier_must_match_resource_authority_namespace() {
+        let s = state();
+        let request = AccessRequest {
+            resource: Resource { domain: "home-a".into(), id: "host-1".into() },
+            right: Right::View, purpose: "support-session".into(), requires_execution: true,
+        };
+        let observed = AuthorityFrontier { namespace: "home-b".into(), revision: 100 };
+        let minimum = AuthorityFrontier { namespace: "home-a".into(), revision: 1 };
+        assert_eq!(
+            s.evaluate_request_at_frontier("child", &request, 500, &observed, &minimum).decision,
+            Decision::Indeterminate
+        );
+    }
+
