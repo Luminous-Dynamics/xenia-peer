@@ -229,6 +229,8 @@ A standalone, dependency-light Rust policy oracle, adversarial unit tests and a 
 
 ## 17. AuthZEN adapter contract (proposed)
 
+Implementation tracker: Xenia #502.
+
 AuthZEN 1.0 exposes a boolean decision (`true` or `false`) between a PDP and PEP. The local Mycelix/Xenia decision type remains three-valued. The adapter MUST map a valid `false` to Denied; a valid `true` to a *PDP permit input only*; and timeout, transport failure, malformed response, invalid metadata/signature, unsupported mandatory obligation or incomplete request context to Indeterminate. Indeterminate is never converted to Permit. AuthZEN does not replace local delegation-lineage and effect-boundary checks.
 
 Example request mapping (illustrative profile values, not a registered AuthZEN vocabulary):
