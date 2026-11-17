@@ -446,3 +446,88 @@ conversion are hard failures. They must not be averaged away by high task
 completion or low median latency. Publish denominators, positive-control
 false-deny rates, raw samples, route-inventory coverage, pinned comparator
 versions, hardware and confidence intervals.
+
+
+## 25. Current ROS-005 Rust implementation boundary (17 November 2026)
+
+The Mycelix ROS-005 implementation is being developed in a stacked public PR
+sequence:
+- [#3660 — base delegated-authority types](https://github.com/Luminous-Dynamics/mycelix/pull/3660),
+  branch `feat/ros-005-delegated-authority`.
+- [#3679 — addressable parent chain and content binding](https://github.com/Luminous-Dynamics/mycelix/pull/3679),
+  branch `feat/ros-005-parent-chain-hardening`, stacked on #3660.
+
+The current #3679 branch head used for this source review is
+`c4cf22922be4917d6aad2ba568bbfe9138ba85cf`. These PRs are open and unmerged.
+No GitHub Actions runs were returned for the latest #3679 head, so the newly
+added tests are pending hosted verification; no CI pass is claimed.
+
+### Existing Rust contract to consume
+
+The public core-types implementation exposes:
+- `Delegation`, `DelegationId`, `PrincipalRef`, `ActionScope`,
+  `ResourceScope`, `DelegationMode`;
+- `ExecutionRequest` and `ExecutionDecision`;
+- `DelegationContext::from_slice` for explicit parent dependencies;
+- `Delegation::authorize(request, context)`;
+- `Delegation::validate_identity()` and
+  `DelegationId::derive_content_bound()`.
+
+The caller-supplied `parent_active` boolean has been removed. Parent records
+are resolved by ID from the explicit context, duplicate IDs are rejected, and
+each retrieved parent is now checked against its own content-bound identity
+before its status or scope is trusted. The context is still only a set of
+records supplied to the pure Rust validator: it does **not** authenticate
+their Holochain/DHT provenance or establish that they are current. An Xenia
+adapter must receive a source-authenticated authority snapshot and prove its
+freshness/currentness under Mycelix #4903 before using it.
+
+### Explicit subdelegation and strict attenuation
+
+On the current #3679 branch:
+- `Delegation::grant` defaults `subdelegation_allowed` to false.
+- The principal must explicitly choose
+  `grant_with_subdelegation(..., true)` for a delegate to issue children.
+- Every parent edge in a multi-hop chain must have opted in.
+- The subdelegation flag is part of the versioned canonical content encoding
+  `mycelix.delegation-content.v2`.
+- A child must narrow at least one currently modeled dimension: proposal-only
+  mode, a later start time, or an earlier/finite expiry. A child with the same
+  mode and validity interval is rejected.
+
+Important limitation: current `ActionScope::Named` and
+`ResourceScope::Named` containment is exact equality. These are not
+hierarchical resource paths or set-valued action collections. The current
+strict-attenuation rule therefore does not yet support a child selecting a
+proper subset of multiple actions or nested resources. Mycelix #6302 tracks
+versioned typed scopes and quantitative budgets. Until that work is complete,
+an Xenia M1 grant should bind one exact delegated action ID and one exact host
+resource identity. Multiple lanes need separate exact grants, or a separately
+qualified typed-scope extension; do not infer wildcard or prefix semantics.
+
+Purpose/audience/data-class binding and quantitative operation/byte/rate/
+concurrency budgets must also remain explicit. Reuse the ROS-004 consent
+contract for disclosure purpose and bind its consent record/digest into the
+Xenia session capability; do not treat consent as delegated execution
+authority or duplicate ROS-004 semantics inside a stringly typed action name.
+
+### Adapter rule
+
+Do not serialize a bare `DelegationContext` from an untrusted client and
+treat it as authoritative. The future bridge must:
+1. resolve the exact delegation and complete parent chain from the authority
+   owner;
+2. verify canonical IDs and any issuer/record authenticity required by the
+   source;
+3. bind the records to a verified authority epoch/frontier and currentness
+   receipt;
+4. construct the exact `ExecutionRequest` from the authenticated delegate,
+   stable M1 action ID, exact host resource, proposal/execute mode and request
+   time;
+5. evaluate the pure ROS-005 contract;
+6. compose the result with recipient consent and the local M1 lane gate;
+7. repeat currentness and final authorization at the effect owner.
+
+A pure `AuthorizedExecution` result is a semantic decision only. It does not
+prove that the Zome call, Xenia lane, host OS effect or remote observation
+occurred.
