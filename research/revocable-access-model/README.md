@@ -21,6 +21,7 @@ Resource matching is exact equality. Wildcards, path-prefix semantics, URI norma
 
 ```sh
 cargo test --manifest-path research/revocable-access-model/Cargo.toml
+cargo bench --manifest-path research/revocable-access-model/Cargo.toml --bench lineage
 ```
 
 The crate has no third-party dependencies and is an isolated workspace so it can be tested independently of Xenia's platform-specific workspace members.
