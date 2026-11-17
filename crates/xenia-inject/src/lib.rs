@@ -997,7 +997,7 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    #[derive(Clone, Debug, Default)]
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
     struct ReleaseAttempts {
         keys: usize,
         buttons: usize,
