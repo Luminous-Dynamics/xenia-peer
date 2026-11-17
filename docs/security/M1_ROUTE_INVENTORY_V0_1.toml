@@ -2,7 +2,7 @@ schema = "xenia-m1-route-inventory-v1"
 version = 1
 status = "partial_source_census"
 completeness = "indeterminate"
-reviewed_commit = "0361ff2982014d781de4b6e904b2581eee09417f"
+reviewed_commit = "9bc2687b7fa61ffe36e0809f27d703c25cfbb1fa"
 claim_ceiling = "Known daemon paths and gate locations were source-reviewed; alternate binaries, platform helpers, plugins, ambient OS interfaces, all feature combinations, and direct bypasses are not yet independently enumerated or negatively tested."
 authorization_semantics = "M1 local consent/session permission only; no Mycelix ROS-005 runtime decision is consumed by this source snapshot."
 effect_evidence = "Current allow_*_flow events are admission/gate evidence, not proof of local OS completion or remote observation. See Xenia issue #510."
@@ -12,7 +12,7 @@ route_coverage_owner = "Xenia issue #512; Mycelix route-mediation oracle #6213."
 daemon = "apps/xenia-peer/src/main.rs@b0da0035f0fd635f3af37f1a8358952426372f55"
 file_transfer = "apps/xenia-peer/src/file_transfer.rs@0b9db18f1eb8cf9842945b075c848a3e5b0b718e"
 runtime = "apps/xenia-peer/src/m1_runtime.rs@49f7c668dc7c9b9138fb3e3848e0ccda2a38af7f"
-permission_model = "crates/xenia-peer-core/src/m1_session.rs@b7ec1ae3558b3413f733a8517b705ef8921ded6b"
+permission_model = "crates/xenia-peer-core/src/m1_session.rs@fa19a4826f2d078a47439e02217c4562f2aab007"
 
 [[routes]]
 id = "M1-HOST-SCREEN-001"
