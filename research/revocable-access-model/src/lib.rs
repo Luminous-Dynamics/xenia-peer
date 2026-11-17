@@ -505,7 +505,9 @@ mod tests {
     #[test]
     fn lineage_depth_is_bounded_before_unbounded_recursion() {
         let mut s = state();
-        let root = s.grants.remove("root").unwrap();
+        let mut root = s.grants.remove("root").unwrap();
+        root.remaining_depth = (MAX_LINEAGE_NODES as u16) + 1;
+        root.may_subdelegate = true;
         let mut parent = root;
         for i in 1..=MAX_LINEAGE_NODES {
             let id = format!("deep-{i}");
