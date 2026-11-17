@@ -604,13 +604,11 @@ mod tests {
             for child_mask in 1_u16..(1 << all.len()) {
                 let mut parent = grant("root", "alice", "bob", None);
                 parent.rights = all.iter().enumerate()
-                    .filter(|(i, _)| parent_mask & (1 << i) != 0)
-                    .map(|(_, right)| *right)
+                    .filter_map(|(i, right)| (parent_mask & (1 << i) != 0).then_some(*right))
                     .collect();
                 let mut child = grant("child", "bob", "carol", Some("root"));
                 child.rights = all.iter().enumerate()
-                    .filter(|(i, _)| child_mask & (1 << i) != 0)
-                    .map(|(_, right)| *right)
+                    .filter_map(|(i, right)| (child_mask & (1 << i) != 0).then_some(*right))
                     .collect();
                 let is_subset = child_mask & !parent_mask == 0;
                 assert_eq!(
