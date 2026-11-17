@@ -533,7 +533,15 @@ impl M1SessionMachine {
         Ok(())
     }
 
-    fn require_active(&self, permission: M1Permission) -> Result<(), M1SessionError> {
+    /// Check that the active session has the exact requested permission.
+    ///
+    /// This is a side-effect-free preflight. It does not record an operation
+    /// or replace the final check that must still run at the protected effect
+    /// boundary.
+    pub fn require_permission(
+        &self,
+        permission: M1Permission,
+    ) -> Result<(), M1SessionError> {
         if self.state == M1SessionState::Active && self.granted.contains(permission) {
             Ok(())
         } else {
@@ -542,6 +550,10 @@ impl M1SessionMachine {
                 permission,
             })
         }
+    }
+
+    fn require_active(&self, permission: M1Permission) -> Result<(), M1SessionError> {
+        self.require_permission(permission)
     }
 }
 
@@ -1047,6 +1059,34 @@ mod tests {
             ]
         );
     }
+    #[test]
+    fn permission_preflight_is_lane_specific_and_side_effect_free() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+        session
+            .grant_consent_scoped(M1PermissionSet {
+                stream_frame: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+        let audit_before = session.audit().to_vec();
+
+        assert!(session.require_permission(M1Permission::StreamFrame).is_ok());
+        assert_eq!(
+            session.require_permission(M1Permission::StreamTelemetry),
+            Err(M1SessionError::PermissionDenied {
+                state: M1SessionState::Active,
+                permission: M1Permission::StreamTelemetry,
+            })
+        );
+        assert_eq!(session.audit(), audit_before.as_slice());
+
+        // Preflight does not authorize the operation or append an operation
+        // event; the final lane method still performs its own check.
+        session.stream_frame().unwrap();
+        assert_eq!(session.audit().last(), Some(&M1AuditEvent::FrameStreamed));
+    }
+
     #[test]
     fn delegated_action_crosswalk_is_stable_unique_and_directional() {
         let expected = [
