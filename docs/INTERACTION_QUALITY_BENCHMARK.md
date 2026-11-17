@@ -206,19 +206,28 @@ Unit tests and GUI harness tests should cover these transitions. Interactive tes
 
 ## 8. Competitive baseline and Xenia's differentiation
 
-Established remote-support products already set expectations around an in-session toolbar, contextual actions, monitor switching, clipboard/file-transfer controls, and visible screen-sharing indicators. Recreating a toolbar is product hygiene, not a differentiator.
+Existing remote-support products already establish a substantial baseline. Official product documentation shows:
 
-Xenia should compete on a stronger interaction contract:
+| Product | Documented interaction baseline | Implication for Xenia |
+|---|---|---|
+| TeamViewer | In-session toolbar with quick actions and controls; an attended-session screen-sharing indicator with a visible end-session affordance on supported Windows configurations | A session toolbar and a recipient-visible indicator are product hygiene, not a unique differentiator |
+| RustDesk | Incoming access modes (custom/full/view) and distinct toggles for keyboard/mouse, clipboard, file transfer, audio, terminal, TCP tunnel, restart and recording; RustDesk Server Pro further separates device access control from in-session Control Roles | Granular permissions and role policy already exist in the market; Xenia must demonstrate a more inspectable, per-session explanation and evidence binding, not merely checkbox granularity |
+| AnyDesk | A recipient-authorized Screen Privacy / Privacy Mode that hides remote screen contents and blocks remote-side input and sound while enabled; permission must be granted by the remote client | Recipient control and privacy modes are also established. Xenia should explain the exact effects and limitations of each control, including what it cannot undo |
 
-- capabilities are explicit and effect-oriented;
-- identity, transport, authorization and observation are separately labelled;
-- uncertainty and stale state are first-class;
-- the recipient can understand and stop access;
-- denial and dismissal are safe, distinct actions;
-- the user can inspect what the evidence proves and what it does not prove;
-- interface changes preserve the underlying coordinate and authorization invariants.
+Sources: [TeamViewer remote-session toolbar](https://www.teamviewer.com/en/global/support/knowledge-base/teamviewer-remote/remote-control/remote-session-toolbar/), [TeamViewer screen-sharing indicator](https://www.teamviewer.com/en-us/global/support/knowledge-base/teamviewer-remote/security/enable-screen-sharing-indicator-for-your-remote-sessions/), [RustDesk incoming access permissions](https://rustdesk.com/docs/en/self-host/client-configuration/advanced-settings/), [RustDesk Control Roles](https://rustdesk.com/docs/en/self-host/rustdesk-server-pro/control-role/), [RustDesk Access Control](https://rustdesk.com/docs/en/self-host/rustdesk-server-pro/permissions/), and [AnyDesk Screen Privacy](https://support.anydesk.com/docs/screen-privacy).
 
-This is a proposed research differentiation, not a claim that Xenia currently outperforms commercial products. Comparative testing must use the same tasks, participants, platforms and success criteria.
+These are documented feature baselines, not independent measurements of usability, accessibility, reliability, security, or user comprehension. Documentation does not establish that the products behave identically across all platforms, plans or deployment modes. Any performance or UX superiority claim requires matched, reproducible testing.
+
+Xenia's proposed differentiation should therefore be a stronger **authority-and-evidence interaction contract**:
+
+- **Per-session effect preview:** show exactly which capabilities are requested, for which target, by which verified requester, for what purpose, in which data direction, and until when. Capability labels must correspond to the canonical request, not a client-authored summary.
+- **Evidence provenance:** for each high-consequence state, identify whether it comes from daemon-enforced authority, authenticated peer identity, transport observation, local measurement or peer-reported telemetry.
+- **Explicit uncertainty:** missing, stale, unverified and unavailable information remains visible as such. Do not make a session look healthy merely because a field is absent.
+- **Recipient-side control:** make viewing/controlling state visible at the host and provide the supported local stop path, aligned with the existing [#392](https://github.com/Luminous-Dynamics/xenia-peer/issues/392) requirement for a visible indicator and mid-session revocation.
+- **Bounded claims:** make it clear that a signed consent event proves the recorded decision and bound request, not comprehension, voluntariness, downstream deletion or reversal of completed effects, as specified in [#455](https://github.com/Luminous-Dynamics/xenia-peer/issues/455).
+- **Fail-closed transitions:** on expiry, revocation, identity/session mismatch or reconnect ambiguity, new remote effects remain blocked until the authoritative state is reconciled.
+
+This is a research differentiation hypothesis, not a claim that Xenia currently outperforms commercial products. The consent UI presently renders a free-form scope string; the complete structured contract and its canonical binding remain follow-up work under #455, #460 and #496.
 
 ## 9. Evidence ledger for every release
 
