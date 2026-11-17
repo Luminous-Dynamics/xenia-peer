@@ -6483,34 +6483,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .saturating_mul(file_transfer::MAX_CONCURRENT_INCOMING_TRANSFERS as u64);
     let mut ft_state = file_transfer::FileTransferState::new(receive_reservation_capacity);
     if let Some(path) = &args.send_file {
-        let source =
-            xenia_peer_core::TransferSource::open_file_limited(path, args.file_transfer_max_bytes)
-                .await?;
-        let size = source.size();
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("transfer")
-            .to_string();
-        let transfer_id = 1;
-        m1_runtime.lock().await.allow_file_send_flow()?;
-        let offer = xenia_peer_core::FileTransferMessage::Offer {
-            transfer_id,
-            name: name.clone(),
-            size,
-            blake3_hash: source.blake3_hash(),
+        // Opening and hashing the source is itself a protected file-read
+        // operation. Do not touch file contents until the exact send lane is
+        // admitted; retain the audited final check immediately before the
+        // offer is sent in case consent was revoked after this preflight.
+        let file_send_permitted = match m1_runtime.lock().await.preflight_file_send_flow() {
+            Ok(()) => true,
+            Err(err) => {
+                warn!(error = %err, "outgoing file transfer denied before opening source");
+                false
+            }
         };
-        let envelope = session
-            .lock()
-            .await
-            .seal_file_transfer_message(offer, true)?;
-        send_half.send_envelope(&envelope).await?;
-        info!(transfer_id, name, size, "file transfer offered");
-        ft_state.outgoing = Some(file_transfer::OutgoingTransfer {
-            transfer_id,
-            source,
-            started: false,
-        });
+        if file_send_permitted {
+            let source =
+                xenia_peer_core::TransferSource::open_file_limited(path, args.file_transfer_max_bytes)
+                    .await?;
+            let size = source.size();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("transfer")
+                .to_string();
+            let transfer_id = 1;
+            m1_runtime.lock().await.allow_file_send_flow()?;
+            let offer = xenia_peer_core::FileTransferMessage::Offer {
+                transfer_id,
+                name: name.clone(),
+                size,
+                blake3_hash: source.blake3_hash(),
+            };
+            let envelope = session
+                .lock()
+                .await
+                .seal_file_transfer_message(offer, true)?;
+            send_half.send_envelope(&envelope).await?;
+            info!(transfer_id, name, size, "file transfer offered");
+            ft_state.outgoing = Some(file_transfer::OutgoingTransfer {
+                transfer_id,
+                source,
+                started: false,
+            });
+        }
     }
 
     // Updated by the send loop below whenever the encoder is (re)built
