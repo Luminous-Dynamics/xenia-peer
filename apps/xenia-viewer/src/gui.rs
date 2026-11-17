@@ -315,6 +315,17 @@ pub struct ViewerConfig {
     pub peer_addr: String,
 }
 
+/// Keyboard events may cross the remote boundary only when the local
+/// window is focused, the pointer is over the remote image, and egui is not
+/// consuming keyboard input for a local control.
+fn remote_keyboard_allowed(
+    window_focused: bool,
+    pointer_targets_remote_image: bool,
+    local_wants_keyboard: bool,
+) -> bool {
+    window_focused && pointer_targets_remote_image && !local_wants_keyboard
+}
+
 /// Tracks only input state that has actually crossed the client boundary.
 ///
 /// This is deliberately separate from egui's transient per-frame event list:
@@ -530,7 +541,7 @@ impl ViewerApp {
             return;
         }
 
-        let (pointer_pos, button_events, key_events) = ctx.input(|i| {
+        let (window_focused, pointer_pos, button_events, key_events) = ctx.input(|i| {
             let pos = i.pointer.interact_pos();
             let buttons = [
                 egui::PointerButton::Primary,
@@ -562,20 +573,31 @@ impl ViewerApp {
                     _ => None,
                 })
                 .collect::<Vec<_>>();
-            (pos, buttons, keys)
+            (i.focused, pos, buttons, keys)
         });
 
-        let pointer_in_image = pointer_pos.and_then(|pos| self.normalize_in_image(pos));
-
-        if let Some(pos) = pointer_pos {
-            if self.last_pointer_pos != Some(pos) {
-                self.last_pointer_pos = Some(pos);
-                if let Some(event) = self.remote_input.pointer_move(pointer_in_image) {
-                    self.send_lossy_input(event);
-                }
-            }
+        // A remote canvas is not an input target while the local OS window
+        // is unfocused. This also covers Alt-Tab, desktop switching, and
+        // focus transfer to another application even when egui still has
+        // a stale pointer position over the image.
+        let pointer_in_image = if window_focused {
+            pointer_pos.and_then(|pos| self.normalize_in_image(pos))
         } else {
             self.last_pointer_pos = None;
+            None
+        };
+
+        if window_focused {
+            if let Some(pos) = pointer_pos {
+                if self.last_pointer_pos != Some(pos) {
+                    self.last_pointer_pos = Some(pos);
+                    if let Some(event) = self.remote_input.pointer_move(pointer_in_image) {
+                        self.send_lossy_input(event);
+                    }
+                }
+            } else {
+                self.last_pointer_pos = None;
+            }
         }
 
         for (button, pressed) in button_events {
@@ -589,17 +611,22 @@ impl ViewerApp {
         }
 
         // A remote drag must not remain held after the pointer leaves the
-        // image, enters local chrome, or leaves the viewer window.
+        // image, the OS window loses focus, or the pointer leaves the viewer.
         if pointer_in_image.is_none() {
             for event in self.remote_input.release_pointer_buttons() {
                 self.send_stateful_input(event);
             }
         }
 
-        // Hovering the remote image is the explicit pointer target for
-        // keyboard forwarding. Local egui text editing, menus, and other
-        // keyboard-consuming controls always take precedence.
-        let allow_remote_keyboard = pointer_in_image.is_some() && !ctx.wants_keyboard_input();
+        // Keyboard input is remote only when the local OS window is focused,
+        // the pointer targets the remote image, and no local egui widget is
+        // asking for keyboard input. Focus loss releases previously forwarded
+        // keys before any new key-down can be admitted.
+        let allow_remote_keyboard = remote_keyboard_allowed(
+            window_focused,
+            pointer_in_image.is_some(),
+            ctx.wants_keyboard_input(),
+        );
         if !allow_remote_keyboard {
             for event in self.remote_input.release_keys() {
                 self.send_stateful_input(event);
@@ -875,6 +902,21 @@ mod tests {
         assert_eq!(pointer_button_id(egui::PointerButton::Primary), 0);
         assert_eq!(pointer_button_id(egui::PointerButton::Middle), 1);
         assert_eq!(pointer_button_id(egui::PointerButton::Secondary), 2);
+    }
+
+    #[test]
+    fn remote_keyboard_requires_window_focus_and_image_target() {
+        assert!(remote_keyboard_allowed(true, true, false));
+        assert!(!remote_keyboard_allowed(false, true, false));
+        assert!(!remote_keyboard_allowed(true, false, false));
+        assert!(!remote_keyboard_allowed(false, false, false));
+    }
+
+    #[test]
+    fn local_egui_keyboard_capture_always_blocks_remote_keys() {
+        assert!(!remote_keyboard_allowed(true, true, true));
+        assert!(!remote_keyboard_allowed(false, true, true));
+        assert!(!remote_keyboard_allowed(true, false, true));
     }
 
     #[test]
