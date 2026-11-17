@@ -1041,24 +1041,37 @@ impl M1RuntimeSession {
         self.stream_audio()
     }
 
-    /// Cheap pre-check ("is a session even active at all") run before
-    /// expensive work (polling telemetry samples, reading the audio
-    /// device) that shouldn't happen for a session that can't possibly
-    /// use the result. Intentionally coarse and shared across the frame/
-    /// telemetry/audio forward paths -- it does NOT check which
-    /// permission tier is granted, only that *some* session is active.
-    /// The real per-tier enforcement is `allow_frame_flow`/
-    /// `allow_telemetry_flow`/`allow_audio_flow`, called after the work
-    /// is done and right before the sealed envelope is actually sent.
+    /// Check the screen-view lane before beginning host screen capture.
+    /// The final `allow_frame_flow` check still runs immediately before send.
     pub(crate) fn preflight_frame_flow(&self) -> Result<(), M1RuntimeError> {
-        if self.session.state() == M1SessionState::Active {
-            Ok(())
-        } else {
-            Err(M1RuntimeError::Session(M1SessionError::PermissionDenied {
-                state: self.session.state(),
-                permission: M1Permission::StreamFrame,
-            }))
-        }
+        self.preflight_permission(M1Permission::StreamFrame)
+    }
+
+    /// Check telemetry authority before polling host telemetry sources.
+    pub(crate) fn preflight_telemetry_flow(&self) -> Result<(), M1RuntimeError> {
+        self.preflight_permission(M1Permission::StreamTelemetry)
+    }
+
+    /// Check audio authority before reading the audio source.
+    pub(crate) fn preflight_audio_flow(&self) -> Result<(), M1RuntimeError> {
+        self.preflight_permission(M1Permission::StreamAudio)
+    }
+
+    /// Check clipboard-disclosure authority before reading the host clipboard.
+    pub(crate) fn preflight_host_clipboard_read_flow(
+        &self,
+    ) -> Result<(), M1RuntimeError> {
+        self.preflight_permission(M1Permission::ReadHostClipboard)
+    }
+
+    /// Check input authority before decoding and processing viewer input.
+    pub(crate) fn preflight_input_flow(&self) -> Result<(), M1RuntimeError> {
+        self.preflight_permission(M1Permission::InjectInput)
+    }
+
+    fn preflight_permission(&self, permission: M1Permission) -> Result<(), M1RuntimeError> {
+        self.session.require_permission(permission)?;
+        Ok(())
     }
 
     pub(crate) fn allow_input_flow(&mut self) -> Result<(), M1RuntimeError> {
