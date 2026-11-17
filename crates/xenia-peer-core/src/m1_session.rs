@@ -122,9 +122,9 @@ impl M1Permission {
             | Self::StreamAudio
             | Self::ReadHostClipboard
             | Self::SendFileToViewer => M1DataDirection::HostToViewer,
-            Self::InjectInput
-            | Self::WriteHostClipboard
-            | Self::ReceiveFileFromViewer => M1DataDirection::ViewerToHost,
+            Self::InjectInput | Self::WriteHostClipboard | Self::ReceiveFileFromViewer => {
+                M1DataDirection::ViewerToHost
+            }
         }
     }
 }
@@ -1179,5 +1179,4 @@ mod tests {
             }
         }
     }
-
 }
