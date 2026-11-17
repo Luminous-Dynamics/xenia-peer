@@ -237,8 +237,8 @@ pub(crate) async fn handle_envelope(
                 "transfer accepted, streaming chunks"
             );
             loop {
-                if let Err(err) = m1_runtime.lock().await.allow_file_send_flow() {
-                    warn!(error = %err, "outgoing file transfer halted by M1 consent gate");
+                if let Err(err) = m1_runtime.lock().await.preflight_file_send_flow() {
+                    warn!(error = %err, "outgoing file transfer halted before reading the next chunk");
                     return Ok(());
                 }
                 let Some(chunk) = transfer.source.next_chunk(FILE_TRANSFER_CHUNK_SIZE).await?
@@ -251,13 +251,25 @@ pub(crate) async fn handle_envelope(
                     data: chunk.data,
                 };
                 let envelope = session.lock().await.seal_file_transfer_message(msg, true)?;
+                if let Err(err) = m1_runtime.lock().await.allow_file_send_flow() {
+                    warn!(error = %err, "outgoing file chunk rejected at the send boundary");
+                    return Ok(());
+                }
                 send_half.send_envelope(&envelope).await?;
+            }
+            if let Err(err) = m1_runtime.lock().await.preflight_file_send_flow() {
+                warn!(error = %err, "outgoing file transfer revoked before completion signal");
+                return Ok(());
             }
             let complete = FileTransferMessage::Complete { transfer_id };
             let envelope = session
                 .lock()
                 .await
                 .seal_file_transfer_message(complete, true)?;
+            if let Err(err) = m1_runtime.lock().await.preflight_file_send_flow() {
+                warn!(error = %err, "outgoing file transfer revoked before completion send");
+                return Ok(());
+            }
             send_half.send_envelope(&envelope).await?;
             info!(transfer_id, "all chunks sent, awaiting verification");
         }
