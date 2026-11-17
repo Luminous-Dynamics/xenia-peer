@@ -178,6 +178,18 @@ Do not replace established authorization interfaces. Map this profile to the ind
 
 The differentiator is not another policy language or another central PDP. It is an interoperable, sovereignty-aware authority lineage whose narrowing rules and revocation consequences are checked at the place where each effect is committed. External PDPs may contribute a decision; they do not mint host authority, override local revocation, or attest that an operation succeeded.
 
+
+
+### Comparative interpretation
+
+- **AuthZEN** is the interoperability boundary, not the delegation store. Its Authorization API 1.0 is a final OpenID specification; map Xenia operations into its subject/action/resource/context request and keep the local enforcement point responsible for the effect. The working-group approval of the final specification was announced in January 2026.
+- **OPA** already documents a roughly 1 ms decision budget for some microservice authorization cases and provides `opa bench`, profiling, percentiles and allocation/memory metrics. The simple sample in its documentation is not a fair direct baseline for a parent-lineage workload; use the same fixtures and request graph for comparisons.
+- **Cedar** provides schema-based policy validation and describes validation soundness, backed by a Lean validator and differential testing. We should reuse Cedar for policy validation or as an adapter where useful, rather than inventing a policy language. Our reference model's job is to qualify delegation lineage and effect semantics that sit around the PDP.
+- **SPIFFE/SPIRE** solves portable workload identity, not authorization policy. Keep identity issuance and authorization separate; do not mistake a valid workload identity for a valid delegation.
+- **OpenFGA** is a strong relationship-based baseline. Pin the exact engine/model version and consistency settings; its 2026 weighted-graph resolution rollout and experimental dynamic tuple conditions make version pinning especially important for reproducibility.
+
+The model's current microbenchmark measures local lineage evaluation only. It does not yet measure allocations, memory, network propagation, or concurrency. Those must be added before any broad performance comparison. Its current benchmark harness is a starting measurement instrument, not a completed SOTA bake-off.
+
 ## 15. Benchmark protocol and aspirational targets
 
 All targets below are proposed engineering goals, not measured results or industry-leading claims. Publish the harness, frozen fixtures, environment, raw samples, denominators, and exact tested commit for every run.
