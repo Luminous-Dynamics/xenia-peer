@@ -458,6 +458,10 @@ pub struct ViewerApp {
     // Input capture (mouse / keyboard -> daemon). `None` means input
     // is disabled client-side (no channel was wired up).
     input_tx: Option<tokio::sync::mpsc::Sender<InputEvent>>,
+    dropped_pointer_motion: u64,
+    last_stateful_enqueue_wait: std::time::Duration,
+    max_stateful_enqueue_wait: std::time::Duration,
+    input_channel_closed: bool,
     remote_input: RemoteInputState,
     // On-screen rect of the last-rendered frame image, used to
     // normalize pointer coordinates and to ignore pointer activity
@@ -491,6 +495,10 @@ impl ViewerApp {
             last_audio: None,
             recent_frame_instants: std::collections::VecDeque::with_capacity(64),
             input_tx,
+            dropped_pointer_motion: 0,
+            last_stateful_enqueue_wait: std::time::Duration::ZERO,
+            max_stateful_enqueue_wait: std::time::Duration::ZERO,
+            input_channel_closed: false,
             remote_input: RemoteInputState::default(),
             image_rect: None,
             last_pointer_pos: None,
@@ -516,21 +524,45 @@ impl ViewerApp {
 
     /// Enqueue lossy pointer motion without blocking the GUI. Saturation drops
     /// the newest motion sample; a later sample supersedes it spatially.
-    fn send_lossy_input(&self, event: InputEvent) {
-        if let Some(tx) = &self.input_tx {
-            let _ = tx.try_send(event);
+    fn send_lossy_input(&mut self, event: InputEvent) {
+        if self.input_channel_closed {
+            return;
+        }
+        let Some(result) = self.input_tx.as_ref().map(|tx| tx.try_send(event)) else {
+            self.input_channel_closed = true;
+            return;
+        };
+        match result {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                self.dropped_pointer_motion = self.dropped_pointer_motion.saturating_add(1);
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                self.input_channel_closed = true;
+            }
         }
     }
 
     /// Enqueue a state transition with bounded backpressure. Key/button
     /// press/release events must not be silently discarded under saturation,
-    /// because doing so can leave remote input logically stuck. This runs only
-    /// on eframe's synchronous GUI thread; the network sender itself has V12's
-    /// finite send-stall timeout, so a disconnected/stalled receiver eventually
-    /// closes this channel instead of allowing unbounded memory growth.
-    fn send_stateful_input(&self, event: InputEvent) {
-        if let Some(tx) = &self.input_tx {
-            let _ = tx.blocking_send(event);
+    /// because doing so can leave remote input logically stuck. The wait is
+    /// measured locally so GUI stalls are observable; this method deliberately
+    /// retains the existing blocking policy until a protocol-level recovery
+    /// path can guarantee remote release on overflow.
+    fn send_stateful_input(&mut self, event: InputEvent) {
+        if self.input_channel_closed {
+            return;
+        }
+        let started = Instant::now();
+        let Some(result) = self.input_tx.as_ref().map(|tx| tx.blocking_send(event)) else {
+            self.input_channel_closed = true;
+            return;
+        };
+        let wait = started.elapsed();
+        self.last_stateful_enqueue_wait = wait;
+        self.max_stateful_enqueue_wait = self.max_stateful_enqueue_wait.max(wait);
+        if result.is_err() {
+            self.input_channel_closed = true;
         }
     }
 
@@ -745,6 +777,21 @@ impl eframe::App for ViewerApp {
                 ui.label(format!("last wire: {} B", self.last_wire_bytes));
                 ui.separator();
                 ui.label(format!("fps: {:.1}", self.fps()));
+                ui.separator();
+                ui.label(format!(
+                    "input queue wait: {:.2} ms (max {:.2} ms)",
+                    self.last_stateful_enqueue_wait.as_secs_f64() * 1_000.0,
+                    self.max_stateful_enqueue_wait.as_secs_f64() * 1_000.0
+                ));
+                ui.separator();
+                ui.label(format!(
+                    "pointer samples dropped: {}",
+                    self.dropped_pointer_motion
+                ));
+                if self.input_channel_closed {
+                    ui.separator();
+                    ui.colored_label(egui::Color32::LIGHT_RED, "input channel closed");
+                }
             });
         });
 
@@ -917,6 +964,81 @@ mod tests {
         assert!(!remote_keyboard_allowed(true, true, true));
         assert!(!remote_keyboard_allowed(false, true, true));
         assert!(!remote_keyboard_allowed(true, false, true));
+    }
+
+    #[test]
+    fn lossy_pointer_motion_counts_full_queue_without_blocking() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        tx.try_send(InputEvent::PointerMove { x: 0.1, y: 0.2 }).unwrap();
+        let mut app = ViewerApp::new(
+            FrameSlot::new(),
+            ViewerConfig {
+                codec: "test".into(),
+                transport: "test".into(),
+                peer_addr: "test".into(),
+            },
+            None,
+            Box::new(crate::NullAudioSink::default()),
+            Some(tx),
+        );
+
+        app.send_lossy_input(InputEvent::PointerMove { x: 0.3, y: 0.4 });
+
+        assert_eq!(app.dropped_pointer_motion, 1);
+        assert!(!app.input_channel_closed);
+    }
+
+    #[test]
+    fn closed_input_receiver_is_reported_and_not_retried() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+        let mut app = ViewerApp::new(
+            FrameSlot::new(),
+            ViewerConfig {
+                codec: "test".into(),
+                transport: "test".into(),
+                peer_addr: "test".into(),
+            },
+            None,
+            Box::new(crate::NullAudioSink::default()),
+            Some(tx),
+        );
+
+        app.send_stateful_input(InputEvent::Key {
+            code: 30,
+            pressed: true,
+            modifiers: 0,
+        });
+        assert!(app.input_channel_closed);
+        app.send_lossy_input(InputEvent::PointerMove { x: 0.5, y: 0.5 });
+        assert_eq!(app.dropped_pointer_motion, 0);
+    }
+
+    #[test]
+    fn stateful_enqueue_wait_is_recorded_without_changing_delivery_policy() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let mut app = ViewerApp::new(
+            FrameSlot::new(),
+            ViewerConfig {
+                codec: "test".into(),
+                transport: "test".into(),
+                peer_addr: "test".into(),
+            },
+            None,
+            Box::new(crate::NullAudioSink::default()),
+            Some(tx),
+        );
+
+        app.send_stateful_input(InputEvent::Key {
+            code: 30,
+            pressed: true,
+            modifiers: 0,
+        });
+
+        assert!(rx.try_recv().is_ok());
+        assert!(app.last_stateful_enqueue_wait >= std::time::Duration::ZERO);
+        assert!(app.max_stateful_enqueue_wait >= app.last_stateful_enqueue_wait);
+        assert!(!app.input_channel_closed);
     }
 
     #[test]
