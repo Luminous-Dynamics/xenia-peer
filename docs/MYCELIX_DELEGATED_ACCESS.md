@@ -225,3 +225,61 @@ The likely advantage to pursue is not raw PDP latency alone: it is a stronger en
 ## 16. Deterministic reference model
 
 A standalone, dependency-light Rust policy oracle, adversarial unit tests and a lineage-depth microbenchmark live in `research/revocable-access-model/` and are tracked by Xenia #501. The benchmark reports per-depth p50/p95/p99/max latency; it is a measurement harness, not a result or proof of comparative superiority. It models exact resource equality, parent attenuation, local revocation, epochs, three-valued decisions and OR/AND composition. It is deliberately not a production authorization service and does not qualify cryptography, Holochain, DHT convergence, or OS enforcement. CI/test results must be attached to the exact tested commit before any qualification claim.
+
+
+## 17. AuthZEN adapter contract (proposed)
+
+AuthZEN 1.0 exposes a boolean decision (`true` or `false`) between a PDP and PEP. The local Mycelix/Xenia decision type remains three-valued. The adapter MUST map a valid `false` to Denied; a valid `true` to a *PDP permit input only*; and timeout, transport failure, malformed response, invalid metadata/signature, unsupported mandatory obligation or incomplete request context to Indeterminate. Indeterminate is never converted to Permit. AuthZEN does not replace local delegation-lineage and effect-boundary checks.
+
+Example request mapping (illustrative profile values, not a registered AuthZEN vocabulary):
+
+```json
+{
+  "subject": {
+    "type": "xenia-delegate",
+    "id": "did:example:delegate-bob",
+    "properties": {
+      "principal_id": "did:example:principal-alice",
+      "delegation_id": "delegation:sha256:...",
+      "authority_epoch": 42
+    }
+  },
+  "action": {
+    "name": "xenia.remote.input",
+    "properties": {
+      "lane": "input",
+      "direction": "viewer-to-host",
+      "mode": "execute"
+    }
+  },
+  "resource": {
+    "type": "xenia-host",
+    "id": "host-key-fingerprint:...",
+    "properties": {
+      "sovereignty_domain": "home-network-a",
+      "resource_id": "device-123"
+    }
+  },
+  "context": {
+    "purpose": "consented-support-session",
+    "session_fingerprint": "sha256:...",
+    "parent_lineage_commitment": "sha256:...",
+    "consent_record_id": "consent:...",
+    "authority_epoch": 42,
+    "policy_profile_digest": "sha256:..."
+  }
+}
+```
+
+Mapping rules:
+
+1. Subject is the authenticated delegate/workload acting now; principal and delegation lineage are bound as context/properties, not collapsed into one identity.
+2. Action is a stable operation name plus exact lane, direction and proposal/execute mode. Do not map generic `remoteAccess` to every lane.
+3. Resource identifies the exact host and sovereignty domain. Avoid ambiguous display names or wildcard resource IDs.
+4. Context carries purpose, consent reference, session fingerprint, authority epoch and immutable policy/delegation commitments. Never include CapSecret, private CapClaim material or other bearer secrets.
+5. A PDP `true` does not mint a capability. Mycelix lineage validation, Xenia session/lane admission and host effect authorization still run locally.
+6. A response context may contain obligations. Every mandatory obligation must be understood and satisfied by the PEP; unsupported mandatory obligations cause a non-permit result. Profile-specific obligation names must be namespaced and versioned rather than pretending to be registered AuthZEN core fields.
+7. Cache keys bind the complete request and policy/delegation digests. Cache lifetime cannot exceed the shortest underlying delegation/session lease; revocation or epoch change invalidates the entry.
+8. Evaluate again at the protected effect commit boundary. A PDP permit obtained at session start is not a standing execution token.
+
+This adapter lets deployments use AuthZEN-compatible PDPs without making Mycelix a proprietary PDP protocol or delegating the host's final authority to a remote service.
