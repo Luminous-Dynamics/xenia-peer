@@ -31,6 +31,24 @@ pub enum Right {
     Administer,
 }
 
+/// Direction is part of the operation identity, not a UI hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Direction {
+    HostToDelegate,
+    DelegateToHost,
+    HostLocal,
+}
+
+impl Right {
+    pub const fn direction(self) -> Direction {
+        match self {
+            Self::View | Self::ClipboardRead | Self::FileRead => Direction::HostToDelegate,
+            Self::Input | Self::ClipboardWrite | Self::FileWrite => Direction::DelegateToHost,
+            Self::Administer => Direction::HostLocal,
+        }
+    }
+}
+
 /// Proposal-only authority cannot be upgraded to execution authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AuthorityMode {
@@ -88,6 +106,7 @@ pub enum Failure {
     InvalidStatement,
     WrongResource,
     RightNotGranted,
+    DirectionMismatch,
     PurposeMismatch,
     ExecutionNotGranted,
 }
@@ -103,6 +122,7 @@ pub struct Evaluation {
 pub struct AccessRequest {
     pub resource: Resource,
     pub right: Right,
+    pub direction: Direction,
     pub purpose: String,
     pub requires_execution: bool,
 }
@@ -233,6 +253,7 @@ impl AuthorityState {
         let grant = &self.grants[id];
         if grant.resource != request.resource { return Evaluation::denied(Failure::WrongResource); }
         if !grant.rights.contains(&request.right) { return Evaluation::denied(Failure::RightNotGranted); }
+        if request.direction != request.right.direction() { return Evaluation::denied(Failure::DirectionMismatch); }
         if grant.purpose != request.purpose { return Evaluation::denied(Failure::PurposeMismatch); }
         if request.requires_execution && grant.mode != AuthorityMode::Execute {
             return Evaluation::denied(Failure::ExecutionNotGranted);
@@ -445,11 +466,12 @@ mod tests {
         let s = state();
         let request = AccessRequest {
             resource: Resource { domain: "home-a".into(), id: "host-1".into() },
-            right: Right::Input, purpose: "support-session".into(), requires_execution: true,
+            right: Right::Input, direction: Direction::DelegateToHost, purpose: "support-session".into(), requires_execution: true,
         };
         assert_eq!(s.evaluate_request("child", &request, 500).decision, Decision::Denied);
         let mut view = request.clone();
         view.right = Right::View;
+        view.direction = Direction::HostToDelegate;
         assert_eq!(s.evaluate_request("child", &view, 500).decision, Decision::Allowed);
         view.resource.id = "host-2".into();
         assert_eq!(s.evaluate_request("child", &view, 500).failure, Some(Failure::WrongResource));
@@ -461,7 +483,7 @@ mod tests {
         s.grants.get_mut("root").unwrap().mode = AuthorityMode::ProposeOnly;
         let request = AccessRequest {
             resource: Resource { domain: "home-a".into(), id: "host-1".into() },
-            right: Right::View, purpose: "support-session".into(), requires_execution: true,
+            right: Right::View, direction: Direction::HostToDelegate, purpose: "support-session".into(), requires_execution: true,
         };
         assert_eq!(s.evaluate_request("root", &request, 500).failure, Some(Failure::ExecutionNotGranted));
     }
@@ -618,6 +640,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn requested_direction_must_match_the_semantics_of_the_right() {
+        let s = state();
+        let request = AccessRequest {
+            resource: Resource { domain: "home-a".into(), id: "host-1".into() },
+            right: Right::View,
+            direction: Direction::DelegateToHost,
+            purpose: "support-session".into(),
+            requires_execution: true,
+        };
+        assert_eq!(
+            s.evaluate_request("child", &request, 500).failure,
+            Some(Failure::DirectionMismatch)
+        );
     }
 
 }
