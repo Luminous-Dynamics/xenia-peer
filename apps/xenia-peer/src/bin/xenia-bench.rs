@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     env,
     error::Error,
     ffi::OsStr,
@@ -14,6 +14,10 @@ use std::{
 const HARNESS_VERSION: &str = "0.1.0";
 const PROFILE_SCHEMA: &str = "xenia-benchmark-profile/v0.1";
 const RUN_SCHEMA: &str = "xenia-benchmark-run/v1";
+const I2P_TRACE_SCHEMA: &str = "xenia-i2p-trace/v1";
+const I2P_CALIBRATION_SCHEMA: &str = "xenia-i2p-calibration/v1";
+const I2P_MIN_VALID_TRIALS: usize = 300;
+const I2P_BOOTSTRAP_RESAMPLES: usize = 2_000;
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -65,10 +69,10 @@ fn run() -> AppResult<()> {
             let output = PathBuf::from(required_option(&options, "--out")?);
             let host_label = options.get("--host-label").cloned();
 
-            let profile_bytes = fs::read(&profile_path)?;
+            let profile_bytes = fs::read(profile_path)?;
             let profile: Value = serde_json::from_slice(&profile_bytes)?;
             validate_profile(&profile)?;
-            let selected = find_profile(&profile, &profile_id)?;
+            let selected = find_profile(&profile, profile_id)?;
             let source = git_snapshot(&repo);
             let host = host_snapshot(host_label);
 
@@ -94,7 +98,7 @@ fn run() -> AppResult<()> {
                 .and_then(|s| s.get(..12))
                 .unwrap_or("unknown");
             let run_id = format!("{profile_id}-{now_ms}-{commit_short}");
-            let required = required_measurements(&profile_id)?;
+            let required = required_measurements(profile_id)?;
             let output_dir = output
                 .parent()
                 .filter(|p| !p.as_os_str().is_empty())
@@ -102,7 +106,9 @@ fn run() -> AppResult<()> {
             let profile_artifact_name = format!("{run_id}.profile.json");
             let profile_artifact_path = output_dir.join(&profile_artifact_name);
             if output == profile_artifact_path {
-                return Err(app_error("run packet path collides with its embedded profile artifact"));
+                return Err(app_error(
+                    "run packet path collides with its embedded profile artifact",
+                ));
             }
             write_new_file(&profile_artifact_path, &profile_bytes)?;
             let profile_digest = match sha256_file(&profile_artifact_path) {
@@ -155,6 +161,10 @@ fn run() -> AppResult<()> {
             );
             Ok(())
         }
+        "import-i2p" => {
+            let options = parse_options(args)?;
+            import_i2p(&options)
+        }
         "check-run" => {
             let path = args
                 .next()
@@ -170,10 +180,13 @@ fn run() -> AppResult<()> {
                 .filter(|p| !p.as_os_str().is_empty())
                 .unwrap_or(Path::new("."));
             if packet["artifacts"].as_array().is_none_or(Vec::is_empty) {
-                return Err(app_error("run packet requires an embedded qualification profile artifact"));
+                return Err(app_error(
+                    "run packet requires an embedded qualification profile artifact",
+                ));
             }
             verify_artifacts_on_disk(&packet, run_dir)?;
             verify_profile_binding(&packet, run_dir)?;
+            verify_physical_latency_binding(&packet, run_dir)?;
             let result = json!({
                 "validation": "CONSISTENT",
                 "result_state": state,
@@ -204,7 +217,8 @@ fn print_usage() {
          Commands:\n\
            validate-profile <profile.json>\n\
            prepare-run --profile <profile.json> --profile-id <id> --repo <path> --out <run.json> [--host-label <label>]\n\
-           check-run <run.json>\n"
+           check-run <run.json>\n\
+           import-i2p --run <run.json> --trace <trace.json> --calibration <calibration.json> --out <updated-run.json>\n"
     );
 }
 
@@ -219,7 +233,7 @@ fn parse_options(
     args: impl Iterator<Item = String>,
 ) -> AppResult<std::collections::BTreeMap<String, String>> {
     let values: Vec<String> = args.collect();
-    if values.len() % 2 != 0 {
+    if !values.len().is_multiple_of(2) {
         return Err(app_error("options must be supplied as --name value pairs"));
     }
     let mut options = std::collections::BTreeMap::new();
@@ -242,6 +256,9 @@ fn parse_options(
             "--repo",
             "--out",
             "--host-label",
+            "--run",
+            "--trace",
+            "--calibration",
         ]
         .contains(&key.as_str())
         {
@@ -286,11 +303,12 @@ fn validate_profile(profile: &Value) -> AppResult<()> {
             .as_str()
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| app_error("each network profile needs a non-empty id"))?;
-        if !id
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-'))
-        {
-            return Err(app_error(format!("profile id contains unsafe characters: {id}")));
+        if !id.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        }) {
+            return Err(app_error(format!(
+                "profile id contains disallowed characters: {id}"
+            )));
         }
         if !ids.insert(id.to_string()) {
             return Err(app_error(format!("duplicate network profile id: {id}")));
@@ -428,6 +446,653 @@ fn required_measurements(profile_id: &str) -> AppResult<Vec<&'static str>> {
     Ok(names)
 }
 
+/// Import a physically measured input-to-photon trace into a new, BLOCKED run packet.
+///
+/// Raw trace and calibration bytes are copied verbatim into digest-named artifacts
+/// beside the output packet. Existing input files and the source run packet are
+/// never overwritten.
+fn import_i2p(options: &std::collections::BTreeMap<String, String>) -> AppResult<()> {
+    let run_path = PathBuf::from(required_option(options, "--run")?);
+    let trace_path = PathBuf::from(required_option(options, "--trace")?);
+    let calibration_path = PathBuf::from(required_option(options, "--calibration")?);
+    let output_path = PathBuf::from(required_option(options, "--out")?);
+
+    let run_bytes = fs::read(&run_path)?;
+    let trace_bytes = fs::read(&trace_path)?;
+    let calibration_bytes = fs::read(&calibration_path)?;
+    let mut packet: Value = serde_json::from_slice(&run_bytes)
+        .map_err(|error| app_error(format!("run packet is invalid JSON: {error}")))?;
+    let trace: Value = serde_json::from_slice(&trace_bytes)
+        .map_err(|error| app_error(format!("I2P trace is invalid JSON: {error}")))?;
+    let calibration: Value = serde_json::from_slice(&calibration_bytes)
+        .map_err(|error| app_error(format!("calibration artifact is invalid JSON: {error}")))?;
+
+    validate_run_packet(&packet)?;
+    if packet["result_state"].as_str() != Some("BLOCKED") {
+        return Err(app_error(
+            "I2P import only accepts a BLOCKED run packet; it never mutates a PASS or FAIL result",
+        ));
+    }
+    let profile_id = packet["profile_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    if !required_measurements(&profile_id)?.contains(&"input_to_photon_p95_ms") {
+        return Err(app_error(format!(
+            "profile {profile_id} does not require physical input-to-photon measurement"
+        )));
+    }
+
+    let run_dir = run_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let run_dir = fs::canonicalize(run_dir)?;
+    verify_artifacts_on_disk(&packet, &run_dir)?;
+    verify_profile_binding(&packet, &run_dir)?;
+
+    let run_file = fs::canonicalize(&run_path)?;
+    let output_parent = output_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let output_parent = fs::canonicalize(output_parent)?;
+    if output_parent != run_dir {
+        return Err(app_error(
+            "the output run packet must be written beside the original packet so all relative artifact paths remain contained",
+        ));
+    }
+    let output_name = output_path
+        .file_name()
+        .ok_or_else(|| app_error("output run packet must have a file name"))?;
+    if run_dir.join(output_name) == run_file {
+        return Err(app_error(
+            "I2P import must write a new run packet; the source packet is immutable",
+        ));
+    }
+    if output_path.exists() {
+        return Err(app_error(
+            "output run packet already exists; refusing to overwrite",
+        ));
+    }
+
+    let trace_digest = sha256_file(&trace_path)?;
+    let calibration_digest = sha256_file(&calibration_path)?;
+    let summary = validate_i2p_trace(
+        &trace,
+        &calibration,
+        &trace_digest,
+        &calibration_digest,
+        &packet,
+    )?;
+
+    let trace_name = format!("physical-i2p-trace-{trace_digest}.json");
+    let calibration_name = format!("physical-i2p-calibration-{calibration_digest}.json");
+    write_or_verify_artifact_copy(&run_dir.join(&trace_name), &trace_bytes, &trace_digest)?;
+    write_or_verify_artifact_copy(
+        &run_dir.join(&calibration_name),
+        &calibration_bytes,
+        &calibration_digest,
+    )?;
+
+    let artifacts = packet["artifacts"]
+        .as_array_mut()
+        .ok_or_else(|| app_error("run packet artifact list is missing"))?;
+    if artifacts.iter().any(|artifact| {
+        matches!(
+            artifact["role"].as_str(),
+            Some("physical_latency_trace" | "instrument_calibration")
+        )
+    }) {
+        return Err(app_error(
+            "run packet already contains a physical latency trace; create a fresh run packet for a new instrument run",
+        ));
+    }
+    artifacts.push(json!({
+        "role": "physical_latency_trace",
+        "path": trace_name,
+        "sha256": trace_digest
+    }));
+    artifacts.push(json!({
+        "role": "instrument_calibration",
+        "path": calibration_name,
+        "sha256": calibration_digest
+    }));
+
+    let p95_ms = summary["p95_ms"]
+        .as_f64()
+        .ok_or_else(|| app_error("internal I2P summary has no p95_ms"))?;
+    if !packet["measurements"].is_object() {
+        packet["measurements"] = json!({});
+    }
+    packet["measurements"]["input_to_photon_p50_ms"] = summary["p50_ms"].clone();
+    packet["measurements"]["input_to_photon_p95_ms"] = json!(p95_ms);
+    packet["measurements"]["input_to_photon_p99_ms"] = summary["p99_ms"].clone();
+    packet["measurements"]["input_to_photon_max_ms"] = summary["max_ms"].clone();
+    packet["measurements"]["input_to_photon_p95_ci95_lower_ms"] =
+        summary["p95_ci_95_ms"]["lower"].clone();
+    packet["measurements"]["input_to_photon_p95_ci95_upper_ms"] =
+        summary["p95_ci_95_ms"]["upper"].clone();
+    packet["latency_measurement"] = summary.clone();
+    packet["physical_latency_import"] = json!({
+        "state": "IMPORTED_PARTIAL_EVIDENCE",
+        "trace_sha256": trace_digest,
+        "calibration_sha256": calibration_digest,
+        "valid_trial_count": summary["valid_trial_count"],
+        "rejected_trial_count": summary["rejected_trial_count"]
+    });
+
+    // Importing one measurement must not elevate the overall run. The adapter,
+    // full sample packet, remaining metrics and profile thresholds still need
+    // independent evidence.
+    packet["result_state"] = json!("BLOCKED");
+    if !packet["blockers"].is_array() {
+        packet["blockers"] = json!([]);
+    }
+    let blockers = packet["blockers"]
+        .as_array_mut()
+        .ok_or_else(|| app_error("blockers must be an array"))?;
+    for blocker in blockers.iter_mut() {
+        if blocker.as_str()
+            == Some(
+                "No Xenia capture-to-display / input-to-photon measurement adapter is registered; this command prepares an evidence packet only.",
+            )
+        {
+            *blocker = json!(
+                "No full Xenia performance measurement adapter is registered. A physical I2P trace may be imported separately, but the complete profile remains unmeasured."
+            );
+        }
+    }
+    blockers.push(json!("Physical I2P evidence imported. Overall qualification remains BLOCKED until every other required metric and adapter evidence is supplied."));
+
+    let rendered = serde_json::to_vec_pretty(&packet)?;
+    write_new_file(&output_path, &rendered)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "import_state": "IMPORTED_PARTIAL_EVIDENCE",
+            "result_state": "BLOCKED",
+            "profile_id": profile_id,
+            "valid_trial_count": summary["valid_trial_count"],
+            "rejected_trial_count": summary["rejected_trial_count"],
+            "input_to_photon_p50_ms": summary["p50_ms"],
+            "input_to_photon_p95_ms": summary["p95_ms"],
+            "input_to_photon_p99_ms": summary["p99_ms"],
+            "input_to_photon_p95_ci95_ms": summary["p95_ci_95_ms"],
+            "output": output_path.display().to_string(),
+            "trace_sha256": trace_digest,
+            "calibration_sha256": calibration_digest
+        }))?
+    );
+    Ok(())
+}
+
+fn write_or_verify_artifact_copy(
+    path: &Path,
+    bytes: &[u8],
+    expected_digest: &str,
+) -> AppResult<()> {
+    if path.exists() {
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            return Err(app_error(
+                "digest-named evidence artifact must be a regular file, not a symlink or special file",
+            ));
+        }
+        let observed = sha256_file(path)?;
+        if !observed.eq_ignore_ascii_case(expected_digest) {
+            return Err(app_error(format!(
+                "digest-named evidence artifact already exists with different bytes: {}",
+                path.display()
+            )));
+        }
+        return Ok(());
+    }
+    write_new_file(path, bytes)?;
+    let observed = sha256_file(path)?;
+    if !observed.eq_ignore_ascii_case(expected_digest) {
+        let _ = fs::remove_file(path);
+        return Err(app_error(
+            "copied evidence artifact failed its post-write digest check",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_i2p_trace(
+    trace: &Value,
+    calibration: &Value,
+    trace_digest: &str,
+    calibration_digest: &str,
+    packet: &Value,
+) -> AppResult<Value> {
+    if trace["schema_version"].as_str() != Some(I2P_TRACE_SCHEMA) {
+        return Err(app_error(format!(
+            "expected I2P trace schema_version {I2P_TRACE_SCHEMA}"
+        )));
+    }
+    if calibration["schema_version"].as_str() != Some(I2P_CALIBRATION_SCHEMA) {
+        return Err(app_error(format!(
+            "expected calibration schema_version {I2P_CALIBRATION_SCHEMA}"
+        )));
+    }
+    if !is_hex_digest(trace_digest, 64) || !is_hex_digest(calibration_digest, 64) {
+        return Err(app_error(
+            "trace and calibration must have verified SHA-256 digests",
+        ));
+    }
+    if trace["calibration_sha256"].as_str() != Some(calibration_digest) {
+        return Err(app_error(
+            "trace calibration_sha256 does not match the supplied calibration artifact bytes",
+        ));
+    }
+
+    let run_id = packet["run_id"]
+        .as_str()
+        .ok_or_else(|| app_error("run packet run_id is missing"))?;
+    if trace["run_id"].as_str() != Some(run_id) {
+        return Err(app_error(
+            "I2P trace run_id does not match the target run packet",
+        ));
+    }
+    let profile_id = packet["profile_id"]
+        .as_str()
+        .ok_or_else(|| app_error("run packet profile_id is missing"))?;
+    if trace["profile_id"].as_str() != Some(profile_id) {
+        return Err(app_error(
+            "I2P trace profile_id does not match the target run packet",
+        ));
+    }
+    if trace["condition_id"]
+        .as_str()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        return Err(app_error("I2P trace requires a non-empty condition_id"));
+    }
+
+    let measured_at = trace["measurement_unix_ms"]
+        .as_u64()
+        .ok_or_else(|| app_error("I2P trace requires measurement_unix_ms"))?;
+    let instrument = &trace["instrument"];
+    let instrument_id = instrument["id"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| app_error("I2P trace requires instrument.id"))?;
+    let firmware_version = instrument["firmware_version"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| app_error("I2P trace requires instrument.firmware_version"))?;
+    let tool_version = instrument["tool_version"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| app_error("I2P trace requires instrument.tool_version"))?;
+    let method = instrument["method"]
+        .as_str()
+        .ok_or_else(|| app_error("I2P trace requires instrument.method"))?;
+    if calibration["instrument_id"].as_str() != Some(instrument_id) {
+        return Err(app_error(
+            "calibration instrument_id does not match the trace instrument",
+        ));
+    }
+    if calibration["method"].as_str() != Some(method) {
+        return Err(app_error(
+            "calibration method does not match the trace method",
+        ));
+    }
+    let calibration_id = calibration["calibration_id"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| app_error("calibration requires calibration_id"))?;
+    let valid_from = calibration["valid_from_unix_ms"]
+        .as_u64()
+        .ok_or_else(|| app_error("calibration requires valid_from_unix_ms"))?;
+    let valid_until = calibration["valid_until_unix_ms"]
+        .as_u64()
+        .ok_or_else(|| app_error("calibration requires valid_until_unix_ms"))?;
+    if valid_from > valid_until || measured_at < valid_from || measured_at > valid_until {
+        return Err(app_error(
+            "calibration is expired or not yet valid at the trace measurement time",
+        ));
+    }
+    let calibration_uncertainty = calibration["uncertainty_ns"]
+        .as_u64()
+        .ok_or_else(|| app_error("calibration requires uncertainty_ns"))?;
+
+    let timebase = &trace["timebase"];
+    let clock_source = timebase["clock_source"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| app_error("I2P trace requires timebase.clock_source"))?;
+    let counter_frequency_hz = timebase["counter_frequency_hz"]
+        .as_u64()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| app_error("timebase.counter_frequency_hz must be a positive integer"))?;
+    let clock_uncertainty = timebase["uncertainty_ns"]
+        .as_u64()
+        .ok_or_else(|| app_error("timebase requires uncertainty_ns"))?;
+    let total_uncertainty_ns = clock_uncertainty
+        .checked_add(calibration_uncertainty)
+        .ok_or_else(|| app_error("combined instrument uncertainty overflows u64"))?;
+
+    let sensor = &trace["sensor"];
+    let position = sensor["position"]
+        .as_str()
+        .filter(|value| matches!(*value, "top" | "centre" | "bottom"))
+        .ok_or_else(|| app_error("sensor.position must be top, centre or bottom"))?;
+    let clock_resolution_ns = sensor["clock_resolution_ns"]
+        .as_u64()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| app_error("sensor.clock_resolution_ns must be a positive integer"))?;
+    match method {
+        "photodiode" => {
+            if clock_resolution_ns > 1_000 {
+                return Err(app_error(
+                    "photodiode timer resolution must be 1000 ns or better",
+                ));
+            }
+            let bandwidth = sensor["bandwidth_hz"]
+                .as_u64()
+                .ok_or_else(|| app_error("photodiode trace requires sensor.bandwidth_hz"))?;
+            if bandwidth < 10_000 {
+                return Err(app_error(
+                    "photodiode sensor bandwidth must be at least 10 kHz",
+                ));
+            }
+        }
+        "high_speed_camera" => {
+            let frame_rate = sensor["frame_rate_fps"]
+                .as_u64()
+                .ok_or_else(|| app_error("camera trace requires sensor.frame_rate_fps"))?;
+            if frame_rate < 1_000 {
+                return Err(app_error(
+                    "high-speed camera must record at least 1000 frames per second",
+                ));
+            }
+        }
+        _ => {
+            return Err(app_error(
+                "instrument.method must be photodiode or high_speed_camera",
+            ));
+        }
+    }
+
+    let display = &trace["display"];
+    let width = display["width_px"]
+        .as_u64()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| app_error("display.width_px must be positive"))?;
+    let height = display["height_px"]
+        .as_u64()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| app_error("display.height_px must be positive"))?;
+    let refresh_hz = display["refresh_rate_hz"]
+        .as_f64()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .ok_or_else(|| app_error("display.refresh_rate_hz must be positive"))?;
+    let vrr_enabled = display["vrr_enabled"]
+        .as_bool()
+        .ok_or_else(|| app_error("display.vrr_enabled must be boolean"))?;
+    let hdr_enabled = display["hdr_enabled"]
+        .as_bool()
+        .ok_or_else(|| app_error("display.hdr_enabled must be boolean"))?;
+
+    let triggers = trace["triggers"]
+        .as_array()
+        .ok_or_else(|| app_error("I2P trace triggers must be an array"))?;
+    let transitions = trace["transitions"]
+        .as_array()
+        .ok_or_else(|| app_error("I2P trace transitions must be an array"))?;
+    if triggers.len() != transitions.len() {
+        return Err(app_error(
+            "every trigger must have exactly one sensor transition; unmatched event IDs are rejected",
+        ));
+    }
+
+    let mut event_ids = HashSet::new();
+    let mut trigger_markers = HashSet::new();
+    let mut transition_markers = HashSet::new();
+    let mut previous_sequence = None::<u64>;
+    let mut previous_trigger_tick = None::<u64>;
+    let mut previous_sensor_tick = None::<u64>;
+    let mut latency_ns = Vec::with_capacity(triggers.len());
+    let mut rejected_reasons = BTreeMap::<String, u64>::new();
+
+    for (index, trigger) in triggers.iter().enumerate() {
+        let transition = &transitions[index];
+        let event_id = trigger["event_id"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| app_error(format!("trigger {index} requires event_id")))?;
+        if !event_ids.insert(event_id.to_string()) {
+            return Err(app_error(format!("duplicate trigger event_id: {event_id}")));
+        }
+        if transition["event_id"].as_str() != Some(event_id) {
+            return Err(app_error(format!(
+                "trigger/transition event-ID join mismatch at index {index}"
+            )));
+        }
+
+        let sequence = trigger["sequence"]
+            .as_u64()
+            .ok_or_else(|| app_error(format!("trigger {event_id} requires sequence")))?;
+        if transition["sequence"].as_u64() != Some(sequence) {
+            return Err(app_error(format!(
+                "trigger/transition sequence mismatch for {event_id}"
+            )));
+        }
+        if previous_sequence.is_some_and(|previous| sequence <= previous) {
+            return Err(app_error("trigger sequence is duplicate or out of order"));
+        }
+        previous_sequence = Some(sequence);
+
+        let marker_id = trigger["expected_marker_id"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| app_error(format!("trigger {event_id} requires expected_marker_id")))?;
+        if !trigger_markers.insert(marker_id.to_string()) {
+            return Err(app_error(format!(
+                "duplicate expected marker ID: {marker_id}"
+            )));
+        }
+        let observed_marker_id = transition["observed_marker_id"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                app_error(format!("transition {event_id} requires observed_marker_id"))
+            })?;
+        if observed_marker_id != marker_id {
+            return Err(app_error(format!(
+                "stale or wrong visual marker for event {event_id}"
+            )));
+        }
+        if !transition_markers.insert(observed_marker_id.to_string()) {
+            return Err(app_error(format!(
+                "visual marker was replayed: {observed_marker_id}"
+            )));
+        }
+
+        let trigger_tick = trigger["trigger_tick"].as_u64().ok_or_else(|| {
+            app_error(format!(
+                "trigger {event_id} requires non-negative trigger_tick"
+            ))
+        })?;
+        let sensor_tick = transition["sensor_tick"].as_u64().ok_or_else(|| {
+            app_error(format!(
+                "transition {event_id} requires non-negative sensor_tick"
+            ))
+        })?;
+        if previous_trigger_tick.is_some_and(|previous| trigger_tick <= previous) {
+            return Err(app_error(
+                "trigger counter ticks are duplicate or out of order",
+            ));
+        }
+        if previous_sensor_tick.is_some_and(|previous| sensor_tick <= previous) {
+            return Err(app_error(
+                "sensor counter ticks are duplicate or out of order",
+            ));
+        }
+        previous_trigger_tick = Some(trigger_tick);
+        previous_sensor_tick = Some(sensor_tick);
+        if sensor_tick < trigger_tick {
+            return Err(app_error(format!(
+                "negative input-to-photon duration for event {event_id}"
+            )));
+        }
+
+        let valid = transition["valid"]
+            .as_bool()
+            .ok_or_else(|| app_error(format!("transition {event_id} requires boolean valid")))?;
+        if valid {
+            if !transition["rejection_reason"].is_null() {
+                return Err(app_error(format!(
+                    "valid transition {event_id} must not carry a rejection_reason"
+                )));
+            }
+            let delta_ticks = sensor_tick - trigger_tick;
+            let duration = (delta_ticks as u128)
+                .checked_mul(1_000_000_000)
+                .ok_or_else(|| app_error("I2P duration conversion overflow"))?
+                / (counter_frequency_hz as u128);
+            let duration = u64::try_from(duration)
+                .map_err(|_| app_error("I2P duration exceeds supported nanosecond range"))?;
+            latency_ns.push(duration);
+        } else {
+            let reason = transition["rejection_reason"]
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    app_error(format!(
+                        "invalid transition {event_id} requires rejection_reason"
+                    ))
+                })?;
+            *rejected_reasons.entry(reason.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    if latency_ns.len() < I2P_MIN_VALID_TRIALS {
+        return Err(app_error(format!(
+            "physical I2P import requires at least {I2P_MIN_VALID_TRIALS} valid trials; observed {} ({} rejected)",
+            latency_ns.len(),
+            rejected_reasons.values().sum::<u64>()
+        )));
+    }
+
+    latency_ns.sort_unstable();
+    let p50 = nearest_rank_percentile(&latency_ns, 50, 100);
+    let p95 = nearest_rank_percentile(&latency_ns, 95, 100);
+    let p99 = nearest_rank_percentile(&latency_ns, 99, 100);
+    let max = *latency_ns.last().ok_or_else(|| {
+        app_error("at least one valid trial is required for percentile calculation")
+    })?;
+    let seed = u64::from_str_radix(&trace_digest[..16], 16)
+        .map_err(|_| app_error("cannot derive deterministic bootstrap seed from trace digest"))?;
+    let (ci_lower, ci_upper) =
+        bootstrap_percentile_ci(&latency_ns, 95, 100, I2P_BOOTSTRAP_RESAMPLES, seed);
+
+    Ok(json!({
+        "method": method,
+        "instrument_id": instrument_id,
+        "firmware_version": firmware_version,
+        "tool_version": tool_version,
+        "calibration_id": calibration_id,
+        "calibration_sha256": calibration_digest,
+        "calibrated": true,
+        "event_id_join_verified": true,
+        "sample_count": latency_ns.len(),
+        "clock_resolution_ns": clock_resolution_ns,
+        "sensor_bandwidth_hz": sensor["bandwidth_hz"],
+        "frame_rate_fps": sensor["frame_rate_fps"],
+        "raw_trace_sha256": trace_digest,
+        "condition_id": trace["condition_id"],
+        "measurement_unix_ms": measured_at,
+        "clock_source": clock_source,
+        "counter_frequency_hz": counter_frequency_hz,
+        "clock_uncertainty_ns": clock_uncertainty,
+        "calibration_uncertainty_ns": calibration_uncertainty,
+        "combined_uncertainty_bound_ns": total_uncertainty_ns,
+        "sensor_position": position,
+        "sensor_clock_resolution_ns": clock_resolution_ns,
+        "display": {
+            "width_px": width,
+            "height_px": height,
+            "refresh_rate_hz": refresh_hz,
+            "vrr_enabled": vrr_enabled,
+            "hdr_enabled": hdr_enabled
+        },
+        "valid_trial_count": latency_ns.len(),
+        "rejected_trial_count": rejected_reasons.values().sum::<u64>(),
+        "rejected_reasons": rejected_reasons,
+        "percentile_method": "nearest_rank",
+        "confidence_interval_method": "deterministic nonparametric bootstrap percentile interval for p95",
+        "bootstrap_resamples": I2P_BOOTSTRAP_RESAMPLES,
+        "bootstrap_seed_hex": format!("{seed:016x}"),
+        "p50_ns": p50,
+        "p95_ns": p95,
+        "p99_ns": p99,
+        "max_ns": max,
+        "p50_ms": p50 as f64 / 1_000_000.0,
+        "p95_ms": p95 as f64 / 1_000_000.0,
+        "p99_ms": p99 as f64 / 1_000_000.0,
+        "max_ms": max as f64 / 1_000_000.0,
+        "p95_ci_95_ms": {
+            "lower": ci_lower as f64 / 1_000_000.0,
+            "upper": ci_upper as f64 / 1_000_000.0
+        }
+    }))
+}
+
+fn nearest_rank_percentile(sorted: &[u64], numerator: u64, denominator: u64) -> u64 {
+    debug_assert!(!sorted.is_empty());
+    let count = sorted.len() as u128;
+    let rank = (count * numerator as u128).div_ceil(denominator as u128);
+    sorted[(rank.max(1).min(count) - 1) as usize]
+}
+
+fn xorshift64(state: &mut u64) -> u64 {
+    let mut value = *state;
+    value ^= value << 13;
+    value ^= value >> 7;
+    value ^= value << 17;
+    *state = value;
+    value
+}
+
+fn bootstrap_percentile_ci(
+    sorted_samples: &[u64],
+    percentile_numerator: u64,
+    percentile_denominator: u64,
+    resamples: usize,
+    seed: u64,
+) -> (u64, u64) {
+    debug_assert!(!sorted_samples.is_empty());
+    debug_assert!(resamples > 0);
+    let mut state = if seed == 0 {
+        0x9e37_79b9_7f4a_7c15
+    } else {
+        seed
+    };
+    let mut estimates = Vec::with_capacity(resamples);
+    let mut sample = Vec::with_capacity(sorted_samples.len());
+    for _ in 0..resamples {
+        sample.clear();
+        for _ in 0..sorted_samples.len() {
+            let index = (xorshift64(&mut state) % sorted_samples.len() as u64) as usize;
+            sample.push(sorted_samples[index]);
+        }
+        sample.sort_unstable();
+        estimates.push(nearest_rank_percentile(
+            &sample,
+            percentile_numerator,
+            percentile_denominator,
+        ));
+    }
+    estimates.sort_unstable();
+    (
+        nearest_rank_percentile(&estimates, 25, 1_000),
+        nearest_rank_percentile(&estimates, 975, 1_000),
+    )
+}
+
 fn validate_run_packet(packet: &Value) -> AppResult<()> {
     if packet["schema_version"].as_str() != Some(RUN_SCHEMA) {
         return Err(app_error(format!("expected schema_version {RUN_SCHEMA}")));
@@ -512,7 +1177,9 @@ fn validate_run_packet(packet: &Value) -> AppResult<()> {
     for artifact in artifacts {
         let hash = artifact["sha256"].as_str().unwrap_or_default();
         if !is_hex_digest(hash, 64)
-            || artifact["path"].as_str().is_none_or(|path| path.trim().is_empty())
+            || artifact["path"]
+                .as_str()
+                .is_none_or(|path| path.trim().is_empty())
         {
             return Err(app_error(
                 "each PASS artifact requires a non-empty path and SHA-256 digest",
@@ -524,7 +1191,9 @@ fn validate_run_packet(packet: &Value) -> AppResult<()> {
         artifact["role"].as_str() == Some("qualification_profile")
             && artifact["sha256"].as_str() == Some(profile_digest)
     }) {
-        return Err(app_error("PASS requires the exact qualification profile to be bound as an artifact"));
+        return Err(app_error(
+            "PASS requires the exact qualification profile to be bound as an artifact",
+        ));
     }
     validate_physical_latency_evidence(packet, artifacts)?;
 
@@ -560,13 +1229,18 @@ fn resolve_artifact_path(base: &Path, artifact: &Value) -> AppResult<PathBuf> {
             )
         })
     {
-        return Err(app_error("artifact paths must be relative and remain inside the run directory"));
+        return Err(app_error(
+            "artifact paths must be relative and remain inside the run directory",
+        ));
     }
 
     let resolved = fs::canonicalize(base.join(relative)).map_err(|error| {
         io::Error::new(
             error.kind(),
-            format!("artifact {} cannot be resolved: {error}", relative.display()),
+            format!(
+                "artifact {} cannot be resolved: {error}",
+                relative.display()
+            ),
         )
     })?;
     if !resolved.starts_with(base) {
@@ -593,7 +1267,9 @@ fn verify_artifacts_on_disk(packet: &Value, run_dir: &Path) -> AppResult<()> {
         let resolved = resolve_artifact_path(&base, artifact)?;
         let expected = artifact["sha256"].as_str().unwrap_or_default();
         if !is_hex_digest(expected, 64) {
-            return Err(app_error("artifact SHA-256 must be 64 hexadecimal characters"));
+            return Err(app_error(
+                "artifact SHA-256 must be 64 hexadecimal characters",
+            ));
         }
         let observed = sha256_file(&resolved)?;
         if !observed.eq_ignore_ascii_case(expected) {
@@ -615,7 +1291,9 @@ fn verify_profile_binding(packet: &Value, run_dir: &Path) -> AppResult<()> {
         .filter(|artifact| artifact["role"].as_str() == Some("qualification_profile"))
         .collect();
     if matches.len() != 1 {
-        return Err(app_error("run packet must contain exactly one qualification_profile artifact"));
+        return Err(app_error(
+            "run packet must contain exactly one qualification_profile artifact",
+        ));
     }
 
     let artifact = matches[0];
@@ -624,7 +1302,9 @@ fn verify_profile_binding(packet: &Value, run_dir: &Path) -> AppResult<()> {
         .filter(|digest| is_hex_digest(digest, 64))
         .ok_or_else(|| app_error("run packet profile_sha256 is missing or invalid"))?;
     if artifact["sha256"].as_str() != Some(expected_digest) {
-        return Err(app_error("qualification profile artifact digest does not match profile_sha256"));
+        return Err(app_error(
+            "qualification profile artifact digest does not match profile_sha256",
+        ));
     }
 
     let base = fs::canonicalize(run_dir)?;
@@ -635,15 +1315,94 @@ fn verify_profile_binding(packet: &Value, run_dir: &Path) -> AppResult<()> {
         return Err(app_error("embedded qualification profile digest mismatch"));
     }
 
-    let profile: Value = serde_json::from_slice(&bytes)
-        .map_err(|error| app_error(format!("embedded qualification profile is invalid JSON: {error}")))?;
+    let profile: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        app_error(format!(
+            "embedded qualification profile is invalid JSON: {error}"
+        ))
+    })?;
     validate_profile(&profile)?;
     let profile_id = packet["profile_id"]
         .as_str()
         .ok_or_else(|| app_error("run packet profile_id is missing"))?;
     let selected = find_profile(&profile, profile_id)?;
     if &packet["profile_configuration"] != selected {
-        return Err(app_error("run packet profile_configuration differs from its embedded profile"));
+        return Err(app_error(
+            "run packet profile_configuration differs from its embedded profile",
+        ));
+    }
+    Ok(())
+}
+
+/// Re-open and re-validate imported physical evidence whenever a run packet is
+/// checked. Digest presence alone is not enough: the raw trace and calibration
+/// files must still produce the exact summary recorded in the packet.
+fn verify_physical_latency_binding(packet: &Value, run_dir: &Path) -> AppResult<()> {
+    if !packet["latency_measurement"].is_object() {
+        if packet["result_state"].as_str() == Some("PASS")
+            && required_measurements(packet["profile_id"].as_str().unwrap_or_default())?
+                .contains(&"input_to_photon_p95_ms")
+        {
+            return Err(app_error(
+                "PASS requires an imported physical latency summary",
+            ));
+        }
+        return Ok(());
+    }
+
+    let artifacts = packet["artifacts"]
+        .as_array()
+        .ok_or_else(|| app_error("physical I2P evidence requires an artifact list"))?;
+    let trace_matches = artifacts
+        .iter()
+        .filter(|item| item["role"].as_str() == Some("physical_latency_trace"))
+        .collect::<Vec<_>>();
+    let calibration_matches = artifacts
+        .iter()
+        .filter(|item| item["role"].as_str() == Some("instrument_calibration"))
+        .collect::<Vec<_>>();
+    if trace_matches.len() != 1 || calibration_matches.len() != 1 {
+        return Err(app_error(
+            "imported physical evidence requires exactly one trace and one calibration artifact",
+        ));
+    }
+
+    let base = fs::canonicalize(run_dir)?;
+    let trace_path = resolve_artifact_path(&base, trace_matches[0])?;
+    let calibration_path = resolve_artifact_path(&base, calibration_matches[0])?;
+    let trace_digest = sha256_file(&trace_path)?;
+    let calibration_digest = sha256_file(&calibration_path)?;
+    if trace_matches[0]["sha256"].as_str() != Some(trace_digest.as_str())
+        || calibration_matches[0]["sha256"].as_str() != Some(calibration_digest.as_str())
+    {
+        return Err(app_error(
+            "physical I2P artifact digest changed after import",
+        ));
+    }
+
+    let trace: Value = serde_json::from_slice(&fs::read(&trace_path)?)
+        .map_err(|error| app_error(format!("stored physical trace is invalid JSON: {error}")))?;
+    let calibration: Value = serde_json::from_slice(&fs::read(&calibration_path)?)
+        .map_err(|error| app_error(format!("stored calibration is invalid JSON: {error}")))?;
+    let recomputed = validate_i2p_trace(
+        &trace,
+        &calibration,
+        &trace_digest,
+        &calibration_digest,
+        packet,
+    )?;
+    if recomputed != packet["latency_measurement"] {
+        return Err(app_error(
+            "latency_measurement summary differs from the recomputed raw-trace result",
+        ));
+    }
+    if packet["physical_latency_import"]["trace_sha256"].as_str() != Some(trace_digest.as_str())
+        || packet["physical_latency_import"]["calibration_sha256"].as_str()
+            != Some(calibration_digest.as_str())
+        || packet["physical_latency_import"]["state"].as_str() != Some("IMPORTED_PARTIAL_EVIDENCE")
+    {
+        return Err(app_error(
+            "physical_latency_import metadata does not bind the exact raw evidence",
+        ));
     }
     Ok(())
 }
@@ -660,25 +1419,38 @@ fn validate_physical_latency_evidence(packet: &Value, artifacts: &[Value]) -> Ap
         .as_str()
         .ok_or_else(|| app_error("input-to-photon PASS requires a physical latency instrument"))?;
     if evidence["calibrated"] != Value::Bool(true) {
-        return Err(app_error("physical latency instrument must have a current calibration"));
+        return Err(app_error(
+            "physical latency instrument must have a current calibration",
+        ));
     }
     if evidence["event_id_join_verified"] != Value::Bool(true) {
-        return Err(app_error("physical latency evidence must bind each sensor transition to its input event ID"));
+        return Err(app_error(
+            "physical latency evidence must bind each sensor transition to its input event ID",
+        ));
     }
     let trials = evidence["sample_count"]
         .as_u64()
         .ok_or_else(|| app_error("physical latency evidence is missing sample_count"))?;
     if trials < 300 {
-        return Err(app_error("physical input-to-photon PASS requires at least 300 valid trials"));
+        return Err(app_error(
+            "physical input-to-photon PASS requires at least 300 valid trials",
+        ));
     }
-    if evidence["instrument_id"].as_str().is_none_or(|s| s.trim().is_empty()) {
-        return Err(app_error("physical latency evidence requires an instrument identifier"));
+    if evidence["instrument_id"]
+        .as_str()
+        .is_none_or(|s| s.trim().is_empty())
+    {
+        return Err(app_error(
+            "physical latency evidence requires an instrument identifier",
+        ));
     }
     if !matches!(
         evidence["sensor_position"].as_str(),
         Some("top" | "centre" | "bottom")
     ) {
-        return Err(app_error("physical latency evidence requires sensor_position top, centre or bottom"));
+        return Err(app_error(
+            "physical latency evidence requires sensor_position top, centre or bottom",
+        ));
     }
 
     match method {
@@ -687,13 +1459,17 @@ fn validate_physical_latency_evidence(packet: &Value, artifacts: &[Value]) -> Ap
                 .as_u64()
                 .ok_or_else(|| app_error("photodiode evidence requires clock_resolution_ns"))?;
             if resolution > 1_000 {
-                return Err(app_error("photodiode timer resolution must be 1000 ns or better"));
+                return Err(app_error(
+                    "photodiode timer resolution must be 1000 ns or better",
+                ));
             }
             let bandwidth = evidence["sensor_bandwidth_hz"]
                 .as_u64()
                 .ok_or_else(|| app_error("photodiode evidence requires sensor_bandwidth_hz"))?;
             if bandwidth < 10_000 {
-                return Err(app_error("photodiode sensor bandwidth must be at least 10 kHz"));
+                return Err(app_error(
+                    "photodiode sensor bandwidth must be at least 10 kHz",
+                ));
             }
         }
         "high_speed_camera" => {
@@ -701,10 +1477,16 @@ fn validate_physical_latency_evidence(packet: &Value, artifacts: &[Value]) -> Ap
                 .as_u64()
                 .ok_or_else(|| app_error("high-speed camera evidence requires frame_rate_fps"))?;
             if fps < 1_000 {
-                return Err(app_error("high-speed camera evidence requires at least 1000 fps"));
+                return Err(app_error(
+                    "high-speed camera evidence requires at least 1000 fps",
+                ));
             }
         }
-        _ => return Err(app_error("physical latency method must be photodiode or high_speed_camera")),
+        _ => {
+            return Err(app_error(
+                "physical latency method must be photodiode or high_speed_camera",
+            ));
+        }
     }
 
     for (role, digest_key) in [
@@ -713,11 +1495,12 @@ fn validate_physical_latency_evidence(packet: &Value, artifacts: &[Value]) -> Ap
     ] {
         let expected = evidence[digest_key].as_str().unwrap_or_default();
         if !is_hex_digest(expected, 64) {
-            return Err(app_error(format!("physical latency evidence requires {digest_key}")));
+            return Err(app_error(format!(
+                "physical latency evidence requires {digest_key}"
+            )));
         }
         let bound = artifacts.iter().any(|artifact| {
-            artifact["role"].as_str() == Some(role)
-                && artifact["sha256"].as_str() == Some(expected)
+            artifact["role"].as_str() == Some(role) && artifact["sha256"].as_str() == Some(expected)
         });
         if !bound {
             return Err(app_error(format!(
@@ -1165,6 +1948,393 @@ mod tests {
         }
     }
 
+    fn fixture_sha256(bytes: &[u8]) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "xenia-i2p-calibration-fixture-{}-{:?}-{}.json",
+            std::process::id(),
+            std::thread::current().id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&path, bytes).unwrap();
+        let digest = sha256_file(&path).unwrap();
+        fs::remove_file(path).unwrap();
+        digest
+    }
+
+    fn rebind_fixture_calibration_digest(trace: &mut Value, calibration: &Value) {
+        let bytes = serde_json::to_vec_pretty(calibration).unwrap();
+        trace["calibration_sha256"] = json!(fixture_sha256(&bytes));
+    }
+
+    fn synthetic_i2p_fixture(valid_count: usize) -> (Value, Value, Value) {
+        let run_id = "synthetic-i2p-run";
+        let mut triggers = Vec::new();
+        let mut transitions = Vec::new();
+        for index in 0..300_u64 {
+            let event_id = format!("event-{index:04}");
+            let marker_id = format!("marker-{index:04}");
+            let sequence = index + 1;
+            let trigger_tick = sequence * 100_000;
+            let duration_ticks = 50_000 + (index % 17) * 1_000;
+            triggers.push(json!({
+                "event_id": event_id,
+                "sequence": sequence,
+                "trigger_tick": trigger_tick,
+                "expected_marker_id": marker_id
+            }));
+            transitions.push(json!({
+                "event_id": event_id,
+                "sequence": sequence,
+                "sensor_tick": trigger_tick + duration_ticks,
+                "observed_marker_id": marker_id,
+                "valid": (index as usize) < valid_count,
+                "rejection_reason": if (index as usize) < valid_count { Value::Null } else { json!("synthetic-blink-rejection") }
+            }));
+        }
+
+        let calibration = json!({
+            "schema_version": I2P_CALIBRATION_SCHEMA,
+            "instrument_id": "synthetic-photodiode-01",
+            "method": "photodiode",
+            "calibration_id": "synthetic-cal-2026-01",
+            "valid_from_unix_ms": 1_000,
+            "valid_until_unix_ms": 2_000,
+            "uncertainty_ns": 100
+        });
+        let calibration_digest = fixture_sha256(&serde_json::to_vec_pretty(&calibration).unwrap());
+        let trace = json!({
+            "schema_version": I2P_TRACE_SCHEMA,
+            "run_id": run_id,
+            "profile_id": "lan_interactive",
+            "condition_id": "lan-static-ui-1080p60",
+            "measurement_unix_ms": 1_500,
+            "instrument": {
+                "id": "synthetic-photodiode-01",
+                "firmware_version": "synthetic-fw-1",
+                "tool_version": "synthetic-generator-1",
+                "method": "photodiode"
+            },
+            "timebase": {
+                "clock_source": "synthetic-shared-counter",
+                "counter_frequency_hz": 1_000_000,
+                "uncertainty_ns": 200
+            },
+            "sensor": {
+                "position": "centre",
+                "clock_resolution_ns": 100,
+                "bandwidth_hz": 20_000
+            },
+            "display": {
+                "width_px": 1920,
+                "height_px": 1080,
+                "refresh_rate_hz": 60.0,
+                "vrr_enabled": false,
+                "hdr_enabled": false
+            },
+            "calibration_sha256": calibration_digest,
+            "triggers": triggers,
+            "transitions": transitions,
+            "fixture_notice": "SYNTHETIC_TEST_DATA_NOT_A_PHYSICAL_MEASUREMENT"
+        });
+        let packet = json!({
+            "run_id": run_id,
+            "profile_id": "lan_interactive",
+            "profile_configuration": { "id": "lan_interactive" }
+        });
+        (trace, calibration, packet)
+    }
+
+    #[test]
+    fn i2p_import_accepts_calibrated_synthetic_fixture_but_only_yields_partial_measurement() {
+        let (trace, calibration, packet) = synthetic_i2p_fixture(300);
+        let calibration_digest = trace["calibration_sha256"]
+            .as_str()
+            .expect("synthetic fixture binds the calibration digest");
+        let summary = validate_i2p_trace(
+            &trace,
+            &calibration,
+            &"a".repeat(64),
+            calibration_digest,
+            &packet,
+        )
+        .unwrap();
+        assert_eq!(summary["valid_trial_count"], 300);
+        assert_eq!(summary["rejected_trial_count"], 0);
+        assert_eq!(summary["p50_ms"].as_f64().unwrap(), 58.0);
+        assert_eq!(summary["p95_ms"].as_f64().unwrap(), 66.0);
+        assert_eq!(summary["p99_ms"].as_f64().unwrap(), 66.0);
+        assert_eq!(
+            summary["confidence_interval_method"],
+            "deterministic nonparametric bootstrap percentile interval for p95"
+        );
+        assert!(summary["p95_ci_95_ms"]["lower"].is_number());
+        assert!(summary["p95_ci_95_ms"]["upper"].is_number());
+        // The importer is not allowed to set the run state. It only returns
+        // one partial metric; the caller always preserves BLOCKED.
+        assert_eq!(packet["profile_id"], "lan_interactive");
+    }
+
+    #[test]
+    fn i2p_import_rejects_duplicate_or_unmatched_event_ids() {
+        let (mut trace, calibration, packet) = synthetic_i2p_fixture(300);
+        let duplicate_event_id = trace["triggers"][0]["event_id"].clone();
+        trace["triggers"][1]["event_id"] = duplicate_event_id;
+        assert!(
+            validate_i2p_trace(
+                &trace,
+                &calibration,
+                &"a".repeat(64),
+                trace["calibration_sha256"].as_str().unwrap(),
+                &packet
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn i2p_import_rejects_wrong_or_replayed_visual_markers() {
+        let (mut trace, calibration, packet) = synthetic_i2p_fixture(300);
+        trace["transitions"][12]["observed_marker_id"] = json!("marker-from-another-event");
+        assert!(
+            validate_i2p_trace(
+                &trace,
+                &calibration,
+                &"a".repeat(64),
+                trace["calibration_sha256"].as_str().unwrap(),
+                &packet
+            )
+            .is_err()
+        );
+
+        let (mut trace, calibration, packet) = synthetic_i2p_fixture(300);
+        let replayed_marker_id = trace["transitions"][0]["observed_marker_id"].clone();
+        trace["transitions"][1]["observed_marker_id"] = replayed_marker_id;
+        assert!(
+            validate_i2p_trace(
+                &trace,
+                &calibration,
+                &"a".repeat(64),
+                trace["calibration_sha256"].as_str().unwrap(),
+                &packet
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn i2p_import_rejects_out_of_order_and_negative_durations() {
+        let (mut trace, calibration, packet) = synthetic_i2p_fixture(300);
+        trace["triggers"][9]["sequence"] = json!(1);
+        assert!(
+            validate_i2p_trace(
+                &trace,
+                &calibration,
+                &"a".repeat(64),
+                trace["calibration_sha256"].as_str().unwrap(),
+                &packet
+            )
+            .is_err()
+        );
+
+        let (mut trace, calibration, packet) = synthetic_i2p_fixture(300);
+        trace["transitions"][0]["sensor_tick"] = json!(0);
+        assert!(
+            validate_i2p_trace(
+                &trace,
+                &calibration,
+                &"a".repeat(64),
+                trace["calibration_sha256"].as_str().unwrap(),
+                &packet
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn i2p_import_rejects_less_than_three_hundred_valid_trials() {
+        let (trace, calibration, packet) = synthetic_i2p_fixture(299);
+        assert!(
+            validate_i2p_trace(
+                &trace,
+                &calibration,
+                &"a".repeat(64),
+                trace["calibration_sha256"].as_str().unwrap(),
+                &packet
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn i2p_import_rejects_expired_calibration_and_digest_mismatch() {
+        let (mut trace, mut calibration, packet) = synthetic_i2p_fixture(300);
+        calibration["valid_until_unix_ms"] = json!(1_499);
+        rebind_fixture_calibration_digest(&mut trace, &calibration);
+        assert!(
+            validate_i2p_trace(
+                &trace,
+                &calibration,
+                &"a".repeat(64),
+                trace["calibration_sha256"].as_str().unwrap(),
+                &packet
+            )
+            .is_err()
+        );
+
+        let (trace, calibration, packet) = synthetic_i2p_fixture(300);
+        assert!(
+            validate_i2p_trace(
+                &trace,
+                &calibration,
+                &"a".repeat(64),
+                &"c".repeat(64),
+                &packet
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn i2p_import_enforces_photodiode_constraints_and_counter_frequency() {
+        let (mut trace, calibration, packet) = synthetic_i2p_fixture(300);
+        trace["sensor"]["bandwidth_hz"] = json!(9_999);
+        assert!(
+            validate_i2p_trace(
+                &trace,
+                &calibration,
+                &"a".repeat(64),
+                trace["calibration_sha256"].as_str().unwrap(),
+                &packet
+            )
+            .is_err()
+        );
+
+        let (mut trace, calibration, packet) = synthetic_i2p_fixture(300);
+        trace["sensor"]["clock_resolution_ns"] = json!(1_001);
+        assert!(
+            validate_i2p_trace(
+                &trace,
+                &calibration,
+                &"a".repeat(64),
+                trace["calibration_sha256"].as_str().unwrap(),
+                &packet
+            )
+            .is_err()
+        );
+
+        let (mut trace, calibration, packet) = synthetic_i2p_fixture(300);
+        trace["timebase"]["counter_frequency_hz"] = json!(0);
+        assert!(
+            validate_i2p_trace(
+                &trace,
+                &calibration,
+                &"a".repeat(64),
+                trace["calibration_sha256"].as_str().unwrap(),
+                &packet
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn i2p_import_enforces_high_speed_camera_frame_rate() {
+        let (mut trace, mut calibration, packet) = synthetic_i2p_fixture(300);
+        trace["instrument"]["method"] = json!("high_speed_camera");
+        trace["sensor"]["frame_rate_fps"] = json!(999);
+        calibration["method"] = json!("high_speed_camera");
+        rebind_fixture_calibration_digest(&mut trace, &calibration);
+        assert!(
+            validate_i2p_trace(
+                &trace,
+                &calibration,
+                &"a".repeat(64),
+                trace["calibration_sha256"].as_str().unwrap(),
+                &packet
+            )
+            .is_err()
+        );
+
+        trace["sensor"]["frame_rate_fps"] = json!(1_000);
+        assert!(
+            validate_i2p_trace(
+                &trace,
+                &calibration,
+                &"a".repeat(64),
+                trace["calibration_sha256"].as_str().unwrap(),
+                &packet
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn i2p_physical_binding_recomputes_summary_from_raw_artifacts() {
+        let (trace, calibration, identity) = synthetic_i2p_fixture(300);
+        let run_dir = std::env::temp_dir().join(format!(
+            "xenia-i2p-binding-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&run_dir).unwrap();
+        let trace_path = run_dir.join("physical-trace.json");
+        let calibration_path = run_dir.join("calibration.json");
+        write_new_file(&trace_path, &serde_json::to_vec_pretty(&trace).unwrap()).unwrap();
+        write_new_file(
+            &calibration_path,
+            &serde_json::to_vec_pretty(&calibration).unwrap(),
+        )
+        .unwrap();
+        let trace_digest = sha256_file(&trace_path).unwrap();
+        let calibration_digest = sha256_file(&calibration_path).unwrap();
+        let summary = validate_i2p_trace(
+            &trace,
+            &calibration,
+            &trace_digest,
+            &calibration_digest,
+            &identity,
+        )
+        .unwrap();
+        let packet = json!({
+            "run_id": identity["run_id"],
+            "profile_id": identity["profile_id"],
+            "result_state": "BLOCKED",
+            "latency_measurement": summary,
+            "physical_latency_import": {
+                "state": "IMPORTED_PARTIAL_EVIDENCE",
+                "trace_sha256": trace_digest,
+                "calibration_sha256": calibration_digest
+            },
+            "artifacts": [
+                { "role": "physical_latency_trace", "path": "physical-trace.json", "sha256": trace_digest },
+                { "role": "instrument_calibration", "path": "calibration.json", "sha256": calibration_digest }
+            ]
+        });
+        verify_physical_latency_binding(&packet, &run_dir).unwrap();
+
+        let mut tampered_summary = packet.clone();
+        tampered_summary["latency_measurement"]["p95_ms"] = json!(999.0);
+        assert!(verify_physical_latency_binding(&tampered_summary, &run_dir).is_err());
+
+        fs::remove_dir_all(run_dir).unwrap();
+    }
+
+    #[test]
+    fn i2p_bootstrap_interval_is_deterministic_for_a_fixed_seed() {
+        let samples = (0..300_u64)
+            .map(|value| 10_000 + value * 7)
+            .collect::<Vec<_>>();
+        let first = bootstrap_percentile_ci(&samples, 95, 100, 500, 0x1234_5678);
+        let second = bootstrap_percentile_ci(&samples, 95, 100, 500, 0x1234_5678);
+        assert_eq!(first, second);
+        assert!(first.0 <= first.1);
+    }
+
     #[test]
     fn required_measurement_contracts_exist_for_every_profile() {
         for id in [
@@ -1223,7 +2393,10 @@ mod tests {
         let run_dir = std::env::temp_dir().join(format!(
             "xenia-bench-artifact-check-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         fs::create_dir_all(&run_dir).unwrap();
         let raw_path = run_dir.join("samples.jsonl");
@@ -1254,7 +2427,10 @@ mod tests {
         let run_dir = std::env::temp_dir().join(format!(
             "xenia-bench-profile-binding-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         fs::create_dir_all(&run_dir).unwrap();
 
@@ -1350,7 +2526,10 @@ mod tests {
         packet["latency_measurement"]["frame_rate_fps"] = json!(240);
         assert!(validate_run_packet(&packet).is_err());
         packet["latency_measurement"]["method"] = json!("photodiode");
-        packet["latency_measurement"].as_object_mut().unwrap().remove("frame_rate_fps");
+        packet["latency_measurement"]
+            .as_object_mut()
+            .unwrap()
+            .remove("frame_rate_fps");
 
         packet["latency_measurement"]["sensor_bandwidth_hz"] = json!(5000);
         assert!(validate_run_packet(&packet).is_err());

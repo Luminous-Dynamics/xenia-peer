@@ -26,7 +26,7 @@ cargo run --locked -p xenia-peer --bin xenia-bench -- prepare-run \
 
 The tool records the profile SHA-256, exact Git commit and dirty state, a neutral repository-directory label, OS/kernel, CPU, discoverable NVIDIA GPU metadata and Rust toolchain, selected network/media profile, and the required measurement keys. It omits absolute checkout paths and Git branch names to avoid leaking usernames or personal branch labels.
 
-The resulting packet is deliberately `BLOCKED` with `measurement_adapter.state=NOT_CONFIGURED`. This first increment does not yet measure capture-to-display or input-to-photon. It never fabricates metrics.
+The resulting packet is deliberately `BLOCKED` with `measurement_adapter.state=NOT_CONFIGURED`. `prepare-run` only prepares evidence; it does not measure capture-to-display or input-to-photon. The `import-i2p` command described below can add a separately measured physical I2P trace, but it never fills the unrelated metrics or changes the overall result from `BLOCKED`.
 
 ## Validate a completed packet
 
@@ -45,6 +45,26 @@ The checker validates packet consistency and on-disk artifact integrity only. It
 Profiles requiring input-to-photon measurement must include a calibrated photodiode record (timer resolution <=1 microsecond) or a high-speed-camera record (>=1,000 frames/s), >=300 valid trials, verified event-ID association, a physical trace digest and a calibration artifact digest. The method and sensor position must be recorded. A software presentation callback is not physical input-to-photon evidence.
 
 See [Measurement Methodology](../../docs/benchmarks/MEASUREMENT_METHODOLOGY.md).
+
+## Import calibrated physical input-to-photon traces
+
+The first physical evidence importer is available through an explicit command:
+
+```sh
+cargo run --locked -p xenia-peer --bin xenia-bench -- import-i2p \
+  --run artifacts/xenia-bench/lan-interactive-run.json \
+  --trace lab/lan-static-ui-1080p60.trace.json \
+  --calibration lab/photodiode-calibration.json \
+  --out artifacts/xenia-bench/lan-interactive-run-with-i2p.json
+```
+
+The input run must be `BLOCKED`, and the output must be a new filename beside the source packet. The importer verifies the exact trace/calibration schemas, run/profile identity, calibration time window, shared counter timebase, event/marker one-to-one joins, increasing sequence/tick order, and method-specific instrument limits. It requires at least 300 valid trials; 1,000 are preferred. It records rejected-trial reasons, p50/p95/p99/max, and a digest-seeded deterministic 95% bootstrap percentile interval for p95.
+
+Trace and calibration artifacts are copied byte-for-byte into the run directory with digest-derived filenames. The original trace, calibration file and input packet are never overwritten. The tool keeps the overall result `BLOCKED`: other profile metrics and an executed full-profile adapter remain outstanding. `check-run` re-opens those raw files, verifies their SHA-256 digests, re-runs the parser/statistics, and rejects a packet summary that does not match the stored bytes.
+
+The calibration JSON is a metadata contract, not proof of issuer authority or instrument authenticity. Retain the lab's signed calibration certificate and custody records where applicable. Synthetic fixtures exist only for parser tests and cannot be used to qualify a real run.
+
+See the [physical I2P trace and calibration format](../../docs/benchmarks/I2P_TRACE_FORMAT.md) and [measurement methodology](../../docs/benchmarks/MEASUREMENT_METHODOLOGY.md).
 
 ## Result vocabulary
 
