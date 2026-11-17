@@ -589,7 +589,7 @@ mod tests {
         s.revoked.insert("root".into());
         let request = AccessRequest {
             resource: Resource { domain: "home-a".into(), id: "host-1".into() },
-            right: Right::View, purpose: "support-session".into(), requires_execution: true,
+            right: Right::View, direction: Direction::HostToDelegate, purpose: "support-session".into(), requires_execution: true,
         };
         assert_eq!(
             s.evaluate_independent_request(&["root", "other"], &request, 500).decision,
