@@ -9,6 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub type DelegationId = String;
 
+/// Hard recursion bound for untrusted or malformed delegation graphs.
+pub const MAX_LINEAGE_NODES: usize = 64;
+
 /// Exact-match resource identity; no wildcard or prefix semantics.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Resource {
@@ -75,6 +78,7 @@ pub enum Failure {
     NotYetValid,
     Expired,
     Cycle,
+    DepthExceeded,
     SubdelegationForbidden,
     ScopeAmplification,
     IssuerMismatch,
@@ -119,6 +123,7 @@ impl Delegation {
             && !self.resource.id.is_empty()
             && !self.rights.is_empty()
             && self.not_before_ms < self.expires_at_ms
+            && self.may_subdelegate == (self.remaining_depth > 0)
     }
 
     /// Prove that this child is no broader than its parent.
@@ -174,6 +179,9 @@ impl AuthorityState {
         visited: &mut Vec<&'a str>,
     ) -> Evaluation {
         if visited.contains(&id) { return Evaluation::denied(Failure::Cycle); }
+        if visited.len() >= MAX_LINEAGE_NODES {
+            return Evaluation::denied(Failure::DepthExceeded);
+        }
         visited.push(id);
         let Some(grant) = self.grants.get(id) else {
             return Evaluation::unknown(Failure::MissingRecord);
@@ -443,3 +451,79 @@ mod tests {
     }
 
 }
+    #[test]
+    fn bounded_exhaustive_request_and_authority_matrix_never_false_allows() {
+        // Exhaustively enumerate 576 small states: completeness (2), revoke
+        // masks (4), epoch state (3), right (3), resource (2), purpose (2),
+        // and execution requirement (2).
+        for complete in [false, true] {
+            for revoke_mask in 0_u8..4 {
+                for epoch_state in 0_u8..3 {
+                    for right in [Right::View, Right::Input, Right::Administer] {
+                        for wrong_resource in [false, true] {
+                            for wrong_purpose in [false, true] {
+                                for requires_execution in [false, true] {
+                                    let mut s = state();
+                                    s.complete = complete;
+                                    if revoke_mask & 1 != 0 { s.revoked.insert("root".into()); }
+                                    if revoke_mask & 2 != 0 { s.revoked.insert("child".into()); }
+                                    match epoch_state {
+                                        0 => { s.epochs.insert("home-a".into(), 7); }
+                                        1 => { s.epochs.insert("home-a".into(), 8); }
+                                        _ => { s.epochs.remove("home-a"); }
+                                    }
+                                    let request = AccessRequest {
+                                        resource: Resource {
+                                            domain: "home-a".into(),
+                                            id: if wrong_resource { "other-host".into() } else { "host-1".into() },
+                                        },
+                                        right,
+                                        purpose: if wrong_purpose { "different-purpose".into() } else { "support-session".into() },
+                                        requires_execution,
+                                    };
+                                    let got = s.evaluate_request("child", &request, 500);
+                                    let expected_allow = complete
+                                        && revoke_mask == 0
+                                        && epoch_state == 0
+                                        && right == Right::View
+                                        && !wrong_resource
+                                        && !wrong_purpose;
+                                    assert_eq!(
+                                        got.decision == Decision::Allowed,
+                                        expected_allow,
+                                        "complete={complete} revoke={revoke_mask} epoch={epoch_state} right={right:?} wrong_resource={wrong_resource} wrong_purpose={wrong_purpose} execution={requires_execution} result={got:?}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lineage_depth_is_bounded_before_unbounded_recursion() {
+        let mut s = state();
+        let root = s.grants.remove("root").unwrap();
+        let mut parent = root;
+        for i in 1..=MAX_LINEAGE_NODES {
+            let id = format!("deep-{i}");
+            let mut child = parent.clone();
+            child.id = id.clone();
+            child.issuer = parent.holder.clone();
+            child.holder = format!("holder-{i}");
+            child.parent = Some(parent.id.clone());
+            child.not_before_ms = parent.not_before_ms;
+            child.expires_at_ms = parent.expires_at_ms;
+            child.remaining_depth = parent.remaining_depth.saturating_sub(1);
+            child.may_subdelegate = child.remaining_depth > 0;
+            s.grants.insert(id, child.clone());
+            parent = child;
+        }
+        assert_eq!(
+            s.evaluate(&parent.id, 500).failure,
+            Some(Failure::DepthExceeded)
+        );
+    }
+
