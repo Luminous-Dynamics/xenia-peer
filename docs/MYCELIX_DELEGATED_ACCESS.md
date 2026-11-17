@@ -285,3 +285,55 @@ Mapping rules:
 8. Evaluate again at the protected effect commit boundary. A PDP permit obtained at session start is not a standing execution token.
 
 This adapter lets deployments use AuthZEN-compatible PDPs without making Mycelix a proprietary PDP protocol or delegating the host's final authority to a remote service.
+
+
+## 21. Causal freshness and authority watermarks
+
+Implementation tracker: Xenia #506.
+
+A grant can be unexpired and not locally marked revoked while still being evaluated against an authority snapshot older than a revocation. Time-to-live alone does not solve this stale-read problem.
+
+Introduce an authenticated, monotonic AuthorityFrontier per sovereignty/authority namespace:
+
+- namespace identifier;
+- monotonic revision or epoch;
+- authenticated issuer/source and signature or equivalent source proof;
+- causal dependencies on relevant delegation, consent, policy and resource updates;
+- issue time and bounded validity/lease;
+- optional predecessor/frontier commitment for audit continuity.
+
+Every session admission and effect request carries a minimum acceptable frontier. The effect owner must establish that its observed frontier is at least as new as the requested minimum and belongs to the exact resource authority namespace. A mismatched namespace or stale frontier is INDETERMINATE, never a permit. The standalone Rust model now includes a small freshness-frontier predicate; it does not authenticate frontiers or establish distributed convergence.
+
+Define explicit consistency profiles:
+
+| Profile | Semantics | Allowed use |
+|---|---|---|
+| Strong | Online authoritative/quorum check satisfying the required causal frontier | High-risk effects |
+| BoundedStaleness | Explicit maximum lag and short lease; observed frontier and exposure are reported | Risk-limited, reversible actions |
+| OfflineLease | Pre-authorized narrow action, hard expiry, no scope expansion or high-risk effect | Limited continuity during disconnection |
+| Unknown | Freshness cannot be established | HOLD/INDETERMINATE |
+
+A reconnect must advance the local frontier monotonically; it must not roll back to an older cached snapshot. Cross-object causal dependencies must be included so a new resource state cannot be authorized using an older permission state.
+
+### Industry comparison
+
+Zanzibar's 2019 paper describes externally consistent authorization checks, causal ordering of ACL changes and a consistency token ("zookie") that lets clients require checks no older than a relevant update. It reports more than 2 trillion ACLs, millions of checks per second, p95 below 10 ms and availability above 99.999% over a three-year production period. Those are Google-reported system results, not a benchmark directly comparable to this prototype.
+
+OpenFGA exposes MINIMIZE_LATENCY and HIGHER_CONSISTENCY query preferences. HIGHER_CONSISTENCY bypasses its cache and reads from the database, but OpenFGA documents that custom eventually consistent multi-region databases may still exhibit replication lag. This is a useful operational control, not a universal linearizability guarantee.
+
+Our target should not be to claim Zanzibar scale. It should be to make freshness semantics explicit and portable across a sovereign, multi-domain system: each operation states which authority frontier it requires, each effect owner proves what it observed, and disconnected/unknown states have defined behavior.
+
+### Qualification corpus
+
+Test:
+- stale frontier immediately after revoke;
+- current frontier at and above the required revision;
+- namespace substitution and cross-domain replay;
+- reordered, duplicated and missing frontier events;
+- epoch reset and monotonicity violations;
+- clock skew and lease expiry;
+- partition, reconnect and stale-cache replay;
+- new resource state combined with old authority state;
+- missing causal dependency or untrusted frontier issuer.
+
+Acceptance: zero permits below the requested freshness frontier; monotonic watermark advancement; explicit HOLD/INDETERMINATE for missing or mismatched evidence; measured propagation lag and maximum lease exposure. Do not infer freshness from wall-clock time alone.
