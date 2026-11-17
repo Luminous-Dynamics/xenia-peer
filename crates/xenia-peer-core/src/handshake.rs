@@ -10,8 +10,8 @@ use crate::transport::TransportKind;
 use crate::{
     frame::RawCapabilities,
     transport::{
-        MAX_HANDSHAKE_ENVELOPE_BYTES, Transport, TransportAvailabilityProfileV1,
-        TransportPreSessionProfileV1, TransportProfileV1,
+        MAX_HANDSHAKE_ENVELOPE_BYTES, NetworkPathProfileV1, Transport,
+        TransportAvailabilityProfileV1, TransportPreSessionProfileV1, TransportProfileV1,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,7 @@ const HANDSHAKE_SIGNATURE_CONTEXT_V1: &str = "xenia-handshake-signature-v1";
 const NEGOTIATED_SESSION_CONTEXT_SCHEMA_V2: &str = "xenia-negotiated-session-context-v2";
 const NEGOTIATED_SESSION_CONTEXT_SCHEMA_V3: &str = "xenia-negotiated-session-context-v3";
 const NEGOTIATED_SESSION_CONTEXT_SCHEMA_V4: &str = "xenia-negotiated-session-context-v4";
+const NEGOTIATED_SESSION_CONTEXT_SCHEMA_V5: &str = "xenia-negotiated-session-context-v5";
 const XENIA_WIRE_ENVELOPE_PROFILE_V1: &str = "xenia-wire-sealed-envelope-v1";
 
 fn ensure_handshake_message_size(len: usize) -> Result<(), std::io::Error> {
@@ -176,6 +177,10 @@ pub enum NegotiatedSessionContextError {
     /// that are not Xenia's exact current policy for the selected carrier.
     #[error("unsupported or non-canonical pre-session profile: {0:?}")]
     UnsupportedPreSessionProfile(TransportKind),
+    /// The caller supplied a network-path policy whose schema or shape does
+    /// not match the actual carrier.
+    #[error("unsupported or non-canonical network path profile: {0:?}")]
+    UnsupportedNetworkPathProfile(TransportKind),
     /// Canonical context encoding failed.
     #[error("failed to encode negotiated session context: {0}")]
     Encoding(#[from] bincode::Error),
@@ -382,6 +387,118 @@ impl NegotiatedSessionContextV4 {
     }
 }
 
+/// Canonical post-handshake session context, version 5.
+///
+/// V5 extends V4 with the exact relay/path policy that was selected for the
+/// authenticated carrier. Custom relay hostnames are not embedded; their
+/// ordered canonical URL set is represented by a digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NegotiatedSessionContextV5 {
+    /// Stable context schema label.
+    pub schema: String,
+    /// Exact transport semantics actually used by the connection.
+    pub transport_profile: TransportProfileV1,
+    /// Exact unauthenticated carrier-establishment policy enforced pre-handshake.
+    pub pre_session_profile: TransportPreSessionProfileV1,
+    /// Exact post-handshake availability/failure semantics.
+    pub availability_profile: TransportAvailabilityProfileV1,
+    /// Relay/path-selection policy bound into the authenticated context.
+    pub network_path_profile: NetworkPathProfileV1,
+    /// Xenia-level sealed-envelope profile (independent of crate semver).
+    pub wire_envelope_profile: String,
+    /// Required handshake cryptographic policy.
+    pub handshake_policy_profile: String,
+    /// Canonical handshake transcript schema.
+    pub handshake_transcript_schema: String,
+    /// Transcript-bound session key schedule schema.
+    pub session_key_schedule_schema: String,
+    /// First sealed capabilities frame decoded as typed capabilities.
+    pub capabilities: RawCapabilities,
+}
+
+impl NegotiatedSessionContextV5 {
+    /// Build the current canonical session context, rejecting carrier,
+    /// pre-session, availability, or network-path policy mismatches.
+    pub fn new(
+        transport_profile: TransportProfileV1,
+        pre_session_profile: TransportPreSessionProfileV1,
+        availability_profile: TransportAvailabilityProfileV1,
+        network_path_profile: NetworkPathProfileV1,
+        capabilities: RawCapabilities,
+    ) -> Result<Self, NegotiatedSessionContextError> {
+        if !transport_profile.is_current_supported_profile() {
+            return Err(NegotiatedSessionContextError::UnsupportedTransportProfile(
+                transport_profile.kind,
+            ));
+        }
+        if !pre_session_profile.is_current_supported_profile()
+            || pre_session_profile.kind != transport_profile.kind
+        {
+            return Err(NegotiatedSessionContextError::UnsupportedPreSessionProfile(
+                pre_session_profile.kind,
+            ));
+        }
+        if !availability_profile.is_current_supported_profile()
+            || availability_profile.kind != transport_profile.kind
+        {
+            return Err(
+                NegotiatedSessionContextError::UnsupportedAvailabilityProfile(
+                    availability_profile.kind,
+                ),
+            );
+        }
+        if !network_path_profile.is_supported_for(&transport_profile) {
+            return Err(
+                NegotiatedSessionContextError::UnsupportedNetworkPathProfile(
+                    network_path_profile.kind,
+                ),
+            );
+        }
+        Ok(Self {
+            schema: NEGOTIATED_SESSION_CONTEXT_SCHEMA_V5.to_string(),
+            transport_profile,
+            pre_session_profile,
+            availability_profile,
+            network_path_profile,
+            wire_envelope_profile: XENIA_WIRE_ENVELOPE_PROFILE_V1.to_string(),
+            handshake_policy_profile: HANDSHAKE_POLICY_PROFILE.to_string(),
+            handshake_transcript_schema: HANDSHAKE_TRANSCRIPT_SCHEMA.to_string(),
+            session_key_schedule_schema: SESSION_KEY_SCHEDULE_SCHEMA.to_string(),
+            capabilities,
+        })
+    }
+
+    /// Return canonical bincode-v1 bytes.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
+        bincode::serialize(self)
+    }
+
+    /// Return BLAKE3-256 hash over canonical context bytes.
+    pub fn context_hash(&self) -> Result<[u8; 32], bincode::Error> {
+        Ok(*blake3::hash(&self.canonical_bytes()?).as_bytes())
+    }
+}
+
+/// Compute the canonical V5 session context hash, including the exact network
+/// path policy observed by the host and viewer. A mismatch fails at capability
+/// acceptance before application payloads are enabled.
+pub fn negotiated_session_context_hash_with_network_path_profile(
+    transport_profile: &TransportProfileV1,
+    pre_session_profile: &TransportPreSessionProfileV1,
+    availability_profile: &TransportAvailabilityProfileV1,
+    network_path_profile: &NetworkPathProfileV1,
+    capabilities: RawCapabilities,
+) -> Result<[u8; 32], NegotiatedSessionContextError> {
+    Ok(NegotiatedSessionContextV5::new(
+        transport_profile.clone(),
+        pre_session_profile.clone(),
+        availability_profile.clone(),
+        network_path_profile.clone(),
+        capabilities,
+    )?
+    .context_hash()?)
+}
+
 /// Compute the canonical negotiated session context hash from the *actual*
 /// transport profile. Callers should obtain the profile from
 /// [`Transport::transport_profile`] rather than reconstructing it manually.
@@ -469,6 +586,7 @@ pub struct PendingSessionSurface {
     transport_profile: TransportProfileV1,
     pre_session_profile: TransportPreSessionProfileV1,
     availability_profile: TransportAvailabilityProfileV1,
+    network_path_profile: Option<NetworkPathProfileV1>,
 }
 
 impl PendingSessionSurface {
@@ -538,7 +656,36 @@ impl PendingSessionSurface {
             transport_profile,
             pre_session_profile,
             availability_profile,
+            network_path_profile: None,
         })
+    }
+
+    /// Create a pending surface from all carrier policies plus the exact
+    /// selected relay/path policy. Use this constructor for current QUIC
+    /// entrypoints; peers with different relay policy will fail context
+    /// comparison before the authenticated application surface is exposed.
+    pub fn new_with_profiles_and_network_path(
+        expected_context_hash: Option<[u8; 32]>,
+        transport_profile: TransportProfileV1,
+        pre_session_profile: TransportPreSessionProfileV1,
+        availability_profile: TransportAvailabilityProfileV1,
+        network_path_profile: NetworkPathProfileV1,
+    ) -> Result<Self, CapabilityAcceptanceError> {
+        let mut pending = Self::new_with_profiles(
+            expected_context_hash,
+            transport_profile,
+            pre_session_profile,
+            availability_profile,
+        )?;
+        if !network_path_profile.is_supported_for(&pending.transport_profile) {
+            return Err(CapabilityAcceptanceError::Context(
+                NegotiatedSessionContextError::UnsupportedNetworkPathProfile(
+                    network_path_profile.kind,
+                ),
+            ));
+        }
+        pending.network_path_profile = Some(network_path_profile);
+        Ok(pending)
     }
 
     /// Consume the pending state and produce the only type that represents a
@@ -558,12 +705,22 @@ impl PendingSessionSurface {
                 lane_envelope_magic: capabilities.lane_envelope_magic,
             });
         }
-        let context_hash = negotiated_session_context_hash_with_profiles(
-            &self.transport_profile,
-            &self.pre_session_profile,
-            &self.availability_profile,
-            capabilities.clone(),
-        )?;
+        let context_hash = if let Some(network_path_profile) = &self.network_path_profile {
+            negotiated_session_context_hash_with_network_path_profile(
+                &self.transport_profile,
+                &self.pre_session_profile,
+                &self.availability_profile,
+                network_path_profile,
+                capabilities.clone(),
+            )?
+        } else {
+            negotiated_session_context_hash_with_profiles(
+                &self.transport_profile,
+                &self.pre_session_profile,
+                &self.availability_profile,
+                capabilities.clone(),
+            )?
+        };
         if self
             .expected_context_hash
             .is_some_and(|expected| expected != context_hash)
@@ -575,6 +732,7 @@ impl PendingSessionSurface {
             transport_profile: self.transport_profile,
             pre_session_profile: self.pre_session_profile,
             availability_profile: self.availability_profile,
+            network_path_profile: self.network_path_profile,
             capabilities,
         })
     }
@@ -589,6 +747,7 @@ pub struct AuthenticatedSessionSurface {
     transport_profile: TransportProfileV1,
     pre_session_profile: TransportPreSessionProfileV1,
     availability_profile: TransportAvailabilityProfileV1,
+    network_path_profile: Option<NetworkPathProfileV1>,
     capabilities: RawCapabilities,
 }
 
@@ -612,6 +771,12 @@ impl AuthenticatedSessionSurface {
     /// Exact authenticated availability/failure profile.
     pub fn availability_profile(&self) -> &TransportAvailabilityProfileV1 {
         &self.availability_profile
+    }
+
+    /// Exact network-path policy bound into the authenticated context, when
+    /// the V5 context constructor was used.
+    pub fn network_path_profile(&self) -> Option<&NetworkPathProfileV1> {
+        self.network_path_profile.as_ref()
     }
 
     /// Immutable authenticated capabilities for the lifetime of the surface.
@@ -1623,6 +1788,107 @@ mod tests {
         .unwrap();
 
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn negotiated_session_context_v5_binds_relay_mode() {
+        let transport = TransportProfileV1::current(TransportKind::Quic);
+        let pre_session = TransportPreSessionProfileV1::current(TransportKind::Quic);
+        let availability = TransportAvailabilityProfileV1::current(TransportKind::Quic);
+        let capabilities = test_capabilities();
+
+        let direct = negotiated_session_context_hash_with_network_path_profile(
+            &transport,
+            &pre_session,
+            &availability,
+            &NetworkPathProfileV1::current(TransportKind::Quic),
+            capabilities.clone(),
+        )
+        .unwrap();
+        let public = negotiated_session_context_hash_with_network_path_profile(
+            &transport,
+            &pre_session,
+            &availability,
+            &NetworkPathProfileV1::public_relay(),
+            capabilities.clone(),
+        )
+        .unwrap();
+        assert_ne!(direct, public);
+    }
+
+    #[test]
+    fn negotiated_session_context_v5_binds_exact_custom_relay_set_digest() {
+        let transport = TransportProfileV1::current(TransportKind::Quic);
+        let pre_session = TransportPreSessionProfileV1::current(TransportKind::Quic);
+        let availability = TransportAvailabilityProfileV1::current(TransportKind::Quic);
+        let capabilities = test_capabilities();
+        let first = NetworkPathProfileV1::custom_relay([0x11; 32]);
+        let second = NetworkPathProfileV1::custom_relay([0x22; 32]);
+
+        let first_hash = negotiated_session_context_hash_with_network_path_profile(
+            &transport,
+            &pre_session,
+            &availability,
+            &first,
+            capabilities.clone(),
+        )
+        .unwrap();
+        let second_hash = negotiated_session_context_hash_with_network_path_profile(
+            &transport,
+            &pre_session,
+            &availability,
+            &second,
+            capabilities,
+        )
+        .unwrap();
+        assert_ne!(first_hash, second_hash);
+    }
+
+    #[test]
+    fn pending_surface_rejects_relay_policy_mismatch_before_application_surface() {
+        let transport = TransportProfileV1::current(TransportKind::Quic);
+        let pre_session = TransportPreSessionProfileV1::current(TransportKind::Quic);
+        let availability = TransportAvailabilityProfileV1::current(TransportKind::Quic);
+        let capabilities = test_capabilities();
+        let host_hash = negotiated_session_context_hash_with_network_path_profile(
+            &transport,
+            &pre_session,
+            &availability,
+            &NetworkPathProfileV1::current(TransportKind::Quic),
+            capabilities.clone(),
+        )
+        .unwrap();
+
+        let pending = PendingSessionSurface::new_with_profiles_and_network_path(
+            Some(host_hash),
+            transport,
+            pre_session,
+            availability,
+            NetworkPathProfileV1::public_relay(),
+        )
+        .unwrap();
+        assert!(matches!(
+            pending.authenticate_capabilities(capabilities),
+            Err(CapabilityAcceptanceError::ContextHashMismatch)
+        ));
+    }
+
+    #[test]
+    fn negotiated_session_context_v5_rejects_invalid_path_profile_shape() {
+        let transport = TransportProfileV1::current(TransportKind::Quic);
+        let pre_session = TransportPreSessionProfileV1::current(TransportKind::Quic);
+        let availability = TransportAvailabilityProfileV1::current(TransportKind::Quic);
+        let invalid = NetworkPathProfileV1::current(TransportKind::Tcp);
+        assert!(matches!(
+            negotiated_session_context_hash_with_network_path_profile(
+                &transport,
+                &pre_session,
+                &availability,
+                &invalid,
+                test_capabilities(),
+            ),
+            Err(NegotiatedSessionContextError::UnsupportedNetworkPathProfile(TransportKind::Tcp))
+        ));
     }
 
     fn test_capabilities() -> RawCapabilities {
