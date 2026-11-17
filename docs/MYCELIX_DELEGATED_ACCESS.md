@@ -337,3 +337,21 @@ Test:
 - missing causal dependency or untrusted frontier issuer.
 
 Acceptance: zero permits below the requested freshness frontier; monotonic watermark advancement; explicit HOLD/INDETERMINATE for missing or mismatched evidence; measured propagation lag and maximum lease exposure. Do not infer freshness from wall-clock time alone.
+
+
+## 22. Quantitative capability budgets
+
+Implementation tracker: Xenia #507.
+
+Least privilege should bound not only *which* operation is allowed, but *how much* authority may be consumed:
+
+- maximum session duration and renewal count;
+- operation/command count and rate;
+- clipboard and file-transfer byte limits;
+- maximum individual file size and total transfer volume;
+- concurrent sessions/workers and target count;
+- screen-view duration or other metered disclosure budgets.
+
+Each child grant must have budgets less than or equal to its parent for every dimension. A reconnect, rekey, process restart or duplicated request must not reset consumption. Consumption uses stable operation IDs and monotonic authority epochs. Reserve/commit/reconcile semantics must treat a timeout after dispatch as UNKNOWN; do not refund or reuse quota until the effect outcome is reconciled. Parallel workers must share a serialized or otherwise overspend-safe budget ledger.
+
+Independent grants retain independent budgets. Required bundles apply the strictest compatible constraints. If budget state or consumption is unknown, high-risk effects are HOLD/INDETERMINATE. Budget accounting must be independently auditable and must not depend on reputation scores.
