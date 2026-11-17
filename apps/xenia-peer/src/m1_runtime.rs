@@ -1057,6 +1057,12 @@ impl M1RuntimeSession {
         self.preflight_permission(M1Permission::StreamAudio)
     }
 
+    /// Check file-send authority before reading the next source chunk.
+    /// The final `allow_file_send_flow` check still runs before network send.
+    pub(crate) fn preflight_file_send_flow(&self) -> Result<(), M1RuntimeError> {
+        self.preflight_permission(M1Permission::SendFileToViewer)
+    }
+
     /// Check clipboard-disclosure authority before reading the host clipboard.
     pub(crate) fn preflight_host_clipboard_read_flow(&self) -> Result<(), M1RuntimeError> {
         self.preflight_permission(M1Permission::ReadHostClipboard)
@@ -1926,6 +1932,7 @@ mod tests {
         assert!(runtime.preflight_frame_flow().is_ok());
         assert!(runtime.preflight_telemetry_flow().is_err());
         assert!(runtime.preflight_audio_flow().is_err());
+        assert!(runtime.preflight_file_send_flow().is_err());
         assert!(runtime.preflight_host_clipboard_read_flow().is_err());
         assert!(runtime.preflight_input_flow().is_err());
 
@@ -1945,6 +1952,7 @@ mod tests {
         assert!(runtime.preflight_frame_flow().is_err());
         assert!(runtime.preflight_telemetry_flow().is_err());
         assert!(runtime.preflight_audio_flow().is_err());
+        assert!(runtime.preflight_file_send_flow().is_err());
         assert!(runtime.preflight_host_clipboard_read_flow().is_err());
         assert!(runtime.preflight_input_flow().is_err());
     }
