@@ -2,8 +2,7 @@ use std::collections::HashSet;
 
 use xenia_peer_core::{M1DataDirection, M1Permission};
 
-const ROUTE_INVENTORY: &str =
-    include_str!("../../../docs/security/M1_ROUTE_INVENTORY_V0_1.toml");
+const ROUTE_INVENTORY: &str = include_str!("../../../docs/security/M1_ROUTE_INVENTORY_V0_1.toml");
 
 #[test]
 fn route_inventory_is_complete_for_the_declared_eight_lane_census() {
@@ -27,7 +26,10 @@ fn route_inventory_is_complete_for_the_declared_eight_lane_census() {
         .get("reviewed_commit")
         .and_then(toml::Value::as_str)
         .expect("reviewed_commit is required");
-    assert!(is_git_sha(reviewed_commit), "reviewed_commit must be a full Git SHA");
+    assert!(
+        is_git_sha(reviewed_commit),
+        "reviewed_commit must be a full Git SHA"
+    );
 
     let source_files = manifest
         .get("source_files")
@@ -41,8 +43,14 @@ fn route_inventory_is_complete_for_the_declared_eight_lane_census() {
         let (path, sha) = source_ref
             .rsplit_once('@')
             .unwrap_or_else(|| panic!("source_files.{name} must be path@sha"));
-        assert!(!path.is_empty(), "source_files.{name} path must not be empty");
-        assert!(is_git_sha(sha), "source_files.{name} must use a full Git SHA");
+        assert!(
+            !path.is_empty(),
+            "source_files.{name} path must not be empty"
+        );
+        assert!(
+            is_git_sha(sha),
+            "source_files.{name} must use a full Git SHA"
+        );
     }
 
     let routes = manifest
