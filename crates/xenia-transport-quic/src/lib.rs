@@ -29,12 +29,15 @@
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{collections::BTreeSet, env, io};
+
+use futures_util::{Stream, StreamExt};
+use serde::{Deserialize, Serialize};
 
 use iroh::{
     Endpoint, EndpointAddr, RelayMode, RelayUrl,
-    endpoint::{Connection, RecvStream, SendStream, presets},
+    endpoint::{Connection, PathEvent, PathId, PathStats, RecvStream, SendStream, presets},
 };
 use thiserror::Error;
 use tracing::debug;
@@ -257,6 +260,182 @@ pub fn decode_endpoint_addr(s: &str) -> Result<EndpointAddr, TransportError> {
         .map_err(|e| TransportError::from(QuicError::Address(e.to_string())))
 }
 
+/// Schema identifier for redacted Iroh path-event observations.
+pub const QUIC_PATH_EVENT_SCHEMA_V1: &str = "xenia-quic-path-event/v1";
+
+/// Redacted event category from Iroh's connection path monitor.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuicPathEventKind {
+    /// A new path became available to the connection.
+    Opened,
+    /// A previously available path closed.
+    Closed,
+    /// The connection selected a path for transmitting application data.
+    Selected,
+    /// The Iroh path-event subscriber missed one or more events.
+    Lagged,
+    /// A future Iroh event variant was observed but is not yet mapped.
+    Unknown,
+}
+
+/// Coarse route classification. No IP address, port, relay URL, or hostname is
+/// retained in this type.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuicRouteClass {
+    /// Direct IP-based path.
+    DirectIp,
+    /// Iroh relay path.
+    Relay,
+    /// Iroh custom transport path.
+    Custom,
+    /// Unknown or not classifiable from the public event.
+    Unknown,
+}
+
+/// Redacted statistics for one QUIC transmission path.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct QuicPathStats {
+    /// Round-trip time estimate in microseconds.
+    pub rtt_us: u64,
+    /// Congestion window in bytes.
+    pub congestion_window_bytes: u64,
+    /// Congestion events observed on this path.
+    pub congestion_events: u64,
+    /// Packets lost on this path.
+    pub lost_packets: u64,
+    /// Bytes lost on this path.
+    pub lost_bytes: u64,
+    /// Current path MTU in bytes.
+    pub current_mtu_bytes: u16,
+}
+
+/// One path in a reconciled open-path snapshot.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct QuicPathSnapshot {
+    /// Ephemeral Iroh path identifier, not a socket address.
+    pub path_id: String,
+    /// Redacted route class.
+    pub route_class: QuicRouteClass,
+    /// Whether Iroh currently selects this path for application data.
+    pub selected_for_transmit: bool,
+    /// Current statistics when Iroh provides them.
+    pub stats: Option<QuicPathStats>,
+}
+
+/// Redacted path event with a local observer clock and explicit history status.
+///
+/// `observer_monotonic_us` is elapsed time since this subscription started.
+/// It must not be compared with timestamps from another process or endpoint.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct QuicPathEvent {
+    /// Versioned event schema.
+    pub schema_version: String,
+    /// Sequence number local to this subscription, starting at one.
+    pub observer_sequence: u64,
+    /// Monotonic microseconds since this subscription started.
+    pub observer_monotonic_us: u64,
+    /// Event category.
+    pub event_kind: QuicPathEventKind,
+    /// Ephemeral Iroh path identifier when the event applies to one path.
+    pub path_id: Option<String>,
+    /// Redacted route classification when available.
+    pub route_class: Option<QuicRouteClass>,
+    /// Current selected status when known.
+    pub selected_for_transmit: Option<bool>,
+    /// Number of events missed when the stream reports a lag.
+    pub missed_events: Option<u64>,
+    /// Path statistics when available.
+    pub stats: Option<QuicPathStats>,
+    /// Current open-path snapshot attached to a lag event for reconciliation.
+    pub reconciled_paths: Option<Vec<QuicPathSnapshot>>,
+    /// True only while no event-history gap has been observed by this subscriber.
+    /// A reconciled snapshot repairs current-state knowledge, not lost history.
+    pub history_complete: bool,
+}
+
+fn route_class_from_flags(is_relay: bool, is_ip: bool, is_custom: bool) -> QuicRouteClass {
+    if is_relay {
+        QuicRouteClass::Relay
+    } else if is_ip {
+        QuicRouteClass::DirectIp
+    } else if is_custom {
+        QuicRouteClass::Custom
+    } else {
+        QuicRouteClass::Unknown
+    }
+}
+
+fn classify_transport_addr(addr: &iroh::TransportAddr) -> QuicRouteClass {
+    route_class_from_flags(addr.is_relay(), addr.is_ip(), addr.is_custom())
+}
+
+fn duration_micros_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+fn summarize_path_stats(stats: &PathStats) -> QuicPathStats {
+    QuicPathStats {
+        rtt_us: duration_micros_u64(stats.rtt),
+        congestion_window_bytes: stats.cwnd,
+        congestion_events: stats.congestion_events,
+        lost_packets: stats.lost_packets,
+        lost_bytes: stats.lost_bytes,
+        current_mtu_bytes: stats.current_mtu,
+    }
+}
+
+fn snapshot_one_path(connection: &Connection, id: PathId) -> Option<QuicPathSnapshot> {
+    let paths = connection.paths();
+    paths.get(id).map(|path| QuicPathSnapshot {
+        path_id: id.to_string(),
+        route_class: classify_transport_addr(path.remote_addr()),
+        selected_for_transmit: path.is_selected(),
+        stats: Some(summarize_path_stats(&path.stats())),
+    })
+}
+
+fn snapshot_open_paths(connection: &Connection) -> Vec<QuicPathSnapshot> {
+    let paths = connection.paths();
+    paths
+        .iter()
+        .map(|path| QuicPathSnapshot {
+            path_id: path.id().to_string(),
+            route_class: classify_transport_addr(path.remote_addr()),
+            selected_for_transmit: path.is_selected(),
+            stats: Some(summarize_path_stats(&path.stats())),
+        })
+        .collect()
+}
+
+fn make_path_event(
+    observer_sequence: u64,
+    observer_monotonic_us: u64,
+    event_kind: QuicPathEventKind,
+    path_id: Option<String>,
+    route_class: Option<QuicRouteClass>,
+    selected_for_transmit: Option<bool>,
+    missed_events: Option<u64>,
+    stats: Option<QuicPathStats>,
+    reconciled_paths: Option<Vec<QuicPathSnapshot>>,
+    history_complete: bool,
+) -> QuicPathEvent {
+    QuicPathEvent {
+        schema_version: QUIC_PATH_EVENT_SCHEMA_V1.to_string(),
+        observer_sequence,
+        observer_monotonic_us,
+        event_kind,
+        path_id,
+        route_class,
+        selected_for_transmit,
+        missed_events,
+        stats,
+        reconciled_paths,
+        history_complete,
+    }
+}
+
 /// Iroh QUIC transport over one bidirectional stream.
 pub struct QuicTransport {
     conn: Connection,
@@ -351,6 +530,111 @@ impl QuicTransport {
         self.send
             .finish()
             .map_err(|e| TransportError::from(QuicError::Io(e.to_string())))
+    }
+
+    /// Subscribe to redacted Iroh path events.
+    ///
+    /// The returned stream owns an additional connection handle and must be
+    /// dropped when monitoring is no longer required. Raw transport addresses
+    /// are classified but never retained or formatted. If Iroh reports a
+    /// lagged subscriber, the event includes a fresh open-path snapshot while
+    /// `history_complete` remains false to preserve the fact that history was
+    /// lost.
+    pub fn path_events(&self) -> impl Stream<Item = QuicPathEvent> + Send + 'static {
+        let connection = self.conn.clone();
+        let started = Instant::now();
+        let mut observer_sequence = 0_u64;
+        let mut history_complete = true;
+
+        self.conn.path_events().map(move |event| {
+            observer_sequence = observer_sequence.saturating_add(1);
+            let observed_us = duration_micros_u64(started.elapsed());
+
+            match event {
+                PathEvent::Opened {
+                    id,
+                    remote_addr,
+                    ..
+                } => {
+                    let snapshot = snapshot_one_path(&connection, id);
+                    make_path_event(
+                        observer_sequence,
+                        observed_us,
+                        QuicPathEventKind::Opened,
+                        Some(id.to_string()),
+                        Some(classify_transport_addr(&remote_addr)),
+                        snapshot.as_ref().map(|path| path.selected_for_transmit),
+                        None,
+                        snapshot.and_then(|path| path.stats),
+                        None,
+                        history_complete,
+                    )
+                }
+                PathEvent::Closed {
+                    id,
+                    remote_addr,
+                    last_stats,
+                    ..
+                } => make_path_event(
+                    observer_sequence,
+                    observed_us,
+                    QuicPathEventKind::Closed,
+                    Some(id.to_string()),
+                    Some(classify_transport_addr(&remote_addr)),
+                    Some(false),
+                    None,
+                    Some(summarize_path_stats(&last_stats)),
+                    None,
+                    history_complete,
+                ),
+                PathEvent::Selected {
+                    id,
+                    remote_addr,
+                    ..
+                } => {
+                    let snapshot = snapshot_one_path(&connection, id);
+                    make_path_event(
+                        observer_sequence,
+                        observed_us,
+                        QuicPathEventKind::Selected,
+                        Some(id.to_string()),
+                        Some(classify_transport_addr(&remote_addr)),
+                        Some(true),
+                        None,
+                        snapshot.and_then(|path| path.stats),
+                        None,
+                        history_complete,
+                    )
+                }
+                PathEvent::Lagged { missed, .. } => {
+                    history_complete = false;
+                    make_path_event(
+                        observer_sequence,
+                        observed_us,
+                        QuicPathEventKind::Lagged,
+                        None,
+                        None,
+                        None,
+                        Some(missed),
+                        None,
+                        Some(snapshot_open_paths(&connection)),
+                        history_complete,
+                    )
+                }
+                _ => make_path_event(
+                    observer_sequence,
+                    observed_us,
+                    QuicPathEventKind::Unknown,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    history_complete,
+                ),
+            }
+        })
     }
 
     /// Wait until the peer closes the underlying QUIC connection.
@@ -533,6 +817,80 @@ impl RecvEnvelope for QuicRecvHalf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn route_classification_is_coarse_and_never_needs_raw_address_text() {
+        assert_eq!(
+            route_class_from_flags(true, false, false),
+            QuicRouteClass::Relay
+        );
+        assert_eq!(
+            route_class_from_flags(false, true, false),
+            QuicRouteClass::DirectIp
+        );
+        assert_eq!(
+            route_class_from_flags(false, false, true),
+            QuicRouteClass::Custom
+        );
+        assert_eq!(
+            route_class_from_flags(false, false, false),
+            QuicRouteClass::Unknown
+        );
+    }
+
+    #[test]
+    fn redacted_path_event_serialization_contains_no_address_fields() {
+        let event = make_path_event(
+            1,
+            2_500,
+            QuicPathEventKind::Selected,
+            Some("path-0".to_string()),
+            Some(QuicRouteClass::Relay),
+            Some(true),
+            None,
+            Some(QuicPathStats {
+                rtt_us: 12_000,
+                congestion_window_bytes: 65_536,
+                congestion_events: 2,
+                lost_packets: 3,
+                lost_bytes: 3_600,
+                current_mtu_bytes: 1_200,
+            }),
+            None,
+            true,
+        );
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("path-0"));
+        assert!(json.contains("relay"));
+        assert!(!json.contains("remote_addr"));
+        assert!(!json.contains("local_addr"));
+        assert!(!json.contains("relay.example"));
+        assert!(!json.contains("10.0.0.1"));
+    }
+
+    #[test]
+    fn lagged_path_event_carries_a_reconciliation_snapshot_and_marks_history_incomplete() {
+        let event = make_path_event(
+            9,
+            91_000,
+            QuicPathEventKind::Lagged,
+            None,
+            None,
+            None,
+            Some(7),
+            None,
+            Some(vec![QuicPathSnapshot {
+                path_id: "path-1".to_string(),
+                route_class: QuicRouteClass::DirectIp,
+                selected_for_transmit: true,
+                stats: None,
+            }]),
+            false,
+        );
+        assert_eq!(event.missed_events, Some(7));
+        assert!(!event.history_complete);
+        assert_eq!(event.reconciled_paths.as_ref().map(Vec::len), Some(1));
+    }
 
     #[test]
     fn relay_policy_defaults_to_direct_only() {
