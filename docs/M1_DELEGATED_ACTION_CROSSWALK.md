@@ -16,6 +16,13 @@ The Rust source of truth is
 identifiers stable once external adapters or receipts depend on them. Any
 renaming or semantic change requires an explicit schema/version migration.
 
+The route inventory pins each reviewed source file as `path@Git-blob-SHA1`.
+The conformance test recomputes Git's blob identity from the exact `include_str!`
+bytes compiled into the test and rejects a stale pin. Source-order checks are
+scoped to the exact daemon loop or file-transfer match arm. This establishes
+source correspondence for the listed files; it does not prove the completeness
+of alternate OS, plugin, helper-binary or future feature routes.
+
 ## Canonical mapping
 
 | M1 permission | Delegated action ID | Direction | Effect meaning |
