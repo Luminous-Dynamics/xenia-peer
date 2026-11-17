@@ -694,7 +694,7 @@ mod tests {
         let s = state();
         let request = AccessRequest {
             resource: Resource { domain: "home-a".into(), id: "host-1".into() },
-            right: Right::View, purpose: "support-session".into(), requires_execution: true,
+            right: Right::View, direction: Direction::HostToDelegate, purpose: "support-session".into(), requires_execution: true,
         };
         let observed = AuthorityFrontier { namespace: "home-b".into(), revision: 100 };
         let minimum = AuthorityFrontier { namespace: "home-a".into(), revision: 1 };
