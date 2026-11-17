@@ -80,12 +80,25 @@ pub enum Failure {
     IssuerMismatch,
     RootIssuerMismatch,
     InvalidStatement,
+    WrongResource,
+    RightNotGranted,
+    PurposeMismatch,
+    ExecutionNotGranted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Evaluation {
     pub decision: Decision,
     pub failure: Option<Failure>,
+}
+
+/// Concrete operation to authorize against a valid delegation lineage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessRequest {
+    pub resource: Resource,
+    pub right: Right,
+    pub purpose: String,
+    pub requires_execution: bool,
 }
 
 impl Evaluation {
@@ -185,6 +198,51 @@ impl AuthorityState {
             return Evaluation::denied(Failure::RootIssuerMismatch);
         }
         Evaluation::allowed()
+    }
+
+    /// Evaluate lineage and the concrete requested effect. A valid grant is
+    /// not enough by itself: resource, right, purpose and execution mode must match.
+    pub fn evaluate_request(&self, id: &str, request: &AccessRequest, now_ms: u64) -> Evaluation {
+        let lineage = self.evaluate(id, now_ms);
+        if lineage.decision != Decision::Allowed { return lineage; }
+        let grant = &self.grants[id];
+        if grant.resource != request.resource { return Evaluation::denied(Failure::WrongResource); }
+        if !grant.rights.contains(&request.right) { return Evaluation::denied(Failure::RightNotGranted); }
+        if grant.purpose != request.purpose { return Evaluation::denied(Failure::PurposeMismatch); }
+        if request.requires_execution && grant.mode != AuthorityMode::Execute {
+            return Evaluation::denied(Failure::ExecutionNotGranted);
+        }
+        Evaluation::allowed()
+    }
+
+    /// Alternative grants: any grant authorizing this exact request suffices.
+    pub fn evaluate_independent_request(&self, ids: &[&str], request: &AccessRequest, now_ms: u64) -> Evaluation {
+        let mut unknown = false;
+        for id in ids {
+            let result = self.evaluate_request(id, request, now_ms);
+            match result.decision {
+                Decision::Allowed => return result,
+                Decision::Denied => {}
+                Decision::Indeterminate => unknown = true,
+            }
+        }
+        if unknown { Evaluation::unknown(Failure::MissingRecord) }
+        else { Evaluation::denied(Failure::RightNotGranted) }
+    }
+
+    /// Every grant in a required bundle must authorize this exact request.
+    pub fn evaluate_required_request(&self, ids: &[&str], request: &AccessRequest, now_ms: u64) -> Evaluation {
+        if ids.is_empty() { return Evaluation::denied(Failure::InvalidStatement); }
+        let mut unknown = false;
+        for id in ids {
+            let result = self.evaluate_request(id, request, now_ms);
+            match result.decision {
+                Decision::Denied => return result,
+                Decision::Indeterminate => unknown = true,
+                Decision::Allowed => {}
+            }
+        }
+        if unknown { Evaluation::unknown(Failure::MissingRecord) } else { Evaluation::allowed() }
     }
 
     /// Alternative grants: any independently valid grant suffices (OR).
@@ -331,4 +389,31 @@ mod tests {
         let child = grant("child", "bob", "carol", Some("root"));
         assert_eq!(child.validate_child(&root), Err(Failure::ScopeAmplification));
     }
+
+    #[test]
+    fn request_must_match_resource_right_and_purpose() {
+        let s = state();
+        let request = AccessRequest {
+            resource: Resource { domain: "home-a".into(), id: "host-1".into() },
+            right: Right::Input, purpose: "support-session".into(), requires_execution: true,
+        };
+        assert_eq!(s.evaluate_request("child", &request, 500).decision, Decision::Denied);
+        let mut view = request.clone();
+        view.right = Right::View;
+        assert_eq!(s.evaluate_request("child", &view, 500).decision, Decision::Allowed);
+        view.resource.id = "host-2".into();
+        assert_eq!(s.evaluate_request("child", &view, 500).failure, Some(Failure::WrongResource));
+    }
+
+    #[test]
+    fn proposal_only_grant_cannot_commit_effect() {
+        let mut s = state();
+        s.grants.get_mut("root").unwrap().mode = AuthorityMode::ProposeOnly;
+        let request = AccessRequest {
+            resource: Resource { domain: "home-a".into(), id: "host-1".into() },
+            right: Right::View, purpose: "support-session".into(), requires_execution: true,
+        };
+        assert_eq!(s.evaluate_request("root", &request, 500).failure, Some(Failure::ExecutionNotGranted));
+    }
+
 }
