@@ -3,7 +3,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use xenia_access_model::{
-    AccessRequest, AuthorityMode, AuthorityState, Delegation, Resource, Right,
+    AccessRequest, AuthorityFrontier, AuthorityMode, AuthorityState, Delegation, Resource, Right,
 };
 
 fn fixture(depth: u16) -> (AuthorityState, String, AccessRequest) {
@@ -59,25 +59,41 @@ fn percentile(sorted: &[u128], percentile: usize) -> u128 {
     sorted[index]
 }
 
-fn main() {
+fn report(mode: &str, depth: u16, mut evaluate: impl FnMut() -> impl Sized) {
     const SAMPLES: usize = 20_000;
-    println!("lineage_depth,samples,p50_ns,p95_ns,p99_ns,max_ns");
+    let mut samples = Vec::with_capacity(SAMPLES);
+    for _ in 0..SAMPLES {
+        let start = Instant::now();
+        black_box(evaluate());
+        samples.push(start.elapsed().as_nanos());
+    }
+    samples.sort_unstable();
+    println!(
+        "{mode},{depth},{SAMPLES},{},{},{},{}",
+        percentile(&samples, 50),
+        percentile(&samples, 95),
+        percentile(&samples, 99),
+        samples[samples.len() - 1],
+    );
+}
+
+fn main() {
+    println!("mode,lineage_depth,samples,p50_ns,p95_ns,p99_ns,max_ns");
     for depth in [0_u16, 1, 4, 8, 16] {
         let (state, id, request) = fixture(depth);
-        let mut samples = Vec::with_capacity(SAMPLES);
-        for _ in 0..SAMPLES {
-            let start = Instant::now();
-            let result = state.evaluate_request(black_box(&id), black_box(&request), 10);
-            black_box(result);
-            samples.push(start.elapsed().as_nanos());
-        }
-        samples.sort_unstable();
-        println!(
-            "{depth},{SAMPLES},{},{},{},{}",
-            percentile(&samples, 50),
-            percentile(&samples, 95),
-            percentile(&samples, 99),
-            samples[samples.len() - 1],
-        );
+        let observed = AuthorityFrontier { namespace: "benchmark-domain".into(), revision: 7 };
+        let minimum = AuthorityFrontier { namespace: "benchmark-domain".into(), revision: 7 };
+        report("lineage_only", depth, || {
+            state.evaluate_request(black_box(&id), black_box(&request), 10)
+        });
+        report("frontier_plus_lineage", depth, || {
+            state.evaluate_request_at_frontier(
+                black_box(&id),
+                black_box(&request),
+                10,
+                black_box(&observed),
+                black_box(&minimum),
+            )
+        });
     }
 }
