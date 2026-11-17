@@ -1734,15 +1734,13 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         NetworkPathProfileV1::current(transport_profile.kind)
     };
-    let mut pending_surface = Some(
-        PendingSessionSurface::new_with_profiles_and_network_path(
-            handshake.negotiated_context_hash,
-            transport_profile.clone(),
-            pre_session_profile,
-            availability_profile,
-            network_path_profile,
-        )?,
-    );
+    let mut pending_surface = Some(PendingSessionSurface::new_with_profiles_and_network_path(
+        handshake.negotiated_context_hash,
+        transport_profile.clone(),
+        pre_session_profile,
+        availability_profile,
+        network_path_profile,
+    )?);
     let mut authenticated_surface: Option<AuthenticatedSessionSurface> = None;
     let mut epoch_state = SessionEpochState::new(handshake.transcript_hash, RekeyPolicy::smoke());
     loop {
