@@ -703,4 +703,45 @@ mod tests {
             Decision::Indeterminate
         );
     }
+    #[test]
+    fn every_modeled_right_has_one_enforced_direction() {
+        let mut s = state();
+        s.grants.get_mut("root").unwrap().rights = [
+            Right::View,
+            Right::Input,
+            Right::ClipboardRead,
+            Right::ClipboardWrite,
+            Right::FileRead,
+            Right::FileWrite,
+            Right::Administer,
+        ].into_iter().collect();
+        for right in [
+            Right::View,
+            Right::Input,
+            Right::ClipboardRead,
+            Right::ClipboardWrite,
+            Right::FileRead,
+            Right::FileWrite,
+            Right::Administer,
+        ] {
+            let request = AccessRequest {
+                resource: Resource { domain: "home-a".into(), id: "host-1".into() },
+                right,
+                direction: right.direction(),
+                purpose: "support-session".into(),
+                requires_execution: true,
+            };
+            assert_eq!(s.evaluate_request("root", &request, 500).decision, Decision::Allowed);
+            let mut wrong = request;
+            wrong.direction = match right.direction() {
+                Direction::HostToDelegate => Direction::DelegateToHost,
+                Direction::DelegateToHost | Direction::HostLocal => Direction::HostToDelegate,
+            };
+            assert_eq!(
+                s.evaluate_request("root", &wrong, 500).failure,
+                Some(Failure::DirectionMismatch)
+            );
+        }
+    }
+
 }
