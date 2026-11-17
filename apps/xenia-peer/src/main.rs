@@ -36,16 +36,17 @@ use xenia_peer_core::{
         TelemetrySample as WireTelemetrySample, TelemetryValue as WireTelemetryValue,
     },
     handshake::{
-        NegotiatedTransport, negotiated_session_context_hash_with_profiles,
+        NegotiatedTransport, negotiated_session_context_hash_with_network_path_profile,
         perform_host_handshake_with_transcript_and_context,
     },
     transport::{
-        GRACEFUL_CLOSE_TIMEOUT_MS, RecvEnvelope, SendEnvelope, TcpRecvHalf, TcpSendHalf,
-        TcpTransport, Transport,
+        GRACEFUL_CLOSE_TIMEOUT_MS, NetworkPathProfileV1, RecvEnvelope, SendEnvelope,
+        TcpRecvHalf, TcpSendHalf, TcpTransport, Transport,
     },
 };
 use xenia_transport_quic::{
-    QuicRecvHalf, QuicSendHalf, QuicTransport, bind_xenia_endpoint, encode_endpoint_addr,
+    QuicRecvHalf, QuicSendHalf, QuicTransport, RelayPolicy, bind_xenia_endpoint,
+    encode_endpoint_addr,
 };
 use xenia_transport_ws::{WsRecvHalf, WsSendHalf, WsTransport};
 use xenia_video::{
@@ -6196,12 +6197,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.input_backend,
             args.clipboard,
         )?;
-        let negotiated_context_hash = negotiated_session_context_hash_with_profiles(
-            &transport_profile,
-            &pre_session_profile,
-            &availability_profile,
-            xenia_peer_core::RawCapabilities::from_frame(&capabilities)?,
-        )?;
+        let network_path_profile = if negotiated_transport == NegotiatedTransport::Quic {
+            RelayPolicy::from_env()?.network_path_profile()?
+        } else {
+            NetworkPathProfileV1::current(transport_profile.kind)
+        };
+        let negotiated_context_hash =
+            negotiated_session_context_hash_with_network_path_profile(
+                &transport_profile,
+                &pre_session_profile,
+                &availability_profile,
+                &network_path_profile,
+                xenia_peer_core::RawCapabilities::from_frame(&capabilities)?,
+            )?;
 
         match tokio::time::timeout(
             handshake_deadline,
