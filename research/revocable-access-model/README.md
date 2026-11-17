@@ -4,13 +4,13 @@ A deterministic Rust reference model for composable, revocable delegated authori
 
 ## Models
 
-- Exact-resource, exact-domain grants with explicit rights and purpose.
+- Exact-resource, exact-domain grants with explicit rights, purpose and operation direction (host-to-delegate, delegate-to-host or host-local).
 - Proposal-only versus execution-authorized grants.
 - Parent lineage and strict attenuation of rights, purpose, mode, validity, epoch, and delegation depth.
 - Local revocation and authority-epoch invalidation.
 - Three-valued results: `Allowed`, `Denied`, and `Indeterminate`.
 - A hard 64-node lineage bound and consistent subdelegation-depth metadata.
-- A bounded exhaustive 576-state authority/request matrix test plus 16,129 parent/child rights-set combinations.
+- A bounded exhaustive 1,152-state authority/request matrix test plus 16,129 parent/child rights-set combinations.
 - An authority-frontier predicate that rejects stale or cross-namespace snapshots before authorization.
 - Distinct composition operators: independent grants (OR) and required bundles (AND).
 
