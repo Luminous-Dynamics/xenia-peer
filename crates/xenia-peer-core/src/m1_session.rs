@@ -1117,6 +1117,38 @@ mod tests {
     }
 
     #[test]
+    fn every_permission_mask_preflights_exactly_its_granted_lanes() {
+        fn from_mask(mask: u8) -> M1PermissionSet {
+            M1PermissionSet {
+                stream_frame: mask & (1 << 0) != 0,
+                stream_telemetry: mask & (1 << 1) != 0,
+                stream_audio: mask & (1 << 2) != 0,
+                inject_input: mask & (1 << 3) != 0,
+                read_host_clipboard: mask & (1 << 4) != 0,
+                write_host_clipboard: mask & (1 << 5) != 0,
+                send_file_to_viewer: mask & (1 << 6) != 0,
+                receive_file_from_viewer: mask & (1 << 7) != 0,
+            }
+        }
+
+        for mask in 0u16..=u8::MAX as u16 {
+            let mask = mask as u8;
+            let mut session = M1SessionMachine::new();
+            session.offer().unwrap();
+            session.grant_consent_scoped(from_mask(mask)).unwrap();
+
+            for (index, permission) in M1Permission::ALL.into_iter().enumerate() {
+                let expected = mask & (1 << index) != 0;
+                assert_eq!(
+                    session.require_permission(permission).is_ok(),
+                    expected,
+                    "permission {permission:?} mismatch for grant mask {mask:#010b}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn delegated_action_crosswalk_is_stable_unique_and_directional() {
         let expected = [
             (
