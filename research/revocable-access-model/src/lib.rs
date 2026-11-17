@@ -160,16 +160,17 @@ impl AuthorityState {
     /// Evaluate a grant and its entire lineage at the supplied instant.
     pub fn evaluate(&self, id: &str, now_ms: u64) -> Evaluation {
         if !self.complete { return Evaluation::unknown(Failure::IncompleteAuthority); }
-        self.evaluate_inner(id, now_ms, &mut BTreeSet::new())
+        self.evaluate_inner(id, now_ms, &mut Vec::with_capacity(16))
     }
 
     fn evaluate_inner(
         &self,
         id: &str,
         now_ms: u64,
-        visited: &mut BTreeSet<DelegationId>,
+        visited: &mut Vec<&str>,
     ) -> Evaluation {
-        if !visited.insert(id.to_owned()) { return Evaluation::denied(Failure::Cycle); }
+        if visited.contains(&id) { return Evaluation::denied(Failure::Cycle); }
+        visited.push(id);
         let Some(grant) = self.grants.get(id) else {
             return Evaluation::unknown(Failure::MissingRecord);
         };
