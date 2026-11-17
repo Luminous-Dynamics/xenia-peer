@@ -1058,9 +1058,7 @@ impl M1RuntimeSession {
     }
 
     /// Check clipboard-disclosure authority before reading the host clipboard.
-    pub(crate) fn preflight_host_clipboard_read_flow(
-        &self,
-    ) -> Result<(), M1RuntimeError> {
+    pub(crate) fn preflight_host_clipboard_read_flow(&self) -> Result<(), M1RuntimeError> {
         self.preflight_permission(M1Permission::ReadHostClipboard)
     }
 
