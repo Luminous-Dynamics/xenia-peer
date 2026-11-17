@@ -38,12 +38,18 @@ not included in this eight-lane set.
 ## Composition rules
 
 - Recipient consent and Mycelix semantic delegation are both required.
-- The child's action set must be a subset of the parent's; widening is rejected,
-  not silently repaired by intersection.
+- A child delegation must be a proper subset of its parent's action set when
+  the profile requires strict attenuation. The core distinguishes
+  `is_subset_of` (non-widening) from `is_strict_subset_of` (at least one lane
+  removed); equal-scope child delegations are not strict attenuation.
 - When two independent authority scopes are both required for the same action,
-  their allowed action sets compose by intersection, never union.
-- Preserve the separate grant identities and parent lineage even after
-  computing the effective action set. A set intersection is not a revocation
+  their effective action sets compose by intersection.
+- When separate grants are independent alternatives, their effective action
+  set may be the union of their lanes. The core exposes this separately as
+  `union_independent_grants`; it must never be used for parent/child
+  attenuation or required bundles.
+- Preserve the separate grant identities and parent lineage after computing
+  an effective action set. Neither intersection nor union is a revocation
   index and must not erase source provenance.
 - A missing, stale, expired, revoked, mismatched or unverified authority result
   is not a permit. The future adapter must represent unknown as HOLD /
@@ -52,8 +58,10 @@ not included in this eight-lane set.
   the relevant lane at admission/preflight and at the actual effect boundary.
 
 The core methods `M1PermissionSet::is_subset_of`,
-`M1PermissionSet::intersection` and `M1PermissionSet::is_empty` implement
-only this finite eight-bit set algebra. They do not evaluate purpose, resource,
+`M1PermissionSet::is_strict_subset_of`,
+`M1PermissionSet::intersection`,
+`M1PermissionSet::union_independent_grants` and
+`M1PermissionSet::is_empty` implement only this finite eight-bit set algebra. They do not evaluate purpose, resource,
 audience, validity, authority epoch, parent liveness, budgets, signatures,
 frontier currentness or host effect outcomes.
 
@@ -92,6 +100,8 @@ and the effect-commit work in #504 must define races after the final check.
 - Uniqueness check for all eight action identifiers.
 - Exhaustive 256 × 256 child/parent permission-set comparisons (65,536 pairs).
 - Every computed intersection is verified to be a subset of each input.
+- Strict-subset semantics are checked independently from non-widening subset
+  semantics; independent-grant union semantics are checked separately.
 - Lane preflight is verified to check only the requested permission and to
   create no ledger events.
 - Lane-specific denial skips sensitive source work while final effect gates
