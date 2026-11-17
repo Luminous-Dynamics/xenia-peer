@@ -52,6 +52,15 @@ print_failure_excerpt() {
   echo "--- first 20 log lines ---" >&2
   head -n 20 "$log" >&2 || true
   echo "--- ... $((total_lines - 40)) line(s) omitted ... ---" >&2
+
+  # cargo-deny output can contain a very large dependency graph. Preserve the
+  # compact head/tail view, but surface structured advisory IDs, crate/version
+  # findings and nearby dependency-chain lines so CI failures are actionable.
+  if grep -q '^command= cargo deny check ' "$log"; then
+    echo "--- cargo-deny diagnostic summary (first 120 matching lines) ---" >&2
+    grep -E 'warning\[[^]]+\]|error\[[^]]+\]|RUSTSEC-[0-9]{4}-[0-9]{4}|GHSA-[[:alnum:]-]+|yanked version|unmaintained|unsound|vulnerability|^ *[├└]──|^ *│' "$log" | head -n 120 >&2 || true
+  fi
+
   echo "--- last 20 log lines ---" >&2
   tail -n 20 "$log" >&2 || true
 }
