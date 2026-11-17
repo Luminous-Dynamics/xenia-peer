@@ -589,6 +589,39 @@ mod tests {
         assert!(!root.well_formed());
     }
 
+    #[test]
+    fn exhaustive_rights_lattice_never_amplifies() {
+        let all = [
+            Right::View,
+            Right::Input,
+            Right::ClipboardRead,
+            Right::ClipboardWrite,
+            Right::FileRead,
+            Right::FileWrite,
+            Right::Administer,
+        ];
+        for parent_mask in 1_u16..(1 << all.len()) {
+            for child_mask in 1_u16..(1 << all.len()) {
+                let mut parent = grant("root", "alice", "bob", None);
+                parent.rights = all.iter().enumerate()
+                    .filter(|(i, _)| parent_mask & (1 << i) != 0)
+                    .map(|(_, right)| *right)
+                    .collect();
+                let mut child = grant("child", "bob", "carol", Some("root"));
+                child.rights = all.iter().enumerate()
+                    .filter(|(i, _)| child_mask & (1 << i) != 0)
+                    .map(|(_, right)| *right)
+                    .collect();
+                let is_subset = child_mask & !parent_mask == 0;
+                assert_eq!(
+                    child.validate_child(&parent).is_ok(),
+                    is_subset,
+                    "parent_mask={parent_mask:07b} child_mask={child_mask:07b}"
+                );
+            }
+        }
+    }
+
 }
     #[test]
     fn freshness_frontier_blocks_stale_snapshots() {
