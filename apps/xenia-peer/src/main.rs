@@ -40,8 +40,8 @@ use xenia_peer_core::{
         perform_host_handshake_with_transcript_and_context,
     },
     transport::{
-        GRACEFUL_CLOSE_TIMEOUT_MS, NetworkPathProfileV1, RecvEnvelope, SendEnvelope,
-        TcpRecvHalf, TcpSendHalf, TcpTransport, Transport,
+        GRACEFUL_CLOSE_TIMEOUT_MS, NetworkPathProfileV1, RecvEnvelope, SendEnvelope, TcpRecvHalf,
+        TcpSendHalf, TcpTransport, Transport,
     },
 };
 use xenia_transport_quic::{
@@ -6202,14 +6202,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             NetworkPathProfileV1::current(transport_profile.kind)
         };
-        let negotiated_context_hash =
-            negotiated_session_context_hash_with_network_path_profile(
-                &transport_profile,
-                &pre_session_profile,
-                &availability_profile,
-                &network_path_profile,
-                xenia_peer_core::RawCapabilities::from_frame(&capabilities)?,
-            )?;
+        let negotiated_context_hash = negotiated_session_context_hash_with_network_path_profile(
+            &transport_profile,
+            &pre_session_profile,
+            &availability_profile,
+            &network_path_profile,
+            xenia_peer_core::RawCapabilities::from_frame(&capabilities)?,
+        )?;
 
         match tokio::time::timeout(
             handshake_deadline,
