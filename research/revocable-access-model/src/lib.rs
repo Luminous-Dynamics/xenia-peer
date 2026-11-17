@@ -450,7 +450,6 @@ mod tests {
         assert_eq!(s.evaluate("root", 500).failure, Some(Failure::SelfDelegation));
     }
 
-}
     #[test]
     fn bounded_exhaustive_request_and_authority_matrix_never_false_allows() {
         // Exhaustively enumerate 576 small states: completeness (2), revoke
@@ -528,4 +527,4 @@ mod tests {
             Some(Failure::DepthExceeded)
         );
     }
-
+}
