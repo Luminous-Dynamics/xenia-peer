@@ -71,7 +71,9 @@ The current file-transfer path already checks M1 consent:
 - before accepting an incoming offer;
 - before each received chunk;
 - before publishing a completed incoming file;
-- before each outgoing chunk.
+- before opening/hashing the initial outbound source;
+- before each outgoing chunk read and after sealing immediately before send;
+- after sealing the terminal completion message and immediately before send.
 
 Delegated authority must be composed into those same boundaries, not only
 checked once at session setup. The completed-file publication is a separate
@@ -138,3 +140,19 @@ Important adapter constraints:
 - `ExecutionDecision::AuthorizedExecution` is semantic authority only. It is not a Holochain zome-call credential, Xenia session capability, host effect commit, transport acknowledgement or evidence that the viewer observed anything.
 
 The next integration sequence is: qualify the upstream core type package on an exact SHA; pin the Mycelix crate revision/API contract; standardize timestamp units and resource canonicalization; retrieve and authenticate current delegation/consent records plus authority frontier; compose ROS-005 AND ROS-004 AND Xenia M1; then qualify every local effect boundary, revocation race, and evidence receipt. Until then, this PR remains a typed crosswalk plus local M1 hardening, not a Mycelix runtime integration.
+
+## Machine-readable route census
+
+The current source-reviewed lane-to-effect route map is recorded in
+`docs/security/M1_ROUTE_INVENTORY_V0_1.toml`. It binds the eight M1 actions to
+their source APIs, preflight points, final gates, local effect owners and
+maximum supported evidence claims. The manifest records the source-file SHAs
+used for the review.
+
+Its completeness is deliberately `INDETERMINATE`: direct OS APIs, helper
+binaries, plugins, background tasks, alternate transports, all platform/feature
+combinations, reconnect/rekey paths and other alternate entry points have not
+yet been independently enumerated and negatively tested. Xenia #512 owns the
+remaining route inventory and bypass corpus; Mycelix #6213 owns the independent
+route-mediation evaluation. The manifest is a bounded source census, not a
+complete-mediation certification.
