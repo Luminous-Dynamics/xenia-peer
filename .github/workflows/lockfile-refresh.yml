@@ -32,7 +32,93 @@ jobs:
             cargo update --package arboard --precise 3.7.0
             cargo update --package clipboard-win --precise 5.4.3
             cargo metadata --locked --format-version 1 --no-deps >/dev/null
-            if grep -q 'name = "rustix"\\nversion = "1.1.4"' Cargo.lock; then
+            if grep -A1 '^name = "rustix"
+            grep -A1 '^name = "rustix"
+          '
+      - name: Commit Cargo-generated lockfile and remove this temporary workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          git diff --check
+          if git diff --quiet -- Cargo.lock; then
+            echo "Cargo produced no lockfile delta; refusing to claim regeneration."
+            rm .github/workflows/lockfile-refresh.yml
+            git add .github/workflows/lockfile-refresh.yml
+            git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "ci: remove temporary lockfile regeneration workflow"
+            git push origin "HEAD:${TARGET_BRANCH}"
+            exit 1
+          fi
+          rm .github/workflows/lockfile-refresh.yml
+          git add Cargo.lock .github/workflows/lockfile-refresh.yml
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "chore(deps): regenerate Cargo lockfile with fixed crates"
+          git push origin "HEAD:${TARGET_BRANCH}"
+ Cargo.lock
+          '
+      - name: Commit Cargo-generated lockfile and remove this temporary workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          git diff --check
+          if git diff --quiet -- Cargo.lock; then
+            echo "Cargo produced no lockfile delta; refusing to claim regeneration."
+            rm .github/workflows/lockfile-refresh.yml
+            git add .github/workflows/lockfile-refresh.yml
+            git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "ci: remove temporary lockfile regeneration workflow"
+            git push origin "HEAD:${TARGET_BRANCH}"
+            exit 1
+          fi
+          rm .github/workflows/lockfile-refresh.yml
+          git add Cargo.lock .github/workflows/lockfile-refresh.yml
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "chore(deps): regenerate Cargo lockfile with fixed crates"
+          git push origin "HEAD:${TARGET_BRANCH}"
+ Cargo.lock | grep -q '^version = "1.1.4"
+            grep -A1 '^name = "rustix"
+          '
+      - name: Commit Cargo-generated lockfile and remove this temporary workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          git diff --check
+          if git diff --quiet -- Cargo.lock; then
+            echo "Cargo produced no lockfile delta; refusing to claim regeneration."
+            rm .github/workflows/lockfile-refresh.yml
+            git add .github/workflows/lockfile-refresh.yml
+            git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "ci: remove temporary lockfile regeneration workflow"
+            git push origin "HEAD:${TARGET_BRANCH}"
+            exit 1
+          fi
+          rm .github/workflows/lockfile-refresh.yml
+          git add Cargo.lock .github/workflows/lockfile-refresh.yml
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "chore(deps): regenerate Cargo lockfile with fixed crates"
+          git push origin "HEAD:${TARGET_BRANCH}"
+ Cargo.lock
+          '
+      - name: Commit Cargo-generated lockfile and remove this temporary workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          git diff --check
+          if git diff --quiet -- Cargo.lock; then
+            echo "Cargo produced no lockfile delta; refusing to claim regeneration."
+            rm .github/workflows/lockfile-refresh.yml
+            git add .github/workflows/lockfile-refresh.yml
+            git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "ci: remove temporary lockfile regeneration workflow"
+            git push origin "HEAD:${TARGET_BRANCH}"
+            exit 1
+          fi
+          rm .github/workflows/lockfile-refresh.yml
+          git add Cargo.lock .github/workflows/lockfile-refresh.yml
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "chore(deps): regenerate Cargo lockfile with fixed crates"
+          git push origin "HEAD:${TARGET_BRANCH}"
+; then
               echo "RUSTSEC-2026-0486 vulnerable rustix 1.1.4 remains in Cargo.lock"
               exit 1
             fi
