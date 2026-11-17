@@ -7,6 +7,17 @@ const DAEMON_SOURCE: &str = include_str!("../../../apps/xenia-peer/src/main.rs")
 const FILE_TRANSFER_SOURCE: &str = include_str!("../../../apps/xenia-peer/src/file_transfer.rs");
 const RUNTIME_SOURCE: &str = include_str!("../../../apps/xenia-peer/src/m1_runtime.rs");
 
+fn source_section<'a>(source: &'a str, route: &str, start: &str, end: &str) -> &'a str {
+    let start_index = source
+        .find(start)
+        .unwrap_or_else(|| panic!("{route}: missing source section start {start:?}"));
+    let tail = &source[start_index..];
+    let end_index = tail
+        .find(end)
+        .unwrap_or_else(|| panic!("{route}: missing source section end {end:?}"));
+    &tail[..end_index + end.len()]
+}
+
 fn assert_source_order(source: &str, route: &str, markers: &[&str]) {
     let mut cursor = 0;
     for marker in markers {
@@ -197,9 +208,10 @@ fn is_git_sha(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 /// Guard the reviewed source ordering against accidental removal or movement
-/// of an M1 lane preflight/final check. This is a source-order regression test,
-/// not proof that every platform, plugin, alternate binary or OS route is
-/// inventoried or unreachable; those remain an explicit INDETERMINATE scope.
+/// of an M1 lane preflight/final check. Each assertion is scoped to the actual
+/// match arm or send-loop block, so a gate in a different branch cannot satisfy
+/// the test. This is not proof that every platform/plugin/alternate route is
+/// inventoried or unreachable; those remain explicitly INDETERMINATE.
 #[test]
 fn sensitive_source_routes_keep_preflight_and_final_lane_gates_in_order() {
     let runtime_mappings = [
@@ -217,19 +229,14 @@ fn sensitive_source_routes_keep_preflight_and_final_lane_gates_in_order() {
         );
     }
 
-    assert_source_order(
+    let telemetry = source_section(
         DAEMON_SOURCE,
-        "screen capture",
-        &[
-            "preflight_frame_flow()",
-            "capture.capture()",
-            "seal_frame(&raw)",
-            "allow_frame_flow()",
-            "send_half.send_envelope(&envelope)",
-        ],
+        "telemetry disclosure",
+        "if args.telemetry_level != TelemetryLevel::Off",
+        "if let Some(audio) = &mut audio",
     );
     assert_source_order(
-        DAEMON_SOURCE,
+        telemetry,
         "telemetry disclosure",
         &[
             "preflight_telemetry_flow()",
@@ -239,8 +246,15 @@ fn sensitive_source_routes_keep_preflight_and_final_lane_gates_in_order() {
             "send_half.send_envelope(&envelope)",
         ],
     );
-    assert_source_order(
+
+    let audio = source_section(
         DAEMON_SOURCE,
+        "audio disclosure",
+        "if let Some(audio) = &mut audio",
+        "if args.clipboard != ClipboardMode::Off",
+    );
+    assert_source_order(
+        audio,
         "audio disclosure",
         &[
             "preflight_audio_flow()",
@@ -250,8 +264,15 @@ fn sensitive_source_routes_keep_preflight_and_final_lane_gates_in_order() {
             "send_half.send_envelope(&envelope)",
         ],
     );
-    assert_source_order(
+
+    let clipboard = source_section(
         DAEMON_SOURCE,
+        "clipboard disclosure",
+        "if args.clipboard != ClipboardMode::Off",
+        "if let Err(err) = m1_runtime.lock().await.preflight_frame_flow()",
+    );
+    assert_source_order(
+        clipboard,
         "clipboard disclosure",
         &[
             "preflight_host_clipboard_read_flow()",
@@ -261,8 +282,38 @@ fn sensitive_source_routes_keep_preflight_and_final_lane_gates_in_order() {
             "send_half.send_envelope(&envelope)",
         ],
     );
-    assert_source_order(
+
+    let screen_capture = source_section(
         DAEMON_SOURCE,
+        "screen capture admission",
+        "if let Err(err) = m1_runtime.lock().await.preflight_frame_flow()",
+        "let Some(encoder) = encoder.as_mut()",
+    );
+    assert_source_order(
+        screen_capture,
+        "screen capture admission",
+        &["preflight_frame_flow()", "capture.capture()"],
+    );
+    let screen_send = source_section(
+        DAEMON_SOURCE,
+        "screen frame send",
+        "let envelope = session.lock().await.seal_frame(&raw)?",
+        "match tokio::time::timeout(send_deadline, send_half.send_envelope(&envelope)).await",
+    );
+    assert_source_order(
+        screen_send,
+        "screen frame send",
+        &["seal_frame(&raw)", "allow_frame_flow()", "send_half.send_envelope(&envelope)"],
+    );
+
+    let input = source_section(
+        DAEMON_SOURCE,
+        "input injection",
+        "if let Err(err) = m1_runtime.lock().await.preflight_input_flow()",
+        "match injector.process_events(std::slice::from_ref(&event))",
+    );
+    assert_source_order(
+        input,
         "input injection",
         &[
             "preflight_input_flow()",
@@ -271,8 +322,15 @@ fn sensitive_source_routes_keep_preflight_and_final_lane_gates_in_order() {
             "injector.process_events(std::slice::from_ref(&event))",
         ],
     );
-    assert_source_order(
+
+    let initial_offer = source_section(
         DAEMON_SOURCE,
+        "initial file offer",
+        "if let Some(path) = &args.send_file {",
+        "// Updated by the send loop below",
+    );
+    assert_source_order(
+        initial_offer,
         "initial file offer",
         &[
             "preflight_file_send_flow()",
@@ -282,8 +340,27 @@ fn sensitive_source_routes_keep_preflight_and_final_lane_gates_in_order() {
             "send_half.send_envelope(&envelope)",
         ],
     );
-    assert_source_order(
+
+    let incoming_offer = source_section(
         FILE_TRANSFER_SOURCE,
+        "incoming file offer",
+        "FileTransferMessage::Offer {",
+        "FileTransferMessage::Accept { transfer_id } =>",
+    );
+    assert_source_order(
+        incoming_offer,
+        "incoming file offer",
+        &["allow_file_receive_flow()", "IncomingFileStager::create("],
+    );
+
+    let outgoing_chunks = source_section(
+        FILE_TRANSFER_SOURCE,
+        "outgoing file chunks",
+        "FileTransferMessage::Accept { transfer_id } =>",
+        "FileTransferMessage::Reject {",
+    );
+    assert_source_order(
+        outgoing_chunks,
         "outgoing file chunks",
         &[
             "preflight_file_send_flow()",
@@ -293,21 +370,27 @@ fn sensitive_source_routes_keep_preflight_and_final_lane_gates_in_order() {
             "send_half.send_envelope(&envelope)",
         ],
     );
-    assert_source_order(
-        FILE_TRANSFER_SOURCE,
-        "incoming file offer",
-        &["allow_file_receive_flow()", "IncomingFileStager::create("],
-    );
-    assert_source_order(
+
+    let incoming_chunks = source_section(
         FILE_TRANSFER_SOURCE,
         "incoming file chunks",
-        &[
-            "allow_file_receive_flow()",
-            "transfer.stager.append(offset, &data)",
-        ],
+        "FileTransferMessage::Chunk {",
+        "FileTransferMessage::Complete { transfer_id } =>",
     );
     assert_source_order(
+        incoming_chunks,
+        "incoming file chunks",
+        &["allow_file_receive_flow()", "transfer.stager.append(offset, &data)"],
+    );
+
+    let incoming_publication = source_section(
         FILE_TRANSFER_SOURCE,
+        "incoming file publication",
+        "FileTransferMessage::Complete { transfer_id } =>",
+        "FileTransferMessage::Verified {",
+    );
+    assert_source_order(
+        incoming_publication,
         "incoming file publication",
         &["allow_file_receive_flow()", "transfer.stager.finish()"],
     );
