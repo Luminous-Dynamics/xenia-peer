@@ -69,10 +69,10 @@ fn run() -> AppResult<()> {
             let output = PathBuf::from(required_option(&options, "--out")?);
             let host_label = options.get("--host-label").cloned();
 
-            let profile_bytes = fs::read(&profile_path)?;
+            let profile_bytes = fs::read(profile_path)?;
             let profile: Value = serde_json::from_slice(&profile_bytes)?;
             validate_profile(&profile)?;
-            let selected = find_profile(&profile, &profile_id)?;
+            let selected = find_profile(&profile, profile_id)?;
             let source = git_snapshot(&repo);
             let host = host_snapshot(host_label);
 
