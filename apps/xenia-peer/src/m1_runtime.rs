@@ -1914,6 +1914,48 @@ mod tests {
     }
 
     #[test]
+    fn runtime_preflight_checks_exact_lane_without_creating_ledger_events() {
+        let (mut runtime, _) = runtime(31);
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet {
+                stream_frame: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        let entries_before = runtime.ledger_len();
+        assert!(runtime.preflight_frame_flow().is_ok());
+        assert!(runtime.preflight_telemetry_flow().is_err());
+        assert!(runtime.preflight_audio_flow().is_err());
+        assert!(runtime.preflight_host_clipboard_read_flow().is_err());
+        assert!(runtime.preflight_input_flow().is_err());
+
+        assert_eq!(runtime.ledger_len(), entries_before);
+        assert_eq!(runtime.state(), M1SessionState::Active);
+    }
+
+    #[test]
+    fn runtime_preflight_fails_closed_after_revocation() {
+        let (mut runtime, _) = runtime(32);
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet::all())
+            .unwrap();
+        runtime.revoke().unwrap();
+
+        for preflight in [
+            M1RuntimeSession::preflight_frame_flow as fn(&M1RuntimeSession) -> _,
+            M1RuntimeSession::preflight_telemetry_flow,
+            M1RuntimeSession::preflight_audio_flow,
+            M1RuntimeSession::preflight_host_clipboard_read_flow,
+            M1RuntimeSession::preflight_input_flow,
+        ] {
+            assert!(preflight(&runtime).is_err());
+        }
+    }
+
+    #[test]
     fn runtime_lifecycle_appends_only_consent_boundaries() {
         let (mut runtime, verifying_key) = runtime(11);
 
