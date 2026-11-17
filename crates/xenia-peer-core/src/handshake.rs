@@ -10,8 +10,8 @@ use crate::transport::TransportKind;
 use crate::{
     frame::RawCapabilities,
     transport::{
-        MAX_HANDSHAKE_ENVELOPE_BYTES, Transport, TransportAvailabilityProfileV1,
-        NetworkPathProfileV1, TransportPreSessionProfileV1, TransportProfileV1,
+        MAX_HANDSHAKE_ENVELOPE_BYTES, NetworkPathProfileV1, Transport,
+        TransportAvailabilityProfileV1, TransportPreSessionProfileV1, TransportProfileV1,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -448,9 +448,11 @@ impl NegotiatedSessionContextV5 {
             );
         }
         if !network_path_profile.is_supported_for(&transport_profile) {
-            return Err(NegotiatedSessionContextError::UnsupportedNetworkPathProfile(
-                network_path_profile.kind,
-            ));
+            return Err(
+                NegotiatedSessionContextError::UnsupportedNetworkPathProfile(
+                    network_path_profile.kind,
+                ),
+            );
         }
         Ok(Self {
             schema: NEGOTIATED_SESSION_CONTEXT_SCHEMA_V5.to_string(),
@@ -1885,9 +1887,7 @@ mod tests {
                 &invalid,
                 test_capabilities(),
             ),
-            Err(NegotiatedSessionContextError::UnsupportedNetworkPathProfile(
-                TransportKind::Tcp
-            ))
+            Err(NegotiatedSessionContextError::UnsupportedNetworkPathProfile(TransportKind::Tcp))
         ));
     }
 
