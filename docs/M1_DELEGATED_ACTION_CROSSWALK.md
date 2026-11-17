@@ -70,9 +70,19 @@ checked once at session setup. The completed-file publication is a separate
 commit boundary: a transfer that was admitted earlier must not publish after a
 later revocation has been observed.
 
-The frame, telemetry, audio, input and clipboard paths need the same
-operation-specific review. A generic "session active" preflight is only a cheap
-resource-work check; it is not a lane permit.
+The outbound runtime now performs exact-lane preflight before screen capture,
+telemetry polling, audio reads and host clipboard reads. The inbound input path
+checks the input lane before decoding the event. The final lane checks remain
+at the send/apply boundary. A denial skips that lane rather than aborting the
+whole daemon session. Clipboard disclosure is checked against
+`ReadHostClipboard` at its final send boundary; it must not accidentally
+require `StreamFrame` as well.
+
+This is a two-stage minimization pattern: reject unauthorized access before
+touching a sensitive source, then re-check at the protected effect boundary.
+The preflight is not a reservation or a linearizable commit token. A later
+Mycelix adapter must add current authority and revocation checks at both stages,
+and the effect-commit work in #504 must define races after the final check.
 
 ## Verification added in this increment
 
@@ -80,11 +90,16 @@ resource-work check; it is not a lane permit.
 - Uniqueness check for all eight action identifiers.
 - Exhaustive 256 × 256 child/parent permission-set comparisons (65,536 pairs).
 - Every computed intersection is verified to be a subset of each input.
-- No change to the existing M1 consent or effect behavior is claimed.
+- Lane preflight is verified to check only the requested permission and to
+  create no ledger events.
+- Lane-specific denial skips sensitive source work while final effect gates
+  remain intact.
+- Clipboard send is gated by clipboard-read authority, not screen-frame access.
 
 ## Explicit claim ceiling
 
-This crosswalk is a typed adapter contract only. No Mycelix authority client,
+This increment adds typed adapter vocabulary and local M1 lane preflight
+hardening. It does not add a Mycelix authority client,
 ROS-005 signature/lineage verifier, freshness watermark, revocation stream,
 session-capability issuance, or runtime enforcement switch-over is added here.
 No Holochain 0.7.1 qualification or security superiority is claimed.
