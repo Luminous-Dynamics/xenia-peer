@@ -320,9 +320,7 @@ impl NetworkPathProfileV1 {
     pub fn current(kind: TransportKind) -> Self {
         let relay_mode = match kind {
             TransportKind::Quic => NetworkRelayModeV1::DirectOnly,
-            TransportKind::Tcp | TransportKind::WebSocket => {
-                NetworkRelayModeV1::NotApplicable
-            }
+            TransportKind::Tcp | TransportKind::WebSocket => NetworkRelayModeV1::NotApplicable,
         };
         Self {
             schema: NETWORK_PATH_PROFILE_SCHEMA.to_string(),
@@ -379,13 +377,16 @@ impl NetworkPathProfileV1 {
         if self.schema != NETWORK_PATH_PROFILE_SCHEMA || self.kind != transport_profile.kind {
             return false;
         }
-        match (self.kind, self.relay_mode, self.custom_relay_set_digest) {
-            (TransportKind::Tcp | TransportKind::WebSocket, NetworkRelayModeV1::NotApplicable, None) => true,
-            (TransportKind::Quic, NetworkRelayModeV1::DirectOnly, None)
-            | (TransportKind::Quic, NetworkRelayModeV1::PublicDefault, None) => true,
-            (TransportKind::Quic, NetworkRelayModeV1::Custom, Some(_)) => true,
-            _ => false,
-        }
+        matches!(
+            (self.kind, self.relay_mode, self.custom_relay_set_digest),
+            (
+                TransportKind::Tcp | TransportKind::WebSocket,
+                NetworkRelayModeV1::NotApplicable,
+                None
+            ) | (TransportKind::Quic, NetworkRelayModeV1::DirectOnly, None)
+                | (TransportKind::Quic, NetworkRelayModeV1::PublicDefault, None)
+                | (TransportKind::Quic, NetworkRelayModeV1::Custom, Some(_))
+        )
     }
 
     /// Canonical bincode-v1 representation used only as input to context hashing.
