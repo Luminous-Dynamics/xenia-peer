@@ -29,11 +29,11 @@
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
 
-use std::io;
+use std::{collections::BTreeSet, env, io};
 use std::time::Duration;
 
 use iroh::{
-    Endpoint, EndpointAddr,
+    Endpoint, EndpointAddr, RelayMode, RelayUrl,
     endpoint::{Connection, RecvStream, SendStream, presets},
 };
 use thiserror::Error;
@@ -90,13 +90,135 @@ impl From<QuicError> for TransportError {
     }
 }
 
+/// Environment variable selecting the Iroh relay policy for both Xenia peers.
+pub const IROH_RELAY_MODE_ENV: &str = "XENIA_IROH_RELAY_MODE";
+/// Environment variable containing comma-separated HTTPS relay URLs for custom mode.
+pub const IROH_RELAY_URLS_ENV: &str = "XENIA_IROH_RELAY_URLS";
+
+/// Operator-selected network path policy for Iroh endpoint establishment.
+///
+/// Direct-only is deliberately the default. Enabling a public or custom relay
+/// allows NAT traversal and relay fallback, but also exposes connection
+/// metadata to the selected relay operator. Xenia application envelopes remain
+/// end-to-end sealed independently of the Iroh relay.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RelayPolicy {
+    /// No relay use. Requires an already-reachable direct address.
+    DirectOnly,
+    /// Use Iroh's default public relay map.
+    PublicRelay,
+    /// Use exactly the supplied operator-managed HTTPS relay URLs.
+    Custom(Vec<RelayUrl>),
+}
+
+impl RelayPolicy {
+    /// Parse the environment-variable contract. Missing mode defaults to
+    /// direct-only; custom mode requires at least one HTTPS relay URL.
+    pub fn from_env() -> Result<Self, TransportError> {
+        let mode = env::var(IROH_RELAY_MODE_ENV).unwrap_or_else(|_| "direct-only".to_string());
+        let urls = env::var(IROH_RELAY_URLS_ENV).ok();
+        Self::parse(&mode, urls.as_deref())
+    }
+
+    /// Parse a mode and optional comma-separated relay list without reading
+    /// process environment. Exposed for deterministic configuration tests.
+    pub fn parse(mode: &str, urls: Option<&str>) -> Result<Self, TransportError> {
+        match mode.trim().to_ascii_lowercase().as_str() {
+            "" | "direct-only" | "disabled" => Ok(Self::DirectOnly),
+            "public" | "public-relay" => Ok(Self::PublicRelay),
+            "custom" | "custom-relay" => {
+                let raw = urls.ok_or_else(|| {
+                    relay_config_error(format!(
+                        "{IROH_RELAY_URLS_ENV} is required when {IROH_RELAY_MODE_ENV}=custom"
+                    ))
+                })?;
+                let mut unique = BTreeSet::new();
+                let mut relays = Vec::new();
+                for candidate in raw.split(',') {
+                    let candidate = candidate.trim();
+                    if candidate.is_empty() {
+                        return Err(relay_config_error(
+                            "custom relay list contains an empty URL".to_string(),
+                        ));
+                    }
+                    if !candidate
+                        .get(..8)
+                        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+                    {
+                        return Err(relay_config_error(format!(
+                            "custom relay URL must use HTTPS: {candidate}"
+                        )));
+                    }
+                    let relay = candidate.parse::<RelayUrl>().map_err(|error| {
+                        relay_config_error(format!(
+                            "custom relay URL is invalid ({candidate}): {error}"
+                        ))
+                    })?;
+                    let canonical = relay.to_string();
+                    if !unique.insert(canonical.clone()) {
+                        return Err(relay_config_error(format!(
+                            "custom relay URL is duplicated: {canonical}"
+                        )));
+                    }
+                    relays.push(relay);
+                }
+                if relays.is_empty() {
+                    return Err(relay_config_error(
+                        "custom relay mode requires at least one relay URL".to_string(),
+                    ));
+                }
+                Ok(Self::Custom(relays))
+            }
+            other => Err(relay_config_error(format!(
+                "unsupported {IROH_RELAY_MODE_ENV} value '{other}'; use direct-only, public-relay, or custom"
+            ))),
+        }
+    }
+
+    fn to_iroh_mode(&self) -> RelayMode {
+        match self {
+            Self::DirectOnly => RelayMode::Disabled,
+            Self::PublicRelay => RelayMode::Default,
+            Self::Custom(relays) => RelayMode::custom(relays.clone()),
+        }
+    }
+
+    /// Stable, non-secret name for operator logs and support diagnostics.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::DirectOnly => "direct-only",
+            Self::PublicRelay => "public-relay",
+            Self::Custom(_) => "custom-relay",
+        }
+    }
+}
+
+fn relay_config_error(message: String) -> TransportError {
+    TransportError::from(QuicError::Address(message))
+}
+
 /// Bind an Iroh endpoint configured for the Xenia QUIC ALPN.
 ///
 /// This uses Iroh's minimal preset: no public relay or DNS dependency is
 /// required. The resulting [`Endpoint::addr`] contains direct addresses that
 /// work for loopback and reachable LAN interfaces.
 pub async fn bind_xenia_endpoint() -> Result<Endpoint, TransportError> {
+    let policy = RelayPolicy::from_env()?;
+    bind_xenia_endpoint_with_policy(policy).await
+}
+
+/// Bind an Iroh endpoint with an explicit Xenia relay policy.
+///
+/// The minimal preset preserves Xenia's TLS configuration and avoids
+/// implicitly enabling address-lookup services. Relay behavior is selected
+/// separately and is therefore reviewable at the call site.
+pub async fn bind_xenia_endpoint_with_policy(
+    policy: RelayPolicy,
+) -> Result<Endpoint, TransportError> {
+    let relay_mode = policy.to_iroh_mode();
+    tracing::info!(relay_policy = policy.label(), "binding Xenia Iroh endpoint");
     Endpoint::builder(presets::Minimal)
+        .relay_mode(relay_mode)
         .alpns(vec![XENIA_QUIC_ALPN.to_vec()])
         .bind()
         .await
@@ -396,6 +518,57 @@ impl RecvEnvelope for QuicRecvHalf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_policy_defaults_to_direct_only() {
+        assert_eq!(
+            RelayPolicy::parse("", None).unwrap(),
+            RelayPolicy::DirectOnly
+        );
+        assert_eq!(
+            RelayPolicy::parse("direct-only", None).unwrap(),
+            RelayPolicy::DirectOnly
+        );
+        assert_eq!(
+            RelayPolicy::parse("disabled", None).unwrap(),
+            RelayPolicy::DirectOnly
+        );
+    }
+
+    #[test]
+    fn relay_policy_supports_explicit_public_relay() {
+        let policy = RelayPolicy::parse("public-relay", None).unwrap();
+        assert_eq!(policy.label(), "public-relay");
+        assert!(matches!(policy.to_iroh_mode(), RelayMode::Default));
+    }
+
+    #[test]
+    fn relay_policy_accepts_unique_https_custom_relays() {
+        let policy = RelayPolicy::parse(
+            "custom",
+            Some("https://relay-a.example.test, https://relay-b.example.test"),
+        )
+        .unwrap();
+        assert_eq!(policy.label(), "custom-relay");
+        assert!(matches!(policy, RelayPolicy::Custom(ref relays) if relays.len() == 2));
+    }
+
+    #[test]
+    fn relay_policy_rejects_empty_duplicate_invalid_and_unsupported_configuration() {
+        assert!(RelayPolicy::parse("custom", None).is_err());
+        assert!(RelayPolicy::parse("custom", Some("")).is_err());
+        assert!(RelayPolicy::parse("custom", Some("https://relay.example.test,")).is_err());
+        assert!(
+            RelayPolicy::parse(
+                "custom",
+                Some("https://relay.example.test, https://relay.example.test")
+            )
+            .is_err()
+        );
+        assert!(RelayPolicy::parse("custom", Some("http://relay.example.test")).is_err());
+        assert!(RelayPolicy::parse("custom", Some("not-a-url")).is_err());
+        assert!(RelayPolicy::parse("automatic-magic", None).is_err());
+    }
 
     #[test]
     fn wire_constants_are_stable() {
