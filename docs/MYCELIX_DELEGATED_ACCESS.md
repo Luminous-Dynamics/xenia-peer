@@ -224,7 +224,7 @@ The likely advantage to pursue is not raw PDP latency alone: it is a stronger en
 
 ## 16. Deterministic reference model
 
-A standalone, dependency-light Rust policy oracle, adversarial unit tests and a lineage-depth microbenchmark live in `research/revocable-access-model/` and are tracked by Xenia #501. The benchmark reports per-depth p50/p95/p99/max latency; it is a measurement harness, not a result or proof of comparative superiority. It models exact resource equality, parent attenuation, local revocation, epochs, three-valued decisions and OR/AND composition. It is deliberately not a production authorization service and does not qualify cryptography, Holochain, DHT convergence, or OS enforcement. CI/test results must be attached to the exact tested commit before any qualification claim.
+A standalone, dependency-light Rust policy oracle, adversarial unit tests and a paired lineage/frontier microbenchmark live in `research/revocable-access-model/` and are tracked by Xenia #501. The benchmark reports per-depth p50/p95/p99/max latency for lineage-only and frontier-plus-lineage paths; it is a measurement harness, not a result or proof of comparative superiority. It models exact resource equality, parent attenuation, local revocation, epochs, three-valued decisions and OR/AND composition. It is deliberately not a production authorization service and does not qualify cryptography, Holochain, DHT convergence, or OS enforcement. CI/test results must be attached to the exact tested commit before any qualification claim.
 
 
 ## 17. AuthZEN adapter contract (proposed)
