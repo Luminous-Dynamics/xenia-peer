@@ -48,6 +48,7 @@ fn fixture(depth: u16) -> (AuthorityState, String, AccessRequest) {
         AccessRequest {
             resource,
             right: Right::View,
+            direction: Right::View.direction(),
             purpose: "benchmark".into(),
             requires_execution: true,
         },
