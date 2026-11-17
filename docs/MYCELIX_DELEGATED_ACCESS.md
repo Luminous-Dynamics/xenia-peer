@@ -317,7 +317,7 @@ A reconnect must advance the local frontier monotonically; it must not roll back
 
 ### Industry comparison
 
-Zanzibar's 2019 paper describes externally consistent authorization checks, causal ordering of ACL changes and a consistency token ("zookie") that lets clients require checks no older than a relevant update. It reports more than 2 trillion ACLs, millions of checks per second, p95 below 10 ms and availability above 99.999% over a three-year production period. Those are Google-reported system results, not a benchmark directly comparable to this prototype.
+Zanzibar's 2019 paper describes externally consistent authorization checks, causal ordering of ACL changes and a consistency token ("zookie") that lets clients require checks no older than a relevant update. The paper reports more than 2 trillion ACLs, millions of authorization checks per second, p95 below 10 ms and availability above 99.999% over a three-year production period. These are Google-reported deployment results, not an independently reproduced benchmark for this project. It reports more than 2 trillion ACLs, millions of checks per second, p95 below 10 ms and availability above 99.999% over a three-year production period. Those are Google-reported system results, not a benchmark directly comparable to this prototype.
 
 OpenFGA exposes MINIMIZE_LATENCY and HIGHER_CONSISTENCY query preferences. HIGHER_CONSISTENCY bypasses its cache and reads from the database, but OpenFGA documents that custom eventually consistent multi-region databases may still exhibit replication lag. This is a useful operational control, not a universal linearizability guarantee.
 
