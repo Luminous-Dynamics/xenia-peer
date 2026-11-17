@@ -1214,10 +1214,7 @@ mod tests {
                 let alternatives = child.union_independent_grants(parent);
                 assert!(child.is_subset_of(alternatives));
                 assert!(parent.is_subset_of(alternatives));
-                assert_eq!(
-                    alternatives.is_empty(),
-                    child_mask == 0 && parent_mask == 0
-                );
+                assert_eq!(alternatives.is_empty(), child_mask == 0 && parent_mask == 0);
             }
         }
     }
