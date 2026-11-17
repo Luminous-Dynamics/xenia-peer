@@ -9808,6 +9808,7 @@ name = "xenia-transport-quic"
 version = "0.0.0-m0"
 dependencies = [
  "bs58",
+ "futures-util",
  "iroh",
  "serde_json",
  "thiserror 1.0.69",
