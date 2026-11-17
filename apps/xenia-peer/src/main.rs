@@ -7226,6 +7226,8 @@ mod consent_scope_tests {
         let args = args_with(InputBackendChoice::Noop, ClipboardMode::Off, None, None);
         let granted = configured_permission_set(&args);
         assert!(granted.stream_frame);
+        assert!(!granted.stream_telemetry);
+        assert!(!granted.stream_audio);
         assert!(!granted.inject_input);
         assert!(!granted.read_host_clipboard);
         assert!(!granted.write_host_clipboard);
@@ -7235,6 +7237,17 @@ mod consent_scope_tests {
 
     #[test]
     fn each_enabled_capability_unlocks_exactly_its_own_tier() {
+        let mut telemetry =
+            args_with(InputBackendChoice::Noop, ClipboardMode::Off, None, None);
+        telemetry.telemetry_level = TelemetryLevel::Basic;
+        assert!(configured_permission_set(&telemetry).stream_telemetry);
+        assert!(!configured_permission_set(&telemetry).stream_audio);
+
+        let mut audio = args_with(InputBackendChoice::Noop, ClipboardMode::Off, None, None);
+        audio.audio = AudioMode::Sine;
+        assert!(configured_permission_set(&audio).stream_audio);
+        assert!(!configured_permission_set(&audio).stream_telemetry);
+
         let input = args_with(InputBackendChoice::Log, ClipboardMode::Off, None, None);
         assert!(configured_permission_set(&input).inject_input);
         assert!(!configured_permission_set(&input).read_host_clipboard);
