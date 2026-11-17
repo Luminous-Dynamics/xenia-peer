@@ -39,6 +39,7 @@ use iroh::{
 use thiserror::Error;
 use tracing::debug;
 use xenia_peer_core::transport::{
+    NetworkPathProfileV1,
     MAX_ENVELOPE_BYTES, QUIC_CONNECT_TIMEOUT_MS, QUIC_PROTOCOL_ID, QUIC_STREAM_OPEN_TIMEOUT_MS,
     RECEIVE_ENVELOPE_TIMEOUT_MS, RecvEnvelope, SEND_STALL_TIMEOUT_MS, SendEnvelope, Transport,
     TransportError, TransportKind, TransportProfileV1,
@@ -180,6 +181,21 @@ impl RelayPolicy {
             Self::DirectOnly => RelayMode::Disabled,
             Self::PublicRelay => RelayMode::Default,
             Self::Custom(relays) => RelayMode::custom(relays.clone()),
+        }
+    }
+
+    /// Produce the privacy-preserving path profile that the host and viewer
+    /// bind into the authenticated negotiated-session context.
+    pub fn network_path_profile(&self) -> Result<NetworkPathProfileV1, TransportError> {
+        match self {
+            Self::DirectOnly => Ok(NetworkPathProfileV1::current(TransportKind::Quic)),
+            Self::PublicRelay => Ok(NetworkPathProfileV1::public_relay()),
+            Self::Custom(relays) => {
+                let canonical_urls = relays.iter().map(ToString::to_string).collect::<Vec<_>>();
+                NetworkPathProfileV1::custom_relay_urls(&canonical_urls).map_err(|error| {
+                    relay_config_error(error.to_string())
+                })
+            }
         }
     }
 
@@ -552,6 +568,36 @@ mod tests {
         .unwrap();
         assert_eq!(policy.label(), "custom-relay");
         assert!(matches!(policy, RelayPolicy::Custom(ref relays) if relays.len() == 2));
+    }
+
+    #[test]
+    fn relay_policy_network_profile_binds_mode_and_custom_url_set() {
+        assert_eq!(
+            RelayPolicy::DirectOnly.network_path_profile().unwrap(),
+            NetworkPathProfileV1::current(TransportKind::Quic)
+        );
+        assert_eq!(
+            RelayPolicy::PublicRelay.network_path_profile().unwrap(),
+            NetworkPathProfileV1::public_relay()
+        );
+
+        let first = RelayPolicy::parse(
+            "custom",
+            Some("https://relay-a.example.test,https://relay-b.example.test"),
+        )
+        .unwrap()
+        .network_path_profile()
+        .unwrap();
+        let reversed = RelayPolicy::parse(
+            "custom",
+            Some("https://relay-b.example.test,https://relay-a.example.test"),
+        )
+        .unwrap()
+        .network_path_profile()
+        .unwrap();
+        assert_ne!(first, reversed);
+        assert_eq!(first.relay_mode, xenia_peer_core::transport::NetworkRelayModeV1::Custom);
+        assert!(!format!("{first:?}").contains("relay-a.example.test"));
     }
 
     #[test]
