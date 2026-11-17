@@ -37,7 +37,8 @@ use xenia_peer_core::handshake::{
     perform_viewer_handshake_with_transcript,
 };
 use xenia_peer_core::transport::{
-    RecvEnvelope, SendEnvelope, TcpRecvHalf, TcpSendHalf, TcpTransport, Transport, TransportError,
+    NetworkPathProfileV1, RecvEnvelope, SendEnvelope, TcpRecvHalf, TcpSendHalf, TcpTransport,
+    Transport, TransportError,
 };
 use xenia_peer_core::{
     AudioCodec, AudioJitterBuffer, ClipboardContent, HandshakeManager, IncomingFileStager,
@@ -45,7 +46,8 @@ use xenia_peer_core::{
     cleanup_orphaned_receive_staging, derive_negotiated_context_key,
 };
 use xenia_transport_quic::{
-    QuicRecvHalf, QuicSendHalf, QuicTransport, bind_xenia_endpoint, decode_endpoint_addr,
+    QuicRecvHalf, QuicSendHalf, QuicTransport, RelayPolicy, bind_xenia_endpoint,
+    decode_endpoint_addr,
 };
 use xenia_transport_ws::{WsRecvHalf, WsSendHalf, WsTransport};
 use xenia_video::passthrough::PassthroughDecoder;
@@ -1727,12 +1729,20 @@ async fn cli_async(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let transport_profile = transport.transport_profile();
     let pre_session_profile = transport.pre_session_profile();
     let availability_profile = transport.availability_profile();
-    let mut pending_surface = Some(PendingSessionSurface::new_with_profiles(
-        handshake.negotiated_context_hash,
-        transport_profile.clone(),
-        pre_session_profile,
-        availability_profile,
-    )?);
+    let network_path_profile = if negotiated_transport == NegotiatedTransport::Quic {
+        RelayPolicy::from_env()?.network_path_profile()?
+    } else {
+        NetworkPathProfileV1::current(transport_profile.kind)
+    };
+    let mut pending_surface = Some(
+        PendingSessionSurface::new_with_profiles_and_network_path(
+            handshake.negotiated_context_hash,
+            transport_profile.clone(),
+            pre_session_profile,
+            availability_profile,
+            network_path_profile,
+        )?,
+    );
     let mut authenticated_surface: Option<AuthenticatedSessionSurface> = None;
     let mut epoch_state = SessionEpochState::new(handshake.transcript_hash, RekeyPolicy::smoke());
     loop {
@@ -2199,12 +2209,18 @@ async fn gui_receive_loop(
     );
     let mut audio_sink: Box<dyn AudioPlaybackSink + Send> =
         Box::new(ChannelAudioSink::new(audio_queue));
+    let network_path_profile = if negotiated_transport == NegotiatedTransport::Quic {
+        RelayPolicy::from_env()?.network_path_profile()?
+    } else {
+        NetworkPathProfileV1::current(transport_profile.kind)
+    };
     let mut pending_surface = Some(
-        PendingSessionSurface::new_with_profiles(
+        PendingSessionSurface::new_with_profiles_and_network_path(
             handshake.negotiated_context_hash,
             transport_profile.clone(),
             pre_session_profile,
             availability_profile,
+            network_path_profile,
         )
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?,
     );
