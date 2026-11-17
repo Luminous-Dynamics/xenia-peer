@@ -7237,8 +7237,7 @@ mod consent_scope_tests {
 
     #[test]
     fn each_enabled_capability_unlocks_exactly_its_own_tier() {
-        let mut telemetry =
-            args_with(InputBackendChoice::Noop, ClipboardMode::Off, None, None);
+        let mut telemetry = args_with(InputBackendChoice::Noop, ClipboardMode::Off, None, None);
         telemetry.telemetry_level = TelemetryLevel::Basic;
         assert!(configured_permission_set(&telemetry).stream_telemetry);
         assert!(!configured_permission_set(&telemetry).stream_audio);
