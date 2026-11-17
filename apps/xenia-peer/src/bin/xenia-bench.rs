@@ -98,7 +98,7 @@ fn run() -> AppResult<()> {
                 .and_then(|s| s.get(..12))
                 .unwrap_or("unknown");
             let run_id = format!("{profile_id}-{now_ms}-{commit_short}");
-            let required = required_measurements(&profile_id)?;
+            let required = required_measurements(profile_id)?;
             let output_dir = output
                 .parent()
                 .filter(|p| !p.as_os_str().is_empty())
@@ -233,7 +233,7 @@ fn parse_options(
     args: impl Iterator<Item = String>,
 ) -> AppResult<std::collections::BTreeMap<String, String>> {
     let values: Vec<String> = args.collect();
-    if values.len() % 2 != 0 {
+    if !values.len().is_multiple_of(2) {
         return Err(app_error("options must be supplied as --name value pairs"));
     }
     let mut options = std::collections::BTreeMap::new();
@@ -981,9 +981,9 @@ fn validate_i2p_trace(
     let p50 = nearest_rank_percentile(&latency_ns, 50, 100);
     let p95 = nearest_rank_percentile(&latency_ns, 95, 100);
     let p99 = nearest_rank_percentile(&latency_ns, 99, 100);
-    let max = *latency_ns
-        .last()
-        .ok_or_else(|| app_error("at least one valid trial is required for percentile calculation"))?;
+    let max = *latency_ns.last().ok_or_else(|| {
+        app_error("at least one valid trial is required for percentile calculation")
+    })?;
     let seed = u64::from_str_radix(&trace_digest[..16], 16)
         .map_err(|_| app_error("cannot derive deterministic bootstrap seed from trace digest"))?;
     let (ci_lower, ci_upper) =
@@ -2004,8 +2004,7 @@ mod tests {
             "valid_until_unix_ms": 2_000,
             "uncertainty_ns": 100
         });
-        let calibration_digest =
-            fixture_sha256(&serde_json::to_vec_pretty(&calibration).unwrap());
+        let calibration_digest = fixture_sha256(&serde_json::to_vec_pretty(&calibration).unwrap());
         let trace = json!({
             "schema_version": I2P_TRACE_SCHEMA,
             "run_id": run_id,
@@ -2168,7 +2167,7 @@ mod tests {
 
     #[test]
     fn i2p_import_rejects_expired_calibration_and_digest_mismatch() {
-        let (trace, mut calibration, packet) = synthetic_i2p_fixture(300);
+        let (mut trace, mut calibration, packet) = synthetic_i2p_fixture(300);
         calibration["valid_until_unix_ms"] = json!(1_499);
         rebind_fixture_calibration_digest(&mut trace, &calibration);
         assert!(
