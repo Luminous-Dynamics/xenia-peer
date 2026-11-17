@@ -6495,9 +6495,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
         if file_send_permitted {
-            let source =
-                xenia_peer_core::TransferSource::open_file_limited(path, args.file_transfer_max_bytes)
-                    .await?;
+            let source = xenia_peer_core::TransferSource::open_file_limited(
+                path,
+                args.file_transfer_max_bytes,
+            )
+            .await?;
             let size = source.size();
             let name = path
                 .file_name()
