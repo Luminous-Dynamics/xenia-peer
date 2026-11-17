@@ -119,3 +119,22 @@ hardening. It does not add a Mycelix authority client,
 ROS-005 signature/lineage verifier, freshness watermark, revocation stream,
 session-capability issuance, or runtime enforcement switch-over is added here.
 No Holochain 0.7.1 qualification or security superiority is claimed.
+
+
+## Mycelix ROS-005 adapter contract (reviewed 2026-11-17)
+
+The current upstream Rust implementation is under review in Mycelix [PR #3660](https://github.com/Luminous-Dynamics/mycelix/pull/3660) with parent-chain/content-identity hardening in [PR #3679](https://github.com/Luminous-Dynamics/mycelix/pull/3679). Its current head at review was `c4cf22922be4917d6aad2ba568bbfe9138ba85cf`. It is not merged or Holochain-qualified yet.
+
+The exposed semantic types are `Delegation`, `DelegationContext`, `ExecutionRequest`, `ExecutionDecision`, `ActionScope`, `ResourceScope`, `DelegationMode`, `PrincipalRef`, and `AuthorityEpoch`. For the eight M1 lanes, the future adapter can construct an exact `ActionScope::named(M1Permission::action_id())` and an exact `ResourceScope::named(canonical_host_resource_id)`, then call `Delegation::authorize(request, context)` with an authenticated delegate/principal and the complete addressable parent-chain snapshot.
+
+Important adapter constraints:
+
+- `DelegationContext::from_slice` checks duplicate IDs and `authorize` validates the content-bound identity of the target and every retrieved parent. The adapter must retrieve the actual parent records from the authority owner; a caller-supplied `parent_active` boolean is not part of the hardened API.
+- Missing parent records, revoked ancestors, altered content, stale epoch, invalid scope or chain errors are non-permits. Missing/incomplete authority evidence must remain HOLD/INDETERMINATE in the Xenia adapter; a valid negative semantic decision is DENIED.
+- The current Mycelix `ActionScope` and `ResourceScope` are exact `Named` equality values. This matches the eight exact M1 action IDs, but does not provide hierarchical resource containment or multi-action set algebra. Xenia retains the local direction and lane crosswalk checks.
+- The current `ExecutionRequest` has no explicit purpose, audience, direction, data-class, session fingerprint or operation digest. Those are not to be smuggled into an action name. Xenia must conjunct ROS-005 with ROS-004 `Consent::authorize`, the authenticated session, M1 lane, resource/direction and final effect-owner gate.
+- The time fields are `i64`, but the reviewed ROS-005/ROS-004 public types do not yet specify their epoch/unit. Do not convert Xenia's millisecond timestamps or issue an integration permit until Mycelix standardizes this contract.
+- The crate-root `PrincipalRef` export ambiguity was resolved in the ROS-005 feature branch by explicit exports `ConsentPrincipalRef` and `DelegationPrincipalRef`; module-qualified names remain available.
+- `ExecutionDecision::AuthorizedExecution` is semantic authority only. It is not a Holochain zome-call credential, Xenia session capability, host effect commit, transport acknowledgement or evidence that the viewer observed anything.
+
+The next integration sequence is: qualify the upstream core type package on an exact SHA; pin the Mycelix crate revision/API contract; standardize timestamp units and resource canonicalization; retrieve and authenticate current delegation/consent records plus authority frontier; compose ROS-005 AND ROS-004 AND Xenia M1; then qualify every local effect boundary, revocation race, and evidence receipt. Until then, this PR remains a typed crosswalk plus local M1 hardening, not a Mycelix runtime integration.
