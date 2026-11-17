@@ -276,6 +276,109 @@ impl TransportAvailabilityProfileV1 {
     }
 }
 
+/// Stable schema label for the network path policy committed into the
+/// authenticated session context.
+pub const NETWORK_PATH_PROFILE_SCHEMA: &str = "xenia-network-path-profile-v1";
+
+/// Relay/path mode selected for one authenticated carrier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NetworkRelayModeV1 {
+    /// The carrier is not Iroh QUIC, so an Iroh relay policy does not apply.
+    NotApplicable,
+    /// Iroh relay use is disabled; direct reachability is required.
+    DirectOnly,
+    /// Iroh's default public relay map is enabled.
+    PublicDefault,
+    /// One or more operator-managed relays are configured. Their canonical
+    /// ordered URL list is represented by a digest in the session context.
+    Custom,
+}
+
+/// Network-path policy committed into the authenticated session context.
+///
+/// The profile intentionally excludes raw relay hostnames and endpoint
+/// locators. Custom relay configuration is represented by a digest over the
+/// exact ordered canonical URL list. Peers with different custom relay sets
+/// therefore fail the context-hash comparison without disclosing those URLs
+/// through ordinary context logs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkPathProfileV1 {
+    /// Stable profile schema.
+    pub schema: String,
+    /// Carrier to which this path policy applies.
+    pub kind: TransportKind,
+    /// Selected relay mode.
+    pub relay_mode: NetworkRelayModeV1,
+    /// BLAKE3-256 digest of a canonical ordered custom relay URL list. Present
+    /// only when relay_mode is Custom.
+    pub custom_relay_set_digest: Option<[u8; 32]>,
+}
+
+impl NetworkPathProfileV1 {
+    /// Default network-path profile for a carrier with no relay configuration.
+    /// QUIC defaults to direct-only; TCP and WebSocket do not use Iroh relays.
+    pub fn current(kind: TransportKind) -> Self {
+        let relay_mode = match kind {
+            TransportKind::Quic => NetworkRelayModeV1::DirectOnly,
+            TransportKind::Tcp | TransportKind::WebSocket => {
+                NetworkRelayModeV1::NotApplicable
+            }
+        };
+        Self {
+            schema: NETWORK_PATH_PROFILE_SCHEMA.to_string(),
+            kind,
+            relay_mode,
+            custom_relay_set_digest: None,
+        }
+    }
+
+    /// Construct a profile for an Iroh endpoint configured with the public
+    /// default relay map.
+    pub fn public_relay() -> Self {
+        Self {
+            schema: NETWORK_PATH_PROFILE_SCHEMA.to_string(),
+            kind: TransportKind::Quic,
+            relay_mode: NetworkRelayModeV1::PublicDefault,
+            custom_relay_set_digest: None,
+        }
+    }
+
+    /// Construct a profile for an operator-managed custom relay set.
+    pub fn custom_relay(custom_relay_set_digest: [u8; 32]) -> Self {
+        Self {
+            schema: NETWORK_PATH_PROFILE_SCHEMA.to_string(),
+            kind: TransportKind::Quic,
+            relay_mode: NetworkRelayModeV1::Custom,
+            custom_relay_set_digest: Some(custom_relay_set_digest),
+        }
+    }
+
+    /// Return true only when the profile has a supported shape for its carrier.
+    /// The custom relay-set digest is dynamic, but its presence is mandatory.
+    pub fn is_supported_for(&self, transport_profile: &TransportProfileV1) -> bool {
+        if self.schema != NETWORK_PATH_PROFILE_SCHEMA || self.kind != transport_profile.kind {
+            return false;
+        }
+        match (self.kind, self.relay_mode, self.custom_relay_set_digest) {
+            (TransportKind::Tcp | TransportKind::WebSocket, NetworkRelayModeV1::NotApplicable, None) => true,
+            (TransportKind::Quic, NetworkRelayModeV1::DirectOnly, None)
+            | (TransportKind::Quic, NetworkRelayModeV1::PublicDefault, None) => true,
+            (TransportKind::Quic, NetworkRelayModeV1::Custom, Some(_)) => true,
+            _ => false,
+        }
+    }
+
+    /// Canonical bincode-v1 representation used only as input to context hashing.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
+        bincode::serialize(self)
+    }
+
+    /// BLAKE3-256 digest of the canonical network-path profile.
+    pub fn profile_hash(&self) -> Result<[u8; 32], bincode::Error> {
+        Ok(*blake3::hash(&self.canonical_bytes()?).as_bytes())
+    }
+}
+
 /// Maximum envelope size this transport will accept. Guards against
 /// a malicious peer sending a length prefix that would cause the
 /// receiver to allocate gigabytes. 16 MiB covers any realistic
