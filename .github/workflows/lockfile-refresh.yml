@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref_name }}
+          ref: ${{ github.head_ref || github.ref_name }}
       - uses: DeterminateSystems/nix-installer-action@main
       - name: Resolve only the reviewed dependency updates
         run: |
@@ -36,6 +36,7 @@ jobs:
       - name: Commit Cargo-generated lockfile and remove this temporary workflow
         env:
           GH_TOKEN: ${{ github.token }}
+          TARGET_BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
           set -euo pipefail
           git diff --check
@@ -44,7 +45,7 @@ jobs:
             rm .github/workflows/lockfile-refresh.yml
             git add .github/workflows/lockfile-refresh.yml
             git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "ci: remove temporary lockfile regeneration workflow"
-            git push origin "HEAD:${GITHUB_REF_NAME}"
+            git push origin "HEAD:${TARGET_BRANCH}"
             exit 1
           fi
           rm .github/workflows/lockfile-refresh.yml
