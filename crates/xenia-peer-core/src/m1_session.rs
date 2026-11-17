@@ -205,6 +205,34 @@ impl M1PermissionSet {
             && (!self.send_file_to_viewer || parent.send_file_to_viewer)
             && (!self.receive_file_from_viewer || parent.receive_file_from_viewer)
     }
+    /// Whether this set is a proper subset of the parent (no widening and at
+    /// least one permission removed).
+    ///
+    /// Use this when the delegation profile requires every child to narrow
+    /// its parent's lane set. is_subset_of remains useful for validating
+    /// effective, non-widening intersections.
+    pub fn is_strict_subset_of(self, parent: Self) -> bool {
+        self.is_subset_of(parent) && self != parent
+    }
+
+    /// Union the lanes of independent alternative grants.
+    ///
+    /// This is OR-composition, not a parent/child delegation operation.
+    /// Callers must preserve each grant's identity and revocation lineage;
+    /// this aggregate mask cannot explain which grant supports a lane.
+    pub const fn union_independent_grants(self, other: Self) -> Self {
+        Self {
+            stream_frame: self.stream_frame || other.stream_frame,
+            stream_telemetry: self.stream_telemetry || other.stream_telemetry,
+            stream_audio: self.stream_audio || other.stream_audio,
+            inject_input: self.inject_input || other.inject_input,
+            read_host_clipboard: self.read_host_clipboard || other.read_host_clipboard,
+            write_host_clipboard: self.write_host_clipboard || other.write_host_clipboard,
+            send_file_to_viewer: self.send_file_to_viewer || other.send_file_to_viewer,
+            receive_file_from_viewer: self.receive_file_from_viewer
+                || other.receive_file_from_viewer,
+        }
+    }
 
     /// Permissions common to two independently required authority scopes.
     ///
@@ -1166,16 +1194,30 @@ mod tests {
             for parent_mask in 0u16..=u8::MAX as u16 {
                 let child = from_mask(child_mask as u8);
                 let parent = from_mask(parent_mask as u8);
+                let is_subset = child_mask & !parent_mask == 0;
                 assert_eq!(
                     child.is_subset_of(parent),
-                    child_mask & !parent_mask == 0,
+                    is_subset,
                     "child={child_mask:08b}, parent={parent_mask:08b}"
+                );
+                assert_eq!(
+                    child.is_strict_subset_of(parent),
+                    is_subset && child_mask != parent_mask,
+                    "strict child={child_mask:08b}, parent={parent_mask:08b}"
                 );
 
                 let common = child.intersection(parent);
                 assert!(common.is_subset_of(child));
                 assert!(common.is_subset_of(parent));
                 assert_eq!(common.is_empty(), child_mask & parent_mask == 0);
+
+                let alternatives = child.union_independent_grants(parent);
+                assert!(child.is_subset_of(alternatives));
+                assert!(parent.is_subset_of(alternatives));
+                assert_eq!(
+                    alternatives.is_empty(),
+                    child_mask == 0 && parent_mask == 0
+                );
             }
         }
     }
