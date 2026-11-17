@@ -2050,11 +2050,14 @@ mod tests {
     #[test]
     fn i2p_import_accepts_calibrated_synthetic_fixture_but_only_yields_partial_measurement() {
         let (trace, calibration, packet) = synthetic_i2p_fixture(300);
+        let calibration_digest = trace["calibration_sha256"]
+            .as_str()
+            .expect("synthetic fixture binds the calibration digest");
         let summary = validate_i2p_trace(
             &trace,
             &calibration,
             &"a".repeat(64),
-            &"b".repeat(64),
+            calibration_digest,
             &packet,
         )
         .unwrap();
