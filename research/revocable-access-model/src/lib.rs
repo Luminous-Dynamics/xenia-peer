@@ -78,6 +78,7 @@ pub enum Failure {
     SubdelegationForbidden,
     ScopeAmplification,
     IssuerMismatch,
+    SelfDelegation,
     RootIssuerMismatch,
     InvalidStatement,
     WrongResource,
@@ -130,6 +131,9 @@ impl Delegation {
         }
         if self.issuer != parent.holder {
             return Err(Failure::IssuerMismatch);
+        }
+        if self.issuer == self.holder {
+            return Err(Failure::SelfDelegation);
         }
         let mode_attenuates =
             parent.mode == AuthorityMode::Execute || self.mode == AuthorityMode::ProposeOnly;
@@ -199,6 +203,8 @@ impl AuthorityState {
             }
         } else if grant.issuer != grant.principal {
             return Evaluation::denied(Failure::RootIssuerMismatch);
+        } else if grant.issuer == grant.holder {
+            return Evaluation::denied(Failure::SelfDelegation);
         }
         Evaluation::allowed()
     }
@@ -426,6 +432,14 @@ mod tests {
         altered.id = "different-id".into();
         s.grants.insert("root".into(), altered);
         assert_eq!(s.evaluate("root", 500).failure, Some(Failure::InvalidStatement));
+    }
+
+    #[test]
+    fn self_delegation_is_rejected() {
+        let mut s = state();
+        let root = grant("root", "alice", "alice", None);
+        s.grants.insert("root".into(), root);
+        assert_eq!(s.evaluate("root", 500).failure, Some(Failure::SelfDelegation));
     }
 
 }
