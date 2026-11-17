@@ -560,6 +560,35 @@ mod tests {
             Some(Failure::DepthExceeded)
         );
     }
+    #[test]
+    fn composition_operators_apply_to_exact_requested_effect() {
+        let mut s = state();
+        s.grants.insert("other".into(), grant("other", "alice", "dave", None));
+        s.revoked.insert("root".into());
+        let request = AccessRequest {
+            resource: Resource { domain: "home-a".into(), id: "host-1".into() },
+            right: Right::View, purpose: "support-session".into(), requires_execution: true,
+        };
+        assert_eq!(
+            s.evaluate_independent_request(&["root", "other"], &request, 500).decision,
+            Decision::Allowed
+        );
+        assert_eq!(
+            s.evaluate_required_request(&["root", "other"], &request, 500).decision,
+            Decision::Denied
+        );
+    }
+
+    #[test]
+    fn inconsistent_subdelegation_depth_metadata_is_invalid() {
+        let mut root = grant("root", "alice", "bob", None);
+        root.may_subdelegate = false;
+        assert!(!root.well_formed());
+        root.may_subdelegate = true;
+        root.remaining_depth = 0;
+        assert!(!root.well_formed());
+    }
+
 }
     #[test]
     fn freshness_frontier_blocks_stale_snapshots() {
