@@ -193,7 +193,7 @@ All targets below are proposed engineering goals, not measured results or indust
 
 ### Performance and scale
 
-Measure local evaluation separately from network propagation. Initial targets for an optimized local evaluator on a declared reference host: p50 ≤ 2 ms, p95 ≤ 10 ms, p99 ≤ 25 ms for a warm cache and lineage depth ≤ 8; report cold-cache and depth-16 results separately. These are targets to test, not assumptions.
+Measure local evaluation separately from network propagation. Initial acceptance targets for an optimized local evaluator on a declared reference host: p50 ≤ 1 ms, p95 ≤ 2 ms, p99 ≤ 5 ms for a warm cache and lineage depth ≤ 8; report cold-cache and depth-16 results separately. OPA's own guidance identifies an order-of-1-ms decision budget for some microservice authorization use cases and provides profiling/benchmark tooling; simple-policy examples are not directly comparable to this lineage workload. These are targets to test, not measured results.
 
 Run 1, 10, 100 and 1,000 concurrent sessions; 1, 8 and 32 lanes/session; 1, 10, 100 and 1,000 grants/principal; lineage depths 0, 1, 4, 8 and 16. Measure CPU, memory, allocation count, throughput, and p50/p95/p99/max latency. Test bursty grant/revoke churn and concurrent authorization/effect commits.
 
@@ -212,4 +212,4 @@ The likely advantage to pursue is not raw PDP latency alone: it is a stronger en
 
 ## 16. Deterministic reference model
 
-A standalone, dependency-light Rust policy oracle and adversarial unit tests live in `research/revocable-access-model/` and are tracked by Xenia #501. It models exact resource equality, parent attenuation, local revocation, epochs, three-valued decisions and OR/AND composition. It is deliberately not a production authorization service and does not qualify cryptography, Holochain, DHT convergence, or OS enforcement. CI/test results must be attached to the exact tested commit before any qualification claim.
+A standalone, dependency-light Rust policy oracle, adversarial unit tests and a lineage-depth microbenchmark live in `research/revocable-access-model/` and are tracked by Xenia #501. The benchmark reports per-depth p50/p95/p99/max latency; it is a measurement harness, not a result or proof of comparative superiority. It models exact resource equality, parent attenuation, local revocation, epochs, three-valued decisions and OR/AND composition. It is deliberately not a production authorization service and does not qualify cryptography, Holochain, DHT convergence, or OS enforcement. CI/test results must be attached to the exact tested commit before any qualification claim.
