@@ -173,7 +173,9 @@ impl AuthorityState {
         let Some(grant) = self.grants.get(id) else {
             return Evaluation::unknown(Failure::MissingRecord);
         };
-        if !grant.well_formed() { return Evaluation::denied(Failure::InvalidStatement); }
+        if grant.id != id || !grant.well_formed() {
+            return Evaluation::denied(Failure::InvalidStatement);
+        }
         if self.revoked.contains(id) { return Evaluation::denied(Failure::Revoked); }
         match self.epochs.get(&grant.resource.domain) {
             Some(epoch) if *epoch == grant.authority_epoch => {}
@@ -414,6 +416,15 @@ mod tests {
             right: Right::View, purpose: "support-session".into(), requires_execution: true,
         };
         assert_eq!(s.evaluate_request("root", &request, 500).failure, Some(Failure::ExecutionNotGranted));
+    }
+
+    #[test]
+    fn map_key_must_match_content_identifier() {
+        let mut s = state();
+        let mut altered = s.grants.remove("root").unwrap();
+        altered.id = "different-id".into();
+        s.grants.insert("root".into(), altered);
+        assert_eq!(s.evaluate("root", 500).failure, Some(Failure::InvalidStatement));
     }
 
 }
