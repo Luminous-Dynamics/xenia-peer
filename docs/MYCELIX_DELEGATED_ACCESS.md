@@ -372,3 +372,77 @@ The target is not to send every mouse event or video frame to a remote PDP. That
 7. If the local frontier is below the required minimum, the session is partitioned beyond its lease, or the revocation state is unknown, stop high-risk effects rather than falling back to a stale cached allow.
 
 This is the intended performance advantage: move expensive immutable proof work out of the hot path, while keeping freshness and effect authorization local and current. Benchmark the complete path, not just the compiled policy decision.
+
+
+## 24. Institutional authorization assurance and trajectory-level evaluation
+
+Cross-project alignment: Mycelix `docs/research/INSTITUTIONAL_AUTHORIZATION_ASSURANCE_PROFILE.md`
+(14 November 2026). That profile is a research note and synthetic conformance
+extension, not a standard, certification or production security claim. Xenia
+should implement its remote-session-specific evidence under the shared
+Claim–Obligation–Enforcement–Evidence–Effect vocabulary rather than inventing
+another system-wide assurance score.
+
+Map the integration as follows:
+
+| IAAP property | Mycelix/Xenia application |
+|---|---|
+| IAAP-1 Complete mediation | Enumerate every effect-capable Xenia route: viewer session, media/input/clipboard/file lane, reconnect/rekey path, daemon/admin route, background worker, and host-side effect owner. A known reachable bypass fails; incomplete inventory is Indeterminate. |
+| IAAP-2 Trajectory-wide least privilege | Compute the union of all active M1 lanes, Mycelix delegations, Holochain grants, ambient credentials and forwarded/session credentials available during the trajectory. Unused but available authority still counts. |
+| IAAP-3 Revocation propagation | Bind the authority owner's effective epoch and each Xenia enforcement point's observed epoch/time; report stale-capability exposure and disconnected surfaces individually. A local Xenia revoke is not proof of cross-system revocation. |
+| IAAP-4 Delegation containment | Check every edge for action, resource, purpose, data class/field, audience, direction, mode, validity, amount/operation/rate/concurrency budget and subject binding. Unknown subset semantics fail closed. |
+| IAAP-5 Effect-level accounting | Keep authorization admission, attempt, dispatch, local commit, peer acknowledgement, independently observed result and reconciliation as distinct events. |
+
+The IAAP profile's descriptive evidence maturity levels are E0 asserted,
+E1 specified, E2 structurally checked, E3 adversarially exercised,
+E4 independently observed and E5 externally replicated. These are not a
+certification or a single assurance grade. Report the level separately for
+each claim and protected-effect scope. In particular, this reference model is
+not E4/E5 evidence and does not prove a production Xenia path.
+
+### Current agent authorization benchmarks
+
+Use these new external benchmarks as design inputs, not as direct scores for
+Xenia or Mycelix:
+
+- **AuthorizationBench** (Zhang et al., 20 October 2026):
+  286 tasks across ten application domains and 6,864 trajectories; 19.2% of
+  trajectories contained an out-of-authorization action. The authors report
+  lower out-of-authorization behavior in paired runs where agents consulted
+  the principal before completing the task (14.0% versus 21.6%). The result is
+  benchmark-specific, not a universal estimate.
+  https://arxiv.org/abs/2610.27548
+- **SABench** (Huang et al., 25 October 2026):
+  201 tasks, 47 templates and 2,211 model-task runs; 15.2% of runs incurred
+  collateral damage, and 12.8% of goal-satisfied runs still contained
+  unauthorized writes. The benchmark uses deterministic traces to evaluate
+  task success and authorization compliance independently.
+  https://arxiv.org/abs/2610.34167
+
+The important transferable design is to keep out-of-scope paths executable and
+observable during evaluation. Hiding every prohibited route makes an
+authorization benchmark vacuous. Also include an ambiguity/clarification
+family: when recipient, resource, action, quantity or destination changes the
+protected effect and is not specified by the principal, the correct behavior
+is clarification and zero dispatch—not a guessed authorization.
+
+### Updated benchmark composition
+
+Keep three scorecards rather than one weighted metric:
+
+1. **Matched PDP decisions:** OPA, Cedar and OpenFGA on equivalent policy graphs,
+   semantics, versions, cache and consistency modes; report engine-only and
+   client/server latency separately.
+2. **Delegated remote-effect assurance:** lineage containment, causal
+   freshness, exact M1 lane enforcement, effect-commit ordering, revocation
+   exposure and independently verified receipts.
+3. **Trajectory-level alignment:** complete mediation, ambient/forwarded
+   privilege union, clarification, unauthorized effects and side effects,
+   using executable positive and negative controls.
+
+Unauthorized protected effects, false permits, delegation amplification,
+known bypass acceptance, duplicate side effects and unknown-to-permit
+conversion are hard failures. They must not be averaged away by high task
+completion or low median latency. Publish denominators, positive-control
+false-deny rates, raw samples, route-inventory coverage, pinned comparator
+versions, hardware and confidence intervals.
