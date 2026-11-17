@@ -266,8 +266,8 @@ pub(crate) async fn handle_envelope(
                 .lock()
                 .await
                 .seal_file_transfer_message(complete, true)?;
-            if let Err(err) = m1_runtime.lock().await.preflight_file_send_flow() {
-                warn!(error = %err, "outgoing file transfer revoked before completion send");
+            if let Err(err) = m1_runtime.lock().await.allow_file_send_flow() {
+                warn!(error = %err, "outgoing file transfer rejected at completion send boundary");
                 return Ok(());
             }
             send_half.send_envelope(&envelope).await?;
