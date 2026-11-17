@@ -59,7 +59,7 @@ fn percentile(sorted: &[u128], percentile: usize) -> u128 {
     sorted[index]
 }
 
-fn report(mode: &str, depth: u16, mut evaluate: impl FnMut() -> impl Sized) {
+fn report<T>(mode: &str, depth: u16, mut evaluate: impl FnMut() -> T) {
     const SAMPLES: usize = 20_000;
     let mut samples = Vec::with_capacity(SAMPLES);
     for _ in 0..SAMPLES {
