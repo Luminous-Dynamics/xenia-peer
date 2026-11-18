@@ -1152,6 +1152,27 @@ mod tests {
     }
 
     #[test]
+    fn completion_sequence_exhaustion_keeps_a_possible_effect_unknown() {
+        let mut gate = gate();
+        let operation = intent(20, M1Permission::WriteHostClipboard);
+        let prepared = prepare_new(&mut gate, &operation);
+        let receipt = gate.linearize_commit(prepared).unwrap();
+        gate.next_sequence = u64::MAX;
+
+        assert_eq!(
+            gate.complete(receipt, M1EffectCompletion::Committed),
+            Err(M1EffectError::SequenceExhausted)
+        );
+        let snapshot = gate.operation(operation.operation_id).unwrap();
+        assert_eq!(snapshot.disposition, M1EffectDisposition::Unknown);
+        assert_eq!(snapshot.resolution_sequence, None);
+        assert_eq!(
+            gate.linearize_commit(prepared),
+            Err(M1EffectError::AlreadyConsumed)
+        );
+    }
+
+    #[test]
     fn zero_operation_and_session_ids_are_rejected() {
         let mut gate = gate();
         let mut empty_operation = intent(16, M1Permission::InjectInput);
