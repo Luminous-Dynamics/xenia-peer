@@ -440,8 +440,15 @@ impl M1EffectGate {
         {
             return Err(M1EffectError::StalePreparedHandle);
         }
-        if record.disposition != M1EffectDisposition::Prepared {
-            return Err(M1EffectError::AlreadyConsumed);
+        match record.disposition {
+            M1EffectDisposition::Prepared => {}
+            M1EffectDisposition::Rejected => {
+                return Err(M1EffectError::InvalidTransition {
+                    actual: M1EffectDisposition::Rejected,
+                    required: "Prepared",
+                });
+            }
+            _ => return Err(M1EffectError::AlreadyConsumed),
         }
 
         let linearization_sequence = self.take_sequence()?;
