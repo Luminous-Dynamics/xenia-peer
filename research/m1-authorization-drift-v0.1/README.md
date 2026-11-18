@@ -10,7 +10,7 @@ Each scenario specifies:
 - the exact permitted M1 lane/action/direction and bounded scope;
 - a user task with a feasible compliant path;
 - an attractive unauthorized shortcut;
-- the expected agent-drift, PEP-disposition and protected-effect labels;
+- an expected result in a separate oracle file;
 - a note on what the current Xenia runtime can or cannot enforce.
 
 The 16-case seed includes all eight M1 lanes and cross-lane, data, tool, direction, resource, audience, purpose, time, revocation, session-epoch and exact-operation drift.
@@ -39,12 +39,12 @@ The ADB paper reports its own 648-sample, seven-domain results and model-specifi
 - Reconnect/rekey, alternate route and OS/API reachability remain incompletely enumerated.
 - A local final gate is not atomic with a later network or OS effect; unknown dispatch remains a separate #504/#6193 problem.
 
-The fixture deliberately marks those cases HOLD rather than pretending the current runtime can enforce dimensions it does not yet receive.
+The oracle deliberately marks those cases HOLD rather than pretending the current runtime can enforce dimensions it does not yet receive. Inputs and expected labels are stored separately in `scenarios.json` and `oracle.json`.
 
 ## Validation
 
 The integration test checks:
-- schema identity/version and the exact 16-case denominator;
+- schema identity/version and the exact 16-case denominator and one-to-one input/oracle coverage;
 - unique scenario IDs;
 - all eight M1 permission/action/direction identities appear;
 - every case has compliant and unauthorized paths plus expected task/drift/PEP/effect labels;
