@@ -10,11 +10,15 @@ use xenia_peer_core::{M1DataDirection, M1Permission};
 
 const FIXTURE: &str =
     include_str!("../../../research/m1-authorization-drift-v0.1/scenarios.json");
+const ORACLE: &str =
+    include_str!("../../../research/m1-authorization-drift-v0.1/oracle.json");
 
 #[test]
-fn fixture_has_sixteen_unique_dual_path_known_answer_scenarios() {
+fn fixture_and_oracle_have_sixteen_unique_dual_path_known_answer_scenarios() {
     let fixture: Value =
-        serde_json::from_str(FIXTURE).expect("M1 authorization-drift fixture must be valid JSON");
+        serde_json::from_str(FIXTURE).expect("M1 drift fixture must be valid JSON");
+    let oracle: Value =
+        serde_json::from_str(ORACLE).expect("M1 drift oracle must be valid JSON");
     assert_eq!(
         fixture["schema_id"].as_str(),
         Some("org.luminousdynamics.xenia.m1-authorization-drift-adapter")
@@ -24,16 +28,28 @@ fn fixture_has_sixteen_unique_dual_path_known_answer_scenarios() {
         fixture["status"].as_str(),
         Some("research_fixture_unqualified")
     );
-    assert_eq!(
+    assert!(
         fixture["claim_ceiling"].as_str().is_some(),
-        true,
         "the fixture must state its qualification ceiling"
     );
+    assert_eq!(
+        oracle["schema_id"].as_str(),
+        Some("org.luminousdynamics.xenia.m1-authorization-drift-oracle")
+    );
+    assert_eq!(oracle["schema_version"].as_str(), Some("0.1.0"));
 
     let scenarios = fixture["scenarios"]
         .as_array()
         .expect("scenarios must be an array");
+    let expected = oracle["scenarios"]
+        .as_array()
+        .expect("oracle scenarios must be an array");
     assert_eq!(scenarios.len(), 16, "the seed denominator is frozen at 16");
+    assert_eq!(
+        expected.len(),
+        scenarios.len(),
+        "oracle must cover every scenario exactly once"
+    );
 
     let mut ids = BTreeSet::new();
     for scenario in scenarios {
@@ -57,6 +73,14 @@ fn fixture_has_sixteen_unique_dual_path_known_answer_scenarios() {
                 .is_some_and(|s| !s.trim().is_empty()),
             "{id}: tempting shortcut must be explicit"
         );
+    }
+
+    let mut oracle_ids = BTreeSet::new();
+    for row in expected {
+        let id = row["scenario_id"]
+            .as_str()
+            .expect("every oracle row needs a scenario_id");
+        assert!(oracle_ids.insert(id), "duplicate oracle scenario ID: {id}");
         for field in [
             "task_success_on_compliant_path",
             "agent_drift_attempt",
@@ -64,15 +88,16 @@ fn fixture_has_sixteen_unique_dual_path_known_answer_scenarios() {
             "protected_effect",
         ] {
             assert!(
-                !scenario["expected"][field].is_null(),
+                !row["expected"][field].is_null(),
                 "{id}: expected.{field} is required"
             );
         }
         assert!(
-            scenario["current_runtime_coverage"].as_str().is_some(),
-            "{id}: implementation coverage must be explicit"
+            row["current_runtime_coverage"].as_str().is_some(),
+            "{id}: current implementation coverage must be explicit"
         );
     }
+    assert_eq!(ids, oracle_ids, "fixture and oracle IDs must match exactly");
 }
 
 #[test]
