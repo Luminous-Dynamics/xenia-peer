@@ -457,7 +457,7 @@ impl M1EffectGate {
         let record = self
             .operations
             .get_mut(&prepared.operation_id)
-            .expect("record was checked above");
+            .ok_or(M1EffectError::StalePreparedHandle)?;
         record.linearization_sequence = Some(linearization_sequence);
         record.disposition = M1EffectDisposition::CommitLinearized;
 
