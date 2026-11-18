@@ -188,6 +188,58 @@ Two 2026 benchmark papers reinforce why authorization and side-effect safety mus
 
 Use these as design comparators: leave out-of-scope routes executable and observable in a deterministic sandbox, and score task success, authorized effect, unauthorized side effects and evidence confidence as separate axes. Do not compare their headline percentages directly with M1 runtime tests or with policy-engine microbenchmarks.
 
+## 4.1 Authorization drift and three-layer approval preservation
+
+Two newer research directions should be represented in the next M1 benchmark expansion. They are design comparators, not score-equivalent M1 results.
+
+### Authorization drift across four dimensions
+
+The Authorization Drift Benchmark (ADB, arXiv:2611.09113, 6 November 2026) defines drift across:
+- **Data:** reading or disclosing more than the task requires.
+- **Tool:** choosing a more powerful or unapproved route when a compliant route exists.
+- **Scope:** widening the object, recipient, quantity, direction or effect beyond the approved request.
+- **Time:** acting after the approved window, after revocation, or under a stale session/authority epoch.
+
+ADB contains 648 samples across seven domains and reports 25,207 trajectories across 13 models and three frameworks. The paper reports drift rates of 0.43–0.61 for frontier-capable models in its tested configurations, while 86.18% of tasks had an observed clean-success trajectory. These are study-specific results, not Xenia baselines. See [Authorization Drift in LLM Agents](https://arxiv.org/abs/2611.09113).
+
+M1 translation: each of the eight lanes should have paired cases in which a legitimate, least-privilege path exists alongside an attractive overbroad alternative. Examples include screen-view permission followed by a clipboard read, file-send via a different resource, input injection to a different target, and a queued transfer after the session expires. The oracle should identify the earliest drift point and the resulting protected effect, not only the final task state.
+
+### Refusal safety AND bounded authorization completeness
+
+The 14 November 2026 study *Auditable Authorization for LLM Agents: Empirical Evidence Across Model, Harness, and Workflow Layers* proposes two independent obligations:
+- **Refusal safety:** a rejected or withdrawn effect must not occur.
+- **Bounded authorization completeness:** every still-authorized, feasible, in-scope action must complete within its declared horizon, unless its conditions become invalid or require renewed consent.
+
+The paper distinguishes three places where approval can be lost:
+1. **Model layer:** the model fails to generate an already-approved action or reintroduces a rejected one.
+2. **Harness layer:** parallel approval aggregation, queue scheduling, pause/resume, restoration or retries lose or revive pending work.
+3. **Workflow layer:** a router or branch records Reject but still reaches the protected effect, or records Approve without dispatching the approved action.
+
+Its experiments report 7 unfinished approvals among 300 paired approvals despite zero denied effects in that paired panel; a restoration path omitted 336/672 approved effects; and 4 of 59 comparable public n8n workflows executed after Reject. Those results are specific to the paper's environments and denominators. See [Auditable Authorization for LLM Agents](https://arxiv.org/abs/2611.19237).
+
+M1 translation: paired tests must hold the same session, operation and host state fixed while changing only the authorization decision. An Approve must preserve the exact eligible lane operation through transport scheduling and effect dispatch. A Revoke/Deny must suppress the exact same operation. Do not mark a blanket shutdown as a successful authorization result; valid unrelated lanes and independent grants must remain usable.
+
+### Required M1 benchmark additions (future corpus, not in the 32-case seed)
+
+Add paired, independently adjudicated cases for:
+- each lane's minimum compliant route versus an over-collection, overbroad-tool, wrong-resource or post-expiry shortcut;
+- a scoped Approve with two authorized operations, where parallel scheduling or reconnect must not drop one;
+- Approve for one lane and Deny for another, where batching must not collapse both decisions into one boolean;
+- a queued effect generated before Revoke but not yet admitted at the effect owner;
+- an admitted in-flight operation racing with Revoke, with a typed pre-revoke / post-revoke linearization result and UNKNOWN when commit cannot be observed;
+- session restoration after restart where a previously approved but uncommitted action must be re-evaluated against current consent and authority;
+- a Reject whose control-plane record is correct but an alternate workflow/transport still attempts the protected effect;
+- a valid Approve where the action is feasible but the harness never dispatches it.
+
+Score refusal safety, bounded authorization completeness, task success, collateral/over-collection, exact operation identity, unknown/partial outcome handling, and time-to-completion separately. No weighted score may let successful refusals compensate for dropped approved work, or let completed work compensate for unauthorized effects.
+
+For Xenia specifically, use the model/harness/workflow distinction to review:
+- model/agent-generated input, clipboard and file actions (if an agent controls Xenia);
+- daemon task scheduling, concurrent file-transfer tasks, reconnect/rekey and cancellation;
+- TCP/WebSocket/QUIC dispatch, operator/control routes and the final OS/filesystem/input effect owners.
+
+The current 32-case corpus remains a structural seed. These cases are a planned extension and do not count as implemented or adjudicated until they have frozen inputs, a separate oracle and executable positive/negative controls.
+
 ## 5. Interoperability and standards
 
 Use OpenID AuthZEN Authorization API 1.0 as the PDP↔PEP interoperability boundary rather than inventing a competing policy query protocol. Treat the AuthZEN Obligations Profile 1.0 as a version-pinned Working Group Draft, not a final standard. If negotiated, a PEP that cannot execute a mandatory obligation must deny; transport/authority uncertainty remains a separate local HOLD/INDETERMINATE condition.
