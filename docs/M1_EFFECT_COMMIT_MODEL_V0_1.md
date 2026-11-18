@@ -74,10 +74,13 @@ An outbound send's local return does not prove remote receipt, rendering or play
 The module includes deterministic checks for:
 - revoke-before-commit and commit-before-revoke order;
 - a concurrent Mutex history with one serializable winner;
-- duplicate exact ID/fingerprint and changed-fingerprint conflict;
+- duplicate exact ID/fingerprint and changed-fingerprint conflict; duplicate
+  preparation returns the same handle only while the original is still
+  Prepared;
 - one-shot commit admission;
 - timeout/unknown retry blocking and reconciliation;
-- restart conversion of unfinished linearized work to Unknown;
+- restart conversion of unfinished linearized work to Unknown and rejection
+  of prepared-but-not-linearized work;
 - binding of session, epoch, lane, direction, resource, operation, consent, purpose, audience, policy and optional delegation/authority fields;
 - missing IDs/commitments, wrong session/epoch, direction mismatch and lane denial;
 - idempotent revocation preserving committed history;
