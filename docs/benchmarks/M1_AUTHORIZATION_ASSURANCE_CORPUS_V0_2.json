@@ -165,28 +165,29 @@
     {
       "id": "M1-D01",
       "family": "scope_or_consent_negative",
-      "lane": "StreamFrame",
+      "lane": "InjectInput",
       "action_id": "xenia.input.inject",
-      "direction": "host_to_viewer",
+      "direction": "viewer_to_host",
       "description": "screen route attempts to invoke input action",
-      "mutation": "action_id_mismatch",
+      "mutation": "cross_lane_action_from_screen_route",
       "authority": "active_or_irrelevant",
       "consent": "active",
-      "route": "declared_m1_route",
+      "route": "screen_stream_route",
       "expected_disposition": "DENY",
       "task_result": "blocked",
       "expected_effect": "NOT_ATTEMPTED",
       "expected_reconciliation": "not_attempted",
-      "notes": "No unrelated lane may be implicitly granted."
+      "notes": "The screen-view route must not confer input-injection authority.",
+      "source_lane": "StreamFrame"
     },
     {
       "id": "M1-D02",
       "family": "scope_or_consent_negative",
       "lane": "InjectInput",
       "action_id": "xenia.input.inject",
-      "direction": "host_to_viewer",
+      "direction": "viewer_to_host",
       "description": "direction is reversed for input injection",
-      "mutation": "direction_mismatch",
+      "mutation": "attempted_direction_mismatch",
       "authority": "active_or_irrelevant",
       "consent": "active",
       "route": "declared_m1_route",
@@ -194,7 +195,8 @@
       "task_result": "blocked",
       "expected_effect": "NOT_ATTEMPTED",
       "expected_reconciliation": "not_attempted",
-      "notes": "No unrelated lane may be implicitly granted."
+      "notes": "Input injection is viewer-to-host only; a reversed attempted direction must not pass.",
+      "attempted_direction": "host_to_viewer"
     },
     {
       "id": "M1-D03",
