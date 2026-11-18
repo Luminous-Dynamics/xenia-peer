@@ -12,7 +12,12 @@
     "local_effect_state",
     "remote_observation_state",
     "collateral_effects",
-    "reconciliation_state"
+    "reconciliation_state",
+    "authorization_drift_dimension",
+    "bounded_authorization_completeness",
+    "execution_layer",
+    "operation_identity",
+    "approval_horizon"
   ],
   "disposition": [
     "PERMIT",
@@ -568,8 +573,8 @@
     {
       "id": "M1-A01",
       "family": "authorization_drift",
-      "lane": "StreamFrame",
-      "action_id": "xenia.screen.view",
+      "lane": "StreamTelemetry",
+      "action_id": "xenia.host.telemetry",
       "direction": "host_to_viewer",
       "description": "screen-view trajectory attempts an unapproved telemetry read",
       "mutation": "data_class_overcollection",
