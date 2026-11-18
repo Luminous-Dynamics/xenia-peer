@@ -58,7 +58,11 @@
         "operation_id": "fixture:paired:data-minimization",
         "approved_operation_fingerprint": "approved:data-minimization",
         "requested_operation_fingerprint": "approved:data-minimization",
-        "upstream_state_fingerprint": "frozen-state:data-minimization"
+        "upstream_state_fingerprint": "frozen-state:data-minimization",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:data-minimization",
+        "requested_effect_resource_ref": "effect-resource:data-minimization"
       },
       "synthetic_fixture_only": true
     },
@@ -91,7 +95,11 @@
         "operation_id": "fixture:paired:data-minimization",
         "approved_operation_fingerprint": "approved:data-minimization",
         "requested_operation_fingerprint": "approved:data-minimization",
-        "upstream_state_fingerprint": "frozen-state:data-minimization"
+        "upstream_state_fingerprint": "frozen-state:data-minimization",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:data-minimization",
+        "requested_effect_resource_ref": "effect-resource:data-minimization"
       },
       "synthetic_fixture_only": true
     },
@@ -123,7 +131,11 @@
         "operation_id": "fixture:paired:tool-minimization",
         "approved_operation_fingerprint": "approved:tool-minimization",
         "requested_operation_fingerprint": "approved:tool-minimization",
-        "upstream_state_fingerprint": "frozen-state:tool-minimization"
+        "upstream_state_fingerprint": "frozen-state:tool-minimization",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:tool-minimization",
+        "requested_effect_resource_ref": "effect-resource:tool-minimization"
       },
       "synthetic_fixture_only": true
     },
@@ -155,7 +167,11 @@
         "operation_id": "fixture:paired:tool-minimization",
         "approved_operation_fingerprint": "approved:tool-minimization",
         "requested_operation_fingerprint": "approved:tool-minimization",
-        "upstream_state_fingerprint": "frozen-state:tool-minimization"
+        "upstream_state_fingerprint": "frozen-state:tool-minimization",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:tool-minimization",
+        "requested_effect_resource_ref": "effect-resource:tool-minimization"
       },
       "synthetic_fixture_only": true
     },
@@ -187,7 +203,11 @@
         "operation_id": "fixture:paired:resource-scope",
         "approved_operation_fingerprint": "approved:resource-scope",
         "requested_operation_fingerprint": "approved:resource-scope",
-        "upstream_state_fingerprint": "frozen-state:resource-scope"
+        "upstream_state_fingerprint": "frozen-state:resource-scope",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "host:alpha/file:reports/notes.txt",
+        "requested_effect_resource_ref": "host:alpha/file:reports/notes.txt"
       },
       "synthetic_fixture_only": true
     },
@@ -219,7 +239,11 @@
         "operation_id": "fixture:paired:resource-scope",
         "approved_operation_fingerprint": "approved:resource-scope",
         "requested_operation_fingerprint": "mutated:resource-scope",
-        "upstream_state_fingerprint": "frozen-state:resource-scope"
+        "upstream_state_fingerprint": "frozen-state:resource-scope",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "host:alpha/file:reports/notes.txt",
+        "requested_effect_resource_ref": "host:alpha/file:private/credentials.db"
       },
       "synthetic_fixture_only": true
     },
@@ -251,7 +275,11 @@
         "operation_id": "fixture:paired:temporal-scope",
         "approved_operation_fingerprint": "approved:temporal-scope",
         "requested_operation_fingerprint": "approved:temporal-scope",
-        "upstream_state_fingerprint": "frozen-state:temporal-scope"
+        "upstream_state_fingerprint": "frozen-state:temporal-scope",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:temporal-scope",
+        "requested_effect_resource_ref": "effect-resource:temporal-scope"
       },
       "synthetic_fixture_only": true
     },
@@ -283,7 +311,11 @@
         "operation_id": "fixture:paired:temporal-scope",
         "approved_operation_fingerprint": "approved:temporal-scope",
         "requested_operation_fingerprint": "approved:temporal-scope",
-        "upstream_state_fingerprint": "frozen-state:temporal-scope"
+        "upstream_state_fingerprint": "frozen-state:temporal-scope",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 3,
+        "approved_effect_resource_ref": "effect-resource:temporal-scope",
+        "requested_effect_resource_ref": "effect-resource:temporal-scope"
       },
       "synthetic_fixture_only": true
     },
@@ -315,7 +347,11 @@
         "operation_id": "fixture:paired:approve-reject-same-operation",
         "approved_operation_fingerprint": "approved:approve-reject-same-operation",
         "requested_operation_fingerprint": "approved:approve-reject-same-operation",
-        "upstream_state_fingerprint": "frozen-state:approve-reject-same-operation"
+        "upstream_state_fingerprint": "frozen-state:approve-reject-same-operation",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:approve-reject-same-operation",
+        "requested_effect_resource_ref": "effect-resource:approve-reject-same-operation"
       },
       "synthetic_fixture_only": true
     },
@@ -349,7 +385,11 @@
         "operation_id": "fixture:paired:approve-reject-same-operation",
         "approved_operation_fingerprint": "approved:approve-reject-same-operation",
         "requested_operation_fingerprint": "approved:approve-reject-same-operation",
-        "upstream_state_fingerprint": "frozen-state:approve-reject-same-operation"
+        "upstream_state_fingerprint": "frozen-state:approve-reject-same-operation",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:approve-reject-same-operation",
+        "requested_effect_resource_ref": "effect-resource:approve-reject-same-operation"
       },
       "synthetic_fixture_only": true
     },
@@ -385,7 +425,11 @@
         "operation_id": "fixture:paired:parallel-approved-branches",
         "approved_operation_fingerprint": "approved:parallel-approved-branches",
         "requested_operation_fingerprint": "approved:parallel-approved-branches",
-        "upstream_state_fingerprint": "frozen-state:parallel-approved-branches"
+        "upstream_state_fingerprint": "frozen-state:parallel-approved-branches",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:parallel-approved-branches",
+        "requested_effect_resource_ref": "effect-resource:parallel-approved-branches"
       },
       "synthetic_fixture_only": true
     },
@@ -421,7 +465,11 @@
         "operation_id": "fixture:paired:parallel-approved-branches",
         "approved_operation_fingerprint": "approved:parallel-approved-branches",
         "requested_operation_fingerprint": "approved:parallel-approved-branches",
-        "upstream_state_fingerprint": "frozen-state:parallel-approved-branches"
+        "upstream_state_fingerprint": "frozen-state:parallel-approved-branches",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:parallel-approved-branches",
+        "requested_effect_resource_ref": "effect-resource:parallel-approved-branches"
       },
       "synthetic_fixture_only": true
     },
@@ -453,7 +501,11 @@
         "operation_id": "fixture:paired:workflow-reject-enforcement",
         "approved_operation_fingerprint": "approved:workflow-reject-enforcement",
         "requested_operation_fingerprint": "approved:workflow-reject-enforcement",
-        "upstream_state_fingerprint": "frozen-state:workflow-reject-enforcement"
+        "upstream_state_fingerprint": "frozen-state:workflow-reject-enforcement",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:workflow-reject-enforcement",
+        "requested_effect_resource_ref": "effect-resource:workflow-reject-enforcement"
       },
       "synthetic_fixture_only": true
     },
@@ -485,7 +537,11 @@
         "operation_id": "fixture:paired:workflow-reject-enforcement",
         "approved_operation_fingerprint": "approved:workflow-reject-enforcement",
         "requested_operation_fingerprint": "approved:workflow-reject-enforcement",
-        "upstream_state_fingerprint": "frozen-state:workflow-reject-enforcement"
+        "upstream_state_fingerprint": "frozen-state:workflow-reject-enforcement",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:workflow-reject-enforcement",
+        "requested_effect_resource_ref": "effect-resource:workflow-reject-enforcement"
       },
       "synthetic_fixture_only": true
     },
@@ -519,7 +575,12 @@
         "operation_id": "fixture:file:revoke:001",
         "approved_operation_fingerprint": "approved:approve-revoke-before-commit",
         "requested_operation_fingerprint": "approved:approve-revoke-before-commit",
-        "upstream_state_fingerprint": "frozen-state:approve-revoke-before-commit"
+        "upstream_state_fingerprint": "frozen-state:approve-revoke-before-commit",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:approve-revoke-before-commit",
+        "requested_effect_resource_ref": "effect-resource:approve-revoke-before-commit",
+        "revocation_observed_before_commit": true
       },
       "synthetic_fixture_only": true
     },
@@ -553,7 +614,12 @@
         "operation_id": "fixture:audio:restore:001",
         "approved_operation_fingerprint": "approved:restore-revalidate-currentness",
         "requested_operation_fingerprint": "approved:restore-revalidate-currentness",
-        "upstream_state_fingerprint": "frozen-state:restore-revalidate-currentness"
+        "upstream_state_fingerprint": "frozen-state:restore-revalidate-currentness",
+        "active_session_epoch": 4,
+        "requested_session_epoch": 4,
+        "approved_effect_resource_ref": "effect-resource:restore-revalidate-currentness",
+        "requested_effect_resource_ref": "effect-resource:restore-revalidate-currentness",
+        "restored_currentness": "unknown"
       },
       "synthetic_fixture_only": true
     }
