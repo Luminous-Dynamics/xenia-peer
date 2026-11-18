@@ -248,11 +248,16 @@
       "action_id": "xenia.file.receive",
       "direction": "viewer_to_host",
       "ingress": "apps/xenia-peer/src/file_transfer.rs::handle_envelope",
-      "preflight": null,
+      "preflight": [
+        {
+          "symbol": "M1RuntimeSession::preflight_file_receive_flow",
+          "before": "receive_reservation_and_local_staging"
+        }
+      ],
       "final_gate": [
         {
           "symbol": "M1RuntimeSession::allow_file_receive_flow",
-          "before": "offer_reservation_and_staging"
+          "before": "Accept_send_after_staging"
         },
         {
           "symbol": "M1RuntimeSession::allow_file_receive_flow",
@@ -266,14 +271,16 @@
       "effect_owner": "host filesystem staging and final publication",
       "effect_stages": [
         "offer_validate",
-        "local_lane_check",
+        "side_effect_free_receive_preflight",
         "reserve_and_stage",
+        "final_lane_admission",
+        "Accept_send",
         "per_chunk_lane_check_and_write",
         "complete_lane_check",
         "verify_and_publish",
         "verified_reply"
       ],
-      "strongest_local_claim": "receive gate was checked before accepting, writing chunks and final publication",
+      "strongest_local_claim": "receiver preflights before staging and rechecks the receive lane before inviting sender transmission, each chunk append and final publication",
       "not_proven": [
         "independent_filesystem_observation",
         "external_storage_durability_beyond_stager_contract"
@@ -555,15 +562,23 @@
       "route_id": "m1.file.receive.v1",
       "source": "apps/xenia-peer/src/file_transfer.rs",
       "must_exist": [
-        "allow_file_receive_flow()",
+        "preflight_file_receive_flow()",
         "state.receive_reservations.try_reserve(size)",
+        "IncomingFileStager::create(&dest, size, blake3_hash)",
+        "allow_file_receive_flow()",
+        "send_half.send_envelope(&envelope)",
         "transfer.stager.append(offset, &data)",
         "transfer.stager.finish()"
       ],
       "ordered": [
         {
-          "gate": "allow_file_receive_flow()",
+          "gate": "preflight_file_receive_flow()",
           "effect": "state.receive_reservations.try_reserve(size)",
+          "occurrence": 0
+        },
+        {
+          "gate": "allow_file_receive_flow()",
+          "effect": "send_half.send_envelope(&envelope)",
           "occurrence": 0
         },
         {
