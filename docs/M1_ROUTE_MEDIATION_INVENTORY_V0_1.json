@@ -378,5 +378,205 @@
     "mycelix_revocation_propagation": "Mycelix #6236",
     "mycelix_effectuation": "Mycelix #6136",
     "mycelix_evidence_provenance": "Mycelix #6140"
-  }
+  },
+  "source_checks": [
+    {
+      "route_id": "m1.screen.frame.disclosure.v1",
+      "source": "apps/xenia-peer/src/main.rs",
+      "must_exist": [
+        "preflight_frame_flow()",
+        "allow_frame_flow()?",
+        "capture.capture()?",
+        "send_half.send_envelope(&envelope)"
+      ],
+      "ordered": [
+        {
+          "gate": "preflight_frame_flow()",
+          "effect": "capture.capture()?",
+          "occurrence": 0
+        },
+        {
+          "gate": "allow_frame_flow()?",
+          "effect": "send_half.send_envelope(&envelope)",
+          "occurrence": 0
+        }
+      ]
+    },
+    {
+      "route_id": "m1.telemetry.disclosure.v1",
+      "source": "apps/xenia-peer/src/main.rs",
+      "must_exist": [
+        "preflight_telemetry_flow()",
+        "allow_telemetry_flow()?",
+        "telemetry.poll_samples()"
+      ],
+      "ordered": [
+        {
+          "gate": "preflight_telemetry_flow()",
+          "effect": "telemetry.poll_samples()",
+          "occurrence": 0
+        },
+        {
+          "gate": "allow_telemetry_flow()?",
+          "effect": "send_half.send_envelope(&envelope)",
+          "occurrence": 0
+        }
+      ]
+    },
+    {
+      "route_id": "m1.audio.disclosure.v1",
+      "source": "apps/xenia-peer/src/main.rs",
+      "must_exist": [
+        "preflight_audio_flow()",
+        "allow_audio_flow()?",
+        "audio.next_raw_audio"
+      ],
+      "ordered": [
+        {
+          "gate": "preflight_audio_flow()",
+          "effect": "audio.next_raw_audio",
+          "occurrence": 0
+        },
+        {
+          "gate": "allow_audio_flow()?",
+          "effect": "send_half.send_envelope(&envelope)",
+          "occurrence": 0
+        }
+      ]
+    },
+    {
+      "route_id": "m1.clipboard.read.disclosure.v1",
+      "source": "apps/xenia-peer/src/main.rs",
+      "must_exist": [
+        "preflight_host_clipboard_read_flow()",
+        "allow_host_clipboard_read_flow()?",
+        "read_host_clipboard_text()"
+      ],
+      "ordered": [
+        {
+          "gate": "preflight_host_clipboard_read_flow()",
+          "effect": "read_host_clipboard_text()",
+          "occurrence": 0
+        },
+        {
+          "gate": "allow_host_clipboard_read_flow()?",
+          "effect": "send_half.send_envelope(&envelope)",
+          "occurrence": 0
+        }
+      ]
+    },
+    {
+      "route_id": "m1.clipboard.write.apply.v1",
+      "source": "apps/xenia-peer/src/main.rs",
+      "must_exist": [
+        "allow_host_clipboard_write_flow()",
+        "apply_clipboard_content(&clipboard.content)"
+      ],
+      "ordered": [
+        {
+          "gate": "allow_host_clipboard_write_flow()",
+          "effect": "apply_clipboard_content(&clipboard.content)",
+          "occurrence": 0
+        }
+      ]
+    },
+    {
+      "route_id": "m1.input.inject.apply.v1",
+      "source": "apps/xenia-peer/src/main.rs",
+      "must_exist": [
+        "preflight_input_flow()",
+        "allow_input_flow()",
+        "bincode::deserialize(&input.payload)",
+        "injector.process_events(std::slice::from_ref(&event))"
+      ],
+      "ordered": [
+        {
+          "gate": "preflight_input_flow()",
+          "effect": "bincode::deserialize(&input.payload)",
+          "occurrence": 0
+        },
+        {
+          "gate": "allow_input_flow()",
+          "effect": "injector.process_events(std::slice::from_ref(&event))",
+          "occurrence": 0
+        }
+      ]
+    },
+    {
+      "route_id": "m1.file.send.v1",
+      "source": "apps/xenia-peer/src/main.rs",
+      "must_exist": [
+        "preflight_file_send_flow()",
+        "TransferSource::open_file_limited",
+        "allow_file_send_flow()?",
+        "send_half.send_envelope(&envelope)"
+      ],
+      "ordered": [
+        {
+          "gate": "preflight_file_send_flow()",
+          "effect": "TransferSource::open_file_limited",
+          "occurrence": 0
+        },
+        {
+          "gate": "allow_file_send_flow()?",
+          "effect": "send_half.send_envelope(&envelope)",
+          "occurrence": 0
+        }
+      ]
+    },
+    {
+      "route_id": "m1.file.send.v1",
+      "source": "apps/xenia-peer/src/file_transfer.rs",
+      "must_exist": [
+        "preflight_file_send_flow()",
+        "transfer.source.next_chunk(FILE_TRANSFER_CHUNK_SIZE)",
+        "allow_file_send_flow()",
+        "send_half.send_envelope(&envelope)"
+      ],
+      "ordered": [
+        {
+          "gate": "preflight_file_send_flow()",
+          "effect": "transfer.source.next_chunk(FILE_TRANSFER_CHUNK_SIZE)",
+          "occurrence": 0
+        },
+        {
+          "gate": "allow_file_send_flow()",
+          "effect": "send_half.send_envelope(&envelope)",
+          "occurrence": 0
+        },
+        {
+          "gate": "allow_file_send_flow()",
+          "effect": "send_half.send_envelope(&envelope)",
+          "occurrence": 1
+        }
+      ]
+    },
+    {
+      "route_id": "m1.file.receive.v1",
+      "source": "apps/xenia-peer/src/file_transfer.rs",
+      "must_exist": [
+        "allow_file_receive_flow()",
+        "state.receive_reservations.try_reserve(size)",
+        "transfer.stager.append(offset, &data)",
+        "transfer.stager.finish()"
+      ],
+      "ordered": [
+        {
+          "gate": "allow_file_receive_flow()",
+          "effect": "state.receive_reservations.try_reserve(size)",
+          "occurrence": 0
+        },
+        {
+          "gate": "allow_file_receive_flow()",
+          "effect": "transfer.stager.append(offset, &data)",
+          "occurrence": 1
+        },
+        {
+          "gate": "allow_file_receive_flow()",
+          "effect": "transfer.stager.finish()",
+          "occurrence": 2
+        }
+      ]
+    }
+  ]
 }
