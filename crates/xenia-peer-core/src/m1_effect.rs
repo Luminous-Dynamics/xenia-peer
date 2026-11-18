@@ -255,6 +255,8 @@ pub struct M1EffectSnapshot {
 pub enum M1EffectError {
     /// A new effect cannot be admitted after local revocation.
     Revoked,
+    /// A recovered gate requires fresh session/consent/authority validation.
+    RecoveryRequired,
     /// The M1 lane was not included in the session's granted permission set.
     PermissionDenied(M1Permission),
     /// The intent names a different session.
@@ -293,6 +295,10 @@ impl fmt::Display for M1EffectError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Revoked => write!(f, "M1 effect gate is revoked"),
+            Self::RecoveryRequired => write!(
+                f,
+                "M1 effect gate recovered from crash; fresh authorization context required"
+            ),
             Self::PermissionDenied(permission) => {
                 write!(f, "M1 permission {permission:?} is not granted")
             }
@@ -349,6 +355,7 @@ pub struct M1EffectGate {
     session_epoch: u64,
     granted: M1PermissionSet,
     revoked: bool,
+    recovery_required: bool,
     revocation_sequence: Option<u64>,
     next_sequence: u64,
     operations: BTreeMap<[u8; 16], OperationRecord>,
@@ -366,6 +373,7 @@ impl M1EffectGate {
             session_epoch,
             granted,
             revoked: false,
+            recovery_required: false,
             revocation_sequence: None,
             next_sequence: 1,
             operations: BTreeMap::new(),
@@ -395,6 +403,9 @@ impl M1EffectGate {
 
         if self.revoked {
             return Err(M1EffectError::Revoked);
+        }
+        if self.recovery_required {
+            return Err(M1EffectError::RecoveryRequired);
         }
         self.validate_intent(intent)?;
         if !self.granted.contains(intent.permission) {
@@ -559,6 +570,10 @@ impl M1EffectGate {
     /// but before a trustworthy terminal outcome. It deliberately does not
     /// reissue a permit or guess that the operation had no effect.
     pub fn recover_after_crash(&mut self) {
+        // This gate's pre-crash grant snapshot is no longer sufficient to
+        // admit new work. Existing records remain queryable/reconcilable, but
+        // callers must build a fresh gate from current owner evidence.
+        self.recovery_required = true;
         for record in self.operations.values_mut() {
             match record.disposition {
                 M1EffectDisposition::Prepared => {
@@ -619,6 +634,15 @@ impl M1EffectGate {
         };
         record.resolution_sequence = Some(resolution_sequence);
         Ok(snapshot_record(operation_id, record))
+    }
+
+    /// Whether a crash recovery requires a newly validated session gate.
+    ///
+    /// Existing Unknown operations may still be reconciled on this gate, but
+    /// new operation admission remains blocked. Reconstruct a new gate only
+    /// after current consent, authority and session state have been verified.
+    pub const fn requires_revalidation(&self) -> bool {
+        self.recovery_required
     }
 
     /// Return the immutable current view for one operation.
@@ -930,6 +954,42 @@ mod tests {
                 required: "Prepared"
             })
         );
+    }
+
+    #[test]
+    fn crash_recovery_fences_new_work_until_a_fresh_gate_is_constructed() {
+        let mut recovered = gate();
+        let pre_crash = intent(21, M1Permission::StreamFrame);
+        let _prepared = prepare_new(&mut recovered, &pre_crash);
+
+        recovered.recover_after_crash();
+        assert!(recovered.requires_revalidation());
+        assert_eq!(
+            recovered.prepare(&intent(22, M1Permission::InjectInput)),
+            Err(M1EffectError::RecoveryRequired)
+        );
+
+        // Existing operation identity remains queryable but cannot regain a
+        // prepared handle after recovery.
+        let existing = recovered.prepare(&pre_crash).unwrap();
+        let M1EffectPrepareResult::Existing(snapshot) = existing else {
+            panic!("recovered operation must not be newly prepared");
+        };
+        assert_eq!(snapshot.disposition, M1EffectDisposition::Rejected);
+        assert_eq!(snapshot.prepared_handle, None);
+
+        // A newly constructed gate represents a fresh session/authority
+        // context. The caller—not this model—must verify that context first.
+        let mut fresh_intent = intent(23, M1Permission::StreamFrame);
+        fresh_intent.session_id = [0xA2; 16];
+        fresh_intent.session_epoch = 8;
+        let mut fresh_gate =
+            M1EffectGate::new([0xA2; 16], 8, M1PermissionSet::all());
+        assert!(!fresh_gate.requires_revalidation());
+        assert!(matches!(
+            fresh_gate.prepare(&fresh_intent).unwrap(),
+            M1EffectPrepareResult::New(_)
+        ));
     }
 
     #[test]
