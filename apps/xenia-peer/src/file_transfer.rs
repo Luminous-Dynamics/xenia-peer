@@ -216,29 +216,34 @@ pub(crate) async fn handle_envelope(
                 }
             };
 
-            // The initial preflight protects local staging allocation. Re-check
-            // after staging and immediately before Accept so an operator revoke
-            // observed during allocation cannot authorize the sender to begin
-            // transmitting. A denied Accept drops the staged transfer.
-            let reply = match reply {
-                FileTransferMessage::Accept { transfer_id } => {
-                    if let Err(err) = m1_runtime.lock().await.allow_file_receive_flow() {
-                        warn!(error = %err, "file receive revoked before Accept send; dropping staged transfer");
-                        state.incoming.remove(&transfer_id);
-                        FileTransferMessage::Reject {
-                            transfer_id,
-                            reason: "file receive permission was revoked before acceptance".to_string(),
-                        }
-                    } else {
-                        FileTransferMessage::Accept { transfer_id }
-                    }
-                }
-                other => other,
+            // Seal the response first, then re-check the receive lane at the
+            // last local boundary before inviting the sender to transmit. If an
+            // operator revoke was observed during staging or sealing, discard
+            // the staged transfer and send a separately sealed Reject.
+            let accepting_transfer_id = match &reply {
+                FileTransferMessage::Accept { transfer_id } => Some(*transfer_id),
+                _ => None,
             };
             let envelope = session
                 .lock()
                 .await
                 .seal_file_transfer_message(reply, true)?;
+            if let Some(transfer_id) = accepting_transfer_id
+                && let Err(err) = m1_runtime.lock().await.allow_file_receive_flow()
+            {
+                warn!(error = %err, "file receive revoked after sealing Accept; dropping staged transfer");
+                state.incoming.remove(&transfer_id);
+                let reject = FileTransferMessage::Reject {
+                    transfer_id,
+                    reason: "file receive permission was revoked before acceptance".to_string(),
+                };
+                let reject_envelope = session
+                    .lock()
+                    .await
+                    .seal_file_transfer_message(reject, true)?;
+                send_half.send_envelope(&reject_envelope).await?;
+                return Ok(());
+            }
             send_half.send_envelope(&envelope).await?;
         }
         FileTransferMessage::Accept { transfer_id } => {
