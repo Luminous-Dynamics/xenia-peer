@@ -7,6 +7,9 @@ const ROUTE_INVENTORY: &str = include_str!("../../../docs/security/M1_ROUTE_INVE
 const DAEMON_SOURCE: &str = include_str!("../../../apps/xenia-peer/src/main.rs");
 const FILE_TRANSFER_SOURCE: &str = include_str!("../../../apps/xenia-peer/src/file_transfer.rs");
 const RUNTIME_SOURCE: &str = include_str!("../../../apps/xenia-peer/src/m1_runtime.rs");
+const CONSENT_SERVER_SOURCE: &str = include_str!("../../../apps/xenia-peer/src/consent_server.rs");
+const SEALED_OPERATOR_CHANNEL_SOURCE: &str =
+    include_str!("../../../apps/xenia-peer/src/operator_sealed_channel.rs");
 const PERMISSION_MODEL_SOURCE: &str = include_str!("../src/m1_session.rs");
 
 fn source_section<'a>(source: &'a str, route: &str, start: &str, end: &str) -> &'a str {
@@ -74,6 +77,16 @@ fn route_inventory_is_complete_for_the_declared_eight_lane_census() {
             "runtime",
             "apps/xenia-peer/src/m1_runtime.rs",
             RUNTIME_SOURCE,
+        ),
+        (
+            "consent_server",
+            "apps/xenia-peer/src/consent_server.rs",
+            CONSENT_SERVER_SOURCE,
+        ),
+        (
+            "sealed_operator_channel",
+            "apps/xenia-peer/src/operator_sealed_channel.rs",
+            SEALED_OPERATOR_CHANNEL_SOURCE,
         ),
         (
             "permission_model",
