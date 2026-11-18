@@ -340,8 +340,8 @@ fn drift_and_dual_obligation_extension_has_matched_pairs_and_separate_oracle() {
             result["expected_authorization_disposition"].as_str(),
             Some("PERMIT" | "DENY" | "HOLD")
         ));
-        assert!(result["expected_new_effect_attempts"].as_u64().is_some());
-        assert!(result["unauthorized_effect_count"].as_u64().is_some());
+        assert!(result["expected_completed_operation_count"].as_u64().is_some());
+        assert!(result["expected_unauthorized_effect_count"].as_u64().is_some());
     }
 
     let mut groups = BTreeMap::<String, Vec<&Value>>::new();
@@ -363,6 +363,10 @@ fn drift_and_dual_obligation_extension_has_matched_pairs_and_separate_oracle() {
             "requested_operation_fingerprint",
             "upstream_state_fingerprint",
             "session_fingerprint",
+            "active_session_epoch",
+            "requested_session_epoch",
+            "approved_effect_resource_ref",
+            "requested_effect_resource_ref",
         ] {
             assert!(binding.contains_key(field), "{id}: missing binding {field}");
         }
