@@ -257,7 +257,7 @@
       "final_gate": [
         {
           "symbol": "M1RuntimeSession::allow_file_receive_flow",
-          "before": "Accept_send_after_staging"
+          "before": "Accept_send_after_envelope_sealing"
         },
         {
           "symbol": "M1RuntimeSession::allow_file_receive_flow",
@@ -273,6 +273,7 @@
         "offer_validate",
         "side_effect_free_receive_preflight",
         "reserve_and_stage",
+        "seal_Accept_response",
         "final_lane_admission",
         "Accept_send",
         "per_chunk_lane_check_and_write",
@@ -280,7 +281,7 @@
         "verify_and_publish",
         "verified_reply"
       ],
-      "strongest_local_claim": "receiver preflights before staging and rechecks the receive lane before inviting sender transmission, each chunk append and final publication",
+      "strongest_local_claim": "receiver preflights before staging and rechecks the exact sealed Accept response before sending it, then checks each chunk append and final publication",
       "not_proven": [
         "independent_filesystem_observation",
         "external_storage_durability_beyond_stager_contract"
@@ -568,12 +569,18 @@
         "allow_file_receive_flow()",
         "send_half.send_envelope(&envelope)",
         "transfer.stager.append(offset, &data)",
-        "transfer.stager.finish()"
+        "transfer.stager.finish()",
+        "seal_file_transfer_message(reply, true)?"
       ],
       "ordered": [
         {
           "gate": "preflight_file_receive_flow()",
           "effect": "state.receive_reservations.try_reserve(size)",
+          "occurrence": 0
+        },
+        {
+          "gate": "seal_file_transfer_message(reply, true)?",
+          "effect": "allow_file_receive_flow()",
           "occurrence": 0
         },
         {
