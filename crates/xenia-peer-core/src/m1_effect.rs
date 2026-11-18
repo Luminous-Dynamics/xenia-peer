@@ -236,6 +236,10 @@ pub struct M1EffectSnapshot {
     pub fingerprint: [u8; 32],
     /// Sequence assigned when the intent was reserved.
     pub admission_sequence: u64,
+    /// The original prepared handle, but only while the operation remains
+    /// Prepared. Replaying it is idempotent because the gate permits only one
+    /// successful linearization.
+    pub prepared_handle: Option<M1PreparedOperation>,
     /// Sequence of the effect-admission linearization point, if reached.
     pub linearization_sequence: Option<u64>,
     /// Sequence of terminal completion/reconciliation, if established.
@@ -535,9 +539,22 @@ impl M1EffectGate {
     /// reissue a permit or guess that the operation had no effect.
     pub fn recover_after_crash(&mut self) {
         for record in self.operations.values_mut() {
-            if record.disposition == M1EffectDisposition::CommitLinearized {
-                record.disposition = M1EffectDisposition::Unknown;
-                record.resolution_sequence = None;
+            match record.disposition {
+                M1EffectDisposition::Prepared => {
+                    // Preparation is not an effect admission. Require a fresh
+                    // authorization after restart rather than resurrecting it.
+                    record.disposition = M1EffectDisposition::Rejected;
+                    record.resolution_sequence = None;
+                }
+                M1EffectDisposition::CommitLinearized => {
+                    // The effect may have escaped before the crash.
+                    record.disposition = M1EffectDisposition::Unknown;
+                    record.resolution_sequence = None;
+                }
+                M1EffectDisposition::Committed
+                | M1EffectDisposition::ConfirmedNoEffect
+                | M1EffectDisposition::Unknown
+                | M1EffectDisposition::Rejected => {}
             }
         }
     }
@@ -672,6 +689,13 @@ fn snapshot_record(
         operation_id,
         fingerprint: record.fingerprint,
         admission_sequence: record.admission_sequence,
+        prepared_handle: (record.disposition == M1EffectDisposition::Prepared).then_some(
+            M1PreparedOperation {
+                operation_id,
+                fingerprint: record.fingerprint,
+                admission_sequence: record.admission_sequence,
+            },
+        ),
         linearization_sequence: record.linearization_sequence,
         resolution_sequence: record.resolution_sequence,
         disposition: record.disposition,
@@ -765,6 +789,35 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_preparation_resumes_only_the_same_unconsumed_handle() {
+        let mut gate = gate();
+        let operation = intent(18, M1Permission::SendFileToViewer);
+        let original = prepare_new(&mut gate, &operation);
+        let M1EffectPrepareResult::Existing(existing) = gate.prepare(&operation).unwrap() else {
+            panic!("duplicate operation must return its existing state");
+        };
+        assert_eq!(existing.disposition, M1EffectDisposition::Prepared);
+        let resumed = existing.prepared_handle.expect("Prepared must expose its original handle");
+        assert_eq!(resumed, original);
+
+        let receipt = gate.linearize_commit(resumed).unwrap();
+        assert_eq!(
+            gate.operation(operation.operation_id)
+                .unwrap()
+                .prepared_handle,
+            None
+        );
+        assert_eq!(
+            gate.linearize_commit(original),
+            Err(M1EffectError::AlreadyConsumed)
+        );
+        assert_eq!(
+            gate.complete(receipt, M1EffectCompletion::Committed).unwrap().disposition,
+            M1EffectDisposition::Committed
+        );
+    }
+
+    #[test]
     fn identical_operation_retry_is_idempotent_and_changed_fingerprint_conflicts() {
         let mut gate = gate();
         let operation = intent(3, M1Permission::SendFileToViewer);
@@ -835,6 +888,8 @@ mod tests {
         let operation = intent(5, M1Permission::StreamAudio);
         let prepared = prepare_new(&mut gate, &operation);
         let _receipt = gate.linearize_commit(prepared).unwrap();
+        let uncommitted = intent(19, M1Permission::ReadHostClipboard);
+        let uncommitted_handle = prepare_new(&mut gate, &uncommitted);
 
         gate.recover_after_crash();
         let snapshot = gate.operation(operation.operation_id).unwrap();
@@ -843,6 +898,16 @@ mod tests {
         assert_eq!(
             gate.linearize_commit(prepared),
             Err(M1EffectError::AlreadyConsumed)
+        );
+        let uncommitted_snapshot = gate.operation(uncommitted.operation_id).unwrap();
+        assert_eq!(uncommitted_snapshot.disposition, M1EffectDisposition::Rejected);
+        assert_eq!(uncommitted_snapshot.prepared_handle, None);
+        assert_eq!(
+            gate.linearize_commit(uncommitted_handle),
+            Err(M1EffectError::InvalidTransition {
+                actual: M1EffectDisposition::Rejected,
+                required: "Prepared"
+            })
         );
     }
 
