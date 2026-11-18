@@ -72,6 +72,33 @@ The core methods `M1PermissionSet::is_subset_of`,
 audience, validity, authority epoch, parent liveness, budgets, signatures,
 frontier currentness or host effect outcomes.
 
+## Local operator revocation observation
+
+The consent server's shared operator-revocation flag is now bound into the
+M1 runtime before that runtime is shared with the sender, input and file
+transfer tasks. Once an authenticated operator `Revoke` is accepted and its
+audit append has succeeded, the consent server stores the shared atomic latch.
+Every M1 source-work preflight and every final lane admission method checks
+that latch and rejects with `OperatorRevocationObserved`, even before the
+main session loop appends the canonical M1 `Revocation` event.
+
+This closes the local gap in which sibling tasks could still see the M1
+state-machine state as `Active` after the operator revoke flag had already
+been set. The main session loop remains the owner of the durable M1 revoke
+transition; the latch is an immediate fail-closed admission signal, not a
+replacement ledger.
+
+Regression coverage sets the latch while the M1 state machine remains
+`Active`, verifies all six source preflights and all eight final lane methods
+deny without appending operation evidence, then verifies the owning runtime
+can still append the canonical revocation transition.
+
+Claim ceiling: this only orders local admission checks after local operator
+revocation observation. It does not make an OS call or asynchronous network
+send atomic with revocation after a final gate has already passed. The
+in-flight/commit race remains owned by #504, and distributed revocation
+propagation remains under Mycelix #6236.
+
 ## Existing effect checkpoints to preserve
 
 The current file-transfer path already checks M1 consent:
