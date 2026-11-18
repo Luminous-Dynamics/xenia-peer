@@ -2085,8 +2085,10 @@ mod tests {
         ));
         assert!(revoked.load(Ordering::SeqCst));
 
-        // The authenticated operator-revoke receipt must be durable before
-        // the shared atomic latch becomes visible to M1 effect owners.
+        // On the successful persistence path, the authenticated operator
+        // audit receipt is now durable. The companion failing-persister test
+        // in consent_server.rs proves the local latch is raised before this
+        // persistence attempt begins, and remains raised if that attempt fails.
         let operator_audit = crate::audit_ledger_store::load_verified(
             &operator_ledger_path,
             &operator_signing_key,
