@@ -142,6 +142,7 @@ pub enum M1EffectPrepareResult {
 }
 
 /// Opaque handle for a newly prepared operation.
+#[must_use = "a prepared M1 operation must reach a final commit check or be rejected"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct M1PreparedOperation {
     operation_id: [u8; 16],
@@ -167,6 +168,7 @@ impl M1PreparedOperation {
 }
 
 /// Receipt for a single linearized effect admission.
+#[must_use = "a commit receipt must be completed or reconciled; it is not proof of effect success"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct M1EffectCommitReceipt {
     operation_id: [u8; 16],
@@ -492,11 +494,23 @@ impl M1EffectGate {
                 return Err(M1EffectError::AlreadyConsumed);
             }
         }
-        let resolution_sequence = self.take_sequence()?;
+        let resolution_sequence = match self.take_sequence() {
+            Ok(sequence) => sequence,
+            Err(error) => {
+                // The effect may already have escaped, but without a terminal
+                // sequence the reference transcript cannot claim a resolved
+                // outcome. Preserve the operation as UNKNOWN.
+                if let Some(record) = self.operations.get_mut(&receipt.operation_id) {
+                    record.disposition = M1EffectDisposition::Unknown;
+                    record.resolution_sequence = None;
+                }
+                return Err(error);
+            }
+        };
         let record = self
             .operations
             .get_mut(&receipt.operation_id)
-            .expect("record was checked above");
+            .ok_or(M1EffectError::StalePreparedHandle)?;
         record.disposition = match completion {
             M1EffectCompletion::Committed => M1EffectDisposition::Committed,
             M1EffectCompletion::ConfirmedNoEffect => M1EffectDisposition::ConfirmedNoEffect,
@@ -598,7 +612,7 @@ impl M1EffectGate {
         let record = self
             .operations
             .get_mut(&operation_id)
-            .expect("record was checked above");
+            .ok_or(M1EffectError::StalePreparedHandle)?;
         record.disposition = match outcome {
             M1ReconciledOutcome::Committed => M1EffectDisposition::Committed,
             M1ReconciledOutcome::ConfirmedNoEffect => M1EffectDisposition::ConfirmedNoEffect,
