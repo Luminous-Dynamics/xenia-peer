@@ -39,11 +39,26 @@
       "authority": "active_exact_scope_current_epoch",
       "consent": "active_exact_lane_scope",
       "route": "declared_m1_route",
-      "expected_disposition": "PERMIT",
-      "task_result": "complete",
-      "expected_effect": "LOCAL_EFFECT_APPLIED",
-      "expected_reconciliation": "known",
-      "notes": "The maximum claim is limited to the local effect owner; remote observation is not inferred."
+      "notes": "The maximum claim is limited to the local effect owner; remote observation is not inferred.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-P01",
+        "operation_fingerprint": "fixture-fingerprint:M1-P01",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "one_operation": true,
+        "one_effect_attempt": true,
+        "exact_scope_match": true
+      }
     },
     {
       "id": "M1-P02",
@@ -55,11 +70,26 @@
       "authority": "active_exact_scope_current_epoch",
       "consent": "active_exact_lane_scope",
       "route": "declared_m1_route",
-      "expected_disposition": "PERMIT",
-      "task_result": "complete",
-      "expected_effect": "LOCAL_EFFECT_APPLIED",
-      "expected_reconciliation": "known",
-      "notes": "The maximum claim is limited to the local effect owner; remote observation is not inferred."
+      "notes": "The maximum claim is limited to the local effect owner; remote observation is not inferred.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-P02",
+        "operation_fingerprint": "fixture-fingerprint:M1-P02",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "one_operation": true,
+        "one_effect_attempt": true,
+        "exact_scope_match": true
+      }
     },
     {
       "id": "M1-P03",
@@ -71,11 +101,26 @@
       "authority": "active_exact_scope_current_epoch",
       "consent": "active_exact_lane_scope",
       "route": "declared_m1_route",
-      "expected_disposition": "PERMIT",
-      "task_result": "complete",
-      "expected_effect": "LOCAL_EFFECT_APPLIED",
-      "expected_reconciliation": "known",
-      "notes": "The maximum claim is limited to the local effect owner; remote observation is not inferred."
+      "notes": "The maximum claim is limited to the local effect owner; remote observation is not inferred.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-P03",
+        "operation_fingerprint": "fixture-fingerprint:M1-P03",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "one_operation": true,
+        "one_effect_attempt": true,
+        "exact_scope_match": true
+      }
     },
     {
       "id": "M1-P04",
@@ -87,11 +132,26 @@
       "authority": "active_exact_scope_current_epoch",
       "consent": "active_exact_lane_scope",
       "route": "declared_m1_route",
-      "expected_disposition": "PERMIT",
-      "task_result": "complete",
-      "expected_effect": "LOCAL_EFFECT_APPLIED",
-      "expected_reconciliation": "known",
-      "notes": "The maximum claim is limited to the local effect owner; remote observation is not inferred."
+      "notes": "The maximum claim is limited to the local effect owner; remote observation is not inferred.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-P04",
+        "operation_fingerprint": "fixture-fingerprint:M1-P04",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "one_operation": true,
+        "one_effect_attempt": true,
+        "exact_scope_match": true
+      }
     },
     {
       "id": "M1-P05",
@@ -103,11 +163,26 @@
       "authority": "active_exact_scope_current_epoch",
       "consent": "active_exact_lane_scope",
       "route": "declared_m1_route",
-      "expected_disposition": "PERMIT",
-      "task_result": "complete",
-      "expected_effect": "LOCAL_EFFECT_APPLIED",
-      "expected_reconciliation": "known",
-      "notes": "The maximum claim is limited to the local effect owner; remote observation is not inferred."
+      "notes": "The maximum claim is limited to the local effect owner; remote observation is not inferred.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-P05",
+        "operation_fingerprint": "fixture-fingerprint:M1-P05",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "one_operation": true,
+        "one_effect_attempt": true,
+        "exact_scope_match": true
+      }
     },
     {
       "id": "M1-P06",
@@ -119,11 +194,26 @@
       "authority": "active_exact_scope_current_epoch",
       "consent": "active_exact_lane_scope",
       "route": "declared_m1_route",
-      "expected_disposition": "PERMIT",
-      "task_result": "complete",
-      "expected_effect": "LOCAL_EFFECT_APPLIED",
-      "expected_reconciliation": "known",
-      "notes": "The maximum claim is limited to the local effect owner; remote observation is not inferred."
+      "notes": "The maximum claim is limited to the local effect owner; remote observation is not inferred.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-P06",
+        "operation_fingerprint": "fixture-fingerprint:M1-P06",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "one_operation": true,
+        "one_effect_attempt": true,
+        "exact_scope_match": true
+      }
     },
     {
       "id": "M1-P07",
@@ -135,11 +225,26 @@
       "authority": "active_exact_scope_current_epoch",
       "consent": "active_exact_lane_scope",
       "route": "declared_m1_route",
-      "expected_disposition": "PERMIT",
-      "task_result": "complete",
-      "expected_effect": "LOCAL_EFFECT_APPLIED",
-      "expected_reconciliation": "known",
-      "notes": "The maximum claim is limited to the local effect owner; remote observation is not inferred."
+      "notes": "The maximum claim is limited to the local effect owner; remote observation is not inferred.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-P07",
+        "operation_fingerprint": "fixture-fingerprint:M1-P07",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "one_operation": true,
+        "one_effect_attempt": true,
+        "exact_scope_match": true
+      }
     },
     {
       "id": "M1-P08",
@@ -151,11 +256,26 @@
       "authority": "active_exact_scope_current_epoch",
       "consent": "active_exact_lane_scope",
       "route": "declared_m1_route",
-      "expected_disposition": "PERMIT",
-      "task_result": "complete",
-      "expected_effect": "LOCAL_EFFECT_APPLIED",
-      "expected_reconciliation": "known",
-      "notes": "The maximum claim is limited to the local effect owner; remote observation is not inferred."
+      "notes": "The maximum claim is limited to the local effect owner; remote observation is not inferred.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-P08",
+        "operation_fingerprint": "fixture-fingerprint:M1-P08",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "one_operation": true,
+        "one_effect_attempt": true,
+        "exact_scope_match": true
+      }
     },
     {
       "id": "M1-D01",
@@ -168,11 +288,21 @@
       "authority": "active_or_irrelevant",
       "consent": "active",
       "route": "declared_m1_route",
-      "expected_disposition": "DENY",
-      "task_result": "blocked",
-      "expected_effect": "NOT_ATTEMPTED",
-      "expected_reconciliation": "not_attempted",
-      "notes": "No unrelated lane may be implicitly granted."
+      "notes": "No unrelated lane may be implicitly granted.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-D01",
+        "operation_fingerprint": "fixture-fingerprint:M1-D01",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests."
     },
     {
       "id": "M1-D02",
@@ -185,11 +315,21 @@
       "authority": "active_or_irrelevant",
       "consent": "active",
       "route": "declared_m1_route",
-      "expected_disposition": "DENY",
-      "task_result": "blocked",
-      "expected_effect": "NOT_ATTEMPTED",
-      "expected_reconciliation": "not_attempted",
-      "notes": "No unrelated lane may be implicitly granted."
+      "notes": "No unrelated lane may be implicitly granted.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-D02",
+        "operation_fingerprint": "fixture-fingerprint:M1-D02",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests."
     },
     {
       "id": "M1-D03",
@@ -202,11 +342,25 @@
       "authority": "active_or_irrelevant",
       "consent": "active",
       "route": "declared_m1_route",
-      "expected_disposition": "DENY",
-      "task_result": "blocked",
-      "expected_effect": "NOT_ATTEMPTED",
-      "expected_reconciliation": "not_attempted",
-      "notes": "No unrelated lane may be implicitly granted."
+      "notes": "No unrelated lane may be implicitly granted.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-D03",
+        "operation_fingerprint": "fixture-fingerprint:M1-D03",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "authorized_resource": "host:alpha",
+        "requested_resource": "host:beta"
+      }
     },
     {
       "id": "M1-D04",
@@ -219,11 +373,21 @@
       "authority": "active_or_irrelevant",
       "consent": "missing",
       "route": "declared_m1_route",
-      "expected_disposition": "DENY",
-      "task_result": "blocked",
-      "expected_effect": "NOT_ATTEMPTED",
-      "expected_reconciliation": "not_attempted",
-      "notes": "No unrelated lane may be implicitly granted."
+      "notes": "No unrelated lane may be implicitly granted.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-D04",
+        "operation_fingerprint": "fixture-fingerprint:M1-D04",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests."
     },
     {
       "id": "M1-D05",
@@ -236,11 +400,27 @@
       "authority": "active_or_irrelevant",
       "consent": "mismatched",
       "route": "declared_m1_route",
-      "expected_disposition": "DENY",
-      "task_result": "blocked",
-      "expected_effect": "NOT_ATTEMPTED",
-      "expected_reconciliation": "not_attempted",
-      "notes": "No unrelated lane may be implicitly granted."
+      "notes": "No unrelated lane may be implicitly granted.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-D05",
+        "operation_fingerprint": "fixture-fingerprint:M1-D05",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "authorized_purpose": "remote_assistance",
+        "requested_purpose": "bulk_export",
+        "authorized_audience": "viewer:beta",
+        "requested_audience": "external:public"
+      }
     },
     {
       "id": "M1-D06",
@@ -253,11 +433,27 @@
       "authority": "expired",
       "consent": "active",
       "route": "declared_m1_route",
-      "expected_disposition": "DENY",
-      "task_result": "blocked",
-      "expected_effect": "NOT_ATTEMPTED",
-      "expected_reconciliation": "not_attempted",
-      "notes": "No unrelated lane may be implicitly granted."
+      "notes": "No unrelated lane may be implicitly granted.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-D06",
+        "operation_fingerprint": "fixture-fingerprint:M1-D06",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "valid_from": "2026-11-18T17:00:00Z",
+        "valid_until": "2026-11-18T17:59:59Z",
+        "effect_time": "2026-11-18T18:00:00Z",
+        "time_unit": "UTC RFC3339 timestamps"
+      }
     },
     {
       "id": "M1-D07",
@@ -270,11 +466,26 @@
       "authority": "active_or_irrelevant",
       "consent": "revoked",
       "route": "declared_m1_route",
-      "expected_disposition": "DENY",
-      "task_result": "blocked",
-      "expected_effect": "NOT_ATTEMPTED",
-      "expected_reconciliation": "not_attempted",
-      "notes": "No unrelated lane may be implicitly granted."
+      "notes": "No unrelated lane may be implicitly granted.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-D07",
+        "operation_fingerprint": "fixture-fingerprint:M1-D07",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "consent_epoch": 4,
+        "revocation_effective_epoch": 4,
+        "consent_status": "revoked"
+      }
     },
     {
       "id": "M1-D08",
@@ -287,11 +498,25 @@
       "authority": "active_or_irrelevant",
       "consent": "active",
       "route": "declared_m1_route",
-      "expected_disposition": "DENY",
-      "task_result": "blocked",
-      "expected_effect": "NOT_ATTEMPTED",
-      "expected_reconciliation": "not_attempted",
-      "notes": "No unrelated lane may be implicitly granted."
+      "notes": "No unrelated lane may be implicitly granted.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-D08",
+        "operation_fingerprint": "fixture-fingerprint:M1-D08",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "authorized_resource": "clipboard:selection:host-alpha",
+        "requested_resource": "clipboard:all:host-alpha"
+      }
     },
     {
       "id": "M1-R01",
@@ -304,11 +529,26 @@
       "authority": "negative",
       "consent": "active_exact_lane_scope",
       "route": "declared_m1_route",
-      "expected_disposition": "DENY",
-      "task_result": "blocked",
-      "expected_effect": "NOT_ATTEMPTED",
-      "expected_reconciliation": "not_attempted",
-      "notes": "A central revocation record or event delivery is not proof that every PEP observed it. Unknown remains HOLD/INDETERMINATE."
+      "notes": "A central revocation record or event delivery is not proof that every PEP observed it. Unknown remains HOLD/INDETERMINATE.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-R01",
+        "operation_fingerprint": "fixture-fingerprint:M1-R01",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "parent_delegation_id": "fixture-parent:01",
+        "parent_status": "revoked",
+        "revocation_observed_by_effect_owner": true
+      }
     },
     {
       "id": "M1-R02",
@@ -321,11 +561,27 @@
       "authority": "incomplete_or_stale",
       "consent": "active_exact_lane_scope",
       "route": "declared_m1_route",
-      "expected_disposition": "HOLD",
-      "task_result": "indeterminate",
-      "expected_effect": "NOT_ATTEMPTED",
-      "expected_reconciliation": "required",
-      "notes": "A central revocation record or event delivery is not proof that every PEP observed it. Unknown remains HOLD/INDETERMINATE."
+      "notes": "A central revocation record or event delivery is not proof that every PEP observed it. Unknown remains HOLD/INDETERMINATE.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-R02",
+        "operation_fingerprint": "fixture-fingerprint:M1-R02",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "authority_namespace": "host:alpha",
+        "required_frontier_sequence": 12,
+        "observed_frontier_sequence": 11,
+        "frontier_authentication": "synthetic_valid_but_stale"
+      }
     },
     {
       "id": "M1-R03",
@@ -338,11 +594,26 @@
       "authority": "incomplete_or_stale",
       "consent": "active_exact_lane_scope",
       "route": "declared_m1_route",
-      "expected_disposition": "HOLD",
-      "task_result": "indeterminate",
-      "expected_effect": "NOT_ATTEMPTED",
-      "expected_reconciliation": "required",
-      "notes": "A central revocation record or event delivery is not proof that every PEP observed it. Unknown remains HOLD/INDETERMINATE."
+      "notes": "A central revocation record or event delivery is not proof that every PEP observed it. Unknown remains HOLD/INDETERMINATE.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-R03",
+        "operation_fingerprint": "fixture-fingerprint:M1-R03",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "required_parent_id": "fixture-parent:02",
+        "parent_context_status": "unavailable",
+        "lineage_completeness": "unknown"
+      }
     },
     {
       "id": "M1-R04",
@@ -355,11 +626,26 @@
       "authority": "incomplete_or_stale",
       "consent": "active_exact_lane_scope",
       "route": "declared_m1_route",
-      "expected_disposition": "HOLD",
-      "task_result": "indeterminate",
-      "expected_effect": "NOT_ATTEMPTED",
-      "expected_reconciliation": "required",
-      "notes": "A central revocation record or event delivery is not proof that every PEP observed it. Unknown remains HOLD/INDETERMINATE."
+      "notes": "A central revocation record or event delivery is not proof that every PEP observed it. Unknown remains HOLD/INDETERMINATE.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-R04",
+        "operation_fingerprint": "fixture-fingerprint:M1-R04",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "central_revocation_epoch": 13,
+        "pep_observed_epoch": null,
+        "pep_acknowledgement": "unknown"
+      }
     },
     {
       "id": "M1-R05",
@@ -372,11 +658,26 @@
       "authority": "negative",
       "consent": "active_exact_lane_scope",
       "route": "declared_m1_route",
-      "expected_disposition": "DENY",
-      "task_result": "blocked",
-      "expected_effect": "NOT_ATTEMPTED",
-      "expected_reconciliation": "not_attempted",
-      "notes": "A central revocation record or event delivery is not proof that every PEP observed it. Unknown remains HOLD/INDETERMINATE."
+      "notes": "A central revocation record or event delivery is not proof that every PEP observed it. Unknown remains HOLD/INDETERMINATE.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-R05",
+        "operation_fingerprint": "fixture-fingerprint:M1-R05",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "active_session_epoch": 4,
+        "queued_operation_session_epoch": 3,
+        "queued_operation_status": "not_revalidated"
+      }
     },
     {
       "id": "M1-R06",
@@ -389,11 +690,25 @@
       "authority": "incomplete_or_stale",
       "consent": "active_exact_lane_scope",
       "route": "unknown_route",
-      "expected_disposition": "HOLD",
-      "task_result": "indeterminate",
-      "expected_effect": "NOT_ATTEMPTED",
-      "expected_reconciliation": "required",
-      "notes": "A central revocation record or event delivery is not proof that every PEP observed it. Unknown remains HOLD/INDETERMINATE."
+      "notes": "A central revocation record or event delivery is not proof that every PEP observed it. Unknown remains HOLD/INDETERMINATE.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-R06",
+        "operation_fingerprint": "fixture-fingerprint:M1-R06",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "route_inventory_status": "incomplete",
+        "unknown_route_id": "host-file-import-alternate"
+      }
     },
     {
       "id": "M1-R07",
@@ -406,11 +721,26 @@
       "authority": "negative",
       "consent": "active_exact_lane_scope",
       "route": "declared_m1_route",
-      "expected_disposition": "DENY",
-      "task_result": "blocked",
-      "expected_effect": "NOT_ATTEMPTED",
-      "expected_reconciliation": "not_attempted",
-      "notes": "A central revocation record or event delivery is not proof that every PEP observed it. Unknown remains HOLD/INDETERMINATE."
+      "notes": "A central revocation record or event delivery is not proof that every PEP observed it. Unknown remains HOLD/INDETERMINATE.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-R07",
+        "operation_fingerprint": "fixture-fingerprint:M1-R07",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "operator_revocation_latch": true,
+        "canonical_ledger_transition": "pending",
+        "session_state": "active"
+      }
     },
     {
       "id": "M1-R08",
@@ -423,11 +753,31 @@
       "authority": "negative",
       "consent": "active_exact_lane_scope",
       "route": "declared_m1_route",
-      "expected_disposition": "DENY",
-      "task_result": "blocked",
-      "expected_effect": "NOT_ATTEMPTED",
-      "expected_reconciliation": "not_attempted",
-      "notes": "A central revocation record or event delivery is not proof that every PEP observed it. Unknown remains HOLD/INDETERMINATE."
+      "notes": "A central revocation record or event delivery is not proof that every PEP observed it. Unknown remains HOLD/INDETERMINATE.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-R08",
+        "operation_fingerprint": "fixture-fingerprint:M1-R08",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "parent_actions": [
+          "xenia.audio.capture"
+        ],
+        "child_requested_actions": [
+          "xenia.audio.capture",
+          "xenia.screen.view"
+        ],
+        "strict_attenuation_required": true
+      }
     },
     {
       "id": "M1-E01",
@@ -440,11 +790,26 @@
       "authority": "valid_at_admission",
       "consent": "active_exact_lane_scope",
       "route": "declared_m1_route",
-      "expected_disposition": "DENY",
-      "task_result": "blocked",
-      "expected_effect": "NOT_ATTEMPTED",
-      "expected_reconciliation": "known_failure",
-      "notes": "Admission, attempt, local commit, transport response, receiver verification and independent observation remain distinct."
+      "notes": "Admission, attempt, local commit, transport response, receiver verification and independent observation remain distinct.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-E01",
+        "operation_fingerprint": "fixture-fingerprint:M1-E01",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "effect_attempted": true,
+        "injector_result": "error",
+        "platform_effect_observation": "unavailable"
+      }
     },
     {
       "id": "M1-E02",
@@ -457,11 +822,26 @@
       "authority": "valid_at_admission",
       "consent": "active_exact_lane_scope",
       "route": "declared_m1_route",
-      "expected_disposition": "HOLD",
-      "task_result": "indeterminate",
-      "expected_effect": "UNKNOWN",
-      "expected_reconciliation": "reconcile_before_retry",
-      "notes": "Admission, attempt, local commit, transport response, receiver verification and independent observation remain distinct."
+      "notes": "Admission, attempt, local commit, transport response, receiver verification and independent observation remain distinct.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-E02",
+        "operation_fingerprint": "fixture-fingerprint:M1-E02",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "dispatch_returned": true,
+        "acknowledgement": "timeout",
+        "provider_or_receiver_state": "unknown"
+      }
     },
     {
       "id": "M1-E03",
@@ -474,11 +854,26 @@
       "authority": "valid_at_admission",
       "consent": "active_exact_lane_scope",
       "route": "declared_m1_route",
-      "expected_disposition": "DENY",
-      "task_result": "blocked",
-      "expected_effect": "LOCAL_STAGED",
-      "expected_reconciliation": "known_rejection",
-      "notes": "Admission, attempt, local commit, transport response, receiver verification and independent observation remain distinct."
+      "notes": "Admission, attempt, local commit, transport response, receiver verification and independent observation remain distinct.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-E03",
+        "operation_fingerprint": "fixture-fingerprint:M1-E03",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "expected_file_fingerprint": "fixture-file:expected",
+        "received_file_fingerprint": "fixture-file:mismatch",
+        "publication_allowed": false
+      }
     },
     {
       "id": "M1-E04",
@@ -491,11 +886,27 @@
       "authority": "valid_at_admission",
       "consent": "active_exact_lane_scope",
       "route": "declared_m1_route",
-      "expected_disposition": "DENY",
-      "task_result": "blocked",
-      "expected_effect": "LOCAL_STAGED",
-      "expected_reconciliation": "known_partial",
-      "notes": "Admission, attempt, local commit, transport response, receiver verification and independent observation remain distinct."
+      "notes": "Admission, attempt, local commit, transport response, receiver verification and independent observation remain distinct.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-E04",
+        "operation_fingerprint": "fixture-fingerprint:M1-E04",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "staging_complete": true,
+        "content_hash_verified": true,
+        "publication_result": "io_error",
+        "final_path_exists": "unknown"
+      }
     },
     {
       "id": "M1-E05",
@@ -508,11 +919,27 @@
       "authority": "valid_at_admission",
       "consent": "active_exact_lane_scope",
       "route": "declared_m1_route",
-      "expected_disposition": "HOLD",
-      "task_result": "indeterminate",
-      "expected_effect": "PARTIAL",
-      "expected_reconciliation": "reconcile_before_retry",
-      "notes": "Admission, attempt, local commit, transport response, receiver verification and independent observation remain distinct."
+      "notes": "Admission, attempt, local commit, transport response, receiver verification and independent observation remain distinct.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-E05",
+        "operation_fingerprint": "fixture-fingerprint:M1-E05",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "total_chunks": 3,
+        "sender_chunks_dispatched": 2,
+        "receiver_chunks_verified": 1,
+        "transfer_complete": false
+      }
     },
     {
       "id": "M1-E06",
@@ -525,11 +952,27 @@
       "authority": "valid_at_admission",
       "consent": "active_exact_lane_scope",
       "route": "declared_m1_route",
-      "expected_disposition": "DENY",
-      "task_result": "blocked",
-      "expected_effect": "LOCAL_EFFECT_APPLIED",
-      "expected_reconciliation": "duplicate_no_second_effect",
-      "notes": "Admission, attempt, local commit, transport response, receiver verification and independent observation remain distinct."
+      "notes": "Admission, attempt, local commit, transport response, receiver verification and independent observation remain distinct.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:clipboard-write-committed-01",
+        "operation_fingerprint": "fixture-fingerprint:clipboard-write-committed-01",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "prior_operation_state": "local_effect_applied",
+        "same_operation_id": true,
+        "same_fingerprint": true,
+        "replay_count": 1
+      }
     },
     {
       "id": "M1-E07",
@@ -542,11 +985,26 @@
       "authority": "valid_at_admission",
       "consent": "active_exact_lane_scope",
       "route": "declared_m1_route",
-      "expected_disposition": "DENY",
-      "task_result": "blocked",
-      "expected_effect": "NOT_ATTEMPTED",
-      "expected_reconciliation": "conflict",
-      "notes": "Admission, attempt, local commit, transport response, receiver verification and independent observation remain distinct."
+      "notes": "Admission, attempt, local commit, transport response, receiver verification and independent observation remain distinct.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:file-send-reused-01",
+        "operation_fingerprint": "fixture-fingerprint:file-send-mutated",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "original_fingerprint": "fixture-fingerprint:file-send-original",
+        "requested_fingerprint": "fixture-fingerprint:file-send-mutated",
+        "operation_id_unchanged": true
+      }
     },
     {
       "id": "M1-E08",
@@ -559,11 +1017,28 @@
       "authority": "valid_at_admission",
       "consent": "active_exact_lane_scope",
       "route": "declared_m1_route",
-      "expected_disposition": "DENY",
-      "task_result": "blocked",
-      "expected_effect": "UNKNOWN",
-      "expected_reconciliation": "reconciliation_required",
-      "notes": "Admission, attempt, local commit, transport response, receiver verification and independent observation remain distinct."
+      "notes": "Admission, attempt, local commit, transport response, receiver verification and independent observation remain distinct.",
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-01",
+        "delegate_ref": "delegate:viewer-01",
+        "host_resource_ref": "host:alpha",
+        "purpose": "remote_assistance",
+        "audience": "viewer:beta",
+        "operation_id": "fixture-op:M1-E08",
+        "operation_fingerprint": "fixture-fingerprint:M1-E08",
+        "session_fingerprint": "fixture-session:alpha",
+        "session_epoch": 3,
+        "authority_epoch": 12,
+        "requested_at": "2026-11-18T18:00:00Z"
+      },
+      "operation_binding_semantics": "All identifiers and fingerprints are synthetic fixture labels, not production identities or cryptographic digests.",
+      "parameters": {
+        "prior_operation_state": "unknown_after_dispatch",
+        "retry_requested": true,
+        "provider_idempotency_contract": "not_qualified"
+      }
     }
-  ]
+  ],
+  "oracle_ref": "M1_AUTHORIZATION_ASSURANCE_ORACLE_V0_1.json",
+  "oracle_status": "separately_stored_reference_outcomes_pending_independent_adjudication"
 }
