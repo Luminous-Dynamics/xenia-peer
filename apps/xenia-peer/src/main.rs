@@ -6403,6 +6403,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Uuid::new_v4(),
         m1_scope,
     );
+    // This latch is set synchronously by the consent server on operator
+    // Revoke. Bind it before the runtime is shared with input/transfer tasks.
+    m1_runtime.bind_operator_revocation_latch(Arc::clone(&revoked));
     m1_runtime.bind_session_transcript_hash(handshake.transcript_hash);
     m1_runtime.offer()?;
     info!(scope = %m1_scope_for_log, "M1 consent scope offered");
