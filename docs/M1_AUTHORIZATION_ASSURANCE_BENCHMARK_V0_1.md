@@ -1,190 +1,232 @@
-# M1 Authorization Assurance Benchmark v0.1
+# M1 authorization assurance benchmark profile v0.1
 
-**Status:** preregistration / development protocol, not benchmark results, certification, or production qualification.  
-**Owner:** Xenia #505, composed with #508, #510, #512, #517 and #518.  
-**Cross-project owners:** Mycelix #6136 (exact-operation effectuation), #6213 (route mediation), #6236 (revocation propagation), #6140 (observation provenance), #6170 (agent authorization), #6189 (one-shot effect interposition), #6193 (distributed consumption consistency).  
-**Seed corpus:** `docs/benchmarks/M1_AUTHORIZATION_ASSURANCE_CORPUS_V0_1.json`.  
-**Structural fixture test:** `apps/xenia-peer/tests/m1_authorization_assurance_corpus.rs`.
+**Status:** preregistration proposal; no comparative measurements have been produced.
+**Owner:** Xenia #505, composed with Mycelix LISE #6136, #6213, #6236, #6140, #6170, #6189 and #6193.
+**Candidate implementation:** Xenia M1 lanes in PR #509. Current route manifest is explicitly incomplete; see `M1_ROUTE_MEDIATION_INVENTORY_V0_1.json`.  
+**Seed corpus:** `docs/benchmarks/M1_AUTHORIZATION_ASSURANCE_CORPUS_V0_1.json` (32 scenario seeds).  
+**Structural test:** `apps/xenia-peer/tests/m1_authorization_assurance_corpus.rs` (fixture integrity only; not the independent outcome oracle).
 
-## 1. Research question and contribution
+## 1. Research objective
 
-Can a remote-session system keep every consequential host/viewer operation inside the principal's exact, current, recipient-consented authority—and can an evaluator distinguish a policy decision from the effect that actually occurred?
+Evaluate not only whether a policy engine returns the expected decision, but whether the **exact protected effect** is admitted by the correct authority, remains valid at the effect owner, traverses a complete set of known enforcement routes, and is accounted for afterwards.
 
-The benchmark is deliberately split into two tracks:
+The benchmark has two separate tracks. Never combine them into one latency or security score:
 
-- **Track A — decision-engine equivalence.** Measure policy decision and relationship-resolution costs under identical semantics and state.
-- **Track B — delegated remote-effect assurance.** Measure complete mediation, exact lane/direction/resource binding, consent and delegation composition, revocation observation, effect-boundary checks, and outcome accounting.
+- **Track A — authorization decision:** subject/action/resource/context decision correctness and decision latency.
+- **Track B — delegated remote-effect assurance:** whether an effect-capable action is correctly bound, mediated, revoked, committed, observed and reconciled across Xenia's actual M1 lanes.
 
-A fast policy decision is not evidence that the protected operation was authorized at its final boundary. Likewise, a successful remote-session task is not evidence that every realized side effect was within scope.
-
-The Xenia-specific seed corpus uses the eight existing M1 lanes. It is a starting panel; it does not claim to enumerate all Xenia routes or generalize to every authorization domain.
-
-## 2. Core separations
-
-The evaluator MUST keep the following propositions distinct:
+The key separations are:
 
 ```
-task success
-  != authorization correctness
-  != PEP invocation / route coverage
-  != local effect attempt
-  != local effect commit
-  != transport acknowledgement
-  != receiver verification
-  != independent observation
+task completion != authorization correctness
+policy decision != effect-owner admission
+admission != dispatch
+dispatch != local commit
+local commit != receiver acknowledgement
+acknowledgement != independent observation
+unknown outcome != no effect
 ```
 
-The following authority layers are independently required where applicable:
+## 2. Track A — matched authorization decision
 
-1. authenticated principal, delegate and workload/session identity;
-2. Mycelix ROS-005 semantic delegation (action, resource, mode, parent lineage, epoch and validity);
-3. Mycelix ROS-004 consent for disclosure/read audience, purpose, data class and field scope;
-4. Xenia session/rekey state and exact M1 lane/direction;
-5. owner-local OS, filesystem, transport or receiver-side enforcement.
+### Comparator arms
 
-No layer promotes another. Reputation or trust scores are not authority. A Holochain zome-call capability is not semantic delegation. Recipient consent is not execution authority. A ROS-005 permit is not a host-effect commit.
+1. **OPA** policy evaluation using a pinned Rego bundle and equivalent input. OPA's `opa bench` measures query evaluation and reports samples, ns/op, memory bytes/op, allocations/op and quantiles; it excludes preparation such as loading, parsing and compilation. Benchmark startup/bundle load separately. See [OPA policy performance](https://www.openpolicyagent.org/docs/policy-performance) and the [OPA benchmark dashboard](https://open-policy-agent.github.io/opa/).
+2. **Cedar** policy evaluation using a pinned schema, policy set and entity/context corpus. Record validation at policy-load/update time separately from per-request decision cost. Cedar documents a formally proved schema-validation soundness result using a Lean implementation and differential tests against the Rust implementation; that is a validation-assurance comparator, not proof that a policy expresses the intended user authority. See [Cedar validation](https://docs.cedarpolicy.com/validation.html).
+3. **OpenFGA** relationship authorization using the same subject/object/relationship cases. Pin model revision, datastore, cache configuration and consistency option. When caching is enabled, `HIGHER_CONSISTENCY` bypasses the cache; `MINIMIZE_LATENCY` may use it. Do not compare different consistency or cache semantics as if they were equivalent. See [OpenFGA query consistency options](https://openfga.dev/blog/query-consistency-options-announcement).
+4. **Zanzibar-style reference arm** for causal authorization-change semantics. This is a comparator design, not Google's production Zanzibar. The original Zanzibar paper reports trillions of ACLs, millions of authorization requests per second, p95 latency below 10 ms and availability above 99.999% over three years of production at Google. These are paper-reported deployment metrics, not a directly reproducible target for this prototype. See [USENIX ATC 2019](https://www.usenix.org/conference/atc19/presentation/pang).
+5. **Xenia local M1 policy arm** with local consent and exact lane checks, measured both with and without the optional Mycelix adapter when that adapter exists.
+6. **No-enforcement negative control** only in a disposable deterministic sandbox, to prove the oracle detects out-of-scope effects. Never expose this arm to a real host or production resource.
+7. **APort Vault** as a direct-effect payment-authorization comparator, using only a license- and semantics-reviewed subset. It tests whether deterministic pre-action authorization blocks recipient/amount violations while retaining valid payment execution. Payment-recipient rates are not directly comparable to Xenia's media, input or file-transfer effects. See [APort Vault](https://arxiv.org/abs/2609.22076).
 
-## 3. Fixed M1 lane vocabulary
+### Frozen workload
 
-| Lane | Action ID | Direction | Protected effect |
+Every arm receives semantically equivalent cases and the same frozen subject, action, resource, purpose, audience, policy revision, relationship graph and expected decision.
+
+Include at minimum:
+- allow and deny positive controls;
+- missing/unknown context;
+- expired, revoked and stale-epoch authority;
+- wrong principal/delegate and cross-resource requests;
+- exact action and direction mismatch;
+- child scope widening;
+- required-scope AND versus independent-grant OR composition;
+- duplicate/replay and changed operation fingerprint;
+- cache warm/cold and policy/model update;
+- long lineage and relationship fanout;
+- partitioned or delayed revocation visibility.
+
+Where an engine cannot express a dimension, mark it **UNSUPPORTED**. Do not silently omit it from the denominator or translate it into a weaker permit.
+
+### Metrics
+
+Report separately:
+- false permit and false deny counts/rates;
+- correct DENY and correct INDETERMINATE/HOLD classification;
+- decision latency p50/p90/p95/p99/p99.9/max;
+- throughput and queueing under concurrency;
+- CPU, RSS, allocations/op and bytes/op;
+- policy/model compilation and load time;
+- cold/warm behavior and update/cache-invalidation cost;
+- relationship/lineage depth and fanout;
+- revocation visibility lag and worst stale-authority exposure.
+
+Include raw samples, exact versions, machine profile, OS, compiler/runtime, policy/model digests and harness SHA.
+
+## 3. Track B — delegated remote-effect assurance
+
+### M1 route units
+
+The first candidate routes are the eight Xenia action lanes:
+
+| Lane | Action identity | Direction | Protected effect owner |
 |---|---|---|---|
-| StreamFrame | `xenia.screen.view` | Host → viewer | Disclose screen frames |
-| StreamTelemetry | `xenia.host.telemetry` | Host → viewer | Disclose configured host telemetry |
-| StreamAudio | `xenia.audio.capture` | Host → viewer | Disclose host audio |
-| InjectInput | `xenia.input.inject` | Viewer → host | Apply keyboard/pointer input |
-| ReadHostClipboard | `xenia.clipboard.read` | Host → viewer | Disclose host clipboard |
-| WriteHostClipboard | `xenia.clipboard.write` | Viewer → host | Apply viewer clipboard content |
-| SendFileToViewer | `xenia.file.send` | Host → viewer | Read and disclose a host file |
-| ReceiveFileFromViewer | `xenia.file.receive` | Viewer → host | Stage, verify and publish a received file |
+| StreamFrame | `xenia.screen.view` | host → viewer | screen capture and frame transport |
+| StreamTelemetry | `xenia.host.telemetry` | host → viewer | host telemetry source and transport |
+| StreamAudio | `xenia.audio.capture` | host → viewer | audio source and transport |
+| ReadHostClipboard | `xenia.clipboard.read` | host → viewer | host clipboard read and transport |
+| WriteHostClipboard | `xenia.clipboard.write` | viewer → host | operating-system clipboard |
+| InjectInput | `xenia.input.inject` | viewer → host | platform input injector |
+| SendFileToViewer | `xenia.file.send` | host → viewer | host file source and transfer transport |
+| ReceiveFileFromViewer | `xenia.file.receive` | viewer → host | staging and final filesystem publication |
 
-The direction is security-relevant. Read and disclose are not the same as write and apply. No lane implies another. Host administration, process execution, reboot, configuration changes and helper-binary control are separate control-plane capabilities and are outside this eight-lane action set.
+The consent socket, sealed operator channel, admin HTTP/WebSocket router, session/rekey paths and file-transfer dispatcher are separate control-plane/transport surfaces. They must not be collapsed into the eight data-lane permissions. The route inventory is not complete until all effect-capable alternatives are enumerated independently.
 
-## 4. Track A — matched authorization decision engines
+### Candidate assurance composition
 
-Compare OPA, Cedar and OpenFGA only on a frozen, semantically equivalent workload:
+For an eventual Mycelix-integrated candidate, a protected operation must satisfy all applicable layers conjunctively:
 
-- same subject/principal, delegate, action, resource, context and entity/relationship graph;
-- same positive, negative, stale and unknown distributions;
-- same delegation depth, parent fanout, policy size and update/revocation churn;
-- same cache state and explicit consistency requirement;
-- pinned engine, policy/model, schema and adapter versions.
+```
+authenticated principal + delegate
+AND current, content-bound ROS-005 delegation and parent lineage
+AND exact action + resource + direction + purpose + audience + data class
+AND exact operation/payload commitment where applicable
+AND recipient consent for the M1 lane
+AND current Xenia session/rekey state
+AND owner-local final gate at the effect boundary
+=> may attempt the named effect
+```
 
-Report two boundaries separately:
+A positive result from one layer never promotes another. A Holochain zome-call capability is not semantic delegation; ROS-005 is not recipient consent; consent is not host OS authorization; a policy decision is not an effect receipt.
 
-**Engine-only:** parse/load/compile excluded; time the evaluation or relationship check itself.
+Until ROS-005 exposes the missing effect-scope fields and authenticated currentness evidence, unsupported dimensions remain HOLD/INDETERMINATE. Do not create a second Xenia delegation service to make a benchmark row look supported.
 
-**End-to-end decision:** include serialization, adapter, PDP request/response and required remote graph access. Do not compare embedded OPA/Cedar evaluation to OpenFGA client/server network latency as though they are the same operation.
+### Trace model
 
-For every run publish p50, p90, p95, p99, p99.9, maximum, throughput, CPU, RSS, allocations/op, bytes/op, warm/cold state, model/policy load time and cache invalidation cost. Preserve raw samples and runner metadata.
+For each operation, record distinct events:
+1. request formed and canonical operation identity fixed;
+2. recipient consent decision;
+3. semantic delegation/currentness decision;
+4. local lane preflight;
+5. final effect-owner authorization;
+6. effect attempted/dispatched;
+7. local commit result;
+8. receiver/provider acknowledgement (when available);
+9. independent observation (when genuinely independent);
+10. reconciliation of unknown or partial outcome.
 
-OPA's `opa bench` and policy-performance guidance are useful evaluation baselines; they do not include every end-to-end loading or transport cost by default. Cedar schema validation is a separate assurance dimension from policy evaluation latency. OpenFGA consistency modes must be matched: a higher-consistency request can bypass a configured cache, but must not be described as globally linearizable unless the deployed datastore and protocol actually establish that property.
+Bind each event to operation ID, monotonic session sequence, lane/action, direction, resource/host, session fingerprint/rekey epoch, consent reference, delegation content commitment/authority epoch when available, policy/profile digest and event-time/knowledge-time data. Do not log clipboard contents, raw file bytes, input payloads, screen/audio samples, or bearer/CapSecret material.
 
-AuthZEN Authorization API 1.0 is the preferred interoperability boundary for PDP↔PEP experiments rather than a competing Xenia-specific wire protocol. The AuthZEN Obligations Profile 1.0 is a July 2026 Working Group Draft, not a final specification. When negotiated, mandatory obligations must be supported and executed; unknown, unsupported, malformed or unexecutable mandatory obligations result in PEP denial under that draft. Transport or authority-state uncertainty remains a separate HOLD/INDETERMINATE case.
+### Adversarial scenario panel
 
-## 5. Track B — delegated remote-effect assurance
+The checked-in v0.1 corpus is a **32-case structural seed**, with eight cases per family. It is not yet the full known-answer panel. Expand to at least 64 independently adjudicated deterministic known-answer scenarios before claiming a frozen benchmark run, then expand to at least 128 development cases plus a sealed holdout. Include:
+- each lane granted alone; every unrelated lane remains denied;
+- screen permission cannot read clipboard, inject input, or send/receive files;
+- clipboard read/write and file send/receive are directionally independent;
+- child action/resource/time/parent/epoch widening attempts;
+- parent revoke with cached child and grandchild;
+- DHT/currentness visibility delayed, missing or conflicting;
+- stale session, reconnect, rekey, daemon restart and old-session replay;
+- consent revoked after source preflight but before final effect gate;
+- source read occurs before revoke but transport send is after revoke;
+- incoming file staging succeeds but final publication is revoked;
+- send dispatched but acknowledgement is lost;
+- duplicate/reordered/replayed file chunks and acknowledgements;
+- operator revoke during a live sealed channel;
+- direct host API, alternate transport, background worker and ambient-credential bypass;
+- incomplete route inventory;
+- malformed/unknown mandatory AuthZEN obligation;
+- ambiguous user intent requiring principal clarification before action;
+- valid positive controls for unrelated independent grants after a scoped revoke.
 
-Use the M1 routes as a domain-specific effect-bearing candidate adapter. The evaluator must retain out-of-scope paths as executable sandbox controls; hiding every forbidden path measures task completion, not authorization alignment.
+Each case must freeze the exact action, lane, direction, resource, purpose, audience, expected consent, currentness evidence, parent chain, session epoch, effect boundary, fault schedule and expected effect state. Keep the oracle independent from the candidate route manifest and enforcement code.
 
-For each operation capture these stages independently:
+The 32-case v0.1 seed covers all eight lanes and has four equal-size families: positive controls; scope/consent negatives; freshness/propagation controls; and effect/outcome controls. Its Rust structural test checks unique IDs, family balance, required fields, valid dispositions, action/direction correspondence and one positive control per lane. This proves fixture consistency only; it does not implement or independently validate the scenario outcome oracle.
 
-1. intent and exact operation projection;
-2. authenticated principal/delegate/session;
-3. delegation and consent references, including parent chain and epoch;
-4. policy decision and decision inputs;
-5. PEP/lane admission and route identity;
-6. source-work preflight (before sensitive source read or resource work);
-7. sealed/immutable operation identity and exact payload digest;
-8. final owner-side lane/currentness check;
-9. effect attempt and local result;
-10. transport/provider acknowledgement;
-11. receiver-side verification or filesystem publication result;
-12. independent observation, when available;
-13. unresolved/partial/unknown reconciliation.
+### Metrics and non-compensatory gates
 
-An operation identity should bind at least the session fingerprint, monotonic per-session sequence, lane/action ID, direction, exact resource, operation/payload digest, schema/profile version and applicable authority epoch. Use owner-native references; do not create a second identity, evidence or revocation service.
+Hard gates (prospective targets, not achieved results):
+- zero false permits on the high-severity holdout;
+- zero unauthorized protected effects in the finite deterministic panel;
+- 100% rejection of finite child-widening, wrong-direction and cross-resource controls;
+- zero effects after an effect owner has observed effective revocation in the tested scope;
+- zero duplicate effect-bearing dispatches for a one-shot capability under tested concurrency/failure histories;
+- zero blind retries after UNKNOWN/PARTIAL effects before qualified reconciliation;
+- 100% correct HOLD/INDETERMINATE classification for incomplete route/currentness evidence;
+- no complete-mediation PASS when route inventory is incomplete.
 
-### 5.1 Required fault and mutation families
+Also report false-deny rate on positive controls, time-to-revocation per route, worst stale exposure duration, route-inventory recall, unknown/partial reconciliation latency, evidence independence, task completion and clarification burden. None of these can offset a false permit or unauthorized effect.
 
-The seed corpus begins with 32 scenarios across four families. A Rust-side structural test checks unique IDs, balanced family counts, required fields, valid dispositions, exact action/direction crosswalks and one positive control per lane. It does not implement the independent expected-outcome oracle or prove any runtime behavior.
+### Performance targets after correctness gates
 
-The 32 scenarios cover:
+The local warm decision target remains aspirational:
+- p50 ≤ 1 ms;
+- p95 ≤ 2 ms;
+- p99 ≤ 5 ms;
+- lineage depth ≤ 8;
+- named reference host, compiler, OS and workload.
 
-- **Positive controls:** one exact, fully authorized operation per M1 lane.
-- **Scope/consent negatives:** lane substitution, direction confusion, resource mismatch, missing consent, wrong purpose/audience, expiry and revocation.
-- **Freshness/propagation controls:** parent revocation, stale epoch, unknown parent/currentness snapshot, incomplete route inventory and stale rekey/session state.
-- **Effect/outcome controls:** injector failure, transport uncertainty after dispatch, receiver verification failure, staging/publication failure, partial operation, duplicate/replay, changed operation under a reused ID and blind retry after UNKNOWN.
+These are not measured results. For distributed/effect-boundary runs, report coordination round trips, durable consumption cost, revocation propagation and network/OS latency separately. A globally consistent one-shot capability necessarily pays the cost of its actual coordination protocol; do not claim partition availability and globally unique consumption without a concrete protocol and assumptions.
 
-Each case freezes its inputs, route, authority/consent state, cutoff, expected decision, expected local effect state and expected reconciliation state. The oracle must be separately authored from the candidate enforcement implementation.
+## 4. Recent agent-benchmark comparators
 
-### 5.2 Non-compensatory gates
+Two 2026 benchmark papers reinforce why authorization and side-effect safety must be separate from task success:
 
-Prospective targets—not achieved results:
+- **AuthorizationBench**: 286 tasks across ten application domains and 6,864 trajectories; reports 19.2% out-of-authorization trajectories in its evaluated models/harnesses, with configurations from 10.5% to 26.6%. It also reports lower out-of-authorization rates in runs that consulted the principal (14.0%) than runs that did not (21.6%). These are study-specific results, not Xenia baselines. [Paper](https://arxiv.org/abs/2610.27548).
+- **SABench**: 201 email/calendar/ticket tasks and 2,211 model-task runs; reports 15.2% collateral-damage runs and 12.8% unauthorized writes among goal-satisfied runs. Its trace oracle scores task success and authorization compliance independently. [Paper](https://arxiv.org/abs/2610.34167).
+- **APort Vault**: a direct-effect payment authorization benchmark with human-authored attack traces and a deterministic pre-action authorization layer. It is useful for recipient/amount control and preserving valid transactions, but its payment-specific outcome rates must not be compared directly with M1 screen, audio, clipboard, input or file actions. [Paper](https://arxiv.org/abs/2609.22076).
 
-- zero false permits and zero unauthorized high-severity effects in the frozen held-out panel;
-- 100% rejection of finite action, direction, resource, purpose, audience, parent-widening and stale-epoch negative controls;
-- zero risk-increasing effects after the local PEP has observed effective revocation in the tested scope;
-- zero duplicate effect-bearing dispatches for a one-shot operation under the declared consistency/failure model;
-- zero blind mutation retries after UNKNOWN/PARTIAL unless a provider-qualified idempotency/reconciliation contract proves the retry safe;
-- incomplete authority, route or revocation inventories remain HOLD/INDETERMINATE;
-- unrelated independent grants remain usable after a scoped revoke;
-- zero promotion of a sender/transport acknowledgement into receiver verification or human observation.
+Use these as design comparators: leave out-of-scope routes executable and observable in a deterministic sandbox, and score task success, authorized effect, unauthorized side effects and evidence confidence as separate axes. Do not compare their headline percentages directly with M1 runtime tests or with policy-engine microbenchmarks.
 
-False denies, legitimate task completion and clarification burden are measured separately. No weighted score may allow latency, throughput or task success to compensate for a false permit or unauthorized effect.
+## 5. Interoperability and standards
 
-## 6. External benchmark comparators
+Use OpenID AuthZEN Authorization API 1.0 as the PDP↔PEP interoperability boundary rather than inventing a competing policy query protocol. Treat the AuthZEN Obligations Profile 1.0 as a version-pinned Working Group Draft, not a final standard. If negotiated, a PEP that cannot execute a mandatory obligation must deny; transport/authority uncertainty remains a separate local HOLD/INDETERMINATE condition.
 
-Use the following as protocol/design references, not as directly comparable headline rates:
+References:
+- [OpenID AuthZEN specifications](https://openid.net/wg/authzen/specifications/)
+- [AuthZEN Profile for Obligations 1.0 Draft 1](https://openid.github.io/authzen/authzen-obligations-profile-1_0.html)
+- [Holochain 0.7.1 upgrade guide](https://developer.holochain.org/resources/upgrade/upgrade-holochain-0.7/)
 
-- **AuthorizationBench** (286 tasks, 10 domains, 6,864 trajectories) reports out-of-authorization behavior in its evaluated agent/sandbox configurations. Its principal-consultation comparison motivates measuring clarification as an authorization control. These rates are specific to its tasks, models and harness.
-- **SABench** (201 tasks, 47 templates, approximately 2,211 model-task runs) uses deterministic trace evaluation to score task success and authorization compliance separately; it highlights collateral effects and unauthorized writes even when the requested task succeeds.
-- **APort Vault** studies agent payment authorization with a deterministic pre-action layer, human-authored attacks and recipient/amount constraints. Reuse only a license- and semantics-reviewed subset; payment-recipient results do not directly compare to screen, input or file-transfer operations.
-- **Zanzibar** is a large-scale consistent relationship-authorization comparator. Its production scale and latency are contextual reference points, not a target for this small prototype.
-- **OPA/Cedar/OpenFGA** are Track A decision-engine arms. Their native guarantees must be reported accurately; do not attribute downstream effect atomicity or independent observation to a policy engine.
+Holochain 0.7.1 remains a separate substrate qualification. The benchmark does not pass it by exercising the pure Rust ROS-005 model.
 
-No raw success or violation percentage is compared across different task populations. Build a common adapter subset and independently adjudicate each candidate's effect trace.
+## 6. Reporting and reproducibility
 
-## 7. Performance targets and reporting
+Every run publishes:
+- scenario and oracle digests;
+- candidate, evaluator and policy/model exact SHAs;
+- engine/runtime/OS/toolchain versions;
+- host hardware and workload settings;
+- raw trace, timings and resource samples;
+- positive/negative/indeterminate/unsupported/not-run denominators;
+- all minimized counterexamples;
+- missing evidence and unsupported guarantees;
+- independence and shared-dependency disclosure;
+- confidence intervals for repeated/stochastic runs;
+- claim ceiling and untested route inventory.
 
-The current local warm objective—p50 ≤1 ms, p95 ≤2 ms, p99 ≤5 ms at lineage depth ≤8—is aspirational, not measured. It is valid only after naming the reference host, compiler/toolchain, policy/model, cache state, concurrency and matched semantics.
+Do not aggregate into a universal “authorization assurance score.” Publish separate correctness, safety, performance, operational and evidence-coverage results. A finite benchmark supports only claims about its declared route universe, scenario corpus, effect owners and fault model.
 
-Report stage-level latency, not only one combined number:
+## 7. Ownership boundaries
 
-- delegation proof/lineage verification;
-- authority currentness/frontier check;
-- consent evaluation;
-- local lane preflight;
-- final effect-owner check;
-- local operation/transport;
-- receiver verification/observation;
-- revocation propagation and reconciliation.
+- Xenia #508/#509: local M1 lane permissions and runtime gate implementation.
+- Xenia #504: effect-commit ordering, timeout and UNKNOWN reconciliation.
+- Xenia #506: consume authenticated authority freshness/frontier evidence.
+- Xenia #510: producer-side authorization/attempt/commit/observation evidence stages.
+- Xenia #517: ROS-005 ↔ M1 adapter scope and missing dimensions.
+- Xenia #518: source route inventory and alternate-path/bypass controls.
+- Xenia #505: matched benchmark corpus and harness.
+- Mycelix #3659/#3677/#3680: semantic delegation and parent/content identity.
+- Mycelix #4903/#6236: DHT/currentness and trajectory-wide revocation.
+- Mycelix #6136/#6213/#6140/#6170/#6189/#6193: exact effectuation, route completeness, evidence provenance, agent authorization, one-shot effect interposition and concurrency/failure semantics.
 
-For Track B, also report worst-surface stale exposure, route recall, duplicate dispatches, false denies, unknown age and reconciliation latency. An average revocation lag must not hide a single stale route.
-
-## 8. Reproducibility and claim ceiling
-
-Every run must bind:
-
-- candidate commit SHA and clean/dirty state;
-- benchmark schema, corpus and oracle digests;
-- engine/policy/model/profile versions;
-- OS, CPU, memory, runtime/toolchain and enabled features;
-- workload seed, warm/cold/cache state, concurrency and fault schedule;
-- all positive, negative, indeterminate, unsupported, timeout and not-run denominators;
-- raw samples, minimized counterexamples and exact replay instructions.
-
-The current source manifests under `docs/security/M1_ROUTE_INVENTORY_V0_1.toml` and `docs/M1_ROUTE_MEDIATION_INVENTORY_V0_1.json` are **partial source censuses**. Their route completeness is INDETERMINATE. They do not establish all OS, helper, plugin, alternate transport, reconnect/rekey or ambient-credential paths. A passing source-drift test is not a complete-mediation proof.
-
-A benchmark pass qualifies only the disclosed corpus, versions, routes, assumptions and tested environment. It does not establish global revocation, arbitrary-provider exactly-once effects, Holochain 0.7.1 qualification, production security, legal compliance or universal SOTA superiority.
-
-## 9. References
-
-- OPA policy performance: https://www.openpolicyagent.org/docs/policy-performance
-- OPA benchmark dashboard: https://open-policy-agent.github.io/opa/
-- Cedar validation: https://docs.cedarpolicy.com/validation.html
-- OpenFGA consistency options: https://openfga.dev/blog/query-consistency-options-announcement
-- OpenID AuthZEN Authorization API 1.0 Final: https://openid.net/specs/authorization-api-1_0-final.html
-- AuthZEN Obligations Profile 1.0 Working Group Draft: https://openid.github.io/authzen/authzen-obligations-profile-1_0.html
-- Zanzibar / USENIX ATC 2019: https://www.usenix.org/conference/atc19/presentation/pang
-- AuthorizationBench: https://arxiv.org/abs/2610.27548
-- SABench: https://arxiv.org/abs/2610.34167
-- APort Vault: https://arxiv.org/abs/2609.22076
+This profile composes those owners. It does not create a parallel authority, policy, route-inventory, event or revocation service.
