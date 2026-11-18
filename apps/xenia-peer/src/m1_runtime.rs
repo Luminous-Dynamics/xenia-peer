@@ -17,6 +17,10 @@
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -38,6 +42,7 @@ use crate::m1_ledger::consent_record_for_m1_event;
 #[derive(Debug)]
 pub(crate) enum M1RuntimeError {
     Session(M1SessionError),
+    OperatorRevocationObserved,
     Ledger(LedgerError),
     Verify(VerifyError),
     EvidenceBundle(EvidenceBundleVerifyError),
@@ -62,6 +67,10 @@ impl fmt::Display for M1RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Session(err) => write!(f, "M1 session error: {err}"),
+            Self::OperatorRevocationObserved => write!(
+                f,
+                "operator revocation has been observed; M1 effect admission is closed"
+            ),
             Self::Ledger(err) => write!(f, "M1 ledger error: {err}"),
             Self::Verify(err) => write!(f, "M1 ledger verification error: {err}"),
             Self::EvidenceBundle(err) => write!(f, "M1 transcript-bound evidence error: {err}"),
@@ -751,6 +760,11 @@ pub(crate) struct M1RuntimeSession {
     scope: String,
     session_transcript_hash: Option<[u8; 32]>,
     next_audit_index: usize,
+    /// Shared synchronous latch set by the consent server at the instant an
+    /// operator Revoke is accepted. The durable M1 revocation ledger event is
+    /// still recorded by the owning session loop; this latch closes every
+    /// lane while that recording/teardown is pending.
+    operator_revoked: Option<Arc<AtomicBool>>,
 }
 
 impl M1RuntimeSession {
@@ -786,6 +800,7 @@ impl M1RuntimeSession {
             scope: scope.into(),
             session_transcript_hash: None,
             next_audit_index: 0,
+            operator_revoked: None,
         }
     }
 
@@ -822,6 +837,28 @@ impl M1RuntimeSession {
 
     pub(crate) fn bind_session_transcript_hash(&mut self, transcript_hash: [u8; 32]) {
         self.session_transcript_hash = Some(transcript_hash);
+    }
+
+    /// Bind the shared operator-revocation latch before this runtime is
+    /// published to the input, transfer, and send tasks.
+    ///
+    /// The consent server sets this AtomicBool synchronously when a valid
+    /// operator Revoke is accepted. Every M1 preflight and final lane gate
+    /// checks it, so a later main-loop ledger append cannot leave an interval
+    /// in which sibling tasks still observe the session as Active.
+    pub(crate) fn bind_operator_revocation_latch(&mut self, revoked: Arc<AtomicBool>) {
+        self.operator_revoked = Some(revoked);
+    }
+
+    fn ensure_operator_not_revoked(&self) -> Result<(), M1RuntimeError> {
+        if self
+            .operator_revoked
+            .as_ref()
+            .is_some_and(|revoked| revoked.load(Ordering::SeqCst))
+        {
+            return Err(M1RuntimeError::OperatorRevocationObserved);
+        }
+        Ok(())
     }
 
     pub(crate) fn session_transcript_binding(&self) -> Option<SessionTranscriptBinding> {
@@ -969,6 +1006,7 @@ impl M1RuntimeSession {
     }
 
     pub(crate) fn grant_consent(&mut self) -> Result<(), M1RuntimeError> {
+        self.ensure_operator_not_revoked()?;
         self.session.grant_consent()?;
         self.flush_new_audit_events()
     }
@@ -980,6 +1018,7 @@ impl M1RuntimeSession {
         &mut self,
         granted: M1PermissionSet,
     ) -> Result<(), M1RuntimeError> {
+        self.ensure_operator_not_revoked()?;
         self.session.grant_consent_scoped(granted)?;
         self.flush_new_audit_events()
     }
@@ -990,41 +1029,49 @@ impl M1RuntimeSession {
     }
 
     pub(crate) fn stream_frame(&mut self) -> Result<(), M1RuntimeError> {
+        self.ensure_operator_not_revoked()?;
         self.session.stream_frame()?;
         self.flush_new_audit_events()
     }
 
     pub(crate) fn stream_telemetry(&mut self) -> Result<(), M1RuntimeError> {
+        self.ensure_operator_not_revoked()?;
         self.session.stream_telemetry()?;
         self.flush_new_audit_events()
     }
 
     pub(crate) fn stream_audio(&mut self) -> Result<(), M1RuntimeError> {
+        self.ensure_operator_not_revoked()?;
         self.session.stream_audio()?;
         self.flush_new_audit_events()
     }
 
     pub(crate) fn inject_input(&mut self) -> Result<(), M1RuntimeError> {
+        self.ensure_operator_not_revoked()?;
         self.session.inject_input()?;
         self.flush_new_audit_events()
     }
 
     pub(crate) fn read_host_clipboard(&mut self) -> Result<(), M1RuntimeError> {
+        self.ensure_operator_not_revoked()?;
         self.session.read_host_clipboard()?;
         self.flush_new_audit_events()
     }
 
     pub(crate) fn write_host_clipboard(&mut self) -> Result<(), M1RuntimeError> {
+        self.ensure_operator_not_revoked()?;
         self.session.write_host_clipboard()?;
         self.flush_new_audit_events()
     }
 
     pub(crate) fn send_file_to_viewer(&mut self) -> Result<(), M1RuntimeError> {
+        self.ensure_operator_not_revoked()?;
         self.session.send_file_to_viewer()?;
         self.flush_new_audit_events()
     }
 
     pub(crate) fn receive_file_from_viewer(&mut self) -> Result<(), M1RuntimeError> {
+        self.ensure_operator_not_revoked()?;
         self.session.receive_file_from_viewer()?;
         self.flush_new_audit_events()
     }
@@ -1074,6 +1121,7 @@ impl M1RuntimeSession {
     }
 
     fn preflight_permission(&self, permission: M1Permission) -> Result<(), M1RuntimeError> {
+        self.ensure_operator_not_revoked()?;
         self.session.require_permission(permission)?;
         Ok(())
     }
@@ -1955,6 +2003,64 @@ mod tests {
         assert!(runtime.preflight_file_send_flow().is_err());
         assert!(runtime.preflight_host_clipboard_read_flow().is_err());
         assert!(runtime.preflight_input_flow().is_err());
+    }
+
+    #[test]
+    fn operator_revoke_latch_closes_every_lane_before_durable_revoke_transition() {
+        let (mut runtime, _) = runtime(33);
+        let revoked = Arc::new(AtomicBool::new(false));
+        runtime.bind_operator_revocation_latch(Arc::clone(&revoked));
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet::all())
+            .unwrap();
+
+        let entries_before = runtime.ledger_len();
+        revoked.store(true, Ordering::SeqCst);
+
+        // All source-work preflights and all final lane gates must reject
+        // immediately, while the state machine is still Active awaiting the
+        // owning loop's durable revocation transition.
+        assert_eq!(runtime.preflight_frame_flow().unwrap_err().to_string(),
+            M1RuntimeError::OperatorRevocationObserved.to_string());
+        assert!(matches!(
+            runtime.preflight_telemetry_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+        assert!(matches!(
+            runtime.preflight_audio_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+        assert!(matches!(
+            runtime.preflight_file_send_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+        assert!(matches!(
+            runtime.preflight_host_clipboard_read_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+        assert!(matches!(
+            runtime.preflight_input_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+
+        assert!(matches!(runtime.allow_frame_flow(), Err(M1RuntimeError::OperatorRevocationObserved)));
+        assert!(matches!(runtime.allow_telemetry_flow(), Err(M1RuntimeError::OperatorRevocationObserved)));
+        assert!(matches!(runtime.allow_audio_flow(), Err(M1RuntimeError::OperatorRevocationObserved)));
+        assert!(matches!(runtime.allow_input_flow(), Err(M1RuntimeError::OperatorRevocationObserved)));
+        assert!(matches!(runtime.allow_host_clipboard_read_flow(), Err(M1RuntimeError::OperatorRevocationObserved)));
+        assert!(matches!(runtime.allow_host_clipboard_write_flow(), Err(M1RuntimeError::OperatorRevocationObserved)));
+        assert!(matches!(runtime.allow_file_send_flow(), Err(M1RuntimeError::OperatorRevocationObserved)));
+        assert!(matches!(runtime.allow_file_receive_flow(), Err(M1RuntimeError::OperatorRevocationObserved)));
+
+        assert_eq!(runtime.state(), M1SessionState::Active);
+        assert_eq!(runtime.ledger_len(), entries_before);
+
+        // The owning loop can still commit the canonical M1 revocation event
+        // after the latch has closed all operation gates.
+        runtime.revoke().unwrap();
+        assert_eq!(runtime.state(), M1SessionState::Revoked);
+        assert!(runtime.ledger_len() > entries_before);
     }
 
     #[test]
