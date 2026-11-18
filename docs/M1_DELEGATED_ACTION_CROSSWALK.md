@@ -101,13 +101,7 @@ propagation remains under Mycelix #6236.
 
 ## Existing effect checkpoints to preserve
 
-The current file-transfer path already checks M1 consent:
-- before accepting an incoming offer;
-- before each received chunk;
-- before publishing a completed incoming file;
-- before opening/hashing the initial outbound source;
-- before each outgoing chunk read and after sealing immediately before send;
-- after sealing the terminal completion message and immediately before send.
+The current file-transfer path now uses two distinct checks for incoming offers: a side-effect-free receive-lane preflight before local reservation/staging, followed by an audited lane recheck after staging and immediately before sending `Accept`. If that final gate detects revocation, the staged transfer is removed and a `Reject` is sent. The path also checks the lane before each incoming chunk append and again before final verification/publication.
 
 Delegated authority must be composed into those same boundaries, not only
 checked once at session setup. The completed-file publication is a separate
