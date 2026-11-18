@@ -43,11 +43,13 @@ pub(crate) enum ConsentFollowup {
 /// set the `revoked` flag. Shared by the plaintext [`ConsentServer`] and the
 /// sealed operator channel, so the decision semantics live in one tested place.
 ///
-/// An authenticated decision's audit entry must be durably persisted
-/// (`ledger_persister`) before the decision itself takes effect -- if
-/// persistence fails, the decision is refused (the grant is left unresolved,
-/// which the caller observes as a closed channel) rather than silently
-/// applying a privileged action with no durable record of who authorized it.
+/// Approve/Deny decisions take effect only after their authenticated audit
+/// entry is durably persisted. Revocation is deliberately different: once a
+/// decoded Revoke action has passed the transport's authentication/authorization
+/// checks, the shared local admission latch is raised immediately, *before*
+/// ledger I/O. If persistence then fails, the latch remains raised and the
+/// session stops. A storage failure must never leave a live mutation window
+/// open merely because the audit sink is unavailable.
 ///
 /// Takes the whole [`Chain`] frontier (`append_transactional_chain`, not
 /// `append_transactional`) rather than just the newly-appended entries --
@@ -62,8 +64,18 @@ pub(crate) async fn apply_consent_decision(
     ledger_persister: &dyn ConsentLedgerPersister,
     session_uuid: Uuid,
 ) -> ConsentFollowup {
-    // Attribute an authenticated decision in the tamper-evident ledger --
-    // durably, before the decision takes effect.
+    // Revocation is a monotonic, fail-closed safety action. `decoded` only
+    // exists after the active transport has accepted the consent message (and,
+    // when configured, verified the operator signature/role/scope). Close all
+    // sibling M1 lanes before any potentially slow durable audit write. If the
+    // write fails below, do not clear this latch or resume the session.
+    if matches!(decoded.action, ConsentAction::Revoke) {
+        revoked.store(true, Ordering::SeqCst);
+    }
+
+    // Approve/Deny and the durable audit record remain ordered: an affirmative
+    // or initial negative decision is not applied until its authenticated
+    // provenance has been persisted.
     if let Some(authorized) = &decoded.authorized {
         let event = crate::operator_audit::operator_consent_audit_event(
             authorized,
@@ -101,8 +113,7 @@ pub(crate) async fn apply_consent_decision(
             ConsentFollowup::Stop
         }
         ConsentAction::Revoke => {
-            tracing::info!("consent revocation received");
-            revoked.store(true, Ordering::SeqCst);
+            tracing::info!("consent revocation received; local M1 admission is closed");
             ConsentFollowup::Stop
         }
     }
@@ -339,6 +350,62 @@ mod tests {
         .await;
         assert!(matches!(f3, ConsentFollowup::Stop));
         assert!(!rx3.await.unwrap());
+    }
+
+    struct RevokeLatchCheckingPersister {
+        revoked: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl crate::consent_ledger_persistence::ConsentLedgerPersister
+        for RevokeLatchCheckingPersister
+    {
+        fn persist(
+            &self,
+            _chain: &Chain,
+        ) -> Result<(), crate::audit_ledger_store::AuditLedgerStoreError> {
+            assert!(
+                self.revoked.load(Ordering::SeqCst),
+                "the local revoke latch must close before durable audit I/O begins"
+            );
+            Err(crate::audit_ledger_store::AuditLedgerStoreError::Io(
+                std::io::Error::other("simulated audit persistence failure"),
+            ))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn revoke_closes_m1_admission_before_audit_and_stays_closed_on_persist_failure() {
+        let daemon = SigningKey::generate(&mut rand::thread_rng());
+        let ledger = TokioMutex::new(Chain::new(daemon));
+        let revoked = std::sync::Arc::new(AtomicBool::new(false));
+        let persister = RevokeLatchCheckingPersister {
+            revoked: std::sync::Arc::clone(&revoked),
+        };
+        let (grant_tx, _grant_rx) = oneshot::channel();
+        let mut grant_tx = Some(grant_tx);
+
+        let outcome = apply_consent_decision(
+            crate::DecodedConsent {
+                action: ConsentAction::Revoke,
+                authorized: Some(authorized_action(ConsentAction::Revoke)),
+            },
+            &mut grant_tx,
+            &revoked,
+            &ledger,
+            &persister,
+            Uuid::from_u128(10),
+        )
+        .await;
+
+        assert!(matches!(outcome, ConsentFollowup::Stop));
+        assert!(
+            revoked.load(Ordering::SeqCst),
+            "audit failure must not reopen the local M1 admission fence"
+        );
+        assert!(
+            grant_tx.is_some(),
+            "mid-session revoke must not resolve the initial consent grant channel"
+        );
     }
 
     fn authorized_action(action: ConsentAction) -> crate::operator_auth::AuthorizedConsentAction {
