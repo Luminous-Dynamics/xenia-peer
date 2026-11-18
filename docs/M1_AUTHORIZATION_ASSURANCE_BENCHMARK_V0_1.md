@@ -3,7 +3,8 @@
 **Status:** preregistration / development protocol, not benchmark results, certification, or production qualification.  
 **Owner:** Xenia #505, composed with #508, #510, #512, #517 and #518.  
 **Cross-project owners:** Mycelix #6136 (exact-operation effectuation), #6213 (route mediation), #6236 (revocation propagation), #6140 (observation provenance), #6170 (agent authorization), #6189 (one-shot effect interposition), #6193 (distributed consumption consistency).  
-**Seed corpus:** `docs/benchmarks/M1_AUTHORIZATION_ASSURANCE_CORPUS_V0_1.json`.
+**Seed corpus:** `docs/benchmarks/M1_AUTHORIZATION_ASSURANCE_CORPUS_V0_1.json`.  
+**Structural fixture test:** `apps/xenia-peer/tests/m1_authorization_assurance_corpus.rs`.
 
 ## 1. Research question and contribution
 
@@ -104,7 +105,9 @@ An operation identity should bind at least the session fingerprint, monotonic pe
 
 ### 5.1 Required fault and mutation families
 
-The seed corpus begins with 32 scenarios across four families:
+The seed corpus begins with 32 scenarios across four families. A Rust-side structural test checks unique IDs, balanced family counts, required fields, valid dispositions, exact action/direction crosswalks and one positive control per lane. It does not implement the independent expected-outcome oracle or prove any runtime behavior.
+
+The 32 scenarios cover:
 
 - **Positive controls:** one exact, fully authorized operation per M1 lane.
 - **Scope/consent negatives:** lane substitution, direction confusion, resource mismatch, missing consent, wrong purpose/audience, expiry and revocation.
