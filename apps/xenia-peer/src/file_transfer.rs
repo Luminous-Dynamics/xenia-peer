@@ -151,8 +151,8 @@ pub(crate) async fn handle_envelope(
             let decision = state.evaluate_offer(config, &name, size);
             let reply = match decision {
                 OfferDecision::Accept { safe_name } => {
-                    if let Err(err) = m1_runtime.lock().await.allow_file_receive_flow() {
-                        warn!(error = %err, "file transfer offer rejected by M1 consent gate");
+                    if let Err(err) = m1_runtime.lock().await.preflight_file_receive_flow() {
+                        warn!(error = %err, "file transfer offer rejected by M1 source preflight");
                         FileTransferMessage::Reject {
                             transfer_id,
                             reason: "file receive is not permitted by current consent".to_string(),
@@ -214,6 +214,26 @@ pub(crate) async fn handle_envelope(
                         reason,
                     }
                 }
+            };
+
+            // The initial preflight protects local staging allocation. Re-check
+            // after staging and immediately before Accept so an operator revoke
+            // observed during allocation cannot authorize the sender to begin
+            // transmitting. A denied Accept drops the staged transfer.
+            let reply = match reply {
+                FileTransferMessage::Accept { transfer_id } => {
+                    if let Err(err) = m1_runtime.lock().await.allow_file_receive_flow() {
+                        warn!(error = %err, "file receive revoked before Accept send; dropping staged transfer");
+                        state.incoming.remove(&transfer_id);
+                        FileTransferMessage::Reject {
+                            transfer_id,
+                            reason: "file receive permission was revoked before acceptance".to_string(),
+                        }
+                    } else {
+                        FileTransferMessage::Accept { transfer_id }
+                    }
+                }
+                other => other,
             };
             let envelope = session
                 .lock()
