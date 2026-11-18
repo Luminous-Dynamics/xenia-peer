@@ -3,8 +3,9 @@
 **Status:** preregistration proposal; no comparative measurements have been produced.
 **Owner:** Xenia #505, composed with Mycelix LISE #6136, #6213, #6236, #6140, #6170, #6189 and #6193.
 **Candidate implementation:** Xenia M1 lanes in PR #509. Current route manifest is explicitly incomplete; see `M1_ROUTE_MEDIATION_INVENTORY_V0_1.json`.  
-**Seed corpus:** `docs/benchmarks/M1_AUTHORIZATION_ASSURANCE_CORPUS_V0_1.json` (32 scenario seeds).  
-**Structural test:** `apps/xenia-peer/tests/m1_authorization_assurance_corpus.rs` (fixture integrity only; not the independent outcome oracle).
+**Input corpus:** `docs/benchmarks/M1_AUTHORIZATION_ASSURANCE_CORPUS_V0_1.json` (32 synthetic scenario inputs, without embedded expected outcomes).  
+**Reference oracle:** `docs/benchmarks/M1_AUTHORIZATION_ASSURANCE_ORACLE_V0_1.json` (separate expected outcomes; authored separately from candidate code, pending independent adjudication).  
+**Structural test:** `apps/xenia-peer/tests/m1_authorization_assurance_corpus.rs` (checks input/oracle one-to-one linkage, schema consistency, adversarial action/direction mutations and stage-separated outcome semantics; it does not execute the candidate or independently adjudicate the oracle).
 
 ## 1. Research objective
 
@@ -149,9 +150,11 @@ The checked-in v0.1 corpus is a **32-case structural seed**, with eight cases pe
 - ambiguous user intent requiring principal clarification before action;
 - valid positive controls for unrelated independent grants after a scoped revoke.
 
-Each case must freeze the exact action, lane, direction, resource, purpose, audience, expected consent, currentness evidence, parent chain, session epoch, effect boundary, fault schedule and expected effect state. Keep the oracle independent from the candidate route manifest and enforcement code.
+Each case must freeze the exact action, lane, direction, resource, purpose, audience, expected consent, currentness evidence, parent chain, session epoch, effect boundary, fault schedule and expected effect state. Keep expected results in the separate oracle file, independent of the candidate route manifest and enforcement code. Independent evaluator adjudication remains pending.
 
-The 32-case v0.1 seed covers all eight lanes and has four equal-size families: positive controls; scope/consent negatives; freshness/propagation controls; and effect/outcome controls. Its Rust structural test checks unique IDs, family balance, required fields, valid dispositions, action/direction correspondence and one positive control per lane. This proves fixture consistency only; it does not implement or independently validate the scenario outcome oracle.
+The 32-case v0.1 seed covers all eight lanes and has four equal-size families: positive controls; scope/consent negatives; freshness/propagation controls; and effect/outcome controls. Inputs and expected outcomes are stored separately. The Rust structural test checks unique IDs, one-to-one input/oracle coverage, family balance, required operation bindings, and explicit preservation of deliberately mismatched action/direction negative controls. It also checks that downstream injector/transport/filesystem failures do not rewrite a valid authorization result, that exact duplicate operation IDs/fingerprints resolve to the prior result without a second dispatch, and that changed-fingerprint reuse conflicts.
+
+The oracle remains a separately authored reference, not an independently adjudicated truth source. In particular, the seed deliberately distinguishes: a valid authorization followed by an effect failure/unknown outcome; an idempotent exact replay that returns the prior result; a changed-fingerprint conflict; and an unknown prior outcome that holds a new retry. These are preregistration semantics, not measured runtime outcomes.
 
 ### Metrics and non-compensatory gates
 
@@ -238,7 +241,7 @@ For Xenia specifically, use the model/harness/workflow distinction to review:
 - daemon task scheduling, concurrent file-transfer tasks, reconnect/rekey and cancellation;
 - TCP/WebSocket/QUIC dispatch, operator/control routes and the final OS/filesystem/input effect owners.
 
-The current 32-case corpus remains a structural seed. These cases are a planned extension and do not count as implemented or adjudicated until they have frozen inputs, a separate oracle and executable positive/negative controls.
+The current 32-case corpus remains a structural seed. Its expected outcome artifact is now stored separately, but independent adjudication and executable positive/negative effect controls remain pending. Planned cases do not count as implemented or adjudicated until they have frozen inputs, a separate oracle and executable positive/negative controls.
 
 ## 5. Interoperability and standards
 
