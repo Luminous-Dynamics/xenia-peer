@@ -136,4 +136,22 @@ Xenia owns the local route implementation and lane gate. Mycelix LISE owns its g
 5. Bind route/session receipts to authenticated Mycelix authority currentness only after the ROS-005 content-binding, parent-chain and delayed-DHT currentness contracts are implemented and exposed by their owning Mycelix APIs.
 6. Independently qualify the control-plane routes and every enabled build/platform/transport profile.
 
-The machine-readable registry and CI check are not implemented by this document. Documentation alone is not route-completeness evidence.
+## 8. Machine-readable source guard
+
+The corresponding machine-readable manifest is
+`docs/M1_ROUTE_MEDIATION_INVENTORY_V0_1.json`. It records the eight lane
+identities, source/effect owner references, selected gate/effect symbol checks,
+six separate control-plane surfaces, known unknowns and explicit claim ceiling.
+
+The integration test `apps/xenia-peer/tests/m1_route_manifest.rs` parses that
+manifest, verifies the action-ID crosswalk against the Rust core source,
+checks that every declared gate/effect token still exists, checks the textual
+ordering of selected gate/effect pairs, and checks the listed control-plane
+routes against source.
+
+This is a **source-drift tripwire** only. It checks text presence/order, not
+Rust AST control flow, dynamic dispatch, alternate executables, feature-specific
+reachability, platform API interception, all OS effects, runtime path coverage,
+or atomicity. It cannot turn an incomplete inventory into complete mediation.
+The route-universe status remains INDETERMINATE until independent route
+enumeration and executable bypass-negative controls are completed.
