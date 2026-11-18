@@ -4,7 +4,8 @@
 **Owner:** Xenia #505, composed with Mycelix LISE #6136, #6213, #6236, #6140, #6170, #6189 and #6193.
 **Candidate implementation:** Xenia M1 lanes in PR #509. Current route manifest is explicitly incomplete; see `M1_ROUTE_MEDIATION_INVENTORY_V0_1.json`.  
 **Seed corpus:** `docs/benchmarks/M1_AUTHORIZATION_ASSURANCE_CORPUS_V0_2.json` (64 scenario seeds across eight balanced families; v0.1 is retained as the original 32-case seed).  
-**Structural test:** `apps/xenia-peer/tests/m1_authorization_assurance_corpus.rs` (fixture integrity only; not the independent outcome oracle).
+**Structural test:** `apps/xenia-peer/tests/m1_authorization_assurance_corpus.rs` (fixture integrity only; not the independent outcome oracle).  
+**Oracle status:** not implemented; v0.2 sets `oracle_separate_from_candidate=false` deliberately. Scenario expected dispositions are preregistration hypotheses, not independently adjudicated ground truth.
 
 ## 1. Research objective
 
@@ -129,7 +130,7 @@ Bind each event to operation ID, monotonic session sequence, lane/action, direct
 
 ### Adversarial scenario panel
 
-The checked-in v0.2 corpus is a **64-case structural seed**, with eight cases per family. It is not yet an independently adjudicated known-answer panel. Before a formal benchmark run, freeze a separate owner-independent oracle for all supported cases, then expand to at least 128 development cases plus a sealed holdout. Include:
+The checked-in v0.2 corpus is a **64-case structural seed**, with eight cases per family. It is not yet an independently adjudicated known-answer panel. The 64 rows contain expected dispositions to preregister the intended semantics, but no separate oracle exists yet; do not score candidates against these labels as if they were independently validated. Before a formal benchmark run, freeze a separate owner-independent oracle for all supported cases, then expand to at least 128 development cases plus a sealed holdout. Include:
 - each lane granted alone; every unrelated lane remains denied;
 - screen permission cannot read clipboard, inject input, or send/receive files;
 - clipboard read/write and file send/receive are directionally independent;
@@ -151,7 +152,7 @@ The checked-in v0.2 corpus is a **64-case structural seed**, with eight cases pe
 
 Each case must freeze the exact action, lane, direction, resource, purpose, audience, expected consent, currentness evidence, parent chain, session epoch, effect boundary, fault schedule and expected effect state. Keep the oracle independent from the candidate route manifest and enforcement code.
 
-The 64-case v0.2 seed covers all eight lanes and has eight equal-size families: positive controls; scope/consent negatives; freshness/propagation; effect/outcome; authorization drift (data/tool/scope/time); bounded approval completeness; harness/workflow refusal; and restoration/replay. Its Rust structural test checks unique IDs, family balance, required fields, valid dispositions, action/direction correspondence, exact ADB dimension balance, eight bounded-completeness positives, eight workflow-refusal negatives, and one basic positive control per lane. This proves fixture consistency only; it does not implement or independently validate the scenario outcome oracle.
+The 64-case v0.2 seed covers all eight lanes and has eight equal-size families: positive controls; scope/consent negatives; freshness/propagation; effect/outcome; authorization drift (data/tool/scope/time); bounded approval completeness; harness/workflow refusal; and restoration/replay. Its Rust structural test checks unique IDs, family balance, required fields, valid dispositions, action/direction correspondence, explicit cross-lane and direction-confusion mutations, exact ADB dimension balance, eight bounded-completeness positives, eight workflow-refusal negatives, and one basic positive control per lane. This proves fixture consistency only; it does not implement or independently validate the scenario outcome oracle.
 
 ### Metrics and non-compensatory gates
 
@@ -238,7 +239,7 @@ For Xenia specifically, use the model/harness/workflow distinction to review:
 - daemon task scheduling, concurrent file-transfer tasks, reconnect/rekey and cancellation;
 - TCP/WebSocket/QUIC dispatch, operator/control routes and the final OS/filesystem/input effect owners.
 
-The current 64-case corpus remains a structural seed. The ADB and dual-obligation scenarios now have machine-readable expected dispositions, but no independent owner oracle, executable host/receiver sandbox, or blinded adjudication has been completed. They do not count as validated known-answer results.
+The current 64-case corpus remains a structural seed. The ADB and dual-obligation scenarios now have machine-readable expected dispositions, but the corpus explicitly records that no independent owner oracle exists yet. No executable host/receiver sandbox, complete route inventory, blinded adjudication or performance measurements have been completed. These rows do not count as validated known-answer results.
 
 ## 5. Interoperability and standards
 
