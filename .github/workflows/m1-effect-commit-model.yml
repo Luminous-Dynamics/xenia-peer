@@ -9,7 +9,7 @@ on:
       - "crates/xenia-peer-core/src/lib.rs"
   push:
     branches:
-      - "research/m1-effect-commit-model-v0.1"
+      - "research/m1-effect-commit-model-v0.2"
     paths:
       - "crates/xenia-peer-core/src/m1_effect.rs"
       - "crates/xenia-peer-core/src/lib.rs"
