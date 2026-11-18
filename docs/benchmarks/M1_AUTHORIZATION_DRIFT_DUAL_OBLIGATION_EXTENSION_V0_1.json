@@ -55,7 +55,10 @@
         "session_epoch": 4,
         "authority_epoch": 12,
         "operation_fingerprint": "synthetic-only-not-cryptographic",
-        "operation_id": "fixture:M1-AD-DATA-01"
+        "operation_id": "fixture:paired:data-minimization",
+        "approved_operation_fingerprint": "approved:data-minimization",
+        "requested_operation_fingerprint": "approved:data-minimization",
+        "upstream_state_fingerprint": "frozen-state:data-minimization"
       },
       "synthetic_fixture_only": true
     },
@@ -85,7 +88,10 @@
         "session_epoch": 4,
         "authority_epoch": 12,
         "operation_fingerprint": "synthetic-only-not-cryptographic",
-        "operation_id": "fixture:M1-AD-DATA-02"
+        "operation_id": "fixture:paired:data-minimization",
+        "approved_operation_fingerprint": "approved:data-minimization",
+        "requested_operation_fingerprint": "approved:data-minimization",
+        "upstream_state_fingerprint": "frozen-state:data-minimization"
       },
       "synthetic_fixture_only": true
     },
@@ -114,7 +120,10 @@
         "session_epoch": 4,
         "authority_epoch": 12,
         "operation_fingerprint": "synthetic-only-not-cryptographic",
-        "operation_id": "fixture:M1-AD-TOOL-01"
+        "operation_id": "fixture:paired:tool-minimization",
+        "approved_operation_fingerprint": "approved:tool-minimization",
+        "requested_operation_fingerprint": "approved:tool-minimization",
+        "upstream_state_fingerprint": "frozen-state:tool-minimization"
       },
       "synthetic_fixture_only": true
     },
@@ -143,7 +152,10 @@
         "session_epoch": 4,
         "authority_epoch": 12,
         "operation_fingerprint": "synthetic-only-not-cryptographic",
-        "operation_id": "fixture:M1-AD-TOOL-02"
+        "operation_id": "fixture:paired:tool-minimization",
+        "approved_operation_fingerprint": "approved:tool-minimization",
+        "requested_operation_fingerprint": "approved:tool-minimization",
+        "upstream_state_fingerprint": "frozen-state:tool-minimization"
       },
       "synthetic_fixture_only": true
     },
@@ -172,7 +184,10 @@
         "session_epoch": 4,
         "authority_epoch": 12,
         "operation_fingerprint": "synthetic-only-not-cryptographic",
-        "operation_id": "fixture:M1-AD-SCOPE-01"
+        "operation_id": "fixture:paired:resource-scope",
+        "approved_operation_fingerprint": "approved:resource-scope",
+        "requested_operation_fingerprint": "approved:resource-scope",
+        "upstream_state_fingerprint": "frozen-state:resource-scope"
       },
       "synthetic_fixture_only": true
     },
@@ -201,7 +216,10 @@
         "session_epoch": 4,
         "authority_epoch": 12,
         "operation_fingerprint": "synthetic-only-not-cryptographic",
-        "operation_id": "fixture:M1-AD-SCOPE-02"
+        "operation_id": "fixture:paired:resource-scope",
+        "approved_operation_fingerprint": "approved:resource-scope",
+        "requested_operation_fingerprint": "mutated:resource-scope",
+        "upstream_state_fingerprint": "frozen-state:resource-scope"
       },
       "synthetic_fixture_only": true
     },
@@ -230,7 +248,10 @@
         "session_epoch": 4,
         "authority_epoch": 12,
         "operation_fingerprint": "synthetic-only-not-cryptographic",
-        "operation_id": "fixture:M1-AD-TIME-01"
+        "operation_id": "fixture:paired:temporal-scope",
+        "approved_operation_fingerprint": "approved:temporal-scope",
+        "requested_operation_fingerprint": "approved:temporal-scope",
+        "upstream_state_fingerprint": "frozen-state:temporal-scope"
       },
       "synthetic_fixture_only": true
     },
@@ -259,7 +280,10 @@
         "session_epoch": 4,
         "authority_epoch": 12,
         "operation_fingerprint": "synthetic-only-not-cryptographic",
-        "operation_id": "fixture:M1-AD-TIME-02"
+        "operation_id": "fixture:paired:temporal-scope",
+        "approved_operation_fingerprint": "approved:temporal-scope",
+        "requested_operation_fingerprint": "approved:temporal-scope",
+        "upstream_state_fingerprint": "frozen-state:temporal-scope"
       },
       "synthetic_fixture_only": true
     },
@@ -288,7 +312,10 @@
         "session_epoch": 4,
         "authority_epoch": 12,
         "operation_fingerprint": "synthetic-only-not-cryptographic",
-        "operation_id": "fixture:input:001"
+        "operation_id": "fixture:paired:approve-reject-same-operation",
+        "approved_operation_fingerprint": "approved:approve-reject-same-operation",
+        "requested_operation_fingerprint": "approved:approve-reject-same-operation",
+        "upstream_state_fingerprint": "frozen-state:approve-reject-same-operation"
       },
       "synthetic_fixture_only": true
     },
@@ -319,7 +346,10 @@
         "session_epoch": 4,
         "authority_epoch": 12,
         "operation_fingerprint": "synthetic-only-not-cryptographic",
-        "operation_id": "fixture:input:001"
+        "operation_id": "fixture:paired:approve-reject-same-operation",
+        "approved_operation_fingerprint": "approved:approve-reject-same-operation",
+        "requested_operation_fingerprint": "approved:approve-reject-same-operation",
+        "upstream_state_fingerprint": "frozen-state:approve-reject-same-operation"
       },
       "synthetic_fixture_only": true
     },
@@ -352,7 +382,10 @@
         "session_epoch": 4,
         "authority_epoch": 12,
         "operation_fingerprint": "synthetic-only-not-cryptographic",
-        "operation_id": "fixture:parallel:001"
+        "operation_id": "fixture:paired:parallel-approved-branches",
+        "approved_operation_fingerprint": "approved:parallel-approved-branches",
+        "requested_operation_fingerprint": "approved:parallel-approved-branches",
+        "upstream_state_fingerprint": "frozen-state:parallel-approved-branches"
       },
       "synthetic_fixture_only": true
     },
@@ -385,7 +418,10 @@
         "session_epoch": 4,
         "authority_epoch": 12,
         "operation_fingerprint": "synthetic-only-not-cryptographic",
-        "operation_id": "fixture:parallel:001"
+        "operation_id": "fixture:paired:parallel-approved-branches",
+        "approved_operation_fingerprint": "approved:parallel-approved-branches",
+        "requested_operation_fingerprint": "approved:parallel-approved-branches",
+        "upstream_state_fingerprint": "frozen-state:parallel-approved-branches"
       },
       "synthetic_fixture_only": true
     },
@@ -414,7 +450,10 @@
         "session_epoch": 4,
         "authority_epoch": 12,
         "operation_fingerprint": "synthetic-only-not-cryptographic",
-        "operation_id": "fixture:clipboard:reject:001"
+        "operation_id": "fixture:paired:workflow-reject-enforcement",
+        "approved_operation_fingerprint": "approved:workflow-reject-enforcement",
+        "requested_operation_fingerprint": "approved:workflow-reject-enforcement",
+        "upstream_state_fingerprint": "frozen-state:workflow-reject-enforcement"
       },
       "synthetic_fixture_only": true
     },
@@ -443,7 +482,10 @@
         "session_epoch": 4,
         "authority_epoch": 12,
         "operation_fingerprint": "synthetic-only-not-cryptographic",
-        "operation_id": "fixture:clipboard:reject:001"
+        "operation_id": "fixture:paired:workflow-reject-enforcement",
+        "approved_operation_fingerprint": "approved:workflow-reject-enforcement",
+        "requested_operation_fingerprint": "approved:workflow-reject-enforcement",
+        "upstream_state_fingerprint": "frozen-state:workflow-reject-enforcement"
       },
       "synthetic_fixture_only": true
     },
@@ -474,7 +516,10 @@
         "session_epoch": 4,
         "authority_epoch": 12,
         "operation_fingerprint": "synthetic-only-not-cryptographic",
-        "operation_id": "fixture:file:revoke:001"
+        "operation_id": "fixture:file:revoke:001",
+        "approved_operation_fingerprint": "approved:approve-revoke-before-commit",
+        "requested_operation_fingerprint": "approved:approve-revoke-before-commit",
+        "upstream_state_fingerprint": "frozen-state:approve-revoke-before-commit"
       },
       "synthetic_fixture_only": true
     },
@@ -505,9 +550,41 @@
         "session_epoch": 4,
         "authority_epoch": 12,
         "operation_fingerprint": "synthetic-only-not-cryptographic",
-        "operation_id": "fixture:audio:restore:001"
+        "operation_id": "fixture:audio:restore:001",
+        "approved_operation_fingerprint": "approved:restore-revalidate-currentness",
+        "requested_operation_fingerprint": "approved:restore-revalidate-currentness",
+        "upstream_state_fingerprint": "frozen-state:restore-revalidate-currentness"
       },
       "synthetic_fixture_only": true
     }
-  ]
+  ],
+  "pairing_contract": {
+    "rule": "Every paired scenario reuses one operation_id and frozen upstream-state fingerprint. Only the declared decision, requested scope, route, session epoch, or fault mutation may differ.",
+    "matched_pair_ids": [
+      "data-minimization",
+      "tool-minimization",
+      "resource-scope",
+      "temporal-scope",
+      "approve-reject-same-operation",
+      "parallel-approved-branches",
+      "workflow-reject-enforcement"
+    ],
+    "same_state_fields": [
+      "principal_ref",
+      "delegate_ref",
+      "host_resource_ref",
+      "purpose",
+      "audience",
+      "session_fingerprint",
+      "upstream_state_fingerprint"
+    ],
+    "mutation_specific_fields": [
+      "requested_actions",
+      "route",
+      "session_epoch",
+      "authority_epoch",
+      "decision",
+      "mutation"
+    ]
+  }
 }
