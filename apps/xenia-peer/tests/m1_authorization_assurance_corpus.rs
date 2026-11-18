@@ -91,6 +91,21 @@ fn benchmark_corpus_has_64_unique_cases_and_balanced_families() {
             "direction mapping mismatch in {id}"
         );
 
+        if let Some(source_lane) = scenario["source_lane"].as_str() {
+            let source_permission = lane(source_lane);
+            assert_ne!(
+                source_permission, permission,
+                "cross-lane negative must identify distinct source and target lanes: {id}"
+            );
+        }
+        if let Some(attempted_direction) = scenario["attempted_direction"].as_str() {
+            assert_ne!(
+                direction(attempted_direction),
+                permission.direction(),
+                "direction-confusion case must differ from the canonical lane: {id}"
+            );
+        }
+
         let disposition = scenario["expected_disposition"]
             .as_str()
             .expect("expected disposition is required");
@@ -151,6 +166,22 @@ fn benchmark_corpus_has_64_unique_cases_and_balanced_families() {
             ("scope_or_consent_negative".to_owned(), 8),
         ])
     );
+}
+
+#[test]
+fn cross_lane_and_direction_mismatch_controls_are_explicit() {
+    let root: Value = serde_json::from_str(CORPUS).expect("benchmark corpus must be valid JSON");
+    let scenarios = root["scenarios"].as_array().unwrap();
+
+    let cross_lane = scenarios.iter().find(|scenario| scenario["id"] == "M1-D01").unwrap();
+    assert_eq!(cross_lane["lane"].as_str(), Some("InjectInput"));
+    assert_eq!(cross_lane["source_lane"].as_str(), Some("StreamFrame"));
+    assert_ne!(cross_lane["lane"], cross_lane["source_lane"]);
+
+    let direction = scenarios.iter().find(|scenario| scenario["id"] == "M1-D02").unwrap();
+    assert_eq!(direction["lane"].as_str(), Some("InjectInput"));
+    assert_eq!(direction["direction"].as_str(), Some("viewer_to_host"));
+    assert_eq!(direction["attempted_direction"].as_str(), Some("host_to_viewer"));
 }
 
 #[test]
