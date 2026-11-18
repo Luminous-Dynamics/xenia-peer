@@ -48,7 +48,7 @@ The integration test checks:
 - unique scenario IDs;
 - all eight M1 permission/action/direction identities appear;
 - every case has compliant and unauthorized paths plus expected task/drift/PEP/effect labels;
-- the current-vs-unsupported runtime coverage is explicit.
+- the current-vs-unsupported runtime coverage is explicit in the oracle.
 
 This validates fixture structure and mapping only. It does not execute an agent, platform effect, network path, or ROS-005 decision. The fixture and expected labels require independent adjudication, a held-out extension and integration into Mycelix #6170 before benchmark qualification.
 
