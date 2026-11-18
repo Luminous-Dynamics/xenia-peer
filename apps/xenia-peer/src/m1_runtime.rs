@@ -2020,19 +2020,28 @@ mod tests {
         // Drive the same decision handler used by both the plaintext and
         // sealed operator transports, rather than manually setting the flag.
         let operator_signing_key = SigningKey::from_bytes(&[34; 32]);
-        let operator_ledger = tokio::sync::Mutex::new(Chain::new(operator_signing_key));
+        let operator_ledger =
+            tokio::sync::Mutex::new(Chain::new(operator_signing_key.clone()));
+        let operator_ledger_dir = std::env::temp_dir().join(format!(
+            "xenia-m1-revocation-latch-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&operator_ledger_dir).unwrap();
+        let operator_ledger_path = operator_ledger_dir.join("operator.ledger");
         let operator_ledger_persister =
             crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
-                std::env::temp_dir().join(format!(
-                    "xenia-m1-revocation-latch-{}.ledger",
-                    Uuid::new_v4()
-                )),
+                operator_ledger_path.clone(),
             );
         let mut grant_tx: Option<tokio::sync::oneshot::Sender<bool>> = None;
         let outcome = crate::consent_server::apply_consent_decision(
             crate::DecodedConsent {
                 action: crate::operator_auth::ConsentAction::Revoke,
-                authorized: None,
+                authorized: Some(crate::operator_auth::AuthorizedConsentAction {
+                    action: crate::operator_auth::ConsentAction::Revoke,
+                    operator_id: "alice".to_string(),
+                    role: crate::operator::OperatorRole::Admin,
+                    ed25519_pubkey: [0x11; 32],
+                }),
             },
             &mut grant_tx,
             &revoked,
@@ -2046,6 +2055,16 @@ mod tests {
             crate::consent_server::ConsentFollowup::Stop
         ));
         assert!(revoked.load(Ordering::SeqCst));
+
+        // The authenticated operator-revoke receipt must be durable before
+        // the shared atomic latch becomes visible to M1 effect owners.
+        let operator_audit = crate::audit_ledger_store::load_verified(
+            &operator_ledger_path,
+            &operator_signing_key,
+        )
+        .unwrap();
+        assert_eq!(operator_audit.len(), 1);
+        std::fs::remove_dir_all(&operator_ledger_dir).ok();
 
         // All source-work preflights and all final lane gates must reject
         // immediately, while the state machine is still Active awaiting the
