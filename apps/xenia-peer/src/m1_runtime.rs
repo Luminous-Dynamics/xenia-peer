@@ -2029,6 +2029,7 @@ mod tests {
         assert!(runtime.preflight_telemetry_flow().is_err());
         assert!(runtime.preflight_audio_flow().is_err());
         assert!(runtime.preflight_file_send_flow().is_err());
+        assert!(runtime.preflight_file_receive_flow().is_err());
         assert!(runtime.preflight_host_clipboard_read_flow().is_err());
         assert!(runtime.preflight_input_flow().is_err());
     }
@@ -2111,6 +2112,10 @@ mod tests {
         ));
         assert!(matches!(
             runtime.preflight_file_send_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+        assert!(matches!(
+            runtime.preflight_file_receive_flow(),
             Err(M1RuntimeError::OperatorRevocationObserved)
         ));
         assert!(matches!(
