@@ -13,7 +13,7 @@ daemon = "apps/xenia-peer/src/main.rs@12fe1336f6a5b2813f772aa8e8c1cec70b33da08"
 consent_server = "apps/xenia-peer/src/consent_server.rs@558fab9a448d3aad8de2416764f72e6ee7db84ba"
 sealed_operator_channel = "apps/xenia-peer/src/operator_sealed_channel.rs@65a4c7f3644ba38b4e76cedb177c501eff6a5db7"
 file_transfer = "apps/xenia-peer/src/file_transfer.rs@0b9db18f1eb8cf9842945b075c848a3e5b0b718e"
-runtime = "apps/xenia-peer/src/m1_runtime.rs@2d530a405cf2c207b18c85ec393ebaaee38afb47"
+runtime = "apps/xenia-peer/src/m1_runtime.rs@b0fbfd3570cc87a82da8413eee1923605a85669b"
 permission_model = "crates/xenia-peer-core/src/m1_session.rs@fa19a4826f2d078a47439e02217c4562f2aab007"
 
 [local_revocation]
