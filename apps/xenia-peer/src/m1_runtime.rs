@@ -2021,8 +2021,10 @@ mod tests {
         // All source-work preflights and all final lane gates must reject
         // immediately, while the state machine is still Active awaiting the
         // owning loop's durable revocation transition.
-        assert_eq!(runtime.preflight_frame_flow().unwrap_err().to_string(),
-            M1RuntimeError::OperatorRevocationObserved.to_string());
+        assert_eq!(
+            runtime.preflight_frame_flow().unwrap_err().to_string(),
+            M1RuntimeError::OperatorRevocationObserved.to_string()
+        );
         assert!(matches!(
             runtime.preflight_telemetry_flow(),
             Err(M1RuntimeError::OperatorRevocationObserved)
@@ -2044,14 +2046,38 @@ mod tests {
             Err(M1RuntimeError::OperatorRevocationObserved)
         ));
 
-        assert!(matches!(runtime.allow_frame_flow(), Err(M1RuntimeError::OperatorRevocationObserved)));
-        assert!(matches!(runtime.allow_telemetry_flow(), Err(M1RuntimeError::OperatorRevocationObserved)));
-        assert!(matches!(runtime.allow_audio_flow(), Err(M1RuntimeError::OperatorRevocationObserved)));
-        assert!(matches!(runtime.allow_input_flow(), Err(M1RuntimeError::OperatorRevocationObserved)));
-        assert!(matches!(runtime.allow_host_clipboard_read_flow(), Err(M1RuntimeError::OperatorRevocationObserved)));
-        assert!(matches!(runtime.allow_host_clipboard_write_flow(), Err(M1RuntimeError::OperatorRevocationObserved)));
-        assert!(matches!(runtime.allow_file_send_flow(), Err(M1RuntimeError::OperatorRevocationObserved)));
-        assert!(matches!(runtime.allow_file_receive_flow(), Err(M1RuntimeError::OperatorRevocationObserved)));
+        assert!(matches!(
+            runtime.allow_frame_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+        assert!(matches!(
+            runtime.allow_telemetry_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+        assert!(matches!(
+            runtime.allow_audio_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+        assert!(matches!(
+            runtime.allow_input_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+        assert!(matches!(
+            runtime.allow_host_clipboard_read_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+        assert!(matches!(
+            runtime.allow_host_clipboard_write_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+        assert!(matches!(
+            runtime.allow_file_send_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
+        assert!(matches!(
+            runtime.allow_file_receive_flow(),
+            Err(M1RuntimeError::OperatorRevocationObserved)
+        ));
 
         assert_eq!(runtime.state(), M1SessionState::Active);
         assert_eq!(runtime.ledger_len(), entries_before);
