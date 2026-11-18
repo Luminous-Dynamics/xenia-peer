@@ -285,3 +285,29 @@ Do not aggregate into a universal “authorization assurance score.” Publish s
 - Mycelix #6136/#6213/#6140/#6170/#6189/#6193: exact effectuation, route completeness, evidence provenance, agent authorization, one-shot effect interposition and concurrency/failure semantics.
 
 This profile composes those owners. It does not create a parallel authority, policy, route-inventory, event or revocation service.
+
+
+## 4.2 M1 authorization-drift and dual-obligation extension
+
+The branch now contains a separate 16-case synthetic extension and oracle:
+- `docs/benchmarks/M1_AUTHORIZATION_DRIFT_DUAL_OBLIGATION_EXTENSION_V0_1.json`
+- `docs/benchmarks/M1_AUTHORIZATION_DRIFT_DUAL_OBLIGATION_ORACLE_V0_1.json`
+
+Seven paired families reuse the same logical operation identity and frozen upstream-state fingerprint while varying only the named mutation:
+- data minimization vs clipboard over-collection;
+- declared file-transfer tool vs unenumerated alternate helper;
+- exact resource vs changed host/file resource;
+- current session vs stale queued session epoch;
+- REJECT vs APPROVE for the exact same input operation;
+- all parallel approved branches preserved vs one branch dropped during restoration;
+- workflow REJECT enforced vs a background route attempting the rejected clipboard operation.
+
+The extension also includes approval followed by revocation before commit, and restoration after restart when current authority/consent/session evidence is unavailable.
+
+Two independent obligations are scored:
+1. **Refusal safety:** rejected or effectively revoked work creates no protected effect across any reachable route.
+2. **Bounded authorization completeness:** every still-authorized and feasible operation reaches its named effect owner within the authorized horizon, unless its conditions change or require renewed consent.
+
+The oracle distinguishes a valid authorization whose harness drops an approved branch from an authorization denial. The former is a completeness failure, not a successful refusal. Likewise, it expects a Reject to suppress alternate-route effects; any observed protected effect is a refusal-safety failure. Unknown route inventory and unknown post-restart authority remain HOLD/INDETERMINATE.
+
+These 16 cases are synthetic inputs and a separately stored reference oracle. The Rust test checks pair identity, one-to-one input/oracle IDs, and selected outcome invariants. It does not execute the daemon/harness, adjudicate the oracle independently, or claim that the current Xenia runtime exhibits any of the modeled failures.
