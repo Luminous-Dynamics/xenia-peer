@@ -107,8 +107,9 @@ fn manifest_identity_and_eight_lane_crosswalk_match_rust_source() {
             action_ids.insert(action_id),
             "delegated action IDs must be unique"
         );
+        let action_mapping = format!("Self::{lane} => \"{action_id}\"");
         assert!(
-            M1_SESSION.contains(&format!("Self::{lane} => \"{action_id}\"")),
+            M1_SESSION.contains(action_mapping.as_str()),
             "M1Permission::action_id must agree with the manifest for {lane}"
         );
         assert!(
@@ -215,8 +216,9 @@ fn control_plane_routes_are_separate_and_source_backed() {
             "admin.http.v1" => {
                 for route in surface["routes"].as_array().unwrap() {
                     let route = route.as_str().unwrap();
+                    let route_literal = format!("\"{route}\"");
                     assert!(
-                        OPERATOR_HTTP.contains(&format!("\"{route}\"")),
+                        OPERATOR_HTTP.contains(route_literal.as_str()),
                         "admin HTTP route missing from router source: {route}"
                     );
                 }
@@ -224,8 +226,9 @@ fn control_plane_routes_are_separate_and_source_backed() {
             "admin.websocket.v1" => {
                 for route in surface["routes"].as_array().unwrap() {
                     let route = route.as_str().unwrap();
+                    let route_literal = format!("\"{route}\"");
                     assert!(
-                        MAIN.contains(&format!("\"{route}\"")),
+                        MAIN.contains(route_literal.as_str()),
                         "admin websocket route missing from daemon source: {route}"
                     );
                 }
