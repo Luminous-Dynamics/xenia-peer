@@ -92,7 +92,9 @@ pub(crate) async fn apply_consent_decision(
         if let Err(err) = committed {
             tracing::error!(
                 error = %err,
-                "operator action refused: its audit entry could not be durably committed"
+                action = ?decoded.action,
+                local_revoke_fence = revoked.load(Ordering::SeqCst),
+                "operator action audit could not be durably committed; session is stopping"
             );
             return ConsentFollowup::Stop;
         }
