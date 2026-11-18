@@ -311,3 +311,14 @@ Two independent obligations are scored:
 The oracle distinguishes a valid authorization whose harness drops an approved branch from an authorization denial. The former is a completeness failure, not a successful refusal. Likewise, it expects a Reject to suppress alternate-route effects; any observed protected effect is a refusal-safety failure. Unknown route inventory and unknown post-restart authority remain HOLD/INDETERMINATE.
 
 These 16 cases are synthetic inputs and a separately stored reference oracle. The Rust test checks pair identity, one-to-one input/oracle IDs, and selected outcome invariants. It does not execute the daemon/harness, adjudicate the oracle independently, or claim that the current Xenia runtime exhibits any of the modeled failures.
+
+
+### Extension oracle semantics
+
+The extension oracle records the **correct expected behavior** for each input. It does not encode a deliberately faulty candidate as the expected result. For example:
+- the restored parallel-branch case expects both approved operations to complete; if only one completes, the measured candidate fails bounded authorization completeness;
+- the rejected-workflow case expects zero protected effects; if the background/alternate route changes clipboard state, the candidate fails refusal safety;
+- an unknown alternate route is HOLD/INDETERMINATE, not a complete-mediation pass;
+- a pending approval restored without current authority/consent evidence is HOLD until revalidated.
+
+The input and oracle are separate artifacts, and the Rust structural test checks their one-to-one identifiers and matched-pair identity. It is a schema/pairing check—not an execution oracle, independent adjudication, or evidence of runtime behavior.
