@@ -2,19 +2,17 @@ name: M1 Effect Commit Model
 
 on:
   pull_request:
+    branches:
+      - "feat/m1-delegation-action-crosswalk-v0.1"
     paths:
       - "crates/xenia-peer-core/src/m1_effect.rs"
       - "crates/xenia-peer-core/src/lib.rs"
-      - "crates/xenia-peer-core/src/m1_session.rs"
-      - ".github/workflows/m1-effect-commit-model.yml"
   push:
     branches:
       - "research/m1-effect-commit-model-v0.1"
     paths:
       - "crates/xenia-peer-core/src/m1_effect.rs"
       - "crates/xenia-peer-core/src/lib.rs"
-      - "crates/xenia-peer-core/src/m1_session.rs"
-      - ".github/workflows/m1-effect-commit-model.yml"
 
 permissions:
   contents: read
