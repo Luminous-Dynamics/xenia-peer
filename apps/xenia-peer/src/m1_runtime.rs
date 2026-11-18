@@ -1110,6 +1110,13 @@ impl M1RuntimeSession {
         self.preflight_permission(M1Permission::SendFileToViewer)
     }
 
+    /// Check file-receive authority before allocating local staging state.
+    /// The final `allow_file_receive_flow` check still runs before sending
+    /// Accept, and again before each chunk append and final publication.
+    pub(crate) fn preflight_file_receive_flow(&self) -> Result<(), M1RuntimeError> {
+        self.preflight_permission(M1Permission::ReceiveFileFromViewer)
+    }
+
     /// Check clipboard-disclosure authority before reading the host clipboard.
     pub(crate) fn preflight_host_clipboard_read_flow(&self) -> Result<(), M1RuntimeError> {
         self.preflight_permission(M1Permission::ReadHostClipboard)
@@ -1981,9 +1988,30 @@ mod tests {
         assert!(runtime.preflight_telemetry_flow().is_err());
         assert!(runtime.preflight_audio_flow().is_err());
         assert!(runtime.preflight_file_send_flow().is_err());
+        assert!(runtime.preflight_file_receive_flow().is_err());
         assert!(runtime.preflight_host_clipboard_read_flow().is_err());
         assert!(runtime.preflight_input_flow().is_err());
 
+        assert_eq!(runtime.ledger_len(), entries_before);
+        assert_eq!(runtime.state(), M1SessionState::Active);
+    }
+
+    #[test]
+    fn file_receive_preflight_is_exact_lane_and_does_not_record_admission() {
+        let (mut runtime, _) = runtime(33);
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet {
+                receive_file_from_viewer: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        let entries_before = runtime.ledger_len();
+        assert!(runtime.preflight_file_receive_flow().is_ok());
+        assert!(runtime.preflight_file_send_flow().is_err());
+        assert!(runtime.preflight_input_flow().is_err());
+        assert!(runtime.preflight_host_clipboard_read_flow().is_err());
         assert_eq!(runtime.ledger_len(), entries_before);
         assert_eq!(runtime.state(), M1SessionState::Active);
     }
