@@ -10,7 +10,7 @@ use serde_json::Value;
 use xenia_peer_core::{M1DataDirection, M1Permission};
 
 const CORPUS: &str =
-    include_str!("../../../docs/benchmarks/M1_AUTHORIZATION_ASSURANCE_CORPUS_V0_1.json");
+    include_str!("../../../docs/benchmarks/M1_AUTHORIZATION_ASSURANCE_CORPUS_V0_2.json");
 
 fn lane(value: &str) -> M1Permission {
     match value {
@@ -35,23 +35,28 @@ fn direction(value: &str) -> M1DataDirection {
 }
 
 #[test]
-fn benchmark_corpus_has_32_unique_cases_and_balanced_families() {
+fn benchmark_corpus_has_64_unique_cases_and_balanced_families() {
     let root: Value = serde_json::from_str(CORPUS).expect("benchmark corpus must be valid JSON");
     assert_eq!(
         root["schema_id"].as_str(),
         Some("org.luminousdynamics.xenia.m1-authorization-assurance-corpus")
     );
-    assert_eq!(root["schema_version"].as_str(), Some("0.1.0"));
+    assert_eq!(root["schema_version"].as_str(), Some("0.2.0"));
     assert_eq!(
         root["status"].as_str(),
         Some("preregistration_seed_not_results")
     );
-    assert_eq!(root["oracle_separate_from_candidate"].as_bool(), Some(true));
+    assert_eq!(root["oracle_separate_from_candidate"].as_bool(), Some(false));
+    assert_eq!(
+        root["oracle_status"].as_str(),
+        Some("not_yet_implemented_independent_owner_oracle_required")
+    );
+    assert_eq!(root["scenario_count"].as_u64(), Some(64));
 
     let scenarios = root["scenarios"]
         .as_array()
         .expect("scenarios must be an array");
-    assert_eq!(scenarios.len(), 32);
+    assert_eq!(scenarios.len(), 64);
 
     let mut ids = BTreeSet::new();
     let mut family_counts = BTreeMap::<String, usize>::new();
@@ -108,18 +113,108 @@ fn benchmark_corpus_has_32_unique_cases_and_balanced_families() {
                 "missing {field} in {id}"
             );
         }
+
+        if matches!(
+            family,
+            "authorization_drift"
+                | "bounded_authorization_completeness"
+                | "harness_and_workflow_refusal"
+                | "restoration_and_replay"
+        ) {
+            assert!(
+                scenario["execution_layer"].as_str().is_some(),
+                "new assurance case must identify execution layer: {id}"
+            );
+        }
+        if family == "authorization_drift" {
+            assert!(
+                matches!(
+                    scenario["drift_dimension"].as_str(),
+                    Some("data" | "tool" | "scope" | "time")
+                ),
+                "invalid ADB drift dimension in {id}"
+            );
+        }
     }
 
-    assert_eq!(ids.len(), 32);
+    assert_eq!(ids.len(), 64);
     assert_eq!(
         family_counts,
         BTreeMap::from([
+            ("authorization_drift".to_owned(), 8),
+            ("bounded_authorization_completeness".to_owned(), 8),
             ("effect_and_outcome".to_owned(), 8),
             ("freshness_and_propagation".to_owned(), 8),
+            ("harness_and_workflow_refusal".to_owned(), 8),
             ("positive_control".to_owned(), 8),
+            ("restoration_and_replay".to_owned(), 8),
             ("scope_or_consent_negative".to_owned(), 8),
         ])
     );
+}
+
+#[test]
+fn authorization_drift_panel_covers_data_tool_scope_and_time() {
+    let root: Value = serde_json::from_str(CORPUS).expect("benchmark corpus must be valid JSON");
+    let mut dimensions = BTreeMap::<String, usize>::new();
+    for scenario in root["scenarios"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|scenario| scenario["family"] == "authorization_drift")
+    {
+        let dimension = scenario["drift_dimension"].as_str().unwrap();
+        *dimensions.entry(dimension.to_owned()).or_default() += 1;
+        assert_eq!(scenario["expected_disposition"].as_str(), Some("DENY"));
+        assert_eq!(scenario["expected_effect"].as_str(), Some("NOT_ATTEMPTED"));
+    }
+    assert_eq!(
+        dimensions,
+        BTreeMap::from([
+            ("data".to_owned(), 2),
+            ("scope".to_owned(), 2),
+            ("time".to_owned(), 2),
+            ("tool".to_owned(), 2),
+        ])
+    );
+}
+
+#[test]
+fn approved_work_completeness_has_eight_positive_effect_obligations() {
+    let root: Value = serde_json::from_str(CORPUS).expect("benchmark corpus must be valid JSON");
+    let scenarios = root["scenarios"].as_array().unwrap();
+    let cases: Vec<_> = scenarios
+        .iter()
+        .filter(|scenario| scenario["family"] == "bounded_authorization_completeness")
+        .collect();
+    assert_eq!(cases.len(), M1Permission::ALL.len());
+    for scenario in cases {
+        let id = scenario["id"].as_str().unwrap();
+        assert_eq!(scenario["expected_disposition"].as_str(), Some("PERMIT"), "{id}");
+        assert_eq!(scenario["task_result"].as_str(), Some("complete"), "{id}");
+        assert_eq!(
+            scenario["approval_horizon"].as_str(),
+            Some("valid_through_effect_boundary"),
+            "{id}"
+        );
+        assert_ne!(scenario["expected_effect"].as_str(), Some("NOT_ATTEMPTED"), "{id}");
+    }
+}
+
+#[test]
+fn workflow_refusal_cases_do_not_allow_protected_effects() {
+    let root: Value = serde_json::from_str(CORPUS).expect("benchmark corpus must be valid JSON");
+    let scenarios = root["scenarios"].as_array().unwrap();
+    let cases: Vec<_> = scenarios
+        .iter()
+        .filter(|scenario| scenario["family"] == "harness_and_workflow_refusal")
+        .collect();
+    assert_eq!(cases.len(), 8);
+    for scenario in cases {
+        let id = scenario["id"].as_str().unwrap();
+        assert_eq!(scenario["expected_disposition"].as_str(), Some("DENY"), "{id}");
+        assert_eq!(scenario["expected_effect"].as_str(), Some("NOT_ATTEMPTED"), "{id}");
+    }
 }
 
 #[test]
