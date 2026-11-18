@@ -504,10 +504,20 @@ impl M1EffectGate {
         if let Some(sequence) = self.revocation_sequence {
             return Ok(sequence);
         }
-        // Close admission first. Sequence exhaustion must not leave the
-        // gate open merely because the audit/receipt counter cannot advance.
+        // Fence first, even if the bookkeeping sequence is exhausted.
         self.revoked = true;
-        let sequence = self.take_sequence()?;
+        let sequence = match self.take_sequence() {
+            Ok(sequence) => sequence,
+            Err(error) => {
+                for record in self.operations.values_mut() {
+                    if record.disposition == M1EffectDisposition::Prepared {
+                        record.disposition = M1EffectDisposition::Rejected;
+                        record.resolution_sequence = None;
+                    }
+                }
+                return Err(error);
+            }
+        };
         self.revocation_sequence = Some(sequence);
         for record in self.operations.values_mut() {
             if record.disposition == M1EffectDisposition::Prepared {
@@ -591,6 +601,12 @@ impl M1EffectGate {
     }
 
     fn validate_intent(&self, intent: &M1EffectIntentV1) -> Result<(), M1EffectError> {
+        if intent.operation_id.iter().all(|byte| *byte == 0) {
+            return Err(M1EffectError::MissingCommitment("operation_id"));
+        }
+        if intent.session_id.iter().all(|byte| *byte == 0) {
+            return Err(M1EffectError::MissingCommitment("session_id"));
+        }
         if intent.session_id != self.session_id {
             return Err(M1EffectError::SessionMismatch);
         }
@@ -971,6 +987,42 @@ mod tests {
             }
             other => panic!("unexpected concurrent result: {other:?}"),
         }
+    }
+
+    #[test]
+    fn revoke_fences_even_when_sequence_bookkeeping_is_exhausted() {
+        let mut gate = gate();
+        let operation = intent(15, M1Permission::InjectInput);
+        let prepared = prepare_new(&mut gate, &operation);
+        gate.next_sequence = u64::MAX;
+
+        assert_eq!(gate.revoke(), Err(M1EffectError::SequenceExhausted));
+        assert!(gate.is_revoked());
+        assert_eq!(
+            gate.linearize_commit(prepared),
+            Err(M1EffectError::Revoked)
+        );
+        let snapshot = gate.operation(operation.operation_id).unwrap();
+        assert_eq!(snapshot.disposition, M1EffectDisposition::Rejected);
+        assert_eq!(snapshot.resolution_sequence, None);
+    }
+
+    #[test]
+    fn zero_operation_and_session_ids_are_rejected() {
+        let mut gate = gate();
+        let mut empty_operation = intent(16, M1Permission::InjectInput);
+        empty_operation.operation_id = [0; 16];
+        assert_eq!(
+            gate.prepare(&empty_operation),
+            Err(M1EffectError::MissingCommitment("operation_id"))
+        );
+
+        let mut empty_session = intent(17, M1Permission::InjectInput);
+        empty_session.session_id = [0; 16];
+        assert_eq!(
+            gate.prepare(&empty_session),
+            Err(M1EffectError::MissingCommitment("session_id"))
+        );
     }
 
     #[test]
