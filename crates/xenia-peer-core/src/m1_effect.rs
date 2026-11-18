@@ -27,9 +27,6 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
-use std::sync::{Arc, Barrier, Mutex};
-use std::thread;
-
 use blake3::Hasher;
 
 use crate::{M1DataDirection, M1Permission, M1PermissionSet};
@@ -384,16 +381,16 @@ impl M1EffectGate {
             if existing.fingerprint != fingerprint {
                 return Err(M1EffectError::IdempotencyConflict);
             }
-            return Ok(M1EffectPrepareResult::Existing(self.snapshot(
+            return Ok(M1EffectPrepareResult::Existing(snapshot_record(
                 intent.operation_id,
                 existing,
             )));
         }
 
-        self.validate_intent(intent)?;
         if self.revoked {
             return Err(M1EffectError::Revoked);
         }
+        self.validate_intent(intent)?;
         if !self.granted.contains(intent.permission) {
             return Err(M1EffectError::PermissionDenied(intent.permission));
         }
@@ -471,25 +468,31 @@ impl M1EffectGate {
         completion: M1EffectCompletion,
     ) -> Result<M1EffectSnapshot, M1EffectError> {
         self.validate_receipt(&receipt)?;
+        {
+            let record = self
+                .operations
+                .get(&receipt.operation_id)
+                .ok_or(M1EffectError::StalePreparedHandle)?;
+            if record.disposition != M1EffectDisposition::CommitLinearized
+                || record.fingerprint != receipt.fingerprint
+                || record.admission_sequence != receipt.admission_sequence
+                || record.linearization_sequence != Some(receipt.linearization_sequence)
+            {
+                return Err(M1EffectError::AlreadyConsumed);
+            }
+        }
         let resolution_sequence = self.take_sequence()?;
         let record = self
             .operations
             .get_mut(&receipt.operation_id)
-            .ok_or(M1EffectError::StalePreparedHandle)?;
-        if record.disposition != M1EffectDisposition::CommitLinearized
-            || record.fingerprint != receipt.fingerprint
-            || record.admission_sequence != receipt.admission_sequence
-            || record.linearization_sequence != Some(receipt.linearization_sequence)
-        {
-            return Err(M1EffectError::AlreadyConsumed);
-        }
+            .expect("record was checked above");
         record.disposition = match completion {
             M1EffectCompletion::Committed => M1EffectDisposition::Committed,
             M1EffectCompletion::ConfirmedNoEffect => M1EffectDisposition::ConfirmedNoEffect,
             M1EffectCompletion::Unknown => M1EffectDisposition::Unknown,
         };
         record.resolution_sequence = Some(resolution_sequence);
-        Ok(self.snapshot(receipt.operation_id, record))
+        Ok(snapshot_record(receipt.operation_id, record))
     }
 
     /// Revoke this session's gate and invalidate every operation not yet
@@ -501,8 +504,10 @@ impl M1EffectGate {
         if let Some(sequence) = self.revocation_sequence {
             return Ok(sequence);
         }
-        let sequence = self.take_sequence()?;
+        // Close admission first. Sequence exhaustion must not leave the
+        // gate open merely because the audit/receipt counter cannot advance.
         self.revoked = true;
+        let sequence = self.take_sequence()?;
         self.revocation_sequence = Some(sequence);
         for record in self.operations.values_mut() {
             if record.disposition == M1EffectDisposition::Prepared {
@@ -539,18 +544,20 @@ impl M1EffectGate {
         fingerprint: [u8; 32],
         outcome: M1ReconciledOutcome,
     ) -> Result<M1EffectSnapshot, M1EffectError> {
-        let record = self
-            .operations
-            .get(&operation_id)
-            .ok_or(M1EffectError::StalePreparedHandle)?;
-        if record.fingerprint != fingerprint {
-            return Err(M1EffectError::IdempotencyConflict);
-        }
-        if record.disposition != M1EffectDisposition::Unknown {
-            return Err(M1EffectError::InvalidTransition {
-                actual: record.disposition,
-                required: "Unknown",
-            });
+        {
+            let record = self
+                .operations
+                .get(&operation_id)
+                .ok_or(M1EffectError::StalePreparedHandle)?;
+            if record.fingerprint != fingerprint {
+                return Err(M1EffectError::IdempotencyConflict);
+            }
+            if record.disposition != M1EffectDisposition::Unknown {
+                return Err(M1EffectError::InvalidTransition {
+                    actual: record.disposition,
+                    required: "Unknown",
+                });
+            }
         }
 
         let resolution_sequence = self.take_sequence()?;
@@ -563,14 +570,14 @@ impl M1EffectGate {
             M1ReconciledOutcome::ConfirmedNoEffect => M1EffectDisposition::ConfirmedNoEffect,
         };
         record.resolution_sequence = Some(resolution_sequence);
-        Ok(self.snapshot(operation_id, record))
+        Ok(snapshot_record(operation_id, record))
     }
 
     /// Return the immutable current view for one operation.
     pub fn operation(&self, operation_id: [u8; 16]) -> Option<M1EffectSnapshot> {
         self.operations
             .get(&operation_id)
-            .map(|record| self.snapshot(operation_id, record))
+            .map(|record| snapshot_record(operation_id, record))
     }
 
     /// Local session revocation sequence, if the gate has been revoked.
@@ -639,19 +646,19 @@ impl M1EffectGate {
         Ok(sequence)
     }
 
-    fn snapshot(
-        &self,
-        operation_id: [u8; 16],
-        record: &OperationRecord,
-    ) -> M1EffectSnapshot {
-        M1EffectSnapshot {
-            operation_id,
-            fingerprint: record.fingerprint,
-            admission_sequence: record.admission_sequence,
-            linearization_sequence: record.linearization_sequence,
-            resolution_sequence: record.resolution_sequence,
-            disposition: record.disposition,
-        }
+}
+
+fn snapshot_record(
+    operation_id: [u8; 16],
+    record: &OperationRecord,
+) -> M1EffectSnapshot {
+    M1EffectSnapshot {
+        operation_id,
+        fingerprint: record.fingerprint,
+        admission_sequence: record.admission_sequence,
+        linearization_sequence: record.linearization_sequence,
+        resolution_sequence: record.resolution_sequence,
+        disposition: record.disposition,
     }
 }
 
@@ -665,6 +672,8 @@ fn direction_tag(direction: M1DataDirection) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier, Mutex};
+    use std::thread;
 
     fn digest(seed: u8) -> [u8; 32] {
         [seed; 32]
