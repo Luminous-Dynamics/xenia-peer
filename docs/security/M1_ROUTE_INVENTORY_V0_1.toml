@@ -11,7 +11,7 @@ route_coverage_owner = "Xenia issue #512; Mycelix route-mediation oracle #6213."
 [source_files]
 daemon = "apps/xenia-peer/src/main.rs@12fe1336f6a5b2813f772aa8e8c1cec70b33da08"
 file_transfer = "apps/xenia-peer/src/file_transfer.rs@0b9db18f1eb8cf9842945b075c848a3e5b0b718e"
-runtime = "apps/xenia-peer/src/m1_runtime.rs@3d2ae7e4567eafcd46a5960942f77aaf7b93846a"
+runtime = "apps/xenia-peer/src/m1_runtime.rs@2d530a405cf2c207b18c85ec393ebaaee38afb47"
 permission_model = "crates/xenia-peer-core/src/m1_session.rs@fa19a4826f2d078a47439e02217c4562f2aab007"
 
 [local_revocation]
