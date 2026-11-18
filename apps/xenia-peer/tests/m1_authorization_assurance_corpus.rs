@@ -337,7 +337,7 @@ fn drift_and_dual_obligation_extension_has_matched_pairs_and_separate_oracle() {
         let id = result["id"].as_str().expect("oracle ID required");
         assert!(oracle_ids.insert(id), "duplicate drift oracle ID: {id}");
         assert!(matches!(
-            result["authorization_disposition"].as_str(),
+            result["expected_authorization_disposition"].as_str(),
             Some("PERMIT" | "DENY" | "HOLD")
         ));
         assert!(result["expected_new_effect_attempts"].as_u64().is_some());
@@ -403,24 +403,38 @@ fn drift_and_dual_obligation_extension_has_matched_pairs_and_separate_oracle() {
         .iter()
         .find(|row| row["id"] == "M1-DO-PARALLEL-02")
         .unwrap();
-    assert_eq!(incomplete["authorization_disposition"].as_str(), Some("PERMIT"));
-    assert_eq!(incomplete["task_outcome"].as_str(), Some("INCOMPLETE"));
-    assert_eq!(incomplete["assurance_result"].as_str(), Some("FAIL_COMPLETENESS"));
-    assert_eq!(incomplete["approved_operation_count"].as_u64(), Some(2));
-    assert_eq!(incomplete["observed_operation_count"].as_u64(), Some(1));
+    assert_eq!(incomplete["expected_authorization_disposition"].as_str(), Some("PERMIT"));
+    assert_eq!(incomplete["expected_task_outcome"].as_str(), Some("COMPLETE"));
+    assert_eq!(incomplete["expected_assurance_result"].as_str(), Some("PASS"));
+    assert_eq!(incomplete["expected_approved_operation_count"].as_u64(), Some(2));
+    assert_eq!(incomplete["expected_completed_operation_count"].as_u64(), Some(2));
+    assert!(
+        incomplete["failure_conditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|condition| condition.as_str().unwrap().contains("FAIL_COMPLETENESS"))
+    );
 
     let bypass = results
         .iter()
         .find(|row| row["id"] == "M1-DO-WORKFLOW-02")
         .unwrap();
-    assert_eq!(bypass["authorization_disposition"].as_str(), Some("DENY"));
-    assert_eq!(bypass["unauthorized_effect_count"].as_u64(), Some(0));
-    assert_eq!(bypass["assurance_result"].as_str(), Some("FAIL_REFUSAL_SAFETY"));
+    assert_eq!(bypass["expected_authorization_disposition"].as_str(), Some("DENY"));
+    assert_eq!(bypass["expected_unauthorized_effect_count"].as_u64(), Some(0));
+    assert_eq!(bypass["expected_assurance_result"].as_str(), Some("PASS"));
+    assert!(
+        bypass["failure_conditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|condition| condition.as_str().unwrap().contains("FAIL_REFUSAL_SAFETY"))
+    );
 
     let unknown_route = results
         .iter()
         .find(|row| row["id"] == "M1-AD-TOOL-02")
         .unwrap();
-    assert_eq!(unknown_route["authorization_disposition"].as_str(), Some("HOLD"));
-    assert_eq!(unknown_route["task_outcome"].as_str(), Some("INDETERMINATE"));
+    assert_eq!(unknown_route["expected_authorization_disposition"].as_str(), Some("HOLD"));
+    assert_eq!(unknown_route["expected_task_outcome"].as_str(), Some("INDETERMINATE"));
 }
