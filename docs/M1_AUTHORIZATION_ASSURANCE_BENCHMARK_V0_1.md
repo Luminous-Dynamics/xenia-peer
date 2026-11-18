@@ -3,7 +3,7 @@
 **Status:** preregistration proposal; no comparative measurements have been produced.
 **Owner:** Xenia #505, composed with Mycelix LISE #6136, #6213, #6236, #6140, #6170, #6189 and #6193.
 **Candidate implementation:** Xenia M1 lanes in PR #509. Current route manifest is explicitly incomplete; see `M1_ROUTE_MEDIATION_INVENTORY_V0_1.json`.  
-**Seed corpus:** `docs/benchmarks/M1_AUTHORIZATION_ASSURANCE_CORPUS_V0_1.json` (32 scenario seeds).  
+**Seed corpus:** `docs/benchmarks/M1_AUTHORIZATION_ASSURANCE_CORPUS_V0_2.json` (64 scenario seeds across eight balanced families; v0.1 is retained as the original 32-case seed).  
 **Structural test:** `apps/xenia-peer/tests/m1_authorization_assurance_corpus.rs` (fixture integrity only; not the independent outcome oracle).
 
 ## 1. Research objective
@@ -129,7 +129,7 @@ Bind each event to operation ID, monotonic session sequence, lane/action, direct
 
 ### Adversarial scenario panel
 
-The checked-in v0.1 corpus is a **32-case structural seed**, with eight cases per family. It is not yet the full known-answer panel. Expand to at least 64 independently adjudicated deterministic known-answer scenarios before claiming a frozen benchmark run, then expand to at least 128 development cases plus a sealed holdout. Include:
+The checked-in v0.2 corpus is a **64-case structural seed**, with eight cases per family. It is not yet an independently adjudicated known-answer panel. Before a formal benchmark run, freeze a separate owner-independent oracle for all supported cases, then expand to at least 128 development cases plus a sealed holdout. Include:
 - each lane granted alone; every unrelated lane remains denied;
 - screen permission cannot read clipboard, inject input, or send/receive files;
 - clipboard read/write and file send/receive are directionally independent;
@@ -151,7 +151,7 @@ The checked-in v0.1 corpus is a **32-case structural seed**, with eight cases pe
 
 Each case must freeze the exact action, lane, direction, resource, purpose, audience, expected consent, currentness evidence, parent chain, session epoch, effect boundary, fault schedule and expected effect state. Keep the oracle independent from the candidate route manifest and enforcement code.
 
-The 32-case v0.1 seed covers all eight lanes and has four equal-size families: positive controls; scope/consent negatives; freshness/propagation controls; and effect/outcome controls. Its Rust structural test checks unique IDs, family balance, required fields, valid dispositions, action/direction correspondence and one positive control per lane. This proves fixture consistency only; it does not implement or independently validate the scenario outcome oracle.
+The 64-case v0.2 seed covers all eight lanes and has eight equal-size families: positive controls; scope/consent negatives; freshness/propagation; effect/outcome; authorization drift (data/tool/scope/time); bounded approval completeness; harness/workflow refusal; and restoration/replay. Its Rust structural test checks unique IDs, family balance, required fields, valid dispositions, action/direction correspondence, exact ADB dimension balance, eight bounded-completeness positives, eight workflow-refusal negatives, and one basic positive control per lane. This proves fixture consistency only; it does not implement or independently validate the scenario outcome oracle.
 
 ### Metrics and non-compensatory gates
 
@@ -219,7 +219,7 @@ Its experiments report 7 unfinished approvals among 300 paired approvals despite
 
 M1 translation: paired tests must hold the same session, operation and host state fixed while changing only the authorization decision. An Approve must preserve the exact eligible lane operation through transport scheduling and effect dispatch. A Revoke/Deny must suppress the exact same operation. Do not mark a blanket shutdown as a successful authorization result; valid unrelated lanes and independent grants must remain usable.
 
-### Required M1 benchmark additions (future corpus, not in the 32-case seed)
+### Required M1 benchmark additions (seeded in v0.2; independent adjudication still required)
 
 Add paired, independently adjudicated cases for:
 - each lane's minimum compliant route versus an over-collection, overbroad-tool, wrong-resource or post-expiry shortcut;
@@ -238,7 +238,7 @@ For Xenia specifically, use the model/harness/workflow distinction to review:
 - daemon task scheduling, concurrent file-transfer tasks, reconnect/rekey and cancellation;
 - TCP/WebSocket/QUIC dispatch, operator/control routes and the final OS/filesystem/input effect owners.
 
-The current 32-case corpus remains a structural seed. These cases are a planned extension and do not count as implemented or adjudicated until they have frozen inputs, a separate oracle and executable positive/negative controls.
+The current 64-case corpus remains a structural seed. The ADB and dual-obligation scenarios now have machine-readable expected dispositions, but no independent owner oracle, executable host/receiver sandbox, or blinded adjudication has been completed. They do not count as validated known-answer results.
 
 ## 5. Interoperability and standards
 
