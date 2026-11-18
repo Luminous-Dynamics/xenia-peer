@@ -4,7 +4,7 @@
   "source_snapshot": {
     "repository": "Luminous-Dynamics/xenia-peer",
     "branch": "feat/m1-delegation-action-crosswalk-v0.1",
-    "commit": "1e046214caeb36720edc2c8f8b40a506c81b096b",
+    "commit": "5aa3d4be8640f5eca99bdcf02afb16b168db5ee5",
     "observed_date": "2026-11-18",
     "paths": [
       "apps/xenia-peer/src/main.rs",
@@ -302,7 +302,7 @@
         "legacy_plaintext_when_operator_auth_disabled",
         "signed_session_and_scope_bound_operator_action_when_required"
       ],
-      "audit": "authenticated operator consent event is persisted before applying the decision; persistence failure refuses the decision",
+      "audit": "Approve/Deny decisions apply only after authenticated operator-audit persistence. For Revoke, the local M1 admission latch is raised immediately before audit I/O; persistence failure leaves the session closed and returns Stop, but does not establish a durable audit record.",
       "note": "Control-plane authority for initial consent and session revocation; not one of the eight viewer data lanes."
     },
     {
