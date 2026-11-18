@@ -48,7 +48,7 @@ These routes can establish, alter, revoke or audit the human/operator authorizat
 - Entry point: `ConsentServer::run`; shared semantics: `apply_consent_decision`.
 - Actions: initial Approve/Deny and subsequent Revoke.
 - When operator authentication is disabled, the legacy consent socket accepts the plaintext strings `Approve`, `Deny` and `Revoke`. When required, actions are authenticated/role-authorized and bound to the daemon's session ID and scope digest.
-- An authenticated operator audit entry is durably persisted before the decision takes effect; persistence failure refuses the decision.
+- Approve/Deny apply only after the authenticated operator audit entry is durably persisted. Revoke is the fail-closed exception: `apply_consent_decision` raises the shared M1 admission latch immediately after a valid decoded action, before audit I/O. If persistence fails, the session remains fenced and stops; the durable audit claim remains unresolved.
 - Main selects the plaintext consent server or sealed operator channel; they are not both started for the same session in this branch.
 
 ### Sealed operator channel
