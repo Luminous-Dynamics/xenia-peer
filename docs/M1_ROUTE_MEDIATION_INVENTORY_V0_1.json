@@ -1,0 +1,382 @@
+{
+  "schema_id": "org.luminousdynamics.xenia.m1-route-inventory",
+  "schema_version": "0.1.0",
+  "source_snapshot": {
+    "repository": "Luminous-Dynamics/xenia-peer",
+    "branch": "feat/m1-delegation-action-crosswalk-v0.1",
+    "commit": "1e046214caeb36720edc2c8f8b40a506c81b096b",
+    "observed_date": "2026-11-18",
+    "paths": [
+      "apps/xenia-peer/src/main.rs",
+      "apps/xenia-peer/src/file_transfer.rs",
+      "apps/xenia-peer/src/consent_server.rs",
+      "apps/xenia-peer/src/operator_http.rs",
+      "apps/xenia-peer/src/operator_sealed_channel.rs",
+      "apps/xenia-peer/src/m1_runtime.rs",
+      "crates/xenia-peer-core/src/m1_session.rs"
+    ]
+  },
+  "claim": {
+    "status": "source_inventoried_incomplete",
+    "complete_mediation": "not_claimed",
+    "global_revocation": "not_claimed",
+    "linearizable_effect_commit": "not_claimed",
+    "mycelix_ros005_runtime_consumption": "not_implemented",
+    "note": "This manifest records source-observed routes and gate symbols. It is not a proof that all effect-capable paths are enumerated or that local checks are atomic with OS/network effects."
+  },
+  "data_plane_routes": [
+    {
+      "route_id": "m1.screen.frame.disclosure.v1",
+      "lane": "StreamFrame",
+      "action_id": "xenia.screen.view",
+      "direction": "host_to_viewer",
+      "ingress": "apps/xenia-peer/src/main.rs::session_send_loop",
+      "preflight": {
+        "symbol": "M1RuntimeSession::preflight_frame_flow",
+        "before": "capture.capture"
+      },
+      "final_gate": {
+        "symbol": "M1RuntimeSession::allow_frame_flow",
+        "before": "send_half.send_envelope"
+      },
+      "effect_owner": "host screen capture and frame transport",
+      "effect_stages": [
+        "capture",
+        "encode",
+        "seal",
+        "local_lane_check",
+        "transport_send"
+      ],
+      "strongest_local_claim": "lane gate was checked before local transport send",
+      "not_proven": [
+        "viewer_received",
+        "viewer_rendered",
+        "viewer_observed"
+      ]
+    },
+    {
+      "route_id": "m1.telemetry.disclosure.v1",
+      "lane": "StreamTelemetry",
+      "action_id": "xenia.host.telemetry",
+      "direction": "host_to_viewer",
+      "ingress": "apps/xenia-peer/src/main.rs::session_send_loop",
+      "preflight": {
+        "symbol": "M1RuntimeSession::preflight_telemetry_flow",
+        "before": "telemetry.poll_samples"
+      },
+      "final_gate": {
+        "symbol": "M1RuntimeSession::allow_telemetry_flow",
+        "before": "send_half.send_envelope"
+      },
+      "effect_owner": "host telemetry poll and transport",
+      "effect_stages": [
+        "source_poll",
+        "filter",
+        "seal",
+        "local_lane_check",
+        "transport_send"
+      ],
+      "strongest_local_claim": "lane gate was checked before local transport send",
+      "not_proven": [
+        "viewer_received",
+        "viewer_displayed",
+        "remote_observation"
+      ]
+    },
+    {
+      "route_id": "m1.audio.disclosure.v1",
+      "lane": "StreamAudio",
+      "action_id": "xenia.audio.capture",
+      "direction": "host_to_viewer",
+      "ingress": "apps/xenia-peer/src/main.rs::session_send_loop",
+      "preflight": {
+        "symbol": "M1RuntimeSession::preflight_audio_flow",
+        "before": "audio.next_raw_audio"
+      },
+      "final_gate": {
+        "symbol": "M1RuntimeSession::allow_audio_flow",
+        "before": "send_half.send_envelope"
+      },
+      "effect_owner": "host audio source and transport",
+      "effect_stages": [
+        "source_read",
+        "encode",
+        "seal",
+        "local_lane_check",
+        "transport_send"
+      ],
+      "strongest_local_claim": "lane gate was checked before local transport send",
+      "not_proven": [
+        "viewer_received",
+        "viewer_played",
+        "human_heard"
+      ]
+    },
+    {
+      "route_id": "m1.clipboard.read.disclosure.v1",
+      "lane": "ReadHostClipboard",
+      "action_id": "xenia.clipboard.read",
+      "direction": "host_to_viewer",
+      "ingress": "apps/xenia-peer/src/main.rs::session_send_loop",
+      "preflight": {
+        "symbol": "M1RuntimeSession::preflight_host_clipboard_read_flow",
+        "before": "read_host_clipboard_text"
+      },
+      "final_gate": {
+        "symbol": "M1RuntimeSession::allow_host_clipboard_read_flow",
+        "before": "send_half.send_envelope"
+      },
+      "effect_owner": "host clipboard read and transport",
+      "effect_stages": [
+        "source_read",
+        "frame_build",
+        "seal",
+        "local_lane_check",
+        "transport_send"
+      ],
+      "strongest_local_claim": "clipboard-read gate was checked before local transport send",
+      "not_proven": [
+        "viewer_received",
+        "viewer_read",
+        "human_observed"
+      ]
+    },
+    {
+      "route_id": "m1.clipboard.write.apply.v1",
+      "lane": "WriteHostClipboard",
+      "action_id": "xenia.clipboard.write",
+      "direction": "viewer_to_host",
+      "ingress": "apps/xenia-peer/src/main.rs::inbound_clipboard_envelope",
+      "preflight": null,
+      "final_gate": {
+        "symbol": "M1RuntimeSession::allow_host_clipboard_write_flow",
+        "before": "apply_clipboard_content"
+      },
+      "effect_owner": "host operating-system clipboard",
+      "effect_stages": [
+        "envelope_open",
+        "mode_check",
+        "local_lane_check",
+        "os_clipboard_apply"
+      ],
+      "strongest_local_claim": "clipboard-write gate was checked before OS apply",
+      "not_proven": [
+        "another_process_read_clipboard",
+        "application_consumed_content"
+      ]
+    },
+    {
+      "route_id": "m1.input.inject.apply.v1",
+      "lane": "InjectInput",
+      "action_id": "xenia.input.inject",
+      "direction": "viewer_to_host",
+      "ingress": "apps/xenia-peer/src/main.rs::inbound_input_envelope",
+      "preflight": {
+        "symbol": "M1RuntimeSession::preflight_input_flow",
+        "before": "bincode::deserialize<InputEvent>"
+      },
+      "final_gate": {
+        "symbol": "M1RuntimeSession::allow_input_flow",
+        "before": "SessionInputInjector::process_events"
+      },
+      "effect_owner": "platform input injector",
+      "effect_stages": [
+        "envelope_open",
+        "preflight",
+        "payload_decode",
+        "local_lane_check",
+        "injector_call"
+      ],
+      "strongest_local_claim": "input injector accepted the event or returned an error",
+      "not_proven": [
+        "target_application_processed_input",
+        "user_visible_effect"
+      ]
+    },
+    {
+      "route_id": "m1.file.send.v1",
+      "lane": "SendFileToViewer",
+      "action_id": "xenia.file.send",
+      "direction": "host_to_viewer",
+      "ingress": [
+        "apps/xenia-peer/src/main.rs::initial_cli_file_offer",
+        "apps/xenia-peer/src/file_transfer.rs::handle_envelope.Accept"
+      ],
+      "preflight": [
+        {
+          "symbol": "M1RuntimeSession::preflight_file_send_flow",
+          "before": "TransferSource::open_file_limited"
+        },
+        {
+          "symbol": "M1RuntimeSession::preflight_file_send_flow",
+          "before": "TransferSource::next_chunk"
+        }
+      ],
+      "final_gate": [
+        {
+          "symbol": "M1RuntimeSession::allow_file_send_flow",
+          "before": "initial_offer_send"
+        },
+        {
+          "symbol": "M1RuntimeSession::allow_file_send_flow",
+          "before": "sealed_chunk_send"
+        },
+        {
+          "symbol": "M1RuntimeSession::allow_file_send_flow",
+          "before": "completion_send"
+        }
+      ],
+      "effect_owner": "host file source and outbound transfer transport",
+      "effect_stages": [
+        "source_open_and_hash",
+        "offer",
+        "per_chunk_read",
+        "per_chunk_seal",
+        "per_chunk_send",
+        "completion_send",
+        "receiver_verified_message"
+      ],
+      "strongest_local_claim": "sender performed lane checks before offer/chunk/completion sends",
+      "not_proven": [
+        "receiver_persisted_file",
+        "independent_file_observation"
+      ]
+    },
+    {
+      "route_id": "m1.file.receive.v1",
+      "lane": "ReceiveFileFromViewer",
+      "action_id": "xenia.file.receive",
+      "direction": "viewer_to_host",
+      "ingress": "apps/xenia-peer/src/file_transfer.rs::handle_envelope",
+      "preflight": null,
+      "final_gate": [
+        {
+          "symbol": "M1RuntimeSession::allow_file_receive_flow",
+          "before": "offer_reservation_and_staging"
+        },
+        {
+          "symbol": "M1RuntimeSession::allow_file_receive_flow",
+          "before": "each_stager_write_chunk"
+        },
+        {
+          "symbol": "M1RuntimeSession::allow_file_receive_flow",
+          "before": "stager_finish_and_publish"
+        }
+      ],
+      "effect_owner": "host filesystem staging and final publication",
+      "effect_stages": [
+        "offer_validate",
+        "local_lane_check",
+        "reserve_and_stage",
+        "per_chunk_lane_check_and_write",
+        "complete_lane_check",
+        "verify_and_publish",
+        "verified_reply"
+      ],
+      "strongest_local_claim": "receive gate was checked before accepting, writing chunks and final publication",
+      "not_proven": [
+        "independent_filesystem_observation",
+        "external_storage_durability_beyond_stager_contract"
+      ]
+    }
+  ],
+  "control_plane_surfaces": [
+    {
+      "surface_id": "operator.consent_socket.v1",
+      "implementation": "apps/xenia-peer/src/consent_server.rs::ConsentServer::run",
+      "decision_handler": "apps/xenia-peer/src/consent_server.rs::apply_consent_decision",
+      "actions": [
+        "Approve",
+        "Deny",
+        "Revoke"
+      ],
+      "auth_modes": [
+        "legacy_plaintext_when_operator_auth_disabled",
+        "signed_session_and_scope_bound_operator_action_when_required"
+      ],
+      "audit": "authenticated operator consent event is persisted before applying the decision; persistence failure refuses the decision",
+      "note": "Control-plane authority for initial consent and session revocation; not one of the eight viewer data lanes."
+    },
+    {
+      "surface_id": "operator.sealed_channel.v1",
+      "implementation": "apps/xenia-peer/src/operator_sealed_channel.rs::serve_sealed_operator_channel",
+      "protections": [
+        "authenticated_operator_handshake",
+        "role_authorization",
+        "operator_revocation_check",
+        "optional_rekey"
+      ],
+      "actions": [
+        "Approve",
+        "Deny",
+        "Revoke",
+        "rekey_ack"
+      ],
+      "note": "Control-plane channel and key lifecycle; not a Mycelix semantic delegation proof."
+    },
+    {
+      "surface_id": "admin.http.v1",
+      "implementation": "apps/xenia-peer/src/operator_http.rs::router",
+      "routes": [
+        "/auth/challenge",
+        "/auth/daemon-identity",
+        "/auth/verify",
+        "/v1/audit/checkpoint",
+        "/v1/audit/ledger",
+        "/operator/revoke",
+        "/operator/replace-key",
+        "/health"
+      ],
+      "note": "Route-level authentication, role, audit and mutation semantics must be qualified per handler. CORS is not authentication."
+    },
+    {
+      "surface_id": "admin.websocket.v1",
+      "implementation": "apps/xenia-peer/src/main.rs::admin_router",
+      "routes": [
+        "/ws"
+      ],
+      "note": "Admin/governance console event WebSocket; keep separate from lane authorization and independently inspect its reachable effects."
+    },
+    {
+      "surface_id": "data_session_transport.v1",
+      "implementation": "apps/xenia-peer/src/main.rs::select_transport",
+      "transports": [
+        "tcp",
+        "websocket",
+        "quic",
+        "auto"
+      ],
+      "note": "Session transport ingress/egress; the same M1 effect gates must be enforced regardless of selected transport."
+    },
+    {
+      "surface_id": "file_transfer_dispatch.v1",
+      "implementation": "apps/xenia-peer/src/file_transfer.rs::handle_envelope",
+      "message_types": [
+        "Offer",
+        "Accept",
+        "Reject",
+        "Chunk",
+        "Complete",
+        "Verified"
+      ],
+      "note": "In/out file-transfer state machine with per-operation lane checks; control messages are not themselves data-lane grants."
+    }
+  ],
+  "known_unknowns": [
+    "All OS/platform API entry points and feature-gated implementations have not yet been independently enumerated.",
+    "All direct host APIs, alternate executables, test/example binaries and background workers have not yet been inventoried.",
+    "Reconnect/rekey behavior is not yet bound to Mycelix authority epochs.",
+    "No independent proof of route-universe completeness exists.",
+    "Local final lane checks are not an atomic transaction with the subsequent OS or network effect."
+  ],
+  "owners": {
+    "xenia_runtime": "Xenia #508/#509/#518",
+    "xenia_effect_commit": "Xenia #504",
+    "xenia_operation_evidence": "Xenia #510",
+    "xenia_ros005_adapter": "Xenia #517",
+    "mycelix_complete_mediation": "Mycelix #6213",
+    "mycelix_revocation_propagation": "Mycelix #6236",
+    "mycelix_effectuation": "Mycelix #6136",
+    "mycelix_evidence_provenance": "Mycelix #6140"
+  }
+}
