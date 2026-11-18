@@ -52,7 +52,8 @@ Committed         v             Unknown
 - If `revoke()` obtains the serialized gate before `linearize_commit()`, the operation is rejected and no commit receipt is issued.
 - If `linearize_commit()` obtains the same serialized gate first, it issues a sequence-bound receipt. A subsequent revoke does not rewrite or erase that already-linearized operation.
 - A later owner result may resolve it as `Committed`, `ConfirmedNoEffect` or `Unknown`.
-- On restart, a commit-linearized operation without a terminal result becomes `Unknown`. It is never reissued automatically.
+- On restart, a commit-linearized operation without a terminal result becomes `Unknown`; a merely Prepared operation becomes `Rejected`.
+- Recovery fences the entire old gate against new operation admission. Old records remain queryable and Unknown records remain reconcilable, but the pre-crash grant snapshot cannot authorize new work. The caller must create a new gate only after verifying current consent, authority, session/rekey state and policy.
 - An Unknown operation ID/fingerprint remains occupied. Repeating the same request returns the existing state; changing the fingerprint is an idempotency conflict. Only owner-qualified reconciliation may close Unknown.
 - Revocation is idempotent. It invalidates operations that are only Prepared but preserves already-linearized history.
 - Sequence exhaustion still closes admission first. It may leave the revocation sequence unavailable, but it cannot keep the gate open.
@@ -73,6 +74,7 @@ An outbound send's local return does not prove remote receipt, rendering or play
 
 The module includes deterministic checks for:
 - revoke-before-commit and commit-before-revoke order;
+- crash recovery fencing the old gate against new operations while preserving read-only operation lookup and owner-qualified reconciliation;
 - a concurrent Mutex history with one serializable winner;
 - duplicate exact ID/fingerprint and changed-fingerprint conflict; duplicate
   preparation returns the same handle only while the original is still
@@ -96,7 +98,7 @@ These tests validate this reference model's state-transition contract. They are 
 4. Persist admission/commit receipts before allowing non-replay-safe external dispatch, or prove an equivalent atomic coupling.
 5. Record Attempted, Committed, ConfirmedNoEffect and Unknown distinctly, with a lane-specific evidence ceiling.
 6. Reconcile Unknown by operation ID and exact fingerprint before any retry.
-7. Exercise every lane through network partitions, concurrent revoke, cancellation, process restart, reconnect/rekey, and alternate-route negative controls.
+7. Exercise every lane through network partitions, concurrent revoke, cancellation, process restart, reconnect/rekey, and alternate-route negative controls. After restart, create a new gate only after current consent/authority/session evidence is re-established; do not clear the recovery fence on the old gate.
 8. Compose verified ROS-005 delegation/currentness and recipient consent at that same boundary; do not let this local model stand in for Mycelix authority.
 
 ## Claim ceiling
