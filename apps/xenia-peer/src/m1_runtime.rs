@@ -2005,8 +2005,8 @@ mod tests {
         assert!(runtime.preflight_input_flow().is_err());
     }
 
-    #[test]
-    fn operator_revoke_latch_closes_every_lane_before_durable_revoke_transition() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn operator_revoke_latch_closes_every_lane_before_durable_revoke_transition() {
         let (mut runtime, _) = runtime(33);
         let revoked = Arc::new(AtomicBool::new(false));
         runtime.bind_operator_revocation_latch(Arc::clone(&revoked));
@@ -2016,11 +2016,40 @@ mod tests {
             .unwrap();
 
         let entries_before = runtime.ledger_len();
-        revoked.store(true, Ordering::SeqCst);
+
+        // Drive the same decision handler used by both the plaintext and
+        // sealed operator transports, rather than manually setting the flag.
+        let operator_signing_key = SigningKey::from_bytes(&[34; 32]);
+        let operator_ledger = tokio::sync::Mutex::new(Chain::new(operator_signing_key));
+        let operator_ledger_persister =
+            crate::consent_ledger_persistence::CompleteConsentLedgerPersister::new(
+                std::env::temp_dir().join(format!(
+                    "xenia-m1-revocation-latch-{}.ledger",
+                    Uuid::new_v4()
+                )),
+            );
+        let mut grant_tx: Option<tokio::sync::oneshot::Sender<bool>> = None;
+        let outcome = crate::consent_server::apply_consent_decision(
+            crate::DecodedConsent {
+                action: crate::operator_auth::ConsentAction::Revoke,
+                authorized: None,
+            },
+            &mut grant_tx,
+            &revoked,
+            &operator_ledger,
+            &operator_ledger_persister,
+            Uuid::from_bytes([3; 16]),
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            crate::consent_server::ConsentFollowup::Stop
+        ));
+        assert!(revoked.load(Ordering::SeqCst));
 
         // All source-work preflights and all final lane gates must reject
         // immediately, while the state machine is still Active awaiting the
-        // owning loop's durable revocation transition.
+        // owning loop's durable M1 revocation transition.
         assert_eq!(
             runtime.preflight_frame_flow().unwrap_err().to_string(),
             M1RuntimeError::OperatorRevocationObserved.to_string()
