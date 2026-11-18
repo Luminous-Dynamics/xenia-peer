@@ -2,7 +2,7 @@ schema = "xenia-m1-route-inventory-v1"
 version = 1
 status = "partial_source_census"
 completeness = "indeterminate"
-reviewed_commit = "6dd48d9db0a2924d1877d4f9172f19fa6bb2a091"
+reviewed_commit = "5aa3d4be8640f5eca99bdcf02afb16b168db5ee5"
 claim_ceiling = "Known daemon paths and gate locations were source-reviewed; receive staging now has a side-effect-free preflight and a final lane recheck after sealing Accept and before it is sent; the operator-revoke latch closes local M1 lane admission on observed revocation before durable ledger transition. Alternate binaries, platform helpers, plugins, ambient OS interfaces, all feature combinations, direct bypasses, and atomic OS/network effect coupling are not yet qualified."
 authorization_semantics = "M1 local consent/session permission only; no Mycelix ROS-005 runtime decision is consumed by this source snapshot."
 effect_evidence = "Current allow_*_flow events are admission/gate evidence, not proof of local OS completion or remote observation. See Xenia issue #510."
@@ -10,18 +10,18 @@ route_coverage_owner = "Xenia issue #512; Mycelix route-mediation oracle #6213."
 
 [source_files]
 daemon = "apps/xenia-peer/src/main.rs@12fe1336f6a5b2813f772aa8e8c1cec70b33da08"
-consent_server = "apps/xenia-peer/src/consent_server.rs@558fab9a448d3aad8de2416764f72e6ee7db84ba"
+consent_server = "apps/xenia-peer/src/consent_server.rs@1edc91944460c94edb89bcf8d2509b2f9b7e0a4e"
 sealed_operator_channel = "apps/xenia-peer/src/operator_sealed_channel.rs@65a4c7f3644ba38b4e76cedb177c501eff6a5db7"
 file_transfer = "apps/xenia-peer/src/file_transfer.rs@b99e1eb6444980077ab6d8db1baa57f91c4f6e13"
 runtime = "apps/xenia-peer/src/m1_runtime.rs@441d72658a66f5c5c8647a6851e94186a37d4427"
 permission_model = "crates/xenia-peer-core/src/m1_session.rs@fa19a4826f2d078a47439e02217c4562f2aab007"
 
 [local_revocation]
-trigger = "ConsentServer::apply_consent_decision stores the shared operator-revoked AtomicBool with SeqCst ordering when a valid Revoke action is accepted."
+trigger = "After transport decoding and any configured operator signature/role/session/scope checks succeed, apply_consent_decision sets the shared operator-revoked AtomicBool with SeqCst ordering immediately for ConsentAction::Revoke, before attempting durable operator-audit persistence."
 runtime_binding = "M1RuntimeSession binds the same Arc<AtomicBool> before it is shared with sender, input, and file-transfer tasks."
-enforcement = "Every source-work preflight and every final M1 lane admission gate rejects with OperatorRevocationObserved while the owning send loop is still pending its durable ConsentKind::Revocation append."
+enforcement = "Every source-work preflight and every final M1 lane admission gate rejects with OperatorRevocationObserved while the owning send loop records the canonical ConsentKind::Revocation transition. The operator audit write occurs after the local fence; a persistence failure returns Stop and never clears the fence."
 durable_record_owner = "The main session loop remains the owner of M1RuntimeSession::revoke() and the canonical consent-ledger transition."
-claim_limit = "This closes the local operator-revocation observation window before effect admission. It does not atomically couple an already-passed final check to a later OS or network operation and does not establish distributed revocation propagation."
+claim_limit = "This closes local M1 admission immediately after a valid Revoke is accepted, even if its audit persistence then fails. A failed audit write means durable audit evidence is unresolved; it does not reopen the session. The latch does not atomically couple an already-passed final check to a later OS or network operation and does not establish distributed revocation propagation."
 
 [[routes]]
 id = "M1-HOST-SCREEN-001"
