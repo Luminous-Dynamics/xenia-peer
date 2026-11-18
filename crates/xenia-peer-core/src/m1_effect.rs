@@ -940,6 +940,64 @@ mod tests {
     }
 
     #[test]
+    fn each_m1_lane_requires_its_own_exact_permission() {
+        for (index, permission) in M1Permission::ALL.into_iter().enumerate() {
+            let granted = match permission {
+                M1Permission::StreamFrame => M1PermissionSet {
+                    stream_frame: true,
+                    ..M1PermissionSet::default()
+                },
+                M1Permission::StreamTelemetry => M1PermissionSet {
+                    stream_telemetry: true,
+                    ..M1PermissionSet::default()
+                },
+                M1Permission::StreamAudio => M1PermissionSet {
+                    stream_audio: true,
+                    ..M1PermissionSet::default()
+                },
+                M1Permission::InjectInput => M1PermissionSet {
+                    inject_input: true,
+                    ..M1PermissionSet::default()
+                },
+                M1Permission::ReadHostClipboard => M1PermissionSet {
+                    read_host_clipboard: true,
+                    ..M1PermissionSet::default()
+                },
+                M1Permission::WriteHostClipboard => M1PermissionSet {
+                    write_host_clipboard: true,
+                    ..M1PermissionSet::default()
+                },
+                M1Permission::SendFileToViewer => M1PermissionSet {
+                    send_file_to_viewer: true,
+                    ..M1PermissionSet::default()
+                },
+                M1Permission::ReceiveFileFromViewer => M1PermissionSet {
+                    receive_file_from_viewer: true,
+                    ..M1PermissionSet::default()
+                },
+            };
+            let mut gate = M1EffectGate::new([0xA1; 16], 7, granted);
+            let authorized = intent(100 + index as u8, permission);
+            assert!(matches!(
+                gate.prepare(&authorized),
+                Ok(M1EffectPrepareResult::New(_))
+            ));
+
+            for other in M1Permission::ALL {
+                if other == permission {
+                    continue;
+                }
+                let unauthorized = intent(150 + index as u8 * 8 + other as u8, other);
+                assert_eq!(
+                    gate.prepare(&unauthorized),
+                    Err(M1EffectError::PermissionDenied(other)),
+                    "granting {permission:?} must not imply {other:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn commit_and_revoke_race_has_one_serializable_winner() {
         let mut initial = gate();
         let operation = intent(13, M1Permission::InjectInput);
