@@ -155,7 +155,11 @@ fn benchmark_corpus_has_32_unique_cases_and_balanced_families() {
                 .expect("direction is required"),
         );
         if mutation == "direction_mismatch" {
-            assert_ne!(observed_direction, permission.direction(), "mutation was not preserved in {id}");
+            assert_ne!(
+                observed_direction,
+                permission.direction(),
+                "mutation was not preserved in {id}"
+            );
             assert_eq!(result["authorization_disposition"].as_str(), Some("DENY"));
             assert_eq!(result["local_effect_state"].as_str(), Some("NOT_ATTEMPTED"));
         } else {
