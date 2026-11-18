@@ -55,6 +55,7 @@ pub mod advertisement;
 pub mod file_transfer;
 pub mod frame;
 pub mod handshake;
+pub mod m1_effect;
 pub mod m1_session;
 pub mod producer_flow;
 pub mod receive_reservation;
@@ -77,6 +78,11 @@ pub use frame::{
     SyntheticAudioSource, TelemetrySample, TelemetryValue,
 };
 pub use handshake::{RekeyPolicy, SessionEpochState};
+pub use m1_effect::{
+    M1EffectCommitReceipt, M1EffectCompletion, M1EffectDisposition, M1EffectError,
+    M1EffectGate, M1EffectIntentV1, M1EffectPrepareResult, M1EffectSnapshot,
+    M1PreparedOperation, M1ReconciledOutcome,
+};
 pub use m1_session::{
     M1AuditEvent, M1DataDirection, M1Permission, M1PermissionSet, M1SessionError, M1SessionMachine,
     M1SessionState,
