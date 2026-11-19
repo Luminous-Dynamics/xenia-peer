@@ -385,3 +385,20 @@ jobs:
           name: cargo-lockfile-resolution-diagnostic
           path: diagnostic-artifacts/
           if-no-files-found: error
+
+  m1-effect-commit-model:
+    name: M1 effect commit model (focused)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Effect model tests
+        run: cargo test --locked -p xenia-peer-core m1_effect::tests
+      - name: Core package Clippy
+        run: cargo clippy --locked -p xenia-peer-core --all-targets -- -D warnings
