@@ -2049,12 +2049,9 @@ mod tests {
         // Drive the same decision handler used by both the plaintext and
         // sealed operator transports, rather than manually setting the flag.
         let operator_signing_key = SigningKey::from_bytes(&[34; 32]);
-        let operator_ledger =
-            tokio::sync::Mutex::new(Chain::new(operator_signing_key.clone()));
-        let operator_ledger_dir = std::env::temp_dir().join(format!(
-            "xenia-m1-revocation-latch-{}",
-            Uuid::new_v4()
-        ));
+        let operator_ledger = tokio::sync::Mutex::new(Chain::new(operator_signing_key.clone()));
+        let operator_ledger_dir =
+            std::env::temp_dir().join(format!("xenia-m1-revocation-latch-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&operator_ledger_dir).unwrap();
         let operator_ledger_path = operator_ledger_dir.join("operator.ledger");
         let operator_ledger_persister =
@@ -2089,11 +2086,9 @@ mod tests {
         // audit receipt is now durable. The companion failing-persister test
         // in consent_server.rs proves the local latch is raised before this
         // persistence attempt begins, and remains raised if that attempt fails.
-        let operator_audit = crate::audit_ledger_store::load_verified(
-            &operator_ledger_path,
-            &operator_signing_key,
-        )
-        .unwrap();
+        let operator_audit =
+            crate::audit_ledger_store::load_verified(&operator_ledger_path, &operator_signing_key)
+                .unwrap();
         assert_eq!(operator_audit.len(), 1);
         std::fs::remove_dir_all(&operator_ledger_dir).ok();
 
