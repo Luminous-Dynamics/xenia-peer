@@ -984,3 +984,285 @@ fn clarification_extension_preserves_intent_scope_without_unnecessary_questions(
     assert_eq!(widened["unapproved_action_attempts"].as_u64(), Some(1));
     assert_eq!(widened["unauthorized_effects"].as_u64(), Some(0));
 }
+
+
+const EFFECT_RACE_CORPUS: &str = include_str!(
+    "../../../docs/benchmarks/M1_EFFECT_RACE_HISTORY_EXTENSION_V0_1.json"
+);
+const EFFECT_RACE_ORACLE: &str = include_str!(
+    "../../../docs/benchmarks/M1_EFFECT_RACE_HISTORY_EXTENSION_V0_1_ORACLE.json"
+);
+
+fn race_corpus() -> Value {
+    serde_json::from_str(EFFECT_RACE_CORPUS)
+        .expect("effect-race input corpus must be valid JSON")
+}
+
+fn race_oracle() -> Value {
+    serde_json::from_str(EFFECT_RACE_ORACLE)
+        .expect("effect-race oracle must be valid JSON")
+}
+
+fn event_seq(case: &Value, event_name: &str) -> u64 {
+    case["schedule"]
+        .as_array()
+        .expect("history schedule required")
+        .iter()
+        .find(|event| event["event"].as_str() == Some(event_name))
+        .unwrap_or_else(|| panic!("{} missing event {event_name}", case["id"]))
+        ["seq"]
+        .as_u64()
+        .expect("event sequence must be unsigned")
+}
+
+fn race_case<'a>(cases: &'a [Value], id: &str) -> &'a Value {
+    cases
+        .iter()
+        .find(|case| case["id"].as_str() == Some(id))
+        .unwrap_or_else(|| panic!("missing effect-race case {id}"))
+}
+
+fn race_result<'a>(rows: &'a [Value], id: &str) -> &'a Value {
+    rows.iter()
+        .find(|row| row["id"].as_str() == Some(id))
+        .unwrap_or_else(|| panic!("missing effect-race oracle result {id}"))
+}
+
+#[test]
+fn effect_race_histories_preserve_linearization_and_unknown_outcome_semantics() {
+    let input = race_corpus();
+    let expected = race_oracle();
+
+    assert_eq!(
+        input["schema_id"].as_str(),
+        Some("org.luminousdynamics.xenia.m1-effect-race-history-extension")
+    );
+    assert_eq!(
+        input["status"].as_str(),
+        Some("preregistration_extension_not_results")
+    );
+    assert_eq!(input["synthetic_only"].as_bool(), Some(true));
+    assert_eq!(
+        input["histories_are_logical_orders_not_wall_clock_times"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(input["oracle_separate_from_candidate"].as_bool(), Some(true));
+    assert_eq!(
+        expected["schema_id"].as_str(),
+        Some("org.luminousdynamics.xenia.m1-effect-race-history-extension-oracle")
+    );
+    assert_eq!(
+        expected["status"].as_str(),
+        Some("preregistration_oracle_not_independently_adjudicated")
+    );
+    assert_eq!(
+        expected["independent_adjudication_status"].as_str(),
+        Some("pending")
+    );
+    assert_eq!(
+        expected["input_source_baseline_commit"].as_str(),
+        input["source_baseline_commit"].as_str()
+    );
+
+    let cases = input["cases"].as_array().expect("race cases required");
+    let rows = expected["scenario_results"]
+        .as_array()
+        .expect("race oracle results required");
+    assert_eq!(cases.len(), 11);
+    assert_eq!(rows.len(), cases.len());
+
+    let mut case_ids = BTreeSet::new();
+    let mut result_ids = BTreeSet::new();
+    let known_events: BTreeSet<&str> = [
+        "source_preflight_permit",
+        "revocation_observed",
+        "effect_owner_gate_denied",
+        "effect_owner_commit",
+        "remote_ack_timeout",
+        "sensitive_source_read",
+        "local_buffer_invalidated",
+        "transport_dispatch_attempted",
+        "transport_timeout",
+        "first_dispatch_attempted",
+        "first_outcome_unknown",
+        "exact_retry_same_operation",
+        "prior_operation_result_returned",
+        "operation_id_seen",
+        "same_id_changed_fingerprint",
+        "idempotency_conflict",
+        "operation_queued_old_session",
+        "session_rekey_committed",
+        "old_operation_reaches_effect_owner",
+        "stale_session_rejected",
+        "parent_revocation_committed",
+        "ancestor_revocation_observed",
+        "cached_child_attempt",
+        "offer_accepted",
+        "chunks_staged",
+        "final_publish_gate_denied",
+        "staged_artifact_quarantined_or_removed",
+        "clipboard_source_preflight_permit",
+        "clipboard_source_read",
+        "disclosure_send_gate_denied",
+        "clipboard_buffer_invalidated",
+        "pep_a_consume_requested",
+        "pep_b_consume_requested",
+        "single_consume_linearized_to_one_pep",
+        "losing_pep_denied_as_consumed",
+        "winner_effect_dispatch",
+    ]
+    .into_iter()
+    .collect();
+
+    for row in rows {
+        let id = row["id"].as_str().expect("oracle case ID required");
+        assert!(result_ids.insert(id), "duplicate oracle ID {id}");
+        assert!(matches!(
+            row["authorization_disposition"].as_str(),
+            Some("DENY" | "PERMIT_AT_COMMIT" | "DENY_AT_FINAL_GATE"
+                | "PRIOR_DECISION_REUSED" | "CONFLICT" | "DENY_STALE_SESSION"
+                | "DENY_REVOKED_ANCESTOR" | "DENY_FINAL_PUBLISH"
+                | "DENY_DISCLOSURE_SEND" | "ONE_CONSUMER_PERMITTED")
+        ));
+        assert!(row["effectful_dispatches"].as_u64().is_some());
+        assert!(row["duplicate_dispatches"].as_u64().is_some());
+        assert!(row["retry_allowed"].as_bool().is_some());
+        assert!(row["reconciliation_required"].as_bool().is_some());
+        assert!(row["terminal_evidence_claim"].as_str().is_some());
+    }
+
+    for case in cases {
+        let id = case["id"].as_str().expect("input case ID required");
+        assert!(case_ids.insert(id), "duplicate input case ID {id}");
+        assert_eq!(case["synthetic_only"].as_bool(), Some(true));
+        assert!(case["description"].as_str().is_some());
+        assert!(case["family"].as_str().is_some());
+
+        let operation = &case["operation"];
+        let action = operation["action_id"].as_str().expect("action ID required");
+        assert!(
+            M1Permission::ALL
+                .iter()
+                .any(|permission| permission.action_id() == action),
+            "{id}: unknown M1 action ID {action}"
+        );
+        assert!(operation["id"].as_str().is_some());
+        assert!(operation["fingerprint"].as_str().is_some());
+        assert!(operation["resource"].as_str().is_some());
+
+        let schedule = case["schedule"].as_array().expect("schedule required");
+        assert!(!schedule.is_empty());
+        let mut prior_seq = 0u64;
+        for event in schedule {
+            let seq = event["seq"].as_u64().expect("event sequence required");
+            assert_eq!(seq, prior_seq + 1, "{id}: logical history sequence must be contiguous");
+            prior_seq = seq;
+            let event_name = event["event"].as_str().expect("event name required");
+            assert!(
+                known_events.contains(event_name),
+                "{id}: unknown event name {event_name}"
+            );
+            assert!(event["owner"].as_str().is_some(), "{id}: event owner required");
+        }
+
+        let result = race_result(rows, id);
+        assert_eq!(
+            result["effectful_dispatches"].as_u64().unwrap(),
+            result["duplicate_dispatches"].as_u64().unwrap_or(0)
+                + result["effectful_dispatches"].as_u64().unwrap()
+                - result["duplicate_dispatches"].as_u64().unwrap_or(0),
+            "{id}: effect count must be numeric"
+        );
+        assert_eq!(
+            result["authorization_disposition"].is_string(),
+            true,
+            "{id}: authorization disposition required"
+        );
+        assert_eq!(
+            result["effectful_dispatches"].as_u64(),
+            Some(result["effectful_dispatches"].as_u64().unwrap()),
+            "{id}: effect count must be integral"
+        );
+    }
+    assert_eq!(case_ids, result_ids, "race input/oracle IDs must match exactly");
+
+    let revoke_first = race_case(cases, "M1-RACE-01");
+    assert!(
+        event_seq(revoke_first, "revocation_observed")
+            < event_seq(revoke_first, "effect_owner_gate_denied")
+    );
+    let revoke_first_result = race_result(rows, "M1-RACE-01");
+    assert_eq!(revoke_first_result["effectful_dispatches"].as_u64(), Some(0));
+
+    let commit_first = race_case(cases, "M1-RACE-02");
+    assert!(
+        event_seq(commit_first, "effect_owner_commit")
+            < event_seq(commit_first, "revocation_observed")
+    );
+    let commit_first_result = race_result(rows, "M1-RACE-02");
+    assert_eq!(
+        commit_first_result["operation_disposition"].as_str(),
+        Some("COMMITTED_BEFORE_REVOCATION")
+    );
+    assert_eq!(commit_first_result["effectful_dispatches"].as_u64(), Some(1));
+    assert_eq!(
+        commit_first_result["remote_observation_state"].as_str(),
+        Some("UNKNOWN_NO_ACK")
+    );
+
+    let timeout_result = race_result(rows, "M1-RACE-04");
+    assert_eq!(
+        timeout_result["operation_disposition"].as_str(),
+        Some("UNKNOWN_AFTER_DISPATCH")
+    );
+    assert_eq!(timeout_result["retry_allowed"].as_bool(), Some(false));
+    assert_eq!(
+        timeout_result["reconciliation_required"].as_bool(),
+        Some(true)
+    );
+
+    let replay_result = race_result(rows, "M1-RACE-05");
+    assert_eq!(replay_result["operation_disposition"].as_str(), Some("IDEMPOTENT_REPLAY"));
+    assert_eq!(replay_result["effectful_dispatches"].as_u64(), Some(1));
+    assert_eq!(replay_result["duplicate_dispatches"].as_u64(), Some(0));
+
+    let conflict = race_case(cases, "M1-RACE-06");
+    assert!(conflict["operation"]["fingerprint"].as_str().unwrap()
+        != conflict["operation"]["retry_fingerprint"].as_str().unwrap());
+    assert_eq!(race_result(rows, "M1-RACE-06")["operation_disposition"], "CHANGED_FINGERPRINT_REJECTED");
+
+    let rekey = race_case(cases, "M1-RACE-07");
+    assert!(
+        rekey["operation"]["session_epoch"].as_u64().unwrap()
+            < rekey["operation"]["current_session_epoch"].as_u64().unwrap()
+    );
+    assert_eq!(race_result(rows, "M1-RACE-07")["effectful_dispatches"].as_u64(), Some(0));
+
+    let ancestor = race_case(cases, "M1-RACE-08");
+    assert!(
+        event_seq(ancestor, "parent_revocation_committed")
+            < event_seq(ancestor, "ancestor_revocation_observed")
+    );
+    assert!(
+        event_seq(ancestor, "ancestor_revocation_observed")
+            < event_seq(ancestor, "cached_child_attempt")
+    );
+    assert_eq!(race_result(rows, "M1-RACE-08")["effectful_dispatches"].as_u64(), Some(0));
+
+    let staged = race_case(cases, "M1-RACE-09");
+    assert!(event_seq(staged, "chunks_staged") < event_seq(staged, "revocation_observed"));
+    assert!(event_seq(staged, "revocation_observed") < event_seq(staged, "final_publish_gate_denied"));
+    assert_eq!(race_result(rows, "M1-RACE-09")["published_files"].as_u64(), Some(0));
+
+    let clipboard = race_case(cases, "M1-RACE-10");
+    assert!(event_seq(clipboard, "clipboard_source_read") < event_seq(clipboard, "revocation_observed"));
+    assert!(event_seq(clipboard, "revocation_observed") < event_seq(clipboard, "disclosure_send_gate_denied"));
+    assert!(event_seq(clipboard, "disclosure_send_gate_denied") < event_seq(clipboard, "clipboard_buffer_invalidated"));
+    assert_eq!(race_result(rows, "M1-RACE-10")["plaintext_disclosures"].as_u64(), Some(0));
+
+    let concurrent = race_case(cases, "M1-RACE-11");
+    assert!(concurrent["operation"]["concurrent_consumers"].as_array().unwrap().len() >= 2);
+    let concurrent_result = race_result(rows, "M1-RACE-11");
+    assert_eq!(concurrent_result["effectful_dispatches"].as_u64(), Some(1));
+    assert_eq!(concurrent_result["duplicate_dispatches"].as_u64(), Some(0));
+}
