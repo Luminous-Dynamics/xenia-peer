@@ -904,9 +904,11 @@ fn clarification_extension_preserves_intent_scope_without_unnecessary_questions(
                 "{id}: expected outcomes must remain in the separate oracle"
             );
         }
-        let requested = case["requested_actions"]
-            .as_array()
-            .expect("requested_actions required");
+        let requested = case
+            .get("requested_actions")
+            .or_else(|| case.get("proposed_actions"))
+            .and_then(Value::as_array)
+            .expect("requested_actions or proposed_actions required");
         let approved = case["approved_actions"]
             .as_array()
             .expect("approved_actions required");
