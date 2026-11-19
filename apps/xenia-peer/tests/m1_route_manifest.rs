@@ -280,24 +280,35 @@ fn operator_revocation_finalizer_runs_after_send_loop_errors_are_captured() {
     let capture = MAIN
         .find("let send_loop_result: Result<(), Box<dyn std::error::Error>> = async")
         .expect("send loop must be captured as a result so `?` cannot bypass teardown");
-    let finalizer = MAIN
+    let finalizer_call = MAIN
         .find("finalize_m1_send_loop(&revoked, &m1_runtime, send_loop_result).await?")
         .expect("normal and error exits must converge on the revocation finalizer");
-    assert!(
-        capture < finalizer,
-        "the finalizer must run after the send-loop result is captured"
-    );
-
-    let append = MAIN
+    let finalizer_fn = MAIN
+        .find("async fn finalize_m1_send_loop(")
+        .expect("the send-loop finalizer implementation must remain present");
+    let append_fn = MAIN
         .find("async fn append_operator_revocation_if_observed(")
         .expect("operator revocation append helper must remain present");
+    assert!(
+        capture < finalizer_call && finalizer_call < finalizer_fn,
+        "the finalizer call must follow result capture and precede its implementation"
+    );
+    assert!(
+        finalizer_fn < append_fn,
+        "the finalizer implementation must precede the append helper implementation"
+    );
+    assert!(
+        MAIN[finalizer_fn..append_fn].contains("append_operator_revocation_if_observed"),
+        "the finalizer must invoke the idempotent append helper"
+    );
+
     let ensure = M1_RUNTIME
         .find("pub(crate) fn ensure_revocation_recorded(")
         .expect("runtime must expose retryable revocation transcript append");
-    let flush = M1_RUNTIME
-        .find("self.flush_new_audit_events()")
-        .expect("runtime revocation must flush the pending canonical session event");
-    assert!(append < finalizer, "the finalizer must invoke the append helper");
-    assert!(ensure < flush, "retryable revocation append must flush pending audit entries");
+    let ensure_body = &M1_RUNTIME[ensure..];
+    assert!(
+        ensure_body.find("self.flush_new_audit_events()").is_some(),
+        "retryable revocation append must flush pending audit entries"
+    );
     assert!(MAIN.contains("operator_revocation_is_appended_when_send_loop_returns_error"));
 }
