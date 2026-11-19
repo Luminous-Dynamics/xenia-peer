@@ -1166,23 +1166,22 @@ fn effect_race_histories_preserve_linearization_and_unknown_outcome_semantics() 
         }
 
         let result = race_result(rows, id);
-        assert_eq!(
-            result["effectful_dispatches"].as_u64().unwrap(),
-            result["duplicate_dispatches"].as_u64().unwrap_or(0)
-                + result["effectful_dispatches"].as_u64().unwrap()
-                - result["duplicate_dispatches"].as_u64().unwrap_or(0),
-            "{id}: effect count must be numeric"
+        let effectful_dispatches = result["effectful_dispatches"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{id}: effectful dispatch count must be integral"));
+        let duplicate_dispatches = result["duplicate_dispatches"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{id}: duplicate dispatch count must be integral"));
+        assert!(
+            effectful_dispatches <= 1,
+            "{id}: one logical operation cannot produce multiple effect-bearing dispatches"
         );
         assert_eq!(
-            result["authorization_disposition"].is_string(),
-            true,
-            "{id}: authorization disposition required"
+            duplicate_dispatches,
+            0,
+            "{id}: oracle must not normalize duplicate effect-bearing dispatches as success"
         );
-        assert_eq!(
-            result["effectful_dispatches"].as_u64(),
-            Some(result["effectful_dispatches"].as_u64().unwrap()),
-            "{id}: effect count must be integral"
-        );
+        assert!(result["authorization_disposition"].is_string());
     }
     assert_eq!(case_ids, result_ids, "race input/oracle IDs must match exactly");
 
