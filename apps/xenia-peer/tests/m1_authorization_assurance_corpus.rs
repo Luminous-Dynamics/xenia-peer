@@ -588,3 +588,236 @@ fn drift_and_dual_obligation_extension_has_matched_pairs_and_separate_oracle() {
         Some("INDETERMINATE")
     );
 }
+
+
+const AUTHZEN_OBLIGATIONS_CORPUS: &str = include_str!(
+    "../../../docs/benchmarks/M1_AUTHZEN_OBLIGATIONS_PROFILE_DRAFT1_CORPUS_V0_1.json"
+);
+const AUTHZEN_OBLIGATIONS_ORACLE: &str = include_str!(
+    "../../../docs/benchmarks/M1_AUTHZEN_OBLIGATIONS_PROFILE_DRAFT1_ORACLE_V0_1.json"
+);
+
+#[test]
+fn authzen_obligations_profile_distinguishes_permit_deny_and_search_compliance() {
+    let input: Value = serde_json::from_str(AUTHZEN_OBLIGATIONS_CORPUS)
+        .expect("AuthZEN obligations input corpus must be valid JSON");
+    let expected: Value = serde_json::from_str(AUTHZEN_OBLIGATIONS_ORACLE)
+        .expect("AuthZEN obligations outcome oracle must be valid JSON");
+
+    assert_eq!(
+        input["schema_id"].as_str(),
+        Some("org.luminousdynamics.xenia.m1-authzen-obligations-profile-draft1-corpus")
+    );
+    assert_eq!(input["schema_version"].as_str(), Some("0.1.0"));
+    assert_eq!(
+        input["status"].as_str(),
+        Some("preregistration_seed_not_results")
+    );
+    assert_eq!(input["synthetic_only"].as_bool(), Some(true));
+    assert_eq!(input["oracle_separate_from_candidate"].as_bool(), Some(true));
+    assert_eq!(
+        input["source_profile_status"].as_str(),
+        Some("openid_authzen_working_group_draft_1_published_2026-07-03")
+    );
+    assert_eq!(
+        expected["schema_id"].as_str(),
+        Some("org.luminousdynamics.xenia.m1-authzen-obligations-profile-draft1-oracle")
+    );
+    assert_eq!(
+        expected["status"].as_str(),
+        Some("preregistration_oracle_not_independently_adjudicated")
+    );
+    assert_eq!(
+        expected["independent_adjudication_status"].as_str(),
+        Some("pending")
+    );
+    assert_eq!(
+        expected["input_corpus_source_commit"].as_str(),
+        input["source_commit"].as_str()
+    );
+
+    let cases = input["cases"].as_array().expect("AuthZEN cases are required");
+    let results = expected["scenario_results"]
+        .as_array()
+        .expect("AuthZEN oracle results are required");
+    assert_eq!(cases.len(), 7);
+    assert_eq!(results.len(), cases.len());
+
+    let mut case_ids = BTreeSet::new();
+    let mut result_ids = BTreeSet::new();
+    for result in results {
+        let id = result["id"].as_str().expect("oracle ID is required");
+        assert!(result_ids.insert(id), "duplicate AuthZEN oracle ID: {id}");
+        assert!(matches!(
+            result["expected_effective_decision"].as_str(),
+            Some("PERMIT" | "DENY" | "FILTER_RESULTS")
+        ));
+        assert!(
+            result["expected_operation_effect_attempts"]
+                .as_u64()
+                .is_some()
+        );
+        for field in [
+            "expected_obligation_attempts",
+            "expected_obligation_successes",
+            "expected_noncompliant_obligations",
+        ] {
+            assert!(
+                result[field].as_array().is_some(),
+                "{id}: missing oracle array {field}"
+            );
+        }
+        assert!(result["expected_rationale"].as_str().is_some());
+    }
+
+    for case in cases {
+        let id = case["id"].as_str().expect("AuthZEN case ID is required");
+        assert!(case_ids.insert(id), "duplicate AuthZEN case ID: {id}");
+        assert_eq!(case["synthetic_fixture_only"].as_bool(), Some(true));
+        let shape = case["request_shape"]
+            .as_str()
+            .expect("request shape is required");
+        assert!(matches!(shape, "decision" | "search"));
+        assert!(matches!(
+            case["original_decision"].as_str(),
+            Some("PERMIT" | "DENY")
+        ));
+        assert!(case["pep_supported_obligation_types"].as_array().is_some());
+
+        if shape == "decision" {
+            let binding = case["operation_binding"]
+                .as_object()
+                .expect("decision operation binding is required");
+            for field in [
+                "principal_ref",
+                "delegate_ref",
+                "action_id",
+                "resource_ref",
+                "audience",
+                "purpose",
+                "operation_id",
+                "operation_digest",
+                "authority_epoch",
+                "session_fingerprint",
+            ] {
+                assert!(binding.contains_key(field), "{id}: missing {field}");
+            }
+            let obligations = case["obligations"]
+                .as_array()
+                .expect("decision obligations are required");
+            let mut obligation_ids = BTreeSet::new();
+            for obligation in obligations {
+                let obligation_id = obligation["id"]
+                    .as_str()
+                    .expect("obligation ID is required");
+                assert!(
+                    obligation_ids.insert(obligation_id),
+                    "{id}: duplicate obligation ID {obligation_id}"
+                );
+                assert!(obligation["type"].as_str().is_some());
+                assert!(obligation["properties"].is_object());
+                assert!(matches!(
+                    obligation["instance_state"].as_str(),
+                    Some("well_formed" | "malformed_missing_required_body")
+                ));
+                assert!(matches!(
+                    obligation["execution_environment"].as_str(),
+                    Some("success" | "failure" | "unsupported" | "cannot_execute")
+                ));
+            }
+        } else {
+            assert!(case.get("operation_binding").is_none());
+            let candidates = case["candidate_results"]
+                .as_array()
+                .expect("Search-shaped result candidates are required");
+            assert!(candidates.len() >= 2);
+            for candidate in candidates {
+                assert!(candidate["result_id"].as_str().is_some());
+                assert!(candidate["obligations"].as_array().is_some());
+            }
+        }
+    }
+
+    assert_eq!(
+        case_ids, result_ids,
+        "AuthZEN corpus and separate oracle IDs must match exactly"
+    );
+
+    // PERMIT is honored only after all mandatory obligations succeed.
+    let permit = results.iter().find(|row| row["id"] == "M1-AO-01").unwrap();
+    assert_eq!(
+        permit["expected_effective_decision"].as_str(),
+        Some("PERMIT")
+    );
+    assert_eq!(
+        permit["expected_operation_effect_attempts"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        permit["expected_obligation_successes"].as_array().unwrap().len(),
+        2
+    );
+
+    // Unsupported, malformed or failed mandatory obligations downgrade a
+    // PERMIT to DENY, while all other executable obligations are still run.
+    for id in ["M1-AO-02", "M1-AO-03", "M1-AO-06"] {
+        let result = results.iter().find(|row| row["id"] == id).unwrap();
+        assert_eq!(
+            result["expected_effective_decision"].as_str(),
+            Some("DENY"),
+            "{id}: noncompliant mandatory obligation must deny"
+        );
+        assert_eq!(
+            result["expected_operation_effect_attempts"].as_u64(),
+            Some(0),
+            "{id}: denied operation must not reach its effect owner"
+        );
+        assert!(
+            !result["expected_obligation_successes"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "{id}: executable obligations must still be attempted"
+        );
+        assert!(
+            !result["expected_noncompliant_obligations"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    // Obligations accompanying DENY never turn it into PERMIT.
+    for id in ["M1-AO-04", "M1-AO-05"] {
+        let result = results.iter().find(|row| row["id"] == id).unwrap();
+        assert_eq!(
+            result["original_decision"].as_str(),
+            Some("DENY")
+        );
+        assert_eq!(
+            result["expected_effective_decision"].as_str(),
+            Some("DENY")
+        );
+        assert_eq!(
+            result["expected_operation_effect_attempts"].as_u64(),
+            Some(0)
+        );
+    }
+
+    // The Search-shaped exception filters only the non-compliant result;
+    // it does not withhold unrelated results or reinterpret the request as
+    // a single-resource DENY.
+    let search = results.iter().find(|row| row["id"] == "M1-AO-07").unwrap();
+    assert_eq!(
+        search["expected_effective_decision"].as_str(),
+        Some("FILTER_RESULTS")
+    );
+    assert_eq!(
+        search["expected_excluded_result_ids"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        search["expected_returned_result_ids"].as_array().unwrap().len(),
+        2
+    );
+}
