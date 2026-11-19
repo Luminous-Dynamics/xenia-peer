@@ -1,0 +1,17 @@
+[package]
+name = "xenia-access-model"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "Apache-2.0 OR MIT"
+description = "Deterministic reference model for revocable, attenuating delegated access"
+
+[workspace]
+
+[lints.rust]
+unsafe_code = "deny"
+
+[[bench]]
+name = "lineage"
+path = "benches/lineage.rs"
+harness = false

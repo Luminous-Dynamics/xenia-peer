@@ -1,0 +1,750 @@
+//! Deterministic reference model for revocable delegated authority.
+//!
+//! Policy semantics only: this crate does not authenticate records, verify
+//! signatures/content commitments, communicate with Holochain, prove DHT
+//! convergence, or enforce operating-system effects. Callers must enforce
+//! decisions at every lane and effect-commit boundary.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+pub type DelegationId = String;
+
+/// Hard recursion bound for untrusted or malformed delegation graphs.
+pub const MAX_LINEAGE_NODES: usize = 64;
+
+/// Exact-match resource identity; no wildcard or prefix semantics.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Resource {
+    pub domain: String,
+    pub id: String,
+}
+
+/// Independently delegable operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Right {
+    View,
+    Input,
+    ClipboardRead,
+    ClipboardWrite,
+    FileRead,
+    FileWrite,
+    Administer,
+}
+
+/// Direction is part of the operation identity, not a UI hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Direction {
+    HostToDelegate,
+    DelegateToHost,
+    HostLocal,
+}
+
+impl Right {
+    pub const fn direction(self) -> Direction {
+        match self {
+            Self::View | Self::ClipboardRead | Self::FileRead => Direction::HostToDelegate,
+            Self::Input | Self::ClipboardWrite | Self::FileWrite => Direction::DelegateToHost,
+            Self::Administer => Direction::HostLocal,
+        }
+    }
+}
+
+/// Proposal-only authority cannot be upgraded to execution authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AuthorityMode {
+    ProposeOnly,
+    Execute,
+}
+
+/// Immutable delegation statement. Times are Unix milliseconds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delegation {
+    /// Must commit cryptographically to every field in an integrating system.
+    pub id: DelegationId,
+    pub principal: String,
+    /// Root issuer equals principal; child issuer equals parent holder.
+    pub issuer: String,
+    pub holder: String,
+    pub resource: Resource,
+    pub rights: BTreeSet<Right>,
+    pub purpose: String,
+    pub mode: AuthorityMode,
+    pub not_before_ms: u64,
+    /// Exclusive expiry.
+    pub expires_at_ms: u64,
+    pub authority_epoch: u64,
+    pub parent: Option<DelegationId>,
+    pub may_subdelegate: bool,
+    /// Maximum remaining child edges; must strictly decrease.
+    pub remaining_depth: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    Allowed,
+    Denied,
+    /// Missing or incomplete authority is never permission.
+    Indeterminate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Failure {
+    MissingRecord,
+    IncompleteAuthority,
+    FreshnessNotMet,
+    Revoked,
+    StaleEpoch,
+    NotYetValid,
+    Expired,
+    Cycle,
+    DepthExceeded,
+    SubdelegationForbidden,
+    ScopeAmplification,
+    IssuerMismatch,
+    SelfDelegation,
+    RootIssuerMismatch,
+    InvalidStatement,
+    WrongResource,
+    RightNotGranted,
+    DirectionMismatch,
+    PurposeMismatch,
+    ExecutionNotGranted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Evaluation {
+    pub decision: Decision,
+    pub failure: Option<Failure>,
+}
+
+/// Concrete operation to authorize against a valid delegation lineage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessRequest {
+    pub resource: Resource,
+    pub right: Right,
+    pub direction: Direction,
+    pub purpose: String,
+    pub requires_execution: bool,
+}
+
+impl Evaluation {
+    const fn allowed() -> Self { Self { decision: Decision::Allowed, failure: None } }
+    const fn denied(f: Failure) -> Self { Self { decision: Decision::Denied, failure: Some(f) } }
+    const fn unknown(f: Failure) -> Self { Self { decision: Decision::Indeterminate, failure: Some(f) } }
+}
+
+impl Delegation {
+    fn well_formed(&self) -> bool {
+        !self.id.is_empty()
+            && !self.principal.is_empty()
+            && !self.issuer.is_empty()
+            && !self.holder.is_empty()
+            && !self.purpose.is_empty()
+            && !self.resource.domain.is_empty()
+            && !self.resource.id.is_empty()
+            && !self.rights.is_empty()
+            && self.not_before_ms < self.expires_at_ms
+            && self.may_subdelegate == (self.remaining_depth > 0)
+    }
+
+    /// Prove that this child is no broader than its parent.
+    pub fn validate_child(&self, parent: &Self) -> Result<(), Failure> {
+        if !self.well_formed() || !parent.well_formed() {
+            return Err(Failure::InvalidStatement);
+        }
+        if !parent.may_subdelegate || parent.remaining_depth == 0 {
+            return Err(Failure::SubdelegationForbidden);
+        }
+        if self.issuer != parent.holder {
+            return Err(Failure::IssuerMismatch);
+        }
+        if self.issuer == self.holder {
+            return Err(Failure::SelfDelegation);
+        }
+        let mode_attenuates =
+            parent.mode == AuthorityMode::Execute || self.mode == AuthorityMode::ProposeOnly;
+        let contained = self.principal == parent.principal
+            && self.resource == parent.resource
+            && self.rights.is_subset(&parent.rights)
+            && self.purpose == parent.purpose
+            && mode_attenuates
+            && self.not_before_ms >= parent.not_before_ms
+            && self.expires_at_ms <= parent.expires_at_ms
+            && self.authority_epoch == parent.authority_epoch
+            && self.remaining_depth < parent.remaining_depth;
+        if contained { Ok(()) } else { Err(Failure::ScopeAmplification) }
+    }
+}
+
+/// Monotonic revision watermark for one authority namespace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorityFrontier {
+    pub namespace: String,
+    pub revision: u64,
+}
+
+/// Authority facts visible to one enforcement point. Revocation here means
+/// this point has observed the revocation; it is not a global convergence claim.
+#[derive(Debug, Clone, Default)]
+pub struct AuthorityState {
+    pub grants: BTreeMap<DelegationId, Delegation>,
+    pub revoked: BTreeSet<DelegationId>,
+    pub epochs: BTreeMap<String, u64>,
+    pub complete: bool,
+}
+
+impl AuthorityState {
+    /// Evaluate a grant and its entire lineage at the supplied instant.
+    pub fn evaluate(&self, id: &str, now_ms: u64) -> Evaluation {
+        if !self.complete { return Evaluation::unknown(Failure::IncompleteAuthority); }
+        self.evaluate_inner(id, now_ms, &mut Vec::with_capacity(16))
+    }
+
+    fn evaluate_inner<'a>(
+        &'a self,
+        id: &'a str,
+        now_ms: u64,
+        visited: &mut Vec<&'a str>,
+    ) -> Evaluation {
+        if visited.contains(&id) { return Evaluation::denied(Failure::Cycle); }
+        if visited.len() >= MAX_LINEAGE_NODES {
+            return Evaluation::denied(Failure::DepthExceeded);
+        }
+        visited.push(id);
+        let Some(grant) = self.grants.get(id) else {
+            return Evaluation::unknown(Failure::MissingRecord);
+        };
+        if grant.id != id || !grant.well_formed() {
+            return Evaluation::denied(Failure::InvalidStatement);
+        }
+        if self.revoked.contains(id) { return Evaluation::denied(Failure::Revoked); }
+        match self.epochs.get(&grant.resource.domain) {
+            Some(epoch) if *epoch == grant.authority_epoch => {}
+            Some(_) => return Evaluation::denied(Failure::StaleEpoch),
+            None => return Evaluation::unknown(Failure::MissingRecord),
+        }
+        if now_ms < grant.not_before_ms { return Evaluation::denied(Failure::NotYetValid); }
+        if now_ms >= grant.expires_at_ms { return Evaluation::denied(Failure::Expired); }
+
+        if let Some(parent_id) = &grant.parent {
+            let Some(parent) = self.grants.get(parent_id) else {
+                return Evaluation::unknown(Failure::MissingRecord);
+            };
+            // Walk first so a malformed cycle cannot be masked by a secondary
+            // attenuation error. Parent authority must itself be current.
+            let parent_result = self.evaluate_inner(parent_id, now_ms, visited);
+            if parent_result.decision != Decision::Allowed { return parent_result; }
+            if let Err(failure) = grant.validate_child(parent) {
+                return Evaluation::denied(failure);
+            }
+        } else if grant.issuer != grant.principal {
+            return Evaluation::denied(Failure::RootIssuerMismatch);
+        } else if grant.issuer == grant.holder {
+            return Evaluation::denied(Failure::SelfDelegation);
+        }
+        Evaluation::allowed()
+    }
+
+    /// Evaluate lineage and the concrete requested effect. A valid grant is
+    /// not enough by itself: resource, right, purpose and execution mode must match.
+    pub fn evaluate_request(&self, id: &str, request: &AccessRequest, now_ms: u64) -> Evaluation {
+        let lineage = self.evaluate(id, now_ms);
+        if lineage.decision != Decision::Allowed { return lineage; }
+        let grant = &self.grants[id];
+        if grant.resource != request.resource { return Evaluation::denied(Failure::WrongResource); }
+        if !grant.rights.contains(&request.right) { return Evaluation::denied(Failure::RightNotGranted); }
+        if request.direction != request.right.direction() { return Evaluation::denied(Failure::DirectionMismatch); }
+        if grant.purpose != request.purpose { return Evaluation::denied(Failure::PurposeMismatch); }
+        if request.requires_execution && grant.mode != AuthorityMode::Execute {
+            return Evaluation::denied(Failure::ExecutionNotGranted);
+        }
+        Evaluation::allowed()
+    }
+
+    /// Alternative grants: any grant authorizing this exact request suffices.
+    pub fn evaluate_independent_request(&self, ids: &[&str], request: &AccessRequest, now_ms: u64) -> Evaluation {
+        let mut unknown = false;
+        for id in ids {
+            let result = self.evaluate_request(id, request, now_ms);
+            match result.decision {
+                Decision::Allowed => return result,
+                Decision::Denied => {}
+                Decision::Indeterminate => unknown = true,
+            }
+        }
+        if unknown { Evaluation::unknown(Failure::MissingRecord) }
+        else { Evaluation::denied(Failure::RightNotGranted) }
+    }
+
+    /// Every grant in a required bundle must authorize this exact request.
+    pub fn evaluate_required_request(&self, ids: &[&str], request: &AccessRequest, now_ms: u64) -> Evaluation {
+        if ids.is_empty() { return Evaluation::denied(Failure::InvalidStatement); }
+        let mut unknown = false;
+        for id in ids {
+            let result = self.evaluate_request(id, request, now_ms);
+            match result.decision {
+                Decision::Denied => return result,
+                Decision::Indeterminate => unknown = true,
+                Decision::Allowed => {}
+            }
+        }
+        if unknown { Evaluation::unknown(Failure::MissingRecord) } else { Evaluation::allowed() }
+    }
+
+    /// Evaluate only if the observed authority frontier satisfies the
+    /// caller's minimum freshness requirement for this resource domain.
+    ///
+    /// The caller must authenticate both frontiers and prove that the
+    /// observed frontier commits to the exact AuthorityState snapshot being
+    /// evaluated. Otherwise an old snapshot could be relabeled with a newer
+    /// revision. This method checks namespace equality and monotonic revision
+    /// ordering; it does not verify signatures, snapshot commitments or DHT
+    /// convergence.
+    pub fn evaluate_request_at_frontier(
+        &self,
+        id: &str,
+        request: &AccessRequest,
+        now_ms: u64,
+        observed: &AuthorityFrontier,
+        minimum: &AuthorityFrontier,
+    ) -> Evaluation {
+        if observed.namespace != request.resource.domain
+            || minimum.namespace != request.resource.domain
+            || observed.namespace != minimum.namespace
+            || observed.revision < minimum.revision
+        {
+            return Evaluation::unknown(Failure::FreshnessNotMet);
+        }
+        self.evaluate_request(id, request, now_ms)
+    }
+
+    /// Alternative grants: any independently valid grant suffices (OR).
+    /// An unknown candidate cannot override a known allowed grant.
+    pub fn evaluate_independent(&self, ids: &[&str], now_ms: u64) -> Evaluation {
+        let mut unknown = false;
+        for id in ids {
+            let result = self.evaluate(id, now_ms);
+            match result.decision {
+                Decision::Allowed => return result,
+                Decision::Denied => {}
+                Decision::Indeterminate => unknown = true,
+            }
+        }
+        if unknown { Evaluation::unknown(Failure::MissingRecord) }
+        else { Evaluation::denied(Failure::Revoked) }
+    }
+
+    /// Required bundle: every named grant must be current (AND).
+    pub fn evaluate_required_bundle(&self, ids: &[&str], now_ms: u64) -> Evaluation {
+        if ids.is_empty() { return Evaluation::denied(Failure::InvalidStatement); }
+        let mut unknown = false;
+        for id in ids {
+            let result = self.evaluate(id, now_ms);
+            match result.decision {
+                Decision::Denied => return result,
+                Decision::Indeterminate => unknown = true,
+                Decision::Allowed => {}
+            }
+        }
+        if unknown { Evaluation::unknown(Failure::MissingRecord) } else { Evaluation::allowed() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn grant(id: &str, issuer: &str, holder: &str, parent: Option<&str>) -> Delegation {
+        Delegation {
+            id: id.into(), principal: "alice".into(), issuer: issuer.into(), holder: holder.into(),
+            resource: Resource { domain: "home-a".into(), id: "host-1".into() },
+            rights: [Right::View, Right::Input].into_iter().collect(),
+            purpose: "support-session".into(), mode: AuthorityMode::Execute,
+            not_before_ms: 100, expires_at_ms: 10_000, authority_epoch: 7,
+            parent: parent.map(str::to_owned), may_subdelegate: true,
+            remaining_depth: if parent.is_some() { 1 } else { 2 },
+        }
+    }
+
+    fn state() -> AuthorityState {
+        let root = grant("root", "alice", "bob", None);
+        let mut child = grant("child", "bob", "carol", Some("root"));
+        child.rights = [Right::View].into_iter().collect();
+        let mut s = AuthorityState { complete: true, ..Default::default() };
+        s.epochs.insert("home-a".into(), 7);
+        s.grants.insert(root.id.clone(), root);
+        s.grants.insert(child.id.clone(), child);
+        s
+    }
+
+    #[test]
+    fn valid_attenuating_child_is_allowed() {
+        assert_eq!(state().evaluate("child", 500).decision, Decision::Allowed);
+    }
+
+    #[test]
+    fn child_cannot_add_rights_or_extend_expiry() {
+        let root = grant("root", "alice", "bob", None);
+        let mut child = grant("child", "bob", "carol", Some("root"));
+        child.rights.insert(Right::Administer);
+        assert_eq!(child.validate_child(&root), Err(Failure::ScopeAmplification));
+        child.rights.remove(&Right::Administer);
+        child.expires_at_ms += 1;
+        assert_eq!(child.validate_child(&root), Err(Failure::ScopeAmplification));
+    }
+
+    #[test]
+    fn revoked_parent_invalidates_child() {
+        let mut s = state();
+        s.revoked.insert("root".into());
+        assert_eq!(s.evaluate("child", 500).failure, Some(Failure::Revoked));
+    }
+
+    #[test]
+    fn missing_parent_is_indeterminate() {
+        let mut s = state();
+        s.grants.remove("root");
+        assert_eq!(s.evaluate("child", 500).decision, Decision::Indeterminate);
+    }
+
+    #[test]
+    fn stale_epoch_denies() {
+        let mut s = state();
+        s.epochs.insert("home-a".into(), 8);
+        assert_eq!(s.evaluate("root", 500).failure, Some(Failure::StaleEpoch));
+    }
+
+    #[test]
+    fn incomplete_authority_is_indeterminate() {
+        let mut s = state();
+        s.complete = false;
+        assert_eq!(s.evaluate("root", 500).decision, Decision::Indeterminate);
+    }
+
+    #[test]
+    fn independent_grants_are_or_composed() {
+        let mut s = state();
+        s.grants.insert("other".into(), grant("other", "alice", "dave", None));
+        s.revoked.insert("root".into());
+        assert_eq!(s.evaluate_independent(&["root", "other"], 500).decision, Decision::Allowed);
+    }
+
+    #[test]
+    fn required_bundle_is_and_composed() {
+        let mut s = state();
+        s.grants.insert("other".into(), grant("other", "alice", "dave", None));
+        assert_eq!(s.evaluate_required_bundle(&["root", "other"], 500).decision, Decision::Allowed);
+        s.revoked.insert("other".into());
+        assert_eq!(s.evaluate_required_bundle(&["root", "other"], 500).failure, Some(Failure::Revoked));
+    }
+
+    #[test]
+    fn time_bounds_are_enforced() {
+        let s = state();
+        assert_eq!(s.evaluate("root", 99).failure, Some(Failure::NotYetValid));
+        assert_eq!(s.evaluate("root", 10_000).failure, Some(Failure::Expired));
+    }
+
+    #[test]
+    fn cycle_is_detected_before_attenuation_checks() {
+        let mut s = state();
+        let mut root = s.grants.remove("root").unwrap();
+        root.parent = Some("child".into());
+        root.issuer = "carol".into();
+        s.grants.insert("root".into(), root);
+        assert_eq!(s.evaluate("root", 500).failure, Some(Failure::Cycle));
+    }
+
+    #[test]
+    fn proposal_only_parent_cannot_delegate_execution() {
+        let mut root = grant("root", "alice", "bob", None);
+        root.mode = AuthorityMode::ProposeOnly;
+        let child = grant("child", "bob", "carol", Some("root"));
+        assert_eq!(child.validate_child(&root), Err(Failure::ScopeAmplification));
+    }
+
+    #[test]
+    fn request_must_match_resource_right_and_purpose() {
+        let s = state();
+        let request = AccessRequest {
+            resource: Resource { domain: "home-a".into(), id: "host-1".into() },
+            right: Right::Input, direction: Direction::DelegateToHost, purpose: "support-session".into(), requires_execution: true,
+        };
+        assert_eq!(s.evaluate_request("child", &request, 500).decision, Decision::Denied);
+        let mut view = request.clone();
+        view.right = Right::View;
+        view.direction = Direction::HostToDelegate;
+        assert_eq!(s.evaluate_request("child", &view, 500).decision, Decision::Allowed);
+        view.resource.id = "host-2".into();
+        assert_eq!(s.evaluate_request("child", &view, 500).failure, Some(Failure::WrongResource));
+    }
+
+    #[test]
+    fn proposal_only_grant_cannot_commit_effect() {
+        let mut s = state();
+        s.grants.get_mut("root").unwrap().mode = AuthorityMode::ProposeOnly;
+        let request = AccessRequest {
+            resource: Resource { domain: "home-a".into(), id: "host-1".into() },
+            right: Right::View, direction: Direction::HostToDelegate, purpose: "support-session".into(), requires_execution: true,
+        };
+        assert_eq!(s.evaluate_request("root", &request, 500).failure, Some(Failure::ExecutionNotGranted));
+    }
+
+    #[test]
+    fn map_key_must_match_content_identifier() {
+        let mut s = state();
+        let mut altered = s.grants.remove("root").unwrap();
+        altered.id = "different-id".into();
+        s.grants.insert("root".into(), altered);
+        assert_eq!(s.evaluate("root", 500).failure, Some(Failure::InvalidStatement));
+    }
+
+    #[test]
+    fn self_delegation_is_rejected() {
+        let mut s = state();
+        let root = grant("root", "alice", "alice", None);
+        s.grants.insert("root".into(), root);
+        assert_eq!(s.evaluate("root", 500).failure, Some(Failure::SelfDelegation));
+    }
+
+    #[test]
+    fn bounded_exhaustive_request_and_authority_matrix_never_false_allows() {
+        // Exhaustively enumerate 1,152 small states: completeness (2), revoke
+        // masks (4), epoch state (3), right (3), resource (2), purpose (2),
+        // direction (2), and execution requirement (2).
+        for complete in [false, true] {
+            for revoke_mask in 0_u8..4 {
+                for epoch_state in 0_u8..3 {
+                    for right in [Right::View, Right::Input, Right::Administer] {
+                        for wrong_resource in [false, true] {
+                            for wrong_purpose in [false, true] {
+                                for wrong_direction in [false, true] {
+                                    for requires_execution in [false, true] {
+                                    let mut s = state();
+                                    s.complete = complete;
+                                    if revoke_mask & 1 != 0 { s.revoked.insert("root".into()); }
+                                    if revoke_mask & 2 != 0 { s.revoked.insert("child".into()); }
+                                    match epoch_state {
+                                        0 => { s.epochs.insert("home-a".into(), 7); }
+                                        1 => { s.epochs.insert("home-a".into(), 8); }
+                                        _ => { s.epochs.remove("home-a"); }
+                                    }
+                                    let request = AccessRequest {
+                                        resource: Resource {
+                                            domain: "home-a".into(),
+                                            id: if wrong_resource { "other-host".into() } else { "host-1".into() },
+                                        },
+                                        right,
+                                        direction: if wrong_direction {
+                                            match right.direction() {
+                                                Direction::HostToDelegate => Direction::DelegateToHost,
+                                                Direction::DelegateToHost | Direction::HostLocal => Direction::HostToDelegate,
+                                            }
+                                        } else {
+                                            right.direction()
+                                        },
+                                        purpose: if wrong_purpose { "different-purpose".into() } else { "support-session".into() },
+                                        requires_execution,
+                                    };
+                                    let got = s.evaluate_request("child", &request, 500);
+                                    let expected_allow = complete
+                                        && revoke_mask == 0
+                                        && epoch_state == 0
+                                        && right == Right::View
+                                        && !wrong_resource
+                                        && !wrong_purpose
+                                        && !wrong_direction;
+                                    assert_eq!(
+                                        got.decision == Decision::Allowed,
+                                        expected_allow,
+                                        "complete={complete} revoke={revoke_mask} epoch={epoch_state} right={right:?} wrong_resource={wrong_resource} wrong_purpose={wrong_purpose} wrong_direction={wrong_direction} execution={requires_execution} result={got:?}"
+                                    );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lineage_depth_is_bounded_before_unbounded_recursion() {
+        let mut s = state();
+        let mut root = s.grants.remove("root").unwrap();
+        root.remaining_depth = (MAX_LINEAGE_NODES as u16) + 1;
+        root.may_subdelegate = true;
+        s.grants.insert(root.id.clone(), root.clone());
+        let mut parent = root;
+        for i in 1..=MAX_LINEAGE_NODES {
+            let id = format!("deep-{i}");
+            let mut child = parent.clone();
+            child.id = id.clone();
+            child.issuer = parent.holder.clone();
+            child.holder = format!("holder-{i}");
+            child.parent = Some(parent.id.clone());
+            child.not_before_ms = parent.not_before_ms;
+            child.expires_at_ms = parent.expires_at_ms;
+            child.remaining_depth = parent.remaining_depth.saturating_sub(1);
+            child.may_subdelegate = child.remaining_depth > 0;
+            s.grants.insert(id, child.clone());
+            parent = child;
+        }
+        assert_eq!(
+            s.evaluate(&parent.id, 500).failure,
+            Some(Failure::DepthExceeded)
+        );
+    }
+    #[test]
+    fn composition_operators_apply_to_exact_requested_effect() {
+        let mut s = state();
+        s.grants.insert("other".into(), grant("other", "alice", "dave", None));
+        s.revoked.insert("root".into());
+        let request = AccessRequest {
+            resource: Resource { domain: "home-a".into(), id: "host-1".into() },
+            right: Right::View, direction: Direction::HostToDelegate, purpose: "support-session".into(), requires_execution: true,
+        };
+        assert_eq!(
+            s.evaluate_independent_request(&["root", "other"], &request, 500).decision,
+            Decision::Allowed
+        );
+        assert_eq!(
+            s.evaluate_required_request(&["root", "other"], &request, 500).decision,
+            Decision::Denied
+        );
+    }
+
+    #[test]
+    fn inconsistent_subdelegation_depth_metadata_is_invalid() {
+        let mut root = grant("root", "alice", "bob", None);
+        root.may_subdelegate = false;
+        assert!(!root.well_formed());
+        root.may_subdelegate = true;
+        root.remaining_depth = 0;
+        assert!(!root.well_formed());
+    }
+
+    #[test]
+    fn exhaustive_rights_lattice_never_amplifies() {
+        let all = [
+            Right::View,
+            Right::Input,
+            Right::ClipboardRead,
+            Right::ClipboardWrite,
+            Right::FileRead,
+            Right::FileWrite,
+            Right::Administer,
+        ];
+        for parent_mask in 1_u16..(1 << all.len()) {
+            for child_mask in 1_u16..(1 << all.len()) {
+                let mut parent = grant("root", "alice", "bob", None);
+                parent.rights = all.iter().enumerate()
+                    .filter_map(|(i, right)| (parent_mask & (1 << i) != 0).then_some(*right))
+                    .collect();
+                let mut child = grant("child", "bob", "carol", Some("root"));
+                child.rights = all.iter().enumerate()
+                    .filter_map(|(i, right)| (child_mask & (1 << i) != 0).then_some(*right))
+                    .collect();
+                let is_subset = child_mask & !parent_mask == 0;
+                assert_eq!(
+                    child.validate_child(&parent).is_ok(),
+                    is_subset,
+                    "parent_mask={parent_mask:07b} child_mask={child_mask:07b}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn requested_direction_must_match_the_semantics_of_the_right() {
+        let s = state();
+        let request = AccessRequest {
+            resource: Resource { domain: "home-a".into(), id: "host-1".into() },
+            right: Right::View,
+            direction: Direction::DelegateToHost,
+            purpose: "support-session".into(),
+            requires_execution: true,
+        };
+        assert_eq!(
+            s.evaluate_request("child", &request, 500).failure,
+            Some(Failure::DirectionMismatch)
+        );
+    }
+
+    #[test]
+    fn freshness_frontier_blocks_stale_snapshots() {
+        let s = state();
+        let request = AccessRequest {
+            resource: Resource { domain: "home-a".into(), id: "host-1".into() },
+            right: Right::View, direction: Direction::HostToDelegate, purpose: "support-session".into(), requires_execution: true,
+        };
+        let minimum = AuthorityFrontier { namespace: "home-a".into(), revision: 12 };
+        let stale = AuthorityFrontier { namespace: "home-a".into(), revision: 11 };
+        let current = AuthorityFrontier { namespace: "home-a".into(), revision: 12 };
+        assert_eq!(
+            s.evaluate_request_at_frontier("child", &request, 500, &stale, &minimum).failure,
+            Some(Failure::FreshnessNotMet)
+        );
+        assert_eq!(
+            s.evaluate_request_at_frontier("child", &request, 500, &current, &minimum).decision,
+            Decision::Allowed
+        );
+    }
+
+    #[test]
+    fn freshness_frontier_must_match_resource_authority_namespace() {
+        let s = state();
+        let request = AccessRequest {
+            resource: Resource { domain: "home-a".into(), id: "host-1".into() },
+            right: Right::View, direction: Direction::HostToDelegate, purpose: "support-session".into(), requires_execution: true,
+        };
+        let observed = AuthorityFrontier { namespace: "home-b".into(), revision: 100 };
+        let minimum = AuthorityFrontier { namespace: "home-a".into(), revision: 1 };
+        assert_eq!(
+            s.evaluate_request_at_frontier("child", &request, 500, &observed, &minimum).decision,
+            Decision::Indeterminate
+        );
+    }
+    #[test]
+    fn every_modeled_right_has_one_enforced_direction() {
+        let mut s = state();
+        s.grants.get_mut("root").unwrap().rights = [
+            Right::View,
+            Right::Input,
+            Right::ClipboardRead,
+            Right::ClipboardWrite,
+            Right::FileRead,
+            Right::FileWrite,
+            Right::Administer,
+        ].into_iter().collect();
+        for right in [
+            Right::View,
+            Right::Input,
+            Right::ClipboardRead,
+            Right::ClipboardWrite,
+            Right::FileRead,
+            Right::FileWrite,
+            Right::Administer,
+        ] {
+            let request = AccessRequest {
+                resource: Resource { domain: "home-a".into(), id: "host-1".into() },
+                right,
+                direction: right.direction(),
+                purpose: "support-session".into(),
+                requires_execution: true,
+            };
+            assert_eq!(s.evaluate_request("root", &request, 500).decision, Decision::Allowed);
+            let mut wrong = request;
+            wrong.direction = match right.direction() {
+                Direction::HostToDelegate => Direction::DelegateToHost,
+                Direction::DelegateToHost | Direction::HostLocal => Direction::HostToDelegate,
+            };
+            assert_eq!(
+                s.evaluate_request("root", &wrong, 500).failure,
+                Some(Failure::DirectionMismatch)
+            );
+        }
+    }
+
+}
