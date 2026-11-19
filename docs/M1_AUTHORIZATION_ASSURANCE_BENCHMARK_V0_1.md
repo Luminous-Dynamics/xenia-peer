@@ -249,6 +249,25 @@ The current 32-case corpus remains a structural seed. Its expected outcome artif
 
 Use OpenID AuthZEN Authorization API 1.0 as the PDP↔PEP interoperability boundary rather than inventing a competing policy query protocol. Treat the AuthZEN Obligations Profile 1.0 as a version-pinned Working Group Draft, not a final standard. If negotiated, a PEP that cannot execute a mandatory obligation must deny; transport/authority uncertainty remains a separate local HOLD/INDETERMINATE condition.
 
+### AuthZEN obligation semantics are not the agent dual-obligation score
+
+The AuthZEN Obligations Profile 1.0 Draft 1 (published 3 July 2026) defines mandatory machine-readable PEP actions. It is **not** the same concept as the agent-benchmark distinction between refusal safety and bounded authorization completeness.
+
+For a single decision request:
+- Obligations may accompany PERMIT or DENY; all returned obligations are mandatory.
+- A PERMIT may be honored only when every obligation is executed successfully.
+- If an obligation is unknown, unsupported, malformed, or fails execution, the PEP treats the overall response as DENY.
+- The PEP still executes every other obligation it understands and can execute, including accountability/notification actions.
+- A DENY remains DENY, while its supported obligations are still executed.
+- For Search-shaped requests only, a result with an unexecutable obligation is excluded while other compliant results may still be returned. This is not the direct M1 lane-decision flow.
+
+A separate seven-case input corpus and outcome oracle now capture these semantics:
+- `docs/benchmarks/M1_AUTHZEN_OBLIGATIONS_PROFILE_DRAFT1_CORPUS_V0_1.json`
+- `docs/benchmarks/M1_AUTHZEN_OBLIGATIONS_PROFILE_DRAFT1_ORACLE_V0_1.json`
+
+The structural Rust test validates the input/oracle linkage and the expected decision/filter distinctions. It does not send live AuthZEN requests, execute obligations, test a deployed PEP/PDP pair, or establish certification/conformance. Keep this profile optional and version-pinned while it remains a Working Group Draft.
+
+
 References:
 - [OpenID AuthZEN specifications](https://openid.net/wg/authzen/specifications/)
 - [AuthZEN Profile for Obligations 1.0 Draft 1](https://openid.github.io/authzen/authzen-obligations-profile-1_0.html)
