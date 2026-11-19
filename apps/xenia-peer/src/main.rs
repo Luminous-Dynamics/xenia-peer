@@ -7091,9 +7091,7 @@ async fn append_operator_revocation_if_observed(
     }
 
     let mut runtime = m1_runtime.lock().await;
-    if runtime.state() != M1SessionState::Revoked {
-        runtime.revoke()?;
-    }
+    runtime.ensure_revocation_recorded()?;
     Ok(true)
 }
 
