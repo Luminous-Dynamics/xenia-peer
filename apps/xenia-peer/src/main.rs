@@ -26,7 +26,8 @@ use xenia_peer_core::OpusAudioCodec;
 #[cfg(any(feature = "audio-capture", test))]
 use xenia_peer_core::frame::audio_flags;
 use xenia_peer_core::{
-    AudioCodec, ClipboardContent, LaneSession, M1PermissionSet, PAYLOAD_TYPE_CLIPBOARD,
+    AudioCodec, ClipboardContent, LaneSession, M1PermissionSet, M1SessionState,
+    PAYLOAD_TYPE_CLIPBOARD,
     RawPcmAudioCodec, RekeyPolicy, SessionEpochState,
     advertisement::{AdvertisedAudioCodec, AudioAdvertisement, TransportAdvertisement},
     cleanup_orphaned_receive_staging,
@@ -7028,11 +7029,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    if revoked.load(Ordering::SeqCst) {
-        if let Err(err) = m1_runtime.lock().await.revoke() {
+    match record_operator_revocation_if_observed(&revoked, &m1_runtime).await {
+        Ok(true) => info!("session revoked by operator; canonical M1 revocation persisted"),
+        Ok(false) => {}
+        Err(err) => {
             warn!(error = %err, "failed to persist canonical M1 revocation after operator latch");
-        } else {
-            info!("session revoked by operator; canonical M1 revocation persisted");
         }
     }
 
@@ -7047,6 +7048,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     send_half.close().await?;
     Ok(())
+}
+
+/// Persist the canonical M1 revocation after any sender-loop exit that
+/// observed the operator latch. Idempotence prevents duplicate ledger events
+/// when a future teardown path calls this helper more than once.
+async fn record_operator_revocation_if_observed(
+    revoked: &AtomicBool,
+    m1_runtime: &Arc<AsyncMutex<crate::m1_runtime::M1RuntimeSession>>,
+) -> Result<bool, crate::m1_runtime::M1RuntimeError> {
+    if !revoked.load(Ordering::SeqCst) {
+        return Ok(false);
+    }
+
+    let mut runtime = m1_runtime.lock().await;
+    if runtime.state() != M1SessionState::Revoked {
+        runtime.revoke()?;
+    }
+    Ok(true)
 }
 
 fn grant_preprod_auto_consent(
@@ -7370,5 +7389,45 @@ mod consent_scope_tests {
         );
         assert!(configured_permission_set(&send).send_file_to_viewer);
         assert!(!configured_permission_set(&send).receive_file_from_viewer);
+    }
+
+    #[tokio::test]
+    async fn operator_latch_teardown_persists_one_canonical_m1_revocation() {
+        let signing_key = SigningKey::from_bytes(&[42; 32]);
+        let mut runtime = crate::m1_runtime::M1RuntimeSession::new(
+            signing_key,
+            [0xAB; 32],
+            Uuid::from_bytes([4; 16]),
+            Uuid::from_bytes([5; 16]),
+            "operator revoke teardown test",
+        );
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet::all())
+            .unwrap();
+
+        let entries_before = runtime.ledger_len();
+        let revoked = Arc::new(AtomicBool::new(true));
+        runtime.bind_operator_revocation_latch(Arc::clone(&revoked));
+        let runtime = Arc::new(AsyncMutex::new(runtime));
+
+        assert!(
+            record_operator_revocation_if_observed(&revoked, &runtime)
+                .await
+                .unwrap()
+        );
+        {
+            let guard = runtime.lock().await;
+            assert_eq!(guard.state(), M1SessionState::Revoked);
+            assert_eq!(guard.ledger_len(), entries_before + 1);
+        }
+
+        // Repeated teardown is a no-op for the durable M1 lifecycle.
+        assert!(
+            record_operator_revocation_if_observed(&revoked, &runtime)
+                .await
+                .unwrap()
+        );
+        assert_eq!(runtime.lock().await.ledger_len(), entries_before + 1);
     }
 }
