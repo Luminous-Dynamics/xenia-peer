@@ -224,14 +224,12 @@ Its experiments report 7 unfinished approvals among 300 paired approvals despite
 
 M1 translation: paired tests must hold the same session, operation and host state fixed while changing only the authorization decision. An Approve must preserve the exact eligible lane operation through transport scheduling and effect dispatch. A Revoke/Deny must suppress the exact same operation. Do not mark a blanket shutdown as a successful authorization result; valid unrelated lanes and independent grants must remain usable.
 
-### Required M1 benchmark additions (future corpus, not in the 32-case seed)
+### Remaining M1 benchmark additions (beyond the current 32-case and 11-history seeds)
 
-Add paired, independently adjudicated cases for:
+The 11-history effect-race extension below now covers revoke/commit order, timeout-after-dispatch, exact replay, changed-fingerprint conflict, stale rekey, ancestor revocation, staged-file publication, sensitive-buffer invalidation and concurrent one-shot consumption. Additional paired, independently adjudicated cases are still needed for:
 - each lane's minimum compliant route versus an over-collection, overbroad-tool, wrong-resource or post-expiry shortcut;
 - a scoped Approve with two authorized operations, where parallel scheduling or reconnect must not drop one;
 - Approve for one lane and Deny for another, where batching must not collapse both decisions into one boolean;
-- a queued effect generated before Revoke but not yet admitted at the effect owner;
-- an admitted in-flight operation racing with Revoke, with a typed pre-revoke / post-revoke linearization result and UNKNOWN when commit cannot be observed;
 - session restoration after restart where a previously approved but uncommitted action must be re-evaluated against current consent and authority;
 - a Reject whose control-plane record is correct but an alternate workflow/transport still attempts the protected effect;
 - a valid Approve where the action is feasible but the harness never dispatches it.
@@ -243,7 +241,30 @@ For Xenia specifically, use the model/harness/workflow distinction to review:
 - daemon task scheduling, concurrent file-transfer tasks, reconnect/rekey and cancellation;
 - TCP/WebSocket/QUIC dispatch, operator/control routes and the final OS/filesystem/input effect owners.
 
-The current 32-case corpus remains a structural seed. Its expected outcome artifact is now stored separately, but independent adjudication and executable positive/negative effect controls remain pending. Planned cases do not count as implemented or adjudicated until they have frozen inputs, a separate oracle and executable positive/negative controls.
+The 32-case decision corpus, 16-case drift/refusal-completeness extension, four-case clarification extension, seven-case AuthZEN obligations extension and 11-history effect-race extension are separate synthetic structural seeds. Each uses a separate outcome oracle. None is an independently adjudicated benchmark result; executable candidate controls, full route/effect interposition and independent observation remain pending.
+
+## 4.2 Effect-race and linearization history extension
+
+A separate 11-history schedule corpus has been added:
+- `docs/benchmarks/M1_EFFECT_RACE_HISTORY_EXTENSION_V0_1.json`
+- `docs/benchmarks/M1_EFFECT_RACE_HISTORY_EXTENSION_V0_1_ORACLE.json`
+
+It covers:
+1. Revocation observed before the effect-owner commit gate → no dispatch.
+2. Local effect commit linearizes before later revocation → preserve the commit while keeping missing remote acknowledgement UNKNOWN.
+3. A screen source read occurs before revocation but the final send gate occurs after it → invalidate the captured buffer and do not disclose.
+4. Transport timeout after dispatch → UNKNOWN and no blind retry.
+5. Exact operation ID + fingerprint replay → return/reconcile the prior result without a second dispatch.
+6. Reused operation ID with changed immutable fingerprint → CONFLICT.
+7. Old queued work after reconnect/rekey → reject the stale session epoch.
+8. Parent/ancestor revocation observed before cached descendant effect → deny descendant.
+9. Incoming file chunks staged before revocation but publication attempted afterwards → quarantine/remove staging and do not publish.
+10. Host clipboard read before revocation but send gate after → invalidate plaintext buffer and do not disclose.
+11. Two enforcement points concurrently consume a one-shot capability → at most one durable consume and effect-bearing dispatch.
+
+The input corpus records ordered logical events, not wall-clock timestamps. Its separate oracle distinguishes local commit from remote observation and represents ambiguous transport results as UNKNOWN. It does not implement a linearizable commit service or prove the current runtime has one. A Rust structural test validates action IDs, input/oracle one-to-one linkage, ordered event sequences, and the expected history invariants. The test is a corpus-drift guard, not an implementation or independent adjudication.
+
+**Claim ceiling:** synthetic preregistration histories only. Xenia #504 must still implement/qualify the effect-owner serialization or equivalent transactional protocol; Mycelix #6193 owns independent linearizability/history checking. A final permission check followed by an asynchronous OS/network operation is not automatically atomic with revocation.
 
 ## 5. Interoperability and standards
 
