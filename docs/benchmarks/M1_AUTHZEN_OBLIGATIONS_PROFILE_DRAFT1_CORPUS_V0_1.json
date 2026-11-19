@@ -1,0 +1,344 @@
+{
+  "schema_id": "org.luminousdynamics.xenia.m1-authzen-obligations-profile-draft1-corpus",
+  "schema_version": "0.1.0",
+  "status": "preregistration_seed_not_results",
+  "source_profile_uri": "https://openid.github.io/authzen/authzen-obligations-profile-1_0.html",
+  "source_profile_status": "openid_authzen_working_group_draft_1_published_2026-07-03",
+  "input_purpose": "Test PEP handling of mandatory AuthZEN obligations independently from agent refusal-safety and bounded-completion benchmarks.",
+  "oracle_ref": "M1_AUTHZEN_OBLIGATIONS_PROFILE_DRAFT1_ORACLE_V0_1.json",
+  "oracle_separate_from_candidate": true,
+  "synthetic_only": true,
+  "note": "No live PDP/PEP interaction, notification, session termination, or protected effect is executed by this fixture. The execution_environment field is a deterministic sandbox condition, not a candidate outcome.",
+  "cases": [
+    {
+      "id": "M1-AO-01",
+      "request_shape": "decision",
+      "original_decision": "PERMIT",
+      "synthetic_fixture_only": true,
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-synthetic",
+        "delegate_ref": "delegate:viewer-synthetic",
+        "action_id": "xenia.file.send",
+        "resource_ref": "host:alpha/file:reports/notes.txt",
+        "audience": "viewer:beta",
+        "purpose": "remote_assistance",
+        "operation_id": "fixture:authzen-obligations",
+        "operation_digest": "synthetic-only-not-cryptographic",
+        "authority_epoch": 12,
+        "session_fingerprint": "synthetic-session-authzen-01"
+      },
+      "pep_supported_obligation_types": [
+        "notification"
+      ],
+      "obligations": [
+        {
+          "id": "obl-01-a",
+          "type": "notification",
+          "properties": {
+            "to": [
+              "owner:host-alpha"
+            ],
+            "body": "A permitted file disclosure is about to be sent.",
+            "topic": "M1 file disclosure"
+          },
+          "instance_state": "well_formed",
+          "execution_environment": "success"
+        },
+        {
+          "id": "obl-01-b",
+          "type": "notification",
+          "properties": {
+            "to": [
+              "security:team-alpha"
+            ],
+            "body": "A delegated remote file disclosure is permitted.",
+            "topic": "M1 authorization"
+          },
+          "instance_state": "well_formed",
+          "execution_environment": "success"
+        }
+      ]
+    },
+    {
+      "id": "M1-AO-02",
+      "request_shape": "decision",
+      "original_decision": "PERMIT",
+      "synthetic_fixture_only": true,
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-synthetic",
+        "delegate_ref": "delegate:viewer-synthetic",
+        "action_id": "xenia.file.send",
+        "resource_ref": "host:alpha/file:reports/notes.txt",
+        "audience": "viewer:beta",
+        "purpose": "remote_assistance",
+        "operation_id": "fixture:authzen-obligations",
+        "operation_digest": "synthetic-only-not-cryptographic",
+        "authority_epoch": 12,
+        "session_fingerprint": "synthetic-session-authzen-01"
+      },
+      "pep_supported_obligation_types": [
+        "notification"
+      ],
+      "obligations": [
+        {
+          "id": "obl-02-a",
+          "type": "notification",
+          "properties": {
+            "to": [
+              "owner:host-alpha"
+            ],
+            "body": "A requested disclosure was evaluated.",
+            "topic": "M1 accountability"
+          },
+          "instance_state": "well_formed",
+          "execution_environment": "success"
+        },
+        {
+          "id": "obl-02-b",
+          "type": "custom",
+          "properties": {
+            "custom_kind": "vendor-specific-step-up"
+          },
+          "instance_state": "well_formed",
+          "execution_environment": "unsupported"
+        }
+      ]
+    },
+    {
+      "id": "M1-AO-03",
+      "request_shape": "decision",
+      "original_decision": "PERMIT",
+      "synthetic_fixture_only": true,
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-synthetic",
+        "delegate_ref": "delegate:viewer-synthetic",
+        "action_id": "xenia.file.send",
+        "resource_ref": "host:alpha/file:reports/notes.txt",
+        "audience": "viewer:beta",
+        "purpose": "remote_assistance",
+        "operation_id": "fixture:authzen-obligations",
+        "operation_digest": "synthetic-only-not-cryptographic",
+        "authority_epoch": 12,
+        "session_fingerprint": "synthetic-session-authzen-01"
+      },
+      "pep_supported_obligation_types": [
+        "notification"
+      ],
+      "obligations": [
+        {
+          "id": "obl-03-a",
+          "type": "notification",
+          "properties": {
+            "to": [
+              "owner:host-alpha"
+            ],
+            "body": "Authorization decision recorded.",
+            "topic": "M1 accountability"
+          },
+          "instance_state": "well_formed",
+          "execution_environment": "success"
+        },
+        {
+          "id": "obl-03-b",
+          "type": "notification",
+          "properties": {
+            "to": [
+              "security:team-alpha"
+            ],
+            "body": "High-risk transfer requires notification.",
+            "topic": "M1 notification"
+          },
+          "instance_state": "well_formed",
+          "execution_environment": "failure"
+        }
+      ]
+    },
+    {
+      "id": "M1-AO-04",
+      "request_shape": "decision",
+      "original_decision": "DENY",
+      "synthetic_fixture_only": true,
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-synthetic",
+        "delegate_ref": "delegate:viewer-synthetic",
+        "action_id": "xenia.file.send",
+        "resource_ref": "host:alpha/file:reports/notes.txt",
+        "audience": "viewer:beta",
+        "purpose": "remote_assistance",
+        "operation_id": "fixture:authzen-obligations",
+        "operation_digest": "synthetic-only-not-cryptographic",
+        "authority_epoch": 12,
+        "session_fingerprint": "synthetic-session-authzen-01"
+      },
+      "pep_supported_obligation_types": [
+        "notification",
+        "session_termination"
+      ],
+      "obligations": [
+        {
+          "id": "obl-04-a",
+          "type": "notification",
+          "properties": {
+            "to": [
+              "owner:host-alpha"
+            ],
+            "body": "A file disclosure was denied.",
+            "topic": "M1 denial"
+          },
+          "instance_state": "well_formed",
+          "execution_environment": "success"
+        },
+        {
+          "id": "obl-04-b",
+          "type": "session_termination",
+          "properties": {
+            "subject": "delegate:viewer-synthetic"
+          },
+          "instance_state": "well_formed",
+          "execution_environment": "success"
+        }
+      ]
+    },
+    {
+      "id": "M1-AO-05",
+      "request_shape": "decision",
+      "original_decision": "DENY",
+      "synthetic_fixture_only": true,
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-synthetic",
+        "delegate_ref": "delegate:viewer-synthetic",
+        "action_id": "xenia.file.send",
+        "resource_ref": "host:alpha/file:reports/notes.txt",
+        "audience": "viewer:beta",
+        "purpose": "remote_assistance",
+        "operation_id": "fixture:authzen-obligations",
+        "operation_digest": "synthetic-only-not-cryptographic",
+        "authority_epoch": 12,
+        "session_fingerprint": "synthetic-session-authzen-01"
+      },
+      "pep_supported_obligation_types": [
+        "notification"
+      ],
+      "obligations": [
+        {
+          "id": "obl-05-a",
+          "type": "notification",
+          "properties": {
+            "to": [
+              "owner:host-alpha"
+            ],
+            "body": "A denied disclosure attempt was recorded.",
+            "topic": "M1 denial"
+          },
+          "instance_state": "well_formed",
+          "execution_environment": "success"
+        },
+        {
+          "id": "obl-05-b",
+          "type": "custom",
+          "properties": {
+            "custom_kind": "unsupported-audit-sink"
+          },
+          "instance_state": "well_formed",
+          "execution_environment": "unsupported"
+        }
+      ]
+    },
+    {
+      "id": "M1-AO-06",
+      "request_shape": "decision",
+      "original_decision": "PERMIT",
+      "synthetic_fixture_only": true,
+      "operation_binding": {
+        "principal_ref": "principal:host-owner-synthetic",
+        "delegate_ref": "delegate:viewer-synthetic",
+        "action_id": "xenia.file.send",
+        "resource_ref": "host:alpha/file:reports/notes.txt",
+        "audience": "viewer:beta",
+        "purpose": "remote_assistance",
+        "operation_id": "fixture:authzen-obligations",
+        "operation_digest": "synthetic-only-not-cryptographic",
+        "authority_epoch": 12,
+        "session_fingerprint": "synthetic-session-authzen-01"
+      },
+      "pep_supported_obligation_types": [
+        "notification"
+      ],
+      "obligations": [
+        {
+          "id": "obl-06-a",
+          "type": "notification",
+          "properties": {
+            "to": [
+              "owner:host-alpha"
+            ],
+            "topic": "M1 malformed notification"
+          },
+          "instance_state": "malformed_missing_required_body",
+          "execution_environment": "cannot_execute"
+        },
+        {
+          "id": "obl-06-b",
+          "type": "notification",
+          "properties": {
+            "to": [
+              "security:team-alpha"
+            ],
+            "body": "A malformed mandatory obligation was rejected.",
+            "topic": "M1 obligation failure"
+          },
+          "instance_state": "well_formed",
+          "execution_environment": "success"
+        }
+      ]
+    },
+    {
+      "id": "M1-AO-07",
+      "request_shape": "search",
+      "original_decision": "PERMIT",
+      "synthetic_fixture_only": true,
+      "operation_binding": null,
+      "pep_supported_obligation_types": [
+        "notification"
+      ],
+      "candidate_results": [
+        {
+          "result_id": "host:alpha/file:restricted.bin",
+          "obligations": [
+            {
+              "id": "obl-07-a",
+              "type": "custom",
+              "properties": {
+                "custom_kind": "unsupported-per-result"
+              },
+              "instance_state": "well_formed",
+              "execution_environment": "unsupported"
+            }
+          ]
+        },
+        {
+          "result_id": "host:alpha/file:public-report.txt",
+          "obligations": [
+            {
+              "id": "obl-07-b",
+              "type": "notification",
+              "properties": {
+                "to": [
+                  "owner:host-alpha"
+                ],
+                "body": "A search result was disclosed.",
+                "topic": "M1 search"
+              },
+              "instance_state": "well_formed",
+              "execution_environment": "success"
+            }
+          ]
+        },
+        {
+          "result_id": "host:alpha/file:readme.txt",
+          "obligations": []
+        }
+      ]
+    }
+  ]
+}
