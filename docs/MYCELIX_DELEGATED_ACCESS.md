@@ -220,6 +220,27 @@ Run 1, 10, 100 and 1,000 concurrent sessions; 1, 8 and 32 lanes/session; 1, 10, 
 
 Compare equivalent policy semantics against at least one Zanzibar-style relationship engine (e.g. OpenFGA), OPA, Cedar, and an AuthZEN-compatible PDP/PEP pair. Keep identity, policy graph, resource count, cache state, consistency mode, hardware, concurrency, and query mix matched. Report raw latency distributions and correctness separately. Do not claim “better than SOTA” from unlike workloads or from a single median.
 
+#### Agent-authorization benchmark comparator: XAAB v2
+
+The Xybern Agent Authorization Benchmark (XAAB) publishes a useful vendor-authored agent-intent comparator. Its v2 page reports 164 scenarios (125 unsafe, 39 legitimate), three runs, 99.7% mean catch rate, 0% false positives and p50/p95 latency of 5.1/11.1 seconds for its LLM-judged authorization layer. It also reports allow-all and block-all baselines, and separates semantic evasions from hard-benign cases. These figures are the vendor's published results, not an independent reproduction or a matched comparison with ROS-005/Xenia. The signed/hash-chained proof bundle can establish integrity and ordering of the submitted run records; it does not, by itself, establish oracle independence, scenario completeness, or ground-truth correctness. Before using XAAB as a comparison arm, pin its code, scenarios, judge/model, verifier, and raw bundle; reproduce it independently and disclose any adapter/semantics changes.
+
+XAAB's multi-second latency is not directly comparable to a local deterministic M1 lane check or a PDP microbenchmark. Its LLM intent judge answers a different question: whether the action appears to violate semantic intent/policy. Keep that as a separate stage rather than putting it in the synchronous data-plane path by default. The proposed architecture is layered:
+1. deterministic identity, delegation, exact scope and consent preconditions;
+2. optional semantic-intent review for ambiguous/high-risk intent, with escalation/clarification;
+3. exact operation digest + current authority check at the effect owner;
+4. local final effect gate and independent outcome reconciliation.
+
+A fast deterministic allow must not bypass a required semantic review; a semantic judge must not mint authority or override an exact-scope denial. Measure the judge's cost and false-positive/false-negative trade-off separately from the PEP/effect-boundary path.
+
+A structured review published 10 November 2026 screened a 75-source library into a 30-source analytical corpus (92 source-claim records). Within that closed corpus, it found no evaluable revocation claim among 21 agent-focused sources and no delegation-containment claim across the 30-source corpus. The authors explicitly present their Minimum Authorization-Assurance Profile as a preliminary review-derived reporting framework, not a validated score or certification. These are corpus-bounded findings, not evidence that all industry systems lack these controls; they reinforce why our benchmark must score revocation, delegation containment, complete mediation and effect evidence as separate properties.
+
+The benchmark should therefore publish three distinct scorecards, not a single “agent authorization” number:
+- **Intent/policy interpretation:** adversarial paraphrase, multi-turn drift, ambiguous goals, clarification burden, precision/recall, false positives, model/version and latency.
+- **Decision correctness:** PDP/PEP conformance, policy mutation, stale context, obligations, subject/resource/action binding, and p50/p95/p99 by cache/consistency state.
+- **Effect assurance:** route coverage, least-privilege union, parent/child attenuation, revocation observed at each PEP, duplicate/unknown outcomes, authorized-vs-realized operation identity, independent observation and false-PASS rate.
+
+Any combined display must retain the three sub-scores and non-compensatory hard gates. A high intent catch rate cannot compensate for a reachable bypass, stale revoked capability, child-scope amplification or unauthorized protected effect.
+
 The likely advantage to pursue is not raw PDP latency alone: it is a stronger end-to-end safety envelope—strict delegation attenuation, no confused OR/AND composition, per-lane enforcement, explicit in-flight commit semantics, and independently verifiable revocation receipts—with acceptable measured overhead.
 
 ## 16. Deterministic reference model
