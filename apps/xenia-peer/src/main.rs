@@ -6520,14 +6520,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .lock()
                 .await
                 .seal_file_transfer_message(offer, true)?;
-            m1_runtime.lock().await.allow_file_send_flow()?;
-            send_half.send_envelope(&envelope).await?;
-            info!(transfer_id, name, size, "file transfer offered");
-            ft_state.outgoing = Some(file_transfer::OutgoingTransfer {
-                transfer_id,
-                source,
-                started: false,
-            });
+            match m1_runtime.lock().await.allow_file_send_flow() {
+                Ok(()) => {
+                    send_half.send_envelope(&envelope).await?;
+                    info!(transfer_id, name, size, "file transfer offered");
+                    ft_state.outgoing = Some(file_transfer::OutgoingTransfer {
+                        transfer_id,
+                        source,
+                        started: false,
+                    });
+                }
+                Err(crate::m1_runtime::M1RuntimeError::OperatorRevocationObserved) => {
+                    warn!("operator revoke observed after file-source preflight; offer suppressed");
+                }
+                Err(err) => {
+                    warn!(error = %err, "file-send lane denied at offer boundary; offer suppressed");
+                }
+            }
         }
     }
 
@@ -6721,24 +6730,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sent_clipboard = 0u64;
     let video_pressure = xenia_peer_core::producer_flow::LanePressureCountersV1::default();
 
-    loop {
+    'send_loop: loop {
+        // Check before sleeping as well as after the ticker so a revoke
+        // observed by a sibling operator task is not delayed by the frame
+        // interval. All exits caused by this latch converge on the one
+        // canonical M1 revocation append after the loop.
+        if revoked.load(Ordering::SeqCst) {
+            break 'send_loop;
+        }
         if args.frames != 0 && sent_frames >= args.frames {
             info!(sent = sent_frames, "reached --frames, daemon exiting");
-            break;
+            break 'send_loop;
         }
 
         ticker.tick().await;
 
-        // Mid-session revocation: if the operator sent "Revoke" on the
-        // consent socket, record it in the consent ledger (which flips the
-        // M1 state to Revoked so every frame/input/clipboard/file gate now
-        // fails closed) and stop streaming with a graceful close.
         if revoked.load(Ordering::SeqCst) {
-            if let Err(err) = m1_runtime.lock().await.revoke() {
-                warn!(error = %err, "failed to record consent revocation");
-            }
-            info!("session revoked by operator; stopping frame flow");
-            break;
+            break 'send_loop;
         }
 
         while let Ok(envelope) = ft_rx.try_recv() {
@@ -6788,7 +6796,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         .into_frame()?;
                         let envelope = session.lock().await.seal_frame(&telemetry_frame)?;
-                        m1_runtime.lock().await.allow_telemetry_flow()?;
+                        match m1_runtime.lock().await.allow_telemetry_flow() {
+                            Ok(()) => {}
+                            Err(crate::m1_runtime::M1RuntimeError::OperatorRevocationObserved) => {
+                                break 'send_loop;
+                            }
+                            Err(err) => {
+                                warn!(error = %err, "telemetry lane denied at send boundary");
+                                continue;
+                            }
+                        }
                         send_half.send_envelope(&envelope).await?;
                         sent_telemetry += 1;
                         last_telemetry_sent = std::time::Instant::now();
@@ -6820,7 +6837,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let frame_id = session.lock().await.next_frame_id();
                 let audio_frame = raw_audio.into_frame(frame_id)?;
                 let envelope = session.lock().await.seal_frame(&audio_frame)?;
-                m1_runtime.lock().await.allow_audio_flow()?;
+                match m1_runtime.lock().await.allow_audio_flow() {
+                    Ok(()) => {}
+                    Err(crate::m1_runtime::M1RuntimeError::OperatorRevocationObserved) => {
+                        break 'send_loop;
+                    }
+                    Err(err) => {
+                        warn!(error = %err, "audio lane denied at send boundary");
+                        continue;
+                    }
+                }
                 send_half.send_envelope(&envelope).await?;
                 epoch_state.record_audio_frame(envelope.len());
                 sent_audio += 1;
@@ -6860,7 +6886,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 .into_frame(frame_id)?;
                 let envelope = session.lock().await.seal_frame(&clipboard_frame)?;
-                m1_runtime.lock().await.allow_host_clipboard_read_flow()?;
+                match m1_runtime.lock().await.allow_host_clipboard_read_flow() {
+                    Ok(()) => {}
+                    Err(crate::m1_runtime::M1RuntimeError::OperatorRevocationObserved) => {
+                        break 'send_loop;
+                    }
+                    Err(err) => {
+                        warn!(error = %err, "clipboard-read lane denied at send boundary");
+                        continue;
+                    }
+                }
                 send_half.send_envelope(&envelope).await?;
                 last_sent_clipboard_text = Some(text);
                 sent_clipboard += 1;
@@ -6944,7 +6979,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 packet.bytes,
             );
             let envelope = session.lock().await.seal_frame(&raw)?;
-            m1_runtime.lock().await.allow_frame_flow()?;
+            match m1_runtime.lock().await.allow_frame_flow() {
+                Ok(()) => {}
+                Err(crate::m1_runtime::M1RuntimeError::OperatorRevocationObserved) => {
+                    break 'send_loop;
+                }
+                Err(err) => {
+                    warn!(error = %err, "screen-frame lane denied at send boundary");
+                    continue;
+                }
+            }
             let send_deadline = Duration::from_millis(
                 xenia_peer_core::producer_flow::HOST_VIDEO_FRESHNESS_V1.max_send_stall_ms,
             );
@@ -6981,6 +7025,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if args.frames != 0 && sent_frames >= args.frames {
                 break;
             }
+        }
+    }
+
+    if revoked.load(Ordering::SeqCst) {
+        if let Err(err) = m1_runtime.lock().await.revoke() {
+            warn!(error = %err, "failed to persist canonical M1 revocation after operator latch");
+        } else {
+            info!("session revoked by operator; canonical M1 revocation persisted");
         }
     }
 
