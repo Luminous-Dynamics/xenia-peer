@@ -1,0 +1,131 @@
+{
+  "schema_id": "org.luminousdynamics.xenia.m1-authzen-obligations-profile-draft1-oracle",
+  "schema_version": "0.1.0",
+  "status": "preregistration_oracle_not_independently_adjudicated",
+  "input_corpus_ref": "M1_AUTHZEN_OBLIGATIONS_PROFILE_DRAFT1_CORPUS_V0_1.json",
+  "input_corpus_source_commit": "to-be-bound-after-commit",
+  "independent_adjudication_status": "pending",
+  "scenario_results": [
+    {
+      "id": "M1-AO-01",
+      "original_decision": "PERMIT",
+      "expected_effective_decision": "PERMIT",
+      "expected_operation_effect_attempts": 1,
+      "expected_obligation_attempts": [
+        "obl-01-a",
+        "obl-01-b"
+      ],
+      "expected_obligation_successes": [
+        "obl-01-a",
+        "obl-01-b"
+      ],
+      "expected_noncompliant_obligations": [],
+      "expected_rationale": "Every mandatory obligation is understood, well formed and successfully executed before honoring the PERMIT."
+    },
+    {
+      "id": "M1-AO-02",
+      "original_decision": "PERMIT",
+      "expected_effective_decision": "DENY",
+      "expected_operation_effect_attempts": 0,
+      "expected_obligation_attempts": [
+        "obl-02-a"
+      ],
+      "expected_obligation_successes": [
+        "obl-02-a"
+      ],
+      "expected_noncompliant_obligations": [
+        "obl-02-b"
+      ],
+      "expected_rationale": "The unsupported mandatory custom obligation forces DENY; the supported notification is still executed."
+    },
+    {
+      "id": "M1-AO-03",
+      "original_decision": "PERMIT",
+      "expected_effective_decision": "DENY",
+      "expected_operation_effect_attempts": 0,
+      "expected_obligation_attempts": [
+        "obl-03-a",
+        "obl-03-b"
+      ],
+      "expected_obligation_successes": [
+        "obl-03-a"
+      ],
+      "expected_noncompliant_obligations": [
+        "obl-03-b"
+      ],
+      "expected_rationale": "A failed mandatory notification forces DENY; the other supported obligation is still executed."
+    },
+    {
+      "id": "M1-AO-04",
+      "original_decision": "DENY",
+      "expected_effective_decision": "DENY",
+      "expected_operation_effect_attempts": 0,
+      "expected_obligation_attempts": [
+        "obl-04-a",
+        "obl-04-b"
+      ],
+      "expected_obligation_successes": [
+        "obl-04-a",
+        "obl-04-b"
+      ],
+      "expected_noncompliant_obligations": [],
+      "expected_rationale": "DENY remains DENY and every supported mandatory obligation is executed."
+    },
+    {
+      "id": "M1-AO-05",
+      "original_decision": "DENY",
+      "expected_effective_decision": "DENY",
+      "expected_operation_effect_attempts": 0,
+      "expected_obligation_attempts": [
+        "obl-05-a"
+      ],
+      "expected_obligation_successes": [
+        "obl-05-a"
+      ],
+      "expected_noncompliant_obligations": [
+        "obl-05-b"
+      ],
+      "expected_rationale": "DENY remains in force; the unknown mandatory obligation is noncompliant but the supported notification is still executed."
+    },
+    {
+      "id": "M1-AO-06",
+      "original_decision": "PERMIT",
+      "expected_effective_decision": "DENY",
+      "expected_operation_effect_attempts": 0,
+      "expected_obligation_attempts": [
+        "obl-06-a",
+        "obl-06-b"
+      ],
+      "expected_obligation_successes": [
+        "obl-06-b"
+      ],
+      "expected_noncompliant_obligations": [
+        "obl-06-a"
+      ],
+      "expected_rationale": "A malformed instance of a recognized obligation is noncompliant; the valid supported notification is still executed and the protected effect is denied."
+    },
+    {
+      "id": "M1-AO-07",
+      "original_decision": "PERMIT",
+      "expected_effective_decision": "FILTER_RESULTS",
+      "expected_operation_effect_attempts": 0,
+      "expected_obligation_attempts": [
+        "obl-07-b"
+      ],
+      "expected_obligation_successes": [
+        "obl-07-b"
+      ],
+      "expected_noncompliant_obligations": [
+        "obl-07-a"
+      ],
+      "expected_returned_result_ids": [
+        "host:alpha/file:public-report.txt",
+        "host:alpha/file:readme.txt"
+      ],
+      "expected_excluded_result_ids": [
+        "host:alpha/file:restricted.bin"
+      ],
+      "expected_rationale": "For a Search-shaped request, the unsupported per-result obligation excludes only that result; other compliant/no-obligation results remain visible."
+    }
+  ]
+}
