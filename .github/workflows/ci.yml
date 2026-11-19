@@ -378,6 +378,22 @@ jobs:
             set -e
             echo "cargo_check_locked_exit=$locked_status" >> diagnostic-artifacts/status.txt
           fi
+
+          # Independently resolve the real macOS target graph, including
+          # target-gated dependencies, without compiling or changing the
+          # production macos-launcher --locked gate. Restore the original
+          # lockfile first so this delta is not contaminated by the WASM
+          # diagnostic above.
+          cp diagnostic-artifacts/Cargo.lock.before Cargo.lock
+          set +e
+          cargo metadata --format-version 1 --filter-platform aarch64-apple-darwin > diagnostic-artifacts/macos-metadata.json
+          mac_metadata_status=$?
+          set -e
+          echo "macos_metadata_exit=$mac_metadata_status" >> diagnostic-artifacts/status.txt
+          cp Cargo.lock diagnostic-artifacts/Cargo.lock.after-macos
+          git diff --no-index -- diagnostic-artifacts/Cargo.lock.before diagnostic-artifacts/Cargo.lock.after-macos > diagnostic-artifacts/Cargo.lock.macos.diff || true
+          sha256sum diagnostic-artifacts/Cargo.lock.before diagnostic-artifacts/Cargo.lock.after-macos >> diagnostic-artifacts/sha256.txt
+          cp diagnostic-artifacts/Cargo.lock.before Cargo.lock
       - name: Upload resolver evidence
         if: always()
         uses: actions/upload-artifact@v4
