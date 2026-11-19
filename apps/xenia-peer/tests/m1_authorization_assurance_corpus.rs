@@ -1128,7 +1128,8 @@ fn effect_race_histories_preserve_linearization_and_unknown_outcome_semantics() 
             Some("DENY" | "PERMIT_AT_COMMIT" | "DENY_AT_FINAL_GATE"
                 | "PRIOR_DECISION_REUSED" | "CONFLICT" | "DENY_STALE_SESSION"
                 | "DENY_REVOKED_ANCESTOR" | "DENY_FINAL_PUBLISH"
-                | "DENY_DISCLOSURE_SEND" | "ONE_CONSUMER_PERMITTED")
+                | "DENY_DISCLOSURE_SEND" | "ONE_CONSUMER_PERMITTED"
+                | "DENY_AFTER_OPERATOR_REVOKE")
         ));
         assert!(row["effectful_dispatches"].as_u64().is_some());
         assert!(row["duplicate_dispatches"].as_u64().is_some());
@@ -1293,6 +1294,14 @@ fn effect_race_histories_preserve_linearization_and_unknown_outcome_semantics() 
             < event_seq(teardown, "original_send_loop_error_propagated")
     );
     let teardown_result = race_result(rows, "M1-RACE-12");
+    assert_eq!(
+        teardown_result["authorization_disposition"].as_str(),
+        Some("DENY_AFTER_OPERATOR_REVOKE")
+    );
+    assert_eq!(
+        teardown_result["operation_disposition"].as_str(),
+        Some("REVOCATION_APPENDED_BEFORE_ERROR_RETURN")
+    );
     assert_eq!(teardown_result["effectful_dispatches"].as_u64(), Some(0));
     assert_eq!(
         teardown_result["original_send_loop_error_propagated"].as_bool(),
