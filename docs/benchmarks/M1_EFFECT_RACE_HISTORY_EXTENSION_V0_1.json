@@ -1,0 +1,482 @@
+{
+  "schema_id": "org.luminousdynamics.xenia.m1-effect-race-history-extension",
+  "schema_version": "0.1.0",
+  "status": "preregistration_extension_not_results",
+  "source_baseline_commit": "5dfa84ec6268fec8229ff3297be42c938eef3237",
+  "synthetic_only": true,
+  "histories_are_logical_orders_not_wall_clock_times": true,
+  "oracle_separate_from_candidate": true,
+  "oracle_ref": "M1_EFFECT_RACE_HISTORY_EXTENSION_V0_1_ORACLE.json",
+  "owner_links": [
+    "https://github.com/Luminous-Dynamics/xenia-peer/issues/504",
+    "https://github.com/Luminous-Dynamics/xenia-peer/issues/510",
+    "https://github.com/Luminous-Dynamics/mycelix/issues/6193",
+    "https://github.com/Luminous-Dynamics/mycelix/issues/6236"
+  ],
+  "cases": [
+    {
+      "id": "M1-RACE-01",
+      "family": "revocation_before_commit",
+      "description": "Revocation becomes effective and is observed before the effect-owner linearization point. The operation must not dispatch.",
+      "operation": {
+        "id": "op:r01",
+        "fingerprint": "sha256:fixture-r01",
+        "lane": "InjectInput",
+        "action_id": "xenia.input.inject",
+        "direction": "viewer_to_host",
+        "resource": "host:alpha/input",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "delegation": "del:child-1"
+      },
+      "schedule": [
+        {
+          "seq": 1,
+          "event": "source_preflight_permit",
+          "owner": "xenia-input"
+        },
+        {
+          "seq": 2,
+          "event": "revocation_observed",
+          "owner": "xenia-input"
+        },
+        {
+          "seq": 3,
+          "event": "effect_owner_gate_denied",
+          "owner": "xenia-input"
+        }
+      ],
+      "faults": [],
+      "notes": "The gate decision and dispatch are distinct. No platform injector call is made."
+    },
+    {
+      "id": "M1-RACE-02",
+      "family": "commit_before_revocation",
+      "description": "The operation crosses the declared local commit point before revocation is observed. The commit record is preserved; later remote outcome remains separately classified.",
+      "operation": {
+        "id": "op:r02",
+        "fingerprint": "sha256:fixture-r02",
+        "lane": "SendFileToViewer",
+        "action_id": "xenia.file.send",
+        "direction": "host_to_viewer",
+        "resource": "host:alpha/file:reports/q1.csv",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "delegation": "del:child-1"
+      },
+      "schedule": [
+        {
+          "seq": 1,
+          "event": "source_preflight_permit",
+          "owner": "xenia-file-send"
+        },
+        {
+          "seq": 2,
+          "event": "effect_owner_commit",
+          "owner": "xenia-file-send"
+        },
+        {
+          "seq": 3,
+          "event": "revocation_observed",
+          "owner": "xenia-file-send"
+        },
+        {
+          "seq": 4,
+          "event": "remote_ack_timeout",
+          "owner": "xenia-file-send"
+        }
+      ],
+      "faults": [
+        "remote_ack_lost"
+      ],
+      "notes": "Revocation is prospective relative to the already-linearized local commit; it does not erase the historical commit. Remote receipt is not inferred."
+    },
+    {
+      "id": "M1-RACE-03",
+      "family": "preflight_to_commit_revocation",
+      "description": "Screen data is captured after an authorized source preflight, then revocation is observed before the final send gate. The captured buffer must not be transmitted and must be invalidated.",
+      "operation": {
+        "id": "op:r03",
+        "fingerprint": "sha256:fixture-r03",
+        "lane": "StreamFrame",
+        "action_id": "xenia.screen.view",
+        "direction": "host_to_viewer",
+        "resource": "host:alpha/display:primary",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "delegation": "del:child-1"
+      },
+      "schedule": [
+        {
+          "seq": 1,
+          "event": "source_preflight_permit",
+          "owner": "xenia-screen"
+        },
+        {
+          "seq": 2,
+          "event": "sensitive_source_read",
+          "owner": "xenia-screen"
+        },
+        {
+          "seq": 3,
+          "event": "revocation_observed",
+          "owner": "xenia-screen"
+        },
+        {
+          "seq": 4,
+          "event": "effect_owner_gate_denied",
+          "owner": "xenia-screen"
+        },
+        {
+          "seq": 5,
+          "event": "local_buffer_invalidated",
+          "owner": "xenia-screen"
+        }
+      ],
+      "faults": [],
+      "notes": "This explicitly tests the gap between source access and disclosure. No frame is sent after revocation observation."
+    },
+    {
+      "id": "M1-RACE-04",
+      "family": "timeout_after_dispatch",
+      "description": "A file-send operation is dispatched, then the transport times out before an acknowledgement establishes whether the receiver observed it.",
+      "operation": {
+        "id": "op:r04",
+        "fingerprint": "sha256:fixture-r04",
+        "lane": "SendFileToViewer",
+        "action_id": "xenia.file.send",
+        "direction": "host_to_viewer",
+        "resource": "host:alpha/file:archive.zip",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "delegation": "del:child-1"
+      },
+      "schedule": [
+        {
+          "seq": 1,
+          "event": "effect_owner_commit",
+          "owner": "xenia-file-send"
+        },
+        {
+          "seq": 2,
+          "event": "transport_dispatch_attempted",
+          "owner": "xenia-transport"
+        },
+        {
+          "seq": 3,
+          "event": "transport_timeout",
+          "owner": "xenia-transport"
+        }
+      ],
+      "faults": [
+        "ack_missing",
+        "connection_lost_after_dispatch"
+      ],
+      "notes": "Timeout after dispatch is UNKNOWN, not confirmed no-effect and not remote success."
+    },
+    {
+      "id": "M1-RACE-05",
+      "family": "exact_replay",
+      "description": "The same operation ID and exact fingerprint are retried after an unknown prior outcome. The prior result is returned/reconciled; no second effect-bearing dispatch occurs.",
+      "operation": {
+        "id": "op:r05",
+        "fingerprint": "sha256:fixture-r05",
+        "lane": "WriteHostClipboard",
+        "action_id": "xenia.clipboard.write",
+        "direction": "viewer_to_host",
+        "resource": "host:alpha/clipboard",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "delegation": "del:child-1"
+      },
+      "schedule": [
+        {
+          "seq": 1,
+          "event": "first_dispatch_attempted",
+          "owner": "xenia-clipboard"
+        },
+        {
+          "seq": 2,
+          "event": "first_outcome_unknown",
+          "owner": "xenia-clipboard"
+        },
+        {
+          "seq": 3,
+          "event": "exact_retry_same_operation",
+          "owner": "xenia-clipboard"
+        },
+        {
+          "seq": 4,
+          "event": "prior_operation_result_returned",
+          "owner": "xenia-clipboard"
+        }
+      ],
+      "faults": [
+        "first_ack_missing"
+      ],
+      "notes": "Idempotency is scoped to the exact immutable operation fingerprint and operation ID."
+    },
+    {
+      "id": "M1-RACE-06",
+      "family": "changed_fingerprint_replay",
+      "description": "A caller reuses an operation ID with a changed operation fingerprint. This is a conflict, not an idempotent retry.",
+      "operation": {
+        "id": "op:r06",
+        "fingerprint": "sha256:fixture-r06-original",
+        "retry_fingerprint": "sha256:fixture-r06-modified",
+        "lane": "ReceiveFileFromViewer",
+        "action_id": "xenia.file.receive",
+        "direction": "viewer_to_host",
+        "resource": "host:alpha/file:incoming/report.pdf",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "delegation": "del:child-1"
+      },
+      "schedule": [
+        {
+          "seq": 1,
+          "event": "operation_id_seen",
+          "owner": "xenia-file-receive"
+        },
+        {
+          "seq": 2,
+          "event": "same_id_changed_fingerprint",
+          "owner": "xenia-file-receive"
+        },
+        {
+          "seq": 3,
+          "event": "idempotency_conflict",
+          "owner": "xenia-file-receive"
+        }
+      ],
+      "faults": [],
+      "notes": "A changed resource, audience, payload digest, purpose or action is a new operation and cannot inherit the old operation's idempotency result."
+    },
+    {
+      "id": "M1-RACE-07",
+      "family": "rekey_stale_queue",
+      "description": "An operation queued under the old session fingerprint/rekey epoch attempts to run after a reconnect has advanced the session epoch.",
+      "operation": {
+        "id": "op:r07",
+        "fingerprint": "sha256:fixture-r07",
+        "lane": "StreamTelemetry",
+        "action_id": "xenia.host.telemetry",
+        "direction": "host_to_viewer",
+        "resource": "host:alpha/telemetry",
+        "session_epoch": 4,
+        "current_session_epoch": 5,
+        "authority_epoch": 12,
+        "delegation": "del:child-1"
+      },
+      "schedule": [
+        {
+          "seq": 1,
+          "event": "operation_queued_old_session",
+          "owner": "xenia-session"
+        },
+        {
+          "seq": 2,
+          "event": "session_rekey_committed",
+          "owner": "xenia-session"
+        },
+        {
+          "seq": 3,
+          "event": "old_operation_reaches_effect_owner",
+          "owner": "xenia-telemetry"
+        },
+        {
+          "seq": 4,
+          "event": "stale_session_rejected",
+          "owner": "xenia-telemetry"
+        }
+      ],
+      "faults": [],
+      "notes": "A new session must not inherit old queued work merely because the human session label is unchanged."
+    },
+    {
+      "id": "M1-RACE-08",
+      "family": "ancestor_revocation",
+      "description": "A parent delegation is revoked and the effect owner observes that revocation before a cached descendant attempts input injection.",
+      "operation": {
+        "id": "op:r08",
+        "fingerprint": "sha256:fixture-r08",
+        "lane": "InjectInput",
+        "action_id": "xenia.input.inject",
+        "direction": "viewer_to_host",
+        "resource": "host:alpha/input",
+        "session_epoch": 4,
+        "authority_epoch": 13,
+        "parent_delegation": "del:parent-1",
+        "delegation": "del:grandchild-3"
+      },
+      "schedule": [
+        {
+          "seq": 1,
+          "event": "parent_revocation_committed",
+          "owner": "mycelix-authority"
+        },
+        {
+          "seq": 2,
+          "event": "ancestor_revocation_observed",
+          "owner": "xenia-input"
+        },
+        {
+          "seq": 3,
+          "event": "cached_child_attempt",
+          "owner": "xenia-input"
+        },
+        {
+          "seq": 4,
+          "event": "effect_owner_gate_denied",
+          "owner": "xenia-input"
+        }
+      ],
+      "faults": [
+        "descendant_cache_previously_active"
+      ],
+      "notes": "The expected denial is scoped to the revoked lineage; unrelated independent grants remain eligible."
+    },
+    {
+      "id": "M1-RACE-09",
+      "family": "staged_file_revocation",
+      "description": "Incoming file chunks are staged successfully, then revocation is observed before final verified publication.",
+      "operation": {
+        "id": "op:r09",
+        "fingerprint": "sha256:fixture-r09",
+        "lane": "ReceiveFileFromViewer",
+        "action_id": "xenia.file.receive",
+        "direction": "viewer_to_host",
+        "resource": "host:alpha/file:incoming/evidence.bin",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "delegation": "del:child-1"
+      },
+      "schedule": [
+        {
+          "seq": 1,
+          "event": "offer_accepted",
+          "owner": "xenia-file-receive"
+        },
+        {
+          "seq": 2,
+          "event": "chunks_staged",
+          "owner": "xenia-file-receive"
+        },
+        {
+          "seq": 3,
+          "event": "revocation_observed",
+          "owner": "xenia-file-receive"
+        },
+        {
+          "seq": 4,
+          "event": "final_publish_gate_denied",
+          "owner": "xenia-file-receive"
+        },
+        {
+          "seq": 5,
+          "event": "staged_artifact_quarantined_or_removed",
+          "owner": "xenia-file-receive"
+        }
+      ],
+      "faults": [],
+      "notes": "Staging is not publication. No final destination file appears after revocation is observed."
+    },
+    {
+      "id": "M1-RACE-10",
+      "family": "clipboard_buffer_revocation",
+      "description": "Host clipboard is read while permission is current, but revocation is observed before the disclosure send gate. The buffered plaintext is discarded and not sent.",
+      "operation": {
+        "id": "op:r10",
+        "fingerprint": "sha256:fixture-r10",
+        "lane": "ReadHostClipboard",
+        "action_id": "xenia.clipboard.read",
+        "direction": "host_to_viewer",
+        "resource": "host:alpha/clipboard",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "delegation": "del:child-1"
+      },
+      "schedule": [
+        {
+          "seq": 1,
+          "event": "clipboard_source_preflight_permit",
+          "owner": "xenia-clipboard"
+        },
+        {
+          "seq": 2,
+          "event": "clipboard_source_read",
+          "owner": "xenia-clipboard"
+        },
+        {
+          "seq": 3,
+          "event": "revocation_observed",
+          "owner": "xenia-clipboard"
+        },
+        {
+          "seq": 4,
+          "event": "disclosure_send_gate_denied",
+          "owner": "xenia-clipboard"
+        },
+        {
+          "seq": 5,
+          "event": "clipboard_buffer_invalidated",
+          "owner": "xenia-clipboard"
+        }
+      ],
+      "faults": [],
+      "notes": "No clipboard plaintext or digest is included in the history artifact."
+    },
+    {
+      "id": "M1-RACE-11",
+      "family": "concurrent_one_shot_consumption",
+      "description": "Two effect owners concurrently attempt to consume one shared operation budget/capability. A single global linearization must select no more than one effect-bearing dispatch.",
+      "operation": {
+        "id": "op:r11",
+        "fingerprint": "sha256:fixture-r11",
+        "lane": "SendFileToViewer",
+        "action_id": "xenia.file.send",
+        "direction": "host_to_viewer",
+        "resource": "host:alpha/file:single-use.bin",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "delegation": "del:one-shot",
+        "max_operations": 1,
+        "concurrent_consumers": [
+          "pep-a",
+          "pep-b"
+        ]
+      },
+      "schedule": [
+        {
+          "seq": 1,
+          "event": "pep_a_consume_requested",
+          "owner": "capability-store"
+        },
+        {
+          "seq": 2,
+          "event": "pep_b_consume_requested",
+          "owner": "capability-store"
+        },
+        {
+          "seq": 3,
+          "event": "single_consume_linearized_to_one_pep",
+          "owner": "capability-store"
+        },
+        {
+          "seq": 4,
+          "event": "losing_pep_denied_as_consumed",
+          "owner": "capability-store"
+        },
+        {
+          "seq": 5,
+          "event": "winner_effect_dispatch",
+          "owner": "xenia-file-send"
+        }
+      ],
+      "faults": [
+        "concurrent_consumers"
+      ],
+      "notes": "A local in-memory boolean on each PEP is insufficient. The one-shot consume contract must be shared/durable or use an equivalent coordination protocol."
+    }
+  ]
+}
