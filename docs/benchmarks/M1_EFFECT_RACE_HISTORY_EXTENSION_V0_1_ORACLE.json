@@ -29,7 +29,9 @@
     "An observed ancestor revocation denies descendants while preserving unrelated independent grants.",
     "Staged incoming bytes are not final publication; revocation before publish blocks publication.",
     "Sensitive buffers read before later revocation are invalidated and not disclosed after the revocation is observed.",
-    "A one-shot capability/budget across concurrent enforcement points is consumed at most once."
+    "A one-shot capability/budget across concurrent enforcement points is consumed at most once.",
+    "A sender-loop error after a valid operator revocation latch must not bypass the canonical M1 revocation finalizer; the original error still propagates after the revocation append is attempted.",
+    "Appending the M1 revocation to the in-memory signed session Chain is distinct from durable operator audit persistence and from an exported/offline-verifiable .xenia-session artifact."
   ],
   "scenario_results": [
     {
@@ -185,6 +187,22 @@
       "retry_allowed": false,
       "reconciliation_required": false,
       "terminal_evidence_claim": "ONE_SHOT_CONSUMED_ONCE"
+    },
+    {
+      "id": "M1-RACE-12",
+      "authorization_disposition": "DENY_AFTER_OPERATOR_REVOKE",
+      "operation_disposition": "REVOCATION_APPENDED_BEFORE_ERROR_RETURN",
+      "local_effect_state": "NO_NEW_EFFECT_AFTER_REVOKE",
+      "remote_observation_state": "NOT_APPLICABLE",
+      "effectful_dispatches": 0,
+      "duplicate_dispatches": 0,
+      "published_files": 0,
+      "plaintext_disclosures": 0,
+      "retry_allowed": false,
+      "reconciliation_required": false,
+      "terminal_evidence_claim": "M1_SESSION_CHAIN_REVOKED_IN_MEMORY",
+      "original_send_loop_error_propagated": true,
+      "durable_session_transcript_export": false
     }
   ]
 }
