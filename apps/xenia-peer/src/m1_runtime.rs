@@ -1158,6 +1158,17 @@ impl M1RuntimeSession {
         self.flush_new_audit_events()
     }
 
+    /// Ensure the operator revocation is represented in the signed session
+    /// transcript. If the state transition already occurred but transcript
+    /// append failed, retry only the pending audit flush rather than attempting
+    /// a second state transition.
+    pub(crate) fn ensure_revocation_recorded(&mut self) -> Result<(), M1RuntimeError> {
+        if self.session.state() != M1SessionState::Revoked {
+            self.session.revoke()?;
+        }
+        self.flush_new_audit_events()
+    }
+
     pub(crate) fn end(&mut self) -> Result<(), M1RuntimeError> {
         self.session.end()?;
         self.flush_new_audit_events()
