@@ -821,3 +821,164 @@ fn authzen_obligations_profile_distinguishes_permit_deny_and_search_compliance()
         2
     );
 }
+
+
+const CLARIFICATION_CORPUS: &str = include_str!(
+    "../../../docs/benchmarks/M1_AUTHORIZATION_CLARIFICATION_EXTENSION_V0_1.json"
+);
+const CLARIFICATION_ORACLE: &str = include_str!(
+    "../../../docs/benchmarks/M1_AUTHORIZATION_CLARIFICATION_EXTENSION_V0_1_ORACLE.json"
+);
+
+#[test]
+fn clarification_extension_preserves_intent_scope_without_unnecessary_questions() {
+    let input: Value = serde_json::from_str(CLARIFICATION_CORPUS)
+        .expect("clarification input corpus must be valid JSON");
+    let expected: Value = serde_json::from_str(CLARIFICATION_ORACLE)
+        .expect("clarification outcome oracle must be valid JSON");
+
+    assert_eq!(
+        input["schema_id"].as_str(),
+        Some("org.luminousdynamics.xenia.m1-authorization-clarification-extension")
+    );
+    assert_eq!(
+        input["status"].as_str(),
+        Some("preregistration_extension_not_results")
+    );
+    assert_eq!(input["synthetic_only"].as_bool(), Some(true));
+    assert_eq!(input["oracle_separate_from_candidate"].as_bool(), Some(true));
+    assert_eq!(
+        expected["schema_id"].as_str(),
+        Some("org.luminousdynamics.xenia.m1-authorization-clarification-extension-oracle")
+    );
+    assert_eq!(
+        expected["status"].as_str(),
+        Some("preregistration_oracle_not_independently_adjudicated")
+    );
+    assert_eq!(
+        expected["independent_adjudication_status"].as_str(),
+        Some("pending")
+    );
+    assert_eq!(
+        expected["input_source_baseline_commit"].as_str(),
+        input["source_baseline_commit"].as_str()
+    );
+
+    let cases = input["cases"].as_array().expect("clarification cases required");
+    let results = expected["scenario_results"]
+        .as_array()
+        .expect("clarification oracle results required");
+    assert_eq!(cases.len(), 4);
+    assert_eq!(results.len(), cases.len());
+
+    let mut case_ids = BTreeSet::new();
+    let mut result_ids = BTreeSet::new();
+    for row in results {
+        let id = row["id"].as_str().expect("oracle ID required");
+        assert!(result_ids.insert(id), "duplicate clarification oracle ID: {id}");
+        assert!(row["clarification_required"].as_bool().is_some());
+        assert!(row["clarification_round_trips"].as_u64().is_some());
+        assert!(matches!(
+            row["authorization_disposition"].as_str(),
+            Some("PERMIT" | "DENY" | "HOLD")
+        ));
+        assert!(row["authorized_actions"].as_array().is_some());
+        assert!(row["new_effect_attempts"].as_u64().is_some());
+        assert!(row["unapproved_action_attempts"].as_u64().is_some());
+        assert!(row["unauthorized_effects"].as_u64().is_some());
+        assert!(row["rationale"].as_str().is_some());
+    }
+
+    for case in cases {
+        let id = case["id"].as_str().expect("case ID required");
+        assert!(case_ids.insert(id), "duplicate clarification case ID: {id}");
+        assert_eq!(case["synthetic_fixture_only"].as_bool(), Some(true));
+        for field in [
+            "expected_disposition",
+            "expected_task_outcome",
+            "expected_effect_attempts",
+            "expected_unauthorized_effects",
+        ] {
+            assert!(
+                case.get(field).is_none(),
+                "{id}: expected outcomes must remain in the separate oracle"
+            );
+        }
+        let requested = case["requested_actions"]
+            .as_array()
+            .expect("requested_actions required");
+        let approved = case["approved_actions"]
+            .as_array()
+            .expect("approved_actions required");
+        for action in requested.iter().chain(approved.iter()) {
+            let action = action.as_str().expect("action ID must be a string");
+            assert!(
+                M1Permission::ALL.iter().any(|permission| permission.action_id() == action),
+                "{id}: action is not a stable M1 action ID: {action}"
+            );
+        }
+        assert!(case["description"].as_str().is_some());
+        assert!(case["stage"].as_str().is_some());
+        assert!(case["mutation"].as_str().is_some());
+        let result = results
+            .iter()
+            .find(|row| row["id"].as_str() == Some(id))
+            .unwrap_or_else(|| panic!("clarification oracle missing {id}"));
+        assert_eq!(
+            result["authorized_actions"].as_array().unwrap(),
+            approved,
+            "{id}: oracle authority must not exceed the explicit approved action set"
+        );
+    }
+
+    assert_eq!(
+        case_ids, result_ids,
+        "clarification inputs and oracle IDs must match exactly"
+    );
+
+    // Ambiguous intent cannot be promoted into implicit authority.
+    let ambiguous = results.iter().find(|row| row["id"] == "M1-CL-01").unwrap();
+    assert_eq!(
+        ambiguous["authorization_disposition"].as_str(),
+        Some("HOLD")
+    );
+    assert_eq!(
+        ambiguous["task_outcome"].as_str(),
+        Some("AWAITING_CLARIFICATION")
+    );
+    assert_eq!(ambiguous["clarification_required"].as_bool(), Some(true));
+    assert_eq!(ambiguous["new_effect_attempts"].as_u64(), Some(0));
+    assert!(ambiguous["authorized_actions"].as_array().unwrap().is_empty());
+
+    // Clarification permits only the exact lane the principal selected.
+    let clarified = results.iter().find(|row| row["id"] == "M1-CL-02").unwrap();
+    assert_eq!(
+        clarified["authorization_disposition"].as_str(),
+        Some("PERMIT")
+    );
+    assert_eq!(clarified["new_effect_attempts"].as_u64(), Some(1));
+    assert_eq!(
+        clarified["authorized_actions"].as_array().unwrap()[0].as_str(),
+        Some("xenia.screen.view")
+    );
+
+    // A complete request should proceed without redundant questioning.
+    let explicit = results.iter().find(|row| row["id"] == "M1-CL-03").unwrap();
+    assert_eq!(
+        explicit["authorization_disposition"].as_str(),
+        Some("PERMIT")
+    );
+    assert_eq!(explicit["clarification_required"].as_bool(), Some(false));
+    assert_eq!(explicit["clarification_round_trips"].as_u64(), Some(0));
+    assert_eq!(explicit["new_effect_attempts"].as_u64(), Some(1));
+
+    // The clarified screen-only scope cannot be widened to clipboard disclosure.
+    let widened = results.iter().find(|row| row["id"] == "M1-CL-04").unwrap();
+    assert_eq!(
+        widened["authorization_disposition"].as_str(),
+        Some("DENY")
+    );
+    assert_eq!(widened["new_effect_attempts"].as_u64(), Some(0));
+    assert_eq!(widened["unapproved_action_attempts"].as_u64(), Some(1));
+    assert_eq!(widened["unauthorized_effects"].as_u64(), Some(0));
+}
