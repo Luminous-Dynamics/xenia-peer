@@ -477,6 +477,58 @@
         "concurrent_consumers"
       ],
       "notes": "A local in-memory boolean on each PEP is insufficient. The one-shot consume contract must be shared/durable or use an equivalent coordination protocol."
+    },
+    {
+      "id": "M1-RACE-12",
+      "family": "operator_revocation_send_loop_error_teardown",
+      "description": "A valid operator Revoke closes the shared M1 latch, then the send loop exits through a transport/source error. The error path still runs the canonical revocation finalizer before propagating the original error. The M1 revocation entry is appended to the in-memory signed session Chain; this is not a durable session transcript export.",
+      "operation": {
+        "id": "op:r12",
+        "fingerprint": "sha256:fixture-r12",
+        "lane": "InjectInput",
+        "action_id": "xenia.input.inject",
+        "direction": "viewer_to_host",
+        "resource": "host:alpha/input",
+        "session_epoch": 4,
+        "authority_epoch": 12,
+        "delegation": "del:child-1"
+      },
+      "schedule": [
+        {
+          "seq": 1,
+          "event": "operator_revoke_authenticated",
+          "owner": "consent-server"
+        },
+        {
+          "seq": 2,
+          "event": "operator_revocation_latch_set",
+          "owner": "consent-server"
+        },
+        {
+          "seq": 3,
+          "event": "send_loop_error_observed",
+          "owner": "daemon-send-loop"
+        },
+        {
+          "seq": 4,
+          "event": "revocation_finalizer_invoked",
+          "owner": "daemon-send-loop"
+        },
+        {
+          "seq": 5,
+          "event": "canonical_revocation_appended_to_session_chain",
+          "owner": "m1-runtime"
+        },
+        {
+          "seq": 6,
+          "event": "original_send_loop_error_propagated",
+          "owner": "daemon-send-loop"
+        }
+      ],
+      "faults": [
+        "send_loop_error_after_revocation_latch"
+      ],
+      "notes": "No protected operation is dispatched after the revoke is observed. The signed session Chain is in memory; this history does not claim durable .xenia-session export or disk persistence."
     }
   ]
 }
