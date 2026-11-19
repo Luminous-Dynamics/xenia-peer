@@ -4,8 +4,8 @@
   "source_snapshot": {
     "repository": "Luminous-Dynamics/xenia-peer",
     "branch": "feat/m1-delegation-action-crosswalk-v0.1",
-    "commit": "402ae8201ec524196596a1100004a9f785c1f461",
-    "observed_date": "2026-11-18",
+    "commit": "7ff9c5c354604eefeabd607b98ebb84e8a089505",
+    "observed_date": "2026-11-19",
     "paths": [
       "apps/xenia-peer/src/main.rs",
       "apps/xenia-peer/src/file_transfer.rs",
