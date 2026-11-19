@@ -49,6 +49,8 @@ These routes can establish, alter, revoke or audit the human/operator authorizat
 - Actions: initial Approve/Deny and subsequent Revoke.
 - When operator authentication is disabled, the legacy consent socket accepts the plaintext strings `Approve`, `Deny` and `Revoke`. When required, actions are authenticated/role-authorized and bound to the daemon's session ID and scope digest.
 - Approve/Deny apply only after the authenticated operator audit entry is durably persisted. Revoke is the fail-closed exception: `apply_consent_decision` raises the shared M1 admission latch immediately after a valid decoded action, before audit I/O. If persistence fails, the session remains fenced and stops; the durable audit claim remains unresolved.
+
+The M1 runtime's separate signed session transcript is currently an in-memory `Chain`. The main send-loop teardown appends the canonical M1 `ConsentRevoked` record to that transcript, including when the send loop exits through an error. This append is **not** an on-disk durable write in the normal daemon path. Portable transcript persistence/export remains a separate operation; do not report the M1 session-chain append as durable merely because the operator audit ledger has been atomically persisted.
 - Main selects the plaintext consent server or sealed operator channel; they are not both started for the same session in this branch.
 
 ### Sealed operator channel
