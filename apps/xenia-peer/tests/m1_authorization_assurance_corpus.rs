@@ -70,7 +70,10 @@ fn benchmark_corpus_has_32_unique_cases_and_balanced_families() {
         input["oracle_ref"].as_str(),
         Some("M1_AUTHORIZATION_ASSURANCE_ORACLE_V0_1.json")
     );
-    assert_eq!(input["oracle_separate_from_candidate"].as_bool(), Some(true));
+    assert_eq!(
+        input["oracle_separate_from_candidate"].as_bool(),
+        Some(true)
+    );
     assert_eq!(
         expected["schema_id"].as_str(),
         Some("org.luminousdynamics.xenia.m1-authorization-assurance-oracle")
@@ -80,8 +83,14 @@ fn benchmark_corpus_has_32_unique_cases_and_balanced_families() {
         expected["status"].as_str(),
         Some("preregistration_oracle_not_independently_adjudicated")
     );
-    assert_eq!(expected["independent_from_candidate_implementation"].as_bool(), Some(true));
-    assert_eq!(expected["independent_adjudication_status"].as_str(), Some("pending"));
+    assert_eq!(
+        expected["independent_from_candidate_implementation"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        expected["independent_adjudication_status"].as_str(),
+        Some("pending")
+    );
     assert_eq!(
         expected["input_corpus_source_commit"].as_str(),
         input["source_commit"].as_str()
@@ -138,7 +147,11 @@ fn benchmark_corpus_has_32_unique_cases_and_balanced_families() {
         let result = oracle_result(&expected, id);
 
         if mutation == "action_id_mismatch" {
-            assert_ne!(action_id, permission.action_id(), "mutation was not preserved in {id}");
+            assert_ne!(
+                action_id,
+                permission.action_id(),
+                "mutation was not preserved in {id}"
+            );
             assert_eq!(result["authorization_disposition"].as_str(), Some("DENY"));
             assert_eq!(result["local_effect_state"].as_str(), Some("NOT_ATTEMPTED"));
         } else {
@@ -186,18 +199,27 @@ fn benchmark_corpus_has_32_unique_cases_and_balanced_families() {
             "authority_epoch",
             "requested_at",
         ] {
-            assert!(binding.contains_key(field), "missing binding {field} in {id}");
+            assert!(
+                binding.contains_key(field),
+                "missing binding {field} in {id}"
+            );
         }
         assert!(scenario["description"].as_str().is_some());
         assert!(scenario["authority"].as_str().is_some());
         assert!(scenario["consent"].as_str().is_some());
         assert!(scenario["route"].as_str().is_some());
         if let Some(parameters) = scenario.get("parameters") {
-            assert!(parameters.is_object(), "parameters must be an object in {id}");
+            assert!(
+                parameters.is_object(),
+                "parameters must be an object in {id}"
+            );
         }
     }
 
-    assert_eq!(ids, oracle_ids, "scenario input and outcome oracle IDs must match exactly");
+    assert_eq!(
+        ids, oracle_ids,
+        "scenario input and outcome oracle IDs must match exactly"
+    );
     assert_eq!(ids.len(), 32);
     assert_eq!(
         family_counts,
@@ -273,13 +295,19 @@ fn effect_outcome_cases_do_not_back_propagate_runtime_failures_into_authorizatio
     // Exact retries resolve to the prior operation; changed fingerprints conflict.
     let replay = oracle_result(&expected, "M1-E06");
     assert_eq!(replay["authorization_disposition"].as_str(), Some("PERMIT"));
-    assert_eq!(replay["replay_state"].as_str(), Some("RESOLVED_PRIOR_RESULT"));
+    assert_eq!(
+        replay["replay_state"].as_str(),
+        Some("RESOLVED_PRIOR_RESULT")
+    );
     assert_eq!(replay["expected_new_effect_attempts"].as_u64(), Some(0));
 
     let conflict = oracle_result(&expected, "M1-E07");
     assert_eq!(conflict["authorization_disposition"].as_str(), Some("DENY"));
     assert_eq!(conflict["replay_state"].as_str(), Some("CONFLICT"));
-    assert_eq!(conflict["local_effect_state"].as_str(), Some("NOT_ATTEMPTED"));
+    assert_eq!(
+        conflict["local_effect_state"].as_str(),
+        Some("NOT_ATTEMPTED")
+    );
 
     let retry = oracle_result(&expected, "M1-E08");
     assert_eq!(retry["authorization_disposition"].as_str(), Some("HOLD"));
@@ -300,7 +328,6 @@ fn permission_name(permission: M1Permission) -> &'static str {
     }
 }
 
-
 const DRIFT_EXTENSION: &str = include_str!(
     "../../../docs/benchmarks/M1_AUTHORIZATION_DRIFT_DUAL_OBLIGATION_EXTENSION_V0_1.json"
 );
@@ -319,14 +346,23 @@ fn drift_and_dual_obligation_extension_has_matched_pairs_and_separate_oracle() {
         input["schema_id"].as_str(),
         Some("org.luminousdynamics.xenia.m1-authorization-drift-dual-obligation-extension")
     );
-    assert_eq!(input["status"].as_str(), Some("preregistration_extension_not_results"));
+    assert_eq!(
+        input["status"].as_str(),
+        Some("preregistration_extension_not_results")
+    );
     assert_eq!(input["synthetic_only"].as_bool(), Some(true));
-    assert_eq!(input["oracle_separate_from_candidate"].as_bool(), Some(true));
+    assert_eq!(
+        input["oracle_separate_from_candidate"].as_bool(),
+        Some(true)
+    );
     assert_eq!(
         expected["schema_id"].as_str(),
         Some("org.luminousdynamics.xenia.m1-authorization-drift-dual-obligation-oracle")
     );
-    assert_eq!(expected["independent_adjudication_status"].as_str(), Some("pending"));
+    assert_eq!(
+        expected["independent_adjudication_status"].as_str(),
+        Some("pending")
+    );
 
     let cases = input["cases"].as_array().expect("cases array required");
     let results = expected["scenario_results"]
@@ -344,8 +380,16 @@ fn drift_and_dual_obligation_extension_has_matched_pairs_and_separate_oracle() {
             result["expected_authorization_disposition"].as_str(),
             Some("PERMIT" | "DENY" | "HOLD")
         ));
-        assert!(result["expected_completed_operation_count"].as_u64().is_some());
-        assert!(result["expected_unauthorized_effect_count"].as_u64().is_some());
+        assert!(
+            result["expected_completed_operation_count"]
+                .as_u64()
+                .is_some()
+        );
+        assert!(
+            result["expected_unauthorized_effect_count"]
+                .as_u64()
+                .is_some()
+        );
     }
 
     let mut groups = BTreeMap::<String, Vec<&Value>>::new();
@@ -381,7 +425,10 @@ fn drift_and_dual_obligation_extension_has_matched_pairs_and_separate_oracle() {
         groups.entry(pair_id.to_owned()).or_default().push(case);
     }
 
-    assert_eq!(case_ids, oracle_ids, "input and oracle IDs must match exactly");
+    assert_eq!(
+        case_ids, oracle_ids,
+        "input and oracle IDs must match exactly"
+    );
     for pair_id in [
         "data-minimization",
         "tool-minimization",
@@ -398,7 +445,10 @@ fn drift_and_dual_obligation_extension_has_matched_pairs_and_separate_oracle() {
         let left = &pair[0]["operation_binding"];
         let right = &pair[1]["operation_binding"];
         assert_eq!(left["operation_id"], right["operation_id"]);
-        assert_eq!(left["upstream_state_fingerprint"], right["upstream_state_fingerprint"]);
+        assert_eq!(
+            left["upstream_state_fingerprint"],
+            right["upstream_state_fingerprint"]
+        );
         assert_eq!(left["principal_ref"], right["principal_ref"]);
         assert_eq!(left["delegate_ref"], right["delegate_ref"]);
         assert_eq!(left["host_resource_ref"], right["host_resource_ref"]);
@@ -411,11 +461,26 @@ fn drift_and_dual_obligation_extension_has_matched_pairs_and_separate_oracle() {
         .iter()
         .find(|row| row["id"] == "M1-DO-PARALLEL-02")
         .unwrap();
-    assert_eq!(incomplete["expected_authorization_disposition"].as_str(), Some("PERMIT"));
-    assert_eq!(incomplete["expected_task_outcome"].as_str(), Some("COMPLETE"));
-    assert_eq!(incomplete["expected_assurance_result"].as_str(), Some("PASS"));
-    assert_eq!(incomplete["expected_approved_operation_count"].as_u64(), Some(2));
-    assert_eq!(incomplete["expected_completed_operation_count"].as_u64(), Some(2));
+    assert_eq!(
+        incomplete["expected_authorization_disposition"].as_str(),
+        Some("PERMIT")
+    );
+    assert_eq!(
+        incomplete["expected_task_outcome"].as_str(),
+        Some("COMPLETE")
+    );
+    assert_eq!(
+        incomplete["expected_assurance_result"].as_str(),
+        Some("PASS")
+    );
+    assert_eq!(
+        incomplete["expected_approved_operation_count"].as_u64(),
+        Some(2)
+    );
+    assert_eq!(
+        incomplete["expected_completed_operation_count"].as_u64(),
+        Some(2)
+    );
     assert!(
         incomplete["failure_conditions"]
             .as_array()
@@ -428,8 +493,14 @@ fn drift_and_dual_obligation_extension_has_matched_pairs_and_separate_oracle() {
         .iter()
         .find(|row| row["id"] == "M1-DO-WORKFLOW-02")
         .unwrap();
-    assert_eq!(bypass["expected_authorization_disposition"].as_str(), Some("DENY"));
-    assert_eq!(bypass["expected_unauthorized_effect_count"].as_u64(), Some(0));
+    assert_eq!(
+        bypass["expected_authorization_disposition"].as_str(),
+        Some("DENY")
+    );
+    assert_eq!(
+        bypass["expected_unauthorized_effect_count"].as_u64(),
+        Some(0)
+    );
     assert_eq!(bypass["expected_assurance_result"].as_str(), Some("PASS"));
     assert!(
         bypass["failure_conditions"]
@@ -443,6 +514,12 @@ fn drift_and_dual_obligation_extension_has_matched_pairs_and_separate_oracle() {
         .iter()
         .find(|row| row["id"] == "M1-AD-TOOL-02")
         .unwrap();
-    assert_eq!(unknown_route["expected_authorization_disposition"].as_str(), Some("HOLD"));
-    assert_eq!(unknown_route["expected_task_outcome"].as_str(), Some("INDETERMINATE"));
+    assert_eq!(
+        unknown_route["expected_authorization_disposition"].as_str(),
+        Some("HOLD")
+    );
+    assert_eq!(
+        unknown_route["expected_task_outcome"].as_str(),
+        Some("INDETERMINATE")
+    );
 }
