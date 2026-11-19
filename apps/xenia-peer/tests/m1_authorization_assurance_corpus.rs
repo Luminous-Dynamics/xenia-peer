@@ -1068,7 +1068,7 @@ fn effect_race_histories_preserve_linearization_and_unknown_outcome_semantics() 
     let rows = expected["scenario_results"]
         .as_array()
         .expect("race oracle results required");
-    assert_eq!(cases.len(), 11);
+    assert_eq!(cases.len(), 12);
     assert_eq!(rows.len(), cases.len());
 
     let mut case_ids = BTreeSet::new();
@@ -1110,6 +1110,12 @@ fn effect_race_histories_preserve_linearization_and_unknown_outcome_semantics() 
         "single_consume_linearized_to_one_pep",
         "losing_pep_denied_as_consumed",
         "winner_effect_dispatch",
+        "operator_revoke_authenticated",
+        "operator_revocation_latch_set",
+        "send_loop_error_observed",
+        "revocation_finalizer_invoked",
+        "canonical_revocation_appended_to_session_chain",
+        "original_send_loop_error_propagated",
     ]
     .into_iter()
     .collect();
@@ -1264,4 +1270,37 @@ fn effect_race_histories_preserve_linearization_and_unknown_outcome_semantics() 
     let concurrent_result = race_result(rows, "M1-RACE-11");
     assert_eq!(concurrent_result["effectful_dispatches"].as_u64(), Some(1));
     assert_eq!(concurrent_result["duplicate_dispatches"].as_u64(), Some(0));
+
+    let teardown = race_case(cases, "M1-RACE-12");
+    assert!(
+        event_seq(teardown, "operator_revoke_authenticated")
+            < event_seq(teardown, "operator_revocation_latch_set")
+    );
+    assert!(
+        event_seq(teardown, "operator_revocation_latch_set")
+            < event_seq(teardown, "send_loop_error_observed")
+    );
+    assert!(
+        event_seq(teardown, "send_loop_error_observed")
+            < event_seq(teardown, "revocation_finalizer_invoked")
+    );
+    assert!(
+        event_seq(teardown, "revocation_finalizer_invoked")
+            < event_seq(teardown, "canonical_revocation_appended_to_session_chain")
+    );
+    assert!(
+        event_seq(teardown, "canonical_revocation_appended_to_session_chain")
+            < event_seq(teardown, "original_send_loop_error_propagated")
+    );
+    let teardown_result = race_result(rows, "M1-RACE-12");
+    assert_eq!(teardown_result["effectful_dispatches"].as_u64(), Some(0));
+    assert_eq!(
+        teardown_result["original_send_loop_error_propagated"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        teardown_result["durable_session_transcript_export"].as_bool(),
+        Some(false),
+        "in-memory M1 Chain append must not be represented as durable session export"
+    );
 }
