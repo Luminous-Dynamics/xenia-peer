@@ -358,9 +358,7 @@ mod tests {
         revoked: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
 
-    impl crate::consent_ledger_persistence::ConsentLedgerPersister
-        for RevokeLatchCheckingPersister
-    {
+    impl crate::consent_ledger_persistence::ConsentLedgerPersister for RevokeLatchCheckingPersister {
         fn persist(
             &self,
             _chain: &Chain,
