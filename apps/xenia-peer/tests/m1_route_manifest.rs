@@ -8,16 +8,14 @@
 use serde_json::Value;
 use std::collections::BTreeSet;
 
-const MANIFEST: &str =
-    include_str!("../../../docs/M1_ROUTE_MEDIATION_INVENTORY_V0_1.json");
+const MANIFEST: &str = include_str!("../../../docs/M1_ROUTE_MEDIATION_INVENTORY_V0_1.json");
 const MAIN: &str = include_str!("../src/main.rs");
 const FILE_TRANSFER: &str = include_str!("../src/file_transfer.rs");
 const CONSENT_SERVER: &str = include_str!("../src/consent_server.rs");
 const OPERATOR_HTTP: &str = include_str!("../src/operator_http.rs");
 const SEALED_OPERATOR: &str = include_str!("../src/operator_sealed_channel.rs");
 const M1_RUNTIME: &str = include_str!("../src/m1_runtime.rs");
-const M1_SESSION: &str =
-    include_str!("../../../crates/xenia-peer-core/src/m1_session.rs");
+const M1_SESSION: &str = include_str!("../../../crates/xenia-peer-core/src/m1_session.rs");
 
 fn manifest() -> Value {
     serde_json::from_str(MANIFEST).expect("M1 route manifest must remain valid JSON")
@@ -48,9 +46,7 @@ fn assert_ordered_occurrence(
         .nth(occurrence)
         .map(|(position, _)| position)
         .unwrap_or_else(|| {
-            panic!(
-                "{route_id}: gate occurrence {occurrence} was not found: {gate}"
-            )
+            panic!("{route_id}: gate occurrence {occurrence} was not found: {gate}")
         });
     let after_gate = &source_text[gate_position + gate.len()..];
     assert!(
@@ -82,16 +78,32 @@ fn manifest_identity_and_eight_lane_crosswalk_match_rust_source() {
         ("StreamTelemetry", "xenia.host.telemetry", "host_to_viewer"),
         ("StreamAudio", "xenia.audio.capture", "host_to_viewer"),
         ("InjectInput", "xenia.input.inject", "viewer_to_host"),
-        ("ReadHostClipboard", "xenia.clipboard.read", "host_to_viewer"),
-        ("WriteHostClipboard", "xenia.clipboard.write", "viewer_to_host"),
+        (
+            "ReadHostClipboard",
+            "xenia.clipboard.read",
+            "host_to_viewer",
+        ),
+        (
+            "WriteHostClipboard",
+            "xenia.clipboard.write",
+            "viewer_to_host",
+        ),
         ("SendFileToViewer", "xenia.file.send", "host_to_viewer"),
-        ("ReceiveFileFromViewer", "xenia.file.receive", "viewer_to_host"),
+        (
+            "ReceiveFileFromViewer",
+            "xenia.file.receive",
+            "viewer_to_host",
+        ),
     ];
 
     let routes = manifest["data_plane_routes"]
         .as_array()
         .expect("data_plane_routes must be an array");
-    assert_eq!(routes.len(), expected.len(), "all eight M1 lanes must be present");
+    assert_eq!(
+        routes.len(),
+        expected.len(),
+        "all eight M1 lanes must be present"
+    );
 
     let mut route_ids = BTreeSet::new();
     let mut action_ids = BTreeSet::new();
@@ -127,7 +139,10 @@ fn every_manifest_source_check_resolves_and_preserves_gate_before_effect_order()
     let checks = manifest["source_checks"]
         .as_array()
         .expect("source_checks must be an array");
-    assert!(!checks.is_empty(), "the source inventory needs executable source checks");
+    assert!(
+        !checks.is_empty(),
+        "the source inventory needs executable source checks"
+    );
 
     let known_routes: BTreeSet<String> = manifest["data_plane_routes"]
         .as_array()
