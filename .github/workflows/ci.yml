@@ -343,3 +343,45 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked -p xenia-secure-file
       - run: cargo clippy --locked -p xenia-secure-file --all-targets -- -D warnings
+
+  # Non-gating diagnostic for lockfile drift exposed by the separate WASM
+  # ledger workflow. The production WASM check remains --locked. This job
+  # captures Cargo's minimal resolver output in an artifact; it never commits
+  # or uploads a modified lockfile back into the repository.
+  lockfile-diagnostic:
+    name: Cargo lockfile resolution diagnostic (non-gating)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Resolve without --locked and capture exact lockfile delta
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p diagnostic-artifacts
+          cp Cargo.lock diagnostic-artifacts/Cargo.lock.before
+          set +e
+          cargo check -p xenia-ledger --target wasm32-unknown-unknown
+          cargo_status=$?
+          set -e
+          echo "cargo_check_exit=$cargo_status" | tee diagnostic-artifacts/status.txt
+          cp Cargo.lock diagnostic-artifacts/Cargo.lock.after
+          git diff --no-index -- diagnostic-artifacts/Cargo.lock.before diagnostic-artifacts/Cargo.lock.after > diagnostic-artifacts/Cargo.lock.diff || true
+          sha256sum diagnostic-artifacts/Cargo.lock.before diagnostic-artifacts/Cargo.lock.after > diagnostic-artifacts/sha256.txt
+          if [ "$cargo_status" -eq 0 ]; then
+            set +e
+            cargo check --locked -p xenia-ledger --target wasm32-unknown-unknown
+            locked_status=$?
+            set -e
+            echo "cargo_check_locked_exit=$locked_status" >> diagnostic-artifacts/status.txt
+          fi
+      - name: Upload resolver evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-lockfile-resolution-diagnostic
+          path: diagnostic-artifacts/
+          if-no-files-found: error
