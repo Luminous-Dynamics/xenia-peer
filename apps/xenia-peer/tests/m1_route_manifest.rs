@@ -274,3 +274,30 @@ fn control_plane_routes_are_separate_and_source_backed() {
         }
     }
 }
+
+#[test]
+fn operator_revocation_finalizer_runs_after_send_loop_errors_are_captured() {
+    let capture = MAIN
+        .find("let send_loop_result: Result<(), Box<dyn std::error::Error>> = async")
+        .expect("send loop must be captured as a result so `?` cannot bypass teardown");
+    let finalizer = MAIN
+        .find("finalize_m1_send_loop(&revoked, &m1_runtime, send_loop_result).await?")
+        .expect("normal and error exits must converge on the revocation finalizer");
+    assert!(
+        capture < finalizer,
+        "the finalizer must run after the send-loop result is captured"
+    );
+
+    let append = MAIN
+        .find("async fn append_operator_revocation_if_observed(")
+        .expect("operator revocation append helper must remain present");
+    let ensure = M1_RUNTIME
+        .find("pub(crate) fn ensure_revocation_recorded(")
+        .expect("runtime must expose retryable revocation transcript append");
+    let flush = M1_RUNTIME
+        .find("self.flush_new_audit_events()")
+        .expect("runtime revocation must flush the pending canonical session event");
+    assert!(append < finalizer, "the finalizer must invoke the append helper");
+    assert!(ensure < flush, "retryable revocation append must flush pending audit entries");
+    assert!(MAIN.contains("operator_revocation_is_appended_when_send_loop_returns_error"));
+}
