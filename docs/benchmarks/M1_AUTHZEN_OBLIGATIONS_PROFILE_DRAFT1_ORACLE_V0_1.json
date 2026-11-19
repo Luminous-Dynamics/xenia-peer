@@ -3,7 +3,7 @@
   "schema_version": "0.1.0",
   "status": "preregistration_oracle_not_independently_adjudicated",
   "input_corpus_ref": "M1_AUTHZEN_OBLIGATIONS_PROFILE_DRAFT1_CORPUS_V0_1.json",
-  "input_corpus_source_commit": "e36d9f4a9833c0a0e887427d5d47555a1de66f93",
+  "input_corpus_source_commit": "070f06d2071b3edfc620bc1b58dec25029c623ba",
   "independent_adjudication_status": "pending",
   "scenario_results": [
     {
