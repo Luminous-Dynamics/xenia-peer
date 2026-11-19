@@ -2,19 +2,20 @@ schema = "xenia-m1-route-inventory-v1"
 version = 1
 status = "partial_source_census"
 completeness = "indeterminate"
-reviewed_commit = "402ae8201ec524196596a1100004a9f785c1f461"
-claim_ceiling = "Known daemon paths and gate locations were source-reviewed; receive staging now has a side-effect-free preflight and a final lane recheck after sealing Accept and before it is sent; the operator-revoke latch closes local M1 lane admission on observed revocation before durable ledger transition. Alternate binaries, platform helpers, plugins, ambient OS interfaces, all feature combinations, direct bypasses, and atomic OS/network effect coupling are not yet qualified."
+reviewed_commit = "7ff9c5c354604eefeabd607b98ebb84e8a089505"
+claim_ceiling = "Known daemon paths and gate locations were source-reviewed; receive staging has a side-effect-free preflight and a final lane recheck after sealing Accept and before it is sent; the operator-revoke latch closes local M1 lane admission on observed revocation. The operator audit ledger is durably written separately; the M1 session Chain is an in-memory signed transcript unless explicitly exported. Alternate binaries, platform helpers, plugins, ambient OS interfaces, all feature combinations, direct bypasses, and atomic OS/network effect coupling are not yet qualified."
 authorization_semantics = "M1 local consent/session permission only; no Mycelix ROS-005 runtime decision is consumed by this source snapshot."
 effect_evidence = "Current allow_*_flow events are admission/gate evidence, not proof of local OS completion or remote observation. See Xenia issue #510."
 route_coverage_owner = "Xenia issue #512; Mycelix route-mediation oracle #6213."
 
 [source_files]
-daemon = "apps/xenia-peer/src/main.rs@12fe1336f6a5b2813f772aa8e8c1cec70b33da08"
-consent_server = "apps/xenia-peer/src/consent_server.rs@04c0272a43cdb84cb37d64b64def49447863d539"
+daemon = "apps/xenia-peer/src/main.rs@7c525ce5beac060c07b53c64f13d8d8261d64ab3"
+consent_server = "apps/xenia-peer/src/consent_server.rs@36716132c1403d099b81709922b2bbe2caadb17a"
 sealed_operator_channel = "apps/xenia-peer/src/operator_sealed_channel.rs@65a4c7f3644ba38b4e76cedb177c501eff6a5db7"
 file_transfer = "apps/xenia-peer/src/file_transfer.rs@b99e1eb6444980077ab6d8db1baa57f91c4f6e13"
-runtime = "apps/xenia-peer/src/m1_runtime.rs@c5c501f53cce0fdc8c368898c7b7265f62e08fec"
+runtime = "apps/xenia-peer/src/m1_runtime.rs@261173be86e12a4b43f0310ea913c42304bab7ec"
 permission_model = "crates/xenia-peer-core/src/m1_session.rs@fa19a4826f2d078a47439e02217c4562f2aab007"
+operator_http = "apps/xenia-peer/src/operator_http.rs@83064997cef3e65570da9f8e967e6237d5d5c522"
 
 [local_revocation]
 trigger = "After transport decoding and any configured operator signature/role/session/scope checks succeed, apply_consent_decision sets the shared operator-revoked AtomicBool with SeqCst ordering immediately for ConsentAction::Revoke, before attempting durable operator-audit persistence."
