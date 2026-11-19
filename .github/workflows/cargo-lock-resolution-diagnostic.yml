@@ -1,0 +1,43 @@
+name: Cargo Lock Resolution Diagnostic
+
+on:
+  push:
+    branches:
+      - "diagnostic/xenia-cargo-lock-resolution-2026-11-19"
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Reproduce normal dependency resolution and WASM check
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "== Cargo metadata before check =="
+          cargo metadata --no-deps --format-version 1 >/tmp/metadata.json
+          echo "== Run wasm ledger check without --locked to capture exact minimal lock update =="
+          cargo check -p xenia-ledger --target wasm32-unknown-unknown
+          echo "== Re-check with --locked =="
+          cargo check --locked -p xenia-ledger --target wasm32-unknown-unknown
+          mkdir -p /tmp/cargo-lock-diagnostic
+          cp Cargo.lock /tmp/cargo-lock-diagnostic/Cargo.lock
+          git diff -- Cargo.lock > /tmp/cargo-lock-diagnostic/Cargo.lock.diff
+          git status --short > /tmp/cargo-lock-diagnostic/git-status.txt
+          sha256sum Cargo.lock > /tmp/cargo-lock-diagnostic/Cargo.lock.sha256
+      - name: Upload resolved lock and minimal diff
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-lock-resolution-diagnostic
+          path: |
+            Cargo.lock
+            /tmp/cargo-lock-diagnostic/
+          if-no-files-found: warn
