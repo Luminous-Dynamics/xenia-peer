@@ -455,6 +455,71 @@ fn drift_and_dual_obligation_extension_has_matched_pairs_and_separate_oracle() {
         assert_eq!(left["purpose"], right["purpose"]);
         assert_eq!(left["audience"], right["audience"]);
         assert_eq!(left["session_fingerprint"], right["session_fingerprint"]);
+
+        // Hold every non-mutated authority/session binding constant. These
+        // paired fixtures should differ only in the dimension named by the
+        // pair, not by a second hidden epoch, principal, operation, or target
+        // change that would confound attribution.
+        for field in [
+            "session_epoch",
+            "authority_epoch",
+            "operation_fingerprint",
+            "active_session_epoch",
+            "approved_operation_fingerprint",
+            "approved_effect_resource_ref",
+        ] {
+            assert_eq!(
+                left[field], right[field],
+                "{pair_id} unexpectedly changed invariant binding {field}"
+            );
+        }
+
+        if pair_id != "temporal-scope" {
+            assert_eq!(
+                left["requested_session_epoch"],
+                right["requested_session_epoch"],
+                "{pair_id} unexpectedly changed requested session epoch"
+            );
+        } else {
+            assert_eq!(left["requested_session_epoch"], left["active_session_epoch"]);
+            assert_ne!(
+                right["requested_session_epoch"],
+                right["active_session_epoch"],
+                "temporal-scope mutation must use a stale queued session epoch"
+            );
+        }
+
+        if pair_id != "resource-scope" {
+            assert_eq!(
+                left["requested_operation_fingerprint"],
+                right["requested_operation_fingerprint"],
+                "{pair_id} unexpectedly changed requested operation fingerprint"
+            );
+            assert_eq!(
+                left["requested_effect_resource_ref"],
+                right["requested_effect_resource_ref"],
+                "{pair_id} unexpectedly changed requested effect resource"
+            );
+        } else {
+            assert_eq!(
+                left["requested_operation_fingerprint"],
+                left["approved_operation_fingerprint"]
+            );
+            assert_ne!(
+                right["requested_operation_fingerprint"],
+                right["approved_operation_fingerprint"],
+                "resource-scope mutation must substitute the requested operation fingerprint"
+            );
+            assert_eq!(
+                left["requested_effect_resource_ref"],
+                left["approved_effect_resource_ref"]
+            );
+            assert_ne!(
+                right["requested_effect_resource_ref"],
+                right["approved_effect_resource_ref"],
+                "resource-scope mutation must substitute the requested effect resource"
+            );
+        }
     }
 
     let incomplete = results
