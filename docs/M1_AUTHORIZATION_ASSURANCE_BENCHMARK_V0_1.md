@@ -224,9 +224,9 @@ Its experiments report 7 unfinished approvals among 300 paired approvals despite
 
 M1 translation: paired tests must hold the same session, operation and host state fixed while changing only the authorization decision. An Approve must preserve the exact eligible lane operation through transport scheduling and effect dispatch. A Revoke/Deny must suppress the exact same operation. Do not mark a blanket shutdown as a successful authorization result; valid unrelated lanes and independent grants must remain usable.
 
-### Remaining M1 benchmark additions (beyond the current 32-case and 11-history seeds)
+### Remaining M1 benchmark additions (beyond the current 32-case and 12-history seeds)
 
-The 11-history effect-race extension below now covers revoke/commit order, timeout-after-dispatch, exact replay, changed-fingerprint conflict, stale rekey, ancestor revocation, staged-file publication, sensitive-buffer invalidation and concurrent one-shot consumption. Additional paired, independently adjudicated cases are still needed for:
+The 12-history effect-race extension below now covers revoke/commit order, timeout-after-dispatch, exact replay, changed-fingerprint conflict, stale rekey, ancestor revocation, staged-file publication, sensitive-buffer invalidation and concurrent one-shot consumption. Additional paired, independently adjudicated cases are still needed for:
 - each lane's minimum compliant route versus an over-collection, overbroad-tool, wrong-resource or post-expiry shortcut;
 - a scoped Approve with two authorized operations, where parallel scheduling or reconnect must not drop one;
 - Approve for one lane and Deny for another, where batching must not collapse both decisions into one boolean;
@@ -241,11 +241,11 @@ For Xenia specifically, use the model/harness/workflow distinction to review:
 - daemon task scheduling, concurrent file-transfer tasks, reconnect/rekey and cancellation;
 - TCP/WebSocket/QUIC dispatch, operator/control routes and the final OS/filesystem/input effect owners.
 
-The 32-case decision corpus, 16-case drift/refusal-completeness extension, four-case clarification extension, seven-case AuthZEN obligations extension and 11-history effect-race extension are separate synthetic structural seeds. Each uses a separate outcome oracle. None is an independently adjudicated benchmark result; executable candidate controls, full route/effect interposition and independent observation remain pending.
+The 32-case decision corpus, 16-case drift/refusal-completeness extension, four-case clarification extension, seven-case AuthZEN obligations extension and 12-history effect-race extension are separate synthetic structural seeds. Each uses a separate outcome oracle. None is an independently adjudicated benchmark result; executable candidate controls, full route/effect interposition and independent observation remain pending.
 
 ## 4.2 Effect-race and linearization history extension
 
-A separate 11-history schedule corpus has been added:
+A separate 12-history schedule corpus has been added:
 - `docs/benchmarks/M1_EFFECT_RACE_HISTORY_EXTENSION_V0_1.json`
 - `docs/benchmarks/M1_EFFECT_RACE_HISTORY_EXTENSION_V0_1_ORACLE.json`
 
@@ -261,6 +261,7 @@ It covers:
 9. Incoming file chunks staged before revocation but publication attempted afterwards → quarantine/remove staging and do not publish.
 10. Host clipboard read before revocation but send gate after → invalidate plaintext buffer and do not disclose.
 11. Two enforcement points concurrently consume a one-shot capability → at most one durable consume and effect-bearing dispatch.
+12. A valid operator Revoke followed by a send-loop error still runs the revocation finalizer before propagating the original error; the appended M1 session Chain event is in-memory evidence, not proof of durable session export.
 
 The input corpus records ordered logical events, not wall-clock timestamps. Its separate oracle distinguishes local commit from remote observation and represents ambiguous transport results as UNKNOWN. It does not implement a linearizable commit service or prove the current runtime has one. A Rust structural test validates action IDs, input/oracle one-to-one linkage, ordered event sequences, and the expected history invariants. The test is a corpus-drift guard, not an implementation or independent adjudication.
 
