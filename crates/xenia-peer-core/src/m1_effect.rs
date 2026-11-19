@@ -118,8 +118,10 @@ impl M1EffectIntentV1 {
 pub enum M1EffectDisposition {
     /// Intent reserved; no final effect admission has occurred.
     Prepared,
-    /// The exact operation crossed the single local effect-admission point.
+    /// The exact operation crossed the serialized final effect-admission point.
     CommitLinearized,
+    /// The owner durably recorded that the effect call is about to be invoked.
+    Attempted,
     /// The owner reported that its declared local commit point was crossed.
     Committed,
     /// The owner positively established that the protected effect did not occur.
@@ -207,6 +209,50 @@ impl M1EffectCommitReceipt {
     }
 }
 
+/// Receipt for the durable write-ahead record that the exact effect call is being invoked.
+#[must_use = "an attempted effect must be completed or reconciled"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct M1EffectAttemptReceipt {
+    operation_id: [u8; 16],
+    fingerprint: [u8; 32],
+    session_epoch: u64,
+    admission_sequence: u64,
+    linearization_sequence: u64,
+    attempt_sequence: u64,
+}
+
+impl M1EffectAttemptReceipt {
+    /// Stable operation identity.
+    pub const fn operation_id(self) -> [u8; 16] {
+        self.operation_id
+    }
+
+    /// Exact immutable operation fingerprint.
+    pub const fn fingerprint(self) -> [u8; 32] {
+        self.fingerprint
+    }
+
+    /// Session epoch at the attempt point.
+    pub const fn session_epoch(self) -> u64 {
+        self.session_epoch
+    }
+
+    /// Sequence assigned when the operation intent was reserved.
+    pub const fn admission_sequence(self) -> u64 {
+        self.admission_sequence
+    }
+
+    /// Sequence that linearizes the operation against local revocation.
+    pub const fn linearization_sequence(self) -> u64 {
+        self.linearization_sequence
+    }
+
+    /// Sequence of the write-ahead attempt record.
+    pub const fn attempt_sequence(self) -> u64 {
+        self.attempt_sequence
+    }
+}
+
 /// Owner-side outcome recorded after a linearized admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum M1EffectCompletion {
@@ -250,6 +296,8 @@ pub struct M1EffectSnapshot {
     pub prepared_handle: Option<M1PreparedOperation>,
     /// Sequence of the effect-admission linearization point, if reached.
     pub linearization_sequence: Option<u64>,
+    /// Write-ahead sequence recorded immediately before invoking the effect.
+    pub attempt_sequence: Option<u64>,
     /// Sequence of terminal completion/reconciliation, if established.
     pub resolution_sequence: Option<u64>,
     /// Current disposition.
@@ -338,6 +386,7 @@ struct OperationRecord {
     fingerprint: [u8; 32],
     admission_sequence: u64,
     linearization_sequence: Option<u64>,
+    attempt_sequence: Option<u64>,
     resolution_sequence: Option<u64>,
     disposition: M1EffectDisposition,
 }
@@ -414,6 +463,7 @@ impl M1EffectGate {
                 fingerprint,
                 admission_sequence,
                 linearization_sequence: None,
+                attempt_sequence: None,
                 resolution_sequence: None,
                 disposition: M1EffectDisposition::Prepared,
             },
@@ -476,16 +526,16 @@ impl M1EffectGate {
         })
     }
 
-    /// Record the effect owner's immediate result for a linearized commit.
+    /// Durably record that the owner is about to invoke the exact effect.
     ///
-    /// A timeout, cancellation or crash after possible dispatch must use
-    /// `Unknown`, never `ConfirmedNoEffect`. A receipt can be completed only
-    /// once; duplicate completion attempts cannot create another effect.
-    pub fn complete(
+    /// The owner must persist this transition before calling the OS, filesystem
+    /// or transport API. After this method succeeds, a crash leaves the outcome
+    /// UNKNOWN until reconciliation. A commit-linearized operation with no
+    /// attempt record proves that no effect call was invoked under this model.
+    pub fn begin_attempt(
         &mut self,
         receipt: M1EffectCommitReceipt,
-        completion: M1EffectCompletion,
-    ) -> Result<M1EffectSnapshot, M1EffectError> {
+    ) -> Result<M1EffectAttemptReceipt, M1EffectError> {
         self.validate_receipt(&receipt)?;
         {
             let record = self
@@ -496,10 +546,40 @@ impl M1EffectGate {
                 || record.fingerprint != receipt.fingerprint
                 || record.admission_sequence != receipt.admission_sequence
                 || record.linearization_sequence != Some(receipt.linearization_sequence)
+                || record.attempt_sequence.is_some()
             {
                 return Err(M1EffectError::AlreadyConsumed);
             }
         }
+        let attempt_sequence = self.take_sequence()?;
+        let record = self
+            .operations
+            .get_mut(&receipt.operation_id)
+            .ok_or(M1EffectError::StalePreparedHandle)?;
+        record.attempt_sequence = Some(attempt_sequence);
+        record.disposition = M1EffectDisposition::Attempted;
+
+        Ok(M1EffectAttemptReceipt {
+            operation_id: receipt.operation_id,
+            fingerprint: receipt.fingerprint,
+            session_epoch: receipt.session_epoch,
+            admission_sequence: receipt.admission_sequence,
+            linearization_sequence: receipt.linearization_sequence,
+            attempt_sequence,
+        })
+    }
+
+    /// Record the effect owner's immediate result for a linearized commit.
+    ///
+    /// A timeout, cancellation or crash after possible dispatch must use
+    /// `Unknown`, never `ConfirmedNoEffect`. A receipt can be completed only
+    /// once; duplicate completion attempts cannot create another effect.
+    pub fn complete(
+        &mut self,
+        receipt: M1EffectAttemptReceipt,
+        completion: M1EffectCompletion,
+    ) -> Result<M1EffectSnapshot, M1EffectError> {
+        self.validate_attempt_receipt(&receipt)?;
         let resolution_sequence = match self.take_sequence() {
             Ok(sequence) => sequence,
             Err(error) => {
@@ -560,30 +640,54 @@ impl M1EffectGate {
         Ok(sequence)
     }
 
-    /// Convert crash-interrupted, already-linearized operations to Unknown.
+    /// Reconcile the last durable stage after a process crash.
     ///
-    /// This models restart recovery after a durable commit-admission record
-    /// but before a trustworthy terminal outcome. It deliberately does not
-    /// reissue a permit or guess that the operation had no effect.
+    /// Prepared work is rejected. CommitLinearized work without a durable
+    /// Attempted record is confirmed no-effect under the write-ahead contract.
+    /// Attempted work becomes Unknown because the external call may have run.
     pub fn recover_after_crash(&mut self) {
-        for record in self.operations.values_mut() {
-            match record.disposition {
-                M1EffectDisposition::Prepared => {
-                    // Preparation is not an effect admission. Require a fresh
-                    // authorization after restart rather than resurrecting it.
-                    record.disposition = M1EffectDisposition::Rejected;
-                    record.resolution_sequence = None;
+        let operation_ids: Vec<_> = self.operations.keys().copied().collect();
+        for operation_id in operation_ids {
+            let disposition = self
+                .operations
+                .get(&operation_id)
+                .map(|record| record.disposition);
+            match disposition {
+                Some(M1EffectDisposition::Prepared) => {
+                    if let Some(record) = self.operations.get_mut(&operation_id) {
+                        record.disposition = M1EffectDisposition::Rejected;
+                        record.resolution_sequence = None;
+                    }
                 }
-                M1EffectDisposition::CommitLinearized => {
-                    // The effect may have escaped before the crash.
-                    record.disposition = M1EffectDisposition::Unknown;
-                    record.resolution_sequence = None;
+                Some(M1EffectDisposition::CommitLinearized) => {
+                    // The protocol requires a durable Attempted record before
+                    // invoking the external API. Without it, no call was issued.
+                    // If even the no-effect recovery record cannot be sequenced,
+                    // preserve UNKNOWN rather than claiming a terminal result.
+                    let resolution = self.take_sequence().ok();
+                    if let Some(record) = self.operations.get_mut(&operation_id) {
+                        record.disposition = if resolution.is_some() {
+                            M1EffectDisposition::ConfirmedNoEffect
+                        } else {
+                            M1EffectDisposition::Unknown
+                        };
+                        record.resolution_sequence = resolution;
+                    }
                 }
-                M1EffectDisposition::Committed
-                | M1EffectDisposition::ConfirmedNoEffect
-                | M1EffectDisposition::Partial
-                | M1EffectDisposition::Unknown
-                | M1EffectDisposition::Rejected => {}
+                Some(M1EffectDisposition::Attempted) => {
+                    if let Some(record) = self.operations.get_mut(&operation_id) {
+                        record.disposition = M1EffectDisposition::Unknown;
+                        record.resolution_sequence = None;
+                    }
+                }
+                Some(
+                    M1EffectDisposition::Committed
+                    | M1EffectDisposition::ConfirmedNoEffect
+                    | M1EffectDisposition::Partial
+                    | M1EffectDisposition::Unknown
+                    | M1EffectDisposition::Rejected,
+                )
+                | None => {}
             }
         }
     }
@@ -700,6 +804,31 @@ impl M1EffectGate {
         Ok(())
     }
 
+    fn validate_attempt_receipt(
+        &self,
+        receipt: &M1EffectAttemptReceipt,
+    ) -> Result<(), M1EffectError> {
+        if receipt.session_epoch != self.session_epoch {
+            return Err(M1EffectError::SessionEpochMismatch {
+                current: self.session_epoch,
+                requested: receipt.session_epoch,
+            });
+        }
+        let record = self
+            .operations
+            .get(&receipt.operation_id)
+            .ok_or(M1EffectError::StalePreparedHandle)?;
+        if record.disposition != M1EffectDisposition::Attempted
+            || record.fingerprint != receipt.fingerprint
+            || record.admission_sequence != receipt.admission_sequence
+            || record.linearization_sequence != Some(receipt.linearization_sequence)
+            || record.attempt_sequence != Some(receipt.attempt_sequence)
+        {
+            return Err(M1EffectError::AlreadyConsumed);
+        }
+        Ok(())
+    }
+
     fn take_sequence(&mut self) -> Result<u64, M1EffectError> {
         let sequence = self.next_sequence;
         self.next_sequence = self
@@ -727,6 +856,7 @@ fn snapshot_record(
             },
         ),
         linearization_sequence: record.linearization_sequence,
+        attempt_sequence: record.attempt_sequence,
         resolution_sequence: record.resolution_sequence,
         disposition: record.disposition,
     }
@@ -811,8 +941,9 @@ mod tests {
             gate.operation(operation.operation_id).unwrap().disposition,
             M1EffectDisposition::CommitLinearized
         );
+        let attempt = gate.begin_attempt(receipt).unwrap();
         let snapshot = gate
-            .complete(receipt, M1EffectCompletion::Committed)
+            .complete(attempt, M1EffectCompletion::Committed)
             .unwrap();
         assert_eq!(snapshot.disposition, M1EffectDisposition::Committed);
         assert!(snapshot.resolution_sequence.unwrap() > revoke_sequence);
@@ -842,7 +973,7 @@ mod tests {
             Err(M1EffectError::AlreadyConsumed)
         );
         assert_eq!(
-            gate.complete(receipt, M1EffectCompletion::Committed).unwrap().disposition,
+            gate.complete(gate.begin_attempt(receipt).unwrap(), M1EffectCompletion::Committed).unwrap().disposition,
             M1EffectDisposition::Committed
         );
     }
@@ -879,8 +1010,9 @@ mod tests {
         let operation = intent(4, M1Permission::ReceiveFileFromViewer);
         let prepared = prepare_new(&mut gate, &operation);
         let receipt = gate.linearize_commit(prepared).unwrap();
+        let attempt = gate.begin_attempt(receipt).unwrap();
         let snapshot = gate
-            .complete(receipt, M1EffectCompletion::Unknown)
+            .complete(attempt, M1EffectCompletion::Unknown)
             .unwrap();
         assert_eq!(snapshot.disposition, M1EffectDisposition::Unknown);
 
@@ -913,11 +1045,31 @@ mod tests {
     }
 
     #[test]
+    fn crash_after_commit_admission_but_before_attempt_is_confirmed_no_effect() {
+        let mut gate = gate();
+        let operation = intent(23, M1Permission::InjectInput);
+        let prepared = prepare_new(&mut gate, &operation);
+        let commit = gate.linearize_commit(prepared).unwrap();
+
+        // The external effect call is forbidden until begin_attempt succeeds.
+        gate.recover_after_crash();
+        let snapshot = gate.operation(operation.operation_id).unwrap();
+        assert_eq!(snapshot.disposition, M1EffectDisposition::ConfirmedNoEffect);
+        assert!(snapshot.attempt_sequence.is_none());
+        assert!(snapshot.resolution_sequence.is_some());
+        assert_eq!(
+            gate.begin_attempt(commit),
+            Err(M1EffectError::AlreadyConsumed)
+        );
+    }
+
+    #[test]
     fn crash_recovery_converts_linearized_incomplete_work_to_unknown() {
         let mut gate = gate();
         let operation = intent(5, M1Permission::StreamAudio);
         let prepared = prepare_new(&mut gate, &operation);
-        let _receipt = gate.linearize_commit(prepared).unwrap();
+        let commit = gate.linearize_commit(prepared).unwrap();
+        let _attempt = gate.begin_attempt(commit).unwrap();
         let uncommitted = intent(19, M1Permission::ReadHostClipboard);
         let uncommitted_handle = prepare_new(&mut gate, &uncommitted);
 
@@ -1133,6 +1285,18 @@ mod tests {
             Ok(receipt) => {
                 assert!(receipt.linearization_sequence() < revoke_sequence);
                 assert_eq!(snapshot.disposition, M1EffectDisposition::CommitLinearized);
+                let attempt = gate
+                    .lock()
+                    .expect("effect gate mutex poisoned")
+                    .begin_attempt(receipt)
+                    .unwrap();
+                let completed = gate
+                    .lock()
+                    .expect("effect gate mutex poisoned")
+                    .complete(attempt, M1EffectCompletion::Committed)
+                    .unwrap();
+                assert_eq!(completed.disposition, M1EffectDisposition::Committed);
+                assert!(completed.resolution_sequence.unwrap() > revoke_sequence);
             }
             Err(M1EffectError::Revoked) => {
                 assert!(snapshot.linearization_sequence.is_none());
@@ -1169,7 +1333,7 @@ mod tests {
         gate.next_sequence = u64::MAX;
 
         assert_eq!(
-            gate.complete(receipt, M1EffectCompletion::Committed),
+            gate.complete(gate.begin_attempt(receipt).unwrap(), M1EffectCompletion::Committed),
             Err(M1EffectError::SequenceExhausted)
         );
         let snapshot = gate.operation(operation.operation_id).unwrap();
@@ -1205,8 +1369,9 @@ mod tests {
         let operation = intent(14, M1Permission::StreamTelemetry);
         let prepared = prepare_new(&mut gate, &operation);
         let receipt = gate.linearize_commit(prepared).unwrap();
+        let attempt = gate.begin_attempt(receipt).unwrap();
         let completion = gate
-            .complete(receipt, M1EffectCompletion::Committed)
+            .complete(attempt, M1EffectCompletion::Committed)
             .unwrap();
         let first_revoke = gate.revoke().unwrap();
         let second_revoke = gate.revoke().unwrap();
@@ -1225,8 +1390,9 @@ mod tests {
         let prepared = prepare_new(&mut gate, &operation);
         let receipt = gate.linearize_commit(prepared).unwrap();
 
+        let attempt = gate.begin_attempt(receipt).unwrap();
         let partial = gate
-            .complete(receipt, M1EffectCompletion::Partial)
+            .complete(attempt, M1EffectCompletion::Partial)
             .unwrap();
         assert_eq!(partial.disposition, M1EffectDisposition::Partial);
 
@@ -1247,7 +1413,8 @@ mod tests {
         let operation = intent(22, M1Permission::SendFileToViewer);
         let prepared = prepare_new(&mut gate, &operation);
         let receipt = gate.linearize_commit(prepared).unwrap();
-        let unknown = gate.complete(receipt, M1EffectCompletion::Unknown).unwrap();
+        let attempt = gate.begin_attempt(receipt).unwrap();
+        let unknown = gate.complete(attempt, M1EffectCompletion::Unknown).unwrap();
         assert_eq!(unknown.disposition, M1EffectDisposition::Unknown);
 
         let resolved = gate
