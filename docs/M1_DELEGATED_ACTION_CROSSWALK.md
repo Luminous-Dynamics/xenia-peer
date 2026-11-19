@@ -190,3 +190,36 @@ route-mediation evaluation. The JSON inventory and TOML inventory are separate
 machine-readable projections; changes to one must be reconciled with the other
 in the same review. The manifest is a bounded source census, not a
 complete-mediation certification.
+
+
+## Mycelix ROS-005 Typed Scope Profile v1 crosswalk (draft, 2026-11-19)
+
+Mycelix [PR #6325](https://github.com/Luminous-Dynamics/mycelix/pull/6325) introduces the separately versioned `TypedDelegationScopeV1` under Mycelix #6302. The PR is open/draft and stacked on the unmerged parent-chain/content-binding PR #3679. The new type is not yet wired into the base `Delegation` API, Holochain validation or any execution path. This section is an adapter mapping proposal, not a claim that Xenia consumes the profile.
+
+| Typed ROS-005 v1 field | Xenia M1 mapping | Required local/owner constraint |
+|---|---|---|
+| `actions` | One or more exact values from the eight `M1Permission::action_id()` IDs | Preserve exact equality; unknown action IDs are unsupported/denied |
+| `resources` | Exact canonical host identity plus the exact object/resource identity for the selected lane | Resource IDs are opaque. Never infer file/path/host hierarchy from string prefixes; use the exact destination or selected object identity |
+| `audiences` | Exact authenticated viewer/relying-party identity | Keep audience separate from principal/delegate identity and from display names |
+| `directions` | `HostToViewer` → `OwnerToDelegate`; `ViewerToHost` → `DelegateToOwner` | No M1 data lane uses `OwnerLocal`; do not treat it as an alias for either network direction |
+| `consent` | Owner-native ROS-004 consent-profile, purpose and data-class commitments | The commitments must be derived from ROS-004's canonical definitions. They do not create consent or replace the M1 recipient consent state |
+| `operation` | `AnyWithinProfile` only for an explicitly bounded session/lane profile; `ExactDigest` where a single immutable operation can be canonically identified | Exact digest must bind the full operation and schema/profile. Do not reuse a friendly request ID or session ID as the operation digest |
+| `budgets.max_duration_ms` | Maximum delegated session/lane lease horizon | Milliseconds are a duration, not an absolute timestamp. Shorten to the tighter local session/consent horizon |
+| `budgets.max_operations` | Maximum admitted operations under the delegation | Static upper bound only; durable shared consumption remains a separate required owner protocol |
+| `budgets.max_bytes` | Maximum disclosure or transfer volume for the bound scope | Define whether bytes count read, admitted, dispatched or committed; do not charge or reset at a child boundary without shared accounting |
+| `budgets.max_concurrent` | Maximum concurrent operations/streams | Static bound only; admission/lease ownership must prevent sibling sessions from multiplying the parent's capacity |
+| `budgets.max_targets` | Maximum distinct host/object targets | Target identity must be canonical and exact |
+| `budgets.rate_limit` | Per-operation/stream admission rate | The v1 definition is a rolling-window limit. A static scope is not a rate meter; enforcement must use a durable or otherwise qualified shared consumption boundary |
+
+### Profile composition and non-claims
+
+1. The typed profile's `is_no_wider_than` and `is_strictly_attenuated_by` compare only the new v1 typed dimensions. They do not prove delegation authenticity, parent record retrieval, current status, authority epoch currentness, consent validity, budget consumption, or effect permission.
+2. PR #6325 keeps base ROS-005 v1/v2 exact-name semantics unchanged and is not wired into `Delegation`. Xenia must not construct a typed scope and then assume the existing ROS-005 `authorize` call enforced it.
+3. Parent-chain validation remains owned by Mycelix #3677/#3680 and open PR #3679. The typed-scope comparison must eventually be replayed against the exact addressable parent records, not a caller-supplied containment boolean.
+4. ROS-004 owns the semantics and validity of consent, purpose and data class. A matching commitment is a binding, not a current consent decision. Xenia's recipient consent remains an independent conjunctive gate.
+5. The base ROS-005 `i64` grant/request/revocation time and authority epoch still need owner-standardized units/epoch and authenticated source evidence. The typed profile's `max_duration_ms` and rolling `window_ms` do not resolve that absolute-time ambiguity.
+6. The typed profile contains no explicit Xenia session fingerprint or rekey epoch. Xenia must continue to bind session/rekey identity locally and must reject stale queued work after rekey/reconnect until a future versioned owner contract defines a stronger mapping.
+7. Static budget limits do not reserve or consume capacity. Mycelix #6302/#507 must define durable, concurrent sibling consumption and crash recovery before these ceilings can be described as enforced cumulative limits.
+8. Mycelix #4903/#6236 still own currentness under delayed DHT visibility and trajectory-wide revocation propagation. Holochain 0.7.1 qualification remains under #5719 and is incomplete.
+
+**Integration gate:** Xenia may implement a typed adapter only after the Mycelix typed profile is merged, its canonical and containment tests are independently qualified, it is connected to the base ROS-005/parent-chain API, and the currentness/time/identity contracts are explicit. Until then the typed-scope dimension is `UNSUPPORTED` for live enforcement and must remain `HOLD/INDETERMINATE`, not a locally reconstructed permit.
