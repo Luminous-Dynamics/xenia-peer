@@ -245,6 +245,10 @@ fn wdrr_reduces_control_tail_wait_on_heterogeneous_backlog() {
         wdrr_p99.saturating_mul(100) < fifo_p99.saturating_mul(70),
         "WDRR control p99 {wdrr_p99} should be at least 30% below FIFO {fifo_p99}"
     );
+    assert!(
+        wdrr_p99.saturating_mul(100) < item_rr_p99.saturating_mul(70),
+        "WDRR control p99 {wdrr_p99} should be at least 30% below item-RR {item_rr_p99}"
+    );
     assert_eq!(completion_counts(&fifo), [CYCLES; 5]);
     assert_eq!(completion_counts(&item_rr), [CYCLES; 5]);
     assert_eq!(completion_counts(&wdrr), [CYCLES; 5]);
