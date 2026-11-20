@@ -81,11 +81,11 @@ impl<'a> FrameFragmentIter<'a> {
         if frame.width == 0 || frame.height == 0 {
             return Err(FrameFragmentationError::InvalidDimensions);
         }
-        if !frame.validate() {
-            return Err(FrameFragmentationError::InvalidFrame);
-        }
         if frame.pixels.is_empty() {
             return Err(FrameFragmentationError::EmptyFrame);
+        }
+        if !frame.validate() {
+            return Err(FrameFragmentationError::InvalidFrame);
         }
         if frame.pixels.len() > DEFAULT_MAX_FRAME_BYTES {
             return Err(FrameFragmentationError::FrameTooLarge);
