@@ -136,6 +136,25 @@ pub struct EffectGateSnapshot {
     pub unresolved_unknown_operations: usize,
 }
 
+/// Receipt proving a prepared permit was abandoned before invocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EffectPermitAbandonReceipt {
+    /// Stable operation identity; it remains consumed and cannot be reused.
+    pub operation_id: [u8; 16],
+    /// Session fingerprint.
+    pub session_fingerprint: [u8; 32],
+    /// Exact M1 permission lane.
+    pub lane: M1Permission,
+    /// Effect direction.
+    pub direction: EffectDirection,
+    /// Context digest bound to the permit.
+    pub context_digest: [u8; 32],
+    /// Authority epoch at permit issuance.
+    pub authority_epoch: u64,
+    /// Digest of caller-supplied abandonment rationale/evidence.
+    pub evidence_digest: [u8; 32],
+}
+
 /// Receipt for a local revocation linearization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EffectRevocationReceipt {
@@ -335,6 +354,46 @@ impl EffectCommitGate {
             direction: request.direction,
             context_digest: request.context_digest,
             authority_epoch: request.authority_epoch,
+        })
+    }
+
+    /// Explicitly abandon a prepared permit before invoking its effect.
+    ///
+    /// The operation ID remains consumed for this gate/session. Abandoning a
+    /// permit is not a rejection receipt from the effect owner and does not
+    /// prove that no other process independently performed the operation.
+    pub fn abandon(
+        &self,
+        permit: EffectCommitPermit,
+        evidence_digest: [u8; 32],
+    ) -> Result<EffectPermitAbandonReceipt, EffectGateError> {
+        let mut inner = self.lock()?;
+        if permit.gate_id != self.gate_id {
+            return Err(EffectGateError::ForeignGatePermit);
+        }
+        if permit.session_fingerprint != inner.session_fingerprint {
+            return Err(EffectGateError::SessionMismatch);
+        }
+        if !matches!(inner.phase, GatePhase::Active) {
+            return Err(EffectGateError::Revoked);
+        }
+        if permit.authority_epoch != inner.authority_epoch {
+            return Err(EffectGateError::AuthorityEpochMismatch {
+                current: inner.authority_epoch,
+                requested: permit.authority_epoch,
+            });
+        }
+        if !inner.pending_operations.remove(&permit.operation_id) {
+            return Err(EffectGateError::PermitInvalidated);
+        }
+        Ok(EffectPermitAbandonReceipt {
+            operation_id: permit.operation_id,
+            session_fingerprint: permit.session_fingerprint,
+            lane: permit.lane,
+            direction: permit.direction,
+            context_digest: permit.context_digest,
+            authority_epoch: permit.authority_epoch,
+            evidence_digest,
         })
     }
 
@@ -654,7 +713,7 @@ mod tests {
         let revoke_gate = Arc::clone(&gate);
         let (started_tx, started_rx) = mpsc::channel();
         let revoke_thread = thread::spawn(move || {
-            started_tx.send(()).ok();
+            let _ = started_tx.send(());
             revoke_gate.revoke(8, [7; 32])
         });
         started_rx
@@ -725,6 +784,29 @@ mod tests {
                 .operation_id,
             [18; 16]
         );
+    }
+
+    #[test]
+    fn abandoned_permit_releases_pending_slot_but_consumes_operation_id() {
+        let gate = gate();
+        let permit = gate
+            .prepare_after_admission(request(19))
+            .unwrap_or_else(|error| panic!("permit failed: {error:?}"));
+        let receipt = gate
+            .abandon(permit, [25; 32])
+            .unwrap_or_else(|error| panic!("abandon failed: {error:?}"));
+        assert_eq!(receipt.operation_id, [19; 16]);
+        assert_eq!(
+            gate.snapshot()
+                .unwrap_or_else(|error| panic!("{error:?}"))
+                .pending_operations,
+            0
+        );
+        assert_eq!(
+            gate.prepare_after_admission(request(19)).err(),
+            Some(EffectGateError::DuplicateOperation)
+        );
+        assert!(gate.prepare_after_admission(request(20)).is_ok());
     }
 
     #[test]
