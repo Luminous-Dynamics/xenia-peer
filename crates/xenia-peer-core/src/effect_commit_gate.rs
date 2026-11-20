@@ -88,9 +88,10 @@ pub enum EffectExecution<T> {
         /// Digest of the local commit receipt/evidence.
         evidence_digest: [u8; 32],
     },
-    /// The local effect owner confirms rejection before commit.
-    Rejected {
-        /// Digest of the rejection evidence.
+    /// The effect owner was invoked but confirms its local commit point
+    /// was not crossed.
+    NotCommitted {
+        /// Digest of the definitive non-commit evidence.
         evidence_digest: [u8; 32],
     },
     /// The effect was invoked but its commit status is ambiguous.
