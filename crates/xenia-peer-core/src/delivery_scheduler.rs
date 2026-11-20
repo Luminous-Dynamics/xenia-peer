@@ -958,7 +958,10 @@ mod tests {
             EnqueueDisposition::Rejected(RejectReason::MissingVideoReference)
         );
         scheduler.set_initial_video_reference(10);
-        assert_eq!(scheduler.enqueue(video(2, 11, Some(10), None), 0), EnqueueDisposition::Accepted);
+        assert_eq!(
+            scheduler.enqueue(video(2, 11, Some(10), None), 0),
+            EnqueueDisposition::Accepted
+        );
     }
 
     #[test]
@@ -1127,6 +1130,116 @@ mod tests {
                 assert!(lane.queued_bytes <= lane.max_bytes);
             }
         }
+    }
+
+    #[test]
+    fn keyframe_resets_old_reference_history() {
+        let mut scheduler = new_scheduler(SchedulerConfig::default());
+        scheduler.set_initial_video_reference(10);
+        assert_eq!(
+            scheduler.enqueue(video(1, 20, None, None), 0),
+            EnqueueDisposition::Accepted
+        );
+        assert_eq!(
+            scheduler.enqueue(video(2, 21, Some(10), None), 0),
+            EnqueueDisposition::Rejected(RejectReason::MissingVideoReference)
+        );
+        assert_eq!(
+            scheduler.enqueue(video(3, 21, Some(20), None), 0),
+            EnqueueDisposition::Accepted
+        );
+    }
+
+    #[test]
+    fn control_transition_is_not_aged_out() {
+        let mut config = SchedulerConfig::default();
+        config.control.max_age_ticks = Some(1);
+        let mut scheduler = new_scheduler(config);
+        let transition = item(
+            1,
+            0,
+            Some(1),
+            8,
+            WorkKind::Control {
+                sequence: 1,
+                operation_id: [3; 16],
+                transition: ControlTransition::ButtonUp,
+            },
+        );
+        assert_eq!(
+            scheduler.enqueue(transition, 0),
+            EnqueueDisposition::Accepted
+        );
+        assert_eq!(selected(&mut scheduler, 10).id, 1);
+    }
+
+    #[test]
+    fn full_video_queue_coalesces_only_an_unreferenced_tail_sibling() {
+        let mut config = SchedulerConfig::default();
+        config.video.max_items = 2;
+        config.video.max_bytes = 1024;
+        let mut scheduler = new_scheduler(config);
+        scheduler.set_initial_video_reference(10);
+        let first = item(
+            1,
+            0,
+            None,
+            400,
+            WorkKind::Video {
+                frame_id: 11,
+                depends_on: Some(10),
+            },
+        );
+        let second = item(
+            2,
+            0,
+            None,
+            400,
+            WorkKind::Video {
+                frame_id: 12,
+                depends_on: Some(10),
+            },
+        );
+        let third = item(
+            3,
+            0,
+            None,
+            400,
+            WorkKind::Video {
+                frame_id: 13,
+                depends_on: Some(10),
+            },
+        );
+        assert_eq!(scheduler.enqueue(first, 0), EnqueueDisposition::Accepted);
+        assert_eq!(scheduler.enqueue(second, 0), EnqueueDisposition::Accepted);
+        assert_eq!(
+            scheduler.enqueue(third, 0),
+            EnqueueDisposition::Coalesced { replaced_id: 2 }
+        );
+        assert_eq!(
+            scheduler.snapshot().lanes[DeliveryClass::Video.index()].queued_items,
+            2
+        );
+    }
+
+    #[test]
+    fn oversized_lane_capacity_is_rejected() {
+        let mut config = SchedulerConfig::default();
+        config.bulk.max_bytes = MAX_LANE_QUEUE_BYTES + 1;
+        assert_eq!(
+            DeliveryScheduler::new(config).err(),
+            Some(SchedulerConfigError::CapacityTooLarge)
+        );
+    }
+
+    #[test]
+    fn too_small_quantum_is_rejected() {
+        let mut config = SchedulerConfig::default();
+        config.quantum_bytes[DeliveryClass::Telemetry.index()] = MIN_QUANTUM_BYTES - 1;
+        assert_eq!(
+            DeliveryScheduler::new(config).err(),
+            Some(SchedulerConfigError::QuantumTooSmall)
+        );
     }
 
     #[test]
