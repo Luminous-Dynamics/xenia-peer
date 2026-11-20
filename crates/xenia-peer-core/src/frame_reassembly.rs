@@ -153,6 +153,8 @@ pub enum FrameFragmentError {
     FrameTooLarge,
     /// Width or height is zero.
     InvalidDimensions,
+    /// PixelFormat is not a supported video/pixel payload format.
+    UnsupportedPixelFormat,
     /// Frame already completed, expired, aborted or failed validation.
     FrameAlreadyFinalized,
     /// Same frame key arrived with inconsistent immutable metadata.
@@ -363,6 +365,17 @@ impl FrameReassembler {
         }
         if fragment.metadata.width == 0 || fragment.metadata.height == 0 {
             return Err(FrameFragmentError::InvalidDimensions);
+        }
+        if !matches!(
+            fragment.metadata.pixel_format,
+            PixelFormat::Rgba8
+                | PixelFormat::Bgra8
+                | PixelFormat::H264
+                | PixelFormat::Vp9
+                | PixelFormat::Passthrough
+                | PixelFormat::Hdc
+        ) {
+            return Err(FrameFragmentError::UnsupportedPixelFormat);
         }
 
         let existing_state = self.assemblies.get(&fragment.key).map(|existing| {
@@ -975,6 +988,19 @@ mod tests {
                 requested: 4,
             })
         );
+    }
+
+    #[test]
+    fn non_video_pixel_formats_are_rejected_before_reservation() {
+        let payload = b"abcdefgh";
+        let mut reassembler = reassembler();
+        let mut fragment = fragment(40, 0, 2, 8, frame_digest(payload), b"abcd");
+        fragment.metadata.pixel_format = PixelFormat::Audio;
+        assert_eq!(
+            reassembler.push(fragment, 0),
+            Err(FrameFragmentError::UnsupportedPixelFormat)
+        );
+        assert_eq!(reassembler.snapshot().reserved_bytes, 0);
     }
 
     #[test]
