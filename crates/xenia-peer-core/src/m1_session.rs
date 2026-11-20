@@ -450,13 +450,18 @@ impl M1SessionMachine {
     /// This is separate from `inject_input`, which records permission admission
     /// only. An injector error may follow partial application, so it is UNKNOWN
     /// rather than a definitive failure.
-    pub fn record_input_effect_outcome(&mut self, outcome: M1InputEffectOutcome) {
+    pub fn record_input_effect_outcome(
+        &mut self,
+        outcome: M1InputEffectOutcome,
+    ) -> Result<(), M1SessionError> {
+        self.require_active(M1Permission::InjectInput)?;
         let event = match outcome {
             M1InputEffectOutcome::PlatformAccepted => M1AuditEvent::InputPlatformAccepted,
             M1InputEffectOutcome::OutcomeUnknown => M1AuditEvent::InputOutcomeUnknown,
             M1InputEffectOutcome::NotAttempted => M1AuditEvent::InputNotAttempted,
         };
         self.audit.push(event);
+        Ok(())
     }
 
     fn transition(
@@ -896,9 +901,9 @@ mod tests {
         }).unwrap();
 
         session.inject_input().unwrap();
-        session.record_input_effect_outcome(M1InputEffectOutcome::PlatformAccepted);
-        session.record_input_effect_outcome(M1InputEffectOutcome::OutcomeUnknown);
-        session.record_input_effect_outcome(M1InputEffectOutcome::NotAttempted);
+        session.record_input_effect_outcome(M1InputEffectOutcome::PlatformAccepted).unwrap();
+        session.record_input_effect_outcome(M1InputEffectOutcome::OutcomeUnknown).unwrap();
+        session.record_input_effect_outcome(M1InputEffectOutcome::NotAttempted).unwrap();
 
         assert_eq!(
             &session.audit()[2..],
