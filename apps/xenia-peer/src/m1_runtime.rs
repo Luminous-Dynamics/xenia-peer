@@ -34,6 +34,7 @@ use xenia_peer_core::{
 };
 
 use crate::m1_ledger::consent_record_for_m1_event;
+use xenia_peer_core::M1InputEffectOutcome;
 
 #[derive(Debug)]
 pub(crate) enum M1RuntimeError {
@@ -1009,6 +1010,34 @@ impl M1RuntimeSession {
         self.flush_new_audit_events()
     }
 
+    /// Admit and execute one synchronous input effect while the caller holds
+    /// the shared M1 runtime mutex. Revocation uses the same mutex, so it
+    /// cannot linearize between permission admission and this effect callback.
+    ///
+    /// Backend-unavailable proves no platform call was made. Other injector
+    /// errors are UNKNOWN because a batch may have partially applied.
+    pub(crate) fn with_input_effect(
+        &mut self,
+        effect: impl FnOnce() -> Result<(), xenia_inject::InjectError>,
+    ) -> Result<Result<(), xenia_inject::InjectError>, M1RuntimeError> {
+        self.session.inject_input()?;
+        self.flush_new_audit_events()?;
+
+        let result = effect();
+        let outcome = match &result {
+            Ok(()) => M1InputEffectOutcome::PlatformAccepted,
+            Err(xenia_inject::InjectError::Unavailable(_)) => {
+                M1InputEffectOutcome::NotAttempted
+            }
+            Err(xenia_inject::InjectError::Backend(_)) => {
+                M1InputEffectOutcome::OutcomeUnknown
+            }
+        };
+        self.session.record_input_effect_outcome(outcome);
+        self.flush_new_audit_events()?;
+        Ok(result)
+    }
+
     pub(crate) fn read_host_clipboard(&mut self) -> Result<(), M1RuntimeError> {
         self.session.read_host_clipboard()?;
         self.flush_new_audit_events()
@@ -1919,6 +1948,73 @@ mod tests {
         assert_eq!(entries[2].event.kind, ConsentKind::Revocation);
 
         runtime.verify(&verifying_key).unwrap();
+    }
+
+    #[test]
+    fn input_effect_records_admission_and_actual_owner_outcome() {
+        let (mut runtime, verifying_key) = runtime(61);
+        runtime.offer().unwrap();
+        runtime.grant_consent_scoped(M1PermissionSet {
+            inject_input: true,
+            ..M1PermissionSet::default()
+        }).unwrap();
+
+        let accepted = runtime
+            .with_input_effect(|| Ok(()))
+            .unwrap_or_else(|error| panic!("runtime failed: {error:?}"));
+        assert!(accepted.is_ok());
+        assert_eq!(
+            &runtime.session.audit()[2..],
+            &[
+                xenia_peer_core::M1AuditEvent::InputPermissionAdmitted,
+                xenia_peer_core::M1AuditEvent::InputPlatformAccepted,
+            ]
+        );
+
+        let unknown = runtime
+            .with_input_effect(|| {
+                Err(xenia_inject::InjectError::Backend(
+                    "simulated partial backend failure".to_string(),
+                ))
+            })
+            .unwrap_or_else(|error| panic!("runtime failed: {error:?}"));
+        assert!(unknown.is_err());
+        assert_eq!(
+            runtime.session.audit().last(),
+            Some(&xenia_peer_core::M1AuditEvent::InputOutcomeUnknown)
+        );
+
+        let unavailable = runtime
+            .with_input_effect(|| {
+                Err(xenia_inject::InjectError::Unavailable(
+                    "simulated unavailable backend".to_string(),
+                ))
+            })
+            .unwrap_or_else(|error| panic!("runtime failed: {error:?}"));
+        assert!(unavailable.is_err());
+        assert_eq!(
+            runtime.session.audit().last(),
+            Some(&xenia_peer_core::M1AuditEvent::InputNotAttempted)
+        );
+        runtime.verify(&verifying_key).unwrap();
+    }
+
+    #[test]
+    fn input_effect_is_not_invoked_without_permission() {
+        let (mut runtime, _) = runtime(62);
+        runtime.offer().unwrap();
+        runtime.grant_consent_scoped(M1PermissionSet::default()).unwrap();
+        let invoked = std::cell::Cell::new(false);
+        let result = runtime.with_input_effect(|| {
+            invoked.set(true);
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert!(!invoked.get());
+        assert_eq!(
+            runtime.session.audit().last(),
+            Some(&xenia_peer_core::M1AuditEvent::ConsentGranted)
+        );
     }
 
     #[test]
