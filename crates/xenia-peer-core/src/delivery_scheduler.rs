@@ -442,86 +442,99 @@ impl DeliveryScheduler {
             return self.reject(RejectReason::Expired);
         }
 
-        if let WorkKind::Control { sequence, .. } = &item.kind {
-            if self
-                .last_control_sequence
-                .is_some_and(|previous| *sequence <= previous)
-            {
-                return self.reject(RejectReason::NonMonotonicControl);
-            }
+        let control_sequence = match &item.kind {
+            WorkKind::Control { sequence, .. } => Some(*sequence),
+            _ => None,
+        };
+        if control_sequence.is_some_and(|sequence| {
+            self.last_control_sequence
+                .is_some_and(|previous| sequence <= previous)
+        }) {
+            return self.reject(RejectReason::NonMonotonicControl);
         }
 
-        if let WorkKind::Video {
-            frame_id,
-            depends_on: Some(reference),
-        } = &item.kind
-        {
+        let video_delta_reference = match &item.kind {
+            WorkKind::Video {
+                frame_id,
+                depends_on: Some(reference),
+            } => {
+                if frame_id == reference {
+                    return self.reject(RejectReason::MissingVideoReference);
+                }
+                Some(*reference)
+            }
+            _ => None,
+        };
+        if let Some(reference) = video_delta_reference {
             let pending_reference = self.queues[DeliveryClass::Video.index()]
                 .items
                 .iter()
-                .any(|queued| queued.kind.video_frame_id() == Some(*reference));
-            if !self.known_video_references.contains(reference) && !pending_reference {
-                return self.reject(RejectReason::MissingVideoReference);
-            }
-            if *frame_id == *reference {
+                .any(|queued| queued.kind.video_frame_id() == Some(reference));
+            if !self.known_video_references.contains(&reference) && !pending_reference {
                 return self.reject(RejectReason::MissingVideoReference);
             }
         }
 
-        match &item.kind {
-            WorkKind::Telemetry { metric_key } => {
-                let queue = &mut self.queues[DeliveryClass::Telemetry.index()];
-                if let Some(index) = queue.items.iter().position(|queued| {
-                    matches!(
-                        queued.kind,
-                        WorkKind::Telemetry {
-                            metric_key: existing
-                        } if existing == *metric_key
-                    )
-                }) {
-                    let old = queue.items.get(index).expect("index came from queue");
-                    let new_bytes = queue
-                        .bytes
-                        .saturating_sub(old.cost_bytes)
-                        .saturating_add(item.cost_bytes);
-                    if new_bytes > limit.max_bytes {
-                        return self.reject(RejectReason::Full);
-                    }
-                    let replaced = queue.remove(index).expect("index came from queue");
-                    queue.push(item);
-                    self.stats.coalesced = self.stats.coalesced.saturating_add(1);
-                    return EnqueueDisposition::Coalesced {
-                        replaced_id: replaced.id,
-                    };
+        let telemetry_key = match &item.kind {
+            WorkKind::Telemetry { metric_key } => Some(*metric_key),
+            _ => None,
+        };
+        if let Some(metric_key) = telemetry_key {
+            let queue = &mut self.queues[DeliveryClass::Telemetry.index()];
+            if let Some(index) = queue.items.iter().position(|queued| {
+                matches!(
+                    &queued.kind,
+                    WorkKind::Telemetry {
+                        metric_key: existing
+                    } if *existing == metric_key
+                )
+            }) {
+                let old_cost = queue.items.get(index).expect("index came from queue").cost_bytes;
+                let replaced_id = queue.items.get(index).expect("index came from queue").id;
+                let new_bytes = queue
+                    .bytes
+                    .saturating_sub(old_cost)
+                    .saturating_add(item.cost_bytes);
+                if new_bytes > limit.max_bytes {
+                    self.stats.rejected = self.stats.rejected.saturating_add(1);
+                    return EnqueueDisposition::Rejected(RejectReason::Full);
                 }
-            }
-            WorkKind::Video {
-                depends_on: None, ..
-            } => {
-                let queue = &mut self.queues[DeliveryClass::Video.index()];
-                let removed = queue.items.len();
-                queue.items.clear();
-                queue.bytes = 0;
+                queue.remove(index).expect("index came from queue");
                 queue.push(item);
-                self.stats.superseded_video = self
-                    .stats
-                    .superseded_video
-                    .saturating_add(removed as u64);
-                self.stats.accepted = self.stats.accepted.saturating_add(1);
-                return if removed == 0 {
-                    EnqueueDisposition::Accepted
-                } else {
-                    EnqueueDisposition::Superseded {
-                        removed_items: removed,
-                    }
-                };
+                self.stats.coalesced = self.stats.coalesced.saturating_add(1);
+                return EnqueueDisposition::Coalesced { replaced_id };
             }
-            _ => {}
         }
 
+        let is_video_keyframe = matches!(
+            &item.kind,
+            WorkKind::Video {
+                depends_on: None,
+                ..
+            }
+        );
+        if is_video_keyframe {
+            let queue = &mut self.queues[DeliveryClass::Video.index()];
+            let removed = queue.items.len();
+            queue.items.clear();
+            queue.bytes = 0;
+            queue.push(item);
+            self.stats.superseded_video = self
+                .stats
+                .superseded_video
+                .saturating_add(removed as u64);
+            self.stats.accepted = self.stats.accepted.saturating_add(1);
+            return if removed == 0 {
+                EnqueueDisposition::Accepted
+            } else {
+                EnqueueDisposition::Superseded {
+                    removed_items: removed,
+                }
+            };
+        }
         let queue = &mut self.queues[class.index()];
         if queue.can_fit(&item, limit) {
-            if let WorkKind::Control { sequence, .. } = item.kind {
+            if let Some(sequence) = control_sequence {
                 self.last_control_sequence = Some(sequence);
             }
             queue.push(item);
@@ -538,21 +551,22 @@ impl DeliveryScheduler {
         } = &item.kind
         {
             if let Some(index) = queue.items.len().checked_sub(1) {
+                let replaced_id = queue.items.get(index).map(|last| last.id);
+                let old_cost = queue.items.get(index).map(|last| last.cost_bytes).unwrap_or(0);
                 let replaceable = queue.items.get(index).is_some_and(|last| {
                     last.kind.video_dependency() == Some(Some(*new_reference))
                 });
                 if replaceable {
-                    let old = queue.items.get(index).expect("index came from queue");
                     let new_bytes = queue
                         .bytes
-                        .saturating_sub(old.cost_bytes)
+                        .saturating_sub(old_cost)
                         .saturating_add(item.cost_bytes);
                     if new_bytes <= limit.max_bytes {
                         queue.remove(index).expect("index came from queue");
                         queue.push(item);
                         self.stats.coalesced = self.stats.coalesced.saturating_add(1);
                         return EnqueueDisposition::Coalesced {
-                            replaced_id: old.id,
+                            replaced_id: replaced_id.unwrap_or(0),
                         };
                     }
                 }
