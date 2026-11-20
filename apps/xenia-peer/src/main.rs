@@ -7317,7 +7317,7 @@ mod consent_scope_tests {
                     input_entered.store(true, Ordering::SeqCst);
                     std::thread::sleep(Duration::from_millis(75));
                     input_finished.store(true, Ordering::SeqCst);
-                    Ok(())
+                    crate::m1_runtime::InputEffectExecution::PlatformAccepted
                 })
                 .unwrap_or_else(|error| panic!("input effect runtime failed: {error:?}"))
                 .unwrap_or_else(|error| panic!("input effect failed: {error:?}"));
