@@ -13,6 +13,7 @@ The required ordering is:
 - If revocation linearizes first, the protected effect closure must not be invoked.
 - If the effect commit closure linearizes first, it completes before revocation can linearize.
 - A stale permit from an earlier authority epoch cannot commit after an epoch advance, revoke or regrant.
+- An UNKNOWN result invalidates every other permit already prepared but not yet committed.
 - If dispatch occurs and the result is ambiguous, the operation is UNKNOWN; no new protected mutation is admitted until reconciliation.
 
 The primitive in `crates/xenia-peer-core/src/effect_commit_gate.rs` implements a local version of this ordering using one mutex shared by commit and revoke.
@@ -82,6 +83,7 @@ The gate is intentionally not a solution to transport head-of-line blocking or w
 - A foreign-gate permit is rejected.
 - Any unresolved UNKNOWN blocks subsequent mutations session-wide.
 - A panic while the effect closure holds the mutex poisons the gate. All future operations fail closed with `LockPoisoned`; recovery requires an explicit process/session recovery and reconciliation, not clearing the poison and continuing.
+- If an UNKNOWN exists, even permits created before that UNKNOWN cannot commit after its receipt is reconciled.
 
 A product integration must persist or independently recover the revocation/authority frontier across daemon restart. A freshly constructed in-memory gate is not a substitute for revalidating authoritative state after restart.
 
