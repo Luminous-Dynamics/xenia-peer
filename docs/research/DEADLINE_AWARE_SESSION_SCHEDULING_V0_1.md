@@ -202,11 +202,15 @@ The model implements:
 - explicit local counters and queue snapshots.
 
 Configuration rejects zero capacities, zero age budgets, lane capacities above 64 MiB, item capacities above 4,096, byte quanta below 8 KiB, and any quantum larger than its lane's byte capacity so the configured weights cannot be silently clipped and the selection loop has a bounded visit budget.
-The scheduler snapshot now exposes scheduled byte-cost per lane, quantum-visit counts and current deficit credit. Under a continuously backlogged lane with no expiry, keyframe reset or queue-drain reset, its accounting invariant is:
+The scheduler snapshot exposes `selected_cost_bytes` per lane, quantum-visit counts and current deficit credit. These are based on caller-supplied item-cost estimates; they are **not measured wire bytes**. Under a continuously backlogged lane with no expiry, keyframe reset, supersession or queue-drain reset, the finite scheduler model maintains:
 
-`scheduled_bytes_i + deficit_bytes_i = lane_visits_i * quantum_bytes_i`
+`selected_cost_bytes_i + deficit_bytes_i = lane_visits_i * quantum_bytes_i`
 
-For a lane whose visit has yielded to the next class, the remaining deficit is below its next head item's size and therefore below the configured maximum item cost. This gives a finite-trace service-lag check in the scheduler's byte-cost model. The current unit test exercises 64 queued items per lane with heterogeneous 4/8/12/16 KiB costs and unequal quanta, then verifies the exact accounting identity after 100 selections. This is a scheduler-accounting invariant, **not** a real network service guarantee: it excludes expiry, supersession, empty queues, transport blocking, write buffering, congestion control and actual remote delivery. The default quanta are hypotheses, not optimized settings. They must be compared against static item-weighted service and the AoI-aware candidate before being treated as a good operating point.
+For a lane whose visit has yielded to the next class, remaining deficit is below the next head item's size and therefore below the maximum eligible item cost `L_i`. At completed-visit boundaries, this yields the candidate service-lag inequality:
+
+`selected_cost_bytes_i >= lane_visits_i * quantum_bytes_i - L_i`
+
+This is a candidate lemma for #530, not yet an independently reviewed proof or competitive ratio. The current unit test exercises 64 queued items per lane with heterogeneous 4/8/12/16 KiB costs and unequal quanta, then checks the exact accounting identity after 100 selections. These are scheduler-accounting properties, **not real network service guarantees**: they exclude expiry, supersession, empty queues, transport blocking, write buffering, congestion control and actual remote delivery. The default quanta are hypotheses, not optimized settings. They must be compared against static item-weighted service and the AoI-aware candidate before being treated as a good operating point.
 
 **Important scheduling boundary:** this model selects whole work items. WDRR byte accounting does not preempt a large send after the caller starts writing it. A whole 4–16 MiB frame or file chunk can still create non-preemptible sender blocking, depending on the transport writer. A bounded, frame-safe fragmentation/preemption contract is tracked separately in [#529](https://github.com/Luminous-Dynamics/xenia-peer/issues/529). Do not infer an end-to-end control p99 guarantee from this queue model alone.
 
