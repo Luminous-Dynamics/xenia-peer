@@ -30,6 +30,8 @@ The envelope writer now loops over Iroh's cancellation-safe `SendStream::write`:
 - the offset advances only by the returned byte count;
 - the four-byte length and payload use the same progress-reporting loop.
 
+An RAII send guard owns the stream's terminal flag while the framed envelope is in progress. If the `send_envelope` future itself is dropped by an outer caller (task abort, timeout wrapper, or `select!` cancellation), the guard's `Drop` finishes the send stream and marks it terminal. This closes the hole that would remain if only the inner timeout branch performed cleanup.
+
 If any write I/O error or deadline timeout occurs after writing begins:
 - the send stream is finished immediately;
 - its local terminal flag is set;
@@ -43,8 +45,8 @@ The same terminal flag moves with the send half when `QuicTransport::split` is c
 ## 3. New receiver behavior
 
 A timed-out/erroring `read_exact` can consume part of the four-byte length prefix or payload. The receiver now treats every envelope-read error/timeout as terminal:
-- the receive half records terminal state;
-- `RecvStream::stop(0)` notifies the peer to stop sending on that direction;
+- an RAII receive guard owns the receive stream's terminal flag while the read is in progress;
+- on read error/timeout or cancellation of the `recv_envelope` future by an outer caller, the guard's `Drop` calls `RecvStream::stop(0)` and marks the receive side terminal;
 - a subsequent receive returns `UnexpectedEof` immediately;
 - split receive halves retain that terminal state.
 
@@ -70,7 +72,7 @@ The current implementation uses `finish()` after a partially written envelope. T
 
 ## 6. Tests and failure corpus
 
-[quic-envelope-cancellation-v0.1.json](../../benchmarks/quic-envelope-cancellation-v0.1.json) contains 10 synthetic state/fault cases.
+[quic-envelope-cancellation-v0.1.json](../../benchmarks/quic-envelope-cancellation-v0.1.json) contains 12 synthetic state/fault cases, including cancellation by an outer caller after partial send/receive progress.
 
 Unit tests verify:
 - only pre-write size rejection is classified as non-terminal;
