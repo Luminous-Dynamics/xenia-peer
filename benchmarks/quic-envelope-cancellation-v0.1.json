@@ -134,6 +134,28 @@
         "receive_on_half"
       ],
       "expected": "UnexpectedEof"
+    },
+    {
+      "id": "QEIO-011",
+      "name": "outer-caller-cancels-send-after-partial-envelope",
+      "steps": [
+        "send_envelope_future_writes_length_prefix",
+        "outer_select_or_task_abort_drops_future",
+        "send_guard_drop_finishes_stream",
+        "next_send"
+      ],
+      "expected": "DirectionTerminalUnexpectedEof"
+    },
+    {
+      "id": "QEIO-012",
+      "name": "outer-caller-cancels-receive-after-partial-read",
+      "steps": [
+        "recv_envelope_future_consumes_partial_length_or_payload",
+        "outer_select_or_task_abort_drops_future",
+        "receive_guard_drop_stop_sending",
+        "next_receive"
+      ],
+      "expected": "DirectionTerminalUnexpectedEof"
     }
   ],
   "performance_results": null,
