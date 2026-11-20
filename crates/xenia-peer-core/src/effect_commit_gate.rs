@@ -19,7 +19,7 @@
 //! commit point and operation-level reconciliation. A panic while the closure
 //! holds the mutex poisons the gate; subsequent calls fail closed.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
@@ -130,6 +130,8 @@ pub struct EffectGateSnapshot {
     pub active: bool,
     /// Number of unique operation IDs already issued by this gate.
     pub issued_operations: usize,
+    /// Number of dispatched operations whose outcome is still unresolved.
+    pub unresolved_unknown_operations: usize,
 }
 
 /// Receipt for a local revocation linearization.
@@ -143,6 +145,33 @@ pub struct EffectRevocationReceipt {
     pub revoked_epoch: u64,
     /// Digest of the authenticated revocation evidence supplied by the caller.
     pub evidence_digest: [u8; 32],
+}
+
+/// Result established by an externally verified reconciliation receipt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EffectReconciliationOutcome {
+    /// The operation did not commit.
+    NotCommitted,
+    /// The local effect owner confirms the operation committed.
+    Committed,
+    /// A stronger observer confirms the outcome was observed.
+    Observed,
+}
+
+/// Local record of a verified reconciliation decision.
+///
+/// The receipt digest is supplied only after the caller independently verifies
+/// its source. This gate does not authenticate the receipt itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EffectReconciliationReceipt {
+    /// Stable operation identity.
+    pub operation_id: [u8; 16],
+    /// Digest recorded when the effect owner returned UNKNOWN.
+    pub original_unknown_digest: [u8; 32],
+    /// Reconciled outcome.
+    pub outcome: EffectReconciliationOutcome,
+    /// Digest of the independently verified reconciliation receipt.
+    pub receipt_digest: [u8; 32],
 }
 
 /// Receipt for reactivation after an externally verified new grant.
@@ -180,6 +209,12 @@ pub enum EffectGateError {
     },
     /// An operation ID has already been issued in this gate/session.
     DuplicateOperation,
+    /// A dispatched operation is unresolved; no new mutation may be admitted.
+    UnknownOutcomeOutstanding,
+    /// No unresolved UNKNOWN record exists for the supplied operation ID.
+    UnknownOperationNotFound,
+    /// A different reconciliation receipt was presented for an already resolved operation.
+    ReconciliationConflict,
     /// The per-session operation-ID bound has been reached.
     OperationCapacityFull,
     /// New authority epochs must be strictly greater than the current epoch.
@@ -211,6 +246,8 @@ struct GateInner {
     authority_epoch: u64,
     phase: GatePhase,
     issued_operations: HashSet<[u8; 16]>,
+    unknown_operations: HashMap<[u8; 16], [u8; 32]>,
+    reconciled_operations: HashMap<[u8; 16], EffectReconciliationReceipt>,
 }
 
 /// Serializes a synchronous local effect commit against local revocation.
@@ -244,6 +281,8 @@ impl EffectCommitGate {
                 authority_epoch,
                 phase: GatePhase::Active,
                 issued_operations: HashSet::new(),
+                unknown_operations: HashMap::new(),
+                reconciled_operations: HashMap::new(),
             }),
         })
     }
@@ -264,6 +303,9 @@ impl EffectCommitGate {
         }
         if !matches!(inner.phase, GatePhase::Active) {
             return Err(EffectGateError::Revoked);
+        }
+        if !inner.unknown_operations.is_empty() {
+            return Err(EffectGateError::UnknownOutcomeOutstanding);
         }
         if request.authority_epoch != inner.authority_epoch {
             return Err(EffectGateError::AuthorityEpochMismatch {
@@ -308,7 +350,7 @@ impl EffectCommitGate {
     where
         F: FnOnce() -> EffectExecution<T>,
     {
-        let inner = self.lock()?;
+        let mut inner = self.lock()?;
         if permit.gate_id != self.gate_id {
             return Err(EffectGateError::ForeignGatePermit);
         }
@@ -324,11 +366,19 @@ impl EffectCommitGate {
                 requested: permit.authority_epoch,
             });
         }
+        if !inner.unknown_operations.is_empty() {
+            return Err(EffectGateError::UnknownOutcomeOutstanding);
+        }
 
         // Linearization boundary: revoke takes this same mutex. The
         // synchronous effect-owner call therefore completes before a later
         // revoke can acquire/linearize, or it is not invoked at all.
         let execution = effect_owner_commit();
+        if let EffectExecution::Unknown { evidence_digest } = &execution {
+            inner
+                .unknown_operations
+                .insert(permit.operation_id, *evidence_digest);
+        }
         let receipt = EffectCommitReceipt {
             operation_id: permit.operation_id,
             session_fingerprint: permit.session_fingerprint,
@@ -442,6 +492,40 @@ impl EffectCommitGate {
         Ok(new_epoch)
     }
 
+    /// Reconcile an outstanding UNKNOWN operation using an externally
+    /// verified receipt. While any UNKNOWN remains, prepare and commit are
+    /// blocked for the entire session.
+    ///
+    /// The caller must authenticate the receipt before calling this method.
+    /// Repeating the same receipt is idempotent; a conflicting receipt cannot
+    /// overwrite the prior resolution.
+    pub fn reconcile_unknown(
+        &self,
+        operation_id: [u8; 16],
+        outcome: EffectReconciliationOutcome,
+        receipt_digest: [u8; 32],
+    ) -> Result<EffectReconciliationReceipt, EffectGateError> {
+        let mut inner = self.lock()?;
+        if let Some(existing) = inner.reconciled_operations.get(&operation_id).copied() {
+            if existing.outcome == outcome && existing.receipt_digest == receipt_digest {
+                return Ok(existing);
+            }
+            return Err(EffectGateError::ReconciliationConflict);
+        }
+        let original_unknown_digest = inner
+            .unknown_operations
+            .remove(&operation_id)
+            .ok_or(EffectGateError::UnknownOperationNotFound)?;
+        let receipt = EffectReconciliationReceipt {
+            operation_id,
+            original_unknown_digest,
+            outcome,
+            receipt_digest,
+        };
+        inner.reconciled_operations.insert(operation_id, receipt);
+        Ok(receipt)
+    }
+
     /// Read a fail-closed snapshot of the gate.
     pub fn snapshot(&self) -> Result<EffectGateSnapshot, EffectGateError> {
         let inner = self.lock()?;
@@ -450,6 +534,7 @@ impl EffectCommitGate {
             authority_epoch: inner.authority_epoch,
             active: matches!(inner.phase, GatePhase::Active),
             issued_operations: inner.issued_operations.len(),
+            unresolved_unknown_operations: inner.unknown_operations.len(),
         })
     }
 
@@ -650,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_effect_outcome_consumes_operation_id_without_claiming_commit() {
+    fn unknown_outcome_blocks_new_mutations_until_reconciled() {
         let gate = gate();
         let permit = gate
             .prepare_after_admission(request(7))
@@ -667,9 +752,37 @@ mod tests {
             }
         );
         assert_eq!(
-            gate.prepare_after_admission(request(7)).err(),
-            Some(EffectGateError::DuplicateOperation)
+            gate.prepare_after_admission(request(8)).err(),
+            Some(EffectGateError::UnknownOutcomeOutstanding)
         );
+        assert_eq!(
+            gate.snapshot()
+                .unwrap_or_else(|error| panic!("{error:?}"))
+                .unresolved_unknown_operations,
+            1
+        );
+
+        let reconciled = gate
+            .reconcile_unknown(
+                [7; 16],
+                EffectReconciliationOutcome::NotCommitted,
+                [14; 32],
+            )
+            .unwrap_or_else(|error| panic!("reconciliation failed: {error:?}"));
+        assert_eq!(reconciled.original_unknown_digest, [13; 32]);
+        assert_eq!(
+            gate.reconcile_unknown(
+                [7; 16],
+                EffectReconciliationOutcome::NotCommitted,
+                [14; 32],
+            )
+            .unwrap_or_else(|error| panic!("idempotent receipt failed: {error:?}")),
+            reconciled
+        );
+        let next = gate
+            .prepare_after_admission(request(8))
+            .unwrap_or_else(|error| panic!("fresh operation still blocked: {error:?}"));
+        assert_eq!(next.operation_id, [8; 16]);
     }
 
     #[test]
