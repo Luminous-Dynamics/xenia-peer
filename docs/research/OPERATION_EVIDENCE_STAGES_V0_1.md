@@ -41,6 +41,7 @@ No payload bytes, screen/audio media, clipboard content, raw input, file content
 | EffectCommitted | The local effect owner crossed its defined commit point | Local commit only; no remote observation implied |
 | OutcomeObserved | A stronger layer-specific observer supplied a receipt | Only the claim supported by that observer |
 | Rejected | Operation was rejected before effect attempt | No effect was attempted |
+| NotCommitted | Effect was attempted; owner proves local commit did not occur | Attempt happened, but local commit did not; not equivalent to preflight rejection |
 | Unknown | Attempt occurred but outcome is ambiguous | Neither success nor failure; retry blocked |
 | Reconciled | A receipt resolves the UNKNOWN state | Only the receipt's explicit outcome |
 
@@ -56,7 +57,8 @@ Examples:
 `Admitted -> Attempted -> Committed -> Observed`
 
 Other valid paths:
-- `Admitted -> Rejected`
+- `Admitted -> Rejected` (no effect invocation)
+- `Attempted -> NotCommitted` (effect invoked; local owner proves commit did not occur)
 - `Attempted -> Unknown -> ReconciledNotCommitted`
 - `Attempted -> Unknown -> ReconciledCommitted -> ReconciledObserved`
 - `Attempted -> Unknown -> ReconciledCommitted`
