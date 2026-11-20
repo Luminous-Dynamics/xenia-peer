@@ -52,6 +52,7 @@
 #![warn(missing_docs)]
 
 pub mod advertisement;
+pub mod delivery_scheduler;
 pub mod file_transfer;
 pub mod frame;
 pub mod handshake;
