@@ -7336,7 +7336,7 @@ mod consent_scope_tests {
 
         let runtime = runtime.lock().await;
         assert_eq!(runtime.state(), xenia_peer_core::M1SessionState::Revoked);
-        let audit = runtime.session.audit();
+        let audit = runtime.audit_events();
         let admitted = audit
             .iter()
             .position(|event| *event == xenia_peer_core::M1AuditEvent::InputPermissionAdmitted);
