@@ -876,6 +876,58 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_byte_reservation_rejects_an_additional_frame() {
+        let config = FrameReassemblyConfig {
+            max_in_flight_frames: 2,
+            max_reassembly_bytes: 8,
+            max_frame_bytes: 8,
+            max_fragment_bytes: 8,
+            max_total_fragments: 4,
+            max_fragments_per_frame: 4,
+            max_age_ticks: 10,
+        };
+        let mut reassembler = FrameReassembler::new([1; 32], 4, config)
+            .unwrap_or_else(|error| panic!("config rejected: {error:?}"));
+        let payload = b"abcdefgh";
+        assert!(reassembler
+            .push(fragment(20, 0, 2, 8, frame_digest(payload), b"abcd"), 0)
+            .is_ok());
+        assert_eq!(
+            reassembler.push(
+                fragment(21, 0, 2, 8, frame_digest(payload), b"abcd"),
+                1
+            ),
+            Err(FrameFragmentError::ReassemblyBytesFull)
+        );
+    }
+
+    #[test]
+    fn aggregate_fragment_descriptor_reservation_is_bounded() {
+        let config = FrameReassemblyConfig {
+            max_in_flight_frames: 2,
+            max_reassembly_bytes: 16,
+            max_frame_bytes: 8,
+            max_fragment_bytes: 8,
+            max_total_fragments: 2,
+            max_fragments_per_frame: 2,
+            max_age_ticks: 10,
+        };
+        let mut reassembler = FrameReassembler::new([1; 32], 4, config)
+            .unwrap_or_else(|error| panic!("config rejected: {error:?}"));
+        let payload = b"abcdefgh";
+        assert!(reassembler
+            .push(fragment(22, 0, 2, 8, frame_digest(payload), b"abcd"), 0)
+            .is_ok());
+        assert_eq!(
+            reassembler.push(
+                fragment(23, 0, 1, 4, frame_digest(b"wxyz"), b"wxyz"),
+                1
+            ),
+            Err(FrameFragmentError::FragmentDescriptorCapacityFull)
+        );
+    }
+
+    #[test]
     fn incomplete_frame_expires_and_releases_all_reservations() {
         let config = FrameReassemblyConfig {
             max_age_ticks: 5,
@@ -891,6 +943,13 @@ mod tests {
         assert_eq!(reassembler.expire(15), Ok(1));
         assert_eq!(reassembler.snapshot().reserved_bytes, 0);
         assert_eq!(reassembler.snapshot().in_flight_frames, 0);
+        assert_eq!(
+            reassembler.push(
+                fragment(12, 1, 2, 8, frame_digest(b"abcdefgh"), b"efgh"),
+                16
+            ),
+            Err(FrameFragmentError::FrameAlreadyFinalized)
+        );
     }
 
     #[test]
