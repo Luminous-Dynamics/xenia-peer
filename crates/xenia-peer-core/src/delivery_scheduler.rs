@@ -339,8 +339,8 @@ pub struct SchedulerStats {
     pub rejected: u64,
     /// Items selected for dispatch.
     pub dispatched: u64,
-    /// Byte service granted to each lane, in Control/Video/Audio/Telemetry/Bulk order.
-    pub dispatched_bytes: [u64; 5],
+    /// Selected caller-supplied byte-cost per lane, not measured wire bytes.
+    pub selected_cost_bytes: [u64; 5],
     /// Number of once-per-round quantum grants to each lane.
     pub lane_visits: [u64; 5],
 }
@@ -727,7 +727,7 @@ impl DeliveryScheduler {
                 if let Some(item) = self.queues[index].pop() {
                     self.deficits[index] -= cost_bytes;
                     self.stats.dispatched = self.stats.dispatched.saturating_add(1);
-                    self.stats.dispatched_bytes[index] = self.stats.dispatched_bytes[index]
+                    self.stats.selected_cost_bytes[index] = self.stats.dispatched_bytes[index]
                         .saturating_add(item.cost_bytes as u64);
                     if self.queues[index].items.is_empty() {
                         self.deficits[index] = 0;
@@ -1415,7 +1415,7 @@ mod tests {
             let index = class.index();
             let quantum = scheduler.config.quantum_bytes[index] as u64;
             let visits = snapshot.stats.lane_visits[index];
-            let served = snapshot.stats.dispatched_bytes[index];
+            let served = snapshot.stats.selected_cost_bytes[index];
             let deficit = snapshot.lanes[index].deficit_bytes as u64;
             assert!(
                 served
