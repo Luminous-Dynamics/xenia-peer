@@ -1,0 +1,149 @@
+{
+  "schema": "xenia-m1-permission-vs-effect-workloads/v1",
+  "status": "synthetic_m1_semantics_and_concurrency_fixtures",
+  "purpose": "Ensure permission admission is not represented as a successful effect and locally serialize synchronous input effect with revoke.",
+  "invariants": {
+    "old_success_shaped_event_variants_retained_for_compatibility": true,
+    "new_permission_gates_emit_admission_events": true,
+    "operation_events_excluded_from_human_consent_ledger": true,
+    "input_owner_call_occurs_under_shared_m1_runtime_lock": true,
+    "revoke_uses_same_m1_runtime_lock": true,
+    "injector_backend_error_is_unknown": true,
+    "unavailable_noop_backend_is_not_attempted": true,
+    "no_target_application_or_photon_claim": true,
+    "async_file_or_network_operations_not_wrapped_in_m1_lock": true
+  },
+  "scenarios": [
+    {
+      "id": "M1FX-001",
+      "name": "permission-admitted-without-platform-call",
+      "steps": [
+        "grant_inject_permission",
+        "request_input"
+      ],
+      "expected": "InputPermissionAdmittedOnly"
+    },
+    {
+      "id": "M1FX-002",
+      "name": "platform-injector-returns-ok",
+      "steps": [
+        "permission_admitted",
+        "injector_process_events_ok",
+        "append_outcome"
+      ],
+      "expected": "InputPlatformAccepted"
+    },
+    {
+      "id": "M1FX-003",
+      "name": "backend-error-after-possible-partial-batch",
+      "steps": [
+        "permission_admitted",
+        "injector_process_events_backend_error"
+      ],
+      "expected": "InputOutcomeUnknown"
+    },
+    {
+      "id": "M1FX-004",
+      "name": "unavailable-backend-or-noop-fallback",
+      "steps": [
+        "permission_admitted",
+        "backend_name_noop_or_unavailable"
+      ],
+      "expected": "InputNotAttempted"
+    },
+    {
+      "id": "M1FX-005",
+      "name": "permission-denied-does-not-invoke-injector",
+      "steps": [
+        "no_input_permission",
+        "call_with_input_effect"
+      ],
+      "expected": "PermissionDenied",
+      "assert": [
+        "effect_closure_not_called"
+      ]
+    },
+    {
+      "id": "M1FX-006",
+      "name": "revoke-waits-for-input-effect",
+      "steps": [
+        "input_locks_runtime",
+        "input_callback_enters",
+        "revoke_waits_for_runtime",
+        "input_outcome_appended",
+        "input_unlocks",
+        "revoke_linearizes"
+      ],
+      "expected": "InputOutcomeBeforeRevoke"
+    },
+    {
+      "id": "M1FX-007",
+      "name": "revoke-before-input-admission",
+      "steps": [
+        "revoke_locks_runtime",
+        "revoke_completes",
+        "input_attempts_lock",
+        "permission_check"
+      ],
+      "expected": "PermissionDenied",
+      "assert": [
+        "effect_closure_not_called"
+      ]
+    },
+    {
+      "id": "M1FX-008",
+      "name": "operation-events-not-consent-boundaries",
+      "steps": [
+        "append_all_new_admission_and_outcome_events",
+        "map_to_consent_journal"
+      ],
+      "expected": "SkipNotConsentBoundary"
+    },
+    {
+      "id": "M1FX-009",
+      "name": "legacy-variants-remain-readable",
+      "steps": [
+        "construct_historical_event_variant",
+        "map_to_consent_journal"
+      ],
+      "expected": "HistoricalVariantStillRecognized"
+    },
+    {
+      "id": "M1FX-010",
+      "name": "host-clipboard-write-failure",
+      "steps": [
+        "permission_admitted",
+        "set_text_fails"
+      ],
+      "expected": "FutureWorkNotCovered"
+    },
+    {
+      "id": "M1FX-011",
+      "name": "file-chunk-send-timeout",
+      "steps": [
+        "permission_admitted",
+        "send_partial_timeout"
+      ],
+      "expected": "FutureWorkNotCovered"
+    },
+    {
+      "id": "M1FX-012",
+      "name": "file-publication-failure",
+      "steps": [
+        "permission_admitted",
+        "stager_finish_fails"
+      ],
+      "expected": "FutureWorkNotCovered"
+    }
+  ],
+  "unimplemented_routes": [
+    "clipboard_disclosure",
+    "clipboard_apply",
+    "file_chunk_send",
+    "file_receive_staging_and_publication",
+    "frame_send_and_presentation",
+    "telemetry_send",
+    "audio_send"
+  ],
+  "performance_results": null
+}
