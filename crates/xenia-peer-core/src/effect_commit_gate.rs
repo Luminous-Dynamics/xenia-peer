@@ -879,6 +879,41 @@ mod tests {
     }
 
     #[test]
+    fn definitive_non_commit_does_not_hold_the_session_unknown() {
+        let gate = gate();
+        let permit = gate
+            .prepare_after_admission(request(22))
+            .unwrap_or_else(|error| panic!("permit failed: {error:?}"));
+        let receipt = gate
+            .commit(permit, || EffectExecution::<()>::NotCommitted {
+                evidence_digest: [26; 32],
+            })
+            .unwrap_or_else(|error| panic!("commit failed: {error:?}"));
+        assert_eq!(
+            receipt.execution,
+            EffectExecution::NotCommitted {
+                evidence_digest: [26; 32],
+            }
+        );
+        assert_eq!(
+            gate.snapshot()
+                .unwrap_or_else(|error| panic!("{error:?}"))
+                .unresolved_unknown_operations,
+            0
+        );
+        assert_eq!(
+            gate.prepare_after_admission(request(23))
+                .unwrap_or_else(|error| panic!("new operation blocked: {error:?}"))
+                .operation_id,
+            [23; 16]
+        );
+        assert_eq!(
+            gate.prepare_after_admission(request(22)).err(),
+            Some(EffectGateError::DuplicateOperation)
+        );
+    }
+
+    #[test]
     fn unknown_outcome_blocks_new_mutations_until_reconciled() {
         let gate = gate();
         let permit = gate
