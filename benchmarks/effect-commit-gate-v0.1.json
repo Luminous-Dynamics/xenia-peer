@@ -178,6 +178,22 @@
         "commit_old_permit"
       ],
       "expected": "AuthorityEpochMismatch"
+    },
+    {
+      "id": "ECG-016",
+      "name": "effect-owner-definitive-non-commit",
+      "steps": [
+        "prepare",
+        "invoke_effect_owner",
+        "owner_proves_not_committed",
+        "prepare_new_operation"
+      ],
+      "expected": "KnownNotCommitted",
+      "assert": [
+        "not_unknown",
+        "no_session_wide_unknown_hold",
+        "same_operation_id_stays_consumed"
+      ]
     }
   ],
   "reporting": {
