@@ -212,9 +212,7 @@ pub fn assess_version(
 
     match source.version.checked_sub(observed.version) {
         Some(version_lag) => VersionFreshness::Known { version_lag },
-        None => VersionFreshness::Unknown(
-            VersionUnknownReason::ObservedVersionAheadOfSource,
-        ),
+        None => VersionFreshness::Unknown(VersionUnknownReason::ObservedVersionAheadOfSource),
     }
 }
 
@@ -384,10 +382,7 @@ mod tests {
         value.local_age = None;
         let result = assess_region_freshness(value)
             .unwrap_or_else(|error| panic!("valid sample rejected: {error:?}"));
-        assert_eq!(
-            result.version,
-            VersionFreshness::Known { version_lag: 4 }
-        );
+        assert_eq!(result.version, VersionFreshness::Known { version_lag: 4 });
         assert_eq!(
             result.local_pipeline_age,
             LocalPipelineAge::Unknown(LocalAgeUnknownReason::MissingEvidence)
@@ -403,5 +398,4 @@ mod tests {
             Err(RegionMetadataError::RelevanceOutOfRange)
         );
     }
-
 }
