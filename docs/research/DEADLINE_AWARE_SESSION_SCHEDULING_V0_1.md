@@ -129,7 +129,11 @@ Recent AoI scheduling literature also warns against equating freshness with gree
 
 The primary external systems remain Parsec, RustDesk, Sunshine/Moonlight and RDP under the matched methodology in #465.
 
-Vendor-published numbers are context only. For example, Parsec reports 7 ms added LAN latency on its own test setup and describes its BUD peer-to-peer UDP stack and hardware codec path. That is not a matched independent result. Sunshine documents packet burst/buffer-overrun failure modes when host send bursts exceed the bottleneck path's drain rate. These observations motivate testing but do not establish that one product is faster than another.
+Vendor-published numbers are context only. Parsec reports 7 ms added LAN latency and 97% NAT traversal success for its own test setup, and describes its BUD peer-to-peer UDP stack and hardware codec path. Neither vendor figure is a matched independent result. Sunshine's current troubleshooting guidance emphasizes path stability/consistency (latency variance and packet loss), and documents burst-induced buffer overruns when host emission exceeds a bottleneck link's drain rate. These observations motivate measuring queue age and pacing; they do not establish that one product is faster than another.
+
+RustDesk is an important sovereignty/connectivity comparator: its official self-host documentation describes an ID/rendezvous service (`hbbs`) that attempts direct hole punching and a relay (`hbbr`) used when direct connectivity fails. It also supports operator-managed relay infrastructure. Xenia therefore needs an explicit relay-policy and metadata-visibility advantage, not just the ability to self-host.
+
+Microsoft RDP is an important channel-architecture comparator: Microsoft's protocol documentation describes multiple virtual channels for presentation, device communication and encrypted keyboard/mouse data. Consequently, separate media/control streams are not, by themselves, a novel Xenia contribution. The stronger differentiator must be the combination of explicit recipient-bound authority, effect-stage evidence, freshness scheduling and a transparent sovereign relay policy.
 
 ## 7. Proposed targets (not achieved)
 
@@ -174,7 +178,10 @@ The evaluator must fail closed or report INDETERMINATE when required telemetry, 
 - [RFC 9000 — QUIC](https://www.rfc-editor.org/rfc/rfc9000.html): defines multiplexed streams plus stream- and connection-level flow control.
 - [RFC 10069 — Managing Multiple Paths for a QUIC Connection](https://www.rfc-editor.org/rfc/rfc10069.html): published November 2026; defines multipath path management but leaves address discovery and application scheduling unspecified.
 - [Parsec technology overview](https://support.parsec.app/hc/en-us/articles/32361354307348-Overview): vendor description and self-reported LAN latency.
-- [Sunshine troubleshooting](https://docs.lizardbyte.dev/projects/sunshine/v2026.214.224301/md_docs_2troubleshooting.html): packet-burst and bottleneck-buffer failure discussion.
+- [Sunshine troubleshooting](https://docs.lizardbyte.dev/projects/sunshine/v2026.319.132152/md_docs_2troubleshooting.html): packet-burst and bottleneck-buffer failure discussion.
+- [RustDesk self-host documentation](https://rustdesk.com/docs/en/self-host/): operator-managed rendezvous, direct hole punching and relay fallback.
+- [Microsoft RDP protocol documentation](https://learn.microsoft.com/en-us/windows/desktop/termserv/remote-desktop-protocol): multiple virtual channels for presentation, device communication and encrypted input.
+
 
 ## 10. V0.1 Rust policy model
 
