@@ -244,7 +244,7 @@ impl Default for SchedulerConfig {
                 max_age_ticks: Some(100),
             },
             telemetry: LaneLimit {
-                max_items: 1,
+                max_items: 32,
                 max_bytes: 64 * 1024,
                 max_age_ticks: Some(5_000),
             },
@@ -908,6 +908,22 @@ mod tests {
         let selected = selected(&mut scheduler, 1);
         assert_eq!(selected.id, 2);
         assert_eq!(scheduler.snapshot().stats.coalesced, 1);
+
+        let second_metric = item(
+            3,
+            2,
+            None,
+            16,
+            WorkKind::Telemetry { metric_key: 8 },
+        );
+        assert_eq!(
+            scheduler.enqueue(second_metric, 2),
+            EnqueueDisposition::Accepted
+        );
+        assert_eq!(
+            scheduler.snapshot().lanes[DeliveryClass::Telemetry.index()].queued_items,
+            2
+        );
     }
 
     #[test]
