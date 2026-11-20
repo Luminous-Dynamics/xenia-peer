@@ -138,6 +138,46 @@
         "prepare_foreign_session"
       ],
       "expected": "SessionMismatch"
+    },
+    {
+      "id": "ECG-013",
+      "name": "unknown-invalidates-all-prepared-permits",
+      "steps": [
+        "prepare_a",
+        "prepare_b",
+        "commit_a_unknown",
+        "reconcile_a",
+        "commit_b"
+      ],
+      "expected": "PermitInvalidated",
+      "assert": [
+        "fresh_permit_required"
+      ]
+    },
+    {
+      "id": "ECG-014",
+      "name": "explicit-pre-effect-abandonment",
+      "steps": [
+        "prepare",
+        "abandon",
+        "prepare_same_id",
+        "prepare_new_id"
+      ],
+      "expected": "DuplicateOperationForSameId",
+      "assert": [
+        "pending_slot_released",
+        "operation_id_not_reusable"
+      ]
+    },
+    {
+      "id": "ECG-015",
+      "name": "authority-epoch-advance-invalidates-pending-permit",
+      "steps": [
+        "prepare_epoch_7",
+        "advance_epoch_8",
+        "commit_old_permit"
+      ],
+      "expected": "AuthorityEpochMismatch"
     }
   ],
   "reporting": {
