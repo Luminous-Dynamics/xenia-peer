@@ -744,6 +744,17 @@ pub(crate) fn verify_sealed_transcript_bound_evidence_bundle_dir_with_backend(
     ))
 }
 
+/// Explicit result class reported by the synchronous input effect owner.
+#[derive(Debug)]
+pub(crate) enum InputEffectExecution {
+    /// The selected platform injector returned success.
+    PlatformAccepted,
+    /// The owner knows no platform call was made (e.g. a no-op fallback).
+    NotAttempted(String),
+    /// A platform call returned an error; partial application is possible.
+    OutcomeUnknown(xenia_inject::InjectError),
+}
+
 pub(crate) struct M1RuntimeSession {
     session: M1SessionMachine,
     chain: Chain,
@@ -1023,20 +1034,16 @@ impl M1RuntimeSession {
     /// errors are UNKNOWN because a batch may have partially applied.
     pub(crate) fn with_input_effect(
         &mut self,
-        effect: impl FnOnce() -> Result<(), xenia_inject::InjectError>,
-    ) -> Result<Result<(), xenia_inject::InjectError>, M1RuntimeError> {
+        effect: impl FnOnce() -> InputEffectExecution,
+    ) -> Result<InputEffectExecution, M1RuntimeError> {
         self.session.inject_input()?;
         self.flush_new_audit_events()?;
 
         let result = effect();
         let outcome = match &result {
-            Ok(()) => M1InputEffectOutcome::PlatformAccepted,
-            Err(xenia_inject::InjectError::Unavailable(_)) => {
-                M1InputEffectOutcome::NotAttempted
-            }
-            Err(xenia_inject::InjectError::Backend(_)) => {
-                M1InputEffectOutcome::OutcomeUnknown
-            }
+            InputEffectExecution::PlatformAccepted => M1InputEffectOutcome::PlatformAccepted,
+            InputEffectExecution::NotAttempted(_) => M1InputEffectOutcome::NotAttempted,
+            InputEffectExecution::OutcomeUnknown(_) => M1InputEffectOutcome::OutcomeUnknown,
         };
         self.session.record_input_effect_outcome(outcome)?;
         self.flush_new_audit_events()?;
@@ -1965,9 +1972,9 @@ mod tests {
         }).unwrap();
 
         let accepted = runtime
-            .with_input_effect(|| Ok(()))
+            .with_input_effect(|| InputEffectExecution::PlatformAccepted)
             .unwrap_or_else(|error| panic!("runtime failed: {error:?}"));
-        assert!(accepted.is_ok());
+        assert!(matches!(accepted, InputEffectExecution::PlatformAccepted));
         assert_eq!(
             &runtime.session.audit()[2..],
             &[
@@ -1978,25 +1985,33 @@ mod tests {
 
         let unknown = runtime
             .with_input_effect(|| {
-                Err(xenia_inject::InjectError::Backend(
-                    "simulated partial backend failure".to_string(),
-                ))
+                InputEffectExecution::OutcomeUnknown(
+                    xenia_inject::InjectError::Unavailable(
+                        "backend returned unavailable after invocation".to_string(),
+                    ),
+                )
             })
             .unwrap_or_else(|error| panic!("runtime failed: {error:?}"));
-        assert!(unknown.is_err());
+        assert!(matches!(
+            unknown,
+            InputEffectExecution::OutcomeUnknown(_)
+        ));
         assert_eq!(
             runtime.session.audit().last(),
             Some(&xenia_peer_core::M1AuditEvent::InputOutcomeUnknown)
         );
 
-        let unavailable = runtime
+        let not_attempted = runtime
             .with_input_effect(|| {
-                Err(xenia_inject::InjectError::Unavailable(
-                    "simulated unavailable backend".to_string(),
-                ))
+                InputEffectExecution::NotAttempted(
+                    "no-op fallback installed; platform API was not called".to_string(),
+                )
             })
             .unwrap_or_else(|error| panic!("runtime failed: {error:?}"));
-        assert!(unavailable.is_err());
+        assert!(matches!(
+            not_attempted,
+            InputEffectExecution::NotAttempted(_)
+        ));
         assert_eq!(
             runtime.session.audit().last(),
             Some(&xenia_peer_core::M1AuditEvent::InputNotAttempted)
