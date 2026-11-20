@@ -45,7 +45,7 @@ The closure must return one of:
 - `NotCommitted`: effect owner was invoked and can prove its local commit point was not crossed;
 - `Unknown`: invocation happened, but the commit result is ambiguous.
 
-The returned receipt binds operation ID, session fingerprint, M1 lane, direction, context digest and authority epoch. The caller can append the receipt to the stage-accurate operation evidence ledger under #510.
+The returned receipt binds operation ID, session fingerprint, M1 lane, direction, context digest and authority epoch. The caller can append the receipt to the stage-accurate operation evidence ledger under #510. A definitive `NotCommitted` is a completed, known outcome and does not create the session-wide UNKNOWN hold; the operation ID nevertheless remains consumed.
 
 ### Revocation
 
@@ -102,9 +102,10 @@ The current unit tests cover:
 6. Authority-epoch advancement invalidates existing permits.
 7. Regrant requires a strictly newer epoch.
 8. UNKNOWN blocks new mutations until reconciliation.
-9. Session fingerprint mismatch is rejected before permit creation.
-10. Revocation receipt idempotency and conflict handling.
-11. A panic inside the effect closure poisons the gate and future calls fail closed.
+9. Definitive NotCommitted does not trigger an UNKNOWN hold, but consumes its operation ID.
+10. Session fingerprint mismatch is rejected before permit creation.
+11. Revocation receipt idempotency and conflict handling.
+12. A panic inside the effect closure poisons the gate and future calls fail closed.
 
 ## 6. Integration order
 
