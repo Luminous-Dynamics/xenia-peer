@@ -305,47 +305,6 @@ async fn write_all_cancel_safe(
     Ok(())
 }
 
-/// Write one length-prefixed envelope to a QUIC stream.
-///
-/// Any timeout or I/O error after writing begins terminates the send stream.
-/// A prefix of the length or payload may already have reached the peer; the
-/// stream must never be reused for another envelope after that point.
-async fn write_envelope_with_timeout(
-    send: &mut SendStream,
-    bytes: &[u8],
-    timeout: Duration,
-) -> Result<(), TransportError> {
-    let len = u32::try_from(bytes.len()).map_err(|_| TransportError::EnvelopeTooLarge(u32::MAX))?;
-    if len > MAX_ENVELOPE_BYTES {
-        return Err(TransportError::EnvelopeTooLarge(len));
-    }
-
-    let result = tokio::time::timeout(timeout, async {
-        write_all_cancel_safe(send, &len.to_be_bytes()).await?;
-        write_all_cancel_safe(send, bytes).await
-    })
-    .await;
-
-    match result {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(error)) => {
-            // Preserve framing by making any partial envelope the final bytes
-            // this stream can ever carry.
-            let _ = send.finish();
-            Err(error)
-        }
-        Err(_) => {
-            // The write future may have made earlier partial progress. Finish
-            // the stream so a caller cannot append a new envelope after it.
-            let _ = send.finish();
-            Err(TransportError::TimedOut {
-                operation: "send_envelope",
-                timeout_ms: timeout.as_millis().try_into().unwrap_or(u64::MAX),
-            })
-        }
-    }
-}
-
 /// RAII guard: if an envelope write future is dropped before a complete
 /// envelope is written, terminate the send stream and mark the direction
 /// unusable. This covers cancellation by an outer caller as well as timeout.
