@@ -314,6 +314,8 @@ pub enum RejectReason {
     NonMonotonicControl,
     /// An audio sequence was not strictly greater than the last admitted one.
     NonMonotonicAudio,
+    /// A video frame ID was not strictly greater than the last admitted one.
+    NonMonotonicVideo,
     /// A delta frame references a frame not queued or known as dispatched.
     MissingVideoReference,
 }
@@ -406,6 +408,7 @@ pub struct DeliveryScheduler {
     max_visits_per_selection: usize,
     last_control_sequence: Option<u64>,
     last_audio_sequence: Option<u64>,
+    last_video_frame_id: Option<u64>,
     known_video_references: VecDeque<u64>,
     stats: SchedulerStats,
 }
@@ -458,6 +461,7 @@ impl DeliveryScheduler {
             max_visits_per_selection,
             last_control_sequence: None,
             last_audio_sequence: None,
+            last_video_frame_id: None,
             known_video_references: VecDeque::new(),
             stats: SchedulerStats::default(),
         })
@@ -506,6 +510,14 @@ impl DeliveryScheduler {
                 .is_some_and(|previous| sequence <= previous)
         }) {
             return self.reject(RejectReason::NonMonotonicAudio);
+        }
+
+        let video_frame_id = item.kind.video_frame_id();
+        if video_frame_id.is_some_and(|frame_id| {
+            self.last_video_frame_id
+                .is_some_and(|previous| frame_id <= previous)
+        }) {
+            return self.reject(RejectReason::NonMonotonicVideo);
         }
 
         let video_delta_reference = match &item.kind {
@@ -584,6 +596,7 @@ impl DeliveryScheduler {
             queue.bytes = 0;
             self.known_video_references.clear();
             queue.push(item);
+            self.last_video_frame_id = video_frame_id;
             self.stats.superseded_video = self
                 .stats
                 .superseded_video
@@ -604,6 +617,9 @@ impl DeliveryScheduler {
             }
             if let Some(sequence) = audio_sequence {
                 self.last_audio_sequence = Some(sequence);
+            }
+            if let Some(frame_id) = video_frame_id {
+                self.last_video_frame_id = Some(frame_id);
             }
             queue.push(item);
             self.stats.accepted = self.stats.accepted.saturating_add(1);
@@ -636,6 +652,7 @@ impl DeliveryScheduler {
                         .saturating_add(item.cost_bytes);
                     if new_bytes <= limit.max_bytes && queue.remove(index).is_some() {
                         queue.push(item);
+                        self.last_video_frame_id = video_frame_id;
                         self.stats.accepted = self.stats.accepted.saturating_add(1);
                         self.stats.coalesced = self.stats.coalesced.saturating_add(1);
                         return EnqueueDisposition::Coalesced { replaced_id };
@@ -745,6 +762,7 @@ impl DeliveryScheduler {
     pub fn set_initial_video_reference(&mut self, frame_id: u64) {
         self.known_video_references.clear();
         self.known_video_references.push_back(frame_id);
+        self.last_video_frame_id = Some(frame_id);
     }
 
     /// Return a bounded snapshot of queue occupancy and local counters.
@@ -1030,6 +1048,23 @@ mod tests {
         scheduler.set_initial_video_reference(10);
         assert_eq!(
             scheduler.enqueue(video(2, 11, Some(10), None), 0),
+            EnqueueDisposition::Accepted
+        );
+    }
+
+    #[test]
+    fn video_frame_id_must_be_strictly_monotonic() {
+        let mut scheduler = new_scheduler(SchedulerConfig::default());
+        assert_eq!(
+            scheduler.enqueue(video(1, 10, None, None), 0),
+            EnqueueDisposition::Accepted
+        );
+        assert_eq!(
+            scheduler.enqueue(video(2, 9, None, None), 0),
+            EnqueueDisposition::Rejected(RejectReason::NonMonotonicVideo)
+        );
+        assert_eq!(
+            scheduler.enqueue(video(3, 11, Some(10), None), 0),
             EnqueueDisposition::Accepted
         );
     }
