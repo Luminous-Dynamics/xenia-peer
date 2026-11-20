@@ -373,11 +373,11 @@ impl EffectCommitGate {
                 requested: permit.authority_epoch,
             });
         }
-        if !inner.pending_operations.remove(&permit.operation_id) {
-            return Err(EffectGateError::PermitInvalidated);
-        }
         if !inner.unknown_operations.is_empty() {
             return Err(EffectGateError::UnknownOutcomeOutstanding);
+        }
+        if !inner.pending_operations.remove(&permit.operation_id) {
+            return Err(EffectGateError::PermitInvalidated);
         }
 
         // Linearization boundary: revoke takes this same mutex. The
