@@ -146,6 +146,28 @@ pub enum M1InputEffectOutcome {
     NotAttempted,
 }
 
+/// Outcome reported by the synchronous host clipboard read owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum M1ClipboardReadOutcome {
+    /// The OS clipboard read call completed; content may be empty/unavailable.
+    ReadCompleted,
+    /// No OS clipboard read call was made.
+    NotAttempted,
+    /// The clipboard read call failed with an uncertain outcome.
+    OutcomeUnknown,
+}
+
+/// Outcome reported by the synchronous host clipboard write owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum M1ClipboardWriteOutcome {
+    /// The OS clipboard write API returned success.
+    Applied,
+    /// No OS clipboard write call was made.
+    NotAttempted,
+    /// The OS clipboard write API returned an error.
+    OutcomeUnknown,
+}
+
 /// Audit event emitted by the M1 lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum M1AuditEvent {
@@ -199,6 +221,18 @@ pub enum M1AuditEvent {
     InputOutcomeUnknown,
     /// No platform input was attempted, for example because the backend is unavailable.
     InputNotAttempted,
+    /// The host clipboard read API completed under the read permission.
+    HostClipboardReadCompleted,
+    /// The host clipboard read API failed with an uncertain outcome.
+    HostClipboardReadOutcomeUnknown,
+    /// The host clipboard read API was not invoked.
+    HostClipboardReadNotAttempted,
+    /// The host clipboard write API returned success.
+    HostClipboardWriteApplied,
+    /// The host clipboard write API returned an error.
+    HostClipboardWriteOutcomeUnknown,
+    /// The host clipboard write API was not invoked.
+    HostClipboardWriteNotAttempted,
 }
 
 /// Typed M1 state-machine failure.
@@ -460,6 +494,46 @@ impl M1SessionMachine {
             M1InputEffectOutcome::PlatformAccepted => M1AuditEvent::InputPlatformAccepted,
             M1InputEffectOutcome::OutcomeUnknown => M1AuditEvent::InputOutcomeUnknown,
             M1InputEffectOutcome::NotAttempted => M1AuditEvent::InputNotAttempted,
+        };
+        self.audit.push(event);
+        Ok(())
+    }
+
+    /// Record the result of the actual synchronous host clipboard read call.
+    pub fn record_host_clipboard_read_outcome(
+        &mut self,
+        outcome: M1ClipboardReadOutcome,
+    ) -> Result<(), M1SessionError> {
+        self.require_active(M1Permission::ReadHostClipboard)?;
+        let event = match outcome {
+            M1ClipboardReadOutcome::ReadCompleted => {
+                M1AuditEvent::HostClipboardReadCompleted
+            }
+            M1ClipboardReadOutcome::NotAttempted => {
+                M1AuditEvent::HostClipboardReadNotAttempted
+            }
+            M1ClipboardReadOutcome::OutcomeUnknown => {
+                M1AuditEvent::HostClipboardReadOutcomeUnknown
+            }
+        };
+        self.audit.push(event);
+        Ok(())
+    }
+
+    /// Record the result of the actual synchronous host clipboard write call.
+    pub fn record_host_clipboard_write_outcome(
+        &mut self,
+        outcome: M1ClipboardWriteOutcome,
+    ) -> Result<(), M1SessionError> {
+        self.require_active(M1Permission::WriteHostClipboard)?;
+        let event = match outcome {
+            M1ClipboardWriteOutcome::Applied => M1AuditEvent::HostClipboardWriteApplied,
+            M1ClipboardWriteOutcome::NotAttempted => {
+                M1AuditEvent::HostClipboardWriteNotAttempted
+            }
+            M1ClipboardWriteOutcome::OutcomeUnknown => {
+                M1AuditEvent::HostClipboardWriteOutcomeUnknown
+            }
         };
         self.audit.push(event);
         Ok(())
