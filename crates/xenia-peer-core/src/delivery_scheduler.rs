@@ -405,6 +405,7 @@ pub struct DeliveryScheduler {
     queues: [LaneQueue; 5],
     cursor: usize,
     deficits: [usize; 5],
+    visit_active: bool,
     max_visits_per_selection: usize,
     last_control_sequence: Option<u64>,
     last_audio_sequence: Option<u64>,
@@ -458,6 +459,7 @@ impl DeliveryScheduler {
             queues: std::array::from_fn(|_| LaneQueue::default()),
             cursor: 0,
             deficits: [0; 5],
+            visit_active: false,
             max_visits_per_selection,
             last_control_sequence: None,
             last_audio_sequence: None,
@@ -673,8 +675,10 @@ impl DeliveryScheduler {
         self.prune_expired(now_ticks);
         if self.queues.iter().all(|queue| queue.items.is_empty()) {
             self.deficits = [0; 5];
+            self.visit_active = false;
             return None;
         }
+
         for _ in 0..self.max_visits_per_selection {
             let class = DeliveryClass::ALL[self.cursor];
             let index = class.index();
@@ -683,26 +687,42 @@ impl DeliveryScheduler {
                 .front()
                 .map(|item| item.cost_bytes);
 
-            if let Some(cost_bytes) = front_cost {
-                if self.deficits[index] >= cost_bytes {
-                    if let Some(item) = self.queues[index].pop() {
-                        self.deficits[index] -= cost_bytes;
-                        if self.queues[index].items.is_empty() {
-                            self.deficits[index] = 0;
-                        }
-                        self.stats.dispatched = self.stats.dispatched.saturating_add(1);
-                        return Some(item);
-                    }
-                } else {
-                    self.deficits[index] = self.deficits[index]
-                        .saturating_add(self.config.quantum_bytes[index])
-                        .min(self.config.limit(class).max_bytes);
-                }
-            } else {
+            let Some(cost_bytes) = front_cost else {
                 self.deficits[index] = 0;
+                self.cursor = (self.cursor + 1) % DeliveryClass::ALL.len();
+                self.visit_active = false;
+                continue;
+            };
+
+            // Add one quantum only when entering this class's visit. A class
+            // may dispatch multiple items while its accumulated deficit covers
+            // them, but it cannot mint a new quantum until every other class
+            // has had its turn.
+            if !self.visit_active {
+                self.deficits[index] = self.deficits[index]
+                    .saturating_add(self.config.quantum_bytes[index])
+                    .min(self.config.limit(class).max_bytes);
+                self.visit_active = true;
             }
 
+            if self.deficits[index] >= cost_bytes {
+                if let Some(item) = self.queues[index].pop() {
+                    self.deficits[index] -= cost_bytes;
+                    self.stats.dispatched = self.stats.dispatched.saturating_add(1);
+                    if self.queues[index].items.is_empty() {
+                        self.deficits[index] = 0;
+                        self.cursor = (self.cursor + 1) % DeliveryClass::ALL.len();
+                        self.visit_active = false;
+                    }
+                    return Some(item);
+                }
+            }
+
+            // The current visit has insufficient deficit for the head item.
+            // Retain unused credits for the next round, then yield to the next
+            // class instead of replenishing this lane repeatedly.
             self.cursor = (self.cursor + 1) % DeliveryClass::ALL.len();
+            self.visit_active = false;
         }
         None
     }
@@ -1245,6 +1265,116 @@ mod tests {
             selected_classes[next.class().index()] = true;
         }
         assert!(selected_classes.iter().all(|selected| *selected));
+    }
+
+    #[test]
+    fn deficit_round_robin_yields_after_each_class_quantum() {
+        let mut config = config_with_capacity(8);
+        config.quantum_bytes = [MIN_QUANTUM_BYTES; 5];
+        let mut scheduler = new_scheduler(config);
+        scheduler.set_initial_video_reference(0);
+
+        let item_cost = MIN_QUANTUM_BYTES;
+        for sequence in 1..=2_u64 {
+            assert_eq!(
+                scheduler.enqueue(
+                    item(
+                        sequence,
+                        0,
+                        None,
+                        item_cost,
+                        WorkKind::Control {
+                            sequence,
+                            operation_id: [sequence as u8; 16],
+                            transition: ControlTransition::KeyUp,
+                        },
+                    ),
+                    0,
+                ),
+                EnqueueDisposition::Accepted
+            );
+            assert_eq!(
+                scheduler.enqueue(
+                    item(
+                        10 + sequence,
+                        0,
+                        None,
+                        item_cost,
+                        WorkKind::Video {
+                            frame_id: sequence,
+                            depends_on: Some(sequence - 1),
+                        },
+                    ),
+                    0,
+                ),
+                EnqueueDisposition::Accepted
+            );
+            assert_eq!(
+                scheduler.enqueue(
+                    item(
+                        20 + sequence,
+                        0,
+                        None,
+                        item_cost,
+                        WorkKind::Audio { sequence },
+                    ),
+                    0,
+                ),
+                EnqueueDisposition::Accepted
+            );
+            assert_eq!(
+                scheduler.enqueue(
+                    item(
+                        30 + sequence,
+                        0,
+                        None,
+                        item_cost,
+                        WorkKind::Telemetry {
+                            metric_key: sequence as u16,
+                        },
+                    ),
+                    0,
+                ),
+                EnqueueDisposition::Accepted
+            );
+            assert_eq!(
+                scheduler.enqueue(
+                    item(
+                        40 + sequence,
+                        0,
+                        None,
+                        item_cost,
+                        WorkKind::Bulk {
+                            transfer_id: [4; 16],
+                            offset: sequence,
+                            digest: [sequence as u8; 32],
+                        },
+                    ),
+                    0,
+                ),
+                EnqueueDisposition::Accepted
+            );
+        }
+
+        let expected = [
+            DeliveryClass::Control,
+            DeliveryClass::Video,
+            DeliveryClass::Audio,
+            DeliveryClass::Telemetry,
+            DeliveryClass::Bulk,
+            DeliveryClass::Control,
+            DeliveryClass::Video,
+            DeliveryClass::Audio,
+            DeliveryClass::Telemetry,
+            DeliveryClass::Bulk,
+        ];
+        for class in expected {
+            let next = selected(&mut scheduler, 0);
+            assert_eq!(next.class(), class);
+            if let WorkKind::Video { frame_id, .. } = next.kind {
+                scheduler.record_video_dispatched(frame_id);
+            }
+        }
     }
 
     #[test]
