@@ -1,0 +1,313 @@
+{
+  "schema": "xenia-version-aoi-region-workloads/v1",
+  "status": "synthetic_semantics_fixtures_only",
+  "purpose": "Exercise region version identity, unknown evidence, local clock rules, and privacy-preserving explicit relevance. Never qualifies live performance.",
+  "constraints": {
+    "no_pixels": true,
+    "no_ocr": true,
+    "no_window_titles": true,
+    "no_application_names": true,
+    "no_clipboard_or_typed_content": true,
+    "no_raw_input_coordinates": true,
+    "no_cross_session_region_graph": true,
+    "relevance_requires_explicit_source_or_user_action": true,
+    "relevance_range": [
+      0,
+      100
+    ],
+    "missing_evidence": "UNKNOWN",
+    "cross_host_clock_subtraction": false,
+    "synthetic_fixture_release_pass": false
+  },
+  "version_identity_fields": [
+    "session_generation",
+    "region_id",
+    "region_generation",
+    "version"
+  ],
+  "region_classes": [
+    "critical_interaction",
+    "active_interaction",
+    "pointer_or_caret_feedback",
+    "background",
+    "unclassified"
+  ],
+  "scenarios": [
+    {
+      "id": "VAOI-001",
+      "name": "small-active-region-amid-background",
+      "source": {
+        "session_generation": 1,
+        "region_id": 11,
+        "region_generation": 1,
+        "version": 120
+      },
+      "observed": {
+        "session_generation": 1,
+        "region_id": 11,
+        "region_generation": 1,
+        "version": 118
+      },
+      "class": "active_interaction",
+      "relevance": 90,
+      "expected": {
+        "version_lag": 2,
+        "version_status": "known"
+      },
+      "assert": [
+        "class_is_explicit_metadata",
+        "no_content_fields"
+      ]
+    },
+    {
+      "id": "VAOI-002",
+      "name": "critical-region-stalls-background-current",
+      "regions": [
+        {
+          "region_id": 11,
+          "source_version": 100,
+          "observed_version": 100,
+          "class": "critical_interaction"
+        },
+        {
+          "region_id": 12,
+          "source_version": 900,
+          "observed_version": 900,
+          "class": "background"
+        },
+        {
+          "region_id": 13,
+          "source_version": 100,
+          "observed_version": 94,
+          "class": "active_interaction"
+        }
+      ],
+      "expected": {
+        "critical_region_lag": 0,
+        "active_region_lag": 6
+      },
+      "assert": [
+        "report_per_region_vector",
+        "do_not_hide_stale_region_in_global_average"
+      ]
+    },
+    {
+      "id": "VAOI-003",
+      "name": "cursor-and-caret-version-churn",
+      "source": {
+        "session_generation": 1,
+        "region_id": 21,
+        "region_generation": 1,
+        "version": 1000
+      },
+      "observed": {
+        "session_generation": 1,
+        "region_id": 21,
+        "region_generation": 1,
+        "version": 998
+      },
+      "class": "pointer_or_caret_feedback",
+      "relevance": 60,
+      "expected": {
+        "version_lag": 2,
+        "version_status": "known"
+      },
+      "assert": [
+        "version_semantics_declared",
+        "no_coordinate_capture"
+      ]
+    },
+    {
+      "id": "VAOI-004",
+      "name": "region-id-reuse-after-capture-restart",
+      "source": {
+        "session_generation": 1,
+        "region_id": 30,
+        "region_generation": 2,
+        "version": 1
+      },
+      "observed": {
+        "session_generation": 1,
+        "region_id": 30,
+        "region_generation": 1,
+        "version": 999
+      },
+      "expected": {
+        "version_status": "unknown",
+        "reason": "region_generation_mismatch"
+      },
+      "assert": [
+        "old_generation_never_looks_fresh"
+      ]
+    },
+    {
+      "id": "VAOI-005",
+      "name": "duplicate-source-version",
+      "source": {
+        "session_generation": 1,
+        "region_id": 31,
+        "region_generation": 1,
+        "version": 50
+      },
+      "observed": {
+        "session_generation": 1,
+        "region_id": 31,
+        "region_generation": 1,
+        "version": 50
+      },
+      "expected": {
+        "version_lag": 0,
+        "version_status": "known"
+      },
+      "assert": [
+        "producer_contract_must_define_duplicate_version_semantics"
+      ]
+    },
+    {
+      "id": "VAOI-006",
+      "name": "viewer-version-ahead",
+      "source": {
+        "session_generation": 1,
+        "region_id": 32,
+        "region_generation": 1,
+        "version": 50
+      },
+      "observed": {
+        "session_generation": 1,
+        "region_id": 32,
+        "region_generation": 1,
+        "version": 51
+      },
+      "expected": {
+        "version_status": "unknown",
+        "reason": "observed_version_ahead_of_source"
+      }
+    },
+    {
+      "id": "VAOI-007",
+      "name": "reordered-version-update",
+      "source": {
+        "session_generation": 1,
+        "region_id": 33,
+        "region_generation": 1,
+        "version": 110
+      },
+      "observed": {
+        "session_generation": 1,
+        "region_id": 33,
+        "region_generation": 1,
+        "version": 107
+      },
+      "expected": {
+        "version_lag": 3,
+        "version_status": "known"
+      },
+      "assert": [
+        "version_lag_is_not_claimed_as_time"
+      ]
+    },
+    {
+      "id": "VAOI-008",
+      "name": "session-generation-change-on-reconnect",
+      "source": {
+        "session_generation": 2,
+        "region_id": 40,
+        "region_generation": 1,
+        "version": 1
+      },
+      "observed": {
+        "session_generation": 1,
+        "region_id": 40,
+        "region_generation": 1,
+        "version": 900
+      },
+      "expected": {
+        "version_status": "unknown",
+        "reason": "session_generation_mismatch"
+      }
+    },
+    {
+      "id": "VAOI-009",
+      "name": "local-clock-domain-mismatch",
+      "local_age": {
+        "enqueue_clock_domain": 1,
+        "observation_clock_domain": 2,
+        "enqueued_at_ticks": 100,
+        "observed_at_ticks": 200
+      },
+      "expected": {
+        "local_age_status": "unknown",
+        "reason": "clock_domain_mismatch"
+      }
+    },
+    {
+      "id": "VAOI-010",
+      "name": "local-clock-regression",
+      "local_age": {
+        "enqueue_clock_domain": 1,
+        "observation_clock_domain": 1,
+        "enqueued_at_ticks": 200,
+        "observed_at_ticks": 100
+      },
+      "expected": {
+        "local_age_status": "unknown",
+        "reason": "clock_regression"
+      }
+    },
+    {
+      "id": "VAOI-011",
+      "name": "high-relevance-flood",
+      "regions": [
+        {
+          "region_id": 51,
+          "relevance": 100,
+          "class": "active_interaction"
+        },
+        {
+          "region_id": 52,
+          "relevance": 0,
+          "class": "background"
+        }
+      ],
+      "expected": {
+        "relevance_is_not_authority": true,
+        "minimum_service_for_other_lanes": true
+      },
+      "assert": [
+        "control_audio_bulk_not_starved"
+      ]
+    },
+    {
+      "id": "VAOI-012",
+      "name": "missing-version-and-classification",
+      "source": null,
+      "observed": null,
+      "class": "unclassified",
+      "relevance": null,
+      "expected": {
+        "version_status": "unknown",
+        "reason": "missing_source"
+      },
+      "assert": [
+        "unknown_not_zero",
+        "no_inferred_relevance"
+      ]
+    }
+  ],
+  "reporting": {
+    "freshness_vector_required": true,
+    "average_only_forbidden": true,
+    "report_percentiles": [
+      "p50",
+      "p95",
+      "p99",
+      "max"
+    ],
+    "report_worst_region": true,
+    "report_critical_region_only_when_class_is_trusted": true,
+    "report_unknown_denominator": true,
+    "report_version_semantics": true,
+    "report_local_clock_domain": true,
+    "physical_input_to_photon_requires_external_calibrated_instrument": true
+  }
+}
