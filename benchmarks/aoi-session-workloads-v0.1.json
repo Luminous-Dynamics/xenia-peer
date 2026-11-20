@@ -10,8 +10,9 @@
   },
   "baseline_policies": [
     "single_stream_fifo",
-    "multistream_static_bounded",
-    "multistream_deadline_aoi",
+    "multistream_static_bounded_item_weighted",
+    "multistream_byte_weighted_deficit_round_robin",
+    "multistream_deadline_aoi_starvation_protected",
     "simulation_oracle_only"
   ],
   "scenarios": [
@@ -288,5 +289,19 @@
     "bind_run_to_source_sha_and_configuration_digest": true,
     "no_aggregate_score": true,
     "synthetic_scenarios_never_produce_release_pass": true
+  },
+  "scheduler_policy_parameters": {
+    "status": "provisional_not_benchmarked",
+    "minimum_quantum_bytes": 8192,
+    "maximum_lane_capacity_bytes": 67108864,
+    "default_quantum_bytes": {
+      "control": 65536,
+      "video": 262144,
+      "audio": 65536,
+      "telemetry": 16384,
+      "bulk": 32768
+    },
+    "fairness_unit": "queued_byte_cost",
+    "comparison_requirement": "measure fairness, control p99, freshness, goodput and starvation separately"
   }
 }
