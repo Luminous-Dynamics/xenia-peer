@@ -87,7 +87,8 @@
         "read_length_prefix_partial",
         "read_timeout",
         "mark_receive_terminal",
-        "read_again"
+        "read_again",
+        "stop_receive_stream_code_0"
       ],
       "expected": "Terminal UnexpectedEof"
     },
@@ -99,7 +100,8 @@
         "read_payload_partial",
         "read_timeout",
         "mark_receive_terminal",
-        "read_again"
+        "read_again",
+        "stop_receive_stream_code_0"
       ],
       "expected": "Terminal UnexpectedEof"
     },
