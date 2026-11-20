@@ -135,6 +135,17 @@ impl M1PermissionSet {
     }
 }
 
+/// Outcome reported by the synchronous platform input effect owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum M1InputEffectOutcome {
+    /// The platform injector returned Ok for the submitted event.
+    PlatformAccepted,
+    /// The injector returned an error and may have partially applied input.
+    OutcomeUnknown,
+    /// The injector was unavailable, so no platform call was made.
+    NotAttempted,
+}
+
 /// Audit event emitted by the M1 lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum M1AuditEvent {
@@ -166,6 +177,28 @@ pub enum M1AuditEvent {
     SessionEnded,
     /// The session failed.
     SessionFailed,
+    /// Permission admission for a frame send; not evidence of transport delivery.
+    FramePermissionAdmitted,
+    /// Permission admission for telemetry; not evidence of transport delivery.
+    TelemetryPermissionAdmitted,
+    /// Permission admission for audio; not evidence of transport delivery.
+    AudioPermissionAdmitted,
+    /// Permission admission for a reverse-path input operation.
+    InputPermissionAdmitted,
+    /// Permission admission to read/disclose the host clipboard.
+    HostClipboardReadPermissionAdmitted,
+    /// Permission admission to apply viewer-originated host clipboard data.
+    HostClipboardWritePermissionAdmitted,
+    /// Permission admission for host-to-viewer file transfer.
+    FileSendPermissionAdmitted,
+    /// Permission admission for viewer-to-host file transfer.
+    FileReceivePermissionAdmitted,
+    /// The platform input injector returned success for the submitted event.
+    InputPlatformAccepted,
+    /// The injector returned an error; partial platform application is possible.
+    InputOutcomeUnknown,
+    /// No platform input was attempted, for example because the backend is unavailable.
+    InputNotAttempted,
 }
 
 /// Typed M1 state-machine failure.
@@ -347,7 +380,7 @@ impl M1SessionMachine {
     /// Record that one frame was allowed through the forward path.
     pub fn stream_frame(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::StreamFrame)?;
-        self.audit.push(M1AuditEvent::FrameStreamed);
+        self.audit.push(M1AuditEvent::FramePermissionAdmitted);
         Ok(())
     }
 
@@ -358,7 +391,7 @@ impl M1SessionMachine {
     /// [`stream_frame`]: Self::stream_frame
     pub fn stream_telemetry(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::StreamTelemetry)?;
-        self.audit.push(M1AuditEvent::TelemetryStreamed);
+        self.audit.push(M1AuditEvent::TelemetryPermissionAdmitted);
         Ok(())
     }
 
@@ -369,14 +402,14 @@ impl M1SessionMachine {
     /// [`stream_frame`]: Self::stream_frame
     pub fn stream_audio(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::StreamAudio)?;
-        self.audit.push(M1AuditEvent::AudioStreamed);
+        self.audit.push(M1AuditEvent::AudioPermissionAdmitted);
         Ok(())
     }
 
     /// Record that one input event was allowed through the reverse path.
     pub fn inject_input(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::InjectInput)?;
-        self.audit.push(M1AuditEvent::InputInjected);
+        self.audit.push(M1AuditEvent::InputPermissionAdmitted);
         Ok(())
     }
 
@@ -384,7 +417,7 @@ impl M1SessionMachine {
     /// the forward path.
     pub fn read_host_clipboard(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::ReadHostClipboard)?;
-        self.audit.push(M1AuditEvent::HostClipboardRead);
+        self.audit.push(M1AuditEvent::HostClipboardReadPermissionAdmitted);
         Ok(())
     }
 
@@ -392,7 +425,7 @@ impl M1SessionMachine {
     /// the host clipboard on the reverse path.
     pub fn write_host_clipboard(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::WriteHostClipboard)?;
-        self.audit.push(M1AuditEvent::HostClipboardWritten);
+        self.audit.push(M1AuditEvent::HostClipboardWritePermissionAdmitted);
         Ok(())
     }
 
@@ -400,7 +433,7 @@ impl M1SessionMachine {
     /// transfer was allowed through.
     pub fn send_file_to_viewer(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::SendFileToViewer)?;
-        self.audit.push(M1AuditEvent::FileSentToViewer);
+        self.audit.push(M1AuditEvent::FileSendPermissionAdmitted);
         Ok(())
     }
 
@@ -408,8 +441,22 @@ impl M1SessionMachine {
     /// transfer was allowed through.
     pub fn receive_file_from_viewer(&mut self) -> Result<(), M1SessionError> {
         self.require_active(M1Permission::ReceiveFileFromViewer)?;
-        self.audit.push(M1AuditEvent::FileReceivedFromViewer);
+        self.audit.push(M1AuditEvent::FileReceivePermissionAdmitted);
         Ok(())
+    }
+
+    /// Record the outcome returned by the actual synchronous input effect owner.
+    ///
+    /// This is separate from `inject_input`, which records permission admission
+    /// only. An injector error may follow partial application, so it is UNKNOWN
+    /// rather than a definitive failure.
+    pub fn record_input_effect_outcome(&mut self, outcome: M1InputEffectOutcome) {
+        let event = match outcome {
+            M1InputEffectOutcome::PlatformAccepted => M1AuditEvent::InputPlatformAccepted,
+            M1InputEffectOutcome::OutcomeUnknown => M1AuditEvent::InputOutcomeUnknown,
+            M1InputEffectOutcome::NotAttempted => M1AuditEvent::InputNotAttempted,
+        };
+        self.audit.push(event);
     }
 
     fn transition(
@@ -729,8 +776,8 @@ mod tests {
             &[
                 M1AuditEvent::SessionOffered,
                 M1AuditEvent::ConsentGranted,
-                M1AuditEvent::FrameStreamed,
-                M1AuditEvent::InputInjected
+                M1AuditEvent::FramePermissionAdmitted,
+                M1AuditEvent::InputPermissionAdmitted
             ]
         );
     }
@@ -781,8 +828,8 @@ mod tests {
             &[
                 M1AuditEvent::SessionOffered,
                 M1AuditEvent::ConsentGranted,
-                M1AuditEvent::HostClipboardRead,
-                M1AuditEvent::HostClipboardWritten
+                M1AuditEvent::HostClipboardReadPermissionAdmitted,
+                M1AuditEvent::HostClipboardWritePermissionAdmitted
             ]
         );
     }
@@ -833,8 +880,33 @@ mod tests {
             &[
                 M1AuditEvent::SessionOffered,
                 M1AuditEvent::ConsentGranted,
-                M1AuditEvent::FileSentToViewer,
-                M1AuditEvent::FileReceivedFromViewer
+                M1AuditEvent::FileSendPermissionAdmitted,
+                M1AuditEvent::FileReceivePermissionAdmitted
+            ]
+        );
+    }
+
+    #[test]
+    fn input_effect_outcomes_are_distinct_from_permission_admission() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+        session.grant_consent_scoped(M1PermissionSet {
+            inject_input: true,
+            ..M1PermissionSet::default()
+        }).unwrap();
+
+        session.inject_input().unwrap();
+        session.record_input_effect_outcome(M1InputEffectOutcome::PlatformAccepted);
+        session.record_input_effect_outcome(M1InputEffectOutcome::OutcomeUnknown);
+        session.record_input_effect_outcome(M1InputEffectOutcome::NotAttempted);
+
+        assert_eq!(
+            &session.audit()[2..],
+            &[
+                M1AuditEvent::InputPermissionAdmitted,
+                M1AuditEvent::InputPlatformAccepted,
+                M1AuditEvent::InputOutcomeUnknown,
+                M1AuditEvent::InputNotAttempted,
             ]
         );
     }
