@@ -339,6 +339,10 @@ pub struct SchedulerStats {
     pub rejected: u64,
     /// Items selected for dispatch.
     pub dispatched: u64,
+    /// Byte service granted to each lane, in Control/Video/Audio/Telemetry/Bulk order.
+    pub dispatched_bytes: [u64; 5],
+    /// Number of once-per-round quantum grants to each lane.
+    pub lane_visits: [u64; 5],
 }
 
 /// Snapshot of one class's bounded queue.
@@ -352,6 +356,8 @@ pub struct LaneSnapshot {
     pub max_items: usize,
     /// Configured byte capacity.
     pub max_bytes: usize,
+    /// Deficit credit currently earned but not yet spent.
+    pub deficit_bytes: usize,
 }
 
 /// Read-only aggregate scheduler snapshot.
@@ -710,9 +716,10 @@ impl DeliveryScheduler {
             // them, but it cannot mint a new quantum until every other class
             // has had its turn.
             if !self.visit_active {
-                self.deficits[index] = self.deficits[index]
-                    .saturating_add(self.config.quantum_bytes[index])
-                    .min(self.config.limit(class).max_bytes);
+                self.deficits[index] =
+                    self.deficits[index].saturating_add(self.config.quantum_bytes[index]);
+                self.stats.lane_visits[index] =
+                    self.stats.lane_visits[index].saturating_add(1);
                 self.visit_active = true;
             }
 
@@ -720,6 +727,8 @@ impl DeliveryScheduler {
                 if let Some(item) = self.queues[index].pop() {
                     self.deficits[index] -= cost_bytes;
                     self.stats.dispatched = self.stats.dispatched.saturating_add(1);
+                    self.stats.dispatched_bytes[index] = self.stats.dispatched_bytes[index]
+                        .saturating_add(item.cost_bytes as u64);
                     if self.queues[index].items.is_empty() {
                         self.deficits[index] = 0;
                         self.cursor = (self.cursor + 1) % DeliveryClass::ALL.len();
@@ -825,6 +834,7 @@ impl DeliveryScheduler {
                 queued_bytes: queue.bytes,
                 max_items: limit.max_items,
                 max_bytes: limit.max_bytes,
+                deficit_bytes: self.deficits[class.index()],
             };
         }
         SchedulerSnapshot {
@@ -1294,6 +1304,131 @@ mod tests {
             selected_classes[next.class().index()] = true;
         }
         assert!(selected_classes.iter().all(|selected| *selected));
+    }
+
+    #[test]
+    fn wdrr_service_lag_stays_within_one_maximum_item_per_visit() {
+        let mut config = config_with_capacity(128);
+        config.quantum_bytes = [
+            MIN_QUANTUM_BYTES,
+            MIN_QUANTUM_BYTES + 4 * 1024,
+            MIN_QUANTUM_BYTES + 8 * 1024,
+            MIN_QUANTUM_BYTES + 12 * 1024,
+            MIN_QUANTUM_BYTES + 16 * 1024,
+        ];
+        let mut scheduler = new_scheduler(config);
+        scheduler.set_initial_video_reference(0);
+        let sizes = [4 * 1024, 16 * 1024, 8 * 1024, 12 * 1024];
+        let max_item_bytes = [16 * 1024; 5];
+
+        for sequence in 1..=64_u64 {
+            let size = sizes[((sequence - 1) as usize) % sizes.len()];
+            assert_eq!(
+                scheduler.enqueue(
+                    item(
+                        sequence,
+                        0,
+                        None,
+                        size,
+                        WorkKind::Control {
+                            sequence,
+                            operation_id: [sequence as u8; 16],
+                            transition: ControlTransition::KeyDown,
+                        },
+                    ),
+                    0,
+                ),
+                EnqueueDisposition::Accepted
+            );
+            assert_eq!(
+                scheduler.enqueue(
+                    item(
+                        100 + sequence,
+                        0,
+                        None,
+                        size,
+                        WorkKind::Video {
+                            frame_id: sequence,
+                            depends_on: Some(sequence - 1),
+                        },
+                    ),
+                    0,
+                ),
+                EnqueueDisposition::Accepted
+            );
+            assert_eq!(
+                scheduler.enqueue(
+                    item(
+                        200 + sequence,
+                        0,
+                        None,
+                        size,
+                        WorkKind::Audio { sequence },
+                    ),
+                    0,
+                ),
+                EnqueueDisposition::Accepted
+            );
+            assert_eq!(
+                scheduler.enqueue(
+                    item(
+                        300 + sequence,
+                        0,
+                        None,
+                        size,
+                        WorkKind::Telemetry {
+                            metric_key: sequence as u16,
+                        },
+                    ),
+                    0,
+                ),
+                EnqueueDisposition::Accepted
+            );
+            assert_eq!(
+                scheduler.enqueue(
+                    item(
+                        400 + sequence,
+                        0,
+                        None,
+                        size,
+                        WorkKind::Bulk {
+                            transfer_id: [7; 16],
+                            offset: sequence,
+                            digest: [sequence as u8; 32],
+                        },
+                    ),
+                    0,
+                ),
+                EnqueueDisposition::Accepted
+            );
+        }
+
+        for _ in 0..100 {
+            let next = selected(&mut scheduler, 0);
+            if let WorkKind::Video { frame_id, .. } = next.kind {
+                scheduler.record_video_dispatched(frame_id);
+            }
+        }
+
+        let snapshot = scheduler.snapshot();
+        for class in DeliveryClass::ALL {
+            let index = class.index();
+            let quantum = scheduler.config.quantum_bytes[index] as u64;
+            let visits = snapshot.stats.lane_visits[index];
+            let served = snapshot.stats.dispatched_bytes[index];
+            let deficit = snapshot.lanes[index].deficit_bytes as u64;
+            assert!(
+                served
+                    .saturating_add(deficit)
+                    .saturating_add(max_item_bytes[index] as u64)
+                    >= visits.saturating_mul(quantum),
+                "lane {class:?}: {served}+{deficit} < {visits}*{quantum}"
+            );
+            assert!(
+                snapshot.lanes[index].queued_items > 0,
+                "class {class:?} must remain backlogged"
+            );
+        }
     }
 
     #[test]
