@@ -57,6 +57,7 @@ pub mod frame;
 pub mod handshake;
 pub mod m1_session;
 pub mod producer_flow;
+pub mod region_freshness;
 pub mod receive_reservation;
 mod session;
 pub mod transfer_source;
