@@ -357,15 +357,21 @@ fn send_failure_is_terminal(result: &Result<(), TransportError>) -> bool {
     )
 }
 
+fn ensure_stream_side_open(terminal: bool) -> Result<(), TransportError> {
+    if terminal {
+        Err(TransportError::UnexpectedEof)
+    } else {
+        Ok(())
+    }
+}
+
 async fn send_envelope_guarded(
     send: &mut SendStream,
     terminal: &mut bool,
     bytes: &[u8],
     timeout: Duration,
 ) -> Result<(), TransportError> {
-    if *terminal {
-        return Err(TransportError::UnexpectedEof);
-    }
+    ensure_stream_side_open(*terminal)?;
     let result = write_envelope_with_timeout(send, bytes, timeout).await;
     if send_failure_is_terminal(&result) {
         *terminal = true;
@@ -439,9 +445,7 @@ impl Transport for QuicTransport {
     }
 
     async fn recv_envelope(&mut self) -> Result<Vec<u8>, TransportError> {
-        if self.recv_terminal {
-            return Err(TransportError::UnexpectedEof);
-        }
+        ensure_stream_side_open(self.recv_terminal)?;
         let result = read_envelope(&mut self.recv).await;
         if result.is_err() {
             self.recv_terminal = true;
@@ -488,9 +492,7 @@ pub struct QuicRecvHalf {
 
 impl RecvEnvelope for QuicRecvHalf {
     async fn recv_envelope(&mut self) -> Result<Vec<u8>, TransportError> {
-        if self.terminal {
-            return Err(TransportError::UnexpectedEof);
-        }
+        ensure_stream_side_open(self.terminal)?;
         let result = read_envelope(&mut self.recv).await;
         if result.is_err() {
             self.terminal = true;
@@ -502,6 +504,30 @@ impl RecvEnvelope for QuicRecvHalf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_pre_write_size_rejections_leave_the_send_stream_reusable() {
+        assert!(!send_failure_is_terminal(&Err(
+            TransportError::EnvelopeTooLarge(MAX_ENVELOPE_BYTES + 1)
+        )));
+        assert!(send_failure_is_terminal(&Err(TransportError::UnexpectedEof)));
+        assert!(send_failure_is_terminal(&Err(TransportError::TimedOut {
+            operation: "send_envelope",
+            timeout_ms: 1,
+        })));
+        assert!(send_failure_is_terminal(&Err(TransportError::Io(
+            io::Error::other("partial write failed")
+        ))));
+    }
+
+    #[test]
+    fn terminal_stream_side_rejects_every_subsequent_operation() {
+        assert!(ensure_stream_side_open(false).is_ok());
+        assert_eq!(
+            ensure_stream_side_open(true),
+            Err(TransportError::UnexpectedEof)
+        );
+    }
 
     #[test]
     fn wire_constants_are_stable() {
