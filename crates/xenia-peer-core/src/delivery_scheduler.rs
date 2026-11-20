@@ -22,6 +22,7 @@ use std::collections::VecDeque;
 pub const VIDEO_REFERENCE_HISTORY: usize = 16;
 
 const MAX_LANE_QUEUE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_LANE_QUEUE_ITEMS: usize = 4_096;
 const MIN_QUANTUM_BYTES: usize = 8 * 1024;
 
 /// One scheduling class with a distinct delivery contract.
@@ -271,7 +272,7 @@ pub enum SchedulerConfigError {
     ZeroCapacity,
     /// A configured age budget is zero and would expire every item at enqueue.
     ZeroAgeBudget,
-    /// A configured lane byte capacity exceeds the scheduler's bounded work limit.
+    /// A configured lane byte or item capacity exceeds its bounded work limit.
     CapacityTooLarge,
     /// A configured byte quantum is below the safe minimum for bounded selection work.
     QuantumTooSmall,
@@ -311,6 +312,8 @@ pub enum RejectReason {
     Full,
     /// A control sequence was not strictly greater than the last admitted one.
     NonMonotonicControl,
+    /// An audio sequence was not strictly greater than the last admitted one.
+    NonMonotonicAudio,
     /// A delta frame references a frame not queued or known as dispatched.
     MissingVideoReference,
 }
@@ -402,6 +405,7 @@ pub struct DeliveryScheduler {
     deficits: [usize; 5],
     max_visits_per_selection: usize,
     last_control_sequence: Option<u64>,
+    last_audio_sequence: Option<u64>,
     known_video_references: VecDeque<u64>,
     stats: SchedulerStats,
 }
@@ -413,7 +417,9 @@ impl DeliveryScheduler {
             if limit.max_items == 0 || limit.max_bytes == 0 {
                 return Err(SchedulerConfigError::ZeroCapacity);
             }
-            if limit.max_bytes > MAX_LANE_QUEUE_BYTES {
+            if limit.max_bytes > MAX_LANE_QUEUE_BYTES
+                || limit.max_items > MAX_LANE_QUEUE_ITEMS
+            {
                 return Err(SchedulerConfigError::CapacityTooLarge);
             }
             if limit.max_age_ticks == Some(0) {
@@ -451,6 +457,7 @@ impl DeliveryScheduler {
             deficits: [0; 5],
             max_visits_per_selection,
             last_control_sequence: None,
+            last_audio_sequence: None,
             known_video_references: VecDeque::new(),
             stats: SchedulerStats::default(),
         })
@@ -489,6 +496,16 @@ impl DeliveryScheduler {
                 .is_some_and(|previous| sequence <= previous)
         }) {
             return self.reject(RejectReason::NonMonotonicControl);
+        }
+        let audio_sequence = match &item.kind {
+            WorkKind::Audio { sequence } => Some(*sequence),
+            _ => None,
+        };
+        if audio_sequence.is_some_and(|sequence| {
+            self.last_audio_sequence
+                .is_some_and(|previous| sequence <= previous)
+        }) {
+            return self.reject(RejectReason::NonMonotonicAudio);
         }
 
         let video_delta_reference = match &item.kind {
@@ -584,6 +601,9 @@ impl DeliveryScheduler {
         if queue.can_fit(&item, limit) {
             if let Some(sequence) = control_sequence {
                 self.last_control_sequence = Some(sequence);
+            }
+            if let Some(sequence) = audio_sequence {
+                self.last_audio_sequence = Some(sequence);
             }
             queue.push(item);
             self.stats.accepted = self.stats.accepted.saturating_add(1);
@@ -683,6 +703,40 @@ impl DeliveryScheduler {
         while self.known_video_references.len() > VIDEO_REFERENCE_HISTORY {
             self.known_video_references.pop_front();
         }
+    }
+
+    /// Invalidate queued deltas that depend on a video frame known not to
+    /// have been sent. This must only be called when the transport proves the
+    /// selected frame was not sent. For an ambiguous send outcome, stop the
+    /// session and reconcile; do not infer failure or retry a state mutation.
+    ///
+    /// Returns the number of queued dependent frames removed.
+    pub fn invalidate_video_after_known_send_failure(&mut self, frame_id: u64) -> usize {
+        let queue = &mut self.queues[DeliveryClass::Video.index()];
+        let mut invalidated = VecDeque::from([frame_id]);
+        let mut retained = VecDeque::new();
+        let mut removed = 0_u64;
+
+        while let Some(item) = queue.pop() {
+            let depends_on = item.kind.video_dependency().flatten();
+            if depends_on.is_some_and(|reference| invalidated.contains(&reference)) {
+                if let Some(dependent_id) = item.kind.video_frame_id() {
+                    invalidated.push_back(dependent_id);
+                }
+                removed = removed.saturating_add(1);
+            } else {
+                retained.push_back(item);
+            }
+        }
+
+        while let Some(item) = retained.pop_front() {
+            queue.push(item);
+        }
+        self.stats.invalidated_video_dependencies = self
+            .stats
+            .invalidated_video_dependencies
+            .saturating_add(removed);
+        removed as usize
     }
 
     /// Record an externally established decoder reference, for example after
@@ -977,6 +1031,58 @@ mod tests {
         assert_eq!(
             scheduler.enqueue(video(2, 11, Some(10), None), 0),
             EnqueueDisposition::Accepted
+        );
+    }
+
+    #[test]
+    fn audio_sequence_must_be_strictly_monotonic() {
+        let mut scheduler = new_scheduler(SchedulerConfig::default());
+        assert_eq!(
+            scheduler.enqueue(audio(1, 2, u64::MAX), 0),
+            EnqueueDisposition::Accepted
+        );
+        assert_eq!(
+            scheduler.enqueue(audio(2, 1, u64::MAX), 0),
+            EnqueueDisposition::Rejected(RejectReason::NonMonotonicAudio)
+        );
+        assert_eq!(
+            scheduler.enqueue(audio(3, 3, u64::MAX), 0),
+            EnqueueDisposition::Accepted
+        );
+    }
+
+    #[test]
+    fn known_unsent_video_frame_invalidates_only_its_dependent_chain() {
+        let mut scheduler = new_scheduler(SchedulerConfig::default());
+        scheduler.set_initial_video_reference(5);
+        assert_eq!(
+            scheduler.enqueue(video(1, 10, Some(5), None), 0),
+            EnqueueDisposition::Accepted
+        );
+        assert_eq!(
+            scheduler.enqueue(video(2, 20, Some(5), None), 0),
+            EnqueueDisposition::Accepted
+        );
+        assert_eq!(
+            scheduler.enqueue(video(3, 11, Some(10), None), 0),
+            EnqueueDisposition::Accepted
+        );
+        assert_eq!(selected(&mut scheduler, 0).id, 1);
+        assert_eq!(scheduler.invalidate_video_after_known_send_failure(10), 1);
+        assert_eq!(
+            scheduler.snapshot().lanes[DeliveryClass::Video.index()].queued_items,
+            1
+        );
+        assert_eq!(selected(&mut scheduler, 0).id, 2);
+    }
+
+    #[test]
+    fn excessive_item_count_capacity_is_rejected() {
+        let mut config = SchedulerConfig::default();
+        config.telemetry.max_items = MAX_LANE_QUEUE_ITEMS + 1;
+        assert_eq!(
+            DeliveryScheduler::new(config).err(),
+            Some(SchedulerConfigError::CapacityTooLarge)
         );
     }
 
