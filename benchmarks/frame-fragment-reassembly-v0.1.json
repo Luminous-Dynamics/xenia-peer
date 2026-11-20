@@ -147,6 +147,38 @@
         "audio-telemetry-control-formats-rejected",
         "no-reassembly-reservation"
       ]
+    },
+    {
+      "id": "FRAG-018",
+      "name": "lazy-sender-fragment-iterator",
+      "expected": "BoundedFragments",
+      "assert": [
+        "exact-size-iterator",
+        "one-payload-materialized-per-next",
+        "full-frame-digest-bound-once"
+      ]
+    },
+    {
+      "id": "FRAG-019",
+      "name": "sender-to-receiver-out-of-order-roundtrip",
+      "expected": "Completed",
+      "assert": [
+        "sender-fragments-consumed-in-reverse-order",
+        "restored-payload-equals-source"
+      ]
+    },
+    {
+      "id": "FRAG-020",
+      "name": "sender-fragmenter-input-validation",
+      "expected": "ExplicitReject",
+      "assert": [
+        "zero-dimensions",
+        "empty-frame",
+        "invalid-rgba-length",
+        "unsupported-pixel-format",
+        "frame-hard-limit",
+        "fragment-hard-limit"
+      ]
     }
   ],
   "transport_candidates": [
