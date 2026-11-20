@@ -192,15 +192,19 @@ The model implements:
 - five typed delivery classes with separate bounded item and byte capacities;
 - byte-weighted Deficit Round Robin with provisional quanta of 64 KiB Control, 256 KiB Video, 64 KiB Audio, 16 KiB Telemetry and 32 KiB Bulk;
 - explicit queue admission, coalescing, supersession and rejection outcomes;
-- monotonic sequence admission for ordered control transitions;
+- monotonic sequence admission for control, audio and video frame identities;
 - deadline/age pruning for video, audio and telemetry, while control and bulk are never silently aged out;
 - keyframe reset and delta-reference validation, including cascading invalidation of deltas that depend on an expired reference;
+- an explicit invalidation method for dependent video frames after the transport proves a selected frame was not sent; ambiguous send outcomes still require session reconciliation;
 - same-key telemetry coalescing and bounded bulk backpressure;
+- bounded descriptor counts (4,096 maximum per lane) as well as byte caps (64 MiB maximum);
 - explicit local counters and queue snapshots.
 
-Configuration rejects zero capacities, zero age budgets, lane capacities above 64 MiB, and byte quanta below 8 KiB so the selection loop has a bounded visit budget. The default quanta are hypotheses, not optimized settings. They must be compared against static item-weighted service and the AoI-aware candidate before being treated as a good operating point.
+Configuration rejects zero capacities, zero age budgets, lane capacities above 64 MiB, item capacities above 4,096 and byte quanta below 8 KiB so the selection loop has a bounded visit budget. The default quanta are hypotheses, not optimized settings. They must be compared against static item-weighted service and the AoI-aware candidate before being treated as a good operating point.
 
-Unit tests are authored for control ordering/full-queue behavior, telemetry coalescing, keyframe dependency resets, stale reference chains, audio deadlines, bulk retention, byte-deficit fairness across all classes, queue bounds, and invalid configurations. **They have not yet been executed**: this authoring environment has no Rust toolchain, and hosted CI is not treated as evidence while queued. The branch contains no runtime transport integration and claims no measured performance or safety qualification.
+**Important scheduling boundary:** this model selects whole work items. WDRR byte accounting does not preempt a large send after the caller starts writing it. A whole 4–16 MiB frame or file chunk can still create non-preemptible sender blocking, depending on the transport writer. A bounded, frame-safe fragmentation/preemption contract is tracked separately in [#529](https://github.com/Luminous-Dynamics/xenia-peer/issues/529). Do not infer an end-to-end control p99 guarantee from this queue model alone.
+
+Unit tests are authored for control ordering/full-queue behavior, audio/video sequence monotonicity, telemetry coalescing, keyframe dependency resets, known-unsent dependency invalidation, stale reference chains, audio deadlines, bulk retention, byte-deficit service across classes, queue bounds, and invalid configuration. **They have not yet been executed**: this authoring environment has no Rust toolchain, and hosted CI is not treated as evidence while queued. The branch contains no runtime transport integration and claims no measured performance or safety qualification.
 
 ## 11. Delivery plan
 
