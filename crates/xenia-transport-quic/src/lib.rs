@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use iroh::{
     Endpoint, EndpointAddr,
-    endpoint::{Connection, RecvStream, SendStream, presets},
+    endpoint::{Connection, RecvStream, SendStream, VarInt, presets},
 };
 use thiserror::Error;
 use tracing::debug;
@@ -457,6 +457,9 @@ impl Transport for QuicTransport {
         ensure_stream_side_open(self.recv_terminal)?;
         let result = read_envelope(&mut self.recv).await;
         record_receive_result(&mut self.recv_terminal, &result);
+        if self.recv_terminal {
+            let _ = self.recv.stop(VarInt::from_u32(0));
+        }
         result
     }
 }
@@ -502,6 +505,9 @@ impl RecvEnvelope for QuicRecvHalf {
         ensure_stream_side_open(self.terminal)?;
         let result = read_envelope(&mut self.recv).await;
         record_receive_result(&mut self.terminal, &result);
+        if self.terminal {
+            let _ = self.recv.stop(VarInt::from_u32(0));
+        }
         result
     }
 }
