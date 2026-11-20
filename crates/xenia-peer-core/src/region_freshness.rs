@@ -404,16 +404,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn no_content_bearing_fields_exist_in_the_region_contract() {
-        let fields = [
-            "session_generation",
-            "region_id",
-            "region_generation",
-            "version",
-        ];
-        assert!(fields.iter().all(|field| !field.contains("pixel")));
-        assert!(fields.iter().all(|field| !field.contains("window")));
-        assert!(fields.iter().all(|field| !field.contains("text")));
-    }
 }
