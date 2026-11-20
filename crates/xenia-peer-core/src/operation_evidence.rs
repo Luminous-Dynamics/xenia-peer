@@ -550,6 +550,7 @@ impl OperationEvidenceLedger {
         for event in &self.events {
             if event.event_sequence != expected_sequence
                 || event.previous_hash != previous_hash
+                || event.clock_domain != self.clock_domain
                 || previous_tick.is_some_and(|tick| event.at_ticks < tick)
             {
                 return false;
@@ -787,6 +788,7 @@ mod tests {
             )
             .unwrap_or_else(|error| panic!("reconciliation failed: {error:?}"));
         assert_eq!(reconciled.state, OperationState::ReconciledNotCommitted);
+        assert_eq!(reconciled.reconciliation_digest, Some([13; 32]));
         assert_eq!(
             ledger
                 .reconcile_unknown(
@@ -902,6 +904,15 @@ mod tests {
         assert!(ledger.verify_chain());
 
         ledger.events[0].evidence_digest[0] ^= 1;
+        assert!(!ledger.verify_chain());
+    }
+
+    #[test]
+    fn hash_chain_binds_each_event_to_the_ledger_clock_domain() {
+        let mut ledger = ledger();
+        admit_one(&mut ledger, operation(11), 1);
+        assert!(ledger.verify_chain());
+        ledger.events[0].clock_domain += 1;
         assert!(!ledger.verify_chain());
     }
 
