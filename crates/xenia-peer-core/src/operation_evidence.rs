@@ -129,6 +129,8 @@ pub enum OperationState {
     Observed,
     /// Operation was rejected before dispatch; no effect was attempted.
     Rejected,
+    /// Effect was attempted and the effect owner confirms no local commit occurred.
+    NotCommitted,
     /// Dispatch/commit outcome is ambiguous and requires reconciliation.
     Unknown,
     /// Unknown outcome was reconciled as not committed.
@@ -153,6 +155,8 @@ pub enum OperationEventKind {
     OutcomeObserved = 4,
     /// The operation was rejected before effect attempt.
     Rejected = 5,
+    /// The effect was attempted but the local owner confirms no commit occurred.
+    EffectNotCommitted = 8,
     /// The operation outcome became ambiguous after attempt.
     Unknown = 6,
     /// An unknown outcome was reconciled by a scoped receipt.
@@ -439,6 +443,27 @@ impl OperationEvidenceLedger {
             OperationEventKind::Rejected,
             at_ticks,
             rejection_evidence_digest,
+        )
+    }
+
+    /// Record a definitive non-commit after the effect owner was invoked.
+    ///
+    /// This differs from `mark_rejected`: the protected operation was
+    /// actually attempted, but the effect owner proves its local commit point
+    /// was not crossed. Use UNKNOWN when the result is ambiguous.
+    pub fn mark_not_committed(
+        &mut self,
+        operation_id: OperationId,
+        at_ticks: u64,
+        non_commit_evidence_digest: [u8; 32],
+    ) -> Result<OperationSnapshot, OperationEvidenceError> {
+        self.transition(
+            operation_id,
+            &[OperationState::Attempted],
+            OperationState::NotCommitted,
+            OperationEventKind::EffectNotCommitted,
+            at_ticks,
+            non_commit_evidence_digest,
         )
     }
 
@@ -860,6 +885,34 @@ mod tests {
                 event: OperationEventKind::Unknown,
             })
         );
+    }
+
+    #[test]
+    fn attempted_effect_can_be_definitively_not_committed() {
+        let mut ledger = ledger();
+        admit_one(&mut ledger, operation(12), 1);
+        ledger
+            .mark_attempted(operation(12), 11, [10; 32])
+            .unwrap_or_else(|error| panic!("attempt failed: {error:?}"));
+        let not_committed = ledger
+            .mark_not_committed(operation(12), 12, [11; 32])
+            .unwrap_or_else(|error| panic!("non-commit receipt failed: {error:?}"));
+        assert_eq!(not_committed.state, OperationState::NotCommitted);
+        assert_eq!(
+            ledger.mark_rejected(operation(12), 13, [12; 32]),
+            Err(OperationEvidenceError::InvalidTransition {
+                from: OperationState::NotCommitted,
+                event: OperationEventKind::Rejected,
+            })
+        );
+        assert_eq!(
+            ledger.mark_unknown(operation(12), 13, [12; 32]),
+            Err(OperationEvidenceError::InvalidTransition {
+                from: OperationState::NotCommitted,
+                event: OperationEventKind::Unknown,
+            })
+        );
+        assert!(ledger.verify_chain());
     }
 
     #[test]
