@@ -1,0 +1,184 @@
+{
+  "schema": "xenia-operation-evidence-workloads/v1",
+  "status": "synthetic_state_machine_fixtures_only",
+  "purpose": "Validate stage transition semantics, idempotency, unknown reconciliation and hash-chain evidence. Never represents a real protected effect.",
+  "limits": {
+    "operation_records": 4096,
+    "stage_events": 32768
+  },
+  "prohibited_fields": [
+    "payload_bytes",
+    "screen_pixels",
+    "audio_samples",
+    "clipboard_content",
+    "raw_input",
+    "file_bytes",
+    "bearer_tokens",
+    "CapSecret"
+  ],
+  "stages": [
+    "AuthorizationAdmitted",
+    "EffectAttempted",
+    "EffectCommitted",
+    "OutcomeObserved",
+    "Rejected",
+    "Unknown",
+    "Reconciled"
+  ],
+  "scenarios": [
+    {
+      "id": "OPE-001",
+      "name": "normal-input-local-commit",
+      "steps": [
+        "admit",
+        "attempt",
+        "commit"
+      ],
+      "expected": "Committed",
+      "claim": "platform injector accepted only"
+    },
+    {
+      "id": "OPE-002",
+      "name": "remote-file-observation",
+      "steps": [
+        "admit",
+        "attempt",
+        "commit",
+        "observe"
+      ],
+      "expected": "Observed",
+      "claim": "receiver-side hash verification receipt"
+    },
+    {
+      "id": "OPE-003",
+      "name": "permission-rejected-before-attempt",
+      "steps": [
+        "admit",
+        "reject"
+      ],
+      "expected": "Rejected",
+      "claim": "no effect attempt"
+    },
+    {
+      "id": "OPE-004",
+      "name": "commit-without-attempt",
+      "steps": [
+        "admit",
+        "commit"
+      ],
+      "expected": "InvalidTransition",
+      "claim": "must not append commit"
+    },
+    {
+      "id": "OPE-005",
+      "name": "timeout-after-dispatch",
+      "steps": [
+        "admit",
+        "attempt",
+        "unknown"
+      ],
+      "expected": "Unknown",
+      "claim": "must block retry"
+    },
+    {
+      "id": "OPE-006",
+      "name": "unknown-reconciled-not-committed",
+      "steps": [
+        "admit",
+        "attempt",
+        "unknown",
+        "reconcile_not_committed"
+      ],
+      "expected": "ReconciledNotCommitted",
+      "claim": "receipt required"
+    },
+    {
+      "id": "OPE-007",
+      "name": "unknown-reconciled-committed",
+      "steps": [
+        "admit",
+        "attempt",
+        "unknown",
+        "reconcile_committed"
+      ],
+      "expected": "ReconciledCommitted",
+      "claim": "local commit only"
+    },
+    {
+      "id": "OPE-008",
+      "name": "duplicate-admission-same-context",
+      "steps": [
+        "admit",
+        "admit_same_id_same_context"
+      ],
+      "expected": "Idempotent",
+      "claim": "no second event"
+    },
+    {
+      "id": "OPE-009",
+      "name": "duplicate-id-changed-resource",
+      "steps": [
+        "admit",
+        "admit_same_id_changed_context"
+      ],
+      "expected": "OperationIdConflict",
+      "claim": "no silent rebinding"
+    },
+    {
+      "id": "OPE-010",
+      "name": "foreign-session-operation-context",
+      "steps": [
+        "admit_foreign_session"
+      ],
+      "expected": "SessionFingerprintMismatch",
+      "claim": "no event appended"
+    },
+    {
+      "id": "OPE-011",
+      "name": "tampered-event-evidence-or-clock",
+      "steps": [
+        "admit",
+        "mutate_event",
+        "verify_chain"
+      ],
+      "expected": "InvalidChain",
+      "claim": "tamper detected"
+    },
+    {
+      "id": "OPE-012",
+      "name": "conflicting-reconciliation-receipts",
+      "steps": [
+        "admit",
+        "attempt",
+        "unknown",
+        "reconcile_committed",
+        "reconcile_not_committed"
+      ],
+      "expected": "ReconciliationConflict",
+      "claim": "no overwrite"
+    },
+    {
+      "id": "OPE-013",
+      "name": "effect-invoked-but-owner-proves-no-commit",
+      "steps": [
+        "admit",
+        "attempt",
+        "effect_not_committed"
+      ],
+      "expected": "NotCommitted",
+      "claim": "operation was invoked; local commit point definitely not crossed",
+      "assert": [
+        "not-equivalent-to-preflight-rejected",
+        "not-unknown",
+        "receipt-digest-recorded"
+      ]
+    }
+  ],
+  "reporting": {
+    "test_denominator_required": true,
+    "unknown_is_not_success_or_failure": true,
+    "receipt_truth_is_external_to_hash_chain": true,
+    "legacy_consent_ledger_remains_separate": true,
+    "synthetic_corpus_never_release_passes": true
+  }
+}
