@@ -20,6 +20,9 @@ use std::collections::VecDeque;
 /// dependency validation in this V0.1 policy model.
 pub const VIDEO_REFERENCE_HISTORY: usize = 16;
 
+const MAX_LANE_QUEUE_BYTES: usize = 64 * 1024 * 1024;
+const MIN_QUANTUM_BYTES: usize = 8 * 1024;
+
 /// One scheduling class with a distinct delivery contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DeliveryClass {
@@ -194,6 +197,9 @@ pub struct SchedulerConfig {
     pub telemetry: LaneLimit,
     /// Durable bulk-transfer queue limits.
     pub bulk: LaneLimit,
+    /// Per-visit byte quanta in Control, Video, Audio, Telemetry, Bulk order.
+    /// These are provisional policy weights and must be benchmarked.
+    pub quantum_bytes: [usize; 5],
 }
 
 impl SchedulerConfig {
@@ -246,6 +252,13 @@ impl Default for SchedulerConfig {
                 max_bytes: 16 * 1024 * 1024,
                 max_age_ticks: None,
             },
+            quantum_bytes: [
+                64 * 1024,
+                256 * 1024,
+                64 * 1024,
+                16 * 1024,
+                32 * 1024,
+            ],
         }
     }
 }
@@ -257,6 +270,10 @@ pub enum SchedulerConfigError {
     ZeroCapacity,
     /// A configured age budget is zero and would expire every item at enqueue.
     ZeroAgeBudget,
+    /// A configured lane byte capacity exceeds the scheduler's bounded work limit.
+    CapacityTooLarge,
+    /// A configured byte quantum is below the safe minimum for bounded selection work.
+    QuantumTooSmall,
 }
 
 /// Explicit admission result. Coalescing and supersession are never silent.
@@ -370,50 +387,68 @@ impl LaneQueue {
 
 /// Pure, deterministic session scheduler with bounded per-class queues.
 ///
-/// The service cycle gives Control four slots, Video three, Audio three,
-/// Telemetry one, and Bulk one in every twelve successful selections.
-/// Empty classes are skipped. Under persistent backlog, each class therefore
-/// receives a bounded share; no high-priority class can monopolize the cycle.
+/// Selection uses weighted deficit round robin (WDRR) in bytes, not item
+/// counts. Each class accumulates its configured quantum while other classes
+/// are visited; a queued item is selected only when its byte cost is covered.
+/// This prevents large media/file items from being treated as equal-cost to
+/// tiny control events, while preserving a positive service share for every
+/// non-empty class. Quantum weights are provisional benchmark parameters.
 #[derive(Debug)]
 pub struct DeliveryScheduler {
     config: SchedulerConfig,
     queues: [LaneQueue; 5],
     cursor: usize,
+    deficits: [usize; 5],
+    max_visits_per_selection: usize,
     last_control_sequence: Option<u64>,
     known_video_references: VecDeque<u64>,
     stats: SchedulerStats,
 }
 
 impl DeliveryScheduler {
-    const SERVICE_CYCLE: [DeliveryClass; 12] = [
-        DeliveryClass::Control,
-        DeliveryClass::Control,
-        DeliveryClass::Video,
-        DeliveryClass::Audio,
-        DeliveryClass::Control,
-        DeliveryClass::Video,
-        DeliveryClass::Control,
-        DeliveryClass::Audio,
-        DeliveryClass::Telemetry,
-        DeliveryClass::Bulk,
-        DeliveryClass::Video,
-        DeliveryClass::Audio,
-    ];
-
     /// Construct a scheduler after validating all queue limits.
     pub fn new(config: SchedulerConfig) -> Result<Self, SchedulerConfigError> {
         for limit in config.limits() {
             if limit.max_items == 0 || limit.max_bytes == 0 {
                 return Err(SchedulerConfigError::ZeroCapacity);
             }
+            if limit.max_bytes > MAX_LANE_QUEUE_BYTES {
+                return Err(SchedulerConfigError::CapacityTooLarge);
+            }
             if limit.max_age_ticks == Some(0) {
                 return Err(SchedulerConfigError::ZeroAgeBudget);
             }
         }
+        if config
+            .quantum_bytes
+            .iter()
+            .any(|quantum| *quantum < MIN_QUANTUM_BYTES)
+        {
+            return Err(SchedulerConfigError::QuantumTooSmall);
+        }
+        let max_lane_bytes = config
+            .limits()
+            .iter()
+            .map(|limit| limit.max_bytes)
+            .max()
+            .unwrap_or(0);
+        let min_quantum = config
+            .quantum_bytes
+            .iter()
+            .copied()
+            .min()
+            .unwrap_or(MIN_QUANTUM_BYTES);
+        let rounds = max_lane_bytes
+            .saturating_add(min_quantum - 1)
+            / min_quantum
+            + 1;
+        let max_visits_per_selection = rounds.saturating_mul(DeliveryClass::ALL.len());
         Ok(Self {
             config,
             queues: std::array::from_fn(|_| LaneQueue::default()),
             cursor: 0,
+            deficits: [0; 5],
+            max_visits_per_selection,
             last_control_sequence: None,
             known_video_references: VecDeque::new(),
             stats: SchedulerStats::default(),
@@ -598,14 +633,31 @@ impl DeliveryScheduler {
     /// a local dispatch decision, not proof of remote observation or commit.
     pub fn next_ready(&mut self, now_ticks: u64) -> Option<WorkItem> {
         self.prune_expired(now_ticks);
-        for offset in 0..Self::SERVICE_CYCLE.len() {
-            let slot = (self.cursor + offset) % Self::SERVICE_CYCLE.len();
-            let class = Self::SERVICE_CYCLE[slot];
-            if let Some(item) = self.queues[class.index()].pop() {
-                self.cursor = (slot + 1) % Self::SERVICE_CYCLE.len();
-                self.stats.dispatched = self.stats.dispatched.saturating_add(1);
-                return Some(item);
+        for _ in 0..self.max_visits_per_selection {
+            let class = DeliveryClass::ALL[self.cursor];
+            let index = class.index();
+            let front_cost = self.queues[index]
+                .items
+                .front()
+                .map(|item| item.cost_bytes);
+
+            if let Some(cost_bytes) = front_cost {
+                if self.deficits[index] >= cost_bytes {
+                    if let Some(item) = self.queues[index].pop() {
+                        self.deficits[index] -= cost_bytes;
+                        self.stats.dispatched = self.stats.dispatched.saturating_add(1);
+                        return Some(item);
+                    }
+                } else {
+                    self.deficits[index] = self.deficits[index]
+                        .saturating_add(self.config.quantum_bytes[index])
+                        .min(self.config.limit(class).max_bytes);
+                }
+            } else {
+                self.deficits[index] = 0;
             }
+
+            self.cursor = (self.cursor + 1) % DeliveryClass::ALL.len();
         }
         None
     }
@@ -798,6 +850,13 @@ mod tests {
             audio: lane,
             telemetry: lane,
             bulk: lane,
+            quantum_bytes: [
+                MIN_QUANTUM_BYTES,
+                MIN_QUANTUM_BYTES,
+                MIN_QUANTUM_BYTES,
+                MIN_QUANTUM_BYTES,
+                MIN_QUANTUM_BYTES,
+            ],
         }
     }
 
@@ -914,67 +973,101 @@ mod tests {
     }
 
     #[test]
-    fn weighted_cycle_services_every_backlogged_class() {
-        let mut scheduler = new_scheduler(config_with_capacity(64));
-        scheduler.set_initial_video_reference(100);
-        for sequence in 1..=48 {
-            assert_eq!(
-                scheduler.enqueue(control(sequence, sequence), 0),
-                EnqueueDisposition::Accepted
-            );
-            assert_eq!(
-                scheduler.enqueue(
-                    video(100 + sequence, 100 + sequence, Some(100 + sequence - 1), None),
+    fn weighted_deficit_services_every_backlogged_class_by_byte_cost() {
+        let mut config = config_with_capacity(8);
+        config.quantum_bytes = [
+            MIN_QUANTUM_BYTES,
+            4 * MIN_QUANTUM_BYTES,
+            MIN_QUANTUM_BYTES,
+            MIN_QUANTUM_BYTES,
+            2 * MIN_QUANTUM_BYTES,
+        ];
+        let mut scheduler = new_scheduler(config);
+        let large_cost = 128 * 1024;
+
+        assert_eq!(
+            scheduler.enqueue(
+                item(
+                    1,
                     0,
+                    None,
+                    large_cost,
+                    WorkKind::Control {
+                        sequence: 1,
+                        operation_id: [1; 16],
+                        transition: ControlTransition::KeyUp,
+                    }
                 ),
-                EnqueueDisposition::Accepted
-            );
-            assert_eq!(
-                scheduler.enqueue(audio(200 + sequence, sequence, u64::MAX), 0),
-                EnqueueDisposition::Accepted
-            );
-            assert_eq!(
-                scheduler.enqueue(
-                    item(
-                        300 + sequence,
-                        0,
-                        None,
-                        8,
-                        WorkKind::Telemetry {
-                            metric_key: sequence as u16
-                        }
-                    ),
+                0
+            ),
+            EnqueueDisposition::Accepted
+        );
+        assert_eq!(
+            scheduler.enqueue(
+                item(
+                    2,
                     0,
+                    None,
+                    large_cost,
+                    WorkKind::Video {
+                        frame_id: 20,
+                        depends_on: None,
+                    }
                 ),
-                EnqueueDisposition::Accepted
-            );
-            assert_eq!(
-                scheduler.enqueue(
-                    item(
-                        400 + sequence,
-                        0,
-                        None,
-                        8,
-                        WorkKind::Bulk {
-                            transfer_id: [1; 16],
-                            offset: sequence,
-                            digest: [sequence as u8; 32]
-                        }
-                    ),
+                0
+            ),
+            EnqueueDisposition::Accepted
+        );
+        assert_eq!(
+            scheduler.enqueue(
+                item(
+                    3,
                     0,
+                    Some(u64::MAX),
+                    large_cost,
+                    WorkKind::Audio { sequence: 1 }
                 ),
-                EnqueueDisposition::Accepted
-            );
-        }
-        let mut selected = [0_u64; 5];
-        for _ in 0..60 {
+                0
+            ),
+            EnqueueDisposition::Accepted
+        );
+        assert_eq!(
+            scheduler.enqueue(
+                item(
+                    4,
+                    0,
+                    None,
+                    large_cost,
+                    WorkKind::Telemetry { metric_key: 1 }
+                ),
+                0
+            ),
+            EnqueueDisposition::Accepted
+        );
+        assert_eq!(
+            scheduler.enqueue(
+                item(
+                    5,
+                    0,
+                    None,
+                    large_cost,
+                    WorkKind::Bulk {
+                        transfer_id: [1; 16],
+                        offset: 0,
+                        digest: [2; 32],
+                    }
+                ),
+                0
+            ),
+            EnqueueDisposition::Accepted
+        );
+
+        let mut selected_classes = [false; 5];
+        for _ in 0..5 {
             let next = selected(&mut scheduler, 0);
-            selected[next.class().index()] += 1;
-            if let WorkKind::Video { frame_id, .. } = next.kind {
-                scheduler.record_video_dispatched(frame_id);
-            }
+            selected_classes[next.class().index()] = true;
         }
-        assert!(selected.iter().all(|count| *count > 0));
+        assert!(selected_classes.iter().all(|selected| *selected));
     }
 
     #[test]
