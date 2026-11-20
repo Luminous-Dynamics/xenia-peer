@@ -365,6 +365,15 @@ fn ensure_stream_side_open(terminal: bool) -> Result<(), TransportError> {
     }
 }
 
+fn record_receive_result<T>(
+    terminal: &mut bool,
+    result: &Result<T, TransportError>,
+) {
+    if result.is_err() {
+        *terminal = true;
+    }
+}
+
 async fn send_envelope_guarded(
     send: &mut SendStream,
     terminal: &mut bool,
@@ -447,9 +456,7 @@ impl Transport for QuicTransport {
     async fn recv_envelope(&mut self) -> Result<Vec<u8>, TransportError> {
         ensure_stream_side_open(self.recv_terminal)?;
         let result = read_envelope(&mut self.recv).await;
-        if result.is_err() {
-            self.recv_terminal = true;
-        }
+        record_receive_result(&mut self.recv_terminal, &result);
         result
     }
 }
@@ -494,9 +501,7 @@ impl RecvEnvelope for QuicRecvHalf {
     async fn recv_envelope(&mut self) -> Result<Vec<u8>, TransportError> {
         ensure_stream_side_open(self.terminal)?;
         let result = read_envelope(&mut self.recv).await;
-        if result.is_err() {
-            self.terminal = true;
-        }
+        record_receive_result(&mut self.terminal, &result);
         result
     }
 }
@@ -518,6 +523,25 @@ mod tests {
         assert!(send_failure_is_terminal(&Err(TransportError::Io(
             io::Error::other("partial write failed")
         ))));
+    }
+
+    #[test]
+    fn receive_error_transitions_to_terminal_but_success_does_not() {
+        let mut terminal = false;
+        let success: Result<Vec<u8>, TransportError> = Ok(vec![1, 2, 3]);
+        record_receive_result(&mut terminal, &success);
+        assert!(!terminal);
+
+        let timeout: Result<Vec<u8>, TransportError> = Err(TransportError::TimedOut {
+            operation: "recv_envelope",
+            timeout_ms: 1,
+        });
+        record_receive_result(&mut terminal, &timeout);
+        assert!(terminal);
+        assert_eq!(
+            ensure_stream_side_open(terminal),
+            Err(TransportError::UnexpectedEof)
+        );
     }
 
     #[test]
