@@ -65,7 +65,7 @@ Every fragment descriptor binds:
 - BLAKE3 digest of the complete encoded payload;
 - fragment payload bytes.
 
-The outer negotiated sealed transport must authenticate the fragment envelope. The BLAKE3 frame digest establishes assembled-payload consistency; it is not a substitute for AEAD, sender signature or authorization.
+The outer negotiated sealed transport must authenticate the fragment envelope. The BLAKE3 frame digest establishes assembled-payload consistency; it is not a substitute for AEAD, sender signature or authorization. The reassembler accepts only video/pixel formats (RGBA8, BGRA8, H.264, VP9, Passthrough and HDC); audio, telemetry and session-control PixelFormat variants are explicitly rejected before reservation.
 
 The receiver accepts out-of-order fragments and only exposes a frame after:
 1. every fragment index is present exactly once;
