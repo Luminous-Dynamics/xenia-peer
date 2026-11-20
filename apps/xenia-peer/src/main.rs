@@ -7319,8 +7319,7 @@ mod consent_scope_tests {
                     input_finished.store(true, Ordering::SeqCst);
                     crate::m1_runtime::InputEffectExecution::PlatformAccepted
                 })
-                .unwrap_or_else(|error| panic!("input effect runtime failed: {error:?}"))
-                .unwrap_or_else(|error| panic!("input effect failed: {error:?}"));
+                .unwrap_or_else(|error| panic!("input effect runtime failed: {error:?}"));
         });
 
         let revoke_runtime = Arc::clone(&runtime);
