@@ -6857,30 +6857,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             && last_clipboard_check.elapsed() >= clipboard_interval
         {
             last_clipboard_check = std::time::Instant::now();
-            if let Some(text) = read_host_clipboard_text()
-                && Some(&text) != last_sent_clipboard_text.as_ref()
-            {
-                m1_runtime.lock().await.preflight_frame_flow()?;
-                m1_runtime.lock().await.allow_host_clipboard_read_flow()?;
-                let frame_id = session.lock().await.next_frame_id();
-                let seq = clipboard_seq;
-                clipboard_seq += 1;
-                let clipboard_frame = RawClipboard {
-                    sequence: seq,
-                    timestamp_ms: now_ms(),
-                    content: ClipboardContent::Text(text.clone()),
+            // Permission admission and the local OS clipboard read are
+            // serialized with revoke. The actual peer disclosure remains a
+            // separate frame-send stage checked immediately before send.
+            let read_execution = {
+                let mut m1_runtime = m1_runtime.lock().await;
+                m1_runtime.with_host_clipboard_read_effect(read_host_clipboard_text)?
+            };
+            match read_execution {
+                crate::m1_runtime::HostClipboardReadExecution::Completed(Some(text))
+                    if Some(&text) != last_sent_clipboard_text.as_ref() =>
+                {
+                    let frame_id = session.lock().await.next_frame_id();
+                    let seq = clipboard_seq;
+                    clipboard_seq += 1;
+                    let clipboard_frame = RawClipboard {
+                        sequence: seq,
+                        timestamp_ms: now_ms(),
+                        content: ClipboardContent::Text(text.clone()),
+                    }
+                    .into_frame(frame_id)?;
+                    let envelope = session.lock().await.seal_frame(&clipboard_frame)?;
+                    m1_runtime.lock().await.allow_frame_flow()?;
+                    send_half.send_envelope(&envelope).await?;
+                    last_sent_clipboard_text = Some(text);
+                    sent_clipboard += 1;
+                    if sent_clipboard <= 3 || sent_clipboard.is_multiple_of(10) {
+                        info!(
+                            sent = sent_clipboard,
+                            frame_id,
+                            "clipboard update sealed and sent"
+                        );
+                    }
                 }
-                .into_frame(frame_id)?;
-                let envelope = session.lock().await.seal_frame(&clipboard_frame)?;
-                m1_runtime.lock().await.allow_frame_flow()?;
-                send_half.send_envelope(&envelope).await?;
-                last_sent_clipboard_text = Some(text);
-                sent_clipboard += 1;
-                if sent_clipboard <= 3 || sent_clipboard.is_multiple_of(10) {
-                    info!(
-                        sent = sent_clipboard,
-                        frame_id, "clipboard update sealed and sent"
-                    );
+                crate::m1_runtime::HostClipboardReadExecution::Completed(_) => {}
+                crate::m1_runtime::HostClipboardReadExecution::NotAttempted(reason) => {
+                    warn!(reason, "host clipboard read was not attempted");
+                }
+                crate::m1_runtime::HostClipboardReadExecution::OutcomeUnknown(error) => {
+                    warn!(error, "host clipboard read returned an uncertain outcome");
                 }
             }
         }
