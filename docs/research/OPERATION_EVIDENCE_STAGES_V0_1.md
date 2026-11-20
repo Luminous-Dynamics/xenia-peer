@@ -114,7 +114,7 @@ Do not wire this model into live operations by merely calling `mark_committed` a
 The proper sequence is:
 1. Freeze exact per-lane effect boundaries using #512 route inventory.
 2. Add the per-operation local serialization gate from #504 so revoke-vs-commit races have one linearization order.
-3. Invoke the effect owner and append Attempted/Committed/Unknown from the actual call result.
+3. Invoke the effect owner and append Attempted/Committed/NotCommitted/Unknown from the actual call result.
 4. Reconcile ambiguous outcomes by operation ID; no blind retry.
 5. Add signed/durable portable export under #450.
 6. Independently verify per-lane outcome evidence and route coverage.
