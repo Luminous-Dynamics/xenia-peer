@@ -7274,4 +7274,83 @@ mod consent_scope_tests {
         assert!(configured_permission_set(&send).send_file_to_viewer);
         assert!(!configured_permission_set(&send).receive_file_from_viewer);
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn revoke_waits_until_synchronous_input_effect_and_receipt_finish() {
+        let mut runtime = crate::m1_runtime::M1RuntimeSession::new(
+            SigningKey::from_bytes(&[0x61; 32]),
+            [0xA1; 32],
+            Uuid::from_bytes([0x11; 16]),
+            Uuid::from_bytes([0x22; 16]),
+            "input effect linearization test",
+        );
+        runtime.offer().unwrap();
+        runtime
+            .grant_consent_scoped(M1PermissionSet {
+                inject_input: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        let runtime = Arc::new(AsyncMutex::new(runtime));
+        let effect_entered = Arc::new(AtomicBool::new(false));
+        let effect_finished = Arc::new(AtomicBool::new(false));
+
+        let input_runtime = Arc::clone(&runtime);
+        let input_entered = Arc::clone(&effect_entered);
+        let input_finished = Arc::clone(&effect_finished);
+        let input_task = tokio::spawn(async move {
+            let mut runtime = input_runtime.lock().await;
+            runtime
+                .with_input_effect(|| {
+                    input_entered.store(true, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(75));
+                    input_finished.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+                .unwrap_or_else(|error| panic!("input effect runtime failed: {error:?}"))
+                .unwrap_or_else(|error| panic!("input effect failed: {error:?}"));
+        });
+
+        let revoke_runtime = Arc::clone(&runtime);
+        let revoke_entered = Arc::clone(&effect_entered);
+        let revoke_finished = Arc::clone(&effect_finished);
+        let revoke_task = tokio::spawn(async move {
+            while !revoke_entered.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+            let mut runtime = revoke_runtime.lock().await;
+            let effect_was_finished = revoke_finished.load(Ordering::SeqCst);
+            runtime
+                .revoke()
+                .unwrap_or_else(|error| panic!("revoke failed: {error:?}"));
+            effect_was_finished
+        });
+
+        input_task
+            .await
+            .unwrap_or_else(|error| panic!("input task panicked: {error}"));
+        let effect_finished_before_revoke = revoke_task
+            .await
+            .unwrap_or_else(|error| panic!("revoke task panicked: {error}"));
+        assert!(effect_finished_before_revoke);
+
+        let runtime = runtime.lock().await;
+        assert_eq!(runtime.state(), xenia_peer_core::M1SessionState::Revoked);
+        let audit = runtime.session.audit();
+        let admitted = audit
+            .iter()
+            .position(|event| *event == xenia_peer_core::M1AuditEvent::InputPermissionAdmitted);
+        let accepted = audit
+            .iter()
+            .position(|event| *event == xenia_peer_core::M1AuditEvent::InputPlatformAccepted);
+        let revoked = audit
+            .iter()
+            .position(|event| *event == xenia_peer_core::M1AuditEvent::ConsentRevoked);
+        assert!(admitted.is_some());
+        assert!(accepted.is_some());
+        assert!(revoked.is_some());
+        assert!(admitted < accepted);
+        assert!(accepted < revoked);
+    }
+
 }
