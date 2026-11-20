@@ -992,6 +992,55 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_effect_outcomes_are_distinct_from_permission_admission() {
+        let mut session = M1SessionMachine::new();
+        session.offer().unwrap();
+        session
+            .grant_consent_scoped(M1PermissionSet {
+                read_host_clipboard: true,
+                write_host_clipboard: true,
+                ..M1PermissionSet::default()
+            })
+            .unwrap();
+
+        session.read_host_clipboard().unwrap();
+        session
+            .record_host_clipboard_read_outcome(M1ClipboardReadOutcome::ReadCompleted)
+            .unwrap();
+        session
+            .record_host_clipboard_read_outcome(M1ClipboardReadOutcome::OutcomeUnknown)
+            .unwrap();
+        session
+            .record_host_clipboard_read_outcome(M1ClipboardReadOutcome::NotAttempted)
+            .unwrap();
+
+        session.write_host_clipboard().unwrap();
+        session
+            .record_host_clipboard_write_outcome(M1ClipboardWriteOutcome::Applied)
+            .unwrap();
+        session
+            .record_host_clipboard_write_outcome(M1ClipboardWriteOutcome::OutcomeUnknown)
+            .unwrap();
+        session
+            .record_host_clipboard_write_outcome(M1ClipboardWriteOutcome::NotAttempted)
+            .unwrap();
+
+        assert_eq!(
+            &session.audit()[2..],
+            &[
+                M1AuditEvent::HostClipboardReadPermissionAdmitted,
+                M1AuditEvent::HostClipboardReadCompleted,
+                M1AuditEvent::HostClipboardReadOutcomeUnknown,
+                M1AuditEvent::HostClipboardReadNotAttempted,
+                M1AuditEvent::HostClipboardWritePermissionAdmitted,
+                M1AuditEvent::HostClipboardWriteApplied,
+                M1AuditEvent::HostClipboardWriteOutcomeUnknown,
+                M1AuditEvent::HostClipboardWriteNotAttempted,
+            ]
+        );
+    }
+
+    #[test]
     fn revocation_disables_frames_and_input() {
         let mut session = M1SessionMachine::new();
         session.offer().unwrap();
