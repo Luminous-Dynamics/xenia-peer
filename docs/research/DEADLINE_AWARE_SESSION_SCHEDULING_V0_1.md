@@ -100,9 +100,12 @@ The scheduling layer is not a second revocation engine and must not duplicate My
 Compare these policies on the same endpoints, codecs, captures, workload traces, and impairment profile:
 
 1. Existing one-stream FIFO baseline.
-2. Multi-stream with bounded per-lane queues and static service policy.
-3. Multi-stream with deadline/AoI-aware selection and starvation protection.
-4. Simulation-only clairvoyant/oracle schedule as an upper bound, never as a production comparison.
+2. Multi-stream with bounded per-lane queues and static item-weighted service.
+3. Multi-stream with byte-weighted Deficit Round Robin (WDRR).
+4. Multi-stream with deadline/AoI-aware selection and starvation protection.
+5. Simulation-only clairvoyant/oracle schedule as an upper bound, never as a production comparison.
+
+The first pure Rust model currently implements candidate 3 only. Its quantum weights are provisional and have not been tuned against live network traffic. Candidate 2 remains a matched baseline to implement in the simulator; candidate 4 remains future work.
 
 Use the synthetic workload definitions in [aoi-session-workloads-v0.1.json](../../benchmarks/aoi-session-workloads-v0.1.json). Synthetic fixtures validate policy semantics; they are not performance measurements.
 
@@ -121,6 +124,8 @@ Report separate distributions and denominators:
 Publish raw traces, configuration and workload digests, source SHA, toolchain, host/device metadata, seeds, impairment settings and confidence intervals. Keep performance, usability, safety and cryptographic assurance as separate dimensions. Do not hide trade-offs in an aggregate score.
 
 ### External comparison
+
+Recent AoI scheduling literature also warns against equating freshness with greedy newest-first service. Jien and Kuo (October 2026) show that, in their single-base-station/multiple-terminal model, packet management combined with fair scheduling has strong competitive properties, while unfair greedy newest-message-first strategies can perform poorly. That theoretical setting is not a direct Xenia remote-session result; it motivates comparing WDRR and AoI-aware policies rather than assuming newest-first is optimal ([DOI 10.1016/j.comnet.2026.112690](https://doi.org/10.1016/j.comnet.2026.112690)).
 
 The primary external systems remain Parsec, RustDesk, Sunshine/Moonlight and RDP under the matched methodology in #465.
 
@@ -171,12 +176,31 @@ The evaluator must fail closed or report INDETERMINATE when required telemetry, 
 - [Parsec technology overview](https://support.parsec.app/hc/en-us/articles/32361354307348-Overview): vendor description and self-reported LAN latency.
 - [Sunshine troubleshooting](https://docs.lizardbyte.dev/projects/sunshine/v2026.214.224301/md_docs_2troubleshooting.html): packet-burst and bottleneck-buffer failure discussion.
 
-## 10. Delivery plan
+## 10. V0.1 Rust policy model
 
-1. Review delivery-class semantics against #482/#495 and the existing M1 control/effect evidence work.
-2. Implement a pure Rust policy model and deterministic state-transition tests.
-3. Run the synthetic scheduler simulator and negative controls without hardware.
-4. Integrate behind a negotiated multi-stream profile only after baseline and stream semantics are frozen.
-5. Feed privacy-minimized traces from #458 and calibrated physical measurements from #457 into the matched programme in #465.
+The draft branch now contains a pure policy model in `crates/xenia-peer-core/src/delivery_scheduler.rs`, exported from `xenia-peer-core`. It is deliberately not connected to a live transport, codec, authorization decision, or OS effect.
 
-**Current evidence state:** research preregistration only; no implementation, Rust test, CI, hardware result, external product comparison, or production qualification is claimed.
+The model implements:
+
+- five typed delivery classes with separate bounded item and byte capacities;
+- byte-weighted Deficit Round Robin with provisional quanta of 64 KiB Control, 256 KiB Video, 64 KiB Audio, 16 KiB Telemetry and 32 KiB Bulk;
+- explicit queue admission, coalescing, supersession and rejection outcomes;
+- monotonic sequence admission for ordered control transitions;
+- deadline/age pruning for video, audio and telemetry, while control and bulk are never silently aged out;
+- keyframe reset and delta-reference validation, including cascading invalidation of deltas that depend on an expired reference;
+- same-key telemetry coalescing and bounded bulk backpressure;
+- explicit local counters and queue snapshots.
+
+Configuration rejects zero capacities, zero age budgets, lane capacities above 64 MiB, and byte quanta below 8 KiB so the selection loop has a bounded visit budget. The default quanta are hypotheses, not optimized settings. They must be compared against static item-weighted service and the AoI-aware candidate before being treated as a good operating point.
+
+Unit tests are authored for control ordering/full-queue behavior, telemetry coalescing, keyframe dependency resets, stale reference chains, audio deadlines, bulk retention, byte-deficit fairness across all classes, queue bounds, and invalid configurations. **They have not yet been executed**: this authoring environment has no Rust toolchain, and hosted CI is not treated as evidence while queued. The branch contains no runtime transport integration and claims no measured performance or safety qualification.
+
+## 11. Delivery plan
+
+1. Run the authored Rust unit tests and Clippy/format checks on the exact branch head when an available local or hosted toolchain permits.
+2. Add a deterministic simulator that compares FIFO, static item-weighted service, WDRR and deadline/AoI-aware selection against the 12 synthetic adversarial workloads.
+3. Replay the resulting scheduler policies through the #458 endpoint-stage telemetry and #457 calibrated physical I2P adapters.
+4. Integrate behind a negotiated multi-stream profile only after baseline semantics and exact-head evidence are frozen.
+5. Compare Parsec, RustDesk, Sunshine/Moonlight and RDP under #465's matched measurement methodology.
+
+**Current evidence state:** pure Rust policy model and deterministic unit tests are committed to the draft branch; no Rust test execution, CI pass, hardware result, external product comparison, live transport integration, or production qualification is claimed.
